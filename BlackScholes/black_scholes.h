@@ -10,6 +10,7 @@ public:
     double get_call_price() const;
     double get_put_price() const;
     double get_delta() const;
+    double get_gamma() const;
     
 private:
 
