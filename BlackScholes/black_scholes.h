@@ -6,11 +6,14 @@ class black_scholes
 {
 public:
     
-    black_scholes(double S, double K, double r, double sigma, double T);
+    black_scholes(double S, double K, double r, double sigma, double T, double d);
     double get_call_price() const;
     double get_put_price() const;
     double get_delta() const;
     double get_gamma() const;
+    double get_theta() const;
+    double get_vega() const;
+    double get_rho() const;
     
 private:
 

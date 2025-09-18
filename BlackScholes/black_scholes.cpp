@@ -1,10 +1,12 @@
+#define _USE_MATH_DEFINES
+
 #include "black_scholes.h" 
 #include <iostream>        
 #include <cmath>
 #include <utility>
 
-black_scholes::black_scholes(double S, double K, double r, double sigma, double T)
-    : current_price(S), strike_price(K), riskfree_interest(r), standard_volatility(sigma), duration(T)
+black_scholes::black_scholes(double S, double K, double r, double sigma, double T, double d)
+    : current_price(S), strike_price(K), riskfree_interest(r), standard_volatility(sigma), duration(T), dividend(d)
 {
 }
 
@@ -27,7 +29,7 @@ double black_scholes::get_put_price() const
     double nd1 = cumulative_normal_distribution(-d1);
     double nd2 = cumulative_normal_distribution(-d2);
 
-    return strike_price * pow(exp(1), -riskfree_interest * duration) * nd2 - current_price * nd1;
+    return strike_price * pow(M_E, -riskfree_interest * duration) * nd2 - current_price * nd1;
 }
 
 double black_scholes::cumulative_normal_distribution(double x) const

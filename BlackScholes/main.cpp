@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <string> 
 #include <sstream>
+#include <chrono>
 
 
 /*
@@ -27,7 +28,7 @@ struct bs_input
     double user_rate = 0.;
     double user_volatility = 0;
     double user_duration = 1;
-    //double user_dividend = 0;
+    double user_dividend = 0;
 
 };
 
@@ -35,6 +36,8 @@ int run_csv_calc()
 {
     std::ifstream iff("C:\\Users\\Leonard\\Desktop\\call_option_scenarios.csv");
     std::ofstream off("C:\\Users\\Leonard\\Desktop\\results.txt");
+
+    std::filesystem::path o_path = "C:\\Users\\Leonard\\Desktop\\results.txt";
 
     if (!iff.good())
     {
@@ -53,6 +56,7 @@ int run_csv_calc()
         ss >> bsi.user_rate;
         ss >> bsi.user_volatility;
         ss >> bsi.user_duration;
+        ss >> bsi.user_dividend;
 
         black_scholes user_option
         (
@@ -60,31 +64,30 @@ int run_csv_calc()
             bsi.user_strike_price,
             bsi.user_rate,
             bsi.user_volatility,
-            bsi.user_duration
-
+            bsi.user_duration,
+            bsi.user_dividend
         );
 
         double csv_call_price = user_option.get_call_price();
-        //double csv_put_price = user_option.get_put_price();
         double csv_delta = user_option.get_delta();
 
-
         off << "Call: " << csv_call_price << '|' << "Delta: " << csv_delta << std::endl;
-
-
+        
     }
-    
+    std::cout << "Die Daten finden sich in: " << o_path;
 }
 
 void run_manual_calc()
 {
-    bs_input cin;
+    std::cout << "Manuller Modus erwarte Input.. " << std::endl;
 
+    bs_input cin;
     cin.user_current_price;
     cin.user_strike_price;
     cin.user_rate;
     cin.user_volatility;
     cin.user_duration;
+    cin.user_dividend;
 
     std::cout << "Current Price: ";
     std::cin >> cin.user_current_price;
@@ -101,30 +104,51 @@ void run_manual_calc()
     std::cout << "Duration: ";
     std::cin >> cin.user_duration;
 
+    std::cout << "Dividend: ";
+    std::cin >> cin.user_dividend;
+
     black_scholes cin_input
     (
         cin.user_current_price,
         cin.user_strike_price,
         cin.user_rate,
         cin.user_volatility,
-        cin.user_duration
+        cin.user_duration,
+        cin.user_dividend
     );
 
     double cin_call_price = cin_input.get_call_price();
-    //double cin_put_price = cin_input.get_put_price();
     double cin_delta = cin_input.get_delta();
-    //std::cout << "Call: " << cin_call_price << '|' << "Put: " << cin_put_price << std::endl;
+    double cin_gamma = cin_input.get_gamma();
 
-    std::cout << cin_call_price << std::endl;
-    std::cout << cin_delta;
+
+    std::cout << "------------------" << std::endl;
+    std::cout << "Call: " << cin_call_price << std::endl;
+    std::cout << "Delta: " << cin_delta << std::endl;
+    std::cout << "Gamma: " << cin_gamma << std::endl;
 }
+
+
 
 int main (int argc, char* argv[]) // default main method
 {
+    std::cout << "Eigene Daten(e) oder CSV(c)?" << std::endl;
+    char decision = 'x';
+    std::cin >> decision;
     
-    
+    while (decision != 'e' || decision != 'c') // Problem er meckert
+    {
+        std::cout << "Falscher Modus erwarte neue Eingabe" << std::endl;        
+        std::cin >> decision;
 
-
+        switch (decision)
+        {
+            case 'e':
+                run_manual_calc();
+            case 'c':
+                run_csv_calc();
+        }
+    }
 
     return 0;
 } 
