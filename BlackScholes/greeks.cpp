@@ -15,3 +15,7 @@ double black_scholes::get_delta() const
 	return e * nd1;
 }
 
+void test()
+{
+
+}
