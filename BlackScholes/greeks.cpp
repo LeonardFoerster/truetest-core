@@ -36,6 +36,8 @@ double  black_scholes::get_gamma() const
 double black_scholes::get_theta() const
 {
 
+	//thfasdfadhfh
+
 }
 
 double black_scholes::get_vega() const

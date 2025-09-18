@@ -79,8 +79,8 @@ int run_csv_calc()
 
 void run_manual_calc()
 {
-    std::cout << "Manuller Modus erwarte Input.. " << std::endl;
-
+    std::cout << "Manuller Modus erwarte Input.. " << std::endl;    
+    
     bs_input cin;
     cin.user_current_price;
     cin.user_strike_price;
@@ -144,9 +144,11 @@ int main (int argc, char* argv[]) // default main method
         switch (decision)
         {
             case 'e':
-                run_manual_calc();
+            run_manual_calc();
+                break;
             case 'c':
-                run_csv_calc();
+            run_csv_calc();
+                break;
         }
     }
 
