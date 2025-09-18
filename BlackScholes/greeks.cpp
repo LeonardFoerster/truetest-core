@@ -16,6 +16,5 @@ double black_scholes::get_delta() const
 }
 
 void test()
-{
 
 }
