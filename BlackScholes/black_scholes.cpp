@@ -43,7 +43,7 @@ std::pair<double, double> black_scholes::calculate_d_values() const
     double temp = riskfree_interest + (pow(standard_volatility, 2) / 2.0);
     double dividend = log_cp_sp + (temp * duration);
     double divisor = standard_volatility * sqrt(duration);
-    
+
     double d1 = dividend / divisor;
     double d2 = d1 - standard_volatility * sqrt(duration);
 

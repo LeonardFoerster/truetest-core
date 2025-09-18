@@ -2,7 +2,6 @@
 #include <cmath>
 #include <vector>
 #include "black_scholes.h"
-#include "black_scholes.cpp"
 #include <cmath>
 
 double black_scholes::get_delta() const
@@ -19,6 +18,7 @@ double black_scholes::get_delta() const
 double  black_scholes::get_gamma() const
 {
 
+	return 0;
 }
 
 
