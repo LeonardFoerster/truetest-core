@@ -13,7 +13,8 @@ public:
     double get_gamma() const;
     double get_theta() const;
     double get_vega() const;
-    double get_rho() const;
+    double get_call_rho() const;
+    double get_put_rho() const;
     
 private:
 
@@ -26,7 +27,10 @@ private:
 
   
     double cumulative_normal_distribution(double x) const;
+    double normal_density(double x) const;
+
     std::pair<double, double> calculate_d_values() const;
+
 
     
 

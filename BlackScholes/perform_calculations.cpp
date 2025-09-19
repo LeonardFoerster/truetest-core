@@ -60,12 +60,12 @@ int run_csv_calc()
         off << "Call: " << csv_call_price << '|' << "Delta: " << csv_delta << std::endl;
 
     }
-    std::cout << "Die Daten finden sich in: " << o_path;
+    std::cout << "Data logged in:  " << o_path;
 }
 
 void run_manual_calc()
 {
-    std::cout << "Manuller Modus erwarte Input.. " << std::endl;
+    std::cout << "Manual: Awaiting Input.. " << std::endl;
 
     bs_input cin;
     cin.user_current_price;
@@ -106,10 +106,16 @@ void run_manual_calc()
     double cin_call_price = cin_input.get_call_price();
     double cin_delta = cin_input.get_delta();
     double cin_gamma = cin_input.get_gamma();
+    double cin_theta = cin_input.get_theta();
+    double cin_vega = cin_input.get_vega();
+    double cin_call_rho = cin_input.get_call_rho();
 
 
     std::cout << "------------------" << std::endl;
     std::cout << "Call: " << cin_call_price << std::endl;
     std::cout << "Delta: " << cin_delta << std::endl;
     std::cout << "Gamma: " << cin_gamma << std::endl;
+    std::cout << "Theta: " << cin_theta << std::endl;
+    std::cout << "Vega: " << cin_vega << std::endl;
+    std::cout << "Rho: " << cin_call_rho << std::endl;
 }
