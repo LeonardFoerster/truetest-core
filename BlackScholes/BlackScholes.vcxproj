@@ -125,12 +125,13 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="black_scholes.cpp" />
-    <ClCompile Include="greeks.cpp" />
+    <ClCompile Include="black_scholes_formula.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="perform_calculations.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="black_scholes.h" />
+    <ClInclude Include="perform_calculations.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

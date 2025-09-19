@@ -18,15 +18,18 @@
     <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="black_scholes.cpp">
+    <ClCompile Include="black_scholes_formula.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="greeks.cpp">
+    <ClCompile Include="perform_calculations.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="black_scholes.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="perform_calculations.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
