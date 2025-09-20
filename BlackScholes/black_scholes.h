@@ -31,7 +31,4 @@ private:
 
     std::pair<double, double> calculate_d_values() const;
 
-
-    
-
 };

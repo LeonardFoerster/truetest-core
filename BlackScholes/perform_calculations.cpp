@@ -2,8 +2,9 @@
 #include "black_scholes.h"
 #include <iostream>
 #include <fstream>
-#include <sstream>
 #include <filesystem>
+#include <chrono>
+#include <vector>
 
 
 struct bs_input
@@ -14,12 +15,13 @@ struct bs_input
     double user_volatility = 0;
     double user_duration = 1;
     double user_dividend = 0;
-
 };
 
 
 int run_csv_calc()
 {
+    auto start = std::chrono::high_resolution_clock::now();
+
     std::ifstream iff("C:\\Users\\Leonard\\Desktop\\call_option_scenarios.csv");
     std::ofstream off("C:\\Users\\Leonard\\Desktop\\results.txt");
 
@@ -32,6 +34,7 @@ int run_csv_calc()
     }
 
     std::string line;
+    std::vector <double> data;
     while (std::getline(iff, line))
     {
         std::stringstream ss(line);
@@ -54,13 +57,23 @@ int run_csv_calc()
             bsi.user_dividend
         );
 
+                      
         double csv_call_price = user_option.get_call_price();
         double csv_delta = user_option.get_delta();
+        double csv_gamma = user_option.get_gamma();
+        double csv_theta = user_option.get_theta();
+        double csv_vega = user_option.get_vega();
+        double csv_call_rho = user_option.get_call_rho();
 
-        off << "Call: " << csv_call_price << '|' << "Delta: " << csv_delta << std::endl;
-
+        off << "Call: " << csv_call_price << "Delta: " << csv_delta << "Gamma: " << csv_gamma << "Theta: " << csv_theta << "Vega: " << csv_vega <<  "Rho: " << csv_call_rho << std::endl;
     }
-    std::cout << "Data logged in:  " << o_path;
+
+    auto end = std::chrono::high_resolution_clock::now();
+    auto run_time_duration = start - end;
+    auto run_time_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+    std::cout << "Data logged in:  " << o_path << std::endl;
+    std::cout << "Calculation Time: " << run_time_duration_ms << std::endl;
 }
 
 void run_manual_calc()
@@ -112,10 +125,10 @@ void run_manual_calc()
 
 
     std::cout << "------------------" << std::endl;
-    std::cout << "Call: " << cin_call_price << std::endl;
-    std::cout << "Delta: " << cin_delta << std::endl;
-    std::cout << "Gamma: " << cin_gamma << std::endl;
-    std::cout << "Theta: " << cin_theta << std::endl;
-    std::cout << "Vega: " << cin_vega << std::endl;
-    std::cout << "Rho: " << cin_call_rho << std::endl;
+    std::cout << "Call:     " << cin_call_price << std::endl;
+    std::cout << "Delta:    " << cin_delta << std::endl;
+    std::cout << "Gamma:    " << cin_gamma << std::endl;
+    std::cout << "Theta:    " << cin_theta << std::endl;
+    std::cout << "Vega:     " << cin_vega << std::endl;
+    std::cout << "Rho:      " << cin_call_rho << std::endl;
 }

@@ -10,6 +10,7 @@ black_scholes::black_scholes(double S, double K, double r, double sigma, double 
 {
 }
 
+
 double black_scholes::get_call_price() const
 {
     double d1 = calculate_d_values().first;
@@ -107,3 +108,9 @@ double black_scholes::get_put_rho() const
     double rho_value = -strike_price * duration * exp(-riskfree_interest * duration) * n_d2;
     return rho_value / 100.0;
 }
+
+
+
+
+
+

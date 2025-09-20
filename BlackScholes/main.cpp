@@ -10,7 +10,7 @@ int main (int argc, char* argv[]) // default main method
     char decision = 'x';
     std::cin >> decision;
     
-    while (decision != 'd' && decision != 'c') // Problem, wenn di erste Eingabe korrekt ist, wird gar nix ausgeführt
+    while (decision != 'd' && decision != 'c') 
     {
         std::cout << "Wrong Input try again" << std::endl;        
         std::cin >> decision;
