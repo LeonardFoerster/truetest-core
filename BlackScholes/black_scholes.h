@@ -18,12 +18,12 @@ public:
     
 private:
 
-    double current_price = 0;
-    double strike_price = 0;
-    double riskfree_interest = 0;
-    double standard_volatility = 0;
-    double duration = 0;
-    double dividend = 0;
+    double current_price = 0.0;
+    double strike_price = 0.0;
+    double riskfree_interest = 0.0;
+    double standard_volatility = 0.0;
+    double duration = 0.0;
+    double dividend = 0.0;
 
   
     double cumulative_normal_distribution(double x) const;

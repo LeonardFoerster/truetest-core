@@ -7,5 +7,6 @@
 
 void run_manual_calc();
 int run_csv_calc();
+void print_manual_results(const black_scholes& option_data);
 
 #endif

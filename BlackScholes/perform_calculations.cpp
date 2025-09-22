@@ -1,5 +1,10 @@
 #include "perform_calculations.h"
 #include "black_scholes.h"
+#include "strategy.h"
+#include "portfolio.h"
+#include "execution.h"
+
+
 #include <iostream>
 #include <fstream>
 #include <filesystem>
@@ -9,13 +14,35 @@
 
 struct bs_input
 {
-    double user_current_price = 0;
-    double user_strike_price = 0;
-    double user_rate = 0.;
-    double user_volatility = 0;
-    double user_duration = 1;
-    double user_dividend = 0;
+    double user_current_price = 0.0;
+    double user_strike_price = 0.0;
+    double user_rate = 0.0;
+    double user_volatility = 0.0;
+    double user_duration = 0.0;
+    double user_dividend = 0.0;
 };
+
+
+struct results
+{
+    results(const bs_input &input)
+    {
+        double current_price = input.user_current_price;
+    }
+    double fair_price = 0.0;
+};
+
+
+void print_manual_results(const black_scholes & cin_input)
+{
+    std::cout << "------------------" << std::endl;
+    std::cout << "Call:     " << cin_input.get_call_price() << std::endl;
+    std::cout << "Delta:    " << cin_input.get_delta()      << std::endl;
+    std::cout << "Gamma:    " << cin_input.get_gamma()      << std::endl;
+    std::cout << "Theta:    " << cin_input.get_theta()      << std::endl;
+    std::cout << "Vega:     " << cin_input.get_vega()       << std::endl;
+    std::cout << "Rho:      " << cin_input.get_call_rho()   << std::endl;
+}
 
 
 int run_csv_calc()
@@ -57,7 +84,7 @@ int run_csv_calc()
             bsi.user_dividend
         );
 
-                      
+             
         double csv_call_price = user_option.get_call_price();
         double csv_delta = user_option.get_delta();
         double csv_gamma = user_option.get_gamma();
@@ -79,43 +106,43 @@ int run_csv_calc()
 void run_manual_calc()
 {
     std::cout << "Manual: Awaiting Input.. " << std::endl;
-
-    bs_input cin;
-    cin.user_current_price;
-    cin.user_strike_price;
-    cin.user_rate;
-    cin.user_volatility;
-    cin.user_duration;
-    cin.user_dividend;
+    
+    double user_current_price;
+    double user_strike_price;
+    double user_rate;
+    double user_volatility;
+    double user_duration;
+    double user_dividend;
 
     std::cout << "Current Price: ";
-    std::cin >> cin.user_current_price;
+    std::cin >> user_current_price; 
 
     std::cout << "Strike Price: ";
-    std::cin >> cin.user_strike_price;
+    std::cin >> user_strike_price;
 
     std::cout << "Interest Rate: ";
-    std::cin >> cin.user_rate;
+    std::cin >> user_rate;
 
     std::cout << "Volatility: ";
-    std::cin >> cin.user_volatility;
+    std::cin >> user_volatility;
 
     std::cout << "Duration: ";
-    std::cin >> cin.user_duration;
+    std::cin >> user_duration;
 
     std::cout << "Dividend: ";
-    std::cin >> cin.user_dividend;
+    std::cin >> user_dividend;
 
     black_scholes cin_input
     (
-        cin.user_current_price,
-        cin.user_strike_price,
-        cin.user_rate,
-        cin.user_volatility,
-        cin.user_duration,
-        cin.user_dividend
+        user_current_price,
+        user_strike_price,
+        user_rate,
+        user_volatility,
+        user_duration,
+        user_dividend
     );
 
+      
     double cin_call_price = cin_input.get_call_price();
     double cin_delta = cin_input.get_delta();
     double cin_gamma = cin_input.get_gamma();
@@ -123,12 +150,11 @@ void run_manual_calc()
     double cin_vega = cin_input.get_vega();
     double cin_call_rho = cin_input.get_call_rho();
 
+    strategy strat_data (user_current_price, cin_call_price);
+    strat_data.set_prices(user_current_price,cin_call_price );
 
-    std::cout << "------------------" << std::endl;
-    std::cout << "Call:     " << cin_call_price << std::endl;
-    std::cout << "Delta:    " << cin_delta << std::endl;
-    std::cout << "Gamma:    " << cin_gamma << std::endl;
-    std::cout << "Theta:    " << cin_theta << std::endl;
-    std::cout << "Vega:     " << cin_vega << std::endl;
-    std::cout << "Rho:      " << cin_call_rho << std::endl;
+    print_manual_results(cin_input);
+    
+
+    
 }
