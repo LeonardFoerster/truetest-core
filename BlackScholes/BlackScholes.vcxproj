@@ -24,6 +24,7 @@
     <ProjectGuid>{4c0eeb38-ec13-4a2b-819e-3e08d6183b0f}</ProjectGuid>
     <RootNamespace>BlackScholes</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>Backtest</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -128,6 +129,7 @@
     <ClCompile Include="black_scholes_formula.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="perform_calculations.cpp" />
+    <ClCompile Include="portfolio.cpp" />
     <ClCompile Include="strategy.cpp" />
     <ClCompile Include="trade.cpp" />
   </ItemGroup>

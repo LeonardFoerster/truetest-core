@@ -30,6 +30,9 @@
     <ClCompile Include="trade.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="portfolio.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="black_scholes.h">

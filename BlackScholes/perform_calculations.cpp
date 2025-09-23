@@ -38,7 +38,7 @@ int run_csv_calc()
 {
     auto start = std::chrono::high_resolution_clock::now();
 
-    std::ifstream iff("C:\\Users\\Leonard\\Desktop\\call_option_scenarios.csv");
+    std::ifstream iff("C:\\Users\\Leonard\\option_scenarios.csv");
     std::ofstream off("C:\\Users\\Leonard\\Desktop\\results.txt");
 
     std::filesystem::path o_path = "C:\\Users\\Leonard\\Desktop\\results.txt";
@@ -95,6 +95,9 @@ int run_csv_calc()
 
 void run_manual_calc()
 {
+    strategy strategy;
+    portfolio portfolio(10000);
+
     std::cout << "Awaiting manual Input.. " << std::endl;
     
     double user_current_price;
@@ -134,9 +137,16 @@ void run_manual_calc()
         user_dividend
     );
 
-    double cin_call_price = cin_input.get_call_price();
-        
-    print_manual_results(cin_input);
+    double cin_call_price = cin_input.get_call_price();     
+    
+    signal_event signal = strategy.check_for_signal(user_current_price, cin_call_price);
+
+    if (signal != signal_event::hold)
+    {
+        portfolio.execute_signal(signal, user_current_price);
+    }
+    
+        //print_manual_results(cin_input);
     
        
       

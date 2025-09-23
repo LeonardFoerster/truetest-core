@@ -16,6 +16,4 @@ private:
 	
 	double open_price = 0.0;
 	double close_price = 0.0;
-
-
 };
