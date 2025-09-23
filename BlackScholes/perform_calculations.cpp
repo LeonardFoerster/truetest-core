@@ -1,9 +1,8 @@
+
 #include "perform_calculations.h"
 #include "black_scholes.h"
 #include "strategy.h"
 #include "portfolio.h"
-#include "execution.h"
-
 
 #include <iostream>
 #include <fstream>
@@ -20,16 +19,6 @@ struct bs_input
     double user_volatility = 0.0;
     double user_duration = 0.0;
     double user_dividend = 0.0;
-};
-
-
-struct results
-{
-    results(const bs_input &input)
-    {
-        double current_price = input.user_current_price;
-    }
-    double fair_price = 0.0;
 };
 
 
@@ -62,6 +51,7 @@ int run_csv_calc()
 
     std::string line;
     std::vector <double> data;
+    
     while (std::getline(iff, line))
     {
         std::stringstream ss(line);
@@ -105,7 +95,7 @@ int run_csv_calc()
 
 void run_manual_calc()
 {
-    std::cout << "Manual: Awaiting Input.. " << std::endl;
+    std::cout << "Awaiting manual Input.. " << std::endl;
     
     double user_current_price;
     double user_strike_price;
@@ -132,6 +122,8 @@ void run_manual_calc()
     std::cout << "Dividend: ";
     std::cin >> user_dividend;
 
+    auto start = std::chrono::high_resolution_clock::now();
+
     black_scholes cin_input
     (
         user_current_price,
@@ -142,19 +134,11 @@ void run_manual_calc()
         user_dividend
     );
 
-      
     double cin_call_price = cin_input.get_call_price();
-    double cin_delta = cin_input.get_delta();
-    double cin_gamma = cin_input.get_gamma();
-    double cin_theta = cin_input.get_theta();
-    double cin_vega = cin_input.get_vega();
-    double cin_call_rho = cin_input.get_call_rho();
-
-    strategy strat_data (user_current_price, cin_call_price);
-    strat_data.set_prices(user_current_price,cin_call_price );
-
+        
     print_manual_results(cin_input);
     
-
+       
+      
     
 }

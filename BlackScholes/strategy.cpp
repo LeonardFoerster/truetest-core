@@ -3,26 +3,22 @@
 #include "strategy.h"
 #include "black_scholes.h"
 
-strategy::strategy(double current_price, double fair_price)
-	: current_price(current_price), fair_price(fair_price)
-{
-}
-
-
-double strategy::buy_option(double current_price, double fair_price)
+signal_event strategy::check_for_signal(double current_market_price, double calculated_fair_price)
 {
 
-	if (fair_price > current_price)
+	if (calculated_fair_price > current_market_price)
 	{
-
+		return signal_event::buy;
+	};
+	
+	if(current_market_price > calculated_fair_price)
+	{
+		return signal_event::sell;
 	}
 
-	return 0;
-}
+	if (current_market_price == calculated_fair_price)
+	{
+		return signal_event::hold;
+	}
 
-double strategy::sell_option()
-{
-	
-	
-	return 0;
 }
