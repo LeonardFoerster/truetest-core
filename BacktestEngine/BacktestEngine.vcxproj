@@ -22,7 +22,7 @@
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
     <ProjectGuid>{4c0eeb38-ec13-4a2b-819e-3e08d6183b0f}</ProjectGuid>
-    <RootNamespace>BlackScholes</RootNamespace>
+    <RootNamespace>BacktestEngine</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
     <ProjectName>Backtest</ProjectName>
   </PropertyGroup>
