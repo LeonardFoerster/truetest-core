@@ -9,7 +9,7 @@
 #include <filesystem>
 #include <chrono>
 #include <vector>
-
+#include <string>
 
 struct bs_input
 {
@@ -40,8 +40,10 @@ int run_csv_calc()
 
     std::ifstream iff("C:\\Users\\Leonard\\option_scenarios.csv");
     std::ofstream off("C:\\Users\\Leonard\\Desktop\\results.txt");
-
     std::filesystem::path o_path = "C:\\Users\\Leonard\\Desktop\\results.txt";
+
+    strategy strat_test;
+    portfolio portfolio_test(10000);
 
     if (!iff.good())
     {
@@ -52,42 +54,39 @@ int run_csv_calc()
     std::string line;
     std::vector <double> data;
     
-    while (std::getline(iff, line))
+    while (std::getline(iff, line)) 
     {
         std::stringstream ss(line);
-        bs_input bsi;
+        std::string value;
+        std::vector<double> values;
+        while (std::getline(ss, value, ',')) 
+        { 
+            try 
+            {
+                values.push_back(std::stod(value));
+            }
+            catch (const std::invalid_argument& e) 
+            {
+                std::cerr << "Could not convert string to double: " << value << std::endl;
+                continue; 
+            }
+        }
 
-        ss >> bsi.user_current_price;
-        ss >> bsi.user_strike_price;
-        ss >> bsi.user_rate;
-        ss >> bsi.user_volatility;
-        ss >> bsi.user_duration;
-        ss >> bsi.user_dividend;
+        if (values.size() < 6) continue; 
 
-        black_scholes user_option
-        (
-            bsi.user_current_price,
-            bsi.user_strike_price,
-            bsi.user_rate,
-            bsi.user_volatility,
-            bsi.user_duration,
-            bsi.user_dividend
-        );
+        double current_price = values[0];
 
-             
-        double csv_call_price = user_option.get_call_price();
-        double csv_delta = user_option.get_delta();
-        double csv_gamma = user_option.get_gamma();
-        double csv_theta = user_option.get_theta();
-        double csv_vega = user_option.get_vega();
-        double csv_call_rho = user_option.get_call_rho();
-
-        off << "Call: " << csv_call_price << "Delta: " << csv_delta << "Gamma: " << csv_gamma << "Theta: " << csv_theta << "Vega: " << csv_vega <<  "Rho: " << csv_call_rho << std::endl;
+        black_scholes option_calculator(values[0], values[1], values[2], values[3], values[4], values[5]);
+        double fair_price = option_calculator.get_call_price();
+        signal_event signal = strat_test.check_for_signal(current_price, fair_price);
+        portfolio_test.execute_signal(signal, current_price);
     }
 
     auto end = std::chrono::high_resolution_clock::now();
     auto run_time_duration = start - end;
     auto run_time_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+    portfolio_test.print_summary();
 
     std::cout << "Data logged in:  " << o_path << std::endl;
     std::cout << "Calculation Time: " << run_time_duration_ms << std::endl;

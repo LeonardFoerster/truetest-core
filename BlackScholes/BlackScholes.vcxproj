@@ -131,14 +131,12 @@
     <ClCompile Include="perform_calculations.cpp" />
     <ClCompile Include="portfolio.cpp" />
     <ClCompile Include="strategy.cpp" />
-    <ClCompile Include="trade.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="black_scholes.h" />
     <ClInclude Include="perform_calculations.h" />
     <ClInclude Include="portfolio.h" />
     <ClInclude Include="strategy.h" />
-    <ClInclude Include="trade.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
