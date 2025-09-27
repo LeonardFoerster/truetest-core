@@ -1,2 +1,2 @@
-# High Frequency Backtesting Engine in C++
+# Backtesting Engine in C++
 
