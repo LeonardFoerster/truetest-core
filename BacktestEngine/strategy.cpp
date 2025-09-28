@@ -4,6 +4,7 @@
 #include "black_scholes.h"
 
 signal_event strategy::check_for_signal(double current_market_price, double calculated_fair_price) {
+    
     if (calculated_fair_price > current_market_price * 1.01) 
     {
         return signal_event::buy;
