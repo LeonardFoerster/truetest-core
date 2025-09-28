@@ -1,13 +1,7 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="black_scholes_formula.cpp">
-      <Filter>SourceFiles</Filter>
-    </ClCompile>
     <ClCompile Include="main.cpp">
-      <Filter>SourceFiles</Filter>
-    </ClCompile>
-    <ClCompile Include="perform_calculations.cpp">
       <Filter>SourceFiles</Filter>
     </ClCompile>
     <ClCompile Include="portfolio.cpp">
@@ -16,21 +10,39 @@
     <ClCompile Include="strategy.cpp">
       <Filter>SourceFiles</Filter>
     </ClCompile>
+    <ClCompile Include="black_scholes_formula.cpp">
+      <Filter>SourceFiles\BlackScholes</Filter>
+    </ClCompile>
+    <ClCompile Include="perform_calculations.cpp">
+      <Filter>SourceFiles\BlackScholes</Filter>
+    </ClCompile>
+    <ClCompile Include="data_handler.cpp">
+      <Filter>SourceFiles</Filter>
+    </ClCompile>
+    <ClCompile Include="backtest_core.cpp">
+      <Filter>SourceFiles</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="black_scholes.h">
-      <Filter>HeaderFiles</Filter>
-    </ClInclude>
     <ClInclude Include="portfolio.h">
       <Filter>HeaderFiles</Filter>
     </ClInclude>
     <ClInclude Include="strategy.h">
       <Filter>HeaderFiles</Filter>
     </ClInclude>
-    <ClInclude Include="perform_calculations.h">
+    <ClInclude Include="data_handler.h">
       <Filter>HeaderFiles</Filter>
     </ClInclude>
-    <ClInclude Include="data_handler.h">
+    <ClInclude Include="market_data.h">
+      <Filter>HeaderFiles</Filter>
+    </ClInclude>
+    <ClInclude Include="black_scholes.h">
+      <Filter>HeaderFiles\BlackScholes</Filter>
+    </ClInclude>
+    <ClInclude Include="perform_calculations.h">
+      <Filter>HeaderFiles\BlackScholes</Filter>
+    </ClInclude>
+    <ClInclude Include="backtester.h">
       <Filter>HeaderFiles</Filter>
     </ClInclude>
   </ItemGroup>
@@ -40,6 +52,12 @@
     </Filter>
     <Filter Include="SourceFiles">
       <UniqueIdentifier>{5bdf3a48-a65a-4def-a0d8-f4308de9c2f0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="SourceFiles\BlackScholes">
+      <UniqueIdentifier>{ddce6871-c329-47d8-a94f-4d1bdaf7064d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="HeaderFiles\BlackScholes">
+      <UniqueIdentifier>{1c70a172-73dc-4082-b209-2a16a17a4374}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

@@ -38,12 +38,12 @@ int run_csv_calc()
     std::ofstream off("C:\\Users\\Leonard\\Desktop\\results.txt");
     std::filesystem::path o_path = "C:\\Users\\Leonard\\Desktop\\results.txt";
 
-    if (!iff.is_open())
+    if (!iff.good())
     {
         std::cerr << "Error opening file" << std::endl;
         return 1;
     }
-    if (!off.is_open())
+    if (!off.good())
     {
         std::cerr << "error creating file" << std::endl;
         return 1;
@@ -52,19 +52,16 @@ int run_csv_calc()
     std::string line;
     auto start = std::chrono::high_resolution_clock::now();
 
-    // Liest die Datei Zeile für Zeile
     while (std::getline(iff, line))
     {
         std::stringstream ss(line);
         std::string value_str;
         std::vector<double> values;
 
-        // Extrahiert die durch Komma getrennten Werte aus der aktuellen Zeile
         while (std::getline(ss, value_str, ','))
         {
             try
             {
-                // Wandelt den String-Wert in eine double-Zahl um
                 values.push_back(std::stod(value_str));
             }
             catch (const std::exception& e)
@@ -75,7 +72,6 @@ int run_csv_calc()
             }
         }
 
-        // Führt die Berechnung nur aus, wenn genau 6 Werte in der Zeile gefunden wurden
         if (values.size() == 6)
         {
             black_scholes option_calculator(values[0], values[1], values[2], values[3], values[4], values[5]);

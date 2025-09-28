@@ -14,7 +14,6 @@ enum class signal_event
 
 class strategy
 {
-
 private:
     double current_market_price = 0.0;
     double calculated_fair_price = 0.0;
