@@ -5,20 +5,29 @@
 #include <vector>
 #include <map>
 
+enum class data_type_content
+{
+	ohlc_data,
+	black_scholes_data
+};
+
 class data_handler
 {
 
 private:
 
-	std::filesystem::path data_path_ = "C:\\Users\\Leonard\\aktien_szenarien.csv";
+	
+
 	std::map <int, market_data_bar> line_data_;
 
 public:
-	data_handler(const std::filesystem::path& file_path);
+	
+	data_handler();
 	bool more_data_available = true;
 	
-	void load_data(const std::filesystem::path& data_path);
-	void get_next_bar() const;
+	void load_olhc_data(const std::filesystem::path& data_path);
+	int load_bs_data(const std::filesystem::path& data_path);
+	void load_data(std::filesystem::path data_path_, data_type_content type);
 	
 	std::map<int, market_data_bar> set_line_data(std::map <int, market_data_bar> new_data)
 	{

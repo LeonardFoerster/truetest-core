@@ -2,6 +2,7 @@
 #include "black_scholes.h"
 #include "strategy.h"
 #include "portfolio.h"
+#include "data_handler.h"
 
 #include <iostream>
 #include <fstream>
@@ -9,7 +10,7 @@
 #include <chrono>
 #include <vector>
 #include <string>
-#include <sstream> // Notwendig für std::stringstream
+#include <sstream> 
 
 struct bs_input
 {
@@ -30,66 +31,6 @@ void print_manual_results(const black_scholes& cin_input)
     std::cout << "Theta:    " << cin_input.get_theta() << std::endl;
     std::cout << "Vega:     " << cin_input.get_vega() << std::endl;
     std::cout << "Rho:      " << cin_input.get_call_rho() << std::endl;
-}
-
-int run_csv_calc()
-{
-    std::ifstream iff("C:\\Users\\Leonard\\option_scenarios.csv");
-    std::ofstream off("C:\\Users\\Leonard\\Desktop\\results.txt");
-    std::filesystem::path o_path = "C:\\Users\\Leonard\\Desktop\\results.txt";
-
-    if (!iff.good())
-    {
-        std::cerr << "Error opening file" << std::endl;
-        return 1;
-    }
-    if (!off.good())
-    {
-        std::cerr << "error creating file" << std::endl;
-        return 1;
-    }
-
-    std::string line;
-    auto start = std::chrono::high_resolution_clock::now();
-
-    while (std::getline(iff, line))
-    {
-        std::stringstream ss(line);
-        std::string value_str;
-        std::vector<double> values;
-
-        while (std::getline(ss, value_str, ','))
-        {
-            try
-            {
-                values.push_back(std::stod(value_str));
-            }
-            catch (const std::exception& e)
-            {
-                std::cerr << "Ungültiger Wert in Zeile gefunden: " << line << std::endl;
-                values.clear(); // Vektor leeren, um diese Zeile zu überspringen
-                break;
-            }
-        }
-
-        if (values.size() == 6)
-        {
-            black_scholes option_calculator(values[0], values[1], values[2], values[3], values[4], values[5]);
-            double fair_price = option_calculator.get_call_price();
-            off << fair_price << "\n";
-        }
-    }
-
-    iff.close();
-    off.close();
-
-    auto end = std::chrono::high_resolution_clock::now();
-    auto run_time_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-
-    std::cout << "Daten geschrieben nach: " << o_path << std::endl;
-    std::cout << "Berechnungszeit: " << run_time_duration_ms.count() << " ms" << std::endl;
-
-    return 0;
 }
 
 void run_manual_calc()
@@ -135,13 +76,5 @@ void run_manual_calc()
     );
 
     double cin_call_price = cin_input.get_call_price();
-
-    signal_event signal = strategy.check_for_signal(user_current_price, cin_call_price);
-
-    if (signal != signal_event::hold)
-    {
-        portfolio.execute_signal(signal, user_current_price);
-    }
-
-    //print_manual_results(cin_input);
+    std::cout << "calculated fair price: " << cin_call_price << std::endl;
 }
