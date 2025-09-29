@@ -15,10 +15,9 @@ class data_handler
 {
 
 private:
-
 	
-
-	std::map <int, market_data_bar> line_data_;
+	std::map <int, double> bs_line_data_;
+	std::map <int, market_data_bar> ohlc_line_data_;
 
 public:
 	
@@ -31,12 +30,12 @@ public:
 	
 	std::map<int, market_data_bar> set_line_data(std::map <int, market_data_bar> new_data)
 	{
-		line_data_ = new_data;
+		ohlc_line_data_ = new_data;
 	}
 
 	std::map<int, market_data_bar> get_line_data() const
 	{
-		return line_data_;
+		return ohlc_line_data_;
 	}
 
 	bool set_more_data_available_false()

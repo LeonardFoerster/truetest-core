@@ -7,8 +7,6 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
-#include <chrono>
-#include <vector>
 #include <string>
 #include <sstream> 
 
@@ -35,10 +33,11 @@ void print_manual_results(const black_scholes& cin_input)
 
 void run_manual_calc()
 {
-    strategy strategy;
-    portfolio portfolio(10000);
 
-    std::cout << "Awaiting manual Input.. " << std::endl;
+    //strategy strategy;
+    //portfolio portfolio(10000);
+
+    std::cout << "Awaiting manual Input: " << std::endl;
 
     double user_current_price;
     double user_strike_price;
@@ -75,6 +74,5 @@ void run_manual_calc()
         user_dividend
     );
 
-    double cin_call_price = cin_input.get_call_price();
-    std::cout << "calculated fair price: " << cin_call_price << std::endl;
+    print_manual_results(cin_input);
 }
