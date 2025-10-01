@@ -4,7 +4,7 @@
 class portfolio 
 {
 public:
-    portfolio(double starting_cash);
+    portfolio();
     void execute_signal(signal_event signal, double execution_price);
     void print_summary() const;
 

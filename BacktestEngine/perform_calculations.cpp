@@ -20,7 +20,7 @@ struct bs_input
     double user_dividend = 0.0;
 };
 
-void print_manual_results(const black_scholes& cin_input)
+void print_manual_bs_results(const black_scholes& cin_input)
 {
     std::cout << "------------------" << std::endl;
     std::cout << "Call:     " << cin_input.get_call_price() << std::endl;
@@ -33,9 +33,6 @@ void print_manual_results(const black_scholes& cin_input)
 
 void run_manual_calc()
 {
-
-    //strategy strategy;
-    //portfolio portfolio(10000);
 
     std::cout << "Awaiting manual Input: " << std::endl;
 
@@ -74,5 +71,6 @@ void run_manual_calc()
         user_dividend
     );
 
-    print_manual_results(cin_input);
+    print_manual_bs_results(cin_input);
 }
+

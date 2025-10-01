@@ -2,12 +2,8 @@
 #include <iostream>
 #include "strategy.h"
 
-portfolio::portfolio(double starting_cash)
-    : m_cash(starting_cash),
-    m_entry_price(0.0),
-    m_total_trades(0) 
-{
-}
+portfolio::portfolio() {};
+
 
 void portfolio::execute_signal(signal_event signal, double execution_price) 
 {

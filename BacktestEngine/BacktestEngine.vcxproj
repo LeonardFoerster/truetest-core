@@ -135,7 +135,7 @@
     <ClCompile Include="strategy.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="backtester.h" />
+    <ClInclude Include="backtest_core.h" />
     <ClInclude Include="black_scholes.h" />
     <ClInclude Include="data_handler.h" />
     <ClInclude Include="market_data.h" />

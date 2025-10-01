@@ -11,8 +11,7 @@ int main (int argc, char* argv[]) // default main method
 {
     std::filesystem::path ohlc_data_path_ = "C:\\Users\\Leonard\\aktien_szenarien.csv";
     std::filesystem::path bs_data_path_ = "C:\\Users\\Leonard\\Desktop\\options_scenarios.csv";
-
-       
+           
     std::cout << "--- Backtesting Engine ---" << std::endl;
     std::cout << "Datenquelle waehlen:" << std::endl;
     std::cout << "  [o] OHLC-Daten " << std::endl;
@@ -40,19 +39,23 @@ int main (int argc, char* argv[]) // default main method
             run_manual_calc();
                 break;
         default:
-            std::cerr << "Wrong input program shutdown" << std::endl;
+            std::cerr << "Wrong input" << std::endl;
                 return 1;
     }
-      
-    try
+     
+
+    if (decision_char == 'o' || decision_char == 'b')
     {
-        data_handler dh;
-        dh.load_data(selected_path, selected_data);
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "Selection error" << std::endl;
-        return 1;
+        try
+        {
+            data_handler dh;
+            dh.load_data(selected_path, selected_data);
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Selection error" << std::endl;
+            return 1;
+        }
     }
             
         

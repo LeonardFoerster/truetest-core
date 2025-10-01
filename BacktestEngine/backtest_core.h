@@ -13,10 +13,11 @@ private:
 	portfolio p_;
 
 public:
-	backtest(const std::string& path, double starting_amount);
+	backtest();
 	void run();
+	void load_data_into_core();
 
-
+	bool data_available_ = true;
 
 
 

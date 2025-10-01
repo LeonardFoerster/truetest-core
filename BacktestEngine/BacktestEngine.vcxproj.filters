@@ -42,7 +42,7 @@
     <ClInclude Include="perform_calculations.h">
       <Filter>HeaderFiles\BlackScholes</Filter>
     </ClInclude>
-    <ClInclude Include="backtester.h">
+    <ClInclude Include="backtest_core.h">
       <Filter>HeaderFiles</Filter>
     </ClInclude>
   </ItemGroup>

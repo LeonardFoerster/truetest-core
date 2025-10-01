@@ -23,21 +23,16 @@ public:
 	
 	data_handler();
 	bool more_data_available = true;
+
+	std::filesystem::path ohlc_data_path_ = "C:\\Users\\Leonard\\aktien_szenarien.csv";
+	std::filesystem::path bs_data_path_ = "C:\\Users\\Leonard\\Desktop\\options_scenarios.csv";
+
 	
-	void load_olhc_data(const std::filesystem::path& data_path);
-	int load_bs_data(const std::filesystem::path& data_path);
+	std::map<int, market_data_bar> load_olhc_data(const std::filesystem::path& data_path);
+	std::map<int, double> load_bs_data(const std::filesystem::path& data_path);
 	void load_data(std::filesystem::path data_path_, data_type_content type);
 	
-	std::map<int, market_data_bar> set_line_data(std::map <int, market_data_bar> new_data)
-	{
-		ohlc_line_data_ = new_data;
-	}
-
-	std::map<int, market_data_bar> get_line_data() const
-	{
-		return ohlc_line_data_;
-	}
-
+		
 	bool set_more_data_available_false()
 	{
 		return more_data_available = false;
@@ -47,6 +42,6 @@ public:
 	{
 		return more_data_available = true;
 	}
-
+	
 
 };
