@@ -1,33 +1,21 @@
 #pragma once
-#include <iostream>
 #include "data_handler.h"
 #include "strategy.h"
 #include "portfolio.h"
+#include <string>
 
 class backtest
 {
 private:
-	
-	strategy s_;
-	portfolio p_;
+	data_handler data_handler_;
+	strategy strategy_;
+	portfolio portfolio_;
+
+	std::string ohlc_data_path_;
+	std::string bs_data_path_;
 
 public:
-	backtest();
+	backtest(const std::string& ohlc_path, const std::string& bs_path);
 	void run();
-
-	data_handler data_;
-	
-	void load_data_in_core(backtest &b) 
-	{
-		data_.load_olhc_data(data_.olhc_data_path_,b);
-		data_.load_bs_data(data_.bs_data_path_, b);
-	}
-
-	int count_available_bs_data_ = 0; // In lines
-	int count_available_olhc_data_ = 0; // In lines
-
-	bool more_bs_data_available_ = true;
-	bool more_olhc_data_available_ = true;
-
-
+	void print_summary();
 };
