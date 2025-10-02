@@ -83,7 +83,7 @@ double black_scholes::get_theta() const
     double third_term = dividend * current_price * exp(-dividend * duration) * cumulative_normal_distribution(d1);
 
     double theta_per_year = first_term - second_term + third_term;
-    return theta_per_year / 365.0;
+    return theta_per_year / days_in_year;
 }
 
 double black_scholes::get_vega() const

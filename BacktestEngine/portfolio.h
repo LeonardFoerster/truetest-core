@@ -9,9 +9,10 @@ public:
     void print_summary() const;
 
 private:
-    double m_cash; 
 
-    bool m_position_open;   
-    double m_entry_price;   
-    int m_total_trades;     
+    double f_cash; 
+
+    bool f_position_open;   
+    double f_entry_price;   
+    int total_trades;     
 };

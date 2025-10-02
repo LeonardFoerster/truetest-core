@@ -1,6 +1,7 @@
-#pragma once 
+#pragma once
+
 #include <iostream>
-#include <cmath> 
+#include <cstdint>
 
 class black_scholes
 {
@@ -18,13 +19,14 @@ public:
     
 private:
 
-    double current_price = 0.0;
+    double current_price = 0.0; 
     double strike_price = 0.0;
     double riskfree_interest = 0.0;
     double standard_volatility = 0.0;
     double duration = 0.0;
     double dividend = 0.0;
 
+    const uint32_t days_in_year = 365;
   
     double cumulative_normal_distribution(double x) const;
     double normal_density(double x) const;

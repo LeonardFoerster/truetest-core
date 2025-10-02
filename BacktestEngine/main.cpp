@@ -26,15 +26,6 @@ int main (int argc, char* argv[]) // default main method
 
     switch (decision_char)
     {
-        case 'o':
-            selected_data = data_type_content::ohlc_data;
-            selected_path = ohlc_data_path_;
-                break;
-
-        case 'b':
-            selected_data = data_type_content::black_scholes_data;
-            selected_path = bs_data_path_;
-                break;
         case 'e':
             run_manual_calc();
                 break;
@@ -42,22 +33,6 @@ int main (int argc, char* argv[]) // default main method
             std::cerr << "Wrong input" << std::endl;
                 return 1;
     }
-     
-
-    if (decision_char == 'o' || decision_char == 'b')
-    {
-        try
-        {
-            data_handler dh;
-            dh.load_data(selected_path, selected_data);
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "Selection error" << std::endl;
-            return 1;
-        }
-    }
-            
-        
+    
     return 0;
 } 

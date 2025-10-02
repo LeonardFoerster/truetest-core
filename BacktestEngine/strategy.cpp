@@ -8,8 +8,7 @@
 
 signal_event strategy::check_for_signal(double current_market_price, double calculated_fair_price) 
 {
-    strategy s;
-
+       
     if (calculated_fair_price > current_market_price ) 
     {
         return signal_event::buy;
