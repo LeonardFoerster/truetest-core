@@ -19,7 +19,7 @@ void portfolio::execute_signal(signal_event signal, double execution_price)
         total_trades++;
 
         f_position_open = false; 
-        f_entry_price = 0.0;
+        f_entry_price = execution_price;
 
         std::cout << "sell executed at " << execution_price << " | PNL: " << profit << std::endl;
     }

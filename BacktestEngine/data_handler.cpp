@@ -6,10 +6,29 @@
 #include <fstream>
 #include <stdexcept>
 #include <iterator>
+#include <utility>
 
-void data_handler::load_data_from_files(const std::filesystem::path& ohlc_path, const std::filesystem::path& bs_path)
+size_t data_handler::get_line_comma_count(std::ifstream &file, std::string &line)
+{
+    std::getline(file, line);
+    char seperator = ',';
+    size_t line_comma_count = 0;
+
+    for (char c : line)
+    {
+        if (c == seperator)
+        {
+            line_comma_count++;
+        }
+    }
+    return line_comma_count;
+}
+
+
+std::pair<std::vector<market_data_bar>, std::vector<double>> data_handler::load_data_from_files(const std::filesystem::path& ohlc_path, const std::filesystem::path& bs_path)
 {
     std::ifstream ohlc_file(ohlc_path);
+    
     if (!ohlc_file.good())
     {
         throw std::runtime_error("OHLC Input File error");
@@ -18,10 +37,13 @@ void data_handler::load_data_from_files(const std::filesystem::path& ohlc_path, 
     std::string line;
     std::getline(ohlc_file, line);
     int line_count = 0;
-
+        
     while (std::getline(ohlc_file, line))
     {
-        if (line.empty()) continue;
+        if (line.empty())
+        {
+            continue;
+        }
 
         std::stringstream ss(line);
         std::string token;
@@ -37,14 +59,14 @@ void data_handler::load_data_from_files(const std::filesystem::path& ohlc_path, 
             bar.low = std::stod(token);
             std::getline(ss, token, ',');
             bar.close = std::stod(token);
-            ohlc_data_[line_count++] = bar;
+            ohlc_data_.push_back(bar);
         }
         catch (const std::exception& e)
         {
             std::cerr << "Error parsing OHLC data on line: " << line << " | " << e.what() << std::endl;
         }
     }
-
+     
     std::ifstream bs_file(bs_path);
     if (!bs_file.good())
     {
@@ -81,15 +103,15 @@ void data_handler::load_data_from_files(const std::filesystem::path& ohlc_path, 
             bs_data_.push_back(option_calculator.get_call_price());
         }
     }
+    return { ohlc_data_, bs_data_ };
 }
 
-std::optional<market_data_bar> data_handler::get_next_market_data()
+size_t data_handler::get_csv_size()
 {
-    if (current_data_index_ < ohlc_data_.size())
+    if (ohlc_data_.size() != bs_data_.size())
     {
-        auto it = std::next(ohlc_data_.begin(), current_data_index_);
-        current_data_index_++;
-        return it->second;
+        throw std::invalid_argument("OHLC and BS data sizes do not match: " + std::to_string(ohlc_data_.size()) + " vs " + std::to_string(bs_data_.size()));
     }
-    return std::nullopt;
+    return ohlc_data_.size();
 }
+

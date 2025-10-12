@@ -10,9 +10,9 @@ public:
 
 private:
 
-    double f_cash; 
-
-    bool f_position_open;   
-    double f_entry_price;   
-    int total_trades;     
+    double f_cash = 0.0; 
+    double f_entry_price = 0.0;   
+    
+    bool f_position_open = false;
+    size_t total_trades  = 0;     
 };

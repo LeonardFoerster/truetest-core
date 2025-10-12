@@ -1,7 +1,6 @@
 #pragma once
 #include <string>
 
-
 struct market_data_bar
 {
 	double open = 0.0;

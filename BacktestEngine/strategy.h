@@ -1,9 +1,5 @@
 #pragma once
 
-#include <iostream>
-//#include <utility>
-
-
 enum class signal_event 
 {
     buy,
