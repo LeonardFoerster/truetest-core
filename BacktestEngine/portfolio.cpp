@@ -15,14 +15,16 @@ void portfolio::execute_signal(signal_event signal, double execution_price)
     }
     else if (signal == signal_event::sell && f_position_open) 
     {
-        double profit = execution_price - f_entry_price;
         total_trades++;
 
         f_position_open = false; 
         f_entry_price = execution_price;
 
-        std::cout << "sell executed at " << execution_price << " | PNL: " << profit << std::endl;
+        std::cout << "sell executed at " << execution_price << std::endl;
     }
+
+
+
 }
 
 void portfolio::print_summary() const 
