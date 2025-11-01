@@ -22,41 +22,47 @@
     <ClCompile Include="backtest_core.cpp">
       <Filter>SourceFiles</Filter>
     </ClCompile>
+    <ClCompile Include="db_connection.cpp">
+      <Filter>SourceFiles</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="portfolio.h">
-      <Filter>HeaderFiles</Filter>
+      <Filter>SourceFiles\HeaderFiles</Filter>
     </ClInclude>
     <ClInclude Include="strategy.h">
-      <Filter>HeaderFiles</Filter>
+      <Filter>SourceFiles\HeaderFiles</Filter>
     </ClInclude>
     <ClInclude Include="data_handler.h">
-      <Filter>HeaderFiles</Filter>
+      <Filter>SourceFiles\HeaderFiles</Filter>
     </ClInclude>
     <ClInclude Include="market_data.h">
-      <Filter>HeaderFiles</Filter>
+      <Filter>SourceFiles\HeaderFiles</Filter>
     </ClInclude>
     <ClInclude Include="black_scholes.h">
-      <Filter>HeaderFiles\BlackScholes</Filter>
+      <Filter>SourceFiles\HeaderFiles\BlackScholes</Filter>
     </ClInclude>
     <ClInclude Include="perform_calculations.h">
-      <Filter>HeaderFiles\BlackScholes</Filter>
+      <Filter>SourceFiles\HeaderFiles\BlackScholes</Filter>
     </ClInclude>
     <ClInclude Include="backtest_core.h">
-      <Filter>HeaderFiles</Filter>
+      <Filter>SourceFiles\HeaderFiles</Filter>
+    </ClInclude>
+    <ClInclude Include="db_connection.h">
+      <Filter>SourceFiles\HeaderFiles</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <Filter Include="HeaderFiles">
-      <UniqueIdentifier>{3a0e915f-1db8-43a9-ac74-0462c5f594c5}</UniqueIdentifier>
-    </Filter>
     <Filter Include="SourceFiles">
       <UniqueIdentifier>{5bdf3a48-a65a-4def-a0d8-f4308de9c2f0}</UniqueIdentifier>
     </Filter>
     <Filter Include="SourceFiles\BlackScholes">
       <UniqueIdentifier>{ddce6871-c329-47d8-a94f-4d1bdaf7064d}</UniqueIdentifier>
     </Filter>
-    <Filter Include="HeaderFiles\BlackScholes">
+    <Filter Include="SourceFiles\HeaderFiles">
+      <UniqueIdentifier>{3a0e915f-1db8-43a9-ac74-0462c5f594c5}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="SourceFiles\HeaderFiles\BlackScholes">
       <UniqueIdentifier>{1c70a172-73dc-4082-b209-2a16a17a4374}</UniqueIdentifier>
     </Filter>
   </ItemGroup>

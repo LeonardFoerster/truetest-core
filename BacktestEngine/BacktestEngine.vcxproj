@@ -109,6 +109,10 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PreBuildEvent>
+      <Command>
+      </Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -124,11 +128,16 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PreBuildEvent>
+      <Command>
+      </Command>
+    </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="backtest_core.cpp" />
     <ClCompile Include="black_scholes_formula.cpp" />
     <ClCompile Include="data_handler.cpp" />
+    <ClCompile Include="db_connection.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="perform_calculations.cpp" />
     <ClCompile Include="portfolio.cpp" />
@@ -138,6 +147,7 @@
     <ClInclude Include="backtest_core.h" />
     <ClInclude Include="black_scholes.h" />
     <ClInclude Include="data_handler.h" />
+    <ClInclude Include="db_connection.h" />
     <ClInclude Include="market_data.h" />
     <ClInclude Include="perform_calculations.h" />
     <ClInclude Include="portfolio.h" />
