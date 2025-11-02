@@ -1,5 +1,6 @@
 #include "header/backtest_core.h"
 #include "header/data_handler.h"
+#include "header/portfolio.h"
 
 #include <iostream>
 #include <filesystem>
@@ -27,11 +28,11 @@ void backtest::run()
     
     for(int i = 0; i <= size; i++)
     {
-       signal_event signal = strategy_.check_for_signal (data_handler_.bs_data_[i], data_handler_.ohlc_data_[i].close);
+       signal_event signal = strategy_.check_for_signal (data_handler_.bs_file_data_vector_[i], data_handler_.ohlc_file_data_vector_[i].close);
 
        if (signal != signal_event::hold)
        {
-           portfolio_.execute_signal(signal, data_handler_.ohlc_data_[i].close);
+           portfolio_.execute_signal(signal, data_handler_.ohlc_file_data_vector_[i].close);
        }
        else
        {

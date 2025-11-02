@@ -13,11 +13,15 @@
   <ItemGroup>
     <ClCompile Include="src\backtest_core.cpp" />
     <ClCompile Include="src\black_scholes_formula.cpp" />
-    <ClCompile Include="src\data_handler.cpp" />
-    <ClCompile Include="src\db_connection.cpp" />
+    <ClCompile Include="src\csv_data_loader.cpp" />
+    <ClCompile Include="src\database_connection.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\perform_calculations.cpp" />
     <ClCompile Include="src\portfolio.cpp" />
     <ClCompile Include="src\strategy.cpp" />
+    <ClCompile Include="src\database_data_loader.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="docs\time_doc.md" />
   </ItemGroup>
 </Project>

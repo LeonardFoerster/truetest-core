@@ -1,20 +1,21 @@
-#include "header/backtest_core.h"
-#include "header/db_connection.h"
 #include <iostream>
 #include <string>
 #include <pqxx/pqxx>
 #include <fstream>
 
+#include "header/backtest_core.h"
+#include "header/db_connection.h"
+
 
 int main()
 {
-    database_connection dh;
-    dh.establish_connection();
-    dh.test_connection();
-
+    database_connection db;
+    db.establish_connection();
+    db.test_connection();
+    db.load_data();
+    
 
     return 0;
-
 
     std::cout << "--- Backtesting Engine ---" << std::endl;
 

@@ -4,10 +4,13 @@
 #include <expected>
 #include <string>
 #include <stdexcept>
-
+#include <array>
+#include <chrono>
 
 #include "header/db_connection.h"
+#include "header/data_handler.h"
 
+//data_handler dh;
 
 std::optional<pqxx::connection> database_connection::establish_connection()
 {
@@ -94,32 +97,17 @@ int database_connection::test_connection()
     std::cout << "Connection Test Passed: " << std::boolalpha << connection_active << std::endl;
     std::cout << "Writing Test Passed: " << std::boolalpha  << write_test_sucessfull << std::endl;
     std::cout << "Read Test Passed: " << std::boolalpha << read_test_sucessfull << std::endl;
-    
+    std::cout << "----------------------------------" << std::endl;
     return 0;
-}
-
-
-int database_connection::load_data()
-{
-    if (!(connection_ && connection_->is_open()))
-    {
-        std::cout << "Connection not active" << std::endl;
-        return 1;           // error handeling needs a rework
-    }
-    
-
-
-
-
 }
 
 void database_connection::write_data()
 {
     if (connection_ && connection_->is_open()) 
     {
-        // Use *connection_ here, e.g., for inserts
+     
         std::cout << "Writing data to database." << std::endl;
-        // Example: pqxx::work txn(*connection_);
+
     }
     else 
     {

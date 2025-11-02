@@ -8,7 +8,7 @@
 #include <iterator>
 #include <utility>
 
-size_t data_handler::get_line_comma_count_csv(std::ifstream &file, std::string &line)
+size_t data_handler::get_csv_line_comma_count(std::ifstream &file, std::string &line)
 {
     std::getline(file, line);
     char seperator = ',';
@@ -25,9 +25,9 @@ size_t data_handler::get_line_comma_count_csv(std::ifstream &file, std::string &
 }
 
 
-std::pair<std::vector<market_data_bar>, std::vector<double>> data_handler::load_data_from_files(const std::filesystem::path& ohlc_path, const std::filesystem::path& bs_path)
+std::pair<std::vector<market_data_bar>, std::vector<double>> data_handler::load_data_from_files(const std::filesystem::path& ohlc_file_path, const std::filesystem::path& bs_path)
 {
-    std::ifstream ohlc_file(ohlc_path);
+    std::ifstream ohlc_file(ohlc_file_path);
     
     if (!ohlc_file.good())
     {
@@ -59,7 +59,7 @@ std::pair<std::vector<market_data_bar>, std::vector<double>> data_handler::load_
             bar.low = std::stod(token);
             std::getline(ss, token, ',');
             bar.close = std::stod(token);
-            ohlc_data_.push_back(bar);
+            ohlc_file_data_vector_.push_back(bar);
         }
         catch (const std::exception& e)
         {
@@ -100,18 +100,18 @@ std::pair<std::vector<market_data_bar>, std::vector<double>> data_handler::load_
         if (values.size() == 6)
         {
             black_scholes option_calculator(values[0], values[1], values[2], values[3], values[4], values[5]);
-            bs_data_.push_back(option_calculator.get_call_price());
+            bs_file_data_vector_.push_back(option_calculator.get_call_price());
         }
     }
-    return { ohlc_data_, bs_data_ };
+    return { ohlc_file_data_vector_, bs_file_data_vector_ };
 }
 
 size_t data_handler::get_csv_size()
 {
-    if (ohlc_data_.size() != bs_data_.size())
+    if (ohlc_file_data_vector_.size() != bs_file_data_vector_.size())
     {
-        throw std::invalid_argument("OHLC and BS data sizes do not match: " + std::to_string(ohlc_data_.size()) + " vs " + std::to_string(bs_data_.size()));
+        throw std::invalid_argument("OHLC and BS data sizes do not match: " + std::to_string(ohlc_file_data_vector_.size()) + " vs " + std::to_string(bs_file_data_vector_.size()));
     }
-    return ohlc_data_.size();
+    return ohlc_file_data_vector_.size();
 }
 
