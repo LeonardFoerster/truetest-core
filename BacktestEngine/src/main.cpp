@@ -1,5 +1,5 @@
-#include "backtest_core.h"
-#include "db_connection.h"
+#include "header/backtest_core.h"
+#include "header/db_connection.h"
 #include <iostream>
 #include <string>
 #include <pqxx/pqxx>
@@ -9,10 +9,12 @@
 int main()
 {
     database_connection dh;
-    
-    std::cout << dh.establish_connection().has_value() << std::endl;
-    
+    dh.establish_connection();
+    dh.test_connection();
+
+
     return 0;
+
 
     std::cout << "--- Backtesting Engine ---" << std::endl;
 

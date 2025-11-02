@@ -1,6 +1,8 @@
-#include "portfolio.h"
+#include "header/portfolio.h"
+#include "header/strategy.h"
+
 #include <iostream>
-#include "strategy.h"
+
 
 portfolio::portfolio() {};
 

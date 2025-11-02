@@ -134,24 +134,24 @@
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="backtest_core.cpp" />
-    <ClCompile Include="black_scholes_formula.cpp" />
-    <ClCompile Include="data_handler.cpp" />
-    <ClCompile Include="db_connection.cpp" />
-    <ClCompile Include="main.cpp" />
-    <ClCompile Include="perform_calculations.cpp" />
-    <ClCompile Include="portfolio.cpp" />
-    <ClCompile Include="strategy.cpp" />
+    <ClInclude Include="src\header\backtest_core.h" />
+    <ClInclude Include="src\header\black_scholes.h" />
+    <ClInclude Include="src\header\data_handler.h" />
+    <ClInclude Include="src\header\db_connection.h" />
+    <ClInclude Include="src\header\market_data.h" />
+    <ClInclude Include="src\header\perform_calculations.h" />
+    <ClInclude Include="src\header\portfolio.h" />
+    <ClInclude Include="src\header\strategy.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="backtest_core.h" />
-    <ClInclude Include="black_scholes.h" />
-    <ClInclude Include="data_handler.h" />
-    <ClInclude Include="db_connection.h" />
-    <ClInclude Include="market_data.h" />
-    <ClInclude Include="perform_calculations.h" />
-    <ClInclude Include="portfolio.h" />
-    <ClInclude Include="strategy.h" />
+    <ClCompile Include="src\backtest_core.cpp" />
+    <ClCompile Include="src\black_scholes_formula.cpp" />
+    <ClCompile Include="src\data_handler.cpp" />
+    <ClCompile Include="src\db_connection.cpp" />
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\perform_calculations.cpp" />
+    <ClCompile Include="src\portfolio.cpp" />
+    <ClCompile Include="src\strategy.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

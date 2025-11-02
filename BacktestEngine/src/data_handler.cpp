@@ -1,5 +1,5 @@
-#include "data_handler.h"
-#include "black_scholes.h"
+#include "header/data_handler.h"
+#include "header/black_scholes.h"
 
 #include <sstream>
 #include <iostream>
@@ -8,7 +8,7 @@
 #include <iterator>
 #include <utility>
 
-size_t data_handler::get_line_comma_count(std::ifstream &file, std::string &line)
+size_t data_handler::get_line_comma_count_csv(std::ifstream &file, std::string &line)
 {
     std::getline(file, line);
     char seperator = ',';
