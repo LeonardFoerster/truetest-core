@@ -1,2 +1,2 @@
-# Backtesting Engine in C++
+
 
