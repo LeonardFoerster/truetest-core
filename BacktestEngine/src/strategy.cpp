@@ -1,5 +1,5 @@
-#include "header/strategy.h"
-#include "header/black_scholes.h"
+#include "..\\header\\strategy.h"
+#include "..\\header\\black_scholes.h"
 
 #include <iostream>
 

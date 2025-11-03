@@ -1,14 +1,14 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClInclude Include="src\header\backtest_core.h" />
-    <ClInclude Include="src\header\black_scholes.h" />
-    <ClInclude Include="src\header\data_handler.h" />
-    <ClInclude Include="src\header\db_connection.h" />
-    <ClInclude Include="src\header\market_data.h" />
-    <ClInclude Include="src\header\perform_calculations.h" />
-    <ClInclude Include="src\header\portfolio.h" />
-    <ClInclude Include="src\header\strategy.h" />
+    <ClInclude Include="header\backtest_core.h" />
+    <ClInclude Include="header\black_scholes.h" />
+    <ClInclude Include="header\data_handler.h" />
+    <ClInclude Include="header\db_connection.h" />
+    <ClInclude Include="header\market_data.h" />
+    <ClInclude Include="header\perform_calculations.h" />
+    <ClInclude Include="header\portfolio.h" />
+    <ClInclude Include="header\strategy.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\backtest_core.cpp" />

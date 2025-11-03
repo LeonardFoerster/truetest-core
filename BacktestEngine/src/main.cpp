@@ -3,8 +3,8 @@
 #include <pqxx/pqxx>
 #include <fstream>
 
-#include "header/backtest_core.h"
-#include "header/db_connection.h"
+#include "..\\header\\backtest_core.h"
+#include "..\\header\\db_connection.h"
 
 
 int main()

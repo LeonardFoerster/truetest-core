@@ -1,6 +1,7 @@
 #define _USE_MATH_DEFINES
 
-#include "header/black_scholes.h"
+#include "..\\header\\black_scholes.h"
+
 #include <iostream>
 #include <cmath>
 #include <utility>

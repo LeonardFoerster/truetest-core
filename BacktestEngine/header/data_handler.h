@@ -1,4 +1,7 @@
 #pragma once
+#include "..\\header\\market_data.h"
+#include "..\\header\\db_connection.h"
+
 #include <filesystem>
 #include <vector>
 #include <map>
@@ -7,8 +10,7 @@
 #include <utility>
 #include <iostream>
 
-#include "header/market_data.h"
-#include "header/db_connection.h"
+#include "..\\header\\market_data.h"
 
 class data_handler
 {
@@ -22,9 +24,20 @@ class data_handler
 		size_t get_csv_size();
 		size_t get_csv_line_comma_count(std::ifstream&, std::string &line);
 
+
 		std::vector<market_data_bar> ohlc_file_data_vector_;
 		std::vector<double> bs_file_data_vector_;
 
+		
+		void move_db_data_into_vector();
+
+		std::vector<double> db_data_open_value;
+		std::vector<double> db_data_high_value;
+		std::vector<double> db_data_low_value;
+		std::vector<double> db_data_close_value;
+		
+		
+		
 		// maybe unnötig
 		struct id_assignment
 		{
@@ -36,10 +49,10 @@ class data_handler
 			
 		struct db_input_data
 		{
-			double open = 0;
-			double high = 0;
-			double low = 0;
-			double close = 0;
+			std::vector<double> open;
+			std::vector<double> high;
+			std::vector<double> low;
+			std::vector<double> close;
 		};
 
 		std::map<uint32_t, std::pair <std::chrono::year_month_day,std::string>> id_date_storage;

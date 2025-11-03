@@ -1,5 +1,5 @@
-#include "header/portfolio.h"
-#include "header/strategy.h"
+#include "..\\header\\portfolio.h"
+#include "..\\header\\strategy.h"
 
 #include <iostream>
 

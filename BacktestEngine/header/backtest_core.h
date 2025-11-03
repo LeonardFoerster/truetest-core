@@ -1,7 +1,7 @@
 #pragma once
-#include "data_handler.h"
-#include "strategy.h"
-#include "portfolio.h"
+#include "..\\header\\data_handler.h"
+#include "..\\header\\strategy.h"
+#include "..\\header\\portfolio.h"
 
 #include <string>
 #include <map>

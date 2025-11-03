@@ -6,35 +6,34 @@
 #include <stdexcept>
 #include <array>
 #include <chrono>
+#include <string_view>
 
-#include "header/db_connection.h"
-#include "header/data_handler.h"
+#include "..\\header\\db_connection.h"
+#include "..\\header\\data_handler.h"
 
-//data_handler dh;
 
-std::optional<pqxx::connection> database_connection::establish_connection()
+data_handler dh;
+
+pqxx::connection& database_connection::establish_connection()
 {
-    try 
+    try
     {
-        pqxx::connection conn("dbname=storage user=leonard password=leonard host=localhost port=5433");
-        if (conn.is_open()) 
-        {
-            std::cout << "Connected to database: " << conn.dbname() << std::endl;
-            connection_ = std::move(conn);
-            return conn;
-        }
-        else 
-        {
-            std::cout << "Failed to connect." << std::endl;
-            return std::nullopt;
-        }
+        connection_.emplace("dbname=storage user=leonard password=leonard host=localhost port=5433");
+
+        if (!connection_->is_open())
+            throw std::runtime_error("Failed to connect.");
+
+        std::cout << "Connected to database: " << connection_->dbname() << std::endl;
+        return *connection_; 
     }
-    catch (const std::exception& e) 
+    catch (const std::exception& e)
     {
         std::cerr << "Connection error: " << e.what() << std::endl;
-        return std::nullopt;
+        connection_.reset();
+        throw; 
     }
 }
+
 
 int database_connection::test_connection()
 {
@@ -99,6 +98,44 @@ int database_connection::test_connection()
     std::cout << "Read Test Passed: " << std::boolalpha << read_test_sucessfull << std::endl;
     std::cout << "----------------------------------" << std::endl;
     return 0;
+}
+
+
+int database_connection::load_data()
+{
+    auto start = std::chrono::high_resolution_clock::now();
+
+    if (!(connection_ && connection_->is_open()))
+    {
+        std::cerr << "Connection not active" << std::endl;
+        return 1;      // error handling needs a rework
+    }
+
+    pqxx::read_transaction load_data_from_database(*connection_); 
+    pqxx::result line_count = load_data_from_database.exec("SELECT COUNT (*) FROM tick_data");
+    std::size_t n = line_count[0][0].as<std::size_t>();
+
+    std::cout << n << std::endl;
+
+    dh.db_data_open_value.reserve(n * 1.1);
+    dh.db_data_high_value.reserve(n * 1.1);
+    dh.db_data_low_value.reserve(n * 1.1);
+    dh.db_data_close_value.reserve(n * 1.1);
+
+
+    for (auto [open, high, low, close] : load_data_from_database.stream<double, double, double, double>("SELECT open, high, low, close FROM tick_data ORDER BY tick_id"))
+    {
+        dh.db_data_open_value.emplace_back(open);
+        dh.db_data_high_value.emplace_back(high);
+        dh.db_data_low_value.emplace_back(low);
+        dh.db_data_close_value.emplace_back(close); 
+    }
+ 
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::seconds>(end - start);
+
+    std::cout << "time: " << duration << " seconds" << std::endl;
 }
 
 void database_connection::write_data()

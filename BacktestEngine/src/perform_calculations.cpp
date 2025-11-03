@@ -1,8 +1,8 @@
-#include "header/perform_calculations.h"
-#include "header/black_scholes.h"
-#include "header/strategy.h"
-#include "header/portfolio.h"
-#include "header/data_handler.h"
+#include "..\\header\\perform_calculations.h"
+#include "..\\header\\black_scholes.h"
+#include "..\\header\\strategy.h"
+#include "..\\header\\portfolio.h"
+#include "..\\header\\data_handler.h"
 
 #include <iostream>
 #include <fstream>
