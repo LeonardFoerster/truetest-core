@@ -2,13 +2,15 @@
 #include <string>
 #include <pqxx/pqxx>
 #include <fstream>
+#include <cstdlib>
 
-#include "..\\header\\backtest_core.h"
-#include "..\\header\\db_connection.h"
+#include "header/backtest_core.h"
+#include "header/db_connection.h"
 
 
 int main()
 {
+        
     database_connection db;
     db.establish_connection();
     db.test_connection();

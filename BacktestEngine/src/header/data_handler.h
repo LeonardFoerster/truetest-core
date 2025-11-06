@@ -1,6 +1,6 @@
 #pragma once
-#include "..\\header\\market_data.h"
-#include "..\\header\\db_connection.h"
+#include "header/market_data.h"
+#include "header/db_connection.h"
 
 #include <filesystem>
 #include <vector>
@@ -10,7 +10,7 @@
 #include <utility>
 #include <iostream>
 
-#include "..\\header\\market_data.h"
+#include "header/market_data.h"
 
 class data_handler
 {

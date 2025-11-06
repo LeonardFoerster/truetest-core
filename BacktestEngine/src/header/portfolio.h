@@ -1,5 +1,5 @@
 #pragma once
-#include "..\\header\\strategy.h"
+#include "header/strategy.h"
 
 class portfolio 
 {

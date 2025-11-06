@@ -1,6 +1,6 @@
-#include "..\\header\\backtest_core.h"
-#include "..\\header\\data_handler.h"
-#include "..\\header\\portfolio.h"
+#include "header/backtest_core.h"
+#include "header/data_handler.h"
+#include "header/portfolio.h"
 
 #include <iostream>
 #include <filesystem>

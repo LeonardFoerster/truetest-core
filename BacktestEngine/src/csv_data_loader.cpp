@@ -1,5 +1,5 @@
-#include "..\\header\\data_handler.h"
-#include "..\\header\\black_scholes.h"
+#include "header/data_handler.h"
+#include "header/black_scholes.h"
 
 #include <sstream>
 #include <iostream>

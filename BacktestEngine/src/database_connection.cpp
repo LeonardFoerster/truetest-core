@@ -8,8 +8,8 @@
 #include <chrono>
 #include <string_view>
 
-#include "..\\header\\db_connection.h"
-#include "..\\header\\data_handler.h"
+#include "header/db_connection.h"
+#include "header/data_handler.h"
 
 
 data_handler dh;
@@ -18,19 +18,24 @@ pqxx::connection& database_connection::establish_connection()
 {
     try
     {
-        connection_.emplace("dbname=storage user=leonard password=leonard host=localhost port=5433");
+        const std::string conn_string =
+            "dbname=storage user=xxxxx host=localhost port=5433";
+
+        connection_.emplace(conn_string);
 
         if (!connection_->is_open())
-            throw std::runtime_error("Failed to connect.");
+        {
+            throw std::runtime_error("Failed to connect. Check pgpass.conf and credentials.");
+        }
 
         std::cout << "Connected to database: " << connection_->dbname() << std::endl;
-        return *connection_; 
+        return *connection_;
     }
     catch (const std::exception& e)
     {
         std::cerr << "Connection error: " << e.what() << std::endl;
         connection_.reset();
-        throw; 
+        throw;
     }
 }
 
