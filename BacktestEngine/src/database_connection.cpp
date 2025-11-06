@@ -18,8 +18,13 @@ pqxx::connection& database_connection::establish_connection()
 {
     try
     {
-        const std::string conn_string =
-            "dbname=storage user=xxxxx host=localhost port=5433";
+        std::cout << "pgpass.conf file path:" << std::endl;
+        std::string password_file;
+        std::cin >> password_file;
+
+        std::string conn_string =
+            "dbname=storage user=leonard host=localhost port=5433 "
+            "passfile='" + password_file + "'";
 
         connection_.emplace(conn_string);
 
