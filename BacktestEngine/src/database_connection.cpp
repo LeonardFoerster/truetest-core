@@ -18,6 +18,7 @@ pqxx::connection& database_connection::establish_connection()
 {
     try
     {
+        
         std::cout << "pgpass.conf file path:" << std::endl;
         std::string password_file;
         std::cin >> password_file;
@@ -51,6 +52,7 @@ int database_connection::test_connection()
     bool write_test_sucessfull = false;
     bool read_test_sucessfull = false;
 
+    auto start = std::chrono::high_resolution_clock::now();
 
     if (!(connection_ && connection_->is_open())) 
     {
@@ -60,6 +62,10 @@ int database_connection::test_connection()
     else
     {
         connection_active = true;
+        std::cout << "Connection Test Passed: " << std::boolalpha << connection_active << std::endl;
+        auto time_stamp_connection_valid_test = std::chrono::high_resolution_clock::now();
+        auto time_stamp_connection_valid_result = std::chrono::duration_cast<std::chrono::milliseconds>(time_stamp_connection_valid_test - start);
+        std::cout << "Connection time: " << time_stamp_connection_valid_result << std::endl;
     }
 
     try
@@ -80,6 +86,12 @@ int database_connection::test_connection()
             tx.commit();
         }
         write_test_sucessfull = true;
+
+        std::cout << "Writing Test Passed: " << std::boolalpha << write_test_sucessfull << std::endl;
+        auto timestamp_write_test = std::chrono::high_resolution_clock::now();
+        auto write_valid_test_result = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp_write_test - start);
+        std::cout << "Write test time: " << write_valid_test_result << std::endl;
+
     }
     catch (std::exception e)
     {
@@ -96,17 +108,18 @@ int database_connection::test_connection()
             auto [ticker, price] = r[i].as<std::string, double>();
         }
         read_test_sucessfull = true;
+
+        std::cout << "Read Test Passed: " << std::boolalpha << read_test_sucessfull << std::endl;
+        auto timestamp_read_test = std::chrono::high_resolution_clock::now();
+        auto read_valid_test_result = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp_read_test - start);
+        std::cout << "Read Test time: " << read_valid_test_result << std::endl;
     }
     catch(std::exception e)    
     {
         std::cerr << "Reading Test failed" << std::endl;
     }
-
-    std::cout << "---------------Test Results--------------" << std::endl;
-    std::cout << "Connection Test Passed: " << std::boolalpha << connection_active << std::endl;
-    std::cout << "Writing Test Passed: " << std::boolalpha  << write_test_sucessfull << std::endl;
-    std::cout << "Read Test Passed: " << std::boolalpha << read_test_sucessfull << std::endl;
-    std::cout << "----------------------------------" << std::endl;
+             
+    
     return 0;
 }
 
@@ -125,26 +138,30 @@ int database_connection::load_data()
     pqxx::result line_count = load_data_from_database.exec("SELECT COUNT (*) FROM tick_data");
     std::size_t n = line_count[0][0].as<std::size_t>();
 
-    std::cout << n << std::endl;
+    dh.db_data_open_value.reserve(n);
+    dh.db_data_high_value.reserve(n);
+    dh.db_data_low_value.reserve(n);
+    dh.db_data_close_value.reserve(n);
 
-    dh.db_data_open_value.reserve(n * 1.1);
-    dh.db_data_high_value.reserve(n * 1.1);
-    dh.db_data_low_value.reserve(n * 1.1);
-    dh.db_data_close_value.reserve(n * 1.1);
+    auto timestamp = std::chrono::high_resolution_clock::now();
+    auto timestamp_duration = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp - start);
 
-
-    for (auto [open, high, low, close] : load_data_from_database.stream<double, double, double, double>("SELECT open, high, low, close FROM tick_data ORDER BY tick_id"))
+    std::cout << "timestamp after reserve: " << timestamp_duration << std::endl;
+    
+    for (auto [open, high, low, close] : load_data_from_database.stream<double, double, double, double>
+            ("SELECT CAST (open as DOUBLE PRECISION), CAST (high as DOUBLE PRECISION), CAST (low as DOUBLE PRECISION), CAST (close as DOUBLE PRECISION)FROM tick_data ORDER BY tick_id")
+        )
     {
         dh.db_data_open_value.emplace_back(open);
         dh.db_data_high_value.emplace_back(high);
         dh.db_data_low_value.emplace_back(low);
         dh.db_data_close_value.emplace_back(close); 
     }
- 
     
+           
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(end - start);
-
+        
     std::cout << "time: " << duration << " seconds" << std::endl;
 }
 
