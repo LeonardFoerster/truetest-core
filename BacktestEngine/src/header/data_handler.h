@@ -29,7 +29,7 @@ class data_handler
 		std::vector<double> bs_file_data_vector_;
 
 		
-		void move_db_data_into_vector();
+		void move_db_data_into_vector(double open, double high, double low, double close);
 
 		std::vector<double> db_data_open_value;
 		std::vector<double> db_data_high_value;

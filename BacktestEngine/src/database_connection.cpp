@@ -138,6 +138,7 @@ int database_connection::load_data()
     pqxx::result line_count = load_data_from_database.exec("SELECT COUNT (*) FROM tick_data");
     std::size_t n = line_count[0][0].as<std::size_t>();
 
+
     dh.db_data_open_value.reserve(n);
     dh.db_data_high_value.reserve(n);
     dh.db_data_low_value.reserve(n);
@@ -148,17 +149,21 @@ int database_connection::load_data()
 
     std::cout << "timestamp after reserve: " << timestamp_duration << std::endl;
 
-    
-    for (auto [open, high, low, close] : load_data_from_database.stream<double, double, double, double>
+
+    for (auto [open, high, low, close] : load_data_from_database.query<double, double, double, double>
             ("SELECT CAST (open as DOUBLE PRECISION), CAST (high as DOUBLE PRECISION), CAST (low as DOUBLE PRECISION), CAST (close as DOUBLE PRECISION)FROM tick_data ORDER BY tick_id")
         )
     {
+        //dh.move_db_data_into_vector(open, high, low, close);
+
+        
         dh.db_data_open_value.emplace_back(open);
         dh.db_data_high_value.emplace_back(high);
         dh.db_data_low_value.emplace_back(low);
         dh.db_data_close_value.emplace_back(close); 
+        
     }
-    
+     
     // Idea: pqx::stream for executing the command -> from the results reading in the doubles
     // Consider using binary data
     // potential issue: the for loop executes the sql command for every itearion instead of doing it once and fetching the result
