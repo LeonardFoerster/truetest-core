@@ -10,7 +10,8 @@
 
 int main()
 {
-   
+    // Idea: create all objects here and maybe use reference at certain "spots"
+
     database_connection db;
     db.establish_connection();
     db.test_connection();
