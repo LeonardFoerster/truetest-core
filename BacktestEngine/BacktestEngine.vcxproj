@@ -150,6 +150,7 @@
     <ClCompile Include="src\database_connection.cpp" />
     <ClCompile Include="src\database_data_loader.cpp" />
     <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\orderbook\orderbook.cpp" />
     <ClCompile Include="src\perform_calculations.cpp" />
     <ClCompile Include="src\portfolio.cpp" />
     <ClCompile Include="src\strategy.cpp" />

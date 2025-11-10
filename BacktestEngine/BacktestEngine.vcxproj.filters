@@ -20,6 +20,7 @@
     <ClCompile Include="src\portfolio.cpp" />
     <ClCompile Include="src\strategy.cpp" />
     <ClCompile Include="src\database_data_loader.cpp" />
+    <ClCompile Include="src\orderbook\orderbook.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="docs\time_doc.md" />
