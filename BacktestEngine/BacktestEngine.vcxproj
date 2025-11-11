@@ -139,6 +139,7 @@
     <ClInclude Include="src\header\data_handler.h" />
     <ClInclude Include="src\header\db_connection.h" />
     <ClInclude Include="src\header\market_data.h" />
+    <ClInclude Include="src\header\orderbook.h" />
     <ClInclude Include="src\header\perform_calculations.h" />
     <ClInclude Include="src\header\portfolio.h" />
     <ClInclude Include="src\header\strategy.h" />
@@ -147,8 +148,8 @@
     <ClCompile Include="src\backtest_core.cpp" />
     <ClCompile Include="src\black_scholes_formula.cpp" />
     <ClCompile Include="src\csv_data_loader.cpp" />
-    <ClCompile Include="src\database_connection.cpp" />
-    <ClCompile Include="src\database_data_loader.cpp" />
+    <ClCompile Include="src\database\database_connection.cpp" />
+    <ClCompile Include="src\database\database_data_loader.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\orderbook\orderbook.cpp" />
     <ClCompile Include="src\perform_calculations.cpp" />

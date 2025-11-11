@@ -9,17 +9,18 @@
     <ClInclude Include="src\header\perform_calculations.h" />
     <ClInclude Include="src\header\portfolio.h" />
     <ClInclude Include="src\header\strategy.h" />
+    <ClInclude Include="src\header\orderbook.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\backtest_core.cpp" />
     <ClCompile Include="src\black_scholes_formula.cpp" />
     <ClCompile Include="src\csv_data_loader.cpp" />
-    <ClCompile Include="src\database_connection.cpp" />
+    <ClCompile Include="src\database\database_connection.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\perform_calculations.cpp" />
     <ClCompile Include="src\portfolio.cpp" />
     <ClCompile Include="src\strategy.cpp" />
-    <ClCompile Include="src\database_data_loader.cpp" />
+    <ClCompile Include="src\database\database_data_loader.cpp" />
     <ClCompile Include="src\orderbook\orderbook.cpp" />
   </ItemGroup>
   <ItemGroup>
