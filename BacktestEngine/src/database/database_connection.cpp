@@ -13,8 +13,6 @@
 #include "../header/data_handler.h"
 
 
-data_handler dh;
-
 pqxx::connection& database_connection::establish_connection()
 {
     try
@@ -119,20 +117,18 @@ int database_connection::test_connection()
     {
         std::cerr << "Reading Test failed" << std::endl;
     }
-             
     
     return 0;
 }
 
 
-int database_connection::load_data()
+int database_connection::load_data(std::shared_ptr<data_handler> dh)
 {
     auto start = std::chrono::high_resolution_clock::now();
 
     if (!(connection_ && connection_->is_open()))
     {
-        std::cerr << "Connection not active" << std::endl;
-        return 1;      // error handling needs a rework
+        throw std::runtime_error("Connection not Active");
     }
 
     pqxx::read_transaction load_data_from_database(*connection_); 
@@ -140,10 +136,10 @@ int database_connection::load_data()
     std::size_t n = line_count[0][0].as<std::size_t>();
 
 
-    dh.db_data_open_value.reserve(n);
-    dh.db_data_high_value.reserve(n);
-    dh.db_data_low_value.reserve(n);
-    dh.db_data_close_value.reserve(n);
+    dh->db_data_open_value.reserve(n);
+    dh->db_data_high_value.reserve(n);
+    dh->db_data_low_value.reserve(n);
+    dh->db_data_close_value.reserve(n);
 
     auto timestamp = std::chrono::high_resolution_clock::now();
     auto timestamp_duration = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp - start);
@@ -155,14 +151,11 @@ int database_connection::load_data()
             ("SELECT CAST (open as DOUBLE PRECISION), CAST (high as DOUBLE PRECISION), CAST (low as DOUBLE PRECISION), CAST (close as DOUBLE PRECISION)FROM tick_data ORDER BY tick_id")
         )
     {
-        //dh.move_db_data_into_vector(open, high, low, close);
-
-        
-        dh.db_data_open_value.emplace_back(open);
-        dh.db_data_high_value.emplace_back(high);
-        dh.db_data_low_value.emplace_back(low);
-        dh.db_data_close_value.emplace_back(close); 
-        
+                
+        dh->db_data_open_value.emplace_back(open);
+        dh->db_data_high_value.emplace_back(high);
+        dh->db_data_low_value.emplace_back(low);
+        dh->db_data_close_value.emplace_back(close); 
     }
      
     // Idea: pqx::stream for executing the command -> from the results reading in the doubles
@@ -180,11 +173,15 @@ void database_connection::write_data()
     if (connection_ && connection_->is_open()) 
     {
      
+
+
         std::cout << "Writing data to database." << std::endl;
 
     }
     else 
     {
+
+
         std::cout << "No active connection to write data." << std::endl;
     }
 }
