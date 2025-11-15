@@ -3,6 +3,9 @@
 
 #include <optional>
 #include <pqxx/pqxx>
+#include <memory>
+
+class data_handler;
 
 class database_connection
 {
@@ -13,10 +16,9 @@ private:
 public:
     
     pqxx::connection& establish_connection();
-
-    
+        
     int test_connection();
-    int load_data();
+    int load_data(std::shared_ptr<data_handler> dh);
     void write_data();
 
 

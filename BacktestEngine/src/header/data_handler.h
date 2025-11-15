@@ -17,6 +17,7 @@ class data_handler
 
 	private:
 		size_t current_csv_row_index_ = 0;
+		
 
 	public:
 		data_handler() = default;
@@ -36,8 +37,7 @@ class data_handler
 		std::vector<double> db_data_low_value;
 		std::vector<double> db_data_close_value;
 		
-		
-		
+				
 		// maybe unnötig
 		struct id_assignment
 		{
@@ -46,7 +46,8 @@ class data_handler
 			std::string time;
 			
 		};
-			
+		
+		// not in use (yet)
 		struct db_input_data
 		{
 			std::vector<double> open;
