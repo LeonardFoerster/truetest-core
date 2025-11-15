@@ -6,20 +6,34 @@
 
 #include "header/backtest_core.h"
 #include "header/db_connection.h"
+#include "header/orderbook.h"
+
+
+void test_ob()
+{
+    orderbook order_book_;
+    const order_id order_id = 1;
+    order_book_.add_order(std::make_shared<order>(order_type::good_till_cancel, order_id, side::buy, 100, 10));
+    std::cout << order_book_.size() << std::endl;
+}
 
 
 int main()
 {
-    // Idea: create all objects here and maybe use reference at certain "spots"
-
-    database_connection db;
-    db.establish_connection();
-    db.test_connection();
-    db.load_data();
+    auto db = std::make_shared<database_connection>();
+    auto dh = std::make_shared<data_handler>();
     
+    db->establish_connection();
+    db->test_connection();
+    db->load_data(dh);
+    
+    std::cout << "----------------------" << std::endl;
+    test_ob();
+
 
     return 0;
 
+    /*
     std::cout << "--- Backtesting Engine ---" << std::endl;
 
     std::filesystem::path ohlc_data_source = "C:\\Users\\Leonard\\aktien_szenarien.csv";
@@ -30,7 +44,9 @@ int main()
     engine.run();
 
     engine.print_summary();
+    
 
     return 0;
  
+    */
 }
