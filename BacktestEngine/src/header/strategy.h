@@ -16,4 +16,6 @@ private:
 
 public:
     signal_event check_for_signal (double current_market_price, double calculated_fair_price);
+    signal_event simple_moving_average();
+
 };  

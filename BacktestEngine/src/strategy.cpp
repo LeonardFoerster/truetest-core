@@ -22,5 +22,13 @@ signal_event strategy::check_for_signal(double current_market_price, double calc
         return signal_event::hold;
     }
 }
+/*
+signal_event strategy::simple_moving_average()
+{
 
+
+  
+}
+
+*/
 
