@@ -4,9 +4,9 @@
 #include <fstream>
 #include <cstdlib>
 
-#include "header/backtest_core.h"
-#include "header/db_connection.h"
-#include "header/orderbook.h"
+#include "core/backtest_core.h"
+#include "data/db_connection.h"
+#include "orderbook/orderbook.h"
 
 
 void test_ob()
@@ -30,23 +30,6 @@ int main()
     std::cout << "----------------------" << std::endl;
     test_ob();
 
-
     return 0;
 
-    /*
-    std::cout << "--- Backtesting Engine ---" << std::endl;
-
-    std::filesystem::path ohlc_data_source = "C:\\Users\\Leonard\\aktien_szenarien.csv";
-    std::filesystem::path bs_data_source   = "C:\\Users\\Leonard\\Desktop\\options_scenarios.csv";
-
-    backtest engine(ohlc_data_source, bs_data_source);
-
-    engine.run();
-
-    engine.print_summary();
-    
-
-    return 0;
- 
-    */
 }
