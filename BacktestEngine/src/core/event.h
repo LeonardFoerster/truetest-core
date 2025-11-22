@@ -2,6 +2,7 @@
 #include <iostream>
 #include <chrono>
 #include <string>
+#include <memory>
 
 enum class event_type
 {
@@ -38,6 +39,7 @@ using event_pointer = std::shared_ptr<event>;
 
 class market_event : public event
 {
+public:
 	market_event
 	(
 		std::chrono::system_clock::time_point timestamp,
@@ -94,10 +96,10 @@ class signal_event : public event
 public:
 	signal_event
 	(
-	std::chrono::system_clock::time_point timestamp,
-	const std::string& symbol,
-	signal_type signal,
-	double strength = 1.0
+		std::chrono::system_clock::time_point timestamp,
+		const std::string& symbol,
+		signal_type signal,
+		double strength = 1.0
 	)
 	: event(event_type::signal, timestamp)
 	, symbol_(symbol)
