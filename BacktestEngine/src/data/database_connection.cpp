@@ -7,11 +7,16 @@
 #include <array>
 #include <chrono>
 #include <string_view>
+#include <memory>
+#include <cstdint>  
+#include <algorithm>
 
 
 #include "db_connection.h"
 #include "data_handler.h"
+#include "../core/event.h"
 
+class data_handler;
 
 pqxx::connection& database_connection::establish_connection()
 {
@@ -115,7 +120,7 @@ void database_connection::test_connection()
 }
 
 
-int database_connection::load_data(std::shared_ptr<data_handler> dh)
+void database_connection::load_data(const std::shared_ptr<data_handler> dh)
 {
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -127,29 +132,25 @@ int database_connection::load_data(std::shared_ptr<data_handler> dh)
     pqxx::read_transaction load_data_from_database(*connection_); 
     pqxx::result line_count = load_data_from_database.exec("SELECT COUNT (*) FROM tick_data");
     std::size_t n = line_count[0][0].as<std::size_t>();
+    const std::size_t report_interval = n > 0 ? std::max<std::size_t>(std::size_t{ 1 }, n / 100) : 1;
 
+    std::size_t processed = 0;
+    std::cout << "\rloading: 0/" << n << std::flush;
 
-    dh->db_data_open_value.reserve(n);  
-    dh->db_data_high_value.reserve(n);
-    dh->db_data_low_value.reserve(n);
-    dh->db_data_close_value.reserve(n);
-
-    auto timestamp = std::chrono::high_resolution_clock::now();
-    auto timestamp_duration = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp - start);
-
-    std::cout << "timestamp after reserve: " << timestamp_duration << std::endl;
-
-
-    for (auto [open, high, low, close] : load_data_from_database.query<double, double, double, double>
-            ("SELECT CAST (open as DOUBLE PRECISION), CAST (high as DOUBLE PRECISION), CAST (low as DOUBLE PRECISION), CAST (close as DOUBLE PRECISION)FROM tick_data ORDER BY tick_id")
+    // Stream rows and update a single "loading" status line in place.
+    for (auto [symbol, open, high, low, close, volume] : load_data_from_database.query<std::string, double, double, double, double, int64_t>
+            ("SELECT CAST(symbol AS VARCHAR(8)), CAST(open AS DOUBLE PRECISION), CAST(high AS DOUBLE PRECISION), CAST(low AS DOUBLE PRECISION), CAST(close AS DOUBLE PRECISION), CAST(volume AS INT) FROM tick_data;")
         )
     {
-                
-        dh->db_data_open_value.emplace_back(open);
-        dh->db_data_high_value.emplace_back(high);
-        dh->db_data_low_value.emplace_back(low);
-        dh->db_data_close_value.emplace_back(close); 
+        dh->load_into_queue(symbol, open, high, low, close, volume, n);
+        ++processed;
+
+        if ((processed % report_interval) == 0 || processed == n)
+        {
+            std::cout << "\rloading: " << processed << "/" << n << std::flush;
+        }
     }
+    std::cout << std::endl;
      
     // Idea: pqx::stream for executing the command -> from the results reading in the doubles
     // Consider using binary data

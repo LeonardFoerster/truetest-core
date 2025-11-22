@@ -10,8 +10,10 @@
 #include <utility>
 #include <iostream>
 #include <deque>
+#include <memory>
+#include <cstdint> 
 
-
+class database_connection;
 
 class data_handler
 {
@@ -31,43 +33,17 @@ class data_handler
 		std::vector<double> bs_file_data_vector_;
 
 		
-		void move_db_data_into_vector(double open, double high, double low, double close);
+		void load_into_queue(std::string, double, double, double, double, int64_t, std::size_t );
 
-		// Change the std::vector to std::deque
-		std::vector<double> db_data_open_value;
-		std::vector<double> db_data_high_value;
-		std::vector<double> db_data_low_value;
-		std::vector<double> db_data_close_value;
-
-		//std::deque<double> db_data_open_value;
-		//std::deque<double> db_data_high_value;
-		//std::deque<double> db_data_low_value;
-		//std::deque<double> db_data_close_value;
 		
-				
-		// maybe unnötig
-		struct id_assignment
-		{
-			uint32_t id = 0;
-			std::chrono::year_month_day date{ std::chrono::year{2025}, std::chrono::month{11}, std::chrono::day{2} };
-			std::string time;
-			
-		};
+		std::deque<std::string>	db_data_symbol;
+		std::deque<double>		db_data_open_value;
+		std::deque<double>		db_data_high_value;
+		std::deque<double>		db_data_low_value;
+		std::deque<double>		db_data_close_value;
+		std::deque<int64_t>		db_data_volume_value;
 		
-		// not in use (yet)
-		struct db_input_data
-		{
-			std::vector<double> open;
-			std::vector<double> high;
-			std::vector<double> low;
-			std::vector<double> close;
-		};
-
-		std::map<uint32_t, std::pair <std::chrono::year_month_day,std::string>> id_date_storage;
-		std::vector<db_input_data> ohlc_database_data;
-
-
-
+		
 		// deque fürs speicher der id + ohlc werte
 		// vlt irgendwie verketter daten struckturen um datum und zeit zuzuordnen, ohne performance zu verlieren
 		// Name überarbeiten -> ohlc data etc wird beim csv parsen verwendent. Das ganze vlt auslagern / zusammen packen

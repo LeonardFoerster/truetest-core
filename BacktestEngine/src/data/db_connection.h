@@ -18,7 +18,7 @@ public:
     pqxx::connection& establish_connection();
         
     void test_connection();
-    int load_data(std::shared_ptr<data_handler> dh);
+    void load_data(std::shared_ptr<data_handler> dh);
     void write_data();
 
 
