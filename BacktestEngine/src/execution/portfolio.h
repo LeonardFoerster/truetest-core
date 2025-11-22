@@ -5,8 +5,10 @@ class portfolio
 {
 public:
     portfolio();
-    void execute_signal(signal_event signal, double execution_price);
+    void execute_signal(const signal_event& signal, double execution_price); // Executes buy/sell based on signal
     void print_summary() const;
+    bool position_open() const { return f_position_open; } // Exposes position state
+    std::size_t get_total_trades() const { return total_trades; }
 
 private:
 

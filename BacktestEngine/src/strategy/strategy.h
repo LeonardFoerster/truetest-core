@@ -1,21 +1,17 @@
 #pragma once
+#include "../core/event.h"
+#include "../indicator/sma.h"
 
-enum class signal_event 
-{
-    buy,
-    sell,
-    hold 
-};
-
+#include <optional>
 
 class strategy
 {
-private:
-    double current_market_price = 0.0;
-    double calculated_fair_price = 0.0;
-
 public:
-    signal_event check_for_signal (double current_market_price, double calculated_fair_price);
-    signal_event simple_moving_average();
+    explicit strategy(std::size_t period = 10);
+    std::optional<signal_event> on_market(const market_event& mkt); // Event-driven signal generation
+    void set_position_open(bool open); // Syncs position state from portfolio
 
-};  
+private:
+    simple_moving_average sma_;
+    bool position_open_ = false; // Tracks if a position is currently open
+};
