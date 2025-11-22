@@ -6,16 +6,6 @@
 
 #include "core/backtest_core.h"
 #include "data/db_connection.h"
-#include "orderbook/orderbook.h"
-
-
-void test_ob()
-{
-    orderbook order_book_;
-    const order_id order_id = 1;
-    order_book_.add_order(std::make_shared<order>(order_type::good_till_cancel, order_id, side::buy, 100, 10));
-    std::cout << order_book_.size() << std::endl;
-}
 
 
 int main()
@@ -25,10 +15,11 @@ int main()
     
     db->establish_connection();
     db->test_connection();
-    db->load_data(dh);
-    
-    std::cout << "----------------------" << std::endl;
-    test_ob();
+    db->load_data(dh); // pull market data from DB
+
+    backtest bt(db, dh, /*sma_period=*/20); // SMA period configurable
+    bt.run();
+    bt.print_summary();
 
     return 0;
 

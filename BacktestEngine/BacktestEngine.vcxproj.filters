@@ -21,7 +21,7 @@
     <ClCompile Include="src\pricing\perform_calculations.cpp" />
     <ClCompile Include="src\execution\portfolio.cpp" />
     <ClCompile Include="src\strategy\strategy.cpp" />
-    <ClCompile Include="src\data\database_data_loader.cpp" />
+    <ClCompile Include="src\data\data_loader.cpp" />
     <ClCompile Include="src\orderbook\orderbook.cpp" />
   </ItemGroup>
   <ItemGroup>

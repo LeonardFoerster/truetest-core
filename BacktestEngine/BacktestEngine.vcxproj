@@ -150,7 +150,7 @@
     <ClCompile Include="src\pricing\black_scholes_formula.cpp" />
     <ClCompile Include="src\data\csv_data_loader.cpp" />
     <ClCompile Include="src\data\database_connection.cpp" />
-    <ClCompile Include="src\data\database_data_loader.cpp" />
+    <ClCompile Include="src\data\data_loader.cpp" />
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\orderbook\orderbook.cpp" />
     <ClCompile Include="src\pricing\perform_calculations.cpp" />
