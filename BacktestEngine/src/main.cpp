@@ -15,9 +15,9 @@ int main()
     
     db->establish_connection();
     db->test_connection();
-    db->load_data(dh); // pull market data from DB
+    db->load_data(dh); 
 
-    backtest bt(db, dh, /*sma_period=*/20); // SMA period configurable
+    backtest bt(db, dh, /*sma_period=*/20); 
     bt.run();
     bt.print_summary();
 

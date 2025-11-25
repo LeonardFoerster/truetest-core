@@ -33,13 +33,13 @@ void backtest::run()
     const auto start = std::chrono::high_resolution_clock::now();
     const std::size_t report_interval = std::max<std::size_t>(std::size_t{1}, n / 100); // ~1% steps
 
-    // Execution progress printed in-place (no line spam).
+    
     std::cout << "\rexecution: 0.000% | Trades executed: 0" << std::flush;
 
     for (std::size_t i = 0; i < n; ++i)
     {
-        // Build market event from DB row.
-        market_event mkt(
+        market_event mkt
+        (
             base_ts + std::chrono::milliseconds(static_cast<long long>(i)),
             data_handler_->db_data_symbol[i],
             data_handler_->db_data_open_value[i],
@@ -50,7 +50,7 @@ void backtest::run()
         );
         events.push(std::make_shared<market_event>(mkt));
 
-        // Event loop: market -> signal -> portfolio
+        
         while (!events.empty())
         {
             auto ev = events.front();
@@ -80,10 +80,10 @@ void backtest::run()
     }
 
     const auto end = std::chrono::high_resolution_clock::now();
-    const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
     std::cout << std::endl;
     std::cout << "Trades executed: " << portfolio_.get_total_trades()
               << " in " << elapsed_ms << " ms" << std::endl;
+    std::cout << "Avg Execution time: " << portfolio_.get_total_trades() / elapsed_ms << "ms" << std::endl;
 }
