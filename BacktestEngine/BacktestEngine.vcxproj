@@ -156,6 +156,7 @@
     <ClCompile Include="src\pricing\perform_calculations.cpp" />
     <ClCompile Include="src\execution\portfolio.cpp" />
     <ClCompile Include="src\strategy\strategy.cpp" />
+    <ClCompile Include="src\utils\log\log.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="docs\time_doc.md" />
