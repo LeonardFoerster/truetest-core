@@ -12,6 +12,7 @@ int main()
 {
     auto db = std::make_shared<database_connection>();
     auto dh = std::make_shared<data_handler>();
+    auto log = std::make_shared<>();
     
     db->establish_connection();
     db->test_connection();
@@ -20,6 +21,7 @@ int main()
     backtest bt(db, dh, /*sma_period=*/20); 
     bt.run();
     bt.print_summary();
+
 
     return 0;
 
