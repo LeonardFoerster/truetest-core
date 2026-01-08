@@ -35,7 +35,6 @@ void log_event(bool s)
 
 
 
-
-
+    
 }
 
