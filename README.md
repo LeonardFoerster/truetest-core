@@ -1,4 +1,4 @@
-# Work in Progress
+# HFT-Engine (Work in Progress)
 
 An Engine to backtest High-Frequenzy-Trading strategies. Using C++23 and PostgreSQL
 - Current Throughput ~ 450.000 events per second 
