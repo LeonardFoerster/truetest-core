@@ -6,7 +6,7 @@ An Engine to backtest High-Frequenzy-Trading strategies. Using C++23 and Postgre
 
 
 ## To-Do
-- Order Matching Logik
+- Multi Order Matching Logic
 - Enhance Throughput to 1 Million order per second
 - Monte Carlo Implementation
 
