@@ -12,7 +12,7 @@ int main()
 {
     auto db = std::make_shared<database_connection>();
     auto dh = std::make_shared<data_handler>();
-    auto log = std::make_shared<>();
+    
     
     db->establish_connection();
     db->test_connection();

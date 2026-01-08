@@ -1,7 +1,7 @@
 #pragma once
 #include "../data/data_handler.h"
 #include "../data/db_connection.h"
-#include "../strategy/strategy.h"
+#include "../strategy/mean_reversion_strategy.h"
 #include "../execution/portfolio.h"
 
 #include <memory>
@@ -12,7 +12,7 @@ class backtest
 private:
     std::shared_ptr<data_handler> data_handler_;
     std::shared_ptr<database_connection> db_;
-    strategy strategy_;
+    mean_reversion_strategy strategy_;
     portfolio portfolio_;
 
 public:
