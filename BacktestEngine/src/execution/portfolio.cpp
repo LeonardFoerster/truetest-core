@@ -1,31 +1,31 @@
 #include "portfolio.h"
-#include "../strategy/strategy.h"
+#include "../core/event.h"
 
 #include <iostream>
 
 
-portfolio::portfolio() {};
+portfolio::portfolio() : f_cash(100000.0) {}; // Start with some initial cash
 
 
-void portfolio::execute_signal(const signal_event& signal, double execution_price) 
+void portfolio::on_fill(const fill_event& fill) 
 {
-    if (signal.get_signal() == signal_type::buy && !f_position_open)
+    if (fill.get_side() == order_side::buy && !f_position_open)
     {
         f_position_open = true;
-        f_entry_price = execution_price;
-        // No per-trade console spam; aggregated reporting handled by backtest_core.
+        f_entry_price = fill.get_fill_price();
+        f_cash -= fill.get_total_cost();
     }
-    else if (signal.get_signal() == signal_type::sell && f_position_open) 
+    else if (fill.get_side() == order_side::sell && f_position_open) 
     {
         total_trades++;
-
-        f_position_open = false; 
-        f_entry_price = execution_price;
+        f_position_open = false;
+        f_cash += fill.get_total_cost();
     }
 
 }
 
 void portfolio::print_summary() const 
 {
+    std::cout << "Ending Cash: " << f_cash << std::endl;
     std::cout << "Total Trades Executed: " << total_trades << std::endl;
 }

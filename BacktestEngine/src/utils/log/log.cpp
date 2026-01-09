@@ -7,10 +7,11 @@
 #include "../../data/db_connection.h"
 
 
-//todo: implement the event "loop"
 
 bool mkdir()
 {
+
+
     std::error_code ec;
     bool created = std::filesystem::create_directory("Log", ec);
 

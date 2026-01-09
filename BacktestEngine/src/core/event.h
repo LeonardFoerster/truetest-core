@@ -164,6 +164,9 @@ public:
 	{
 	}
 
+	uint64_t get_order_id() const { return order_id_; }
+	void set_order_id(uint64_t id) { order_id_ = id; }
+
 	const std::string& get_symbol() const { return symbol_; }
 	order_type get_order_type() const { return order_type_; }
 	order_side get_side() const { return side_; }
@@ -179,12 +182,13 @@ public:
 		case order_type::limit: type_str = "LIMIT"; break;
 		case order_type::stop: type_str = "STOP"; break;
 		}
-		return "OrderEvent[" + type_str + " " + side_str + " " +
+		return "OrderEvent[id=" + std::to_string(order_id_) + " " + type_str + " " + side_str + " " +
 			std::to_string(quantity_) + " " + symbol_ +
 			" @ " + std::to_string(price_) + "]";
 	}
 
 private:
+	uint64_t order_id_ = 0;
 	std::string symbol_;
 	order_type order_type_;
 	order_side side_;
@@ -199,6 +203,7 @@ public:
 	(
 		std::chrono::system_clock::time_point timestamp,
 		const std::string& symbol,
+		uint64_t order_id,
 		order_side side,
 		int filled_quantity,
 		double fill_price,
@@ -206,6 +211,7 @@ public:
 	)
 		: event(event_type::fill, timestamp)
 		, symbol_(symbol)
+		, order_id_(order_id)
 		, side_(side)
 		, filled_quantity_(filled_quantity)
 		, fill_price_(fill_price)
@@ -213,6 +219,7 @@ public:
 	{
 	}
 
+	uint64_t get_order_id() const { return order_id_; }
 	const std::string& get_symbol() const { return symbol_; }
 	order_side get_side() const { return side_; }
 	int get_filled_quantity() const { return filled_quantity_; }
@@ -229,13 +236,14 @@ public:
 	std::string to_string() const override 
 	{
 		std::string side_str = (side_ == order_side::buy) ? "BOUGHT" : "SOLD";
-		return "FillEvent[" + side_str + " " +
+		return "FillEvent[order_id=" + std::to_string(order_id_) + " " + side_str + " " +
 			std::to_string(filled_quantity_) + " " + symbol_ +
 			" @ " + std::to_string(fill_price_) +
 			" commission=" + std::to_string(commission_) + "]";
 	}
 
 private:
+	uint64_t order_id_ = 0;
 	std::string symbol_;
 	order_side side_;
 	int filled_quantity_;

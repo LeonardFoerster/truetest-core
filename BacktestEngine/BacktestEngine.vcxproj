@@ -136,17 +136,22 @@
   <ItemGroup>
     <ClInclude Include="src\core\event.h" />
     <ClInclude Include="src\core\backtest_core.h" />
+    <ClInclude Include="src\market_maker\market_maker.h" />
     <ClInclude Include="src\pricing\black_scholes.h" />
     <ClInclude Include="src\data\data_handler.h" />
     <ClInclude Include="src\data\db_connection.h" />
+    <ClInclude Include="src\strategy\sma_strategy.h" />
+    <ClInclude Include="src\strategy\strategy_interface.h" />
     <ClInclude Include="src\utils\market_data.h" />
     <ClInclude Include="src\orderbook\orderbook.h" />
     <ClInclude Include="src\pricing\perform_calculations.h" />
     <ClInclude Include="src\execution\portfolio.h" />
-    <ClInclude Include="src\strategy\strategy.h" />
+    <ClInclude Include="src\strategy\sma.h" />
+    <ClInclude Include="src\strategy\mean_reversion_strategy.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\core\backtest_core.cpp" />
+    <ClCompile Include="src\market_maker\market_maker.cpp" />
     <ClCompile Include="src\pricing\black_scholes_formula.cpp" />
     <ClCompile Include="src\data\csv_data_loader.cpp" />
     <ClCompile Include="src\data\database_connection.cpp" />
@@ -155,7 +160,9 @@
     <ClCompile Include="src\orderbook\orderbook.cpp" />
     <ClCompile Include="src\pricing\perform_calculations.cpp" />
     <ClCompile Include="src\execution\portfolio.cpp" />
-    <ClCompile Include="src\strategy\strategy.cpp" />
+    <ClCompile Include="src\strategy\sma.cpp" />
+    <ClCompile Include="src\strategy\mean_reversion_strategy.cpp" />
+    <ClCompile Include="src\strategy\sma_strategy.cpp" />
     <ClCompile Include="src\utils\log\log.cpp" />
   </ItemGroup>
   <ItemGroup>

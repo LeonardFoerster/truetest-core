@@ -1,6 +1,6 @@
 #include "perform_calculations.h"
 #include "black_scholes.h"
-#include "../strategy/strategy.h"
+#include "../strategy/sma.h"
 #include "../execution/portfolio.h"
 #include "../data/data_handler.h"
 

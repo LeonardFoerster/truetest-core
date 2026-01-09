@@ -44,7 +44,6 @@ pqxx::connection& database_connection::establish_connection()
     }
 }
 
-
 void database_connection::test_connection()
 {
     bool connection_active = false;
@@ -119,7 +118,6 @@ void database_connection::test_connection()
        
 }
 
-
 void database_connection::load_data(const std::shared_ptr<data_handler> dh)
 {
     auto start = std::chrono::high_resolution_clock::now();
@@ -137,11 +135,12 @@ void database_connection::load_data(const std::shared_ptr<data_handler> dh)
     std::size_t processed = 0;
     std::cout << "\rloading: 0/" << n << std::flush;
 
-    // Stream rows and update a single "loading" status line in place.
-    for (auto [symbol, open, high, low, close, volume] : load_data_from_database.query<std::string, double, double, double, double, int64_t>
-            ("SELECT CAST(symbol AS VARCHAR(8)), CAST(open AS DOUBLE PRECISION), CAST(high AS DOUBLE PRECISION), CAST(low AS DOUBLE PRECISION), CAST(close AS DOUBLE PRECISION), CAST(volume AS INT) FROM tick_data;")
-        )
+    // Execute query once and iterate over results
+    pqxx::result r = load_data_from_database.exec("SELECT CAST(symbol AS VARCHAR(8)), CAST(open AS DOUBLE PRECISION), CAST(high AS DOUBLE PRECISION), CAST(low AS DOUBLE PRECISION), CAST(close AS DOUBLE PRECISION), CAST(volume AS INT) FROM tick_data;");
+    
+    for (auto row : r)
     {
+        auto [symbol, open, high, low, close, volume] = row.as<std::string, double, double, double, double, int64_t>();
         dh->load_into_queue(symbol, open, high, low, close, volume, n);
         ++processed;
 
@@ -166,16 +165,11 @@ void database_connection::write_data()
 {
     if (connection_ && connection_->is_open()) 
     {
-     
-
-
         std::cout << "Writing data to database." << std::endl;
 
     }
     else 
     {
-
-
         std::cout << "No active connection to write data." << std::endl;
     }
 }

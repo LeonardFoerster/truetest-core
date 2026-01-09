@@ -27,6 +27,7 @@ class data_handler
 		std::pair<std::vector<market_data_bar>, std::vector<double>> load_data_from_files(const std::filesystem::path& ohlc_path, const std::filesystem::path& bs_path);
 		size_t get_csv_size();
 		size_t get_csv_line_comma_count(std::ifstream&, std::string &line);
+		void load_from_csv(const std::filesystem::path& path);
 
 
 		std::vector<market_data_bar> ohlc_file_data_vector_;
