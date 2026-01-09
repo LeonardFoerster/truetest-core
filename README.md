@@ -1,8 +1,6 @@
 # HFT-Engine (Work in Progress)
 
 An Engine to backtest High-Frequenzy-Trading strategies. Using C++23 and PostgreSQL
-- Current Throughput ~ 450.000 events per second 
-- Executing ~ 22.500 trades per second 
 
 ## Build:
 ```
@@ -17,6 +15,8 @@ mkdir build && cd build
 cmake ..
 cmake --build .
 ./hft-engine2
+
+(Windows is following)
 ```
 
 
