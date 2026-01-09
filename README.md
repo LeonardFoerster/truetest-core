@@ -7,8 +7,8 @@ An Engine to backtest High-Frequenzy-Trading strategies. Using C++23 and Postgre
 sudo apt update && sudo apt upgrade
 sudo apt install git cmake build-essential postgresql postgresql-contrib libpq-dev
 sudo systemctl start postgresql
-sudo -u postgres createuser --interactive --pwprompt leonard  # Erstelle User 'leonard'
-sudo -u postgres createdb storage  # Erstelle DB 'storage'
+sudo -u postgres createuser --interactive --pwprompt "your-username"  # Create your user
+sudo -u postgres createdb "your-database"  # Create your database
 git clone https://github.com/LeonardFoerster/hft-engine.git
 cd hft-engine
 mkdir build && cd build
