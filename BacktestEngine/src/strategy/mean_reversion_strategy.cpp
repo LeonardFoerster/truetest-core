@@ -6,16 +6,16 @@
 
 mean_reversion_strategy::mean_reversion_strategy(std::size_t period) : sma_(period) {}
 
-std::optional<signal_event> mean_reversion_strategy::on_market(const market_event& mkt)
+std::optional<order_event> mean_reversion_strategy::on_market(const market_event& mkt)
 {
     auto sma_value = sma_.update(mkt.get_close());
     if (!sma_value) return std::nullopt; 
 
     if (!position_open_ && mkt.get_close() < *sma_value) {
-        return signal_event(mkt.get_timestamp(), mkt.get_symbol(), signal_type::buy, 1.0);
+        return order_event(mkt.get_timestamp(), mkt.get_symbol(), order_type::limit, order_side::buy, 100, mkt.get_close());
     }
     if (position_open_ && mkt.get_close() > *sma_value) {
-        return signal_event(mkt.get_timestamp(), mkt.get_symbol(), signal_type::sell, 1.0);
+        return order_event(mkt.get_timestamp(), mkt.get_symbol(), order_type::limit, order_side::sell, 100, mkt.get_close());
     }
     return std::nullopt; 
 }

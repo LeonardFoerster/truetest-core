@@ -5,10 +5,10 @@
 
 #include <optional>
 
-class mean_reversion_strategy : public IStrategy
+class sma_strategy : public IStrategy
 {
 public:
-    explicit mean_reversion_strategy(std::size_t period = 20);
+    explicit sma_strategy(std::size_t period = 20);
     std::optional<order_event> on_market(const market_event& mkt) override;
     void set_position_open(bool open) override;
 

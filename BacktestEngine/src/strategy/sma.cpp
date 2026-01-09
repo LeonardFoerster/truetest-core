@@ -1,4 +1,4 @@
-#include "strategy.h"
+#include "sma.h"
 #include "../pricing/black_scholes.h"
 #include "../core/event.h"
 
@@ -10,7 +10,7 @@ strategy::strategy(std::size_t period) : sma_(period) {}
 std::optional<signal_event> strategy::on_market(const market_event& mkt)
 {
     auto sma_value = sma_.update(mkt.get_close());
-    if (!sma_value) return std::nullopt; // need full window before trading
+    if (!sma_value) return std::nullopt; 
 
     if (!position_open_ && mkt.get_close() > *sma_value) {
         return signal_event(mkt.get_timestamp(), mkt.get_symbol(), signal_type::buy, 1.0);
@@ -18,7 +18,7 @@ std::optional<signal_event> strategy::on_market(const market_event& mkt)
     if (position_open_ && mkt.get_close() < *sma_value) {
         return signal_event(mkt.get_timestamp(), mkt.get_symbol(), signal_type::sell, 1.0);
     }
-    return std::nullopt; // hold / no signal
+    return std::nullopt; 
 }
 
 void strategy::set_position_open(bool open)
