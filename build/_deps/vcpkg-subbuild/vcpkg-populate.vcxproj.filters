@@ -1,0 +1,44 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeFiles\963ce38d7236b3d7738e41117e00d480\vcpkg-populate-mkdir.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeFiles\963ce38d7236b3d7738e41117e00d480\vcpkg-populate-download.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeFiles\963ce38d7236b3d7738e41117e00d480\vcpkg-populate-update.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeFiles\963ce38d7236b3d7738e41117e00d480\vcpkg-populate-patch.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeFiles\963ce38d7236b3d7738e41117e00d480\vcpkg-populate-configure.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeFiles\963ce38d7236b3d7738e41117e00d480\vcpkg-populate-build.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeFiles\963ce38d7236b3d7738e41117e00d480\vcpkg-populate-install.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeFiles\963ce38d7236b3d7738e41117e00d480\vcpkg-populate-test.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeFiles\be1b4d135f2d37a55799d4f926cbec47\vcpkg-populate-complete.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeFiles\ab02c9367badf9a55397741584af1237\vcpkg-populate.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+    <CustomBuild Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="C:\Users\Leonard\source\repos\hft-engine\build\_deps\vcpkg-subbuild\CMakeFiles\vcpkg-populate" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{4DA6F3CC-6EE8-35D6-BFA1-746442CDD97E}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

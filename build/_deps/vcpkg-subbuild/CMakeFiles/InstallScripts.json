@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

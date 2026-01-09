@@ -1,0 +1,14 @@
+# Target labels
+ vcpkg-populate
+# Source files and their labels
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/vcpkg-populate
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/ab02c9367badf9a55397741584af1237/vcpkg-populate.rule
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/be1b4d135f2d37a55799d4f926cbec47/vcpkg-populate-complete.rule
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/963ce38d7236b3d7738e41117e00d480/vcpkg-populate-build.rule
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/963ce38d7236b3d7738e41117e00d480/vcpkg-populate-configure.rule
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/963ce38d7236b3d7738e41117e00d480/vcpkg-populate-download.rule
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/963ce38d7236b3d7738e41117e00d480/vcpkg-populate-install.rule
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/963ce38d7236b3d7738e41117e00d480/vcpkg-populate-mkdir.rule
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/963ce38d7236b3d7738e41117e00d480/vcpkg-populate-patch.rule
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/963ce38d7236b3d7738e41117e00d480/vcpkg-populate-test.rule
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/963ce38d7236b3d7738e41117e00d480/vcpkg-populate-update.rule

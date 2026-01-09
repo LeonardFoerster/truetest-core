@@ -1,0 +1,3 @@
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/vcpkg-populate.dir
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/ALL_BUILD.dir
+C:/Users/Leonard/source/repos/hft-engine/build/_deps/vcpkg-subbuild/CMakeFiles/ZERO_CHECK.dir
