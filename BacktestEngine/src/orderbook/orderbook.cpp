@@ -84,7 +84,6 @@ trades orderbook::match_orders()
 
     while (!bids_.empty() && !asks_.empty() && bids_.top().first >= asks_.top().first)
     {
-        std::cout << "Matching: Bid price " << bids_.top().first << ", Ask price " << asks_.top().first << std::endl;
         auto bid = bids_.top(); bids_.pop();
         auto ask = asks_.top(); asks_.pop();
 

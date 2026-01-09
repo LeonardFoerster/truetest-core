@@ -10,7 +10,8 @@
 #include <memory>
 #include <cstdint>  
 #include <algorithm>
-
+#include <filesystem>
+#include <fstream>
 
 #include "db_connection.h"
 #include "data_handler.h"
@@ -120,45 +121,100 @@ void database_connection::test_connection()
 
 void database_connection::load_data(const std::shared_ptr<data_handler> dh)
 {
-    auto start = std::chrono::high_resolution_clock::now();
+    std::string cache_file = "data_cache.bin";
 
-    if (!(connection_ && connection_->is_open()))
-    {
-        throw std::runtime_error("Connection not Active");
-    }
+    if (std::filesystem::exists(cache_file)) {
+        std::cout << "Loading from cache..." << std::endl;
+        std::ifstream ifs(cache_file, std::ios::binary);
+        size_t size;
+        ifs.read(reinterpret_cast<char*>(&size), sizeof(size));
 
-    pqxx::read_transaction load_data_from_database(*connection_); 
-    pqxx::result line_count = load_data_from_database.exec("SELECT COUNT (*) FROM tick_data");
-    std::size_t n = line_count[0][0].as<std::size_t>();
-    const std::size_t report_interval = n > 0 ? std::max<std::size_t>(std::size_t{ 1 }, n / 100) : 1;
-
-    std::size_t processed = 0;
-    std::cout << "\rloading: 0/" << n << std::flush;
-
-    // Execute query once and iterate over results
-    pqxx::result r = load_data_from_database.exec("SELECT CAST(symbol AS VARCHAR(8)), CAST(open AS DOUBLE PRECISION), CAST(high AS DOUBLE PRECISION), CAST(low AS DOUBLE PRECISION), CAST(close AS DOUBLE PRECISION), CAST(volume AS INT) FROM tick_data;");
-    
-    for (auto row : r)
-    {
-        auto [symbol, open, high, low, close, volume] = row.as<std::string, double, double, double, double, int64_t>();
-        dh->load_into_queue(symbol, open, high, low, close, volume, n);
-        ++processed;
-
-        if ((processed % report_interval) == 0 || processed == n)
-        {
-            std::cout << "\rloading: " << processed << "/" << n << std::flush;
+        dh->db_data_symbol.resize(size);
+        for (auto& s : dh->db_data_symbol) {
+            size_t len;
+            ifs.read(reinterpret_cast<char*>(&len), sizeof(len));
+            s.resize(len);
+            ifs.read(&s[0], len);
         }
-    }
-    std::cout << std::endl;
-     
-    // Idea: pqx::stream for executing the command -> from the results reading in the doubles
-    // Consider using binary data
-    // potential issue: the for loop executes the sql command for every itearion instead of doing it once and fetching the result
-           
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::seconds>(end - start);
+
+        dh->db_data_open_value.resize(size);
+        ifs.read(reinterpret_cast<char*>(dh->db_data_open_value.data()), size * sizeof(double));
+
+        dh->db_data_high_value.resize(size);
+        ifs.read(reinterpret_cast<char*>(dh->db_data_high_value.data()), size * sizeof(double));
+
+        dh->db_data_low_value.resize(size);
+        ifs.read(reinterpret_cast<char*>(dh->db_data_low_value.data()), size * sizeof(double));
+
+        dh->db_data_close_value.resize(size);
+        ifs.read(reinterpret_cast<char*>(dh->db_data_close_value.data()), size * sizeof(double));
+
+        dh->db_data_volume_value.resize(size);
+        ifs.read(reinterpret_cast<char*>(dh->db_data_volume_value.data()), size * sizeof(int64_t));
+
+        std::cout << "Loaded " << size << " records from cache." << std::endl;
+    } else {
+        std::cout << "Loading from database..." << std::endl;
+        auto start = std::chrono::high_resolution_clock::now();
+
+        if (!(connection_ && connection_->is_open()))
+        {
+            throw std::runtime_error("Connection not Active");
+        }
+
+        pqxx::read_transaction load_data_from_database(*connection_); 
+        pqxx::result line_count = load_data_from_database.exec("SELECT COUNT (*) FROM tick_data");
+        std::size_t n = line_count[0][0].as<std::size_t>();
+        const std::size_t report_interval = n > 0 ? std::max<std::size_t>(std::size_t{ 1 }, n / 100) : 1;
+
+        std::size_t processed = 0;
+        std::cout << "\rloading: 0/" << n << std::flush;
+
+        // Execute query once and iterate over results
+        pqxx::result r = load_data_from_database.exec("SELECT CAST(symbol AS VARCHAR(8)), CAST(open AS DOUBLE PRECISION), CAST(high AS DOUBLE PRECISION), CAST(low AS DOUBLE PRECISION), CAST(close AS DOUBLE PRECISION), CAST(volume AS INT) FROM tick_data;");
         
-    std::cout << "time: " << duration << " seconds" << std::endl;
+        for (auto row : r)
+        {
+            auto [symbol, open, high, low, close, volume] = row.as<std::string, double, double, double, double, int64_t>();
+            dh->load_into_queue(symbol, open, high, low, close, volume, n);
+            ++processed;
+
+            if ((processed % report_interval) == 0 || processed == n)
+            {
+                std::cout << "\rloading: " << processed << "/" << n << std::flush;
+            }
+        }
+        std::cout << std::endl;
+         
+        // Idea: pqx::stream for executing the command -> from the results reading in the doubles
+        // Consider using binary data
+        // potential issue: the for loop executes the sql command for every itearion instead of doing it once and fetching the result
+               
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::seconds>(end - start);
+            
+        std::cout << "time: " << duration << " seconds" << std::endl;
+
+        // Save to cache
+        std::cout << "Saving to cache..." << std::endl;
+        std::ofstream ofs(cache_file, std::ios::binary);
+        size_t size = dh->db_data_symbol.size();
+        ofs.write(reinterpret_cast<const char*>(&size), sizeof(size));
+
+        for (const auto& s : dh->db_data_symbol) {
+            size_t len = s.size();
+            ofs.write(reinterpret_cast<const char*>(&len), sizeof(len));
+            ofs.write(s.data(), len);
+        }
+
+        ofs.write(reinterpret_cast<const char*>(dh->db_data_open_value.data()), size * sizeof(double));
+        ofs.write(reinterpret_cast<const char*>(dh->db_data_high_value.data()), size * sizeof(double));
+        ofs.write(reinterpret_cast<const char*>(dh->db_data_low_value.data()), size * sizeof(double));
+        ofs.write(reinterpret_cast<const char*>(dh->db_data_close_value.data()), size * sizeof(double));
+        ofs.write(reinterpret_cast<const char*>(dh->db_data_volume_value.data()), size * sizeof(int64_t));
+
+        std::cout << "Cache saved." << std::endl;
+    }
 }
 
 void database_connection::write_data()

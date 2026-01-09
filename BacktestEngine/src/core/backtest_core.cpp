@@ -26,7 +26,6 @@ void backtest::run()
 
     
     if (data_handler_->db_data_symbol.empty()) { db_->load_data(data_handler_); }
-    std::cout << "Loaded " << data_handler_->db_data_symbol.size() << " data points" << std::endl;
 
     const auto base_ts = std::chrono::system_clock::now();
     const auto n = data_handler_->db_data_symbol.size();
@@ -41,7 +40,7 @@ void backtest::run()
 
     for (std::size_t i = 0; i < n; ++i)
     {
-        // Collect events in batch
+        
         market_event mkt(
             base_ts + std::chrono::milliseconds(static_cast<long long>(i)),
             data_handler_->db_data_symbol[i],
@@ -53,7 +52,7 @@ void backtest::run()
         );
         batch_events.push_back(mkt);
 
-        // Process batch when full or at end
+        
         if (batch_events.size() == batch_size || i == n - 1)
         {
             std::queue<event_pointer> events;
@@ -62,7 +61,6 @@ void backtest::run()
                 events.push(std::make_shared<market_event>(mkt));
             }
 
-            // Process all events in the batch
             while (!events.empty())
             {
                 auto ev = events.front();
@@ -84,7 +82,6 @@ void backtest::run()
                     case event_type::order:
                     {
                         auto o = std::static_pointer_cast<order_event>(ev);
-                        std::cout << "Processing order: " << (o->get_side() == order_side::buy ? "BUY" : "SELL") << " " << o->get_quantity() << " @ " << o->get_price() << std::endl;
 
                         ob_order_type book_order_type = ob_order_type::good_till_cancel; // Assuming GTC for limit orders
                         side book_side = (o->get_side() == order_side::buy) ? side::buy : side::sell;
@@ -95,7 +92,6 @@ void backtest::run()
                         auto book_order = std::make_shared<order>(book_order_type, o->get_order_id(), book_side, book_price, book_quantity);
                         
                         trades resulting_trades = orderbook_->add_order(book_order);
-                        std::cout << "Trades from add_order: " << resulting_trades.size() << std::endl;
 
                         for (const auto& trade : resulting_trades)
                         {
@@ -112,7 +108,6 @@ void backtest::run()
                                     static_cast<double>(our_trade_info.price_) / 100.0 
                                 );
                                 events.push(fill);
-                                std::cout << "Fill event created for order " << o->get_order_id() << std::endl;
                             }
                         }
                         break;

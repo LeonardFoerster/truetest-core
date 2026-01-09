@@ -49,7 +49,7 @@ int main()
     db->test_connection();
     db->load_data(dh); 
 
-    // Add market maker orders
+    
     MarketMaker mm;
     if (!dh->db_data_close_value.empty()) {
         mm.add_orders(ob, dh->db_data_close_value.front(), 10);

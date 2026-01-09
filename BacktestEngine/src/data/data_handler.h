@@ -37,12 +37,12 @@ class data_handler
 		void load_into_queue(std::string, double, double, double, double, int64_t, std::size_t );
 
 		
-		std::deque<std::string>	db_data_symbol;
-		std::deque<double>		db_data_open_value;
-		std::deque<double>		db_data_high_value;
-		std::deque<double>		db_data_low_value;
-		std::deque<double>		db_data_close_value;
-		std::deque<int64_t>		db_data_volume_value;
+		std::vector<std::string>	db_data_symbol;
+		std::vector<double>		db_data_open_value;
+		std::vector<double>		db_data_high_value;
+		std::vector<double>		db_data_low_value;
+		std::vector<double>		db_data_close_value;
+		std::vector<int64_t>		db_data_volume_value;
 		
 		
 		// deque fürs speicher der id + ohlc werte

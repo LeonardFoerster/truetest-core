@@ -9,7 +9,7 @@ void MarketMaker::add_orders(std::shared_ptr<orderbook> ob, double current_price
         double buy_price = current_price * (1 - spread);
         double sell_price = current_price * (1 + spread);
 
-        // Scale prices as in the code
+        
         int buy_price_scaled = static_cast<int>(buy_price * 100);
         int sell_price_scaled = static_cast<int>(sell_price * 100);
 
