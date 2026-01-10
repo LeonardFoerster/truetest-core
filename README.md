@@ -4,6 +4,11 @@
 An Engine to backtest High-Frequenzy-Trading strategies. Using C++23 and PostgreSQL
 
 
+**I am working on a solution to import your own data via CSV.  Currently, only the following format works:**  
+```
+ID, symbol, date, time (without zone), open, high, low, close, volume
+```
+
 
 ## Build:
 ```
