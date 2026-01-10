@@ -38,6 +38,8 @@ void backtest::run()
     std::vector<market_event> batch_events;
     batch_events.reserve(batch_size);
 
+    std::size_t event_count = 0;
+
     for (std::size_t i = 0; i < n; ++i)
     {
         
@@ -65,6 +67,7 @@ void backtest::run()
             {
                 auto ev = events.front();
                 events.pop();
+                ++event_count;
 
                 switch (ev->get_type())
                 {
@@ -142,4 +145,7 @@ void backtest::run()
     std::cout << std::endl;
     std::cout << "Trades executed: " << portfolio_.get_total_trades()
               << " in " << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
+
+    double throughput = static_cast<double>(event_count) / (elapsed_ms / 1000.0);
+    std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
 }
