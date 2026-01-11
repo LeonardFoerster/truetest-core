@@ -32,7 +32,7 @@ Once PostgreSQL is installed, you can configure the project.
 ```bash
 # It is recommended to start with a clean build directory
 cd hft-engine
-rm -rf build
+(sudo) rm -rf build
 mkdir build
 cd build
 
@@ -50,9 +50,9 @@ Once CMake has been configured successfully, you can build the project with:
 cmake --build .
 ```
 
-This will create the `hft-engine2` executable in the `build` directory.
+This will create the `hft-engine` executable in the `build` directory.
 ```bash
-./hft-engine2
+./hft-engine
 ```
 
 
