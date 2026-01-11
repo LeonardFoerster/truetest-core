@@ -26,6 +26,10 @@ CMAKE_ADDR2LINE:FILEPATH=/usr/bin/addr2line
 //Path to a program.
 CMAKE_AR:FILEPATH=/usr/bin/ar
 
+//For backwards compatibility, what version of CMake commands and
+// syntax should this version of CMake try to support.
+CMAKE_BACKWARDS_COMPATIBILITY:STRING=2.4
+
 //Choose the type of build, options are: None Debug Release RelWithDebInfo
 // MinSizeRel ...
 CMAKE_BUILD_TYPE:STRING=
@@ -176,7 +180,7 @@ CMAKE_PROJECT_DESCRIPTION:STATIC=
 CMAKE_PROJECT_HOMEPAGE_URL:STATIC=
 
 //Value Computed by CMake
-CMAKE_PROJECT_NAME:STATIC=hft-engine2
+CMAKE_PROJECT_NAME:STATIC=hft-engine
 
 //Value Computed by CMake
 CMAKE_PROJECT_VERSION:STATIC=7.7.4
@@ -276,6 +280,9 @@ CPACK_SOURCE_TZ:BOOL=ON
 //Enable to build ZIP source packages
 CPACK_SOURCE_ZIP:BOOL=OFF
 
+//Single output directory for building all executables.
+EXECUTABLE_OUTPUT_PATH:PATH=
+
 //Directory under which to collect all populated content
 FETCHCONTENT_BASE_DIR:PATH=/home/leonard/w/cloned/hft-engine/build/_deps
 
@@ -298,6 +305,9 @@ FETCHCONTENT_UPDATES_DISCONNECTED_LIBPQXX:BOOL=OFF
 
 //Git command line client
 GIT_EXECUTABLE:FILEPATH=/usr/bin/git
+
+//Single output directory for building all libraries.
+LIBRARY_OUTPUT_PATH:PATH=
 
 //The Set the PostgreSQL_INCLUDE_DIR cmake cache entry to the top-level
 // directory containing the PostgreSQL include directories. E.g
@@ -325,6 +335,15 @@ hft-engine2_IS_TOP_LEVEL:STATIC=ON
 
 //Value Computed by CMake
 hft-engine2_SOURCE_DIR:STATIC=/home/leonard/w/cloned/hft-engine
+
+//Value Computed by CMake
+hft-engine_BINARY_DIR:STATIC=/home/leonard/w/cloned/hft-engine/build
+
+//Value Computed by CMake
+hft-engine_IS_TOP_LEVEL:STATIC=ON
+
+//Value Computed by CMake
+hft-engine_SOURCE_DIR:STATIC=/home/leonard/w/cloned/hft-engine
 
 //Value Computed by CMake
 libpqxx_BINARY_DIR:STATIC=/home/leonard/w/cloned/hft-engine/build/_deps/libpqxx-build

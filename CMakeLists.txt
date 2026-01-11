@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(hft-engine2 LANGUAGES CXX)
+project(hft-engine LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,8 +20,8 @@ set(SOURCES
     BacktestEngine/src/market_maker/market_maker.cpp
     BacktestEngine/src/utils/log/log.cpp
 )
-add_executable(hft-engine2 ${SOURCES})
-target_include_directories(hft-engine2 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/BacktestEngine/src")
+add_executable(hft-engine ${SOURCES})
+target_include_directories(hft-engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/BacktestEngine/src")
 
 find_package(PostgreSQL)
 if (NOT PostgreSQL_FOUND)
@@ -32,8 +32,7 @@ if (NOT PostgreSQL_FOUND)
 *   **Windows:** Install PostgreSQL from the official website and make sure the `bin` and `lib` directories are in your PATH.
 
 If it's installed in a non-standard location, you can tell CMake where to find it by setting the `POSTGRESQL_ROOT_DIR` environment variable.
-
-See `BUILD_INSTRUCTIONS.md` for more details.")
+")
 endif()
 
 include(FetchContent)
@@ -45,20 +44,20 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(libpqxx)
 
-target_include_directories(hft-engine2 PRIVATE ${PostgreSQL_INCLUDE_DIRS})
-target_link_libraries(hft-engine2 PRIVATE 
+target_include_directories(hft-engine PRIVATE ${PostgreSQL_INCLUDE_DIRS})
+target_link_libraries(hft-engine PRIVATE 
     pqxx
     ${PostgreSQL_LIBRARIES}
 )
 
 if(MSVC)
-    target_compile_options(hft-engine2 PRIVATE /W4)
+    target_compile_options(hft-engine PRIVATE /W4)
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(hft-engine2 PRIVATE /D_ITERATOR_DEBUG_LEVEL=2)
+        target_compile_options(hft-engine PRIVATE /D_ITERATOR_DEBUG_LEVEL=2)
     endif()
 else()
-    target_compile_options(hft-engine2 PRIVATE -Wall -Wextra)
+    target_compile_options(hft-engine PRIVATE -Wall -Wextra)
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_definitions(hft-engine2 PRIVATE _GLIBCXX_DEBUG)
+        target_compile_definitions(hft-engine PRIVATE _GLIBCXX_DEBUG)
     endif()
 endif()
