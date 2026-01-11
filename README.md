@@ -31,6 +31,7 @@ Once PostgreSQL is installed, you can configure the project.
 
 ```bash
 # It is recommended to start with a clean build directory
+cd hft-engine
 rm -rf build
 mkdir build
 cd build
