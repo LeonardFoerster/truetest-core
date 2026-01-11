@@ -36,7 +36,6 @@ std::pair<std::vector<market_data_bar>, std::vector<double>> data_handler::load_
 
     std::string line;
     std::getline(ohlc_file, line);
-    int line_count = 0;
         
     while (std::getline(ohlc_file, line))
     {

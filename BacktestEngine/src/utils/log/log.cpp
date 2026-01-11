@@ -30,7 +30,8 @@ bool mkdir()
 
 void log_event(bool s)
 {
-	mkdir();
+        (void)s;
+        mkdir();
 
 
 
@@ -38,4 +39,3 @@ void log_event(bool s)
 
     
 }
-

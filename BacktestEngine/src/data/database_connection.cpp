@@ -63,7 +63,7 @@ void database_connection::test_connection()
         std::cout << "Connection Test Passed: " << std::boolalpha << connection_active << std::endl;
         auto time_stamp_connection_valid_test = std::chrono::high_resolution_clock::now();
         auto time_stamp_connection_valid_result = std::chrono::duration_cast<std::chrono::milliseconds>(time_stamp_connection_valid_test - start);
-        std::cout << "Connection time: " << time_stamp_connection_valid_result << std::endl;
+        std::cout << "Connection time: " << time_stamp_connection_valid_result.count() << "ms" << std::endl;
     }
 
     try
@@ -75,11 +75,11 @@ void database_connection::test_connection()
         
         connection_->prepare("ins_test", "INSERT INTO test (ticker, price) VALUES ($1, $2)");
         {
-            tx.exec("INSERT INTO test (ticker, price) VALUES ($1, $2)",
-                pqxx::params{ "IBM", 193.523 });
+            tx.exec_params("INSERT INTO test (ticker, price) VALUES ($1, $2)",
+                "IBM", 193.523);
 
-            tx.exec(pqxx::prepped{ "ins_test" },
-                pqxx::params{ "AAPL", 193.523 });
+            tx.exec_prepared("ins_test",
+                "AAPL", 193.523);
 
             tx.commit();
         }
@@ -88,10 +88,10 @@ void database_connection::test_connection()
         std::cout << "Writing Test Passed: " << std::boolalpha << write_test_sucessfull << std::endl;
         auto timestamp_write_test = std::chrono::high_resolution_clock::now();
         auto write_valid_test_result = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp_write_test - start);
-        std::cout << "Write test time: " << write_valid_test_result << std::endl;
+        std::cout << "Write test time: " << write_valid_test_result.count() << "ms" << std::endl;
 
     }
-    catch (std::exception e)
+    catch (const std::exception& e)
     {
         std::cerr << "Writing Test failed: " << e.what() << std::endl;
     }
@@ -101,18 +101,18 @@ void database_connection::test_connection()
         pqxx::read_transaction rtx{ *connection_ }; 
         pqxx::result r = rtx.exec("SELECT * FROM test");
 
-        for (std::size_t i = 0; i < r.size(); ++i) 
+        for (std::size_t i = 0; i < static_cast<std::size_t>(r.size()); ++i) 
         {
-            auto [ticker, price] = r[i].as<std::string, double>();
+            auto [ticker, price] = r[static_cast<pqxx::row::size_type>(i)].as<std::string, double>();
         }
         read_test_sucessfull = true;
 
         std::cout << "Read Test Passed: " << std::boolalpha << read_test_sucessfull << std::endl;
         auto timestamp_read_test = std::chrono::high_resolution_clock::now();
         auto read_valid_test_result = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp_read_test - start);
-        std::cout << "Read Test time: " << read_valid_test_result << std::endl;
+        std::cout << "Read Test time: " << read_valid_test_result.count() << "ms" << std::endl;
     }
-    catch(std::exception e)    
+    catch(const std::exception& e)    
     {
         std::cerr << "Reading Test failed" << std::endl;
     }
@@ -193,7 +193,7 @@ void database_connection::load_data(const std::shared_ptr<data_handler> dh)
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::seconds>(end - start);
             
-        std::cout << "time: " << duration << " seconds" << std::endl;
+        std::cout << "time: " << duration.count() << " seconds" << std::endl;
 
         // Save to cache
         std::cout << "Saving to cache..." << std::endl;

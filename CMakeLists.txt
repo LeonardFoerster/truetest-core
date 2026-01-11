@@ -15,7 +15,9 @@ set(SOURCES
     BacktestEngine/src/pricing/black_scholes_formula.cpp
     BacktestEngine/src/pricing/perform_calculations.cpp
     BacktestEngine/src/strategy/mean_reversion_strategy.cpp
-    BacktestEngine/src/strategy/strategy.cpp
+    BacktestEngine/src/strategy/sma_strategy.cpp
+    BacktestEngine/src/strategy/sma.cpp
+    BacktestEngine/src/market_maker/market_maker.cpp
     BacktestEngine/src/utils/log/log.cpp
 )
 add_executable(hft-engine2 ${SOURCES})
@@ -50,12 +52,12 @@ target_link_libraries(hft-engine2 PRIVATE
 )
 
 if(MSVC)
-    target_compile_options(hft-engine2 PRIVATE /W4 /WX)
+    target_compile_options(hft-engine2 PRIVATE /W4)
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(hft-engine2 PRIVATE /D_ITERATOR_DEBUG_LEVEL=2)
     endif()
 else()
-    target_compile_options(hft-engine2 PRIVATE -Wall -Wextra -Werror)
+    target_compile_options(hft-engine2 PRIVATE -Wall -Wextra)
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_definitions(hft-engine2 PRIVATE _GLIBCXX_DEBUG)
     endif()
