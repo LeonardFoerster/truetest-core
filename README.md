@@ -51,6 +51,9 @@ cmake --build .
 ```
 
 This will create the `hft-engine2` executable in the `build` directory.
+```bash
+./hft-engine2
+```
 
 
 
