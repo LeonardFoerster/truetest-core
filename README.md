@@ -32,7 +32,6 @@ cmake --build .
 
 ### To-Do
 - Multi Order Matching Logic
-- Enhance Throughput to 1 Million order per second
 - Monte Carlo Implementation
 
 
