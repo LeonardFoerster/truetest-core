@@ -1,5 +1,4 @@
 # HFT-Engine (Work in Progress)
-**Currently there is an issue regarding CMake. I'll fix this asap!**  
 
 An Engine to backtest High-Frequenzy-Trading strategies. Using C++23 and PostgreSQL
 
