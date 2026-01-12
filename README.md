@@ -1,6 +1,6 @@
 # HFT-Engine (Work in Progress)
 
-An Engine to backtest High-Frequenzy-Trading strategies. Using C++23 and PostgreSQL
+An Engine to backtest High-Frequency-Trading strategies. Using C++23 and PostgreSQL
 
 
 **I am working on a solution to import your own data via CSV.  Currently, only the following format works:**  
@@ -62,7 +62,7 @@ flowchart TD
 
 ## Build Instructions
 
-This project now automatically downloads and builds `libpqxx` from source. The only manual dependency you need to install is PostgreSQL.
+This project  automatically downloads and builds `libpqxx` from source. The only manual dependency you need to install is PostgreSQL.
 
 ### 1. Install PostgreSQL
 
@@ -106,7 +106,7 @@ This will create the `hft-engine` executable in the `build` directory.
 ./hft-engine
 ```
 
-#### To DO / Planned:
+#### To Do / Planned:
 - Level 3 Order Book Reconstruction
 - Probabilistic Fill Model
 - Stochastic Latency Modeling
