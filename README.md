@@ -12,7 +12,7 @@ ID, symbol, date, time (without zone), open, high, low, close, volume
 
 ```mermaid
 xychart-beta
-    title "Throughput in Events/Second)"
+    title "Throughput in Events/Second"
     x-axis ["backtest.py", "Leonards C++ Engine"]
     y-axis "Events (in Mio.)" 0 --> 5
     bar [0.025, 4.3]
