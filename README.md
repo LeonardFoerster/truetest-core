@@ -55,6 +55,14 @@ This will create the `hft-engine` executable in the `build` directory.
 ./hft-engine
 ```
 
+#### To DO / Planned:
+- Level 3 Order Book Reconstruction
+- Probabilistic Fill Model
+- Stochastic Latency Modeling
+- Maker/Taker Fee Schedules
+- Pre-Trade Risk Engine
+
+
 
 
 ### Additionally
