@@ -8,6 +8,57 @@ An Engine to backtest High-Frequenzy-Trading strategies. Using C++23 and Postgre
 ID, symbol, date, time (without zone), open, high, low, close, volume
 ```
 
+## Benchmark
+
+```mermaid
+xychart-beta
+    title "Throughput in Events/Second)"
+    x-axis ["backtest.py", "Leonards C++ Engine"]
+    y-axis "Events (in Mio.)" 0 --> 5
+    bar [0.025, 4.3]
+```
+## Functionality
+```mermaid
+flowchart TD
+    Start([Start: Load Historical Data]) --> Init[Create MarketEvents from Data]
+    Init --> Queue[Add to Event Queue]
+    Queue --> Loop{Event Queue Empty?}
+    
+    Loop -->|No| GetEvent[Get Next Event]
+    Loop -->|Yes| End([End: Load Next Dataset])
+    
+    GetEvent --> CheckType{Event Type?}
+    
+    CheckType -->|MarketEvent| Strategy[Strategy: on_market]
+    Strategy --> StrategyDecision{Trading Decision?}
+    StrategyDecision -->|Yes| CreateOrder[Create OrderEvent]
+    StrategyDecision -->|No| Loop
+    CreateOrder --> AddOrderToQueue[Add OrderEvent to Queue]
+    AddOrderToQueue --> Loop
+    
+    CheckType -->|OrderEvent| Orderbook[Orderbook: add_order]
+    Orderbook --> Match[Match Orders]
+    Match --> MatchSuccess{Match Successful?}
+    MatchSuccess -->|Yes| CreateFill[Create FillEvent]
+    MatchSuccess -->|No| Loop
+    CreateFill --> AddFillToQueue[Add FillEvent to Queue]
+    AddFillToQueue --> Loop
+    
+    CheckType -->|FillEvent| Portfolio[Portfolio: on_fill]
+    Portfolio --> UpdatePortfolio[Update Positions & Cash]
+    UpdatePortfolio --> NotifyStrategy[Notify Strategy: set_position_open]
+    NotifyStrategy --> Loop
+    
+    CheckType -->|SignalEvent| SignalHandler[Signal Handler]
+    SignalHandler --> Loop
+
+    style Start fill:#4CAF50
+    style End fill:#4CAF50
+    style Strategy fill:#2196F3
+    style Orderbook fill:#FF9800
+    style Portfolio fill:#9C27B0
+    style Loop fill:#FFC107
+  ```
 
 ## Build Instructions
 
