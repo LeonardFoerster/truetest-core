@@ -67,7 +67,7 @@ void backtest::run()
             {
                 auto ev = events.front();
                 events.pop();
-                ++event_count;
+                
 
                 switch (ev->get_type())
                 {
@@ -86,10 +86,10 @@ void backtest::run()
                     {
                         auto o = std::static_pointer_cast<order_event>(ev);
 
-                        ob_order_type book_order_type = ob_order_type::good_till_cancel; // Assuming GTC for limit orders
+                        ob_order_type book_order_type = ob_order_type::good_till_cancel; 
                         side book_side = (o->get_side() == order_side::buy) ? side::buy : side::sell;
                         
-                        price book_price = static_cast<price>(o->get_price() * 100); // e.g., scale by 100
+                        price book_price = static_cast<price>(o->get_price() * 100); 
                         quantity book_quantity = static_cast<quantity>(o->get_quantity());
 
                         auto book_order = std::make_shared<order>(book_order_type, o->get_order_id(), book_side, book_price, book_quantity);
@@ -125,6 +125,7 @@ void backtest::run()
                     case event_type::signal:
                         break;
                 }
+                event_count++;
             }
 
             batch_events.clear();
