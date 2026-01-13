@@ -107,6 +107,7 @@ This will create the `hft-engine` executable in the `build` directory.
 ```
 
 #### To Do / Planned:
+- **Next Step: Advanced Logging including writing trade data into PostgreSQL**
 - Level 3 Order Book Reconstruction
 - Probabilistic Fill Model
 - Stochastic Latency Modeling
