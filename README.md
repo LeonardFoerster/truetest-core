@@ -15,7 +15,7 @@ xychart-beta
     title "Throughput in Events/Second"
     x-axis ["backtest.py", "hft-engine"]
     y-axis "Events (in Mio.)" 0 --> 5
-    bar [0.025, 4.3]
+    bar [0.075, 4.3]
 ```
 ## Functionality
 ```mermaid
