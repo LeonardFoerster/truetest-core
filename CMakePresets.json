@@ -2,14 +2,36 @@
   "version": 3,
   "configurePresets": [
     {
+      "name": "windows-ninja",
+      "displayName": "Windows (Ninja)",
+      "description": "Ninja generator — requires Ninja on PATH",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
       "name": "windows-vs-2022",
-      "displayName": "Visual Studio 2022 MSBuild",
-      "description": "Use the native Visual Studio build system instead of Ninja",
+      "displayName": "Windows (Visual Studio 2022)",
+      "description": "MSBuild via Visual Studio 17 2022",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
       "cacheVariables": {
         "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
+      }
+    },
+    {
+      "name": "linux-default",
+      "displayName": "Linux (Unix Makefiles)",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     }
   ]
