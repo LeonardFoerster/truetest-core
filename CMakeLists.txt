@@ -1,12 +1,13 @@
 cmake_minimum_required(VERSION 3.22)
 
-# ── Automatic dependency management ──────────────────────────────────────────
-# Check for PostgreSQL before project() using pg_config (searches PATH and
-# works without a compiler). If absent, bootstrap vcpkg to auto-install libpq.
+# ── Auto-fetch vcpkg when PostgreSQL is not found on the system ───────────────
+# On Linux/macOS with PostgreSQL installed, pg_config is present and vcpkg is
+# skipped entirely. On Windows (or any system without libpq), CMake clones and
+# bootstraps vcpkg automatically — no prior installation required.
 find_program(_pg_config NAMES pg_config)
 
 if(NOT _pg_config AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
-    message(STATUS "PostgreSQL not found on system — fetching via vcpkg...")
+    message(STATUS "pg_config not found — fetching vcpkg to provide PostgreSQL...")
     include(FetchContent)
     FetchContent_Declare(
         vcpkg
@@ -25,7 +26,7 @@ if(NOT _pg_config AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     endif()
 
     if(NOT EXISTS "${_vcpkg_exe}")
-        message(STATUS "Bootstrapping vcpkg (one-time)...")
+        message(STATUS "Bootstrapping vcpkg (one-time setup)...")
         if(WIN32)
             execute_process(
                 COMMAND           "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg/bootstrap-vcpkg.bat" -disableMetrics
@@ -42,7 +43,7 @@ if(NOT _pg_config AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
         if(NOT _vcpkg_result EQUAL 0)
             message(FATAL_ERROR
                 "vcpkg bootstrap failed (exit ${_vcpkg_result}).\n"
-                "Please install PostgreSQL development libraries manually:\n"
+                "As an alternative, install PostgreSQL dev libraries manually:\n"
                 "  Ubuntu/Debian : sudo apt-get install libpq-dev\n"
                 "  Arch Linux    : sudo pacman -S postgresql-libs\n"
                 "  macOS         : brew install postgresql\n"
@@ -53,7 +54,7 @@ if(NOT _pg_config AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE
         "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg/scripts/buildsystems/vcpkg.cmake"
         CACHE STRING "vcpkg toolchain" FORCE)
-    message(STATUS "Using vcpkg toolchain: ${CMAKE_TOOLCHAIN_FILE}")
+    message(STATUS "vcpkg toolchain: ${CMAKE_TOOLCHAIN_FILE}")
 endif()
 # ─────────────────────────────────────────────────────────────────────────────
 
