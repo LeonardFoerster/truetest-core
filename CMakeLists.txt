@@ -57,6 +57,26 @@ if(NOT _pg_config AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE
         "${_vcpkg_dir}/scripts/buildsystems/vcpkg.cmake"
         CACHE STRING "vcpkg toolchain" FORCE)
+
+    # Tell vcpkg to use the Ninja generator internally so it doesn't need NMake.
+    # Falls back gracefully if Ninja is absent (vcpkg will pick its own default).
+    if(WIN32)
+        find_program(_ninja ninja)
+        if(_ninja)
+            set(ENV{VCPKG_CMAKE_GENERATOR} "Ninja")
+        else()
+            # Ninja not found — warn if nmake is also absent (build will likely fail)
+            find_program(_nmake nmake)
+            if(NOT _nmake)
+                message(WARNING
+                    "Neither ninja nor nmake found on PATH.\n"
+                    "vcpkg package builds will likely fail.\n"
+                    "Fix: open an 'x64 Native Tools Command Prompt for VS' before running CMake,\n"
+                    "     OR install Ninja: https://ninja-build.org/")
+            endif()
+        endif()
+    endif()
+
     message(STATUS "vcpkg toolchain: ${CMAKE_TOOLCHAIN_FILE}")
 endif()
 # ─────────────────────────────────────────────────────────────────────────────
