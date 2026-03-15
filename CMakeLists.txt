@@ -8,19 +8,22 @@ find_program(_pg_config NAMES pg_config)
 
 if(NOT _pg_config AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     message(STATUS "pg_config not found — fetching vcpkg to provide PostgreSQL...")
-    include(FetchContent)
-    FetchContent_Declare(
-        vcpkg
-        GIT_REPOSITORY https://github.com/microsoft/vcpkg.git
-        GIT_TAG        2024.11.16
-        SOURCE_DIR     "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg"
-    )
-    FetchContent_GetProperties(vcpkg)
-    if(NOT vcpkg_POPULATED)
-        FetchContent_Populate(vcpkg)
+    set(_vcpkg_dir "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg")
+
+    if(NOT EXISTS "${_vcpkg_dir}/.git")
+        message(STATUS "Cloning vcpkg 2024.11.16...")
+        execute_process(
+            COMMAND git clone --depth 1 --branch 2024.11.16
+                    https://github.com/microsoft/vcpkg.git
+                    "${_vcpkg_dir}"
+            RESULT_VARIABLE _git_result
+        )
+        if(NOT _git_result EQUAL 0)
+            message(FATAL_ERROR "Failed to clone vcpkg (exit ${_git_result}). Ensure git is on PATH.")
+        endif()
     endif()
 
-    set(_vcpkg_exe "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg/vcpkg")
+    set(_vcpkg_exe "${_vcpkg_dir}/vcpkg")
     if(WIN32)
         string(APPEND _vcpkg_exe ".exe")
     endif()
@@ -29,14 +32,14 @@ if(NOT _pg_config AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
         message(STATUS "Bootstrapping vcpkg (one-time setup)...")
         if(WIN32)
             execute_process(
-                COMMAND           "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg/bootstrap-vcpkg.bat" -disableMetrics
-                WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg"
+                COMMAND           "${_vcpkg_dir}/bootstrap-vcpkg.bat" -disableMetrics
+                WORKING_DIRECTORY "${_vcpkg_dir}"
                 RESULT_VARIABLE   _vcpkg_result
             )
         else()
             execute_process(
-                COMMAND           sh "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg/bootstrap-vcpkg.sh" -disableMetrics
-                WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg"
+                COMMAND           sh "${_vcpkg_dir}/bootstrap-vcpkg.sh" -disableMetrics
+                WORKING_DIRECTORY "${_vcpkg_dir}"
                 RESULT_VARIABLE   _vcpkg_result
             )
         endif()
@@ -52,7 +55,7 @@ if(NOT _pg_config AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     endif()
 
     set(CMAKE_TOOLCHAIN_FILE
-        "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg/scripts/buildsystems/vcpkg.cmake"
+        "${_vcpkg_dir}/scripts/buildsystems/vcpkg.cmake"
         CACHE STRING "vcpkg toolchain" FORCE)
     message(STATUS "vcpkg toolchain: ${CMAKE_TOOLCHAIN_FILE}")
 endif()
