@@ -57,7 +57,7 @@ if(NOT _pg_config AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
 endif()
 # ─────────────────────────────────────────────────────────────────────────────
 
-project(hft-engine LANGUAGES CXX)
+project(truetest LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -65,7 +65,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SOURCES
     BacktestEngine/src/main.cpp
     BacktestEngine/src/core/backtest_core.cpp
-    BacktestEngine/src/data/csv_data_loader.cpp
     BacktestEngine/src/data/database_connection.cpp
     BacktestEngine/src/data/data_loader.cpp
     BacktestEngine/src/execution/portfolio.cpp
@@ -74,12 +73,13 @@ set(SOURCES
     BacktestEngine/src/pricing/perform_calculations.cpp
     BacktestEngine/src/strategy/mean_reversion_strategy.cpp
     BacktestEngine/src/strategy/sma_strategy.cpp
+    BacktestEngine/src/strategy/ma_crossover_strategy.cpp
     BacktestEngine/src/strategy/sma.cpp
     BacktestEngine/src/market_maker/market_maker.cpp
     BacktestEngine/src/utils/log/log.cpp
 )
-add_executable(hft-engine ${SOURCES})
-target_include_directories(hft-engine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/BacktestEngine/src")
+add_executable(truetest ${SOURCES})
+target_include_directories(truetest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/BacktestEngine/src")
 
 find_package(PostgreSQL REQUIRED)
 
@@ -92,26 +92,26 @@ FetchContent_Declare(
 set(SKIP_BUILD_AUDIT ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(libpqxx)
 
-target_include_directories(hft-engine PRIVATE ${PostgreSQL_INCLUDE_DIRS})
-target_link_libraries(hft-engine PRIVATE
+target_include_directories(truetest PRIVATE ${PostgreSQL_INCLUDE_DIRS})
+target_link_libraries(truetest PRIVATE
     pqxx
     ${PostgreSQL_LIBRARIES}
 )
 
 if(WIN32)
-    target_link_libraries(hft-engine PRIVATE ws2_32 secur32)
+    target_link_libraries(truetest PRIVATE ws2_32 secur32)
 endif()
 
 if(MSVC)
-    target_compile_options(hft-engine PRIVATE /W4)
+    target_compile_options(truetest PRIVATE /W4)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(hft-engine PRIVATE /D_ITERATOR_DEBUG_LEVEL=2)
+        target_compile_options(truetest PRIVATE /D_ITERATOR_DEBUG_LEVEL=2)
     endif()
 else()
-    target_compile_options(hft-engine PRIVATE -Wall -Wextra)
+    target_compile_options(truetest PRIVATE -Wall -Wextra)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-            target_compile_definitions(hft-engine PRIVATE _GLIBCXX_DEBUG)
+            target_compile_definitions(truetest PRIVATE _GLIBCXX_DEBUG)
         endif()
     endif()
 endif()

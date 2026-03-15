@@ -176,7 +176,7 @@ void database_connection::load_data(const std::shared_ptr<data_handler> dh)
         for (auto row : r)
         {
             auto [symbol, open, high, low, close, volume] = row.as<std::string, double, double, double, double, int64_t>();
-            dh->load_into_queue(symbol, open, high, low, close, volume, n);
+            dh->load_into_queue("", symbol, open, high, low, close, volume);
             ++processed;
 
             if ((processed % report_interval) == 0 || processed == n)
