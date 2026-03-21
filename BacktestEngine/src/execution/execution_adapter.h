@@ -1,0 +1,146 @@
+#pragma once
+
+#include "../core/event.h"
+#include "../orderbook/orderbook.h"
+#include "../orderbook/fill_model.h"
+#include "fee_model.h"
+
+#include <cmath>
+#include <memory>
+#include <random>
+#include <vector>
+
+class IExecutionAdapter
+{
+public:
+    virtual ~IExecutionAdapter() = default;
+    virtual void submit_order(const order_event& o) = 0;
+    virtual bool poll_fills(std::vector<fill_event>& out) = 0;
+};
+
+// Wraps the local orderbook for backtest and shadow modes.
+// Orders are matched immediately against the simulated book.
+class LocalBookAdapter : public IExecutionAdapter
+{
+public:
+    LocalBookAdapter(std::shared_ptr<orderbook> ob,
+                     std::shared_ptr<IFeeModel> fee_model,
+                     std::shared_ptr<IFillModel> fill_model,
+                     unsigned rng_seed = 42)
+        : ob_(std::move(ob))
+        , fee_model_(std::move(fee_model))
+        , fill_model_(std::move(fill_model))
+        , fill_rng_(rng_seed)
+        , fill_dist_(0.0, 1.0) {}
+
+    void set_mid_price(double price) { mid_price_ = price; }
+
+    void submit_order(const order_event& o) override
+    {
+        // Stop and stop-limit orders are handled by the engine, not the book
+        if (o.get_order_type() == order_type::stop || o.get_order_type() == order_type::stop_limit)
+            return;
+
+        // Fill probability check for limit orders
+        if (fill_model_ && o.get_order_type() == order_type::limit && mid_price_ > 0.0)
+        {
+            double distance = std::abs(o.get_price() - mid_price_) / mid_price_;
+            double prob = fill_model_->get_fill_probability(o.get_side(), distance);
+            if (fill_dist_(fill_rng_) > prob)
+                return; // missed fill probability roll
+        }
+
+        // Map time_in_force to ob_order_type
+        ob_order_type book_order_type;
+        switch (o.get_tif()) {
+        case time_in_force::fok: book_order_type = ob_order_type::fill_or_kill; break;
+        case time_in_force::ioc: book_order_type = ob_order_type::immediate_or_cancel; break;
+        default:                 book_order_type = ob_order_type::good_till_cancel; break;
+        }
+
+        side book_side = (o.get_side() == order_side::buy) ? side::buy : side::sell;
+
+        Price book_price = Price::from_double(o.get_price());
+        quantity book_quantity = static_cast<quantity>(o.get_quantity());
+
+        auto book_order = std::make_shared<order>(
+            book_order_type, o.get_order_id(), book_side, book_price, book_quantity);
+
+        trades resulting_trades = ob_->add_order(book_order);
+
+        double fade_rate = fill_model_ ? fill_model_->get_fade_rate() : 0.0;
+
+        for (const auto& trade : resulting_trades)
+        {
+            const auto& our_trade_info =
+                (trade.get_bid_trade().orderId_ == o.get_order_id())
+                    ? trade.get_bid_trade() : trade.get_ask_trade();
+
+            if (our_trade_info.orderId_ == o.get_order_id())
+            {
+                double fill_price = our_trade_info.price_.to_double();
+                int fill_qty = static_cast<int>(our_trade_info.quantity_);
+
+                if (fade_rate > 0.0)
+                {
+                    fill_qty = static_cast<int>(fill_qty * (1.0 - fade_rate));
+                    if (fill_qty <= 0)
+                        continue;
+                }
+
+                double commission = 0.0;
+                if (fee_model_)
+                    commission = fee_model_->compute_commission(o.get_side(), fill_qty, fill_price);
+
+                pending_fills_.emplace_back(
+                    o.get_earliest_eligible_ts(),
+                    o.get_symbol(),
+                    o.get_order_id(),
+                    o.get_side(),
+                    fill_qty,
+                    fill_price,
+                    commission
+                );
+            }
+        }
+    }
+
+    bool poll_fills(std::vector<fill_event>& out) override
+    {
+        if (pending_fills_.empty())
+            return false;
+
+        out.insert(out.end(),
+                   std::make_move_iterator(pending_fills_.begin()),
+                   std::make_move_iterator(pending_fills_.end()));
+        pending_fills_.clear();
+        return true;
+    }
+
+private:
+    std::shared_ptr<orderbook> ob_;
+    std::shared_ptr<IFeeModel> fee_model_;
+    std::shared_ptr<IFillModel> fill_model_;
+    std::vector<fill_event> pending_fills_;
+    std::mt19937 fill_rng_;
+    std::uniform_real_distribution<double> fill_dist_;
+    double mid_price_ = 0.0;
+};
+
+// Stub for future live exchange execution.
+// submit_order would forward to exchange REST/WS API.
+// poll_fills would check for execution reports.
+class ExchangeAdapter : public IExecutionAdapter
+{
+public:
+    void submit_order(const order_event& /*o*/) override
+    {
+        // TODO: forward to exchange API
+    }
+
+    bool poll_fills(std::vector<fill_event>& /*out*/) override
+    {
+        // TODO: poll exchange for fill reports
+        return false;
+    }
+};

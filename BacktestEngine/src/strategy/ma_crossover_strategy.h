@@ -4,15 +4,20 @@
 #include "strategy_interface.h"
 
 #include <optional>
+#include <string>
+#include <unordered_map>
 
 class ma_crossover_strategy : public IStrategy
 {
 public:
     explicit ma_crossover_strategy(std::size_t period = 20);
     std::optional<order_event> on_market(const market_event& mkt) override;
-    void set_position_open(bool open) override;
+    void set_position_open(const std::string& symbol, bool open) override;
 
 private:
-    simple_moving_average sma_;
-    bool position_open_ = false;
+    std::size_t period_;
+    std::unordered_map<std::string, simple_moving_average> smas_;
+    std::unordered_map<std::string, bool> position_open_;
+
+    simple_moving_average& get_sma(const std::string& symbol);
 };

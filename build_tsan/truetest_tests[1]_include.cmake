@@ -1,0 +1,5 @@
+if(EXISTS "/home/leonard/work/hft-engine/build_tsan/truetest_tests[1]_tests.cmake")
+  include("/home/leonard/work/hft-engine/build_tsan/truetest_tests[1]_tests.cmake")
+else()
+  add_test(truetest_tests_NOT_BUILT truetest_tests_NOT_BUILT)
+endif()

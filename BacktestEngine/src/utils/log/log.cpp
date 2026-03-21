@@ -3,14 +3,11 @@
 #include <filesystem>
 #include <optional>
 
-#include "../../core/backtest_core.h"
-#include "../../data/db_connection.h"
 
 
 
 bool mkdir()
 {
-
 
     std::error_code ec;
     bool created = std::filesystem::create_directory("Log", ec);

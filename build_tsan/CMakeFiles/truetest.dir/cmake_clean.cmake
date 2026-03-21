@@ -1,0 +1,42 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/truetest.dir/link.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/analytics/analytics.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/analytics/analytics.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/core/engine.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/core/engine.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/data/binary_cache_source.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/data/binary_cache_source.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/data/csv_data_source.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/data/csv_data_source.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/data/data_loader.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/data/data_loader.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/execution/portfolio.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/execution/portfolio.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/main.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/main.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/market_maker/market_maker.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/market_maker/market_maker.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/orderbook/orderbook.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/orderbook/orderbook.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/risk/risk_manager.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/risk/risk_manager.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/ma_crossover_strategy.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/ma_crossover_strategy.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o.d"
+  "truetest"
+  "truetest.pdb"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/truetest.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()

@@ -1,13 +1,13 @@
 #include "orderbook.h"
+#include "../types/order_id.h"
 #include <stdexcept>
-#include <numeric>
 #include <algorithm>
-#include <iostream> // For logging
 
-// --- order Method Implementations ---
+// ── order ───────────────────────────────────────────────────────────────────
 
-order::order(ob_order_type Order_type, order_id Order_id_, side Side_, price Price_, quantity Quantity_)
-    : order_type_(Order_type), order_id_(Order_id_), side_(Side_), price_(Price_), initial_quantity_(Quantity_), remaining_quantity(Quantity_) {}
+order::order(ob_order_type Order_type, order_id Order_id_, side Side_, Price Price_, quantity Quantity_)
+    : order_type_(Order_type), order_id_(Order_id_), side_(Side_), price_(Price_),
+      initial_quantity_(Quantity_), remaining_quantity(Quantity_) {}
 
 void order::fill(quantity quantity)
 {
@@ -21,14 +21,14 @@ void order::fill(quantity quantity)
 
 order_id order::get_order_id() const { return order_id_; }
 side order::get_side() const { return side_; }
-price order::get_price() const { return price_; }
+Price order::get_price() const { return price_; }
 ob_order_type order::get_order_type() const { return order_type_; }
 quantity order::get_inital_quantity() const { return initial_quantity_; }
 quantity order::get_reamaining_quantity() const { return remaining_quantity; }
 quantity order::get_filled_quantity() const { return initial_quantity_ - remaining_quantity; }
 bool order::is_filled() const { return remaining_quantity == 0; }
 
-// --- order_modify Method Implementations ---
+// ── order_modify ────────────────────────────────────────────────────────────
 
 order_pointer order_modify::to_order_pointer(ob_order_type type) const
 {
@@ -36,11 +36,14 @@ order_pointer order_modify::to_order_pointer(ob_order_type type) const
 }
 
 order_id order_modify::get_order_id() const { return orderId_; }
-price order_modify::get_price() const { return price_; }
+Price order_modify::get_price() const { return price_; }
 side order_modify::get_side() const { return side_; }
 quantity order_modify::get_quantity() const { return quantity_; }
 
-// --- trade Method Implementations ---
+order_modify::order_modify(order_id order_id, side side, Price price, quantity quantity)
+    : orderId_(order_id), price_(price), side_(side), quantity_(quantity) {}
+
+// ── trade ───────────────────────────────────────────────────────────────────
 
 trade::trade(const trade_info& bid_trade, const trade_info& ask_trade)
     : bid_trade_(bid_trade), ask_trade_(ask_trade) {}
@@ -48,7 +51,7 @@ trade::trade(const trade_info& bid_trade, const trade_info& ask_trade)
 const trade_info& trade::get_bid_trade() const { return bid_trade_; }
 const trade_info& trade::get_ask_trade() const { return ask_trade_; }
 
-// --- orderbook_lvl_infos Method Implementations ---
+// ── orderbook_lvl_infos ─────────────────────────────────────────────────────
 
 orderbook_lvl_infos::orderbook_lvl_infos(const lvl_infos& bids, const lvl_infos& asks)
     : bids_(bids), asks_(asks) {}
@@ -56,138 +59,380 @@ orderbook_lvl_infos::orderbook_lvl_infos(const lvl_infos& bids, const lvl_infos&
 const lvl_infos& orderbook_lvl_infos::get_bids() const { return bids_; }
 const lvl_infos& orderbook_lvl_infos::get_asks() const { return asks_; }
 
-// --- orderbook Method Implementations ---
+// ── Node pool ───────────────────────────────────────────────────────────────
 
-bool orderbook::can_match(side side, price price) const
+order_node* orderbook::alloc_node()
 {
-    if (side == side::buy)
+    if (!free_nodes_)
     {
-        if (asks_.empty())
+        auto blk = std::make_unique<node_block>();
+        // Build freelist through the block
+        for (std::size_t i = 0; i < NODE_BLOCK_SIZE; ++i)
         {
-            return false;
+            blk->nodes[i].next = free_nodes_;
+            free_nodes_ = &blk->nodes[i];
         }
-        return price >= asks_.top().first;
+        node_blocks_.push_back(std::move(blk));
+    }
+
+    order_node* n = free_nodes_;
+    free_nodes_ = n->next;
+    n->next = nullptr;
+    n->prev = nullptr;
+    n->order = nullptr;
+    return n;
+}
+
+void orderbook::free_node(order_node* n)
+{
+    n->order.reset();
+    n->prev = nullptr;
+    n->next = free_nodes_;
+    free_nodes_ = n;
+}
+
+// ── Level management ────────────────────────────────────────────────────────
+
+price_level& orderbook::find_or_insert_level(std::vector<price_level>& levels, Price price, side s)
+{
+    if (s == side::buy)
+    {
+        // Bids sorted descending: best (highest) at front
+        auto it = std::lower_bound(levels.begin(), levels.end(), price,
+            [](const price_level& lvl, Price p) { return lvl.price > p; });
+
+        if (it != levels.end() && it->price == price)
+            return *it;
+
+        price_level new_level;
+        new_level.price = price;
+        it = levels.insert(it, new_level);
+        return *it;
     }
     else
     {
-        if (bids_.empty())
+        // Asks sorted ascending: best (lowest) at front
+        auto it = std::lower_bound(levels.begin(), levels.end(), price,
+            [](const price_level& lvl, Price p) { return lvl.price < p; });
+
+        if (it != levels.end() && it->price == price)
+            return *it;
+
+        price_level new_level;
+        new_level.price = price;
+        it = levels.insert(it, new_level);
+        return *it;
+    }
+}
+
+void orderbook::remove_level_if_empty(std::vector<price_level>& levels, Price price)
+{
+    for (auto it = levels.begin(); it != levels.end(); ++it)
+    {
+        if (it->price == price && it->empty())
         {
-            return false;
+            levels.erase(it);
+            return;
         }
-        return price <= bids_.top().first;
+    }
+}
+
+// ── Matching ────────────────────────────────────────────────────────────────
+
+bool orderbook::can_match(side side, Price price) const
+{
+    if (side == side::buy)
+    {
+        if (ask_levels_.empty()) return false;
+        return price >= ask_levels_.front().price;
+    }
+    else
+    {
+        if (bid_levels_.empty()) return false;
+        return price <= bid_levels_.front().price;
     }
 }
 
 trades orderbook::match_orders()
 {
-    trades trades;
+    trades result;
 
-    while (!bids_.empty() && !asks_.empty() && bids_.top().first >= asks_.top().first)
+    while (!bid_levels_.empty() && !ask_levels_.empty() &&
+           bid_levels_.front().price >= ask_levels_.front().price)
     {
-        auto bid = bids_.top(); bids_.pop();
-        auto ask = asks_.top(); asks_.pop();
+        auto& bid_lvl = bid_levels_.front();
+        auto& ask_lvl = ask_levels_.front();
 
-        quantity trade_quantity = std::min(bid.second->get_reamaining_quantity(), ask.second->get_reamaining_quantity());
+        order_node* bid_node = bid_lvl.head;
+        order_node* ask_node = ask_lvl.head;
 
-        bid.second->fill(trade_quantity);
-        ask.second->fill(trade_quantity);
+        if (!bid_node || !ask_node) break;
 
-        trade_info bid_trade{ bid.second->get_order_id(), bid.second->get_price(), trade_quantity };
-        trade_info ask_trade{ ask.second->get_order_id(), ask.second->get_price(), trade_quantity };
-        trades.push_back(trade{ bid_trade, ask_trade });
+        // Skip cancelled orders (removed from order_map_ but still in level list)
+        if (order_map_.find(bid_node->order->get_order_id()) == order_map_.end())
+        {
+            bid_lvl.remove(bid_node);
+            free_node(bid_node);
+            if (bid_lvl.empty()) bid_levels_.erase(bid_levels_.begin());
+            continue;
+        }
+        if (order_map_.find(ask_node->order->get_order_id()) == order_map_.end())
+        {
+            ask_lvl.remove(ask_node);
+            free_node(ask_node);
+            if (ask_lvl.empty()) ask_levels_.erase(ask_levels_.begin());
+            continue;
+        }
 
-        // If not filled, push back
-        if (!bid.second->is_filled()) bids_.push(bid);
-        if (!ask.second->is_filled()) asks_.push(ask);
+        quantity trade_qty = std::min(
+            bid_node->order->get_reamaining_quantity(),
+            ask_node->order->get_reamaining_quantity());
 
-        // Remove from orders if filled
-        if (bid.second->is_filled()) orders_.erase(bid.second->get_order_id());
-        if (ask.second->is_filled()) orders_.erase(ask.second->get_order_id());
+        bid_node->order->fill(trade_qty);
+        ask_node->order->fill(trade_qty);
+
+        trade_info bid_trade{bid_node->order->get_order_id(), bid_node->order->get_price(), trade_qty};
+        trade_info ask_trade{ask_node->order->get_order_id(), ask_node->order->get_price(), trade_qty};
+        result.push_back(trade{bid_trade, ask_trade});
+
+        // Remove filled orders
+        if (bid_node->order->is_filled())
+        {
+            bid_lvl.remove(bid_node);
+            order_map_.erase(bid_node->order->get_order_id());
+            free_node(bid_node);
+        }
+        else
+        {
+            // Update level total_qty (remove old, re-add remaining)
+            bid_lvl.total_qty -= trade_qty;
+        }
+
+        if (ask_node->order->is_filled())
+        {
+            ask_lvl.remove(ask_node);
+            order_map_.erase(ask_node->order->get_order_id());
+            free_node(ask_node);
+        }
+        else
+        {
+            ask_lvl.total_qty -= trade_qty;
+        }
+
+        // Remove empty levels
+        if (bid_lvl.empty()) bid_levels_.erase(bid_levels_.begin());
+        if (!ask_levels_.empty() && ask_levels_.front().empty())
+            ask_levels_.erase(ask_levels_.begin());
     }
 
-    // Handle fill_or_kill (simplified)
-    if (!bids_.empty() && bids_.top().second->get_order_type() == ob_order_type::fill_or_kill)
-    {
-        cancel_order(bids_.top().second->get_order_id());
-    }
-    if (!asks_.empty() && asks_.top().second->get_order_type() == ob_order_type::fill_or_kill)
-    {
-        cancel_order(asks_.top().second->get_order_id());
-    }
+    // Cancel unfilled FOK / IOC orders at the top of each side
+    auto cancel_aggressive = [&](std::vector<price_level>& levels) {
+        while (!levels.empty())
+        {
+            auto& lvl = levels.front();
+            order_node* n = lvl.head;
+            if (!n) { levels.erase(levels.begin()); continue; }
 
-    return trades;
+            // Skip cancelled nodes
+            if (order_map_.find(n->order->get_order_id()) == order_map_.end())
+            {
+                lvl.remove(n);
+                free_node(n);
+                if (lvl.empty()) levels.erase(levels.begin());
+                continue;
+            }
+
+            auto type = n->order->get_order_type();
+            if (type == ob_order_type::fill_or_kill || type == ob_order_type::immediate_or_cancel)
+            {
+                cancel_order(n->order->get_order_id());
+                return;
+            }
+            break;
+        }
+    };
+    cancel_aggressive(bid_levels_);
+    cancel_aggressive(ask_levels_);
+
+    return result;
 }
+
+// ── Public API ──────────────────────────────────────────────────────────────
 
 trades orderbook::add_order(order_pointer order)
 {
-    if (orders_.count(order->get_order_id()))
+    if (order_map_.count(order->get_order_id()))
+        return {};
+
+    // FOK pre-check: reject if full quantity isn't available
+    if (order->get_order_type() == ob_order_type::fill_or_kill)
     {
-        return { };
+        if (!can_match(order->get_side(), order->get_price()))
+            return {};
+
+        quantity available = 0;
+        auto& contra_levels = (order->get_side() == side::buy) ? ask_levels_ : bid_levels_;
+        for (const auto& lvl : contra_levels)
+        {
+            bool crosses = (order->get_side() == side::buy)
+                ? lvl.price <= order->get_price()
+                : lvl.price >= order->get_price();
+            if (crosses)
+                available += lvl.total_qty;
+        }
+        if (available < order->get_reamaining_quantity())
+            return {};
     }
 
-    if (order->get_order_type() == ob_order_type::fill_or_kill && !can_match(order->get_side(), order->get_price()))
+    // IOC pre-check: reject if no match possible
+    if (order->get_order_type() == ob_order_type::immediate_or_cancel &&
+        !can_match(order->get_side(), order->get_price()))
     {
-        return { };
+        return {};
     }
 
-    if (order->get_side() == side::buy)
-    {
-        bids_.push({order->get_price(), order});
-        bid_quantities_[order->get_price()] += order->get_reamaining_quantity();
-    }
-    else
-    {
-        asks_.push({order->get_price(), order});
-        ask_quantities_[order->get_price()] += order->get_reamaining_quantity();
-    }
+    // Allocate node and insert into the correct price level
+    order_node* n = alloc_node();
+    n->order = order;
 
-    orders_[order->get_order_id()] = {order};
+    auto& levels = (order->get_side() == side::buy) ? bid_levels_ : ask_levels_;
+    auto& lvl = find_or_insert_level(levels, order->get_price(), order->get_side());
+    lvl.append(n);
+
+    order_map_[order->get_order_id()] = n;
+
     return match_orders();
 }
 
-void orderbook::cancel_order(order_id order_id)
+void orderbook::cancel_order(order_id oid)
 {
-    auto it = orders_.find(order_id);
-    if (it == orders_.end())
-    {
+    auto it = order_map_.find(oid);
+    if (it == order_map_.end())
         return;
+
+    order_node* n = it->second;
+    auto s = n->order->get_side();
+    auto price = n->order->get_price();
+
+    auto& levels = (s == side::buy) ? bid_levels_ : ask_levels_;
+
+    // Find the level and remove the node
+    for (auto& lvl : levels)
+    {
+        if (lvl.price == price)
+        {
+            lvl.remove(n);
+            break;
+        }
     }
 
-    // Note: priority_queue does not support efficient removal, so we just remove from orders_
-    // The order may still be in the queue, but since it's cancelled, it won't be matched.
-    orders_.erase(it);
+    order_map_.erase(it);
+    free_node(n);
+
+    remove_level_if_empty(levels, price);
 }
 
 trades orderbook::match_order(order_modify order)
 {
-    if (orders_.find(order.get_order_id()) == orders_.end())
-    {
-        return { };
-    }
+    if (order_map_.find(order.get_order_id()) == order_map_.end())
+        return {};
 
-    const auto& [existing_order] = orders_.at(order.get_order_id());
+    auto existing_node = order_map_[order.get_order_id()];
+    auto existing_type = existing_node->order->get_order_type();
     cancel_order(order.get_order_id());
-    return add_order(order.to_order_pointer(existing_order->get_order_type()));
+    return add_order(order.to_order_pointer(existing_type));
 }
 
 std::size_t orderbook::size() const
 {
-    return orders_.size();
+    return order_map_.size();
 }
 
 orderbook_lvl_infos orderbook::get_order_infos() const
 {
     lvl_infos bid_infos, ask_infos;
 
-    for (const auto& [price, qty] : bid_quantities_)
+    for (const auto& lvl : bid_levels_)
+        if (lvl.total_qty > 0)
+            bid_infos.push_back({lvl.price, lvl.total_qty});
+
+    for (const auto& lvl : ask_levels_)
+        if (lvl.total_qty > 0)
+            ask_infos.push_back({lvl.price, lvl.total_qty});
+
+    return orderbook_lvl_infos{bid_infos, ask_infos};
+}
+
+void orderbook::clear()
+{
+    // Free all nodes back to the pool
+    for (auto& [id, n] : order_map_)
+        free_node(n);
+
+    order_map_.clear();
+    bid_levels_.clear();
+    ask_levels_.clear();
+}
+
+void orderbook::apply_l2_snapshot(const std::vector<std::pair<Price, quantity>>& bids,
+                                   const std::vector<std::pair<Price, quantity>>& asks)
+{
+    clear();
+
+    for (const auto& [p, q] : bids)
     {
-        bid_infos.push_back({price, qty});
+        if (q == 0) continue;
+        auto o = std::make_shared<order>(ob_order_type::good_till_cancel,
+                                          OrderIdGenerator::next(), side::buy, p, q);
+        order_node* n = alloc_node();
+        n->order = o;
+        auto& lvl = find_or_insert_level(bid_levels_, p, side::buy);
+        lvl.append(n);
+        order_map_[o->get_order_id()] = n;
     }
 
-    for (const auto& [price, qty] : ask_quantities_)
+    for (const auto& [p, q] : asks)
     {
-        ask_infos.push_back({price, qty});
+        if (q == 0) continue;
+        auto o = std::make_shared<order>(ob_order_type::good_till_cancel,
+                                          OrderIdGenerator::next(), side::sell, p, q);
+        order_node* n = alloc_node();
+        n->order = o;
+        auto& lvl = find_or_insert_level(ask_levels_, p, side::sell);
+        lvl.append(n);
+        order_map_[o->get_order_id()] = n;
     }
+}
 
-    return orderbook_lvl_infos{ bid_infos, ask_infos };
+void orderbook::apply_l2_update(side side, Price price, quantity new_qty)
+{
+    auto& levels = (side == side::buy) ? bid_levels_ : ask_levels_;
+
+    // Remove all existing orders at this price level
+    for (auto& lvl : levels)
+    {
+        if (lvl.price == price)
+        {
+            while (lvl.head)
+            {
+                order_node* n = lvl.head;
+                lvl.remove(n);
+                order_map_.erase(n->order->get_order_id());
+                free_node(n);
+            }
+            break;
+        }
+    }
+    remove_level_if_empty(levels, price);
+
+    if (new_qty > 0)
+    {
+        auto o = std::make_shared<order>(ob_order_type::good_till_cancel,
+                                          OrderIdGenerator::next(), side, price, new_qty);
+        order_node* n = alloc_node();
+        n->order = o;
+        auto& lvl = find_or_insert_level(levels, price, side);
+        lvl.append(n);
+        order_map_[o->get_order_id()] = n;
+    }
 }

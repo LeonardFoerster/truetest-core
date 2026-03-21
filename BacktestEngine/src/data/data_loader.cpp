@@ -1,8 +1,4 @@
 #include "data_handler.h"
-#include "../core/backtest_core.h"
-#include "../data/db_connection.h"
-#include "../orderbook/orderbook.h"
-
 
 #include <sstream>
 #include <iostream>
@@ -42,7 +38,7 @@ void data_handler::load_from_csv(const std::filesystem::path& path)
         int idx = 0;
         while (std::getline(hss, col, ','))
         {
-            // trim leading/trailing whitespace
+
             auto start = col.find_first_not_of(" \t\r\n");
             auto end   = col.find_last_not_of(" \t\r\n");
             col_index[start == std::string::npos ? "" : col.substr(start, end - start + 1)] = idx++;

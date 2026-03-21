@@ -1,5 +1,4 @@
 #include "sma.h"
-#include "../pricing/black_scholes.h"
 #include "../core/event.h"
 
 #include <iostream>

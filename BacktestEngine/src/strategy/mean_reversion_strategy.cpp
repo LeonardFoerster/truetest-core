@@ -1,26 +1,39 @@
 #include "mean_reversion_strategy.h"
 #include "../core/event.h"
 
-#include <iostream>
 #include <optional>
 
-mean_reversion_strategy::mean_reversion_strategy(std::size_t period) : sma_(period) {}
+mean_reversion_strategy::mean_reversion_strategy(std::size_t period) : period_(period) {}
+
+simple_moving_average& mean_reversion_strategy::get_sma(const std::string& symbol)
+{
+    auto it = smas_.find(symbol);
+    if (it == smas_.end())
+    {
+        smas_.emplace(symbol, simple_moving_average(period_));
+        return smas_.at(symbol);
+    }
+    return it->second;
+}
 
 std::optional<order_event> mean_reversion_strategy::on_market(const market_event& mkt)
 {
-    auto sma_value = sma_.update(mkt.get_close());
-    if (!sma_value) return std::nullopt; 
+    auto& sma = get_sma(mkt.get_symbol());
+    auto sma_value = sma.update(mkt.get_close());
+    if (!sma_value) return std::nullopt;
 
-    if (!position_open_ && mkt.get_close() < *sma_value) {
+    bool is_open = position_open_[mkt.get_symbol()];
+
+    if (!is_open && mkt.get_close() < *sma_value) {
         return order_event(mkt.get_timestamp(), mkt.get_symbol(), order_type::limit, order_side::buy, 100, mkt.get_close());
     }
-    if (position_open_ && mkt.get_close() > *sma_value) {
+    if (is_open && mkt.get_close() > *sma_value) {
         return order_event(mkt.get_timestamp(), mkt.get_symbol(), order_type::limit, order_side::sell, 100, mkt.get_close());
     }
-    return std::nullopt; 
+    return std::nullopt;
 }
 
-void mean_reversion_strategy::set_position_open(bool open)
+void mean_reversion_strategy::set_position_open(const std::string& symbol, bool open)
 {
-    position_open_ = open;
+    position_open_[symbol] = open;
 }

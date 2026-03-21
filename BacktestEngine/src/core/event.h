@@ -3,13 +3,17 @@
 #include <chrono>
 #include <string>
 #include <memory>
+#include <vector>
 
 enum class event_type
 {
         market,
         signal,
         order,
-        fill
+        fill,
+        tick,
+        l2_snapshot,
+        l2_update
 };
 
 
@@ -135,7 +139,16 @@ enum class order_type
 {
         market,
         limit,
-        stop
+        stop,
+        stop_limit
+};
+
+enum class time_in_force
+{
+        ioc,    // immediate-or-cancel: fill what you can, cancel rest
+        fok,    // fill-or-kill: all or nothing
+        gtc,    // good-till-cancel: stays on book
+        day     // good-till-end-of-session
 };
 
 enum class order_side
@@ -144,7 +157,7 @@ enum class order_side
         sell
 };
 
-class order_event : public event 
+class order_event : public event
 {
 public:
         order_event
@@ -154,7 +167,9 @@ public:
                 order_type order_type,
                 order_side side,
                 int quantity,
-                double price = 0.0
+                double price = 0.0,
+                time_in_force tif = time_in_force::gtc,
+                double stop_price = 0.0
         )
                 : event(event_type::order, timestamp)
                 , symbol_(symbol)
@@ -162,7 +177,13 @@ public:
                 , side_(side)
                 , quantity_(quantity)
                 , price_(price)
+                , tif_(tif)
+                , stop_price_(stop_price)
+                , earliest_eligible_ts_(timestamp)
         {
+                // Default TIF based on order type if caller used gtc (the default)
+                if (tif == time_in_force::gtc && order_type == order_type::market)
+                        tif_ = time_in_force::ioc;
         }
 
         uint64_t get_order_id() const { return order_id_; }
@@ -173,8 +194,13 @@ public:
         order_side get_side() const { return side_; }
         int get_quantity() const { return quantity_; }
         double get_price() const { return price_; }
+        time_in_force get_tif() const { return tif_; }
+        double get_stop_price() const { return stop_price_; }
 
-        std::string to_string() const override 
+        std::chrono::system_clock::time_point get_earliest_eligible_ts() const { return earliest_eligible_ts_; }
+        void set_earliest_eligible_ts(std::chrono::system_clock::time_point ts) { earliest_eligible_ts_ = ts; }
+
+        std::string to_string() const override
         {
                 std::string side_str = (side_ == order_side::buy) ? "BUY" : "SELL";
                 std::string type_str;
@@ -182,6 +208,7 @@ public:
                 case order_type::market: type_str = "MARKET"; break;
                 case order_type::limit: type_str = "LIMIT"; break;
                 case order_type::stop: type_str = "STOP"; break;
+                case order_type::stop_limit: type_str = "STOP_LIMIT"; break;
                 }
                 return "OrderEvent[id=" + std::to_string(order_id_) + " " + type_str + " " + side_str + " " +
                         std::to_string(quantity_) + " " + symbol_ +
@@ -195,6 +222,9 @@ private:
         order_side side_;
         int quantity_;
         double price_;
+        time_in_force tif_;
+        double stop_price_;
+        std::chrono::system_clock::time_point earliest_eligible_ts_;
 };
 
 class fill_event : public event 
@@ -250,4 +280,130 @@ private:
         int filled_quantity_;
         double fill_price_;
         double commission_;
+};
+
+
+enum class tick_side
+{
+        bid,
+        ask,
+        unknown
+};
+
+class tick_event : public event
+{
+public:
+        tick_event(
+                std::chrono::system_clock::time_point timestamp,
+                const std::string& symbol,
+                double price,
+                int64_t quantity,
+                tick_side side = tick_side::unknown
+        )
+                : event(event_type::tick, timestamp)
+                , symbol_(symbol)
+                , price_(price)
+                , quantity_(quantity)
+                , side_(side)
+        { }
+
+        const std::string& get_symbol() const { return symbol_; }
+        double get_price() const { return price_; }
+        int64_t get_quantity() const { return quantity_; }
+        tick_side get_side() const { return side_; }
+
+        std::string to_string() const override
+        {
+                std::string side_str;
+                switch (side_) {
+                case tick_side::bid: side_str = "BID"; break;
+                case tick_side::ask: side_str = "ASK"; break;
+                case tick_side::unknown: side_str = "UNK"; break;
+                }
+                return "TickEvent[" + symbol_ + " " + std::to_string(price_) +
+                        " x" + std::to_string(quantity_) + " " + side_str + "]";
+        }
+
+private:
+        std::string symbol_;
+        double price_;
+        int64_t quantity_;
+        tick_side side_;
+};
+
+
+struct l2_level
+{
+        double price;
+        int64_t quantity;
+};
+
+class l2_snapshot_event : public event
+{
+public:
+        l2_snapshot_event(
+                std::chrono::system_clock::time_point timestamp,
+                const std::string& symbol,
+                std::vector<l2_level> bids,
+                std::vector<l2_level> asks
+        )
+                : event(event_type::l2_snapshot, timestamp)
+                , symbol_(symbol)
+                , bids_(std::move(bids))
+                , asks_(std::move(asks))
+        { }
+
+        const std::string& get_symbol() const { return symbol_; }
+        const std::vector<l2_level>& get_bids() const { return bids_; }
+        const std::vector<l2_level>& get_asks() const { return asks_; }
+
+        std::string to_string() const override
+        {
+                return "L2SnapshotEvent[" + symbol_ +
+                        " bids=" + std::to_string(bids_.size()) +
+                        " asks=" + std::to_string(asks_.size()) + "]";
+        }
+
+private:
+        std::string symbol_;
+        std::vector<l2_level> bids_;
+        std::vector<l2_level> asks_;
+};
+
+
+class l2_update_event : public event
+{
+public:
+        l2_update_event(
+                std::chrono::system_clock::time_point timestamp,
+                const std::string& symbol,
+                tick_side side,
+                double price,
+                int64_t new_quantity
+        )
+                : event(event_type::l2_update, timestamp)
+                , symbol_(symbol)
+                , side_(side)
+                , price_(price)
+                , new_quantity_(new_quantity)
+        { }
+
+        const std::string& get_symbol() const { return symbol_; }
+        tick_side get_side() const { return side_; }
+        double get_price() const { return price_; }
+        int64_t get_new_quantity() const { return new_quantity_; }
+
+        std::string to_string() const override
+        {
+                std::string side_str = (side_ == tick_side::bid) ? "BID" : "ASK";
+                return "L2UpdateEvent[" + symbol_ + " " + side_str +
+                        " " + std::to_string(price_) +
+                        " qty=" + std::to_string(new_quantity_) + "]";
+        }
+
+private:
+        std::string symbol_;
+        tick_side side_;
+        double price_;
+        int64_t new_quantity_;
 };
