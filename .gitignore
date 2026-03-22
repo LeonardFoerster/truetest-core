@@ -367,6 +367,13 @@ FodyWeavers.xsd
 
 # To-do file
 to_do.md
+CLAUDE.MD
+
+# Docs
+docs/
+
 
 # CMake build directory
 build/
+
+
