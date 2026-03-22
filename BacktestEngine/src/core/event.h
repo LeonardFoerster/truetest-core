@@ -5,6 +5,10 @@
 #include <memory>
 #include <vector>
 
+#ifdef HAS_DEBUG
+#include "debug/copy_tracker.h"
+#endif
+
 enum class event_type
 {
         market,
@@ -42,6 +46,9 @@ using event_pointer = std::shared_ptr<event>;
 
 
 class market_event : public event
+#ifdef HAS_DEBUG
+    , public debug::CopyTracker<market_event>
+#endif
 {
 public:
         market_event
@@ -158,6 +165,9 @@ enum class order_side
 };
 
 class order_event : public event
+#ifdef HAS_DEBUG
+    , public debug::CopyTracker<order_event>
+#endif
 {
 public:
         order_event
@@ -227,7 +237,10 @@ private:
         std::chrono::system_clock::time_point earliest_eligible_ts_;
 };
 
-class fill_event : public event 
+class fill_event : public event
+#ifdef HAS_DEBUG
+    , public debug::CopyTracker<fill_event>
+#endif
 {
 public:
         fill_event
@@ -291,6 +304,9 @@ enum class tick_side
 };
 
 class tick_event : public event
+#ifdef HAS_DEBUG
+    , public debug::CopyTracker<tick_event>
+#endif
 {
 public:
         tick_event(

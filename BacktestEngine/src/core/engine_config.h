@@ -11,6 +11,7 @@
 class IFeeModel;
 class IFillModel;
 class ILatencyModel;
+class IProvider;
 
 enum class engine_mode { backtest, shadow, live };
 
@@ -49,6 +50,11 @@ struct engine_config
     // Text logging
     std::string text_log_path;
     bool log_to_stdout = false;
+
+    // Provider: when set, the engine uses this provider's transport and
+    // execution adapter instead of manually wired sources.
+    // This is scaffolding — full provider-based engine wiring comes later.
+    std::shared_ptr<IProvider> provider;
 
     // Helper
     bool is_threaded() const { return threading != thread_preset::inline_mode; }

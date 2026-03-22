@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(ENABLE_POSTGRESQL "Build with PostgreSQL storage backend" OFF)
 option(ENABLE_LIVE_DATA "Build with WebSocket live data feed (requires Boost.Beast)" OFF)
+option(ENABLE_DEBUG "Build with performance instrumentation (requires Abseil)" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 
 # ── Core engine sources (no external dependencies) ────────────────────────────
@@ -26,6 +27,7 @@ set(SOURCES
     BacktestEngine/src/strategy/sma.cpp
     BacktestEngine/src/market_maker/market_maker.cpp
     BacktestEngine/src/risk/risk_manager.cpp
+    BacktestEngine/src/providers/local/local_register.cpp
     BacktestEngine/src/utils/log/log.cpp
 )
 
@@ -137,6 +139,40 @@ if(ENABLE_LIVE_DATA)
     target_link_libraries(truetest PRIVATE Boost::system)
     target_compile_definitions(truetest PRIVATE HAS_LIVE_DATA)
 endif()
+
+# ── Optional debug instrumentation (Abseil) ──────────────────────────────────
+if(ENABLE_DEBUG)
+    include(FetchContent)
+    FetchContent_Declare(
+        abseil-cpp
+        GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
+        GIT_TAG        20240722.0
+    )
+    set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(abseil-cpp)
+
+    target_sources(truetest PRIVATE
+        BacktestEngine/src/debug/hardware_info.cpp
+        BacktestEngine/src/debug/stage_timer.cpp
+        BacktestEngine/src/debug/memory_info.cpp
+        BacktestEngine/src/debug/debug_report.cpp
+    )
+
+    target_link_libraries(truetest PRIVATE
+        absl::log
+        absl::log_initialize
+        absl::log_severity
+        absl::log_sink
+        absl::log_sink_registry
+        absl::flags
+        absl::flags_parse
+        absl::strings
+        absl::str_format
+    )
+
+    target_compile_definitions(truetest PRIVATE HAS_DEBUG)
+endif()
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ── Unit Tests (GoogleTest) ──────────────────────────────────────────────────
@@ -179,6 +215,10 @@ if(BUILD_TESTS)
         tests/test_event_log.cpp
         tests/test_thread_preset.cpp
         tests/test_threading_correctness.cpp
+        tests/test_provider_transport.cpp
+        tests/test_data_bridge.cpp
+        tests/test_provider_event.cpp
+        tests/test_provider_registry.cpp
         # Production sources (no main.cpp)
         BacktestEngine/src/core/engine.cpp
         BacktestEngine/src/analytics/analytics.cpp
@@ -194,12 +234,14 @@ if(BUILD_TESTS)
         BacktestEngine/src/strategy/sma.cpp
         BacktestEngine/src/market_maker/market_maker.cpp
         BacktestEngine/src/risk/risk_manager.cpp
+        BacktestEngine/src/providers/local/local_register.cpp
         BacktestEngine/src/utils/log/log.cpp
     )
 
     add_executable(truetest_tests ${TEST_SOURCES})
     target_include_directories(truetest_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/BacktestEngine/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests"
     )
     target_compile_definitions(truetest_tests PRIVATE
         TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
@@ -208,6 +250,21 @@ if(BUILD_TESTS)
 
     if(NOT MSVC)
         target_compile_options(truetest_tests PRIVATE -Wall -Wextra)
+    endif()
+
+    if(ENABLE_DEBUG)
+        target_sources(truetest_tests PRIVATE
+            BacktestEngine/src/debug/hardware_info.cpp
+            BacktestEngine/src/debug/stage_timer.cpp
+            BacktestEngine/src/debug/memory_info.cpp
+            BacktestEngine/src/debug/debug_report.cpp
+        )
+        target_link_libraries(truetest_tests PRIVATE
+            absl::log absl::log_initialize absl::log_severity
+            absl::log_sink absl::log_sink_registry
+            absl::strings absl::str_format
+        )
+        target_compile_definitions(truetest_tests PRIVATE HAS_DEBUG)
     endif()
 
     include(GoogleTest)

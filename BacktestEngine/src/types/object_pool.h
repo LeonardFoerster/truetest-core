@@ -104,4 +104,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return blocks_.size();
     }
+
+#ifdef HAS_DEBUG
+    std::size_t debug_footprint_bytes() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return blocks_.size() * BlockSize * SlotSize;
+    }
+#endif
 };

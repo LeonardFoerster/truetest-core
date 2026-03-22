@@ -7,6 +7,10 @@
 #include <chrono>
 #include <cstdint>
 
+#ifdef HAS_DEBUG
+#include "debug/copy_tracker.h"
+#endif
+
 // Tick side for aggressor identification
 enum class data_tick_side : uint8_t
 {
@@ -16,6 +20,9 @@ enum class data_tick_side : uint8_t
 };
 
 struct tick_record
+#ifdef HAS_DEBUG
+    : public debug::CopyTracker<tick_record>
+#endif
 {
 	std::chrono::system_clock::time_point timestamp;
 	std::string symbol;

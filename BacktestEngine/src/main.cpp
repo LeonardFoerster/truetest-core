@@ -23,14 +23,43 @@
 #include "data/pg_data_source.h"
 #endif
 
+#include "providers/provider_registry.h"
+#include "providers/data_bridge.h"
+#include "providers/local/csv_parser.h"
+#include "providers/local/file_transport.h"
+
+#ifdef HAS_DEBUG
+#include "debug/debug_log.h"
+#include "absl/flags/parse.h"
+#endif
+
 int main(int argc, char* argv[])
 {
+#ifdef HAS_DEBUG
+    absl::ParseCommandLine(argc, argv);
+    debug::init();
+
+    // Optional: log to file as well as stderr
+    static debug::FileSink file_sink("truetest_debug.log");
+    absl::AddLogSink(&file_sink);
+
+    LOG(INFO) << "TrueTest debug instrumentation enabled";
+#endif
     // --- CLI flags ---
     std::string replay_path;
     std::string event_log_path;
     uint64_t seed = 0;
     std::string thread_preset_str;
     bool no_pin = false;
+    std::string provider_name;
+    std::string provider_path;
+    std::string cli_strategy;
+    std::string cli_format;
+    std::size_t cli_sma_period = 20;
+    std::string cli_fee_model;
+    double cli_fee_value = 0.0;
+    double cli_maker_rate = 0.0;
+    double cli_taker_rate = 0.0;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -44,6 +73,24 @@ int main(int argc, char* argv[])
             thread_preset_str = argv[++i];
         else if (std::strcmp(argv[i], "--no-pin") == 0)
             no_pin = true;
+        else if (std::strcmp(argv[i], "--provider") == 0 && i + 1 < argc)
+            provider_name = argv[++i];
+        else if (std::strcmp(argv[i], "--path") == 0 && i + 1 < argc)
+            provider_path = argv[++i];
+        else if (std::strcmp(argv[i], "--strategy") == 0 && i + 1 < argc)
+            cli_strategy = argv[++i];
+        else if (std::strcmp(argv[i], "--format") == 0 && i + 1 < argc)
+            cli_format = argv[++i];
+        else if (std::strcmp(argv[i], "--sma-period") == 0 && i + 1 < argc)
+            cli_sma_period = std::stoull(argv[++i]);
+        else if (std::strcmp(argv[i], "--fee") == 0 && i + 1 < argc)
+            cli_fee_model = argv[++i];
+        else if (std::strcmp(argv[i], "--fee-value") == 0 && i + 1 < argc)
+            cli_fee_value = std::stod(argv[++i]);
+        else if (std::strcmp(argv[i], "--maker-rate") == 0 && i + 1 < argc)
+            cli_maker_rate = std::stod(argv[++i]);
+        else if (std::strcmp(argv[i], "--taker-rate") == 0 && i + 1 < argc)
+            cli_taker_rate = std::stod(argv[++i]);
     }
     // --- Replay mode: skip TUI, replay events from log ---
     if (!replay_path.empty())
@@ -61,6 +108,98 @@ int main(int argc, char* argv[])
         auto dh = std::make_shared<data_handler>();
         engine eng(dh, nullptr, strategy, std::move(cfg));
         eng.run_replay(replay_path);
+        eng.print_summary();
+        return 0;
+    }
+
+    // --- Provider mode: skip TUI, use registry-based provider ---
+    if (!provider_name.empty())
+    {
+        if (provider_path.empty())
+        {
+            std::cerr << "  ! --provider requires --path <file>\n";
+            return 1;
+        }
+
+        provider_config pcfg;
+        pcfg["path"] = provider_path;
+
+        auto provider = ProviderRegistry::instance().create(provider_name, pcfg);
+
+        // Select strategy (default: mean-reversion)
+        std::shared_ptr<IStrategy> prov_strategy;
+        if (cli_strategy == "sma")
+            prov_strategy = std::make_shared<sma_strategy>(cli_sma_period);
+        else if (cli_strategy == "ma-crossover")
+            prov_strategy = std::make_shared<ma_crossover_strategy>(cli_sma_period);
+        else
+            prov_strategy = std::make_shared<mean_reversion_strategy>(cli_sma_period);
+
+        // Build engine config
+        engine_config prov_cfg;
+        prov_cfg.seed = seed;
+        prov_cfg.event_log_path = event_log_path;
+        prov_cfg.disable_pinning = no_pin;
+        prov_cfg.provider = provider;
+
+        if (!thread_preset_str.empty())
+            prov_cfg.threading = string_to_preset(thread_preset_str);
+        else
+            prov_cfg.threading = select_preset(detect_physical_cores());
+
+        // Fee model
+        if (cli_fee_model == "fixed")
+            prov_cfg.fee_model = std::make_shared<FixedFeeModel>(cli_fee_value);
+        else if (cli_fee_model == "tiered")
+            prov_cfg.fee_model = std::make_shared<TieredFeeModel>(cli_maker_rate, cli_taker_rate);
+
+        // Load data via DataBridge using the provider's transport
+        auto transport = std::make_shared<FileTransport>(provider_path);
+        auto dh = std::make_shared<data_handler>();
+        bool is_tick = (cli_format == "tick");
+
+        if (is_tick)
+        {
+            auto parser = std::make_shared<CsvTickParser>();
+            auto bridge = std::make_shared<DataBridge<tick_record>>(
+                transport, parser, tick_record_sink);
+
+            if (!bridge->load_data(dh))
+            {
+                std::cerr << "  ! Failed to load tick data via provider bridge.\n";
+                return 1;
+            }
+        }
+        else
+        {
+            auto parser = std::make_shared<CsvBarParser>();
+            auto bridge = std::make_shared<DataBridge<bar_record>>(
+                transport, parser, bar_record_sink);
+
+            if (!bridge->load_data(dh))
+            {
+                std::cerr << "  ! Failed to load bar data via provider bridge.\n";
+                return 1;
+            }
+        }
+
+        std::cout << "\n";
+        std::cout << "  ============================================\n";
+        std::cout << "    Provider: " << provider_name << "\n";
+        std::cout << "    Format:   " << (is_tick ? "tick" : "bar") << "\n";
+        std::cout << "    Strategy: " << (cli_strategy.empty() ? "mean-reversion" : cli_strategy) << "\n";
+        std::cout << "    SMA:      " << cli_sma_period << "\n";
+        std::cout << "    Threading: " << preset_to_string(prov_cfg.threading)
+                  << " (" << preset_worker_count(prov_cfg.threading) << " workers)\n";
+        std::cout << "  ============================================\n\n";
+
+        engine eng(dh, nullptr, prov_strategy, std::move(prov_cfg));
+
+        if (is_tick)
+            eng.run_tick_data();
+        else
+            eng.run();
+
         eng.print_summary();
         return 0;
     }

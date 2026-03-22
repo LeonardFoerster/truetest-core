@@ -59,7 +59,13 @@ bool TickCsvDataSource::load_data(std::shared_ptr<data_handler> handler)
         auto timestamp = std::chrono::system_clock::time_point(
             std::chrono::milliseconds(ts_ms));
 
-        handler->tick_data.push_back({timestamp, symbol, price, qty, side});
+        tick_record rec;
+        rec.timestamp = timestamp;
+        rec.symbol = symbol;
+        rec.price = price;
+        rec.quantity = qty;
+        rec.side = side;
+        handler->tick_data.push_back(std::move(rec));
         ++count;
     }
 

@@ -23,6 +23,17 @@
 #include "../types/order_id.h"
 #include "../types/object_pool.h"
 
+// stage_timer.h included unconditionally — provides DEBUG_STAGE macro
+// that compiles to ((void)0) when HAS_DEBUG is off
+#include "../debug/stage_timer.h"
+
+#ifdef HAS_DEBUG
+#include "../debug/debug_log.h"
+#include "../debug/memory_info.h"
+#include "../debug/ring_stats.h"
+#include "../debug/debug_report.h"
+#endif
+
 #include <atomic>
 #include <memory>
 #include <queue>
@@ -88,6 +99,17 @@ private:
     std::size_t observer_drops_ = 0;
     std::size_t risk_stats_drops_ = 0;
     std::size_t mm_drops_ = 0;
+
+#ifdef HAS_DEBUG
+    debug::StageTimer stage_timer_;
+    debug::MemorySampler memory_sampler_;
+    debug::ring_diagnostics logging_diag_{"logging_ring", DEFAULT_RING_SIZE};
+    debug::ring_diagnostics risk_diag_{"risk_ring", DEFAULT_RING_SIZE};
+    debug::ring_diagnostics stats_diag_{"stats_ring", DEFAULT_RING_SIZE};
+    debug::ring_diagnostics observer_diag_{"observer_ring", DEFAULT_RING_SIZE};
+    debug::ring_diagnostics risk_stats_diag_{"risk_stats_ring", DEFAULT_RING_SIZE};
+    debug::ring_diagnostics mm_diag_{"mm_ring", DEFAULT_RING_SIZE};
+#endif
 
     // Worker instances (only the ones used by the active preset are non-null)
     std::unique_ptr<LoggingWorker> logging_worker_;

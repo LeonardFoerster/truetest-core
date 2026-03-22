@@ -3,6 +3,10 @@
 #include "../core/event.h"
 #include "ring_buffer.h"
 
+#ifdef HAS_DEBUG
+#include "../debug/thread_stats.h"
+#endif
+
 #include <atomic>
 #include <exception>
 #include <iostream>
@@ -23,8 +27,35 @@ public:
             event_pointer ev;
             while (running_.load(std::memory_order_acquire))
             {
-                if (inbound.try_pop(ev))
+#ifdef HAS_DEBUG
+                auto t0 = std::chrono::high_resolution_clock::now();
+#endif
+                bool got = inbound.try_pop(ev);
+#ifdef HAS_DEBUG
+                auto t1 = std::chrono::high_resolution_clock::now();
+                utilization_.poll_attempts++;
+#endif
+
+                if (got)
+                {
+#ifdef HAS_DEBUG
+                    utilization_.poll_hits++;
+                    utilization_.idle_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+                    auto t2 = std::chrono::high_resolution_clock::now();
+#endif
                     on_event(ev);
+#ifdef HAS_DEBUG
+                    utilization_.busy_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::high_resolution_clock::now() - t2).count();
+                    utilization_.events_processed++;
+#endif
+                }
+                else
+                {
+#ifdef HAS_DEBUG
+                    utilization_.idle_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+#endif
+                }
             }
 
             // Drain remaining events after shutdown signal
@@ -48,6 +79,12 @@ public:
 
     // Set shared failure flag (engine checks this alongside halt_flag)
     void set_failure_flag(std::atomic<bool>& flag) { failure_flag_ = &flag; }
+
+#ifdef HAS_DEBUG
+    debug::thread_utilization utilization_;
+public:
+    const debug::thread_utilization& debug_utilization() const { return utilization_; }
+#endif
 
 private:
     std::atomic<bool> running_{false};

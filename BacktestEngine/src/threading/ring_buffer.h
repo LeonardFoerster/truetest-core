@@ -106,6 +106,14 @@ public:
     bool full() const { return size() >= N; }
     static constexpr std::size_t capacity() { return N; }
 
+#ifdef HAS_DEBUG
+    std::size_t occupancy() const
+    {
+        return (write_pos_.load(std::memory_order_relaxed)
+              - read_pos_.load(std::memory_order_relaxed)) & (N - 1);
+    }
+#endif
+
 private:
     static constexpr std::size_t mask_ = N - 1;
 

@@ -70,25 +70,95 @@ void engine::publish_event(const event_pointer& ev)
         return;
 
     case thread_preset::light:
-        if (observer_ring_ && !observer_ring_->try_push(ev)) observer_drops_++;
+        if (observer_ring_ && !observer_ring_->try_push(ev)) { observer_drops_++;
+#ifdef HAS_DEBUG
+            observer_diag_.on_drop();
+#endif
+        }
+#ifdef HAS_DEBUG
+        else if (observer_ring_) observer_diag_.on_push(observer_ring_->occupancy());
+#endif
         return;
 
     case thread_preset::standard:
-        if (logging_ring_ && !logging_ring_->try_push(ev)) logging_drops_++;
-        if (risk_stats_ring_ && !risk_stats_ring_->try_push(ev)) risk_stats_drops_++;
+        if (logging_ring_ && !logging_ring_->try_push(ev)) { logging_drops_++;
+#ifdef HAS_DEBUG
+            logging_diag_.on_drop();
+#endif
+        }
+#ifdef HAS_DEBUG
+        else if (logging_ring_) logging_diag_.on_push(logging_ring_->occupancy());
+#endif
+        if (risk_stats_ring_ && !risk_stats_ring_->try_push(ev)) { risk_stats_drops_++;
+#ifdef HAS_DEBUG
+            risk_stats_diag_.on_drop();
+#endif
+        }
+#ifdef HAS_DEBUG
+        else if (risk_stats_ring_) risk_stats_diag_.on_push(risk_stats_ring_->occupancy());
+#endif
         return;
 
     case thread_preset::full:
-        if (logging_ring_ && !logging_ring_->try_push(ev)) logging_drops_++;
-        if (risk_ring_ && !risk_ring_->try_push(ev)) risk_drops_++;
-        if (stats_ring_ && !stats_ring_->try_push(ev)) stats_drops_++;
+        if (logging_ring_ && !logging_ring_->try_push(ev)) { logging_drops_++;
+#ifdef HAS_DEBUG
+            logging_diag_.on_drop();
+#endif
+        }
+#ifdef HAS_DEBUG
+        else if (logging_ring_) logging_diag_.on_push(logging_ring_->occupancy());
+#endif
+        if (risk_ring_ && !risk_ring_->try_push(ev)) { risk_drops_++;
+#ifdef HAS_DEBUG
+            risk_diag_.on_drop();
+#endif
+        }
+#ifdef HAS_DEBUG
+        else if (risk_ring_) risk_diag_.on_push(risk_ring_->occupancy());
+#endif
+        if (stats_ring_ && !stats_ring_->try_push(ev)) { stats_drops_++;
+#ifdef HAS_DEBUG
+            stats_diag_.on_drop();
+#endif
+        }
+#ifdef HAS_DEBUG
+        else if (stats_ring_) stats_diag_.on_push(stats_ring_->occupancy());
+#endif
         return;
 
     case thread_preset::extended:
-        if (logging_ring_ && !logging_ring_->try_push(ev)) logging_drops_++;
-        if (risk_ring_ && !risk_ring_->try_push(ev)) risk_drops_++;
-        if (stats_ring_ && !stats_ring_->try_push(ev)) stats_drops_++;
-        if (mm_ring_ && !mm_ring_->try_push(ev)) mm_drops_++;
+        if (logging_ring_ && !logging_ring_->try_push(ev)) { logging_drops_++;
+#ifdef HAS_DEBUG
+            logging_diag_.on_drop();
+#endif
+        }
+#ifdef HAS_DEBUG
+        else if (logging_ring_) logging_diag_.on_push(logging_ring_->occupancy());
+#endif
+        if (risk_ring_ && !risk_ring_->try_push(ev)) { risk_drops_++;
+#ifdef HAS_DEBUG
+            risk_diag_.on_drop();
+#endif
+        }
+#ifdef HAS_DEBUG
+        else if (risk_ring_) risk_diag_.on_push(risk_ring_->occupancy());
+#endif
+        if (stats_ring_ && !stats_ring_->try_push(ev)) { stats_drops_++;
+#ifdef HAS_DEBUG
+            stats_diag_.on_drop();
+#endif
+        }
+#ifdef HAS_DEBUG
+        else if (stats_ring_) stats_diag_.on_push(stats_ring_->occupancy());
+#endif
+        if (mm_ring_ && !mm_ring_->try_push(ev)) { mm_drops_++;
+#ifdef HAS_DEBUG
+            mm_diag_.on_drop();
+#endif
+        }
+#ifdef HAS_DEBUG
+        else if (mm_ring_) mm_diag_.on_push(mm_ring_->occupancy());
+#endif
         return;
     }
 }
@@ -353,6 +423,10 @@ void engine::run()
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path);
 
+#ifdef HAS_DEBUG
+    memory_sampler_.set_start(debug::memory_snapshot::capture());
+#endif
+
     start_workers();
 
     // Use a fixed epoch when seed is set for deterministic replay
@@ -459,6 +533,7 @@ void engine::run()
              && !halt_flag_.load(std::memory_order_acquire)
              && !worker_failed_.load(std::memory_order_acquire); ++i)
     {
+        DEBUG_STAGE(stage_timer_, market_create);
         market_event mkt(
             base_ts + std::chrono::milliseconds(static_cast<long long>(i)),
             data_handler_->db_data_symbol[i],
@@ -473,12 +548,15 @@ void engine::run()
         const auto& symbol = mkt.get_symbol();
 
         // Drain eligible pending orders before processing this market event
-        while (!pending_orders.empty() &&
-               pending_orders.top().order->get_earliest_eligible_ts() <= sim_time)
         {
-            auto entry = pending_orders.top();
-            pending_orders.pop();
-            if (!process_order(entry.order)) break;
+            DEBUG_STAGE(stage_timer_, pending_drain);
+            while (!pending_orders.empty() &&
+                   pending_orders.top().order->get_earliest_eligible_ts() <= sim_time)
+            {
+                auto entry = pending_orders.top();
+                pending_orders.pop();
+                if (!process_order(entry.order)) break;
+            }
         }
         if (halt_requested) break;
 
@@ -487,6 +565,7 @@ void engine::run()
 
         // Check pending stop orders for triggers
         {
+            DEBUG_STAGE(stage_timer_, stop_check);
             auto it = pending_stops.begin();
             while (it != pending_stops.end())
             {
@@ -532,9 +611,12 @@ void engine::run()
         }
 
         // Reactive market maker: replenish depleted book levels per symbol
-        auto ob = orderbook_registry_.get_or_create(symbol);
-        if (!preset_has_mm_worker(config_.threading))
-            market_maker_.replenish(ob, last_mid_price_);
+        {
+            DEBUG_STAGE(stage_timer_, mm_replenish);
+            auto ob = orderbook_registry_.get_or_create(symbol);
+            if (!preset_has_mm_worker(config_.threading))
+                market_maker_.replenish(ob, last_mid_price_);
+        }
 
         // Drain market maker inbound orders (extended preset only)
         if (mm_order_ring_)
@@ -558,9 +640,16 @@ void engine::run()
 
         // Process market event
         auto mkt_ptr = market_pool_.acquire(mkt);
-        auto order_opt = strategy_->on_market(mkt);
+        std::optional<order_event> order_opt;
+        {
+            DEBUG_STAGE(stage_timer_, strategy);
+            order_opt = strategy_->on_market(mkt);
+        }
         log_event(mkt);
-        publish_event(mkt_ptr);
+        {
+            DEBUG_STAGE(stage_timer_, ring_publish);
+            publish_event(mkt_ptr);
+        }
         if (!config_.is_threaded())
             analytics_.on_event(mkt_ptr);
         event_count++;
@@ -630,6 +719,27 @@ void engine::run()
 
     if (event_logger_) event_logger_->flush();
     stop_workers();
+
+#ifdef HAS_DEBUG
+    memory_sampler_.set_end(debug::memory_snapshot::capture());
+    {
+        debug::DebugReport report;
+        std::vector<std::pair<const char*, const debug::thread_utilization*>> worker_utils;
+        if (logging_worker_)    worker_utils.push_back({"logging", &logging_worker_->debug_utilization()});
+        if (risk_worker_)       worker_utils.push_back({"risk", &risk_worker_->debug_utilization()});
+        if (stats_worker_)      worker_utils.push_back({"stats", &stats_worker_->debug_utilization()});
+        if (observer_worker_)   worker_utils.push_back({"observer", &observer_worker_->debug_utilization()});
+        if (risk_stats_worker_) worker_utils.push_back({"risk_stats", &risk_stats_worker_->debug_utilization()});
+        if (mm_worker_)         worker_utils.push_back({"market_maker", &mm_worker_->debug_utilization()});
+
+        std::vector<const debug::ring_diagnostics*> ring_diags = {
+            &logging_diag_, &risk_diag_, &stats_diag_,
+            &observer_diag_, &risk_stats_diag_, &mm_diag_
+        };
+
+        report.log_all(stage_timer_, memory_sampler_, worker_utils, ring_diags);
+    }
+#endif
 }
 
 void engine::run_tick_data()
