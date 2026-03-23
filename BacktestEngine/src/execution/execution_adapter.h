@@ -60,8 +60,16 @@ public:
 
         side book_side = (o.get_side() == order_side::buy) ? side::buy : side::sell;
 
-        Price book_price = Price::from_double(o.get_price());
-        quantity book_quantity = static_cast<quantity>(o.get_quantity());
+        // Market orders use aggressive price to sweep available liquidity
+        Price book_price;
+        if (o.get_order_type() == order_type::market)
+            book_price = (book_side == side::buy) ? Price::from_double(o.get_price() * 1.1)
+                                                  : Price::from_double(o.get_price() * 0.9);
+        else
+            book_price = Price::from_double(o.get_price());
+
+        // Scale fractional qty to integer for the orderbook (1e8 scale, like satoshis)
+        quantity book_quantity = static_cast<quantity>(std::round(o.get_quantity() * qty_scale_));
 
         auto book_order = std::make_shared<order>(
             book_order_type, o.get_order_id(), book_side, book_price, book_quantity);
@@ -79,12 +87,13 @@ public:
             if (our_trade_info.orderId_ == o.get_order_id())
             {
                 double fill_price = our_trade_info.price_.to_double();
-                int fill_qty = static_cast<int>(our_trade_info.quantity_);
+                // Unscale from orderbook integer qty back to fractional
+                double fill_qty = static_cast<double>(our_trade_info.quantity_) / qty_scale_;
 
                 if (fade_rate > 0.0)
                 {
-                    fill_qty = static_cast<int>(fill_qty * (1.0 - fade_rate));
-                    if (fill_qty <= 0)
+                    fill_qty *= (1.0 - fade_rate);
+                    if (fill_qty <= 0.0)
                         continue;
                 }
 
@@ -125,6 +134,7 @@ private:
     std::mt19937 fill_rng_;
     std::uniform_real_distribution<double> fill_dist_;
     double mid_price_ = 0.0;
+    static constexpr double qty_scale_ = 1e8;  // fractional qty → integer scale factor
 };
 
 // Stub for future live exchange execution.

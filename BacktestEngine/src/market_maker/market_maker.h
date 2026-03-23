@@ -14,7 +14,7 @@ struct mm_order
 {
     order_side side;
     double price;
-    int quantity;
+    double quantity;
 };
 
 class MarketMaker

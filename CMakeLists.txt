@@ -8,6 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 option(ENABLE_POSTGRESQL "Build with PostgreSQL storage backend" OFF)
 option(ENABLE_LIVE_DATA "Build with WebSocket live data feed (requires Boost.Beast)" OFF)
 option(ENABLE_DEBUG "Build with performance instrumentation (requires Abseil)" OFF)
+option(ENABLE_WEB_UI "Build with WebSocket UI server (requires Boost.Beast)" OFF)
+option(ENABLE_BINANCE "Build with Binance exchange provider" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 
 # ── Core engine sources (no external dependencies) ────────────────────────────
@@ -140,6 +142,25 @@ if(ENABLE_LIVE_DATA)
     target_compile_definitions(truetest PRIVATE HAS_LIVE_DATA)
 endif()
 
+# ── Optional WebSocket UI server (Boost.Beast) ───────────────────────────────
+if(ENABLE_WEB_UI)
+    find_package(Boost REQUIRED)
+    target_link_libraries(truetest PRIVATE Boost::headers)
+    target_compile_definitions(truetest PRIVATE HAS_WEB_UI)
+endif()
+
+# ── Optional Binance exchange provider ────────────────────────────────────────
+if(ENABLE_BINANCE)
+    find_package(Boost REQUIRED)
+    find_package(OpenSSL REQUIRED)
+
+    target_sources(truetest PRIVATE
+        BacktestEngine/src/providers/binance/binance_register.cpp
+    )
+    target_link_libraries(truetest PRIVATE Boost::headers OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(truetest PRIVATE HAS_BINANCE)
+endif()
+
 # ── Optional debug instrumentation (Abseil) ──────────────────────────────────
 if(ENABLE_DEBUG)
     include(FetchContent)
@@ -215,6 +236,9 @@ if(BUILD_TESTS)
         tests/test_event_log.cpp
         tests/test_thread_preset.cpp
         tests/test_threading_correctness.cpp
+        tests/test_engine_streaming.cpp
+        tests/test_event_json.cpp
+        tests/test_binance_parser.cpp
         tests/test_provider_transport.cpp
         tests/test_data_bridge.cpp
         tests/test_provider_event.cpp

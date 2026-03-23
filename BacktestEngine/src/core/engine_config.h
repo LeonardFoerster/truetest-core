@@ -39,6 +39,8 @@ struct engine_config
     int pin_stats      = -1;
     int pin_mm         = -1;
 
+    double initial_balance = 10000.0;                 // starting cash
+
     risk_limits risk = {};                           // defaults are permissive
 
     // Deterministic mode: when non-zero, seeds all RNGs for reproducibility.
@@ -55,6 +57,10 @@ struct engine_config
     // execution adapter instead of manually wired sources.
     // This is scaffolding — full provider-based engine wiring comes later.
     std::shared_ptr<IProvider> provider;
+
+    // WebSocket UI: when enabled, streams events to browser clients
+    bool enable_web_ui = false;
+    uint16_t ws_port = 8765;
 
     // Helper
     bool is_threaded() const { return threading != thread_preset::inline_mode; }

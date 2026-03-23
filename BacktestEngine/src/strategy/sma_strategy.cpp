@@ -25,10 +25,10 @@ std::optional<order_event> sma_strategy::on_market(const market_event& mkt)
     bool is_open = position_open_[mkt.get_symbol()];
 
     if (!is_open && mkt.get_close() > *sma_value) {
-        return order_event(mkt.get_timestamp(), mkt.get_symbol(), order_type::limit, order_side::buy, 100, mkt.get_close());
+        return order_event(mkt.get_timestamp(), mkt.get_symbol(), order_type::limit, order_side::buy, 100.0, mkt.get_close());
     }
     if (is_open && mkt.get_close() < *sma_value) {
-        return order_event(mkt.get_timestamp(), mkt.get_symbol(), order_type::limit, order_side::sell, 100, mkt.get_close());
+        return order_event(mkt.get_timestamp(), mkt.get_symbol(), order_type::limit, order_side::sell, 100.0, mkt.get_close());
     }
     return std::nullopt;
 }

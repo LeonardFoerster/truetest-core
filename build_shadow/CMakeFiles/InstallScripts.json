@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/leonard/work/hft-engine/build_shadow/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

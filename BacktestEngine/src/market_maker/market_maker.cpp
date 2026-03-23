@@ -21,10 +21,10 @@ void MarketMaker::add_orders(std::shared_ptr<orderbook> ob, double current_price
 
         auto buy_order = std::make_shared<order>(
             ob_order_type::good_till_cancel, OrderIdGenerator::next(), side::buy,
-            Price::from_double(buy_price), 100);
+            Price::from_double(buy_price), static_cast<quantity>(100 * 1e8));
         auto sell_order = std::make_shared<order>(
             ob_order_type::good_till_cancel, OrderIdGenerator::next(), side::sell,
-            Price::from_double(sell_price), 100);
+            Price::from_double(sell_price), static_cast<quantity>(100 * 1e8));
 
         ob->add_order(buy_order);
         ob->add_order(sell_order);
@@ -82,7 +82,7 @@ std::vector<mm_order> MarketMaker::compute_replenish(double current_price)
         double ask_price = current_price * (1.0 + distance);
 
         // Depth increases with distance from mid (more liquidity further out)
-        int depth = base_depth_ * i;
+        double depth = static_cast<double>(base_depth_ * i);
 
         if (Price::from_double(bid_price) > Price())
         {
@@ -103,7 +103,7 @@ void MarketMaker::replenish(std::shared_ptr<orderbook> ob, double current_price)
         auto ob_side = (mo.side == order_side::buy) ? side::buy : side::sell;
         auto ob_order = std::make_shared<order>(
             ob_order_type::good_till_cancel, OrderIdGenerator::next(),
-            ob_side, p, static_cast<quantity>(mo.quantity));
+            ob_side, p, static_cast<quantity>(std::round(mo.quantity * 1e8)));
         ob->add_order(ob_order);
     }
 }

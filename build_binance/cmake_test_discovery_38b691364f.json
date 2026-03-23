@@ -1,0 +1,1657 @@
+{
+  "tests": 269,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MarketEvent",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "Construction",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 6
+        },
+        {
+          "name": "ToString",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 21
+        }
+      ]
+    },
+    {
+      "name": "OrderEvent",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "DefaultState",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 27
+        },
+        {
+          "name": "SetOrderId",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 35
+        },
+        {
+          "name": "EarliestEligibleTs",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 42
+        }
+      ]
+    },
+    {
+      "name": "FillEvent",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "TotalCost_Buy",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 51
+        },
+        {
+          "name": "TotalCost_Sell",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 57
+        },
+        {
+          "name": "ZeroCommission",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 63
+        }
+      ]
+    },
+    {
+      "name": "TickEvent",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "Construction",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 69
+        },
+        {
+          "name": "DefaultSide",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 80
+        }
+      ]
+    },
+    {
+      "name": "L2SnapshotEvent",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "Construction",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 86
+        }
+      ]
+    },
+    {
+      "name": "L2UpdateEvent",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "Construction",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 99
+        }
+      ]
+    },
+    {
+      "name": "Event",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "Polymorphism",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_events.cpp",
+          "line": 108
+        }
+      ]
+    },
+    {
+      "name": "Orderbook",
+      "tests": 17,
+      "testsuite": [
+        {
+          "name": "AddOrder_SingleBid",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 7
+        },
+        {
+          "name": "AddOrder_SingleAsk",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 15
+        },
+        {
+          "name": "MatchOrders_ExactCross",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 23
+        },
+        {
+          "name": "MatchOrders_BidHigherThanAsk",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 34
+        },
+        {
+          "name": "MatchOrders_NoMatch",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 44
+        },
+        {
+          "name": "MatchOrders_PartialFill",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 55
+        },
+        {
+          "name": "MatchOrders_MultipleFills",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 67
+        },
+        {
+          "name": "DuplicateOrderId",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 81
+        },
+        {
+          "name": "CancelOrder",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 91
+        },
+        {
+          "name": "FillOrKill_CanMatch",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 99
+        },
+        {
+          "name": "FillOrKill_CannotMatch",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 109
+        },
+        {
+          "name": "GetOrderInfos",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 131
+        },
+        {
+          "name": "L2Snapshot_Apply",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 141
+        },
+        {
+          "name": "L2Snapshot_ClearsPrevious",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 150
+        },
+        {
+          "name": "L2Update_AddLevel",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 161
+        },
+        {
+          "name": "L2Update_RemoveLevel",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 169
+        },
+        {
+          "name": "Clear",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 181
+        }
+      ]
+    },
+    {
+      "name": "Order",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "Fill_Overfill",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 117
+        },
+        {
+          "name": "Fill_Exact",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook.cpp",
+          "line": 123
+        }
+      ]
+    },
+    {
+      "name": "Portfolio",
+      "tests": 11,
+      "testsuite": [
+        {
+          "name": "InitialState",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_portfolio.cpp",
+          "line": 6
+        },
+        {
+          "name": "BuyFill_OpensPosition",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_portfolio.cpp",
+          "line": 13
+        },
+        {
+          "name": "SellWithNoPosition_Ignored",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_portfolio.cpp",
+          "line": 22
+        },
+        {
+          "name": "BuySell_RoundTrip",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_portfolio.cpp",
+          "line": 31
+        },
+        {
+          "name": "PartialSell",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_portfolio.cpp",
+          "line": 42
+        },
+        {
+          "name": "MultipleBuys_AverageEntry",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_portfolio.cpp",
+          "line": 53
+        },
+        {
+          "name": "BuyWithCommission",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_portfolio.cpp",
+          "line": 67
+        },
+        {
+          "name": "SellWithCommission",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_portfolio.cpp",
+          "line": 76
+        },
+        {
+          "name": "MultiSymbol_IndependentPositions",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_portfolio.cpp",
+          "line": 89
+        },
+        {
+          "name": "MultiSymbol_BothClosed",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_portfolio.cpp",
+          "line": 111
+        },
+        {
+          "name": "MultiSymbol_CashTracking",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_portfolio.cpp",
+          "line": 128
+        }
+      ]
+    },
+    {
+      "name": "ZeroFeeModel",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "ReturnsZero",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fee_model.cpp",
+          "line": 4
+        }
+      ]
+    },
+    {
+      "name": "FixedFeeModel",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "IgnoresQuantityAndPrice",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fee_model.cpp",
+          "line": 11
+        }
+      ]
+    },
+    {
+      "name": "TieredFeeModel",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "BuyAppliesTaker",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fee_model.cpp",
+          "line": 18
+        },
+        {
+          "name": "SellAppliesMaker",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fee_model.cpp",
+          "line": 25
+        },
+        {
+          "name": "ZeroQuantity",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fee_model.cpp",
+          "line": 32
+        },
+        {
+          "name": "LargeNotional",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fee_model.cpp",
+          "line": 38
+        }
+      ]
+    },
+    {
+      "name": "ZeroLatencyModel",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "ReturnsZero",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_latency_model.cpp",
+          "line": 4
+        }
+      ]
+    },
+    {
+      "name": "FixedLatencyModel",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "ReturnsConstant",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_latency_model.cpp",
+          "line": 11
+        }
+      ]
+    },
+    {
+      "name": "StochasticLatencyModel",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "NonNegative",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_latency_model.cpp",
+          "line": 21
+        },
+        {
+          "name": "Seeded",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_latency_model.cpp",
+          "line": 31
+        },
+        {
+          "name": "MeanApproximate",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_latency_model.cpp",
+          "line": 39
+        }
+      ]
+    },
+    {
+      "name": "PerfectFillModel",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "ZeroFade",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fill_model.cpp",
+          "line": 4
+        },
+        {
+          "name": "AlwaysFills",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fill_model.cpp",
+          "line": 10
+        }
+      ]
+    },
+    {
+      "name": "RealisticFillModel",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "FadeRate",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fill_model.cpp",
+          "line": 18
+        },
+        {
+          "name": "AtMoney",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fill_model.cpp",
+          "line": 24
+        },
+        {
+          "name": "FarFromMid",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fill_model.cpp",
+          "line": 30
+        },
+        {
+          "name": "ProbDecreases",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fill_model.cpp",
+          "line": 38
+        },
+        {
+          "name": "ClampFadeRate",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fill_model.cpp",
+          "line": 48
+        },
+        {
+          "name": "ClampBaseProbability",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_fill_model.cpp",
+          "line": 54
+        }
+      ]
+    },
+    {
+      "name": "SMA",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "WarmupPeriod",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_sma.cpp",
+          "line": 4
+        },
+        {
+          "name": "FirstValue",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_sma.cpp",
+          "line": 11
+        },
+        {
+          "name": "SlidingWindow",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_sma.cpp",
+          "line": 21
+        },
+        {
+          "name": "Period1",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_sma.cpp",
+          "line": 32
+        },
+        {
+          "name": "LargePeriod",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_sma.cpp",
+          "line": 40
+        },
+        {
+          "name": "ConstantInput",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_sma.cpp",
+          "line": 50
+        }
+      ]
+    },
+    {
+      "name": "SmaStrategy",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "NoSignalDuringWarmup",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_strategies.cpp",
+          "line": 18
+        },
+        {
+          "name": "BuySignal",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_strategies.cpp",
+          "line": 25
+        },
+        {
+          "name": "SellSignal",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_strategies.cpp",
+          "line": 38
+        },
+        {
+          "name": "NoDoubleEntry",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_strategies.cpp",
+          "line": 51
+        }
+      ]
+    },
+    {
+      "name": "MeanRevStrategy",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "BuySignal",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_strategies.cpp",
+          "line": 65
+        },
+        {
+          "name": "SellSignal",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_strategies.cpp",
+          "line": 78
+        }
+      ]
+    },
+    {
+      "name": "MACrossoverStrategy",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "BuySignal",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_strategies.cpp",
+          "line": 93
+        }
+      ]
+    },
+    {
+      "name": "Strategy",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "OrderFields",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_strategies.cpp",
+          "line": 107
+        },
+        {
+          "name": "OnTickDefault",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_strategies.cpp",
+          "line": 122
+        },
+        {
+          "name": "OnL2UpdateDefault",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_strategies.cpp",
+          "line": 129
+        }
+      ]
+    },
+    {
+      "name": "RingBuffer",
+      "tests": 12,
+      "testsuite": [
+        {
+          "name": "PushPop_SingleElement",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 5
+        },
+        {
+          "name": "FIFO_Order",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 14
+        },
+        {
+          "name": "Empty_PopFails",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 26
+        },
+        {
+          "name": "Full_PushFails",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 33
+        },
+        {
+          "name": "Capacity",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 43
+        },
+        {
+          "name": "Size_Tracking",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 49
+        },
+        {
+          "name": "Empty_Predicate",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 61
+        },
+        {
+          "name": "Full_Predicate",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 69
+        },
+        {
+          "name": "WrapAround",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 79
+        },
+        {
+          "name": "Policy_AssertFull_Throws",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 93
+        },
+        {
+          "name": "Policy_DropOldest",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 100
+        },
+        {
+          "name": "SharedPtr_Elements",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_ring_buffer.cpp",
+          "line": 112
+        }
+      ]
+    },
+    {
+      "name": "BarAggregator",
+      "tests": 8,
+      "testsuite": [
+        {
+          "name": "SingleTick_NoEmit",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_bar_aggregator.cpp",
+          "line": 9
+        },
+        {
+          "name": "IntervalComplete_EmitsBar",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_bar_aggregator.cpp",
+          "line": 17
+        },
+        {
+          "name": "OHLC_Correctness",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_bar_aggregator.cpp",
+          "line": 38
+        },
+        {
+          "name": "Volume_Accumulation",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_bar_aggregator.cpp",
+          "line": 57
+        },
+        {
+          "name": "Flush_EmitsPartialBar",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_bar_aggregator.cpp",
+          "line": 72
+        },
+        {
+          "name": "Flush_NothingOpen",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_bar_aggregator.cpp",
+          "line": 81
+        },
+        {
+          "name": "MultipleBarEmissions",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_bar_aggregator.cpp",
+          "line": 89
+        },
+        {
+          "name": "Symbol_Propagation",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_bar_aggregator.cpp",
+          "line": 112
+        }
+      ]
+    },
+    {
+      "name": "Analytics",
+      "tests": 10,
+      "testsuite": [
+        {
+          "name": "InitialReport",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_analytics.cpp",
+          "line": 9
+        },
+        {
+          "name": "MarketEvent_TracksPrice",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_analytics.cpp",
+          "line": 20
+        },
+        {
+          "name": "OrderEvent_RecordsIntendedPrice",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_analytics.cpp",
+          "line": 36
+        },
+        {
+          "name": "FillEvent_BuyUpdatesEquity",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_analytics.cpp",
+          "line": 50
+        },
+        {
+          "name": "RoundTrip_PnL",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_analytics.cpp",
+          "line": 72
+        },
+        {
+          "name": "WinRate",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_analytics.cpp",
+          "line": 100
+        },
+        {
+          "name": "EventDispatch_UnknownType",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_analytics.cpp",
+          "line": 132
+        },
+        {
+          "name": "Welford_AccuracyVsBatch",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_analytics.cpp",
+          "line": 146
+        },
+        {
+          "name": "RunningDrawdown_MatchesPostHoc",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_analytics.cpp",
+          "line": 202
+        },
+        {
+          "name": "Snapshot_MidRun_ReturnsPartialMetrics",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_analytics.cpp",
+          "line": 242
+        }
+      ]
+    },
+    {
+      "name": "MarketMaker",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "AddOrders_PopulatesBook",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_market_maker.cpp",
+          "line": 5
+        },
+        {
+          "name": "AddOrders_BidsBelowAsk",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_market_maker.cpp",
+          "line": 13
+        },
+        {
+          "name": "Replenish_AddsLevels",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_market_maker.cpp",
+          "line": 26
+        },
+        {
+          "name": "Replenish_VolatilityWidensSpread",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_market_maker.cpp",
+          "line": 35
+        },
+        {
+          "name": "OrderId_NoCollision",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_market_maker.cpp",
+          "line": 57
+        }
+      ]
+    },
+    {
+      "name": "DataHandler",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "LoadIntoQueue",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_handler.cpp",
+          "line": 30
+        },
+        {
+          "name": "HasBarData",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_handler.cpp",
+          "line": 40
+        },
+        {
+          "name": "HasTickData",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_handler.cpp",
+          "line": 48
+        }
+      ]
+    },
+    {
+      "name": "CsvDataSource",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "LoadsCorrectly",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_handler.cpp",
+          "line": 62
+        },
+        {
+          "name": "FileNotFound",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_handler.cpp",
+          "line": 73
+        }
+      ]
+    },
+    {
+      "name": "TickCsvDataSource",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "LoadsCorrectly",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_handler.cpp",
+          "line": 81
+        },
+        {
+          "name": "SideParsing",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_handler.cpp",
+          "line": 93
+        },
+        {
+          "name": "FileNotFound",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_handler.cpp",
+          "line": 104
+        }
+      ]
+    },
+    {
+      "name": "LocalBookAdapter",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "SubmitAndFill",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_execution_adapter.cpp",
+          "line": 6
+        },
+        {
+          "name": "NoMatch",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_execution_adapter.cpp",
+          "line": 26
+        },
+        {
+          "name": "WithFeeModel",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_execution_adapter.cpp",
+          "line": 39
+        },
+        {
+          "name": "PerfectFillModel",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_execution_adapter.cpp",
+          "line": 58
+        },
+        {
+          "name": "PollClears",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_execution_adapter.cpp",
+          "line": 78
+        }
+      ]
+    },
+    {
+      "name": "ExchangeAdapter",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "Stub",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_execution_adapter.cpp",
+          "line": 98
+        }
+      ]
+    },
+    {
+      "name": "Engine",
+      "tests": 13,
+      "testsuite": [
+        {
+          "name": "EmptyData_Throws",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 76
+        },
+        {
+          "name": "RunCompletes",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 85
+        },
+        {
+          "name": "StrategyReceivesEvents",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 99
+        },
+        {
+          "name": "TickData_DispatchesToRunTickData",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 114
+        },
+        {
+          "name": "LatencyModel_DelaysOrders",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 128
+        },
+        {
+          "name": "ThreadingDisabled_NoRings",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 145
+        },
+        {
+          "name": "FullPreset_RingsCreated",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 164
+        },
+        {
+          "name": "LightPreset_ObserverWorkerRuns",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 184
+        },
+        {
+          "name": "StandardPreset_LoggingAndRiskStatsRun",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 206
+        },
+        {
+          "name": "ThreadingEnabled_WorkersRun",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 234
+        },
+        {
+          "name": "HaltChannel_StopsEngine",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 257
+        },
+        {
+          "name": "GracefulShutdown_RingsDrained",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 287
+        },
+        {
+          "name": "ExtendedPreset_MMWorkerRuns",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine.cpp",
+          "line": 309
+        }
+      ]
+    },
+    {
+      "name": "OrderIdGenerator",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "Monotonic",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_id.cpp",
+          "line": 7
+        },
+        {
+          "name": "NoDuplicates",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_id.cpp",
+          "line": 19
+        },
+        {
+          "name": "ThreadSafe",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_id.cpp",
+          "line": 30
+        },
+        {
+          "name": "Reset",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_id.cpp",
+          "line": 57
+        }
+      ]
+    },
+    {
+      "name": "Price",
+      "tests": 9,
+      "testsuite": [
+        {
+          "name": "DefaultZero",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_price.cpp",
+          "line": 4
+        },
+        {
+          "name": "FromDouble",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_price.cpp",
+          "line": 11
+        },
+        {
+          "name": "FromDoubleSubCent",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_price.cpp",
+          "line": 18
+        },
+        {
+          "name": "RoundTrip",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_price.cpp",
+          "line": 25
+        },
+        {
+          "name": "Arithmetic",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_price.cpp",
+          "line": 35
+        },
+        {
+          "name": "CompoundAssignment",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_price.cpp",
+          "line": 44
+        },
+        {
+          "name": "Comparison",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_price.cpp",
+          "line": 54
+        },
+        {
+          "name": "Negative",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_price.cpp",
+          "line": 70
+        },
+        {
+          "name": "LargeValues",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_price.cpp",
+          "line": 77
+        }
+      ]
+    },
+    {
+      "name": "OrderbookRegistry",
+      "tests": 8,
+      "testsuite": [
+        {
+          "name": "GetOrCreate_NewSymbol",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook_registry.cpp",
+          "line": 4
+        },
+        {
+          "name": "GetOrCreate_SameSymbol",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook_registry.cpp",
+          "line": 12
+        },
+        {
+          "name": "GetOrCreate_MultipleSymbols",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook_registry.cpp",
+          "line": 21
+        },
+        {
+          "name": "Get_Existing",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook_registry.cpp",
+          "line": 30
+        },
+        {
+          "name": "Get_NonExisting",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook_registry.cpp",
+          "line": 38
+        },
+        {
+          "name": "Symbols",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook_registry.cpp",
+          "line": 45
+        },
+        {
+          "name": "Clear",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook_registry.cpp",
+          "line": 55
+        },
+        {
+          "name": "IndependentBooks",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_orderbook_registry.cpp",
+          "line": 65
+        }
+      ]
+    },
+    {
+      "name": "OrderTypes",
+      "tests": 17,
+      "testsuite": [
+        {
+          "name": "DefaultTIF_Market",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 24
+        },
+        {
+          "name": "DefaultTIF_Limit",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 30
+        },
+        {
+          "name": "ExplicitTIF",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 36
+        },
+        {
+          "name": "StopPrice",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 42
+        },
+        {
+          "name": "StopLimitFields",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 50
+        },
+        {
+          "name": "ToString_StopLimit",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 59
+        },
+        {
+          "name": "IOC_PartialFill",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 68
+        },
+        {
+          "name": "IOC_FullFill",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 87
+        },
+        {
+          "name": "IOC_NoMatch",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 103
+        },
+        {
+          "name": "FOK_AllOrNothing",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 116
+        },
+        {
+          "name": "StopBuy_Triggers",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 177
+        },
+        {
+          "name": "StopSell_Triggers",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 194
+        },
+        {
+          "name": "StopLimit_ConvertsToLimit",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 243
+        },
+        {
+          "name": "Stop_NoTrigger",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 259
+        },
+        {
+          "name": "DayOrder_CancelledAtSessionEnd",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 277
+        },
+        {
+          "name": "GTC_PersistsAcrossBars",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 323
+        },
+        {
+          "name": "Adapter_IOC_PartialFill",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_order_types.cpp",
+          "line": 345
+        }
+      ]
+    },
+    {
+      "name": "ObjectPool",
+      "tests": 8,
+      "testsuite": [
+        {
+          "name": "AcquireAndRelease",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_object_pool.cpp",
+          "line": 18
+        },
+        {
+          "name": "ReusesMemory",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_object_pool.cpp",
+          "line": 26
+        },
+        {
+          "name": "ExhaustionTriggersNewBlock",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_object_pool.cpp",
+          "line": 40
+        },
+        {
+          "name": "DestructorCalled",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_object_pool.cpp",
+          "line": 63
+        },
+        {
+          "name": "MultipleAcquiresDistinct",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_object_pool.cpp",
+          "line": 85
+        },
+        {
+          "name": "ThreadSafety",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_object_pool.cpp",
+          "line": 101
+        },
+        {
+          "name": "SharedPtrKeepsAlive",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_object_pool.cpp",
+          "line": 129
+        },
+        {
+          "name": "NonTrivialType",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_object_pool.cpp",
+          "line": 150
+        }
+      ]
+    },
+    {
+      "name": "RiskManager",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "OrderWithinLimits_Pass",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_risk_manager.cpp",
+          "line": 21
+        },
+        {
+          "name": "MaxPositionValue_Reject",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_risk_manager.cpp",
+          "line": 38
+        },
+        {
+          "name": "DrawdownExceeded_Halt",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_risk_manager.cpp",
+          "line": 58
+        },
+        {
+          "name": "PostFillLossExceeded_Halt",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_risk_manager.cpp",
+          "line": 73
+        },
+        {
+          "name": "MaxOpenOrders_Reject",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_risk_manager.cpp",
+          "line": 100
+        }
+      ]
+    },
+    {
+      "name": "EventLog",
+      "tests": 14,
+      "testsuite": [
+        {
+          "name": "RoundTrip_MarketEvent",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 39
+        },
+        {
+          "name": "RoundTrip_SignalEvent",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 69
+        },
+        {
+          "name": "RoundTrip_OrderEvent",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 92
+        },
+        {
+          "name": "RoundTrip_FillEvent",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 124
+        },
+        {
+          "name": "RoundTrip_TickEvent",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 150
+        },
+        {
+          "name": "RoundTrip_L2SnapshotEvent",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 174
+        },
+        {
+          "name": "RoundTrip_L2UpdateEvent",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 204
+        },
+        {
+          "name": "MultipleEvents_RoundTrip",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 230
+        },
+        {
+          "name": "EmptyLog_NoEvents",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 264
+        },
+        {
+          "name": "BadPath_Throws",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 280
+        },
+        {
+          "name": "Deterministic_SameSeedSameLog",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 331
+        },
+        {
+          "name": "Deterministic_DifferentSeedDifferentLog",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 361
+        },
+        {
+          "name": "Replay_ProducesIdenticalAnalytics",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 395
+        },
+        {
+          "name": "Replay_ConsumesAllEvents",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_log.cpp",
+          "line": 436
+        }
+      ]
+    },
+    {
+      "name": "ThreadPreset",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "SelectPreset_CoreBuckets",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_thread_preset.cpp",
+          "line": 4
+        },
+        {
+          "name": "StringRoundTrip",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_thread_preset.cpp",
+          "line": 17
+        },
+        {
+          "name": "StringToPreset_Invalid",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_thread_preset.cpp",
+          "line": 27
+        },
+        {
+          "name": "WorkerCount",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_thread_preset.cpp",
+          "line": 32
+        },
+        {
+          "name": "PresetCapabilities",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_thread_preset.cpp",
+          "line": 41
+        }
+      ]
+    },
+    {
+      "name": "ThreadingCorrectness",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "AllPresetsProduceSameStrategyCallCount",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_threading_correctness.cpp",
+          "line": 82
+        },
+        {
+          "name": "AllPresetsComplete",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_threading_correctness.cpp",
+          "line": 99
+        }
+      ]
+    },
+    {
+      "name": "EngineStreaming",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "BarStreamProcessesAllRecords",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine_streaming.cpp",
+          "line": 100
+        },
+        {
+          "name": "BarStreamStrategyGeneratesSignals",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine_streaming.cpp",
+          "line": 140
+        },
+        {
+          "name": "BarStreamStopCausesReturn",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine_streaming.cpp",
+          "line": 175
+        },
+        {
+          "name": "BarStreamBatchTransportFallback",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine_streaming.cpp",
+          "line": 209
+        },
+        {
+          "name": "TickStreamProcessesAllRecords",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine_streaming.cpp",
+          "line": 235
+        },
+        {
+          "name": "TickStreamStopCausesReturn",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_engine_streaming.cpp",
+          "line": 274
+        }
+      ]
+    },
+    {
+      "name": "EventJson",
+      "tests": 8,
+      "testsuite": [
+        {
+          "name": "MarketEventSerialization",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_json.cpp",
+          "line": 18
+        },
+        {
+          "name": "OrderEventSerialization",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_json.cpp",
+          "line": 29
+        },
+        {
+          "name": "FillEventSerialization",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_json.cpp",
+          "line": 44
+        },
+        {
+          "name": "TickEventSerialization",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_json.cpp",
+          "line": 56
+        },
+        {
+          "name": "PortfolioSerialization",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_json.cpp",
+          "line": 66
+        },
+        {
+          "name": "AnalyticsSerialization",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_json.cpp",
+          "line": 80
+        },
+        {
+          "name": "EventDispatch",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_json.cpp",
+          "line": 99
+        },
+        {
+          "name": "UnhandledEventReturnsEmpty",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_event_json.cpp",
+          "line": 120
+        }
+      ]
+    },
+    {
+      "name": "FileTransport",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "IsStreamingReturnsFalse",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_transport.cpp",
+          "line": 16
+        },
+        {
+          "name": "ReadLineBlockingFallsBackToReadLine",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_transport.cpp",
+          "line": 22
+        },
+        {
+          "name": "RequestStopCallsClose",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_transport.cpp",
+          "line": 45
+        }
+      ]
+    },
+    {
+      "name": "MockStreamingTransport",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "IsStreamingReturnsTrue",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_transport.cpp",
+          "line": 57
+        },
+        {
+          "name": "ReadLineBlockingBlocksUntilData",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_transport.cpp",
+          "line": 63
+        },
+        {
+          "name": "RequestStopUnblocksReader",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_transport.cpp",
+          "line": 81
+        },
+        {
+          "name": "ReturnsDataInOrder",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_transport.cpp",
+          "line": 104
+        },
+        {
+          "name": "StopWithPendingDataDrainsFirst",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_transport.cpp",
+          "line": 117
+        }
+      ]
+    },
+    {
+      "name": "MockBatchTransport",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "IsStreamingReturnsFalse",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_transport.cpp",
+          "line": 132
+        },
+        {
+          "name": "ReturnsLinesInOrder",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_transport.cpp",
+          "line": 138
+        }
+      ]
+    },
+    {
+      "name": "DataBridge",
+      "tests": 8,
+      "testsuite": [
+        {
+          "name": "BatchLoadsBarRecords",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_bridge.cpp",
+          "line": 28
+        },
+        {
+          "name": "BatchEmptyTransportReturnsFalse",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_bridge.cpp",
+          "line": 49
+        },
+        {
+          "name": "BatchHeaderOnlyReturnsFalse",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_bridge.cpp",
+          "line": 60
+        },
+        {
+          "name": "BatchSkipsMalformedLines",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_bridge.cpp",
+          "line": 73
+        },
+        {
+          "name": "BatchLoadsTickRecords",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_bridge.cpp",
+          "line": 91
+        },
+        {
+          "name": "StreamingDeliversAllRecords",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_bridge.cpp",
+          "line": 111
+        },
+        {
+          "name": "StreamingStopReturnPromptly",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_bridge.cpp",
+          "line": 143
+        },
+        {
+          "name": "StreamingCallbackFiresPerRecord",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_data_bridge.cpp",
+          "line": 172
+        }
+      ]
+    },
+    {
+      "name": "ProviderEvent",
+      "tests": 11,
+      "testsuite": [
+        {
+          "name": "BarRoundTrip",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_event.cpp",
+          "line": 16
+        },
+        {
+          "name": "TickRoundTrip",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_event.cpp",
+          "line": 44
+        },
+        {
+          "name": "TickSideMapping",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_event.cpp",
+          "line": 67
+        },
+        {
+          "name": "VariantHoldsBar",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_event.cpp",
+          "line": 87
+        },
+        {
+          "name": "VariantHoldsTick",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_event.cpp",
+          "line": 96
+        },
+        {
+          "name": "VariantHoldsL2Snapshot",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_event.cpp",
+          "line": 105
+        },
+        {
+          "name": "VariantHoldsStatus",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_event.cpp",
+          "line": 115
+        },
+        {
+          "name": "SinkBarPopulatesHandler",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_event.cpp",
+          "line": 128
+        },
+        {
+          "name": "SinkTickPopulatesHandler",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_event.cpp",
+          "line": 149
+        },
+        {
+          "name": "SinkStatusNoCrash",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_event.cpp",
+          "line": 168
+        },
+        {
+          "name": "SinkL2SnapshotNoCrash",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_event.cpp",
+          "line": 185
+        }
+      ]
+    },
+    {
+      "name": "ProviderRegistry",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "CreateThrowsForUnregistered",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 26
+        },
+        {
+          "name": "HasReturnsFalseForUnregistered",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 34
+        },
+        {
+          "name": "LocalIsRegistered",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 39
+        },
+        {
+          "name": "AvailableContainsLocal",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 45
+        },
+        {
+          "name": "CreateLocalWithPathSucceeds",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 60
+        },
+        {
+          "name": "CreateLocalWithoutPathThrows",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 71
+        },
+        {
+          "name": "RegisterAndCreateCustomProvider",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 152
+        }
+      ]
+    },
+    {
+      "name": "LocalProvider",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "HasDataFeedTrue",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 82
+        },
+        {
+          "name": "HasExecutionFalse",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 88
+        },
+        {
+          "name": "GetExecutionAdapterReturnsNull",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 94
+        },
+        {
+          "name": "OpenSucceeds",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 100
+        },
+        {
+          "name": "TransportIsNotStreaming",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 108
+        },
+        {
+          "name": "TransportReadsLines",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 116
+        },
+        {
+          "name": "OpenFailsForNonexistent",
+          "file": "\/home\/leonard\/work\/hft-engine\/tests\/test_provider_registry.cpp",
+          "line": 132
+        }
+      ]
+    }
+  ]
+}

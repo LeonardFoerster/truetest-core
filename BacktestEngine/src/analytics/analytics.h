@@ -42,7 +42,7 @@ struct trade_record
 {
     uint64_t order_id;
     order_side side;
-    int quantity;
+    double quantity;
     double fill_price;
     double commission;
     double intended_price;

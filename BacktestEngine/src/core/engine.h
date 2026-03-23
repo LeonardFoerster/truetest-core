@@ -27,12 +27,20 @@
 // that compiles to ((void)0) when HAS_DEBUG is off
 #include "../debug/stage_timer.h"
 
+#ifdef HAS_WEB_UI
+#include "../threading/ws_worker.h"
+#endif
+
 #ifdef HAS_DEBUG
 #include "../debug/debug_log.h"
 #include "../debug/memory_info.h"
 #include "../debug/ring_stats.h"
 #include "../debug/debug_report.h"
 #endif
+
+#include "../providers/data_bridge.h"
+#include "../providers/local/csv_parser.h"
+#include "../analytics/shadow_tracker.h"
 
 #include <atomic>
 #include <memory>
@@ -80,11 +88,28 @@ private:
     // Optional event logger (created when event_log_path is set)
     std::unique_ptr<EventLogger> event_logger_;
 
+    // Shadow mode: tracks simulated vs exchange fills for comparison
+    std::unique_ptr<ShadowTracker> shadow_tracker_;
+
     // Log an event to the event log (no-op when logger is null)
     void log_event(const event& ev);
 
     // Get or create execution adapter for a symbol
     std::shared_ptr<IExecutionAdapter> get_adapter(const std::string& symbol);
+
+    // Shared order-processing pipeline: submit order, poll fills, update portfolio.
+    // Returns false if risk manager requested halt.
+    bool process_order(const std::shared_ptr<order_event>& o,
+                       std::size_t& event_count,
+                       bool& halt_requested);
+
+    // Process a single market event through the strategy → order → fill pipeline.
+    // Used by both batch run() and streaming run_streaming().
+    void process_single_bar(const bar_record& rec, std::size_t& event_count,
+                            const std::chrono::system_clock::time_point& timestamp);
+
+    // Process a single tick record through the strategy → order → fill pipeline.
+    void process_single_tick(const tick_record& rec, std::size_t& event_count);
 
     // Threading: shared halt flag (risk worker → engine loop)
     std::atomic<bool> halt_flag_{false};
@@ -119,6 +144,13 @@ private:
     std::unique_ptr<RiskStatsWorker> risk_stats_worker_;
     std::unique_ptr<MarketMakerWorker> mm_worker_;
 
+#ifdef HAS_WEB_UI
+    // WebSocket UI: ring buffer + worker for browser streaming
+    std::shared_ptr<EventRing> ws_ring_;
+    std::unique_ptr<WebSocketWorker> ws_worker_;
+    std::size_t ws_drops_ = 0;
+#endif
+
     // Worker threads
     std::vector<std::thread> worker_threads_;
 
@@ -141,6 +173,8 @@ public:
     void run();
     void run_tick_data();
     void run_replay(const std::string& log_path);
+    void run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge);
+    void run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge);
     void print_summary();
 
     // Access outbound rings for wiring worker threads

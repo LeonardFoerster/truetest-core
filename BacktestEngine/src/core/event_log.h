@@ -159,7 +159,6 @@ inline std::vector<uint8_t> serialise(const order_event& e)
     };
     auto append_f64 = [&](double v) { append(&v, 8); };
     auto append_u64 = [&](uint64_t v) { append(&v, 8); };
-    auto append_i32 = [&](int32_t v) { append(&v, 4); };
 
     append_ts(e.get_timestamp());
     append_str(e.get_symbol());
@@ -167,7 +166,7 @@ inline std::vector<uint8_t> serialise(const order_event& e)
     append(&ot, 1);
     uint8_t sd = static_cast<uint8_t>(e.get_side());
     append(&sd, 1);
-    append_i32(e.get_quantity());
+    append_f64(e.get_quantity());
     append_f64(e.get_price());
     uint8_t tif = static_cast<uint8_t>(e.get_tif());
     append(&tif, 1);
@@ -196,14 +195,13 @@ inline std::vector<uint8_t> serialise(const fill_event& e)
     };
     auto append_f64 = [&](double v) { append(&v, 8); };
     auto append_u64 = [&](uint64_t v) { append(&v, 8); };
-    auto append_i32 = [&](int32_t v) { append(&v, 4); };
 
     append_ts(e.get_timestamp());
     append_str(e.get_symbol());
     append_u64(e.get_order_id());
     uint8_t sd = static_cast<uint8_t>(e.get_side());
     append(&sd, 1);
-    append_i32(e.get_filled_quantity());
+    append_f64(e.get_filled_quantity());
     append_f64(e.get_fill_price());
     append_f64(e.get_commission());
     return buf;
@@ -332,7 +330,7 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         auto symbol = r.read_str();
         auto ot = static_cast<order_type>(r.read_u8());
         auto sd = static_cast<order_side>(r.read_u8());
-        int32_t qty = r.read_i32();
+        double qty = r.read_f64();
         double price = r.read_f64();
         auto tif = static_cast<time_in_force>(r.read_u8());
         double stop_price = r.read_f64();
@@ -348,7 +346,7 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         auto symbol = r.read_str();
         uint64_t oid = r.read_u64();
         auto sd = static_cast<order_side>(r.read_u8());
-        int32_t qty = r.read_i32();
+        double qty = r.read_f64();
         double price = r.read_f64();
         double commission = r.read_f64();
         return std::make_shared<fill_event>(ts, symbol, oid, sd, qty, price, commission);

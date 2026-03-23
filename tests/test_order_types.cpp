@@ -345,16 +345,16 @@ TEST(OrderTypes, GTC_PersistsAcrossBars)
 TEST(OrderTypes, Adapter_IOC_PartialFill)
 {
     auto ob = std::make_shared<orderbook>();
-    // Seed 5 qty on ask
+    // Seed 5.0 qty on ask (scaled to orderbook integer: 5 * 1e8)
     auto ask = std::make_shared<order>(ob_order_type::good_till_cancel, 1, side::sell,
-                                        Price::from_double(100.0), 5);
+                                        Price::from_double(100.0), static_cast<quantity>(5e8));
     ob->add_order(ask);
 
     LocalBookAdapter adapter(ob, nullptr, nullptr);
     adapter.set_mid_price(100.0);
 
-    // IOC buy for 10
-    order_event ioc_order(epoch_ms(0), "TEST", order_type::market, order_side::buy, 10, 100.0);
+    // IOC buy for 10.0
+    order_event ioc_order(epoch_ms(0), "TEST", order_type::market, order_side::buy, 10.0, 100.0);
     ioc_order.set_order_id(42);
     // market orders default to IOC
     EXPECT_EQ(ioc_order.get_tif(), time_in_force::ioc);
@@ -364,7 +364,7 @@ TEST(OrderTypes, Adapter_IOC_PartialFill)
     std::vector<fill_event> fills;
     EXPECT_TRUE(adapter.poll_fills(fills));
     EXPECT_EQ(fills.size(), 1u);
-    EXPECT_EQ(fills[0].get_filled_quantity(), 5);  // partial fill
+    EXPECT_DOUBLE_EQ(fills[0].get_filled_quantity(), 5.0);  // partial fill
 
     // IOC remainder cancelled — nothing left on book from the buy side
     EXPECT_EQ(ob->size(), 0u);

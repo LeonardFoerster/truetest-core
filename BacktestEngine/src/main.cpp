@@ -28,6 +28,12 @@
 #include "providers/local/csv_parser.h"
 #include "providers/local/file_transport.h"
 
+#ifdef HAS_BINANCE
+#include "providers/binance/binance_parser.h"
+#include "providers/binance/binance_recorder.h"
+#include "providers/binance/binance_replay_transport.h"
+#endif
+
 #ifdef HAS_DEBUG
 #include "debug/debug_log.h"
 #include "absl/flags/parse.h"
@@ -60,6 +66,22 @@ int main(int argc, char* argv[])
     double cli_fee_value = 0.0;
     double cli_maker_rate = 0.0;
     double cli_taker_rate = 0.0;
+    bool enable_web_ui = false;
+    uint16_t ws_port = 8765;
+    std::string cli_symbol;
+    std::string cli_stream;
+    std::string cli_api_key;
+    std::string cli_api_secret;
+    std::string cli_host;
+    std::string cli_port;
+    std::string cli_record_path;
+    std::string cli_replay_data_path;
+    bool cli_live = false;
+    std::string cli_mode;
+    double cli_balance = 10000.0;
+    double cli_risk_fraction = 0.02;
+    double cli_sl_pct = 0.005;   // 0.5% default stop loss
+    double cli_tp_pct = 0.01;    // 1.0% default take profit
 
     for (int i = 1; i < argc; ++i)
     {
@@ -91,6 +113,38 @@ int main(int argc, char* argv[])
             cli_maker_rate = std::stod(argv[++i]);
         else if (std::strcmp(argv[i], "--taker-rate") == 0 && i + 1 < argc)
             cli_taker_rate = std::stod(argv[++i]);
+        else if (std::strcmp(argv[i], "--web-ui") == 0)
+            enable_web_ui = true;
+        else if (std::strcmp(argv[i], "--ws-port") == 0 && i + 1 < argc)
+            ws_port = static_cast<uint16_t>(std::stoul(argv[++i]));
+        else if (std::strcmp(argv[i], "--symbol") == 0 && i + 1 < argc)
+            cli_symbol = argv[++i];
+        else if (std::strcmp(argv[i], "--stream") == 0 && i + 1 < argc)
+            cli_stream = argv[++i];
+        else if (std::strcmp(argv[i], "--api-key") == 0 && i + 1 < argc)
+            cli_api_key = argv[++i];
+        else if (std::strcmp(argv[i], "--api-secret") == 0 && i + 1 < argc)
+            cli_api_secret = argv[++i];
+        else if (std::strcmp(argv[i], "--host") == 0 && i + 1 < argc)
+            cli_host = argv[++i];
+        else if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc)
+            cli_port = argv[++i];
+        else if (std::strcmp(argv[i], "--record") == 0 && i + 1 < argc)
+            cli_record_path = argv[++i];
+        else if (std::strcmp(argv[i], "--replay-data") == 0 && i + 1 < argc)
+            cli_replay_data_path = argv[++i];
+        else if (std::strcmp(argv[i], "--live") == 0)
+            cli_live = true;
+        else if (std::strcmp(argv[i], "--mode") == 0 && i + 1 < argc)
+            cli_mode = argv[++i];
+        else if (std::strcmp(argv[i], "--balance") == 0 && i + 1 < argc)
+            cli_balance = std::stod(argv[++i]);
+        else if (std::strcmp(argv[i], "--risk-fraction") == 0 && i + 1 < argc)
+            cli_risk_fraction = std::stod(argv[++i]);
+        else if (std::strcmp(argv[i], "--sl") == 0 && i + 1 < argc)
+            cli_sl_pct = std::stod(argv[++i]);
+        else if (std::strcmp(argv[i], "--tp") == 0 && i + 1 < argc)
+            cli_tp_pct = std::stod(argv[++i]);
     }
     // --- Replay mode: skip TUI, replay events from log ---
     if (!replay_path.empty())
@@ -115,14 +169,14 @@ int main(int argc, char* argv[])
     // --- Provider mode: skip TUI, use registry-based provider ---
     if (!provider_name.empty())
     {
-        if (provider_path.empty())
-        {
-            std::cerr << "  ! --provider requires --path <file>\n";
-            return 1;
-        }
-
         provider_config pcfg;
-        pcfg["path"] = provider_path;
+        if (!provider_path.empty()) pcfg["path"] = provider_path;
+        if (!cli_symbol.empty())    pcfg["symbol"] = cli_symbol;
+        if (!cli_stream.empty())    pcfg["stream"] = cli_stream;
+        if (!cli_api_key.empty())   pcfg["api_key"] = cli_api_key;
+        if (!cli_api_secret.empty()) pcfg["api_secret"] = cli_api_secret;
+        if (!cli_host.empty())      pcfg["host"] = cli_host;
+        if (!cli_port.empty())      pcfg["port"] = cli_port;
 
         auto provider = ProviderRegistry::instance().create(provider_name, pcfg);
 
@@ -133,7 +187,8 @@ int main(int argc, char* argv[])
         else if (cli_strategy == "ma-crossover")
             prov_strategy = std::make_shared<ma_crossover_strategy>(cli_sma_period);
         else
-            prov_strategy = std::make_shared<mean_reversion_strategy>(cli_sma_period);
+            prov_strategy = std::make_shared<mean_reversion_strategy>(
+                cli_sma_period, cli_balance, cli_risk_fraction, cli_sl_pct, cli_tp_pct);
 
         // Build engine config
         engine_config prov_cfg;
@@ -141,6 +196,9 @@ int main(int argc, char* argv[])
         prov_cfg.event_log_path = event_log_path;
         prov_cfg.disable_pinning = no_pin;
         prov_cfg.provider = provider;
+        prov_cfg.enable_web_ui = enable_web_ui;
+        prov_cfg.ws_port = ws_port;
+        prov_cfg.initial_balance = cli_balance;
 
         if (!thread_preset_str.empty())
             prov_cfg.threading = string_to_preset(thread_preset_str);
@@ -152,55 +210,190 @@ int main(int argc, char* argv[])
             prov_cfg.fee_model = std::make_shared<FixedFeeModel>(cli_fee_value);
         else if (cli_fee_model == "tiered")
             prov_cfg.fee_model = std::make_shared<TieredFeeModel>(cli_maker_rate, cli_taker_rate);
+        else if (provider_name == "binance")
+            prov_cfg.fee_model = std::make_shared<TieredFeeModel>(0.001, 0.001);
 
-        // Load data via DataBridge using the provider's transport
-        auto transport = std::make_shared<FileTransport>(provider_path);
+        // Engine mode from CLI
+        if (cli_mode == "shadow")
+            prov_cfg.mode = engine_mode::shadow;
+        else if (cli_mode == "live" || cli_live)
+            prov_cfg.mode = engine_mode::live;
+
+        // Safety: live mode requires explicit --live flag + API keys
+        if (prov_cfg.mode == engine_mode::live)
+        {
+            if (!cli_live)
+            {
+                std::cerr << "  ! Live mode requires --live flag.\n";
+                return 1;
+            }
+            if (cli_api_key.empty() || cli_api_secret.empty())
+            {
+                std::cerr << "  ! Live mode requires --api-key and --api-secret.\n";
+                return 1;
+            }
+            std::cout << "  WARNING: You are about to submit REAL orders. Type YES to continue: ";
+            std::string confirm;
+            std::getline(std::cin, confirm);
+            if (confirm != "YES")
+            {
+                std::cout << "  Aborted.\n";
+                return 0;
+            }
+        }
+
+        // Open the provider (connects WebSocket, initializes transport, etc.)
+        if (provider->has_data_feed() && !provider->open())
+        {
+            std::cerr << "  ! Provider failed to open.\n";
+            return 1;
+        }
+
+        // Get transport from provider (instead of always using FileTransport)
+        auto transport = provider->get_transport();
+        if (!transport)
+        {
+            // Fallback: local file transport for providers without one
+            transport = std::make_shared<FileTransport>(provider_path);
+        }
+
+#ifdef HAS_BINANCE
+        // Wrap transport in RecordingTransport if --record is specified
+        if (!cli_record_path.empty())
+        {
+            transport = std::make_shared<RecordingTransport>(transport, cli_record_path);
+        }
+
+        // Override transport with ReplayTransport if --replay-data is specified
+        if (!cli_replay_data_path.empty())
+        {
+            transport = std::make_shared<ReplayTransport>(cli_replay_data_path);
+        }
+#endif
+
         auto dh = std::make_shared<data_handler>();
+
+        // Determine data format: tick vs bar
+        // Binance trade stream → tick, kline → bar; local uses --format flag
         bool is_tick = (cli_format == "tick");
+        bool is_streaming = transport->is_streaming();
 
-        if (is_tick)
+#ifdef HAS_BINANCE
+        if (provider_name == "binance" || is_streaming)
         {
-            auto parser = std::make_shared<CsvTickParser>();
-            auto bridge = std::make_shared<DataBridge<tick_record>>(
-                transport, parser, tick_record_sink);
-
-            if (!bridge->load_data(dh))
-            {
-                std::cerr << "  ! Failed to load tick data via provider bridge.\n";
-                return 1;
-            }
+            if (cli_stream.empty() || cli_stream == "trade")
+                is_tick = true;
+            else if (cli_stream.find("kline") != std::string::npos)
+                is_tick = false;
         }
-        else
-        {
-            auto parser = std::make_shared<CsvBarParser>();
-            auto bridge = std::make_shared<DataBridge<bar_record>>(
-                transport, parser, bar_record_sink);
-
-            if (!bridge->load_data(dh))
-            {
-                std::cerr << "  ! Failed to load bar data via provider bridge.\n";
-                return 1;
-            }
-        }
+#endif
 
         std::cout << "\n";
         std::cout << "  ============================================\n";
-        std::cout << "    Provider: " << provider_name << "\n";
-        std::cout << "    Format:   " << (is_tick ? "tick" : "bar") << "\n";
-        std::cout << "    Strategy: " << (cli_strategy.empty() ? "mean-reversion" : cli_strategy) << "\n";
-        std::cout << "    SMA:      " << cli_sma_period << "\n";
+        std::cout << "    Provider:  " << provider_name << "\n";
+        std::cout << "    Format:    " << (is_tick ? "tick" : "bar") << "\n";
+        std::cout << "    Strategy:  " << (cli_strategy.empty() ? "mean-reversion" : cli_strategy) << "\n";
+        std::cout << "    SMA:       " << cli_sma_period << "\n";
+        std::cout << "    Balance:   $" << cli_balance << "\n";
+        std::cout << "    Risk:      " << (cli_risk_fraction * 100) << "% per trade\n";
+        std::cout << "    SL/TP:     " << (cli_sl_pct * 100) << "% / " << (cli_tp_pct * 100) << "%\n";
+        std::cout << "    Fees:      " << (prov_cfg.fee_model ? "yes" : "none") << "\n";
+        std::cout << "    Streaming: " << (is_streaming ? "yes" : "no") << "\n";
         std::cout << "    Threading: " << preset_to_string(prov_cfg.threading)
                   << " (" << preset_worker_count(prov_cfg.threading) << " workers)\n";
+        if (!cli_record_path.empty())
+            std::cout << "    Recording: " << cli_record_path << "\n";
+        if (!cli_replay_data_path.empty())
+            std::cout << "    Replay:    " << cli_replay_data_path << "\n";
         std::cout << "  ============================================\n\n";
 
-        engine eng(dh, nullptr, prov_strategy, std::move(prov_cfg));
+        if (is_streaming)
+        {
+            // Streaming path: engine processes records as they arrive
+            engine eng(dh, nullptr, prov_strategy, std::move(prov_cfg));
 
-        if (is_tick)
-            eng.run_tick_data();
+            if (is_tick)
+            {
+                std::shared_ptr<IDataParser<tick_record>> parser;
+#ifdef HAS_BINANCE
+                if (provider_name == "binance")
+                    parser = std::make_shared<BinanceTradeParser>();
+                else
+#endif
+                    parser = std::make_shared<CsvTickParser>();
+
+                auto bridge = std::make_shared<DataBridge<tick_record>>(
+                    transport, parser, tick_record_sink);
+                eng.run_streaming(bridge);
+            }
+            else
+            {
+                std::shared_ptr<IDataParser<bar_record>> parser;
+#ifdef HAS_BINANCE
+                if (provider_name == "binance")
+                    parser = std::make_shared<BinanceKlineParser>();
+                else
+#endif
+                    parser = std::make_shared<CsvBarParser>();
+
+                auto bridge = std::make_shared<DataBridge<bar_record>>(
+                    transport, parser, bar_record_sink);
+                eng.run_streaming(bridge);
+            }
+
+            eng.print_summary();
+        }
         else
-            eng.run();
+        {
+            // Batch path: load all data first, then run engine
+            if (is_tick)
+            {
+                std::shared_ptr<IDataParser<tick_record>> parser;
+#ifdef HAS_BINANCE
+                if (provider_name == "binance")
+                    parser = std::make_shared<BinanceTradeParser>();
+                else
+#endif
+                    parser = std::make_shared<CsvTickParser>();
 
-        eng.print_summary();
+                auto bridge = std::make_shared<DataBridge<tick_record>>(
+                    transport, parser, tick_record_sink);
+
+                if (!bridge->load_data(dh))
+                {
+                    std::cerr << "  ! Failed to load tick data via provider bridge.\n";
+                    return 1;
+                }
+            }
+            else
+            {
+                std::shared_ptr<IDataParser<bar_record>> parser;
+#ifdef HAS_BINANCE
+                if (provider_name == "binance")
+                    parser = std::make_shared<BinanceKlineParser>();
+                else
+#endif
+                    parser = std::make_shared<CsvBarParser>();
+
+                auto bridge = std::make_shared<DataBridge<bar_record>>(
+                    transport, parser, bar_record_sink);
+
+                if (!bridge->load_data(dh))
+                {
+                    std::cerr << "  ! Failed to load bar data via provider bridge.\n";
+                    return 1;
+                }
+            }
+
+            engine eng(dh, nullptr, prov_strategy, std::move(prov_cfg));
+
+            if (is_tick)
+                eng.run_tick_data();
+            else
+                eng.run();
+
+            eng.print_summary();
+        }
         return 0;
     }
 

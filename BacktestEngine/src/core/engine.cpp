@@ -4,6 +4,7 @@
 #include "../execution/fee_model.h"
 #include "../execution/latency_model.h"
 #include "../orderbook/fill_model.h"
+#include "../providers/provider.h"
 
 #include <iostream>
 #include <vector>
@@ -17,20 +18,18 @@ engine::engine(std::shared_ptr<data_handler> dh,
                std::shared_ptr<IStrategy> strategy,
                engine_config config)
     : config_(std::move(config)), data_handler_(std::move(dh)), strategy_(std::move(strategy)),
+      portfolio_(config_.initial_balance),
       risk_manager_(config_.risk),
       market_maker_(config_.seed != 0 ? MarketMaker(static_cast<unsigned>(config_.seed + 1))
                                       : MarketMaker())
 {
     // Register the provided orderbook under a default symbol
-    // The actual symbol will be determined at runtime from market data
     if (ob)
-    {
-        // We'll store it and assign to the first symbol we see
-        // For now, pre-register it — the run() loop will use get_adapter() per symbol
         orderbook_registry_ = OrderbookRegistry();
-    }
 
-    // Rings are created in start_workers() based on the active preset
+    // Shadow mode: create tracker for simulated vs exchange fill comparison
+    if (config_.mode == engine_mode::shadow)
+        shadow_tracker_ = std::make_unique<ShadowTracker>();
 }
 
 std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol)
@@ -42,12 +41,19 @@ std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol
     auto ob = orderbook_registry_.get_or_create(symbol);
 
     std::shared_ptr<IExecutionAdapter> adapter;
-    if (config_.mode == engine_mode::live)
-        adapter = std::make_shared<ExchangeAdapter>();
+    if (config_.mode == engine_mode::live && config_.provider &&
+        config_.provider->get_execution_adapter())
+    {
+        // Live mode: use provider's execution adapter (e.g. Binance REST API)
+        adapter = config_.provider->get_execution_adapter();
+    }
     else
+    {
+        // Backtest + shadow mode: use local orderbook adapter
         adapter = std::make_shared<LocalBookAdapter>(
             ob, config_.fee_model, config_.fill_model,
             config_.seed != 0 ? static_cast<unsigned>(config_.seed + 2) : 42u);
+    }
 
     execution_adapters_[symbol] = adapter;
     return adapter;
@@ -67,7 +73,7 @@ void engine::publish_event(const event_pointer& ev)
     switch (config_.threading)
     {
     case thread_preset::inline_mode:
-        return;
+        break;
 
     case thread_preset::light:
         if (observer_ring_ && !observer_ring_->try_push(ev)) { observer_drops_++;
@@ -78,7 +84,7 @@ void engine::publish_event(const event_pointer& ev)
 #ifdef HAS_DEBUG
         else if (observer_ring_) observer_diag_.on_push(observer_ring_->occupancy());
 #endif
-        return;
+        break;
 
     case thread_preset::standard:
         if (logging_ring_ && !logging_ring_->try_push(ev)) { logging_drops_++;
@@ -97,7 +103,7 @@ void engine::publish_event(const event_pointer& ev)
 #ifdef HAS_DEBUG
         else if (risk_stats_ring_) risk_stats_diag_.on_push(risk_stats_ring_->occupancy());
 #endif
-        return;
+        break;
 
     case thread_preset::full:
         if (logging_ring_ && !logging_ring_->try_push(ev)) { logging_drops_++;
@@ -124,7 +130,7 @@ void engine::publish_event(const event_pointer& ev)
 #ifdef HAS_DEBUG
         else if (stats_ring_) stats_diag_.on_push(stats_ring_->occupancy());
 #endif
-        return;
+        break;
 
     case thread_preset::extended:
         if (logging_ring_ && !logging_ring_->try_push(ev)) { logging_drops_++;
@@ -159,8 +165,13 @@ void engine::publish_event(const event_pointer& ev)
 #ifdef HAS_DEBUG
         else if (mm_ring_) mm_diag_.on_push(mm_ring_->occupancy());
 #endif
-        return;
+        break;
     }
+
+#ifdef HAS_WEB_UI
+    if (ws_ring_ && !ws_ring_->try_push(ev))
+        ws_drops_++;
+#endif
 }
 
 std::unique_ptr<LoggingWorker> engine::make_logging_worker()
@@ -177,14 +188,28 @@ std::unique_ptr<LoggingWorker> engine::make_logging_worker()
 
 void engine::start_workers()
 {
-    if (!config_.is_threaded())
-        return;
-
     halt_flag_.store(false, std::memory_order_release);
     worker_failed_.store(false, std::memory_order_release);
 
     // Helper to wire shared failure flag to any worker
     auto wire_failure = [this](Worker& w) { w.set_failure_flag(worker_failed_); };
+
+#ifdef HAS_WEB_UI
+    // Start WebSocket worker if enabled (works with any threading preset)
+    if (config_.enable_web_ui)
+    {
+        ws_ring_ = std::make_shared<EventRing>();
+        ws_worker_ = std::make_unique<WebSocketWorker>(config_.ws_port);
+        wire_failure(*ws_worker_);
+
+        worker_threads_.emplace_back([this]() {
+            ws_worker_->run(*ws_ring_);
+        });
+    }
+#endif
+
+    if (!config_.is_threaded())
+        return;
 
     // Build core map for pinning
     auto core_map = build_core_map();
@@ -321,9 +346,6 @@ void engine::start_workers()
 
 void engine::stop_workers()
 {
-    if (!config_.is_threaded())
-        return;
-
     // Signal all active workers to stop
     if (observer_worker_) observer_worker_->stop();
     if (logging_worker_) logging_worker_->stop();
@@ -331,6 +353,9 @@ void engine::stop_workers()
     if (stats_worker_) stats_worker_->stop();
     if (risk_stats_worker_) risk_stats_worker_->stop();
     if (mm_worker_) mm_worker_->stop();
+#ifdef HAS_WEB_UI
+    if (ws_worker_) ws_worker_->stop();
+#endif
 
     // Join all threads
     for (auto& t : worker_threads_)
@@ -351,7 +376,12 @@ void engine::stop_workers()
     // Report worker exceptions
     Worker* all_workers[] = {
         logging_worker_.get(), risk_worker_.get(), stats_worker_.get(),
-        observer_worker_.get(), risk_stats_worker_.get(), mm_worker_.get()
+        observer_worker_.get(), risk_stats_worker_.get(), mm_worker_.get(),
+#ifdef HAS_WEB_UI
+        ws_worker_.get(),
+#else
+        nullptr,
+#endif
     };
     for (auto* w : all_workers)
     {
@@ -368,8 +398,12 @@ void engine::stop_workers()
     }
 
     // Report drop counts
+    std::size_t ws_d = 0;
+#ifdef HAS_WEB_UI
+    ws_d = ws_drops_;
+#endif
     std::size_t total_drops = logging_drops_ + risk_drops_ + stats_drops_
-                            + observer_drops_ + risk_stats_drops_ + mm_drops_;
+                            + observer_drops_ + risk_stats_drops_ + mm_drops_ + ws_d;
     if (total_drops > 0)
     {
         std::cerr << "  WARNING: " << total_drops << " events dropped from ring buffers.\n";
@@ -401,8 +435,286 @@ void engine::print_summary()
     case thread_preset::extended:
         if (stats_worker_)
             stats_worker_->analytics().print_report();
-        return;
+        break;
     }
+
+    // Shadow mode: print comparison report
+    if (shadow_tracker_)
+        shadow_tracker_->print_report();
+}
+
+bool engine::process_order(const std::shared_ptr<order_event>& o,
+                           std::size_t& event_count,
+                           bool& halt_requested)
+{
+    // Pre-order risk check (inline only — when threaded, RiskWorker handles this)
+    if (!config_.is_threaded())
+    {
+        auto snap = analytics_.snapshot();
+        auto action = risk_manager_.check_order(*o, portfolio_, snap);
+        if (action == risk_action::halt)
+        {
+            halt_requested = true;
+            return false;
+        }
+        if (action == risk_action::reject)
+            return true; // drop order, continue engine
+    }
+
+    log_event(*o);
+    publish_event(o);
+    if (!config_.is_threaded())
+        analytics_.on_event(o);
+
+    auto adapter = get_adapter(o->get_symbol());
+
+    // Update mid price on the adapter (for fill model distance calculations)
+    if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
+        local->set_mid_price(last_mid_price_);
+
+    adapter->submit_order(*o);
+
+    // Shadow mode: also forward order to provider's execution adapter
+    if (config_.mode == engine_mode::shadow && config_.provider)
+    {
+        auto exchange_adapter = config_.provider->get_execution_adapter();
+        if (exchange_adapter)
+            exchange_adapter->submit_order(*o);
+    }
+
+    std::vector<fill_event> fills;
+    if (adapter->poll_fills(fills))
+    {
+        for (auto& f : fills)
+        {
+            auto fill_ptr = fill_pool_.acquire(f);
+            log_event(f);
+            portfolio_.on_fill(f);
+            strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+            publish_event(fill_ptr);
+            if (!config_.is_threaded())
+                analytics_.on_event(fill_ptr);
+
+            // Shadow mode: track simulated fill for comparison
+            if (config_.mode == engine_mode::shadow && shadow_tracker_)
+                shadow_tracker_->on_simulated_fill(f);
+
+            event_count++;
+
+            // Post-fill risk check (inline only)
+            if (!config_.is_threaded())
+            {
+                auto post_snap = analytics_.generate_report();
+                auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
+                if (post_action == risk_action::halt)
+                {
+                    halt_requested = true;
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Shadow mode: poll exchange fills for comparison
+    if (config_.mode == engine_mode::shadow && config_.provider)
+    {
+        auto exchange_adapter = config_.provider->get_execution_adapter();
+        if (exchange_adapter)
+        {
+            std::vector<fill_event> exchange_fills;
+            if (exchange_adapter->poll_fills(exchange_fills))
+            {
+                for (auto& ef : exchange_fills)
+                {
+                    if (shadow_tracker_)
+                        shadow_tracker_->on_exchange_fill(ef);
+                }
+            }
+        }
+    }
+
+    event_count++;
+    return true;
+}
+
+void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
+                                const std::chrono::system_clock::time_point& timestamp)
+{
+    market_event mkt(
+        timestamp,
+        rec.symbol,
+        rec.open,
+        rec.high,
+        rec.low,
+        rec.close,
+        rec.volume
+    );
+
+    last_mid_price_ = mkt.get_close();
+
+    // Replenish orderbook for this symbol
+    auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
+    if (!preset_has_mm_worker(config_.threading))
+        market_maker_.replenish(ob, last_mid_price_);
+
+    // Process market event through strategy
+    auto mkt_ptr = market_pool_.acquire(mkt);
+    auto order_opt = strategy_->on_market(mkt);
+    log_event(mkt);
+    publish_event(mkt_ptr);
+    if (!config_.is_threaded())
+        analytics_.on_event(mkt_ptr);
+    event_count++;
+
+    if (order_opt)
+    {
+        order_opt->set_order_id(OrderIdGenerator::next());
+        order_opt->set_earliest_eligible_ts(timestamp);
+        bool halt = false;
+        process_order(order_pool_.acquire(*order_opt), event_count, halt);
+    }
+}
+
+void engine::process_single_tick(const tick_record& rec, std::size_t& event_count)
+{
+    tick_side ts = tick_side::unknown;
+    if (rec.side == data_tick_side::bid) ts = tick_side::bid;
+    else if (rec.side == data_tick_side::ask) ts = tick_side::ask;
+
+    tick_event te(rec.timestamp, rec.symbol, rec.price, rec.quantity, ts);
+
+    last_mid_price_ = rec.price;
+
+    // Replenish orderbook with liquidity around current price.
+    // Always inline for tick data — the MM worker only handles bar-driven replenish.
+    auto ob = orderbook_registry_.get_or_create(rec.symbol);
+    market_maker_.replenish(ob, last_mid_price_);
+
+    auto tick_ptr = tick_pool_.acquire(te);
+    log_event(te);
+    publish_event(tick_ptr);
+    if (!config_.is_threaded())
+        analytics_.on_event(tick_ptr);
+    event_count++;
+
+    // Dispatch to strategy's tick handler
+    auto order_opt = strategy_->on_tick(te);
+    if (order_opt)
+    {
+        order_opt->set_order_id(OrderIdGenerator::next());
+        order_opt->set_earliest_eligible_ts(rec.timestamp);
+
+        auto adapter = get_adapter(rec.symbol);
+        if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
+            local->set_mid_price(last_mid_price_);
+        adapter->submit_order(*order_opt);
+
+        auto order_ptr = order_pool_.acquire(*order_opt);
+        publish_event(order_ptr);
+        if (!config_.is_threaded())
+            analytics_.on_event(order_ptr);
+
+        std::vector<fill_event> fills;
+        if (adapter->poll_fills(fills))
+        {
+            for (auto& f : fills)
+            {
+                auto fill_ptr = fill_pool_.acquire(f);
+                portfolio_.on_fill(f);
+                strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+                publish_event(fill_ptr);
+                if (!config_.is_threaded())
+                    analytics_.on_event(fill_ptr);
+                event_count++;
+            }
+        }
+        event_count++;
+    }
+}
+
+void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
+{
+    if (!data_handler_) throw std::runtime_error("missing dependencies");
+
+    if (!config_.event_log_path.empty())
+        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path);
+
+    start_workers();
+
+    const auto start = std::chrono::high_resolution_clock::now();
+    std::size_t event_count = 0;
+    std::size_t bar_index = 0;
+
+    std::cout << "\rStreaming: waiting for data..." << std::flush;
+
+    auto last_report_time = std::chrono::steady_clock::now();
+
+    bridge->run_streaming(data_handler_, [&](const bar_record& rec) {
+        auto timestamp = std::chrono::system_clock::now();
+        process_single_bar(rec, event_count, timestamp);
+        bar_index++;
+
+        auto now_report = std::chrono::steady_clock::now();
+        if (now_report - last_report_time >= std::chrono::milliseconds(200))
+        {
+            std::cout << "\rStreaming: " << bar_index << " bars | Trades: "
+                      << portfolio_.get_total_trades() << std::flush;
+            last_report_time = now_report;
+        }
+    });
+
+    const auto end = std::chrono::high_resolution_clock::now();
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    std::cout << std::endl;
+    std::cout << "Streaming complete: " << bar_index << " bars, "
+              << portfolio_.get_total_trades() << " trades in "
+              << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
+
+    if (event_logger_) event_logger_->flush();
+    stop_workers();
+}
+
+void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
+{
+    if (!data_handler_) throw std::runtime_error("missing dependencies");
+
+    if (!config_.event_log_path.empty())
+        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path);
+
+    start_workers();
+
+    const auto start = std::chrono::high_resolution_clock::now();
+    std::size_t event_count = 0;
+    std::size_t tick_count = 0;
+
+    std::cout << "\rStreaming: waiting for data..." << std::flush;
+
+    auto last_report_time = std::chrono::steady_clock::now();
+
+    bridge->run_streaming(data_handler_, [&](const tick_record& rec) {
+        process_single_tick(rec, event_count);
+        tick_count++;
+
+        auto now_report = std::chrono::steady_clock::now();
+        if (now_report - last_report_time >= std::chrono::milliseconds(200))
+        {
+            std::cout << "\rStreaming: " << tick_count << " ticks | Trades: "
+                      << portfolio_.get_total_trades() << std::flush;
+            last_report_time = now_report;
+        }
+    });
+
+    const auto end = std::chrono::high_resolution_clock::now();
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    std::cout << std::endl;
+    std::cout << "Streaming complete: " << tick_count << " ticks, "
+              << portfolio_.get_total_trades() << " trades in "
+              << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
+
+    if (event_logger_) event_logger_->flush();
+    stop_workers();
 }
 
 void engine::run()
@@ -465,68 +777,12 @@ void engine::run()
 
     bool halt_requested = false;
 
-    // Submits an order via the per-symbol execution adapter and processes resulting fills
-    auto process_order = [&](const std::shared_ptr<order_event>& o) -> bool
+    // Wraps member process_order with day-order tracking
+    auto do_process_order = [&](const std::shared_ptr<order_event>& o) -> bool
     {
-        // Pre-order risk check (inline only — when threaded, RiskWorker handles this)
-        if (!config_.is_threaded())
-        {
-            auto snap = analytics_.snapshot();
-            auto action = risk_manager_.check_order(*o, portfolio_, snap);
-            if (action == risk_action::halt)
-            {
-                halt_requested = true;
-                return false;
-            }
-            if (action == risk_action::reject)
-                return true; // drop order, continue engine
-        }
-
-        // Track day orders for end-of-session cancellation
         if (o->get_tif() == time_in_force::day)
             day_order_ids.push_back({o->get_symbol(), o->get_order_id()});
-        log_event(*o);
-        publish_event(o);
-        if (!config_.is_threaded())
-            analytics_.on_event(o);
-
-        auto adapter = get_adapter(o->get_symbol());
-
-        // Update mid price on the adapter (for fill model distance calculations)
-        if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
-            local->set_mid_price(last_mid_price_);
-
-        adapter->submit_order(*o);
-
-        std::vector<fill_event> fills;
-        if (adapter->poll_fills(fills))
-        {
-            for (auto& f : fills)
-            {
-                auto fill_ptr = fill_pool_.acquire(f);
-                log_event(f);
-                portfolio_.on_fill(f);
-                strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
-                publish_event(fill_ptr);
-                if (!config_.is_threaded())
-                    analytics_.on_event(fill_ptr);
-                event_count++;
-
-                // Post-fill risk check (inline only — when threaded, RiskWorker handles this)
-                if (!config_.is_threaded())
-                {
-                    auto post_snap = analytics_.generate_report();
-                    auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
-                    if (post_action == risk_action::halt)
-                    {
-                        halt_requested = true;
-                        return false;
-                    }
-                }
-            }
-        }
-        event_count++;
-        return true;
+        return process_order(o, event_count, halt_requested);
     };
 
     for (std::size_t i = 0; i < n && !halt_requested
@@ -555,7 +811,7 @@ void engine::run()
             {
                 auto entry = pending_orders.top();
                 pending_orders.pop();
-                if (!process_order(entry.order)) break;
+                if (!do_process_order(entry.order)) break;
             }
         }
         if (halt_requested) break;
@@ -588,7 +844,7 @@ void engine::run()
                             time_in_force::ioc);
                         market_order->set_order_id(stop->get_order_id());
                         market_order->set_earliest_eligible_ts(sim_time);
-                        if (!process_order(market_order)) break;
+                        if (!do_process_order(market_order)) break;
                     }
                     else // stop_limit
                     {
@@ -599,7 +855,7 @@ void engine::run()
                             stop->get_tif());
                         limit_order->set_order_id(stop->get_order_id());
                         limit_order->set_earliest_eligible_ts(sim_time);
-                        if (!process_order(limit_order)) break;
+                        if (!do_process_order(limit_order)) break;
                     }
                     it = pending_stops.erase(it);
                 }
@@ -632,7 +888,7 @@ void engine::run()
                     auto mm_ob_order = std::make_shared<order>(
                         ob_order_type::good_till_cancel, mm_order.get_order_id(),
                         mm_side, Price::from_double(mm_order.get_price()),
-                        static_cast<quantity>(mm_order.get_quantity()));
+                        static_cast<quantity>(std::round(mm_order.get_quantity() * 1e8)));
                     mm_ob->add_order(mm_ob_order);
                 }
             }
@@ -674,7 +930,7 @@ void engine::run()
             {
                 // No latency model — process immediately (current behavior)
                 order_opt->set_earliest_eligible_ts(sim_time);
-                process_order(order_pool_.acquire(*order_opt));
+                do_process_order(order_pool_.acquire(*order_opt));
             }
         }
 
@@ -696,7 +952,7 @@ void engine::run()
     {
         auto entry = pending_orders.top();
         pending_orders.pop();
-        process_order(entry.order);
+        do_process_order(entry.order);
     }
 
     // Cancel all day orders at session end

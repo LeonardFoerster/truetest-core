@@ -176,7 +176,7 @@ public:
                 const std::string& symbol,
                 order_type order_type,
                 order_side side,
-                int quantity,
+                double quantity,
                 double price = 0.0,
                 time_in_force tif = time_in_force::gtc,
                 double stop_price = 0.0
@@ -202,7 +202,7 @@ public:
         const std::string& get_symbol() const { return symbol_; }
         order_type get_order_type() const { return order_type_; }
         order_side get_side() const { return side_; }
-        int get_quantity() const { return quantity_; }
+        double get_quantity() const { return quantity_; }
         double get_price() const { return price_; }
         time_in_force get_tif() const { return tif_; }
         double get_stop_price() const { return stop_price_; }
@@ -230,7 +230,7 @@ private:
         std::string symbol_;
         order_type order_type_;
         order_side side_;
-        int quantity_;
+        double quantity_;
         double price_;
         time_in_force tif_;
         double stop_price_;
@@ -249,7 +249,7 @@ public:
                 const std::string& symbol,
                 uint64_t order_id,
                 order_side side,
-                int filled_quantity,
+                double filled_quantity,
                 double fill_price,
                 double commission = 0.0
         )
@@ -266,7 +266,7 @@ public:
         uint64_t get_order_id() const { return order_id_; }
         const std::string& get_symbol() const { return symbol_; }
         order_side get_side() const { return side_; }
-        int get_filled_quantity() const { return filled_quantity_; }
+        double get_filled_quantity() const { return filled_quantity_; }
         double get_fill_price() const { return fill_price_; }
         double get_commission() const { return commission_; }
 
@@ -290,7 +290,7 @@ private:
         uint64_t order_id_ = 0;
         std::string symbol_;
         order_side side_;
-        int filled_quantity_;
+        double filled_quantity_;
         double fill_price_;
         double commission_;
 };
