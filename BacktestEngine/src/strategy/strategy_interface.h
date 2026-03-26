@@ -71,6 +71,14 @@ public:
 
     const std::unordered_map<std::string, position_stops>& get_stops() const { return stops_; }
 
+    // Indicator values: strategies can expose their current indicator state
+    // for UI display. Called after on_market() to collect values.
+    virtual std::vector<std::pair<std::string, double>> get_indicator_values(
+        const std::string& /*symbol*/) const
+    {
+        return {};
+    }
+
 protected:
     std::unordered_map<std::string, position_stops> stops_;
 };

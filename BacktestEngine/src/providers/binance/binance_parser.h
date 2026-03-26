@@ -86,7 +86,7 @@ inline std::optional<tick_record> parse_trade(const std::string& json)
 
     tick_record rec;
     rec.price = std::stod(price_str);
-    rec.quantity = static_cast<int64_t>(std::stod(qty_str));
+    rec.quantity = static_cast<int64_t>(std::stod(qty_str) * 1e8);  // scale to satoshis
     rec.symbol = symbol;
 
     // "m" field: true = buyer is maker (i.e. sell aggressor), false = buy aggressor
@@ -135,7 +135,7 @@ inline std::optional<bar_record> parse_kline(const std::string& json)
     rec.high = std::stod(high);
     rec.low = std::stod(low);
     rec.close = std::stod(close);
-    rec.volume = volume.empty() ? 0 : static_cast<int64_t>(std::stod(volume));
+    rec.volume = volume.empty() ? 0 : static_cast<int64_t>(std::stod(volume) * 1e8);
 
     // Use kline close time as the date
     auto time_str = extract_number(k_json, "t");

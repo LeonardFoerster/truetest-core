@@ -50,7 +50,7 @@ TEST(BinanceParser, ParseTradeMessage)
 
     EXPECT_EQ(result->symbol, "BTCUSDT");
     EXPECT_DOUBLE_EQ(result->price, 16800.50);
-    EXPECT_EQ(result->quantity, 0);  // 0.5 truncated to int64_t
+    EXPECT_EQ(result->quantity, 50000000);  // 0.5 * 1e8 (satoshi-scaled)
     EXPECT_EQ(result->side, data_tick_side::ask);  // m=true → seller aggressor → ask
 
     auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -70,7 +70,7 @@ TEST(BinanceParser, ParseTradeMessageBuyAggressor)
 
     EXPECT_EQ(result->symbol, "ETHUSDT");
     EXPECT_EQ(result->side, data_tick_side::bid);  // m=false → buyer aggressor → bid
-    EXPECT_EQ(result->quantity, 10);
+    EXPECT_EQ(result->quantity, 1000000000);  // 10 * 1e8
 }
 
 TEST(BinanceParser, ParseTradeWrongEventType)
@@ -108,7 +108,7 @@ TEST(BinanceParser, ParseKlineMessage)
     EXPECT_DOUBLE_EQ(result->close, 16850.50);
     EXPECT_DOUBLE_EQ(result->high, 16860.00);
     EXPECT_DOUBLE_EQ(result->low, 16790.00);
-    EXPECT_EQ(result->volume, 100);  // truncated from 100.5
+    EXPECT_EQ(result->volume, 10050000000);  // 100.5 * 1e8 (satoshi-scaled)
 }
 
 TEST(BinanceParser, ParseKlineWrongEventType)

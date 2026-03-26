@@ -95,9 +95,14 @@ public:
 			return;
 		}
 
-		// Parse header if the transport provides one
-		if (auto header_line = transport_->read_line())
-			parser_->parse_header(*header_line);
+		// Parse header for batch sources (CSV files have a header row).
+		// Streaming transports (WebSocket) have no header — skip to avoid
+		// silently dropping the first real message.
+		if (!transport_->is_streaming())
+		{
+			if (auto header_line = transport_->read_line())
+				parser_->parse_header(*header_line);
+		}
 
 		while (transport_->is_open())
 		{

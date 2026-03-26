@@ -67,6 +67,12 @@ private:
     MarketMaker market_maker_;
     double last_mid_price_ = 0.0;
 
+    // Tick-to-bar aggregator for WebSocket UI when streaming tick data.
+    // Collects ticks into OHLCV bars at tick_bar_interval_ and broadcasts
+    // completed bars to the web UI so lightweight-charts gets proper candles.
+    std::unique_ptr<BarAggregator> tick_aggregator_;
+    std::chrono::milliseconds tick_bar_interval_{60000}; // default 1m
+
     // Object pools for hot-path event allocation (avoid heap pressure)
     ObjectPool<market_event> market_pool_;
     ObjectPool<order_event>  order_pool_;
@@ -149,6 +155,21 @@ private:
     std::shared_ptr<EventRing> ws_ring_;
     std::unique_ptr<WebSocketWorker> ws_worker_;
     std::size_t ws_drops_ = 0;
+
+    // Process inbound WS commands (start/pause/stop/order)
+    void process_ws_commands(bool& halt_requested, std::size_t& event_count);
+
+    // Broadcast orderbook depth snapshot to WS clients
+    void broadcast_orderbook_snapshot(const std::string& symbol);
+
+    // Send full state snapshot to newly connected WS clients
+    void send_state_snapshot();
+
+    // Broadcast market event with indicator values via WS
+    void broadcast_market_with_indicators(const market_event& mkt);
+
+    // Track last orderbook snapshot time for throttling
+    std::chrono::steady_clock::time_point last_ob_snapshot_time_;
 #endif
 
     // Worker threads

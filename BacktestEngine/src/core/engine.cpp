@@ -416,6 +416,156 @@ void engine::stop_workers()
     }
 }
 
+#ifdef HAS_WEB_UI
+void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
+{
+    if (!ws_worker_) return;
+
+    ws_command cmd;
+    while (ws_worker_->poll_command(cmd))
+    {
+        if (cmd.command == "stop")
+        {
+            halt_requested = true;
+            ws_worker_->broadcast_status("halted",
+                config_.provider ? config_.provider->name() : "",
+                "");
+        }
+        else if (cmd.command == "order" && !cmd.side.empty() && cmd.quantity > 0.0)
+        {
+            // Build and process an order from the UI
+            auto otype = (cmd.order_type == "limit") ? order_type::limit : order_type::market;
+            auto oside = (cmd.side == "sell") ? order_side::sell : order_side::buy;
+            double price = (otype == order_type::limit && cmd.price > 0.0) ? cmd.price : last_mid_price_;
+
+            // Use the first known symbol, or empty string
+            std::string symbol;
+            if (!data_handler_->db_data_symbol.empty())
+                symbol = data_handler_->db_data_symbol.back();
+
+            auto ts = std::chrono::system_clock::now();
+            auto o = order_pool_.acquire(ts, symbol, otype, oside, cmd.quantity, price, time_in_force::ioc);
+            o->set_order_id(OrderIdGenerator::next());
+            o->set_earliest_eligible_ts(ts);
+
+            process_order(o, event_count, halt_requested);
+        }
+        else if (cmd.command == "set_timeframe" && !cmd.timeframe.empty())
+        {
+            // Parse timeframe string (e.g. "1m", "5m", "15m", "1h") to milliseconds
+            int value = 0;
+            char unit = 0;
+            if (std::sscanf(cmd.timeframe.c_str(), "%d%c", &value, &unit) == 2 && value > 0)
+            {
+                std::chrono::milliseconds new_interval{0};
+                switch (unit)
+                {
+                case 's': new_interval = std::chrono::seconds(value); break;
+                case 'm': new_interval = std::chrono::minutes(value); break;
+                case 'h': new_interval = std::chrono::hours(value); break;
+                default: break;
+                }
+
+                if (new_interval.count() > 0)
+                {
+                    tick_bar_interval_ = new_interval;
+
+                    // Flush current aggregator and recreate with new interval
+                    if (tick_aggregator_)
+                    {
+                        tick_aggregator_->flush();
+                        tick_aggregator_ = std::make_unique<BarAggregator>(
+                            tick_bar_interval_,
+                            [this](const market_event& bar) {
+                                broadcast_market_with_indicators(bar);
+                            });
+                    }
+
+                    // Tell the UI to clear its chart data
+                    ws_worker_->broadcast(R"({"type":"chart_reset","data":{"timeframe":")"
+                        + cmd.timeframe + R"("}})");
+                }
+            }
+        }
+        // "start" and "pause" are informational — the engine is already running in its loop
+    }
+}
+
+void engine::broadcast_orderbook_snapshot(const std::string& symbol)
+{
+    if (!ws_worker_) return;
+
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_ob_snapshot_time_ < std::chrono::milliseconds(250))
+        return;
+    last_ob_snapshot_time_ = now;
+
+    auto ob = orderbook_registry_.get(symbol);
+    if (!ob) return;
+
+    auto infos = ob->get_order_infos();
+    const auto& bid_lvls = infos.get_bids();
+    const auto& ask_lvls = infos.get_asks();
+
+    const int max_levels = 20;
+    std::vector<std::pair<double, double>> bids;
+    std::vector<std::pair<double, double>> asks;
+
+    for (int i = 0; i < std::min(max_levels, static_cast<int>(bid_lvls.size())); ++i)
+    {
+        bids.emplace_back(bid_lvls[i].price_.to_double(),
+                          static_cast<double>(bid_lvls[i].quantity_) / 1e8);
+    }
+    for (int i = 0; i < std::min(max_levels, static_cast<int>(ask_lvls.size())); ++i)
+    {
+        asks.emplace_back(ask_lvls[i].price_.to_double(),
+                          static_cast<double>(ask_lvls[i].quantity_) / 1e8);
+    }
+
+    double spread = 0.0;
+    if (!bids.empty() && !asks.empty())
+        spread = asks.front().first - bids.front().first;
+
+    ws_worker_->broadcast_orderbook(bids, asks, spread);
+}
+
+void engine::send_state_snapshot()
+{
+    if (!ws_worker_) return;
+
+    // 1. Engine status
+    ws_worker_->broadcast_status("running",
+        config_.provider ? config_.provider->name() : "",
+        (!data_handler_->db_data_symbol.empty()) ? data_handler_->db_data_symbol.back() : "");
+
+    // 2. Portfolio snapshot
+    {
+        auto json = event_json::portfolio_to_json(portfolio_);
+        ws_worker_->broadcast(json);
+    }
+
+    // 3. Analytics snapshot
+    {
+        auto report = analytics_.snapshot();
+        report.final_equity = portfolio_.get_equity(last_mid_price_);
+        auto json = event_json::analytics_to_json(report);
+        ws_worker_->broadcast(json);
+    }
+}
+
+void engine::broadcast_market_with_indicators(const market_event& mkt)
+{
+    if (!ws_worker_) return;
+
+    auto indicators = strategy_ ? strategy_->get_indicator_values(mkt.get_symbol())
+                                : std::vector<std::pair<std::string, double>>{};
+
+    // Broadcast market event (with indicators when available) via WS worker
+    auto json = event_json::to_json_with_indicators(mkt, indicators);
+    ws_worker_->broadcast(json);
+}
+#endif
+
 void engine::print_summary()
 {
     switch (config_.threading)
@@ -566,6 +716,10 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         analytics_.on_event(mkt_ptr);
     event_count++;
 
+#ifdef HAS_WEB_UI
+    broadcast_market_with_indicators(mkt);
+#endif
+
     if (order_opt)
     {
         order_opt->set_order_id(OrderIdGenerator::next());
@@ -596,6 +750,12 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     if (!config_.is_threaded())
         analytics_.on_event(tick_ptr);
     event_count++;
+
+#ifdef HAS_WEB_UI
+    // Feed tick into bar aggregator for charting (emits bars via callback)
+    if (tick_aggregator_)
+        tick_aggregator_->on_tick(rec.symbol, rec.price, rec.quantity, rec.timestamp);
+#endif
 
     // Dispatch to strategy's tick handler
     auto order_opt = strategy_->on_tick(te);
@@ -650,9 +810,30 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
     auto last_report_time = std::chrono::steady_clock::now();
 
     bridge->run_streaming(data_handler_, [&](const bar_record& rec) {
-        auto timestamp = std::chrono::system_clock::now();
+        // Use the bar's own timestamp when available (e.g. Binance kline open time
+        // stored as epoch-ms string in rec.date), fall back to wall clock.
+        auto timestamp = [&]() {
+            if (!rec.date.empty()) {
+                try {
+                    int64_t ts_ms = std::stoll(rec.date);
+                    if (ts_ms > 1000000000000LL) // looks like epoch ms
+                        return std::chrono::system_clock::time_point(
+                            std::chrono::milliseconds(ts_ms));
+                } catch (...) {}
+            }
+            return std::chrono::system_clock::now();
+        }();
         process_single_bar(rec, event_count, timestamp);
         bar_index++;
+
+#ifdef HAS_WEB_UI
+        // Broadcast orderbook + WS commands in streaming mode
+        broadcast_orderbook_snapshot(rec.symbol);
+        bool halt = false;
+        process_ws_commands(halt, event_count);
+        if (ws_worker_ && ws_worker_->has_pending_connect())
+            send_state_snapshot();
+#endif
 
         auto now_report = std::chrono::steady_clock::now();
         if (now_report - last_report_time >= std::chrono::milliseconds(200))
@@ -682,6 +863,15 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path);
 
+    // Create tick-to-bar aggregator for WebSocket UI charting
+#ifdef HAS_WEB_UI
+    tick_aggregator_ = std::make_unique<BarAggregator>(
+        tick_bar_interval_,
+        [this](const market_event& bar) {
+            broadcast_market_with_indicators(bar);
+        });
+#endif
+
     start_workers();
 
     const auto start = std::chrono::high_resolution_clock::now();
@@ -695,6 +885,14 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     bridge->run_streaming(data_handler_, [&](const tick_record& rec) {
         process_single_tick(rec, event_count);
         tick_count++;
+
+#ifdef HAS_WEB_UI
+        broadcast_orderbook_snapshot(rec.symbol);
+        bool halt = false;
+        process_ws_commands(halt, event_count);
+        if (ws_worker_ && ws_worker_->has_pending_connect())
+            send_state_snapshot();
+#endif
 
         auto now_report = std::chrono::steady_clock::now();
         if (now_report - last_report_time >= std::chrono::milliseconds(200))
@@ -712,6 +910,10 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     std::cout << "Streaming complete: " << tick_count << " ticks, "
               << portfolio_.get_total_trades() << " trades in "
               << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
+
+#ifdef HAS_WEB_UI
+    if (tick_aggregator_) tick_aggregator_->flush();
+#endif
 
     if (event_logger_) event_logger_->flush();
     stop_workers();
@@ -740,6 +942,14 @@ void engine::run()
 #endif
 
     start_workers();
+
+#ifdef HAS_WEB_UI
+    if (ws_worker_)
+    {
+        std::string sym = (!data_handler_->db_data_symbol.empty()) ? data_handler_->db_data_symbol[0] : "";
+        ws_worker_->broadcast_status("running", "", sym);
+    }
+#endif
 
     // Use a fixed epoch when seed is set for deterministic replay
     const auto base_ts = (config_.seed != 0)
@@ -909,6 +1119,21 @@ void engine::run()
         if (!config_.is_threaded())
             analytics_.on_event(mkt_ptr);
         event_count++;
+
+#ifdef HAS_WEB_UI
+        // Broadcast indicator-enriched market event to WS clients
+        broadcast_market_with_indicators(mkt);
+
+        // Broadcast orderbook depth snapshot (throttled to 250ms)
+        broadcast_orderbook_snapshot(symbol);
+
+        // Process inbound WS commands
+        process_ws_commands(halt_requested, event_count);
+
+        // Send state snapshot if a new client just connected
+        if (ws_worker_ && ws_worker_->has_pending_connect())
+            send_state_snapshot();
+#endif
 
         if (order_opt)
         {

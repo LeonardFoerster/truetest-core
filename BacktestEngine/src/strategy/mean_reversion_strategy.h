@@ -21,6 +21,18 @@ public:
 
     void update_equity(double equity) { equity_ = equity; }
 
+    std::vector<std::pair<std::string, double>> get_indicator_values(
+        const std::string& symbol) const override
+    {
+        std::vector<std::pair<std::string, double>> vals;
+        auto it = smas_.find(symbol);
+        if (it != smas_.end() && it->second.ready())
+        {
+            vals.emplace_back("sma_" + std::to_string(period_), it->second.value());
+        }
+        return vals;
+    }
+
 private:
     std::size_t period_;
     double equity_;

@@ -23,12 +23,40 @@ inline std::string to_json(const market_event& e)
 {
     char buf[512];
     std::snprintf(buf, sizeof(buf),
-        R"({"type":"market","timestamp":%lld,"data":{"symbol":"%s","open":%.6f,"high":%.6f,"low":%.6f,"close":%.6f,"volume":%lld}})",
+        R"({"type":"market","timestamp":%lld,"data":{"symbol":"%s","time":%lld,"open":%.6f,"high":%.6f,"low":%.6f,"close":%.6f,"volume":%lld}})",
         static_cast<long long>(epoch_ms(e.get_timestamp())),
         e.get_symbol().c_str(),
+        static_cast<long long>(epoch_ms(e.get_timestamp()) / 1000),
         e.get_open(), e.get_high(), e.get_low(), e.get_close(),
         static_cast<long long>(e.get_volume()));
     return buf;
+}
+
+// Market event with indicator values attached (Phase 5.5)
+inline std::string to_json_with_indicators(
+    const market_event& e,
+    const std::vector<std::pair<std::string, double>>& indicators)
+{
+    auto base = to_json(e);
+    if (indicators.empty()) return base;
+
+    // Insert indicators object before the closing }}
+    std::string ind_json = R"(,"indicators":{)";
+    for (std::size_t i = 0; i < indicators.size(); ++i)
+    {
+        if (i > 0) ind_json += ",";
+        char ibuf[128];
+        std::snprintf(ibuf, sizeof(ibuf), R"("%s":%.6f)",
+            indicators[i].first.c_str(), indicators[i].second);
+        ind_json += ibuf;
+    }
+    ind_json += "}";
+
+    // Insert before the last two closing braces
+    auto pos = base.rfind("}}");
+    if (pos != std::string::npos)
+        base.insert(pos, ind_json);
+    return base;
 }
 
 inline std::string to_json(const order_event& e)
@@ -59,13 +87,14 @@ inline std::string to_json(const fill_event& e)
 
     char buf[512];
     std::snprintf(buf, sizeof(buf),
-        R"({"type":"fill","timestamp":%lld,"data":{"order_id":%llu,"symbol":"%s","side":"%s","quantity":%.8g,"price":%.6f,"commission":%.6f}})",
+        R"({"type":"fill","timestamp":%lld,"data":{"order_id":%llu,"symbol":"%s","side":"%s","quantity":%.8g,"price":%.6f,"commission":%.6f,"time":%lld}})",
         static_cast<long long>(epoch_ms(e.get_timestamp())),
         static_cast<unsigned long long>(e.get_order_id()),
         e.get_symbol().c_str(),
         side_str,
         e.get_filled_quantity(), e.get_fill_price(),
-        e.get_commission());
+        e.get_commission(),
+        static_cast<long long>(epoch_ms(e.get_timestamp()) / 1000));
     return buf;
 }
 
