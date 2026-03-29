@@ -27,6 +27,15 @@
 // that compiles to ((void)0) when HAS_DEBUG is off
 #include "../debug/stage_timer.h"
 
+#ifdef HAS_SQLITE
+#include "../data/sqlite_store.h"
+#endif
+
+#ifdef HAS_BINANCE
+#include "../providers/binance/hybrid_executor.h"
+#include "../providers/binance/binance_backfill.h"
+#endif
+
 #ifdef HAS_WEB_UI
 #include "../threading/ws_worker.h"
 #endif
@@ -41,9 +50,11 @@
 #include "../providers/data_bridge.h"
 #include "../providers/local/csv_parser.h"
 #include "../analytics/shadow_tracker.h"
+#include "../strategy/strategy_factory.h"
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <thread>
 
@@ -66,6 +77,11 @@ private:
     RiskManager risk_manager_;
     MarketMaker market_maker_;
     double last_mid_price_ = 0.0;
+
+#ifdef HAS_BINANCE
+    // Hybrid executor for paper-mode limit order fills via local orderbook
+    std::shared_ptr<HybridExecutor> hybrid_exec_;
+#endif
 
     // Tick-to-bar aggregator for WebSocket UI when streaming tick data.
     // Collects ticks into OHLCV bars at tick_bar_interval_ and broadcasts
@@ -90,6 +106,10 @@ private:
 
     // Publish an event to all outbound rings (no-op when threading disabled)
     void publish_event(const event_pointer& ev);
+
+#ifdef HAS_SQLITE
+    std::unique_ptr<SqliteStore> store_;
+#endif
 
     // Optional event logger (created when event_log_path is set)
     std::unique_ptr<EventLogger> event_logger_;
@@ -170,7 +190,16 @@ private:
 
     // Track last orderbook snapshot time for throttling
     std::chrono::steady_clock::time_point last_ob_snapshot_time_;
+
+    // Recent bar history for replaying to newly connected clients
+    static constexpr std::size_t MAX_BAR_HISTORY = 1000;
+    std::vector<std::string> bar_history_;  // JSON strings
 #endif
+
+    // Pending runtime switches (set by WS command, applied in streaming loop)
+    std::mutex switch_mu_;
+    std::string pending_symbol_;
+    std::string pending_strategy_;
 
     // Worker threads
     std::vector<std::thread> worker_threads_;
@@ -196,6 +225,8 @@ public:
     void run_replay(const std::string& log_path);
     void run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge);
     void run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge);
+    void set_strategy(std::shared_ptr<IStrategy> strategy);
+    void switch_symbol(const std::string& new_symbol);
     void print_summary();
 
     // Access outbound rings for wiring worker threads

@@ -13,6 +13,7 @@ interface Dispatchers {
 
 let fillIdCounter = 0;
 let lastBarTime = 0;
+let isBackfilling = false;
 
 export function dispatchMessage(msg: Record<string, any>, dispatchers: Dispatchers): void {
   dispatchers.engine({ type: 'INCREMENT_EVENTS' });
@@ -21,6 +22,12 @@ export function dispatchMessage(msg: Record<string, any>, dispatchers: Dispatche
     case 'market': {
       const d = msg.data;
       const barTime = d.time ?? Math.floor(Date.now() / 1000);
+
+      // lightweight-charts requires strictly ascending timestamps.
+      // Drop bars that would go backwards (can happen on reconnect or
+      // out-of-order Binance messages).
+      if (barTime < lastBarTime) break;
+
       const bar = {
         time: barTime,
         open: d.open ?? d.close ?? 0,
@@ -40,6 +47,11 @@ export function dispatchMessage(msg: Record<string, any>, dispatchers: Dispatche
         lastBarTime = barTime;
       }
 
+      if (isBackfilling) {
+        dispatchers.engine({ type: 'SET_BACKFILLING', value: false });
+        isBackfilling = false;
+      }
+
       if (d.symbol) {
         dispatchers.market({ type: 'SET_SYMBOL', symbol: d.symbol });
       }
@@ -48,6 +60,8 @@ export function dispatchMessage(msg: Record<string, any>, dispatchers: Dispatche
 
     case 'chart_reset': {
       dispatchers.market({ type: 'RESET' });
+      dispatchers.engine({ type: 'SET_BACKFILLING', value: true });
+      isBackfilling = true;
       lastBarTime = 0;
       if (msg.data?.timeframe) {
         dispatchers.market({ type: 'SET_TIMEFRAME', timeframe: msg.data.timeframe });
@@ -131,6 +145,70 @@ export function dispatchMessage(msg: Record<string, any>, dispatchers: Dispatche
       break;
     }
 
+    case 'fills_history': {
+      const fills = (msg.data as any[]).map((f: any, i: number) => ({
+        id: f.id ?? i,
+        time: f.timestamp ? f.timestamp / 1000 : 0,
+        symbol: f.symbol ?? '',
+        side: f.side ?? 'buy',
+        quantity: f.quantity ?? 0,
+        price: f.price ?? 0,
+        commission: f.commission ?? 0,
+      }));
+      dispatchers.fill({ type: 'BULK_ADD', fills });
+      break;
+    }
+
+    case 'equity_history': {
+      const points = msg.data as { timestamp: number; equity: number }[];
+      for (const p of points) {
+        dispatchers.analytics({ type: 'ADD_EQUITY_POINT', value: p.equity });
+      }
+      break;
+    }
+
+    case 'order_response': {
+      const d = msg.data;
+      const orderId = d.order_id ?? 0;
+      const status = (d.status as string) ?? 'unknown';
+      const reason = (d.reason as string) ?? '';
+      const side = (d.side as string ?? '').toUpperCase();
+      const qty = d.quantity ?? 0;
+      const price = d.price ?? 0;
+      const symbol = d.symbol ?? '';
+
+      dispatchers.engine({
+        type: 'ADD_ORDER_RESPONSE',
+        response: { orderId, status, reason, symbol, side, qty, price, time: Date.now() },
+      });
+
+      if (dispatchers.toast) {
+        switch (status) {
+          case 'accepted':
+            dispatchers.toast(`Order #${orderId} accepted: ${side} ${qty} ${symbol}`, 'info');
+            break;
+          case 'filled':
+            dispatchers.toast(`Order #${orderId} filled: ${side} ${qty} ${symbol} @ ${price.toFixed(2)}`, 'success');
+            break;
+          case 'rejected':
+            dispatchers.toast(`Order rejected: ${reason}`, 'error');
+            break;
+          case 'error':
+            dispatchers.toast(`Order error: ${reason}`, 'error');
+            break;
+        }
+      }
+      break;
+    }
+
+    case 'error': {
+      const message = (msg.data as any).message ?? 'Unknown engine error';
+      if (dispatchers.toast) {
+        dispatchers.toast(message, 'error');
+      }
+      break;
+    }
+
     case 'status': {
       const d = msg.data;
       dispatchers.engine({
@@ -145,6 +223,14 @@ export function dispatchMessage(msg: Record<string, any>, dispatchers: Dispatche
       if (dispatchers.toast && d.state === 'halted') {
         dispatchers.toast('Engine halted by risk manager', 'error');
       }
+      break;
+    }
+
+    case 'strategies': {
+      dispatchers.engine({
+        type: 'SET_AVAILABLE_STRATEGIES',
+        strategies: msg.data as string[],
+      });
       break;
     }
   }

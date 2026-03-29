@@ -2,6 +2,7 @@
 #ifdef HAS_WEB_UI
 
 #include "worker.h"
+#include "ring_buffer.h"
 #include "../core/event_json.h"
 
 #include <boost/asio.hpp>
@@ -25,25 +26,33 @@ using tcp = net::ip::tcp;
 // Command received from a WebSocket client.
 struct ws_command
 {
-    std::string command;    // "start", "pause", "stop", "order", "set_timeframe"
+    std::string command;    // "start", "pause", "stop", "order", "set_timeframe", "set_symbol", "set_strategy"
     std::string side;       // for order commands
     double quantity = 0.0;
     double price = 0.0;
     std::string order_type; // "market" or "limit"
     std::string timeframe;  // for set_timeframe (e.g. "1m", "5m", "1h")
+    std::string value;      // generic value for set_symbol, set_strategy
 };
 
 // Callback type: called when a new client connects (for sending state snapshot)
 using on_client_connect_fn = std::function<void()>;
 
 // A single WebSocket session, created per client connection.
+//
+// Lock-free design: the engine thread (producer) pushes messages into an SPSC
+// ring buffer via send(). The Boost.Asio io_context thread (consumer) pops
+// messages and feeds them to async_write. An atomic writing_ flag coordinates
+// the async_write chain startup between the two threads.
 class WsSession : public std::enable_shared_from_this<WsSession>
 {
 public:
     using command_callback_t = std::function<void(const std::string&)>;
 
-    explicit WsSession(tcp::socket socket, command_callback_t on_msg = {})
+    explicit WsSession(tcp::socket socket, net::io_context& ioc,
+                       command_callback_t on_msg = {})
         : ws_(std::move(socket))
+        , ioc_(ioc)
         , on_message_(std::move(on_msg)) {}
 
     void start()
@@ -57,30 +66,45 @@ public:
         });
     }
 
+    // Called from the engine thread (single producer).
+    // Lock-free: pushes to SPSC ring, uses CAS + net::post to kick the
+    // async_write chain on the io_context thread when needed.
     void send(const std::string& msg)
     {
-        std::lock_guard<std::mutex> lk(mu_);
-        if (!open_) return;
+        if (!open_.load(std::memory_order_acquire)) return;
 
-        // Queue the message
-        queue_.push_back(msg);
-        if (queue_.size() == 1)
-            do_write();
+        if (!ring_.try_push(msg))
+            return;  // ring full — drop (backpressure)
+
+        // If no async_write chain is active, start one on the io_context thread
+        bool expected = false;
+        if (writing_.compare_exchange_strong(expected, true,
+                                             std::memory_order_acq_rel))
+        {
+            net::post(ioc_, [self = shared_from_this()]() {
+                self->do_write();
+            });
+        }
     }
 
     bool is_open() const
     {
-        std::lock_guard<std::mutex> lk(mu_);
-        return open_;
+        return open_.load(std::memory_order_acquire);
     }
 
 private:
+    static constexpr std::size_t QUEUE_CAPACITY = 4096;
+
     websocket::stream<tcp::socket> ws_;
-    mutable std::mutex mu_;
-    bool open_ = true;
-    beast::flat_buffer buffer_;
-    std::vector<std::string> queue_;
+    net::io_context& ioc_;
+    beast::flat_buffer buffer_;          // for do_read (io_context thread only)
     command_callback_t on_message_;
+
+    // Lock-free outbound queue (SPSC: engine thread pushes, io_context pops)
+    RingBuffer<std::string, QUEUE_CAPACITY> ring_;
+    std::atomic<bool> open_{true};
+    std::atomic<bool> writing_{false};   // true while an async_write chain is active
+    std::string write_buf_;              // holds in-flight message (io_context thread only)
 
     void do_read()
     {
@@ -102,31 +126,57 @@ private:
             });
     }
 
+    // Runs exclusively on the io_context thread (single consumer).
+    // Pops one message from the ring, writes it, then chains to itself.
+    // When the ring is empty, releases writing_ and posts a deferred
+    // recheck to close the push-between-pop-and-release race window.
     void do_write()
     {
-        // mu_ must be held by caller
-        if (queue_.empty() || !open_) return;
+        if (!open_.load(std::memory_order_acquire))
+        {
+            writing_.store(false, std::memory_order_release);
+            return;
+        }
+
+        if (!ring_.try_pop(write_buf_))
+        {
+            // Ring appears empty. Release the writing flag.
+            writing_.store(false, std::memory_order_release);
+
+            // A send() may have pushed between our try_pop and the flag
+            // release, with its CAS failing because writing_ was still true.
+            // Post a deferred recheck on the io_context to catch this case.
+            // This runs after any pending net::post from send(), ensuring
+            // we see the pushed data.
+            net::post(ioc_, [self = shared_from_this()]() {
+                if (self->ring_.empty()) return;
+                bool expected = false;
+                if (self->writing_.compare_exchange_strong(
+                        expected, true, std::memory_order_acq_rel))
+                {
+                    self->do_write();
+                }
+            });
+            return;
+        }
 
         ws_.text(true);
         ws_.async_write(
-            net::buffer(queue_.front()),
+            net::buffer(write_buf_),
             [self = shared_from_this()](beast::error_code ec, std::size_t) {
-                std::lock_guard<std::mutex> lk(self->mu_);
                 if (ec)
                 {
-                    self->open_ = false;
+                    self->open_.store(false, std::memory_order_release);
+                    self->writing_.store(false, std::memory_order_release);
                     return;
                 }
-                self->queue_.erase(self->queue_.begin());
-                if (!self->queue_.empty())
-                    self->do_write();
+                self->do_write();  // chain next message
             });
     }
 
     void close()
     {
-        std::lock_guard<std::mutex> lk(mu_);
-        open_ = false;
+        open_.store(false, std::memory_order_release);
     }
 };
 
@@ -293,7 +343,7 @@ private:
                 {
                     // Create session with command callback
                     auto session = std::make_shared<WsSession>(
-                        std::move(socket),
+                        std::move(socket), ioc_,
                         [this](const std::string& msg) { on_client_message(msg); }
                     );
                     {
@@ -355,6 +405,7 @@ private:
         cmd.quantity = extract_num("quantity");
         cmd.price = extract_num("price");
         cmd.timeframe = extract("timeframe");
+        cmd.value = extract("value");
 
         std::lock_guard<std::mutex> lk(cmd_mu_);
         command_queue_.push(std::move(cmd));

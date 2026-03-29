@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useWebSocket } from '../../contexts/WebSocketContext';
 import { useEngineState } from '../../store/EngineStore';
 import { cn } from '../../utils/format';
@@ -9,11 +9,27 @@ export function TradeEntry() {
   const [quantity, setQuantity] = useState('');
   const [price, setPrice] = useState('');
   const [orderType, setOrderType] = useState<'market' | 'limit'>('market');
+  const [pendingOrder, setPendingOrder] = useState(false);
 
   const disabled = connectionState !== 'connected' || engine.status !== 'running';
 
-  function submitOrder(side: 'buy' | 'sell') {
-    if (!quantity || disabled) return;
+  // Clear pending state when we receive any order_response
+  const latestResponse = engine.orderResponses[0];
+  useEffect(() => {
+    if (latestResponse && pendingOrder) {
+      setPendingOrder(false);
+    }
+  }, [latestResponse, pendingOrder]);
+
+  // Timeout: clear pending state after 5 seconds
+  useEffect(() => {
+    if (!pendingOrder) return;
+    const timer = setTimeout(() => setPendingOrder(false), 5000);
+    return () => clearTimeout(timer);
+  }, [pendingOrder]);
+
+  const submitOrder = useCallback((side: 'buy' | 'sell') => {
+    if (!quantity || disabled || pendingOrder) return;
     const order: Record<string, unknown> = {
       command: 'order',
       side,
@@ -24,9 +40,12 @@ export function TradeEntry() {
       order.price = parseFloat(price);
     }
     send(order);
+    setPendingOrder(true);
     setQuantity('');
     setPrice('');
-  }
+  }, [quantity, price, orderType, disabled, pendingOrder, send]);
+
+  const buttonDisabled = disabled || !quantity || pendingOrder;
 
   return (
     <div className="p-3 flex flex-col gap-3">
@@ -81,21 +100,21 @@ export function TradeEntry() {
       <div className="flex gap-2">
         <button
           onClick={() => submitOrder('buy')}
-          disabled={disabled || !quantity}
+          disabled={buttonDisabled}
           className="flex-1 py-2.5 rounded text-sm font-semibold bg-[#26a69a] text-white hover:bg-[#2bbd9e] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
-          Buy
+          {pendingOrder ? 'Submitting...' : 'Buy'}
         </button>
         <button
           onClick={() => submitOrder('sell')}
-          disabled={disabled || !quantity}
+          disabled={buttonDisabled}
           className="flex-1 py-2.5 rounded text-sm font-semibold bg-[#ef5350] text-white hover:bg-[#d32f2f] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
-          Sell
+          {pendingOrder ? 'Submitting...' : 'Sell'}
         </button>
       </div>
 
-      {disabled && (
+      {disabled && !pendingOrder && (
         <p className="text-[10px] text-[#787b86] text-center">
           {connectionState !== 'connected' ? 'Disconnected from engine' : 'Engine not running'}
         </p>

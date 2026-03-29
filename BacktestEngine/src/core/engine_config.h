@@ -58,6 +58,14 @@ struct engine_config
     // This is scaffolding — full provider-based engine wiring comes later.
     std::shared_ptr<IProvider> provider;
 
+    // SQLite persistence: when non-empty, trades/portfolio/equity are stored
+    std::string db_path;
+
+    // Historical backfill: fetch N bars from REST API before streaming starts
+    int backfill_bars = 500;          // Number of historical bars to fetch on start
+    std::string backfill_interval;    // Kline interval for backfill (default: match stream)
+    std::string backfill_host;        // REST host override (empty = auto-detect from provider)
+
     // WebSocket UI: when enabled, streams events to browser clients
     bool enable_web_ui = false;
     uint16_t ws_port = 8765;

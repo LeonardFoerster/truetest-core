@@ -6,12 +6,13 @@
 #include "../orderbook/fill_model.h"
 #include "../providers/provider.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <iostream>
 #include <vector>
 #include <queue>
 #include <chrono>
 #include <iomanip>
-#include <algorithm>
 
 engine::engine(std::shared_ptr<data_handler> dh,
                std::shared_ptr<orderbook> ob,
@@ -30,10 +31,64 @@ engine::engine(std::shared_ptr<data_handler> dh,
     // Shadow mode: create tracker for simulated vs exchange fill comparison
     if (config_.mode == engine_mode::shadow)
         shadow_tracker_ = std::make_unique<ShadowTracker>();
+
+#ifdef HAS_SQLITE
+    if (!config_.db_path.empty())
+        store_ = std::make_unique<SqliteStore>(config_.db_path);
+#endif
+}
+
+void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
+{
+    if (!strategy) return;
+    strategy_ = std::move(strategy);
+    // Transfer current position state to new strategy
+    for (const auto& [symbol, pos] : portfolio_.get_positions()) {
+        strategy_->set_position_open(symbol, pos.qty > 0.0);
+    }
+}
+
+void engine::switch_symbol(const std::string& new_symbol)
+{
+#ifdef HAS_WEB_UI
+    // Reset bar aggregator
+    if (tick_aggregator_) {
+        tick_aggregator_->flush();
+        tick_aggregator_ = std::make_unique<BarAggregator>(
+            tick_bar_interval_,
+            [this](const market_event& bar) {
+                broadcast_market_with_indicators(bar);
+            });
+    }
+    bar_history_.clear();
+#endif
+
+    // Update data handler symbol
+    data_handler_->db_data_symbol.clear();
+    data_handler_->db_data_symbol.push_back(new_symbol);
+
+    // Notify strategy of new symbol context
+    strategy_->set_position_open(new_symbol, false);
+
+#ifdef HAS_WEB_UI
+    // Broadcast chart reset and status update to UI
+    if (ws_worker_) {
+        ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
+        ws_worker_->broadcast_status("running",
+            config_.provider ? config_.provider->name() : "",
+            new_symbol);
+    }
+#endif
 }
 
 std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol)
 {
+#ifdef HAS_BINANCE
+    // Paper-mode hybrid executor handles both market and limit orders
+    if (hybrid_exec_)
+        return hybrid_exec_;
+#endif
+
     auto it = execution_adapters_.find(symbol);
     if (it != execution_adapters_.end())
         return it->second;
@@ -170,7 +225,12 @@ void engine::publish_event(const event_pointer& ev)
 
 #ifdef HAS_WEB_UI
     if (ws_ring_ && !ws_ring_->try_push(ev))
+    {
         ws_drops_++;
+        // Warn on first drop and then every 1000 drops
+        if (ws_drops_ == 1 || ws_drops_ % 1000 == 0)
+            std::cerr << "  WS ring: " << ws_drops_ << " events dropped\n";
+    }
 #endif
 }
 
@@ -431,8 +491,16 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
                 config_.provider ? config_.provider->name() : "",
                 "");
         }
-        else if (cmd.command == "order" && !cmd.side.empty() && cmd.quantity > 0.0)
+        else if (cmd.command == "order")
         {
+            // Validate order parameters
+            if (cmd.side.empty() || cmd.quantity <= 0.0)
+            {
+                ws_worker_->broadcast(event_json::order_response_to_json(
+                    0, "rejected", "invalid order parameters"));
+                continue;
+            }
+
             // Build and process an order from the UI
             auto otype = (cmd.order_type == "limit") ? order_type::limit : order_type::market;
             auto oside = (cmd.side == "sell") ? order_side::sell : order_side::buy;
@@ -444,11 +512,23 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
                 symbol = data_handler_->db_data_symbol.back();
 
             auto ts = std::chrono::system_clock::now();
-            auto o = order_pool_.acquire(ts, symbol, otype, oside, cmd.quantity, price, time_in_force::ioc);
+            auto tif = (otype == order_type::limit) ? time_in_force::gtc : time_in_force::ioc;
+            auto o = order_pool_.acquire(ts, symbol, otype, oside, cmd.quantity, price, tif);
             o->set_order_id(OrderIdGenerator::next());
             o->set_earliest_eligible_ts(ts);
 
-            process_order(o, event_count, halt_requested);
+            // Broadcast acceptance
+            ws_worker_->broadcast(event_json::order_response_to_json(
+                o->get_order_id(), "accepted", "",
+                symbol, cmd.side, cmd.quantity, price));
+
+            bool result = process_order(o, event_count, halt_requested);
+            if (!result)
+            {
+                ws_worker_->broadcast(event_json::order_response_to_json(
+                    o->get_order_id(), "rejected", "risk manager halt",
+                    symbol, cmd.side, cmd.quantity, price));
+            }
         }
         else if (cmd.command == "set_timeframe" && !cmd.timeframe.empty())
         {
@@ -488,6 +568,90 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
             }
         }
         // "start" and "pause" are informational — the engine is already running in its loop
+#ifdef HAS_SQLITE
+        else if (cmd.command == "query_fills")
+        {
+            int limit = cmd.price > 0 ? static_cast<int>(cmd.price) : 200;
+            if (store_)
+            {
+                ws_worker_->broadcast(event_json::fills_history_to_json(
+                    store_->query_fills_json(cmd.timeframe, limit)));
+            }
+        }
+#endif
+        else if (cmd.command == "set_symbol" && !cmd.value.empty())
+        {
+            std::string new_symbol = cmd.value;
+            // Convert to lowercase (Binance requires lowercase)
+            std::transform(new_symbol.begin(), new_symbol.end(),
+                           new_symbol.begin(), ::tolower);
+
+            std::lock_guard<std::mutex> lk(switch_mu_);
+            pending_symbol_ = new_symbol;
+
+            ws_worker_->broadcast_status("switching",
+                config_.provider ? config_.provider->name() : "", new_symbol);
+        }
+        else if (cmd.command == "set_strategy" && !cmd.value.empty())
+        {
+            std::string new_strategy = cmd.value;
+
+            // Validate against available strategies
+            auto available = StrategyFactory::available();
+            bool valid = std::find(available.begin(), available.end(), new_strategy)
+                         != available.end();
+            if (!valid) {
+                ws_worker_->broadcast(event_json::error_to_json(
+                    "Unknown strategy: " + new_strategy));
+                continue;
+            }
+
+            std::lock_guard<std::mutex> lk(switch_mu_);
+            pending_strategy_ = new_strategy;
+
+            ws_worker_->broadcast_status("running",
+                new_strategy,
+                (!data_handler_->db_data_symbol.empty())
+                    ? data_handler_->db_data_symbol.back() : "");
+        }
+        else if (cmd.command == "backfill")
+        {
+#ifdef HAS_BINANCE
+            int count = cmd.price > 0 ? static_cast<int>(cmd.price) : 500;
+            std::string interval = cmd.value.empty() ? "1m" : cmd.value;
+
+            std::thread([this, count, interval]() {
+                std::string rest_host = "api.binance.com";
+                if (!config_.backfill_host.empty())
+                    rest_host = config_.backfill_host;
+
+                BinanceBackfill backfiller(rest_host);
+                std::string symbol = data_handler_->db_data_symbol.empty()
+                    ? "btcusdt" : data_handler_->db_data_symbol.back();
+
+                auto bars = backfiller.fetch(symbol, interval, count);
+                if (bars.empty()) return;
+
+                std::vector<std::string> jsons;
+                for (const auto& b : bars) {
+                    int64_t ts_sec = b.open_time / 1000;
+                    char buf[512];
+                    std::snprintf(buf, sizeof(buf),
+                        R"({"type":"market","data":{"time":%lld,"open":%.8g,"high":%.8g,"low":%.8g,"close":%.8g,"volume":%.2f,"indicators":{}}})",
+                        static_cast<long long>(ts_sec),
+                        b.open, b.high, b.low, b.close, b.volume);
+                    jsons.push_back(buf);
+                }
+
+                if (ws_worker_) {
+                    ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
+                    for (const auto& json : jsons) {
+                        ws_worker_->broadcast(json);
+                    }
+                }
+            }).detach();
+#endif
+        }
     }
 }
 
@@ -551,6 +715,35 @@ void engine::send_state_snapshot()
         auto json = event_json::analytics_to_json(report);
         ws_worker_->broadcast(json);
     }
+
+    // 4. Replay bar history so the chart is populated immediately
+    //    Send a chart_reset first so the client clears stale bars
+    ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
+    for (const auto& bar_json : bar_history_)
+        ws_worker_->broadcast(bar_json);
+
+#ifdef HAS_SQLITE
+    // 5. Send persisted trade and equity history
+    if (store_)
+    {
+        ws_worker_->broadcast(
+            event_json::fills_history_to_json(store_->query_fills_json("", 200)));
+        ws_worker_->broadcast(
+            event_json::equity_history_to_json(store_->query_equity_json(500)));
+    }
+#endif
+
+    // 6. Broadcast available strategies list
+    {
+        auto names = StrategyFactory::available();
+        std::string json = R"({"type":"strategies","data":[)";
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            if (i > 0) json += ",";
+            json += "\"" + names[i] + "\"";
+        }
+        json += "]}";
+        ws_worker_->broadcast(json);
+    }
 }
 
 void engine::broadcast_market_with_indicators(const market_event& mkt)
@@ -563,6 +756,11 @@ void engine::broadcast_market_with_indicators(const market_event& mkt)
     // Broadcast market event (with indicators when available) via WS worker
     auto json = event_json::to_json_with_indicators(mkt, indicators);
     ws_worker_->broadcast(json);
+
+    // Store in bar history for replaying to reconnecting clients
+    if (bar_history_.size() >= MAX_BAR_HISTORY)
+        bar_history_.erase(bar_history_.begin());
+    bar_history_.push_back(json);
 }
 #endif
 
@@ -602,13 +800,28 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     {
         auto snap = analytics_.snapshot();
         auto action = risk_manager_.check_order(*o, portfolio_, snap);
-        if (action == risk_action::halt)
+        if (action == risk_action::halt || action == risk_action::reject)
         {
-            halt_requested = true;
-            return false;
+#ifdef HAS_WEB_UI
+            if (ws_worker_)
+            {
+                const char* reason = (action == risk_action::halt)
+                    ? "risk limit breached - engine halted"
+                    : "order rejected by risk manager";
+                ws_worker_->broadcast(event_json::order_response_to_json(
+                    o->get_order_id(), "rejected", reason,
+                    o->get_symbol(),
+                    o->get_side() == order_side::buy ? "buy" : "sell",
+                    o->get_quantity(), o->get_price()));
+            }
+#endif
+            if (action == risk_action::halt)
+            {
+                halt_requested = true;
+                return false;
+            }
+            return true; // reject: drop order, continue engine
         }
-        if (action == risk_action::reject)
-            return true; // drop order, continue engine
     }
 
     log_event(*o);
@@ -640,6 +853,9 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             auto fill_ptr = fill_pool_.acquire(f);
             log_event(f);
             portfolio_.on_fill(f);
+#ifdef HAS_SQLITE
+            if (store_) store_->insert_fill(f);
+#endif
             strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
             publish_event(fill_ptr);
             if (!config_.is_threaded())
@@ -648,6 +864,17 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             // Shadow mode: track simulated fill for comparison
             if (config_.mode == engine_mode::shadow && shadow_tracker_)
                 shadow_tracker_->on_simulated_fill(f);
+
+#ifdef HAS_WEB_UI
+            if (ws_worker_)
+            {
+                ws_worker_->broadcast(event_json::order_response_to_json(
+                    f.get_order_id(), "filled", "",
+                    f.get_symbol(),
+                    f.get_side() == order_side::buy ? "buy" : "sell",
+                    f.get_filled_quantity(), f.get_fill_price()));
+            }
+#endif
 
             event_count++;
 
@@ -658,6 +885,11 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                 auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
                 if (post_action == risk_action::halt)
                 {
+#ifdef HAS_WEB_UI
+                    if (ws_worker_)
+                        ws_worker_->broadcast(event_json::error_to_json(
+                            "Risk manager halted engine", "risk"));
+#endif
                     halt_requested = true;
                     return false;
                 }
@@ -707,6 +939,51 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     if (!preset_has_mm_worker(config_.threading))
         market_maker_.replenish(ob, last_mid_price_);
 
+#ifdef HAS_BINANCE
+    // Seed the hybrid executor's orderbook and check pending limit fills
+    if (hybrid_exec_) {
+        auto& hbook = hybrid_exec_->get_book();
+        hbook->clear();
+        double spread_step = last_mid_price_ * 0.0001;
+        for (int i = 1; i <= 10; ++i) {
+            double bid_px = last_mid_price_ - i * spread_step;
+            double ask_px = last_mid_price_ + i * spread_step;
+            quantity qty = static_cast<quantity>(1e8);
+            hbook->add_order(std::make_shared<order>(
+                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
+                side::buy, Price::from_double(bid_px), qty));
+            hbook->add_order(std::make_shared<order>(
+                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
+                side::sell, Price::from_double(ask_px), qty));
+        }
+        hybrid_exec_->update_mid_price(last_mid_price_);
+        hybrid_exec_->update_last_price(last_mid_price_);
+
+        // Poll for any limit fills triggered by the new price levels
+        std::vector<fill_event> limit_fills;
+        if (hybrid_exec_->poll_fills(limit_fills)) {
+            for (auto& f : limit_fills) {
+                auto fill_ptr = fill_pool_.acquire(f);
+                portfolio_.on_fill(f);
+                strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+                publish_event(fill_ptr);
+                if (!config_.is_threaded())
+                    analytics_.on_event(fill_ptr);
+#ifdef HAS_WEB_UI
+                if (ws_worker_) {
+                    ws_worker_->broadcast(event_json::order_response_to_json(
+                        f.get_order_id(), "filled", "",
+                        f.get_symbol(),
+                        f.get_side() == order_side::buy ? "buy" : "sell",
+                        f.get_filled_quantity(), f.get_fill_price()));
+                }
+#endif
+                event_count++;
+            }
+        }
+    }
+#endif
+
     // Process market event through strategy
     auto mkt_ptr = market_pool_.acquire(mkt);
     auto order_opt = strategy_->on_market(mkt);
@@ -715,6 +992,15 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     if (!config_.is_threaded())
         analytics_.on_event(mkt_ptr);
     event_count++;
+
+#ifdef HAS_SQLITE
+    if (store_)
+    {
+        auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            timestamp.time_since_epoch()).count();
+        store_->insert_equity_point(ts_ms, portfolio_.get_equity(last_mid_price_));
+    }
+#endif
 
 #ifdef HAS_WEB_UI
     broadcast_market_with_indicators(mkt);
@@ -744,12 +1030,66 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     auto ob = orderbook_registry_.get_or_create(rec.symbol);
     market_maker_.replenish(ob, last_mid_price_);
 
+#ifdef HAS_BINANCE
+    // Seed the hybrid executor's orderbook and check pending limit fills
+    if (hybrid_exec_) {
+        auto& hbook = hybrid_exec_->get_book();
+        hbook->clear();
+        double spread_step = last_mid_price_ * 0.0001;
+        for (int i = 1; i <= 10; ++i) {
+            double bid_px = last_mid_price_ - i * spread_step;
+            double ask_px = last_mid_price_ + i * spread_step;
+            quantity qty = static_cast<quantity>(1e8);
+            hbook->add_order(std::make_shared<order>(
+                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
+                side::buy, Price::from_double(bid_px), qty));
+            hbook->add_order(std::make_shared<order>(
+                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
+                side::sell, Price::from_double(ask_px), qty));
+        }
+        hybrid_exec_->update_mid_price(last_mid_price_);
+        hybrid_exec_->update_last_price(last_mid_price_);
+
+        // Poll for any limit fills triggered by the new price levels
+        std::vector<fill_event> limit_fills;
+        if (hybrid_exec_->poll_fills(limit_fills)) {
+            for (auto& f : limit_fills) {
+                auto fill_ptr = fill_pool_.acquire(f);
+                portfolio_.on_fill(f);
+                strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+                publish_event(fill_ptr);
+                if (!config_.is_threaded())
+                    analytics_.on_event(fill_ptr);
+#ifdef HAS_WEB_UI
+                if (ws_worker_) {
+                    ws_worker_->broadcast(event_json::order_response_to_json(
+                        f.get_order_id(), "filled", "",
+                        f.get_symbol(),
+                        f.get_side() == order_side::buy ? "buy" : "sell",
+                        f.get_filled_quantity(), f.get_fill_price()));
+                }
+#endif
+                event_count++;
+            }
+        }
+    }
+#endif
+
     auto tick_ptr = tick_pool_.acquire(te);
     log_event(te);
     publish_event(tick_ptr);
     if (!config_.is_threaded())
         analytics_.on_event(tick_ptr);
     event_count++;
+
+#ifdef HAS_SQLITE
+    if (store_)
+    {
+        auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            rec.timestamp.time_since_epoch()).count();
+        store_->insert_equity_point(ts_ms, portfolio_.get_equity(last_mid_price_));
+    }
+#endif
 
 #ifdef HAS_WEB_UI
     // Feed tick into bar aggregator for charting (emits bars via callback)
@@ -780,6 +1120,9 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
             for (auto& f : fills)
             {
                 auto fill_ptr = fill_pool_.acquire(f);
+#ifdef HAS_SQLITE
+                if (store_) store_->insert_fill(f);
+#endif
                 portfolio_.on_fill(f);
                 strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
@@ -799,7 +1142,71 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path);
 
+#ifdef HAS_BINANCE
+    // Create hybrid executor for paper-mode limit order fills
+    if (config_.provider && config_.provider->name() == "binance"
+        && config_.mode != engine_mode::live)
+    {
+        auto binance_exec = std::dynamic_pointer_cast<BinanceExecutor>(
+            config_.provider->get_execution_adapter());
+        if (binance_exec) {
+            auto book = std::make_shared<orderbook>();
+            hybrid_exec_ = std::make_shared<HybridExecutor>(
+                binance_exec, book, config_.fee_model, config_.fill_model);
+        }
+    }
+#endif
+
     start_workers();
+
+#if defined(HAS_BINANCE) && defined(HAS_WEB_UI)
+    if (config_.backfill_bars > 0
+        && config_.provider && config_.provider->name() == "binance")
+    {
+        std::string interval = config_.backfill_interval;
+        if (interval.empty()) interval = "1m";
+
+        // Determine REST host (match testnet if configured)
+        std::string rest_host = "api.binance.com";
+        if (!config_.backfill_host.empty()) {
+            rest_host = config_.backfill_host;
+        }
+
+        BinanceBackfill backfiller(rest_host);
+        std::string symbol = data_handler_->db_data_symbol.empty()
+            ? "btcusdt" : data_handler_->db_data_symbol.back();
+
+        std::cerr << "  Backfilling " << config_.backfill_bars
+                  << " bars for " << symbol << " (" << interval << ")...\n";
+
+        auto bars = backfiller.fetch(symbol, interval, config_.backfill_bars);
+
+        if (!bars.empty()) {
+            std::cerr << "  Backfill: " << bars.size() << " bars loaded\n";
+
+            for (const auto& b : bars) {
+                int64_t ts_sec = b.open_time / 1000;
+
+                char buf[512];
+                std::snprintf(buf, sizeof(buf),
+                    R"({"type":"market","data":{"time":%lld,"open":%.8g,"high":%.8g,"low":%.8g,"close":%.8g,"volume":%.2f,"indicators":{}}})",
+                    static_cast<long long>(ts_sec),
+                    b.open, b.high, b.low, b.close, b.volume);
+
+                if (bar_history_.size() >= MAX_BAR_HISTORY)
+                    bar_history_.erase(bar_history_.begin());
+                bar_history_.push_back(buf);
+            }
+
+            if (ws_worker_) {
+                ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
+                for (const auto& json : bar_history_) {
+                    ws_worker_->broadcast(json);
+                }
+            }
+        }
+    }
+#endif
 
     const auto start = std::chrono::high_resolution_clock::now();
     std::size_t event_count = 0;
@@ -835,6 +1242,23 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
             send_state_snapshot();
 #endif
 
+        // Apply pending runtime switches
+        {
+            std::lock_guard<std::mutex> lk(switch_mu_);
+            if (!pending_symbol_.empty()) {
+                std::string new_sym = std::move(pending_symbol_);
+                pending_symbol_.clear();
+                switch_symbol(new_sym);
+            }
+            if (!pending_strategy_.empty()) {
+                std::string new_strat = std::move(pending_strategy_);
+                pending_strategy_.clear();
+                strategy_params params;
+                params.balance = config_.initial_balance;
+                set_strategy(StrategyFactory::create(new_strat, params));
+            }
+        }
+
         auto now_report = std::chrono::steady_clock::now();
         if (now_report - last_report_time >= std::chrono::milliseconds(200))
         {
@@ -852,6 +1276,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
               << portfolio_.get_total_trades() << " trades in "
               << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
 
+#ifdef HAS_SQLITE
+    if (store_) store_->flush_equity_batch();
+#endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
 }
@@ -863,6 +1290,21 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path);
 
+#ifdef HAS_BINANCE
+    // Create hybrid executor for paper-mode limit order fills
+    if (config_.provider && config_.provider->name() == "binance"
+        && config_.mode != engine_mode::live)
+    {
+        auto binance_exec = std::dynamic_pointer_cast<BinanceExecutor>(
+            config_.provider->get_execution_adapter());
+        if (binance_exec) {
+            auto book = std::make_shared<orderbook>();
+            hybrid_exec_ = std::make_shared<HybridExecutor>(
+                binance_exec, book, config_.fee_model, config_.fill_model);
+        }
+    }
+#endif
+
     // Create tick-to-bar aggregator for WebSocket UI charting
 #ifdef HAS_WEB_UI
     tick_aggregator_ = std::make_unique<BarAggregator>(
@@ -873,6 +1315,54 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 #endif
 
     start_workers();
+
+#if defined(HAS_BINANCE) && defined(HAS_WEB_UI)
+    if (config_.backfill_bars > 0
+        && config_.provider && config_.provider->name() == "binance")
+    {
+        std::string interval = config_.backfill_interval;
+        if (interval.empty()) interval = "1m";
+
+        std::string rest_host = "api.binance.com";
+        if (!config_.backfill_host.empty()) {
+            rest_host = config_.backfill_host;
+        }
+
+        BinanceBackfill backfiller(rest_host);
+        std::string symbol = data_handler_->db_data_symbol.empty()
+            ? "btcusdt" : data_handler_->db_data_symbol.back();
+
+        std::cerr << "  Backfilling " << config_.backfill_bars
+                  << " bars for " << symbol << " (" << interval << ")...\n";
+
+        auto bars = backfiller.fetch(symbol, interval, config_.backfill_bars);
+
+        if (!bars.empty()) {
+            std::cerr << "  Backfill: " << bars.size() << " bars loaded\n";
+
+            for (const auto& b : bars) {
+                int64_t ts_sec = b.open_time / 1000;
+
+                char buf[512];
+                std::snprintf(buf, sizeof(buf),
+                    R"({"type":"market","data":{"time":%lld,"open":%.8g,"high":%.8g,"low":%.8g,"close":%.8g,"volume":%.2f,"indicators":{}}})",
+                    static_cast<long long>(ts_sec),
+                    b.open, b.high, b.low, b.close, b.volume);
+
+                if (bar_history_.size() >= MAX_BAR_HISTORY)
+                    bar_history_.erase(bar_history_.begin());
+                bar_history_.push_back(buf);
+            }
+
+            if (ws_worker_) {
+                ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
+                for (const auto& json : bar_history_) {
+                    ws_worker_->broadcast(json);
+                }
+            }
+        }
+    }
+#endif
 
     const auto start = std::chrono::high_resolution_clock::now();
     std::size_t event_count = 0;
@@ -893,6 +1383,23 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
         if (ws_worker_ && ws_worker_->has_pending_connect())
             send_state_snapshot();
 #endif
+
+        // Apply pending runtime switches
+        {
+            std::lock_guard<std::mutex> lk(switch_mu_);
+            if (!pending_symbol_.empty()) {
+                std::string new_sym = std::move(pending_symbol_);
+                pending_symbol_.clear();
+                switch_symbol(new_sym);
+            }
+            if (!pending_strategy_.empty()) {
+                std::string new_strat = std::move(pending_strategy_);
+                pending_strategy_.clear();
+                strategy_params params;
+                params.balance = config_.initial_balance;
+                set_strategy(StrategyFactory::create(new_strat, params));
+            }
+        }
 
         auto now_report = std::chrono::steady_clock::now();
         if (now_report - last_report_time >= std::chrono::milliseconds(200))
@@ -915,6 +1422,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     if (tick_aggregator_) tick_aggregator_->flush();
 #endif
 
+#ifdef HAS_SQLITE
+    if (store_) store_->flush_equity_batch();
+#endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
 }
@@ -1172,6 +1682,16 @@ void engine::run()
         }
     }
 
+#ifdef HAS_WEB_UI
+    if (ws_worker_)
+    {
+        if (worker_failed_.load(std::memory_order_acquire))
+            ws_worker_->broadcast(event_json::error_to_json("Worker thread crashed", "engine"));
+        else if (halt_flag_.load(std::memory_order_acquire))
+            ws_worker_->broadcast(event_json::error_to_json("Risk manager halted engine", "risk"));
+    }
+#endif
+
     // Drain any remaining pending orders after all market data
     while (!pending_orders.empty())
     {
@@ -1197,6 +1717,35 @@ void engine::run()
 
     double throughput = static_cast<double>(event_count) / (elapsed_ms / 1000.0);
     std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
+
+#ifdef HAS_SQLITE
+    if (store_)
+    {
+        store_->flush_equity_batch();
+        auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+        // Build positions JSON array
+        std::string pos_json = "[";
+        bool first = true;
+        for (const auto& [sym, pos] : portfolio_.get_positions())
+        {
+            if (pos.qty <= 0.0) continue;
+            if (!first) pos_json += ",";
+            first = false;
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                R"({"symbol":"%s","qty":%.8g,"cost_basis":%.6f})",
+                sym.c_str(), pos.qty, pos.cost_basis);
+            pos_json += buf;
+        }
+        pos_json += "]";
+
+        store_->insert_portfolio_snapshot(
+            portfolio_.get_cash(), portfolio_.get_equity(last_mid_price_),
+            pos_json, portfolio_.get_total_trades(), ts_ms);
+    }
+#endif
 
     if (event_logger_) event_logger_->flush();
     stop_workers();
@@ -1271,6 +1820,9 @@ void engine::run_tick_data()
                 for (auto& f : fills)
                 {
                     auto fill_ptr = fill_pool_.acquire(f);
+#ifdef HAS_SQLITE
+                    if (store_) store_->insert_fill(f);
+#endif
                     portfolio_.on_fill(f);
                     strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                     publish_event(fill_ptr);
@@ -1330,6 +1882,9 @@ void engine::run_tick_data()
                 for (auto& f : fills)
                 {
                     auto fill_ptr = fill_pool_.acquire(f);
+#ifdef HAS_SQLITE
+                    if (store_) store_->insert_fill(f);
+#endif
                     portfolio_.on_fill(f);
                     strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                     publish_event(fill_ptr);
@@ -1370,6 +1925,9 @@ void engine::run_tick_data()
     double throughput = static_cast<double>(event_count) / (elapsed_ms / 1000.0);
     std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
 
+#ifdef HAS_SQLITE
+    if (store_) store_->flush_equity_batch();
+#endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
 }

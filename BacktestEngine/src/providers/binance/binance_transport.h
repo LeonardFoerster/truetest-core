@@ -182,6 +182,31 @@ public:
         close();
     }
 
+    // Reconnect to a different symbol/stream without creating a new transport.
+    // Called from the streaming thread when a symbol switch is requested.
+    bool reconnect_stream(const std::string& new_symbol,
+                          const std::string& new_stream_type)
+    {
+        // Close existing connection
+        request_stop();
+
+        // Wait for close to complete
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // Update stream parameters
+        symbol_ = new_symbol;
+        stream_type_ = new_stream_type;
+
+        // Reset state
+        stopped_ = false;
+        reconnect_attempts_ = 0;
+
+        // Reconnect
+        ioc_.restart();
+        ws_.reset();
+        return open();
+    }
+
 private:
     std::string symbol_;
     std::string stream_type_;

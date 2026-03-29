@@ -78,10 +78,13 @@ int main(int argc, char* argv[])
     std::string cli_replay_data_path;
     bool cli_live = false;
     std::string cli_mode;
+    std::string cli_db_path = "truetest.db";
     double cli_balance = 10000.0;
     double cli_risk_fraction = 0.02;
     double cli_sl_pct = 0.005;   // 0.5% default stop loss
     double cli_tp_pct = 0.01;    // 1.0% default take profit
+    int cli_backfill = 500;
+    std::string cli_backfill_interval;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -137,6 +140,10 @@ int main(int argc, char* argv[])
             cli_live = true;
         else if (std::strcmp(argv[i], "--mode") == 0 && i + 1 < argc)
             cli_mode = argv[++i];
+        else if (std::strcmp(argv[i], "--db") == 0 && i + 1 < argc)
+            cli_db_path = argv[++i];
+        else if (std::strcmp(argv[i], "--no-db") == 0)
+            cli_db_path.clear();
         else if (std::strcmp(argv[i], "--balance") == 0 && i + 1 < argc)
             cli_balance = std::stod(argv[++i]);
         else if (std::strcmp(argv[i], "--risk-fraction") == 0 && i + 1 < argc)
@@ -145,6 +152,10 @@ int main(int argc, char* argv[])
             cli_sl_pct = std::stod(argv[++i]);
         else if (std::strcmp(argv[i], "--tp") == 0 && i + 1 < argc)
             cli_tp_pct = std::stod(argv[++i]);
+        else if (std::strcmp(argv[i], "--backfill") == 0 && i + 1 < argc)
+            cli_backfill = std::stoi(argv[++i]);
+        else if (std::strcmp(argv[i], "--backfill-interval") == 0 && i + 1 < argc)
+            cli_backfill_interval = argv[++i];
     }
     // --- Replay mode: skip TUI, replay events from log ---
     if (!replay_path.empty())
@@ -199,6 +210,16 @@ int main(int argc, char* argv[])
         prov_cfg.enable_web_ui = enable_web_ui;
         prov_cfg.ws_port = ws_port;
         prov_cfg.initial_balance = cli_balance;
+        prov_cfg.db_path = cli_db_path;
+        prov_cfg.backfill_bars = cli_backfill;
+        prov_cfg.backfill_interval = cli_backfill_interval;
+        // Map WS host to REST host for backfill
+        if (!cli_host.empty()) {
+            if (cli_host.find("testnet") != std::string::npos)
+                prov_cfg.backfill_host = "testnet.binance.vision";
+            else
+                prov_cfg.backfill_host = "api.binance.com";
+        }
 
         if (!thread_preset_str.empty())
             prov_cfg.threading = string_to_preset(thread_preset_str);
@@ -512,6 +533,7 @@ int main(int argc, char* argv[])
     config.seed = seed;
     config.event_log_path = event_log_path;
     config.disable_pinning = no_pin;
+    config.db_path = cli_db_path;
 
     // Thread preset: CLI override or auto-detect
     if (!thread_preset_str.empty())

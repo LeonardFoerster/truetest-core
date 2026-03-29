@@ -10,6 +10,7 @@ option(ENABLE_LIVE_DATA "Build with WebSocket live data feed (requires Boost.Bea
 option(ENABLE_DEBUG "Build with performance instrumentation (requires Abseil)" OFF)
 option(ENABLE_WEB_UI "Build with WebSocket UI server (requires Boost.Beast)" OFF)
 option(ENABLE_BINANCE "Build with Binance exchange provider" OFF)
+option(ENABLE_SQLITE "SQLite persistence for trades/portfolio" ON)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 
 # ── Core engine sources (no external dependencies) ────────────────────────────
@@ -156,9 +157,19 @@ if(ENABLE_BINANCE)
 
     target_sources(truetest PRIVATE
         BacktestEngine/src/providers/binance/binance_register.cpp
+        BacktestEngine/src/providers/binance/binance_backfill.h
     )
     target_link_libraries(truetest PRIVATE Boost::headers OpenSSL::SSL OpenSSL::Crypto)
     target_compile_definitions(truetest PRIVATE HAS_BINANCE)
+endif()
+
+# ── Optional SQLite persistence ──────────────────────────────────────────────
+if(ENABLE_SQLITE)
+    find_package(SQLite3 REQUIRED)
+
+    target_sources(truetest PRIVATE BacktestEngine/src/data/sqlite_store.cpp)
+    target_link_libraries(truetest PRIVATE SQLite::SQLite3)
+    target_compile_definitions(truetest PRIVATE HAS_SQLITE)
 endif()
 
 # ── Optional debug instrumentation (Abseil) ──────────────────────────────────
@@ -274,6 +285,12 @@ if(BUILD_TESTS)
 
     if(NOT MSVC)
         target_compile_options(truetest_tests PRIVATE -Wall -Wextra)
+    endif()
+
+    if(ENABLE_SQLITE)
+        target_sources(truetest_tests PRIVATE BacktestEngine/src/data/sqlite_store.cpp)
+        target_link_libraries(truetest_tests PRIVATE SQLite::SQLite3)
+        target_compile_definitions(truetest_tests PRIVATE HAS_SQLITE)
     endif()
 
     if(ENABLE_DEBUG)

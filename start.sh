@@ -1,93 +1,108 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── TrueTest All-in-One Start Script ────────────────────────────────────────
+# ── TrueTest Start Script ──────────────────────────────────────────────────
 #
-# Usage:
-#   ./start.sh                        Build + start engine + open UI
-#   ./start.sh --dev                  Build + engine + frontend dev server (hot reload)
-#   ./start.sh --build-only           Build everything, don't start
-#   ./start.sh --no-build             Skip build, start directly
-#   ./start.sh --binance <symbol>     Live Binance trade stream (e.g. btcusdt)
-#   ./start.sh --binance-kline <sym>  Live Binance kline_1m stream
-#   ./start.sh --provider local --path market_data.csv --strategy sma
+# All engine and build settings are configured in the section below.
+# Edit the variables, then run:  ./start.sh
 #
-# Script flags:
-#   --dev             Use Vite dev server (hot reload) instead of static build
-#   --build-only      Build everything, don't start
-#   --no-build        Skip build, start directly
-#   --no-browser      Don't auto-open the browser
-#   --ws-port <port>  WebSocket port (default: 8765)
-#   --binance <sym>   Shortcut: --provider binance --symbol <sym> --stream trade
-#   --binance-kline <sym>  Shortcut: --provider binance --symbol <sym> --stream kline_1m
-#
-# The UI includes a timeframe selector (1s–1h) that controls how trade-stream
-# ticks are aggregated into OHLCV bars on the chart. Chart updates are
-# incremental for low-latency rendering during live streaming.
-#
-# Engine arguments are passed through after the script flags.
 # ────────────────────────────────────────────────────────────────────────────
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$ROOT/build"
 WEB_DIR="$ROOT/web"
 BINARY="$BUILD_DIR/truetest"
-WS_PORT=8765
-VITE_PORT=5173
 
-# Defaults
-MODE="full"          # full | dev | build-only | no-build
-ENGINE_ARGS=()
-OPEN_BROWSER=true
-ENABLE_BINANCE=false
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║                         CONFIGURATION                                  ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
 
-# ── Parse flags ─────────────────────────────────────────────────────────────
+# ── Script mode ────────────────────────────────────────────────────────────
+# "full"       → build + start engine + build frontend + serve
+# "dev"        → build + start engine + Vite dev server (hot reload)
+# "build-only" → build everything, don't start
+# "no-build"   → skip build, start directly
+MODE="dev"
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --dev)
-            MODE="dev"
-            shift
-            ;;
-        --build-only)
-            MODE="build-only"
-            shift
-            ;;
-        --no-build)
-            MODE="no-build"
-            shift
-            ;;
-        --no-browser)
-            OPEN_BROWSER=false
-            shift
-            ;;
-        --ws-port)
-            WS_PORT="$2"
-            shift 2
-            ;;
-        --binance)
-            ENABLE_BINANCE=true
-            ENGINE_ARGS+=(--provider binance --symbol "$2" --stream trade)
-            shift 2
-            ;;
-        --binance-kline)
-            ENABLE_BINANCE=true
-            ENGINE_ARGS+=(--provider binance --symbol "$2" --stream kline_1m)
-            shift 2
-            ;;
-        --help|-h)
-            head -26 "$0" | tail -22
-            exit 0
-            ;;
-        *)
-            ENGINE_ARGS+=("$1")
-            shift
-            ;;
-    esac
-done
+# ── CMake build flags ─────────────────────────────────────────────────────
+ENABLE_WEB_UI=ON          # WebSocket dashboard (requires Boost)
+ENABLE_BINANCE=ON         # Binance live WebSocket streaming
+ENABLE_LIVE_DATA=OFF      # Generic WebSocket data source
+ENABLE_POSTGRESQL=OFF     # PostgreSQL backend (needs libpqxx/vcpkg)
+ENABLE_SQLITE=ON          # SQLite persistence for trades/portfolio
+ENABLE_DEBUG=OFF          # Performance instrumentation (needs Abseil)
+ENABLE_TSAN=OFF           # ThreadSanitizer
+BUILD_TESTS=ON            # GoogleTest suite
 
-# ── Colors ──────────────────────────────────────────────────────────────────
+# ── Data provider ─────────────────────────────────────────────────────────
+# "local"   → read from a CSV file (set PROVIDER_PATH below)
+# "binance" → live WebSocket stream from Binance
+PROVIDER="binance"
 
+# ── Local provider settings ───────────────────────────────────────────────
+PROVIDER_PATH="$ROOT/market_data.csv"   # CSV file for local provider
+FORMAT="bar"                             # "bar" (OHLCV) or "tick"
+
+# ── Binance provider settings ─────────────────────────────────────────────
+SYMBOL="btcusdt"           # Binance symbol (lowercase)
+STREAM="trade"             # "trade" (tick data) or "kline_1m" (1-min bars)
+API_KEY=""                 # Binance API key (for live execution, optional)
+API_SECRET=""              # Binance API secret (optional)
+BINANCE_HOST=""            # Override host (e.g. testnet: "testnet.binance.vision")
+BINANCE_PORT=""            # Override port
+
+# ── Strategy ──────────────────────────────────────────────────────────────
+# "mean-reversion" | "sma" | "ma-crossover"
+STRATEGY="mean-reversion"
+SMA_PERIOD=20              # SMA lookback window
+
+# ── Portfolio / risk ──────────────────────────────────────────────────────
+BALANCE=10000.0            # Starting cash balance
+RISK_FRACTION=0.02         # Fraction of equity per trade (0.02 = 2%)
+STOP_LOSS=0.005            # Stop-loss percentage (0.005 = 0.5%)
+TAKE_PROFIT=0.01           # Take-profit percentage (0.01 = 1.0%)
+
+# ── Fee model ─────────────────────────────────────────────────────────────
+# "none" | "fixed" | "tiered"
+FEE_MODEL="none"
+FEE_VALUE=0.0              # For fixed: flat fee per trade
+MAKER_RATE=0.0             # For tiered: maker rate
+TAKER_RATE=0.0             # For tiered: taker rate
+
+# ── Engine mode ───────────────────────────────────────────────────────────
+# "" (default backtest) | "shadow" (compare sim vs exchange) | "live" (execute)
+ENGINE_MODE=""
+LIVE_EXECUTION=false       # Pass --live flag (enables real order submission)
+
+# ── Threading ─────────────────────────────────────────────────────────────
+# "" (auto-detect) | "inline" | "light" | "standard" | "full" | "extended"
+THREAD_PRESET=""
+NO_PIN=false               # Disable CPU affinity pinning
+SEED=0                     # RNG seed (0 = random)
+
+# ── Historical backfill ──────────────────────────────────────────────────
+BACKFILL_BARS=500             # Number of historical candles to load on start (0 = disabled)
+BACKFILL_INTERVAL=""          # Kline interval for backfill (empty = match stream type)
+
+# ── WebSocket UI ──────────────────────────────────────────────────────────
+WS_PORT=8765               # Engine WebSocket broadcast port
+VITE_PORT=5173             # Frontend dev server port
+OPEN_BROWSER=true          # Auto-open browser on start
+
+# ── Event logging ─────────────────────────────────────────────────────────
+# ── SQLite persistence ────────────────────────────────────────────────────
+DB_PATH="truetest.db"      # SQLite database path (empty = no persistence)
+
+# ── Event logging ─────────────────────────────────────────────────────
+EVENT_LOG_PATH=""           # Binary event log output (e.g. "events.bin")
+RECORD_PATH=""              # Record raw transport data (for replay)
+REPLAY_DATA_PATH=""         # Replay previously recorded data
+
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║                     END OF CONFIGURATION                               ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
+
+# ── Colors ─────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -100,10 +115,8 @@ ok()    { echo -e "${GREEN}[ok]${NC}    $*"; }
 warn()  { echo -e "${YELLOW}[warn]${NC}  $*"; }
 fail()  { echo -e "${RED}[fail]${NC}  $*"; exit 1; }
 
-# ── Cleanup on exit ────────────────────────────────────────────────────────
-
+# ── Cleanup on exit ───────────────────────────────────────────────────────
 PIDS=()
-
 cleanup() {
     echo ""
     info "Shutting down..."
@@ -115,18 +128,22 @@ cleanup() {
     done
     ok "Done."
 }
-
 trap cleanup EXIT INT TERM
 
-# ── Build C++ engine ────────────────────────────────────────────────────────
-
+# ── Build C++ engine ──────────────────────────────────────────────────────
 build_engine() {
-    local cmake_flags=(-DENABLE_WEB_UI=ON)
-    if [[ "$ENABLE_BINANCE" == true ]]; then
-        cmake_flags+=(-DENABLE_BINANCE=ON)
-    fi
+    local cmake_flags=(
+        -DENABLE_WEB_UI="$ENABLE_WEB_UI"
+        -DENABLE_BINANCE="$ENABLE_BINANCE"
+        -DENABLE_LIVE_DATA="$ENABLE_LIVE_DATA"
+        -DENABLE_POSTGRESQL="$ENABLE_POSTGRESQL"
+        -DENABLE_SQLITE="$ENABLE_SQLITE"
+        -DENABLE_DEBUG="$ENABLE_DEBUG"
+        -DENABLE_TSAN="$ENABLE_TSAN"
+        -DBUILD_TESTS="$BUILD_TESTS"
+    )
 
-    info "Configuring C++ engine... (flags: ${cmake_flags[*]})"
+    info "Configuring C++ engine... (${cmake_flags[*]})"
     cmake -B "$BUILD_DIR" "${cmake_flags[@]}" -Wno-dev "$ROOT" > /dev/null 2>&1
 
     info "Building C++ engine..."
@@ -138,46 +155,102 @@ build_engine() {
     ok "Engine built: $BINARY"
 }
 
-# ── Build frontend ──────────────────────────────────────────────────────────
-
+# ── Build frontend ────────────────────────────────────────────────────────
 build_frontend() {
     if [[ ! -d "$WEB_DIR/node_modules" ]]; then
         info "Installing frontend dependencies..."
         (cd "$WEB_DIR" && npm install --silent)
     fi
-
     info "Building frontend..."
     (cd "$WEB_DIR" && npx vite build --outDir "$BUILD_DIR/web-dist" --emptyOutDir > /dev/null 2>&1)
     ok "Frontend built: $BUILD_DIR/web-dist/"
 }
 
-# ── Start engine ────────────────────────────────────────────────────────────
+# ── Assemble engine CLI args ──────────────────────────────────────────────
+build_engine_args() {
+    ENGINE_ARGS=(--web-ui --ws-port "$WS_PORT")
 
-start_engine() {
-    local args=(--web-ui --ws-port "$WS_PORT")
+    # Provider
+    ENGINE_ARGS+=(--provider "$PROVIDER")
 
-    # If no provider/path/strategy given, use defaults
-    if [[ ${#ENGINE_ARGS[@]} -eq 0 ]]; then
-        if [[ -f "$ROOT/market_data.csv" ]]; then
-            args+=(--provider local --path "$ROOT/market_data.csv" --strategy sma)
-            info "Using default: local provider, market_data.csv, SMA strategy"
+    if [[ "$PROVIDER" == "local" ]]; then
+        ENGINE_ARGS+=(--path "$PROVIDER_PATH")
+        if [[ "$FORMAT" != "bar" ]]; then ENGINE_ARGS+=(--format "$FORMAT"); fi
+    fi
+
+    if [[ "$PROVIDER" == "binance" ]]; then
+        if [[ -n "$SYMBOL" ]];        then ENGINE_ARGS+=(--symbol "$SYMBOL"); fi
+        if [[ -n "$STREAM" ]];        then ENGINE_ARGS+=(--stream "$STREAM"); fi
+        if [[ -n "$API_KEY" ]];       then ENGINE_ARGS+=(--api-key "$API_KEY"); fi
+        if [[ -n "$API_SECRET" ]];    then ENGINE_ARGS+=(--api-secret "$API_SECRET"); fi
+        if [[ -n "$BINANCE_HOST" ]];  then ENGINE_ARGS+=(--host "$BINANCE_HOST"); fi
+        if [[ -n "$BINANCE_PORT" ]];  then ENGINE_ARGS+=(--port "$BINANCE_PORT"); fi
+    fi
+
+    # Strategy
+    ENGINE_ARGS+=(--strategy "$STRATEGY")
+    ENGINE_ARGS+=(--sma-period "$SMA_PERIOD")
+
+    # Portfolio / risk
+    ENGINE_ARGS+=(--balance "$BALANCE")
+    ENGINE_ARGS+=(--risk-fraction "$RISK_FRACTION")
+    ENGINE_ARGS+=(--sl "$STOP_LOSS")
+    ENGINE_ARGS+=(--tp "$TAKE_PROFIT")
+
+    # Fees
+    if [[ "$FEE_MODEL" != "none" ]]; then
+        ENGINE_ARGS+=(--fee "$FEE_MODEL")
+        ENGINE_ARGS+=(--fee-value "$FEE_VALUE")
+        if [[ "$FEE_MODEL" == "tiered" ]]; then
+            ENGINE_ARGS+=(--maker-rate "$MAKER_RATE")
+            ENGINE_ARGS+=(--taker-rate "$TAKER_RATE")
         fi
-    else
-        args+=("${ENGINE_ARGS[@]}")
+    fi
+
+    # Engine mode
+    if [[ -n "$ENGINE_MODE" ]];        then ENGINE_ARGS+=(--mode "$ENGINE_MODE"); fi
+    if [[ "$LIVE_EXECUTION" == true ]]; then ENGINE_ARGS+=(--live); fi
+
+    # Threading
+    if [[ -n "$THREAD_PRESET" ]];   then ENGINE_ARGS+=(--thread-preset "$THREAD_PRESET"); fi
+    if [[ "$NO_PIN" == true ]];     then ENGINE_ARGS+=(--no-pin); fi
+    if [[ "$SEED" -ne 0 ]];        then ENGINE_ARGS+=(--seed "$SEED"); fi
+
+    # SQLite persistence
+    if [[ -n "$DB_PATH" ]];           then ENGINE_ARGS+=(--db "$DB_PATH"); else ENGINE_ARGS+=(--no-db); fi
+
+    # Historical backfill
+    if [[ "$BACKFILL_BARS" -gt 0 ]]; then
+        ENGINE_ARGS+=(--backfill "$BACKFILL_BARS")
+    fi
+    if [[ -n "$BACKFILL_INTERVAL" ]]; then
+        ENGINE_ARGS+=(--backfill-interval "$BACKFILL_INTERVAL")
+    fi
+
+    # Event logging / recording
+    if [[ -n "$EVENT_LOG_PATH" ]];    then ENGINE_ARGS+=(--log-events "$EVENT_LOG_PATH"); fi
+    if [[ -n "$RECORD_PATH" ]];       then ENGINE_ARGS+=(--record "$RECORD_PATH"); fi
+    if [[ -n "$REPLAY_DATA_PATH" ]];  then ENGINE_ARGS+=(--replay-data "$REPLAY_DATA_PATH"); fi
+}
+
+# ── Start engine ──────────────────────────────────────────────────────────
+start_engine() {
+    build_engine_args
+
+    # Kill any leftover process on the WS port from a previous run
+    if command -v fuser &>/dev/null; then
+        fuser -k "$WS_PORT/tcp" 2>/dev/null || true
+        sleep 0.3
     fi
 
     info "Starting engine on ws://localhost:$WS_PORT ..."
-    info "Engine args: ${args[*]}"
-    if [[ "$ENABLE_BINANCE" == true ]]; then
-        info "Binance live mode — use the timeframe selector in the UI to change bar interval"
-    fi
-    "$BINARY" "${args[@]}" &
+    info "Engine args: ${ENGINE_ARGS[*]}"
+    "$BINARY" "${ENGINE_ARGS[@]}" &
     PIDS+=($!)
     ok "Engine PID: ${PIDS[-1]}"
 }
 
-# ── Start frontend dev server ───────────────────────────────────────────────
-
+# ── Start frontend dev server ─────────────────────────────────────────────
 start_dev_server() {
     info "Starting Vite dev server on http://localhost:$VITE_PORT ..."
     (cd "$WEB_DIR" && npx vite --port "$VITE_PORT" --host) &
@@ -185,13 +258,11 @@ start_dev_server() {
     ok "Vite PID: ${PIDS[-1]}"
 }
 
-# ── Serve built frontend ───────────────────────────────────────────────────
-
+# ── Serve built frontend ─────────────────────────────────────────────────
 start_static_server() {
     local dist="$BUILD_DIR/web-dist"
     [[ -f "$dist/index.html" ]] || fail "Frontend not built. Run without --no-build first."
 
-    # Try python3, then python, then npx serve
     if command -v python3 &>/dev/null; then
         info "Serving frontend via python3 on http://localhost:$VITE_PORT ..."
         (cd "$dist" && python3 -m http.server "$VITE_PORT" --bind 127.0.0.1) &>/dev/null &
@@ -206,12 +277,10 @@ start_static_server() {
     ok "Frontend served at http://localhost:$VITE_PORT"
 }
 
-# ── Open browser ───────────────────────────────────────────────────────────
-
+# ── Open browser ──────────────────────────────────────────────────────────
 open_browser() {
     [[ "$OPEN_BROWSER" == true ]] || return 0
     local url="http://localhost:$VITE_PORT"
-
     sleep 1
     if command -v xdg-open &>/dev/null; then
         xdg-open "$url" 2>/dev/null &
@@ -220,8 +289,7 @@ open_browser() {
     fi
 }
 
-# ── Main ────────────────────────────────────────────────────────────────────
-
+# ── Main ──────────────────────────────────────────────────────────────────
 echo -e "${BOLD}${BLUE}"
 echo "  ╔══════════════════════════════════╗"
 echo "  ║   TrueTest Trading Dashboard     ║"
@@ -241,7 +309,6 @@ case "$MODE" in
         ;;
     dev)
         build_engine
-        # Ensure node_modules exist
         [[ -d "$WEB_DIR/node_modules" ]] || (cd "$WEB_DIR" && npm install --silent)
         start_engine
         start_dev_server
@@ -254,19 +321,22 @@ case "$MODE" in
         build_engine
         build_frontend
         echo ""
-        ok "Build complete. Run with --no-build to start."
+        ok "Build complete. Set MODE=\"no-build\" and run again to start."
         ;;
     no-build)
-        [[ -x "$BINARY" ]] || fail "Engine not built. Run without --no-build first."
+        [[ -x "$BINARY" ]] || fail "Engine not built. Set MODE=\"full\" or \"dev\" first."
         start_engine
         if [[ -f "$BUILD_DIR/web-dist/index.html" ]]; then
             start_static_server
         else
-            warn "Frontend not built. Run with --dev for hot reload or build first."
+            warn "Frontend not built. Set MODE=\"dev\" for hot reload or build first."
         fi
         open_browser
         echo ""
         ok "Running. Press Ctrl+C to stop."
         wait
+        ;;
+    *)
+        fail "Unknown MODE: $MODE (use full, dev, build-only, or no-build)"
         ;;
 esac

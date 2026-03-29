@@ -1,7 +1,11 @@
 import { useEffect, useRef } from 'react';
-import { createChart, type IChartApi, type ISeriesApi, ColorType, CrosshairMode } from 'lightweight-charts';
-import { useMarketState, type Bar } from '../../store/MarketStore';
-import { useFillState } from '../../store/FillStore';
+import {
+  createChart,
+  CandlestickSeries, LineSeries, HistogramSeries,
+  type IChartApi, type ISeriesApi,
+  ColorType, CrosshairMode,
+} from 'lightweight-charts';
+import { useMarketState } from '../../store/MarketStore';
 
 const INDICATOR_COLORS = [
   '#2962ff', '#ff6d00', '#ab47bc', '#00bcd4', '#ffeb3b', '#e91e63',
@@ -18,7 +22,6 @@ export function ChartPanel() {
   const isUserScrollingRef = useRef(false);
 
   const { bars } = useMarketState();
-  const { fills } = useFillState();
 
   // Initialize chart
   useEffect(() => {
@@ -83,15 +86,16 @@ export function ChartPanel() {
     };
   }, []);
 
-  // Ensure the correct series type exists and return it
+  // Ensure the correct series type exists
   const ensureSeries = (chart: IChartApi, hasOHLC: boolean) => {
     if (hasOHLC) {
       if (!candleSeriesRef.current) {
         if (lineSeriesRef.current) {
           chart.removeSeries(lineSeriesRef.current);
           lineSeriesRef.current = null;
+
         }
-        candleSeriesRef.current = chart.addCandlestickSeries({
+        candleSeriesRef.current = chart.addSeries(CandlestickSeries, {
           upColor: '#26a69a',
           downColor: '#ef5350',
           borderDownColor: '#ef5350',
@@ -105,8 +109,9 @@ export function ChartPanel() {
         if (candleSeriesRef.current) {
           chart.removeSeries(candleSeriesRef.current);
           candleSeriesRef.current = null;
+
         }
-        lineSeriesRef.current = chart.addLineSeries({
+        lineSeriesRef.current = chart.addSeries(LineSeries, {
           color: '#2962ff',
           lineWidth: 2,
         });
@@ -116,7 +121,7 @@ export function ChartPanel() {
 
   const ensureVolumeSeries = (chart: IChartApi) => {
     if (!volumeSeriesRef.current) {
-      volumeSeriesRef.current = chart.addHistogramSeries({
+      volumeSeriesRef.current = chart.addSeries(HistogramSeries, {
         priceFormat: { type: 'volume' },
         priceScaleId: 'volume',
       });
@@ -140,7 +145,6 @@ export function ChartPanel() {
 
     if (isIncremental && newCount - prevCount <= 2) {
       // Incremental path: only update the changed bars
-      // This covers: new bar appended (count+1) or last bar updated in-place (same count)
       const startIdx = newCount === prevCount ? prevCount - 1 : prevCount;
       for (let i = startIdx; i < newCount; i++) {
         const b = bars[i];
@@ -167,7 +171,7 @@ export function ChartPanel() {
           for (const [name, value] of Object.entries(b.indicators)) {
             let series = indicatorSeriesRef.current.get(name);
             if (!series) {
-              series = chart.addLineSeries({
+              series = chart.addSeries(LineSeries, {
                 color: INDICATOR_COLORS[colorIdx % INDICATOR_COLORS.length],
                 lineWidth: 1,
                 title: name,
@@ -215,7 +219,7 @@ export function ChartPanel() {
       for (const name of indicatorNames) {
         let series = indicatorSeriesRef.current.get(name);
         if (!series) {
-          series = chart.addLineSeries({
+          series = chart.addSeries(LineSeries, {
             color: INDICATOR_COLORS[colorIdx % INDICATOR_COLORS.length],
             lineWidth: 1,
             title: name,
@@ -237,28 +241,12 @@ export function ChartPanel() {
       }
     }
 
-    // Fill markers on the active price series
-    const activeSeries = candleSeriesRef.current ?? lineSeriesRef.current;
-    if (activeSeries && fills.length > 0) {
-      const markers = fills
-        .filter((f) => f.time > 0)
-        .map((f) => ({
-          time: f.time as any,
-          position: f.side === 'buy' ? 'belowBar' as const : 'aboveBar' as const,
-          color: f.side === 'buy' ? '#26a69a' : '#ef5350',
-          shape: f.side === 'buy' ? 'arrowUp' as const : 'arrowDown' as const,
-          text: `${f.side.toUpperCase()} ${f.quantity} @ ${f.price.toFixed(2)}`,
-        }))
-        .sort((a, b) => (a.time as number) - (b.time as number));
-      activeSeries.setMarkers(markers);
-    }
-
     // Auto-scroll to latest
     if (!isUserScrollingRef.current && newCount > prevCount) {
       chart.timeScale().scrollToRealTime();
     }
     lastBarCountRef.current = newCount;
-  }, [bars, fills]);
+  }, [bars]);
 
   return (
     <div className="flex-1 bg-[#0f1117] relative min-h-0">

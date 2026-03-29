@@ -25,10 +25,29 @@ type MarketAction =
 
 const initialState: MarketState = { bars: [], symbol: '', timeframe: '' };
 
+const MAX_BARS = 2000;
+
 function reducer(state: MarketState, action: MarketAction): MarketState {
   switch (action.type) {
-    case 'ADD_BAR':
-      return { ...state, bars: [...state.bars, action.bar] };
+    case 'ADD_BAR': {
+      const bars = state.bars;
+      const newBar = action.bar;
+
+      // Deduplicate: if last bar has same timestamp, update it instead of appending
+      if (bars.length > 0 && bars[bars.length - 1].time === newBar.time) {
+        const updated = [...bars];
+        updated[updated.length - 1] = newBar;
+        return { ...state, bars: updated };
+      }
+
+      // Skip bars older than the latest (out-of-order from backfill overlap)
+      if (bars.length > 0 && newBar.time < bars[bars.length - 1].time) {
+        return state;
+      }
+
+      const next = [...bars, newBar];
+      return { ...state, bars: next.length > MAX_BARS ? next.slice(-MAX_BARS) : next };
+    }
     case 'UPDATE_LAST_BAR': {
       if (state.bars.length === 0) return { ...state, bars: [action.bar] };
       const updated = [...state.bars];

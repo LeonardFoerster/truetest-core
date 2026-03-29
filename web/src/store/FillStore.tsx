@@ -19,7 +19,7 @@ type FillAction =
   | { type: 'BULK_ADD'; fills: Fill[] }
   | { type: 'RESET' };
 
-const MAX_FILLS = 200;
+const MAX_FILLS = 1000;
 const initialState: FillState = { fills: [] };
 
 function reducer(state: FillState, action: FillAction): FillState {
@@ -29,7 +29,9 @@ function reducer(state: FillState, action: FillAction): FillState {
       return { fills };
     }
     case 'BULK_ADD': {
-      const fills = [...action.fills, ...state.fills].slice(0, MAX_FILLS);
+      const existingIds = new Set(state.fills.map(f => f.id));
+      const newFills = action.fills.filter(f => !existingIds.has(f.id));
+      const fills = [...newFills, ...state.fills].slice(0, MAX_FILLS);
       return { fills };
     }
     case 'RESET':

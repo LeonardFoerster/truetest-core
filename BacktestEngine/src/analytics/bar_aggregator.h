@@ -52,9 +52,14 @@ public:
         close_ = price;
         volume_ += volume;
 
-        // Emit partial bar update (same bar_start_ timestamp, so the UI
-        // dispatcher will call UPDATE_LAST_BAR instead of ADD_BAR)
-        emit_bar();
+        // Throttle partial bar updates to avoid flooding the UI.
+        // Emit at most once per 250ms within a bar interval.
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_partial_emit_ >= std::chrono::milliseconds(250))
+        {
+            emit_bar();
+            last_partial_emit_ = now;
+        }
     }
 
     // Flush any partial bar (call at end of data)
@@ -82,4 +87,5 @@ private:
     double low_ = 0.0;
     double close_ = 0.0;
     int64_t volume_ = 0;
+    std::chrono::steady_clock::time_point last_partial_emit_;
 };

@@ -181,4 +181,44 @@ inline std::string event_to_json(const event_pointer& ev)
     }
 }
 
+// Order response: feedback for UI-submitted orders (accept/fill/reject/error)
+inline std::string order_response_to_json(
+    uint64_t order_id,
+    const std::string& status,
+    const std::string& reason,
+    const std::string& symbol = "",
+    const std::string& side = "",
+    double quantity = 0.0,
+    double price = 0.0)
+{
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+        R"({"type":"order_response","data":{"order_id":%llu,"status":"%s","reason":"%s","symbol":"%s","side":"%s","quantity":%.8g,"price":%.6f}})",
+        static_cast<unsigned long long>(order_id),
+        status.c_str(), reason.c_str(), symbol.c_str(), side.c_str(),
+        quantity, price);
+    return buf;
+}
+
+// Generic engine error broadcast
+inline std::string error_to_json(const std::string& message,
+                                  const std::string& source = "engine")
+{
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+        R"({"type":"error","data":{"message":"%s","source":"%s","timestamp":%lld}})",
+        message.c_str(), source.c_str(),
+        static_cast<long long>(epoch_ms(std::chrono::system_clock::now())));
+    return buf;
+}
+
+// Wraps pre-built JSON arrays from SqliteStore queries
+inline std::string fills_history_to_json(const std::string& fills_array) {
+    return R"({"type":"fills_history","data":)" + fills_array + "}";
+}
+
+inline std::string equity_history_to_json(const std::string& equity_array) {
+    return R"({"type":"equity_history","data":)" + equity_array + "}";
+}
+
 } // namespace event_json

@@ -15,6 +15,13 @@ public:
 
 	bool open() override
 	{
+		if (file_.is_open())
+		{
+			// Already open — rewind to beginning so it can be re-read
+			file_.clear();
+			file_.seekg(0);
+			return file_.good();
+		}
 		file_.open(path_);
 		return file_.good();
 	}

@@ -53,12 +53,16 @@ public:
 
     bool is_live() const { return live_trading_enabled_; }
 
+    const std::string& last_error() const { return last_error_; }
+
     void set_last_price(double price) { last_price_ = price; }
 
     void set_symbol(const std::string& sym) { symbol_ = sym; }
 
     void submit_order(const order_event& o) override
     {
+        last_error_.clear();
+
         if (live_trading_enabled_)
         {
             submit_live_order(o);
@@ -112,6 +116,7 @@ private:
     double last_price_ = 0.0;
     std::vector<fill_event> pending_fills_;
     std::unique_ptr<BinanceRestClient> rest_client_;
+    std::string last_error_;
 
     // Track pending live orders for fill polling
     struct pending_order
@@ -127,7 +132,8 @@ private:
     {
         if (!rest_client_)
         {
-            std::cerr << "BinanceExecutor: REST client not initialized\n";
+            last_error_ = "REST client not initialized";
+            std::cerr << "BinanceExecutor: " << last_error_ << "\n";
             return;
         }
 
@@ -183,6 +189,8 @@ private:
 
         if (resp.status == 200)
         {
+            last_error_.clear();
+
             // Extract orderId from response
             auto order_id_str = binance::extract_number(resp.body, "orderId");
             std::cout << "  [LIVE] Order submitted: " << side_str << " "
@@ -198,8 +206,8 @@ private:
         }
         else
         {
-            std::cerr << "  [LIVE] Order REJECTED: HTTP " << resp.status
-                      << " " << resp.body << "\n";
+            last_error_ = "HTTP " + std::to_string(resp.status) + ": " + resp.body;
+            std::cerr << "  [LIVE] Order REJECTED: " << last_error_ << "\n";
         }
     }
 
