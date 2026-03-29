@@ -24,7 +24,7 @@ risk_action RiskManager::check_order(const order_event& order,
         auto it = positions.find(order.get_symbol());
         double current_notional = 0.0;
         if (it != positions.end())
-            current_notional = it->second.qty * order.get_price();
+            current_notional = std::abs(it->second.cost_basis);
 
         double order_notional = order.get_quantity() * order.get_price();
         if (current_notional + order_notional > limits_.max_position_value)

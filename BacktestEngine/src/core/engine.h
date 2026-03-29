@@ -129,6 +129,19 @@ private:
                        std::size_t& event_count,
                        bool& halt_requested);
 
+    // Route a strategy-generated order: buffers stops, applies latency, or
+    // processes immediately. Shared by all loops (bar, tick, streaming).
+    // Returns false if engine should halt.
+    bool route_order(order_event& order,
+                     const std::chrono::system_clock::time_point& sim_time,
+                     std::size_t& event_count, bool& halt_requested);
+
+    // Check pending stop orders against a price range. Triggers any that
+    // cross the stop_price. Works for both bar (high/low) and tick (price/price).
+    void check_pending_stops(double high, double low,
+                             const std::chrono::system_clock::time_point& sim_time,
+                             std::size_t& event_count, bool& halt_requested);
+
     // Process a single market event through the strategy → order → fill pipeline.
     // Used by both batch run() and streaming run_streaming().
     void process_single_bar(const bar_record& rec, std::size_t& event_count,
@@ -136,6 +149,28 @@ private:
 
     // Process a single tick record through the strategy → order → fill pipeline.
     void process_single_tick(const tick_record& rec, std::size_t& event_count);
+
+    // Pending stop orders (shared across all loop types)
+    std::vector<std::shared_ptr<order_event>> pending_stops_;
+
+    // Pending latency-delayed orders (shared across all loop types)
+    struct pending_entry
+    {
+        std::shared_ptr<order_event> order;
+        uint64_t seq;
+    };
+    static bool pending_cmp(const pending_entry& a, const pending_entry& b)
+    {
+        if (a.order->get_earliest_eligible_ts() != b.order->get_earliest_eligible_ts())
+            return a.order->get_earliest_eligible_ts() > b.order->get_earliest_eligible_ts();
+        return a.seq > b.seq;
+    }
+    std::priority_queue<pending_entry, std::vector<pending_entry>,
+                        decltype(&engine::pending_cmp)> pending_orders_{&engine::pending_cmp};
+    uint64_t order_seq_ = 0;
+
+    // Day order tracking for session-end cancellation
+    std::vector<std::pair<std::string, uint64_t>> day_order_ids_;
 
     // Threading: shared halt flag (risk worker → engine loop)
     std::atomic<bool> halt_flag_{false};

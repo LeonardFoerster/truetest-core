@@ -202,8 +202,9 @@ AnalyticsReport Analytics::snapshot() const
     }
     else if (return_stats_.n > 1 && return_stats_.mean > 0.0)
     {
-        // All trades profitable → no downside deviation
-        r.sortino_ratio = 0.0;
+        // All trades profitable → no downside deviation → effectively infinite Sortino.
+        // Cap at 1e9 to avoid JSON/display issues while still ranking correctly.
+        r.sortino_ratio = 1e9;
     }
 
     // Max drawdown from running accumulator

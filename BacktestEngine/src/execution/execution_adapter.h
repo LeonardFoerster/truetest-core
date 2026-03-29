@@ -99,7 +99,14 @@ public:
 
                 double commission = 0.0;
                 if (fee_model_)
-                    commission = fee_model_->compute_commission(o.get_side(), fill_qty, fill_price);
+                {
+                    // An order is a taker if it crosses the spread (market orders,
+                    // or limit orders priced through the opposite side)
+                    bool is_taker = (o.get_order_type() == order_type::market) ||
+                        (o.get_side() == order_side::buy && mid_price_ > 0.0 && o.get_price() >= mid_price_) ||
+                        (o.get_side() == order_side::sell && mid_price_ > 0.0 && o.get_price() <= mid_price_);
+                    commission = fee_model_->compute_commission(o.get_side(), fill_qty, fill_price, is_taker);
+                }
 
                 pending_fills_.emplace_back(
                     o.get_earliest_eligible_ts(),

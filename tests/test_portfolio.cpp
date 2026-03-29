@@ -19,13 +19,34 @@ TEST(Portfolio, BuyFill_OpensPosition)
     EXPECT_TRUE(p.position_open("AAPL"));
 }
 
-TEST(Portfolio, SellWithNoPosition_Ignored)
+TEST(Portfolio, SellWithNoPosition_OpensShort)
 {
     portfolio p;
+    double initial_cash = p.get_cash();
     fill_event f(now(), "AAPL", 1, order_side::sell, 10, 100.0, 0.0);
     p.on_fill(f);
-    EXPECT_FALSE(p.position_open());
+    EXPECT_TRUE(p.position_open());
+    EXPECT_TRUE(p.position_open("AAPL"));
+    // Short: cash increases by sale proceeds
+    EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash + 1000.0);
+    // Equity at current price should equal initial (no profit yet)
+    EXPECT_DOUBLE_EQ(p.get_equity(100.0), initial_cash);
     EXPECT_EQ(p.get_total_trades(), 0u);
+}
+
+TEST(Portfolio, ShortRoundTrip)
+{
+    portfolio p;
+    double initial_cash = p.get_cash();
+    // Open short at 100
+    fill_event sell(now(), "AAPL", 1, order_side::sell, 10, 100.0, 0.0);
+    p.on_fill(sell);
+    // Close short at 90 (profit = 10 * 10 = 100)
+    fill_event buy(now(), "AAPL", 2, order_side::buy, 10, 90.0, 0.0);
+    p.on_fill(buy);
+    EXPECT_FALSE(p.position_open());
+    EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash + 100.0);
+    EXPECT_EQ(p.get_total_trades(), 1u);
 }
 
 TEST(Portfolio, BuySell_RoundTrip)

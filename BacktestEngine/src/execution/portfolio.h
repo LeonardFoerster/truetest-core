@@ -23,8 +23,9 @@ public:
     bool position_open() const;
     bool position_open(const std::string& symbol) const;
 
-    // Can we afford this order? Checks cash for buys.
+    // Can we afford this order? Checks cash for buys, position for sells.
     bool can_afford(order_side side, double quantity, double price) const;
+    bool can_afford(const std::string& symbol, order_side side, double quantity, double price) const;
 
     // Compute position size based on risk fraction of current equity
     double compute_quantity(double price, double risk_fraction) const;

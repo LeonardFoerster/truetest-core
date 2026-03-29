@@ -881,7 +881,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             // Post-fill risk check (inline only)
             if (!config_.is_threaded())
             {
-                auto post_snap = analytics_.generate_report();
+                auto post_snap = analytics_.snapshot();
                 auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
                 if (post_action == risk_action::halt)
                 {
@@ -917,6 +917,88 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 
     event_count++;
     return true;
+}
+
+bool engine::route_order(order_event& order,
+                         const std::chrono::system_clock::time_point& sim_time,
+                         std::size_t& event_count, bool& halt_requested)
+{
+    order.set_order_id(OrderIdGenerator::next());
+
+    // Stop/stop-limit orders are buffered until price triggers them
+    if (order.get_order_type() == order_type::stop ||
+        order.get_order_type() == order_type::stop_limit)
+    {
+        pending_stops_.push_back(order_pool_.acquire(order));
+        return true;
+    }
+
+    // Apply latency model if configured
+    if (config_.latency_model)
+    {
+        auto latency = config_.latency_model->get_order_latency();
+        order.set_earliest_eligible_ts(sim_time + latency);
+        pending_orders_.push({order_pool_.acquire(order), order_seq_++});
+        return true;
+    }
+
+    // No latency — process immediately
+    order.set_earliest_eligible_ts(sim_time);
+    auto order_ptr = order_pool_.acquire(order);
+    if (order.get_tif() == time_in_force::day)
+        day_order_ids_.push_back({order.get_symbol(), order.get_order_id()});
+    return process_order(order_ptr, event_count, halt_requested);
+}
+
+void engine::check_pending_stops(double high, double low,
+                                 const std::chrono::system_clock::time_point& sim_time,
+                                 std::size_t& event_count, bool& halt_requested)
+{
+    auto it = pending_stops_.begin();
+    while (it != pending_stops_.end() && !halt_requested)
+    {
+        auto& stop = *it;
+        bool triggered = false;
+
+        if (stop->get_side() == order_side::buy && high >= stop->get_stop_price())
+            triggered = true;
+        else if (stop->get_side() == order_side::sell && low <= stop->get_stop_price())
+            triggered = true;
+
+        if (triggered)
+        {
+            if (stop->get_order_type() == order_type::stop)
+            {
+                // Convert to market order
+                auto market_order = order_pool_.acquire(
+                    sim_time, stop->get_symbol(), order_type::market,
+                    stop->get_side(), stop->get_quantity(), stop->get_stop_price(),
+                    time_in_force::ioc);
+                market_order->set_order_id(stop->get_order_id());
+                market_order->set_earliest_eligible_ts(sim_time);
+                if (market_order->get_tif() == time_in_force::day)
+                    day_order_ids_.push_back({market_order->get_symbol(), market_order->get_order_id()});
+                process_order(market_order, event_count, halt_requested);
+            }
+            else // stop_limit
+            {
+                auto limit_order = order_pool_.acquire(
+                    sim_time, stop->get_symbol(), order_type::limit,
+                    stop->get_side(), stop->get_quantity(), stop->get_price(),
+                    stop->get_tif());
+                limit_order->set_order_id(stop->get_order_id());
+                limit_order->set_earliest_eligible_ts(sim_time);
+                if (limit_order->get_tif() == time_in_force::day)
+                    day_order_ids_.push_back({limit_order->get_symbol(), limit_order->get_order_id()});
+                process_order(limit_order, event_count, halt_requested);
+            }
+            it = pending_stops_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
 }
 
 void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
@@ -1008,10 +1090,8 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
     if (order_opt)
     {
-        order_opt->set_order_id(OrderIdGenerator::next());
-        order_opt->set_earliest_eligible_ts(timestamp);
         bool halt = false;
-        process_order(order_pool_.acquire(*order_opt), event_count, halt);
+        route_order(*order_opt, timestamp, event_count, halt);
     }
 }
 
@@ -1075,6 +1155,24 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     }
 #endif
 
+    bool halt = false;
+
+    // Drain eligible pending (latency-delayed) orders
+    while (!pending_orders_.empty() &&
+           pending_orders_.top().order->get_earliest_eligible_ts() <= rec.timestamp)
+    {
+        auto entry = pending_orders_.top();
+        pending_orders_.pop();
+        if (entry.order->get_tif() == time_in_force::day)
+            day_order_ids_.push_back({entry.order->get_symbol(), entry.order->get_order_id()});
+        if (!process_order(entry.order, event_count, halt)) break;
+    }
+    if (halt) return;
+
+    // Check pending stop orders against tick price
+    check_pending_stops(rec.price, rec.price, rec.timestamp, event_count, halt);
+    if (halt) return;
+
     auto tick_ptr = tick_pool_.acquire(te);
     log_event(te);
     publish_event(tick_ptr);
@@ -1097,42 +1195,16 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         tick_aggregator_->on_tick(rec.symbol, rec.price, rec.quantity, rec.timestamp);
 #endif
 
+    // Check strategy SL/TP against current tick price
+    auto sl_tp_order = strategy_->check_stops(rec.symbol, rec.price, rec.timestamp);
+    if (sl_tp_order)
+        route_order(*sl_tp_order, rec.timestamp, event_count, halt);
+    if (halt) return;
+
     // Dispatch to strategy's tick handler
     auto order_opt = strategy_->on_tick(te);
     if (order_opt)
-    {
-        order_opt->set_order_id(OrderIdGenerator::next());
-        order_opt->set_earliest_eligible_ts(rec.timestamp);
-
-        auto adapter = get_adapter(rec.symbol);
-        if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
-            local->set_mid_price(last_mid_price_);
-        adapter->submit_order(*order_opt);
-
-        auto order_ptr = order_pool_.acquire(*order_opt);
-        publish_event(order_ptr);
-        if (!config_.is_threaded())
-            analytics_.on_event(order_ptr);
-
-        std::vector<fill_event> fills;
-        if (adapter->poll_fills(fills))
-        {
-            for (auto& f : fills)
-            {
-                auto fill_ptr = fill_pool_.acquire(f);
-#ifdef HAS_SQLITE
-                if (store_) store_->insert_fill(f);
-#endif
-                portfolio_.on_fill(f);
-                strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
-                publish_event(fill_ptr);
-                if (!config_.is_threaded())
-                    analytics_.on_event(fill_ptr);
-                event_count++;
-            }
-        }
-        event_count++;
-    }
+        route_order(*order_opt, rec.timestamp, event_count, halt);
 }
 
 void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
@@ -1472,38 +1544,13 @@ void engine::run()
     std::size_t event_count = 0;
     auto last_report_time = std::chrono::steady_clock::now();
 
-    // Pending stop orders: triggered when market price crosses stop_price
-    std::vector<std::shared_ptr<order_event>> pending_stops;
-
-    // Pending orders min-heap: sorted by (eligible time, sequence number for FIFO)
-    struct pending_entry
-    {
-        std::shared_ptr<order_event> order;
-        uint64_t seq;
-    };
-
-    auto pending_cmp = [](const pending_entry& a, const pending_entry& b)
-    {
-        if (a.order->get_earliest_eligible_ts() != b.order->get_earliest_eligible_ts())
-            return a.order->get_earliest_eligible_ts() > b.order->get_earliest_eligible_ts();
-        return a.seq > b.seq;
-    };
-
-    std::priority_queue<pending_entry, std::vector<pending_entry>, decltype(pending_cmp)> pending_orders(pending_cmp);
-    uint64_t order_seq = 0;
-
-    // Track day orders for session-end cancellation: (symbol, order_id)
-    std::vector<std::pair<std::string, uint64_t>> day_order_ids;
+    // Clear shared pending state for this run
+    pending_stops_.clear();
+    while (!pending_orders_.empty()) pending_orders_.pop();
+    order_seq_ = 0;
+    day_order_ids_.clear();
 
     bool halt_requested = false;
-
-    // Wraps member process_order with day-order tracking
-    auto do_process_order = [&](const std::shared_ptr<order_event>& o) -> bool
-    {
-        if (o->get_tif() == time_in_force::day)
-            day_order_ids.push_back({o->get_symbol(), o->get_order_id()});
-        return process_order(o, event_count, halt_requested);
-    };
 
     for (std::size_t i = 0; i < n && !halt_requested
              && !halt_flag_.load(std::memory_order_acquire)
@@ -1526,12 +1573,14 @@ void engine::run()
         // Drain eligible pending orders before processing this market event
         {
             DEBUG_STAGE(stage_timer_, pending_drain);
-            while (!pending_orders.empty() &&
-                   pending_orders.top().order->get_earliest_eligible_ts() <= sim_time)
+            while (!pending_orders_.empty() &&
+                   pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time)
             {
-                auto entry = pending_orders.top();
-                pending_orders.pop();
-                if (!do_process_order(entry.order)) break;
+                auto entry = pending_orders_.top();
+                pending_orders_.pop();
+                if (entry.order->get_tif() == time_in_force::day)
+                    day_order_ids_.push_back({entry.order->get_symbol(), entry.order->get_order_id()});
+                if (!process_order(entry.order, event_count, halt_requested)) break;
             }
         }
         if (halt_requested) break;
@@ -1542,48 +1591,7 @@ void engine::run()
         // Check pending stop orders for triggers
         {
             DEBUG_STAGE(stage_timer_, stop_check);
-            auto it = pending_stops.begin();
-            while (it != pending_stops.end())
-            {
-                auto& stop = *it;
-                bool triggered = false;
-
-                if (stop->get_side() == order_side::buy && mkt.get_high() >= stop->get_stop_price())
-                    triggered = true;
-                else if (stop->get_side() == order_side::sell && mkt.get_low() <= stop->get_stop_price())
-                    triggered = true;
-
-                if (triggered)
-                {
-                    if (stop->get_order_type() == order_type::stop)
-                    {
-                        // Convert to market order
-                        auto market_order = order_pool_.acquire(
-                            sim_time, stop->get_symbol(), order_type::market,
-                            stop->get_side(), stop->get_quantity(), stop->get_stop_price(),
-                            time_in_force::ioc);
-                        market_order->set_order_id(stop->get_order_id());
-                        market_order->set_earliest_eligible_ts(sim_time);
-                        if (!do_process_order(market_order)) break;
-                    }
-                    else // stop_limit
-                    {
-                        // Convert to limit order at the limit price
-                        auto limit_order = order_pool_.acquire(
-                            sim_time, stop->get_symbol(), order_type::limit,
-                            stop->get_side(), stop->get_quantity(), stop->get_price(),
-                            stop->get_tif());
-                        limit_order->set_order_id(stop->get_order_id());
-                        limit_order->set_earliest_eligible_ts(sim_time);
-                        if (!do_process_order(limit_order)) break;
-                    }
-                    it = pending_stops.erase(it);
-                }
-                else
-                {
-                    ++it;
-                }
-            }
+            check_pending_stops(mkt.get_high(), mkt.get_low(), sim_time, event_count, halt_requested);
         }
 
         // Reactive market maker: replenish depleted book levels per symbol
@@ -1647,26 +1655,7 @@ void engine::run()
 
         if (order_opt)
         {
-            order_opt->set_order_id(OrderIdGenerator::next());
-
-            // Stop/stop-limit orders are buffered until triggered
-            if (order_opt->get_order_type() == order_type::stop ||
-                order_opt->get_order_type() == order_type::stop_limit)
-            {
-                pending_stops.push_back(order_pool_.acquire(*order_opt));
-            }
-            else if (config_.latency_model)
-            {
-                auto latency = config_.latency_model->get_order_latency();
-                order_opt->set_earliest_eligible_ts(sim_time + latency);
-                pending_orders.push({order_pool_.acquire(*order_opt), order_seq++});
-            }
-            else
-            {
-                // No latency model — process immediately (current behavior)
-                order_opt->set_earliest_eligible_ts(sim_time);
-                do_process_order(order_pool_.acquire(*order_opt));
-            }
+            route_order(*order_opt, sim_time, event_count, halt_requested);
         }
 
         {
@@ -1693,15 +1682,17 @@ void engine::run()
 #endif
 
     // Drain any remaining pending orders after all market data
-    while (!pending_orders.empty())
+    while (!pending_orders_.empty())
     {
-        auto entry = pending_orders.top();
-        pending_orders.pop();
-        do_process_order(entry.order);
+        auto entry = pending_orders_.top();
+        pending_orders_.pop();
+        if (entry.order->get_tif() == time_in_force::day)
+            day_order_ids_.push_back({entry.order->get_symbol(), entry.order->get_order_id()});
+        process_order(entry.order, event_count, halt_requested);
     }
 
     // Cancel all day orders at session end
-    for (const auto& [symbol, oid] : day_order_ids)
+    for (const auto& [symbol, oid] : day_order_ids_)
     {
         auto ob = orderbook_registry_.get(symbol);
         if (ob)
@@ -1777,6 +1768,12 @@ void engine::run_tick_data()
     if (!config_.event_log_path.empty() && !event_logger_)
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path);
 
+    // Clear shared pending state for this run
+    pending_stops_.clear();
+    while (!pending_orders_.empty()) pending_orders_.pop();
+    order_seq_ = 0;
+    day_order_ids_.clear();
+
     start_workers();
 
     const auto& ticks = data_handler_->tick_data;
@@ -1786,9 +1783,11 @@ void engine::run_tick_data()
     std::cout << "\rProgress: 0.000% | Trades executed: 0" << std::flush;
 
     std::size_t event_count = 0;
+    bool halt_requested = false;
     auto last_report_time = std::chrono::steady_clock::now();
 
     // Bar aggregator: converts ticks into OHLCV bars for on_market()
+    // Uses route_order() so bar-originated orders get proper stop/latency handling
     BarAggregator bar_agg(std::chrono::seconds(1), [&](const market_event& bar)
     {
         auto bar_ptr = market_pool_.acquire(bar);
@@ -1798,46 +1797,37 @@ void engine::run_tick_data()
             analytics_.on_event(bar_ptr);
 
         if (order_opt)
-        {
-            order_opt->set_order_id(OrderIdGenerator::next());
-            order_opt->set_earliest_eligible_ts(bar.get_timestamp());
-
-            auto adapter = get_adapter(bar.get_symbol());
-
-            if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
-                local->set_mid_price(last_mid_price_);
-
-            adapter->submit_order(*order_opt);
-
-            auto order_ptr = order_pool_.acquire(*order_opt);
-            publish_event(order_ptr);
-            if (!config_.is_threaded())
-                analytics_.on_event(order_ptr);
-
-            std::vector<fill_event> fills;
-            if (adapter->poll_fills(fills))
-            {
-                for (auto& f : fills)
-                {
-                    auto fill_ptr = fill_pool_.acquire(f);
-#ifdef HAS_SQLITE
-                    if (store_) store_->insert_fill(f);
-#endif
-                    portfolio_.on_fill(f);
-                    strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
-                    publish_event(fill_ptr);
-                    if (!config_.is_threaded())
-                        analytics_.on_event(fill_ptr);
-                    event_count++;
-                }
-            }
-            event_count++;
-        }
+            route_order(*order_opt, bar.get_timestamp(), event_count, halt_requested);
     });
 
-    for (std::size_t i = 0; i < n; ++i)
+    for (std::size_t i = 0; i < n && !halt_requested
+             && !halt_flag_.load(std::memory_order_acquire)
+             && !worker_failed_.load(std::memory_order_acquire); ++i)
     {
         const auto& tick = ticks[i];
+
+        // Track mid price
+        last_mid_price_ = tick.price;
+
+        // Replenish orderbook
+        auto ob = orderbook_registry_.get_or_create(tick.symbol);
+        market_maker_.replenish(ob, last_mid_price_);
+
+        // Drain eligible pending orders
+        while (!pending_orders_.empty() &&
+               pending_orders_.top().order->get_earliest_eligible_ts() <= tick.timestamp)
+        {
+            auto entry = pending_orders_.top();
+            pending_orders_.pop();
+            if (entry.order->get_tif() == time_in_force::day)
+                day_order_ids_.push_back({entry.order->get_symbol(), entry.order->get_order_id()});
+            if (!process_order(entry.order, event_count, halt_requested)) break;
+        }
+        if (halt_requested) break;
+
+        // Check pending stop orders against tick price
+        check_pending_stops(tick.price, tick.price, tick.timestamp, event_count, halt_requested);
+        if (halt_requested) break;
 
         // Convert data_tick_side to tick_side for event
         tick_side ts = tick_side::unknown;
@@ -1845,9 +1835,6 @@ void engine::run_tick_data()
         else if (tick.side == data_tick_side::ask) ts = tick_side::ask;
 
         tick_event te(tick.timestamp, tick.symbol, tick.price, tick.quantity, ts);
-
-        // Track mid price
-        last_mid_price_ = tick.price;
 
         // Publish tick event
         auto tick_ptr = tick_pool_.acquire(te);
@@ -1857,44 +1844,17 @@ void engine::run_tick_data()
             analytics_.on_event(tick_ptr);
         event_count++;
 
+        // Check strategy SL/TP against current tick price
+        auto sl_tp_order = strategy_->check_stops(tick.symbol, tick.price, tick.timestamp);
+        if (sl_tp_order)
+            route_order(*sl_tp_order, tick.timestamp, event_count, halt_requested);
+        if (halt_requested) break;
+
         // Dispatch to strategy's tick handler
         auto order_opt = strategy_->on_tick(te);
         if (order_opt)
-        {
-            order_opt->set_order_id(OrderIdGenerator::next());
-            order_opt->set_earliest_eligible_ts(tick.timestamp);
-
-            auto adapter = get_adapter(tick.symbol);
-
-            if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
-                local->set_mid_price(last_mid_price_);
-
-            adapter->submit_order(*order_opt);
-
-            auto order_ptr = order_pool_.acquire(*order_opt);
-            publish_event(order_ptr);
-            if (!config_.is_threaded())
-                analytics_.on_event(order_ptr);
-
-            std::vector<fill_event> fills;
-            if (adapter->poll_fills(fills))
-            {
-                for (auto& f : fills)
-                {
-                    auto fill_ptr = fill_pool_.acquire(f);
-#ifdef HAS_SQLITE
-                    if (store_) store_->insert_fill(f);
-#endif
-                    portfolio_.on_fill(f);
-                    strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
-                    publish_event(fill_ptr);
-                    if (!config_.is_threaded())
-                        analytics_.on_event(fill_ptr);
-                    event_count++;
-                }
-            }
-            event_count++;
-        }
+            route_order(*order_opt, tick.timestamp, event_count, halt_requested);
+        if (halt_requested) break;
 
         // Feed tick into bar aggregator for bar-based strategies
         bar_agg.on_tick(tick.symbol, tick.price, tick.quantity, tick.timestamp);
@@ -1914,6 +1874,14 @@ void engine::run_tick_data()
 
     // Flush any partial bar
     bar_agg.flush();
+
+    // Drain remaining pending orders
+    while (!pending_orders_.empty())
+    {
+        auto entry = pending_orders_.top();
+        pending_orders_.pop();
+        process_order(entry.order, event_count, halt_requested);
+    }
 
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();

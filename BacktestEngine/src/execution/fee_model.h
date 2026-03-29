@@ -7,13 +7,15 @@ class IFeeModel
 {
 public:
     virtual ~IFeeModel() = default;
-    virtual double compute_commission(order_side side, double quantity, double price) const = 0;
+    virtual double compute_commission(order_side side, double quantity, double price,
+                                      bool is_taker) const = 0;
 };
 
 class ZeroFeeModel : public IFeeModel
 {
 public:
-    double compute_commission(order_side /*side*/, double /*quantity*/, double /*price*/) const override
+    double compute_commission(order_side /*side*/, double /*quantity*/, double /*price*/,
+                              bool /*is_taker*/) const override
     {
         return 0.0;
     }
@@ -24,7 +26,8 @@ class FixedFeeModel : public IFeeModel
 public:
     explicit FixedFeeModel(double fee_per_trade) : fee_per_trade_(fee_per_trade) {}
 
-    double compute_commission(order_side /*side*/, double /*quantity*/, double /*price*/) const override
+    double compute_commission(order_side /*side*/, double /*quantity*/, double /*price*/,
+                              bool /*is_taker*/) const override
     {
         return fee_per_trade_;
     }
@@ -39,11 +42,11 @@ public:
     TieredFeeModel(double maker_rate, double taker_rate)
         : maker_rate_(maker_rate), taker_rate_(taker_rate) {}
 
-    double compute_commission(order_side side, double quantity, double price) const override
+    double compute_commission(order_side /*side*/, double quantity, double price,
+                              bool is_taker) const override
     {
         double notional = std::abs(quantity * price);
-        // Buys are takers (crossing the spread), sells are makers (providing liquidity)
-        double rate = (side == order_side::buy) ? taker_rate_ : maker_rate_;
+        double rate = is_taker ? taker_rate_ : maker_rate_;
         return notional * rate;
     }
 
