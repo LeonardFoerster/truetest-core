@@ -31,7 +31,6 @@ set(SOURCES
     BacktestEngine/src/market_maker/market_maker.cpp
     BacktestEngine/src/risk/risk_manager.cpp
     BacktestEngine/src/providers/local/local_register.cpp
-    BacktestEngine/src/utils/log/log.cpp
 )
 
 add_executable(truetest ${SOURCES})
@@ -168,7 +167,7 @@ if(ENABLE_SQLITE)
     find_package(SQLite3 REQUIRED)
 
     target_sources(truetest PRIVATE BacktestEngine/src/data/sqlite_store.cpp)
-    target_link_libraries(truetest PRIVATE SQLite::SQLite3)
+    target_link_libraries(truetest PRIVATE SQLite3::SQLite3)
     target_compile_definitions(truetest PRIVATE HAS_SQLITE)
 endif()
 
@@ -270,7 +269,6 @@ if(BUILD_TESTS)
         BacktestEngine/src/market_maker/market_maker.cpp
         BacktestEngine/src/risk/risk_manager.cpp
         BacktestEngine/src/providers/local/local_register.cpp
-        BacktestEngine/src/utils/log/log.cpp
     )
 
     add_executable(truetest_tests ${TEST_SOURCES})
@@ -289,7 +287,7 @@ if(BUILD_TESTS)
 
     if(ENABLE_SQLITE)
         target_sources(truetest_tests PRIVATE BacktestEngine/src/data/sqlite_store.cpp)
-        target_link_libraries(truetest_tests PRIVATE SQLite::SQLite3)
+        target_link_libraries(truetest_tests PRIVATE SQLite3::SQLite3)
         target_compile_definitions(truetest_tests PRIVATE HAS_SQLITE)
     endif()
 

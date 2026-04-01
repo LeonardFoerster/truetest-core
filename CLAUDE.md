@@ -108,7 +108,7 @@ cmake -B build \
   -DENABLE_LIVE_DATA=ON \     # Generic WebSocket data source
   -DENABLE_DEBUG=ON \          # Performance instrumentation (Abseil)
   -DENABLE_TSAN=ON \           # ThreadSanitizer
-  -DBUILD_TESTS=ON             # GoogleTest suite (282+ tests)
+  -DBUILD_TESTS=ON             # GoogleTest suite (283 tests, 2 known crashers in EngineStreaming tick tests)
 cmake --build build
 
 # Run
