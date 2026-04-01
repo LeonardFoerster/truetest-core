@@ -90,9 +90,7 @@ hft-engine/
         │   ├── price.h                 # fixed-point price representation
         │   ├── object_pool.h           # pre-allocated event pool
         │   └── aliases.h               # type aliases
-        ├── debug/                      # stage timer, memory sampler, ring stats (#ifdef HAS_DEBUG)
-        └── utils/
-            └── log/log.cpp             # logging stub (superseded by LoggingWorker)
+        └── debug/                      # stage timer, memory sampler, ring stats (#ifdef HAS_DEBUG)
 ```
 
 ## Build
@@ -168,19 +166,12 @@ buffers (65536 slots). Five auto-detected presets scale with physical core count
 CPU affinity pinning via `sched_setaffinity` (Linux). Each worker holds a shadow
 copy of portfolio/analytics to avoid data races.
 
-### WebSocket UI (one-directional)
+### WebSocket UI (bidirectional)
 When `--web-ui` is passed, a Boost.Beast WebSocket server (default port 8765)
 broadcasts all events as JSON to connected browsers. `web/index.html` renders a
-live dashboard with equity curve, fills, positions, and analytics. Currently
-server→client only (no browser→engine commands).
-
-## Orphaned files (safe to delete)
-
-- `BacktestEngine/src/data/db_connection.h` — replaced by pg_data_source.h
-- `BacktestEngine/src/data/database_connection.cpp` — replaced by pg_data_source.cpp
-- `BacktestEngine/src/pricing/black_scholes.h/.cpp` — unused placeholder
-- `BacktestEngine/src/pricing/perform_calculations.h/.cpp` — unused placeholder
-- `BacktestEngine/src/utils/log/log.cpp` — stub, superseded by LoggingWorker
+live dashboard with equity curve, fills, positions, and analytics. Clients can
+send JSON commands back to the engine (start, pause, stop, order, set_timeframe,
+set_symbol, set_strategy) via `ws_command` structs polled by the engine.
 
 ## Implemented providers
 
@@ -200,8 +191,6 @@ and live mode (stub — REST API submission not implemented).
   at `providers/metatrader/`.
 - **Polymarket provider** — WebSocket/API client for AMM. README stub only at
   `providers/polymarket/`.
-- **Browser→engine commands** — WebSocket UI is one-directional. No way to
-  start/stop backtests or change parameters from the browser.
 - **Risk resume** — `halt_flag_` stops the engine but there's no resume channel.
 - **ExchangeAdapter** — generic live exchange execution stub in `execution_adapter.h`.
 
