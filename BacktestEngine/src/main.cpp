@@ -1,8 +1,13 @@
-#include <iostream>
-#include <string>
-#include <memory>
+#include <climits>
+#include <cstdint>
 #include <cstdlib>
-#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <string>
+
+#include <CLI/CLI.hpp>
+#include <nlohmann/json.hpp>
 
 #include "core/engine.h"
 #include "core/engine_config.h"
@@ -39,6 +44,221 @@
 #include "absl/flags/parse.h"
 #endif
 
+// ---------------------------------------------------------------------------
+// Helper: load a JSON config file and apply values to locals (CLI overrides)
+// ---------------------------------------------------------------------------
+static void load_config_file(const std::string& path,
+                             std::string& replay_path,
+                             std::string& event_log_path,
+                             uint64_t& seed,
+                             std::string& thread_preset_str,
+                             bool& no_pin,
+                             std::string& provider_name,
+                             std::string& provider_path,
+                             std::string& cli_strategy,
+                             std::string& cli_format,
+                             std::size_t& cli_sma_period,
+                             std::string& cli_fee_model,
+                             double& cli_fee_value,
+                             double& cli_maker_rate,
+                             double& cli_taker_rate,
+                             bool& enable_web_ui,
+                             uint16_t& ws_port,
+                             std::string& cli_symbol,
+                             std::string& cli_stream,
+                             std::string& cli_api_key,
+                             std::string& cli_api_secret,
+                             std::string& cli_host,
+                             std::string& cli_port,
+                             std::string& cli_record_path,
+                             std::string& cli_replay_data_path,
+                             bool& cli_live,
+                             std::string& cli_mode,
+                             std::string& cli_db_path,
+                             double& cli_balance,
+                             double& cli_risk_fraction,
+                             double& cli_sl_pct,
+                             double& cli_tp_pct,
+                             int& cli_backfill,
+                             std::string& cli_backfill_interval,
+                             double& risk_max_position_value,
+                             double& risk_max_drawdown,
+                             double& risk_max_loss_per_trade,
+                             int& risk_max_open_orders,
+                             double& risk_max_portfolio_exposure)
+{
+    std::ifstream f(path);
+    if (!f.is_open())
+    {
+        std::cerr << "  ! Cannot open config file: " << path << "\n";
+        std::exit(1);
+    }
+
+    nlohmann::json j;
+    try { j = nlohmann::json::parse(f); }
+    catch (const nlohmann::json::parse_error& e)
+    {
+        std::cerr << "  ! Config JSON parse error: " << e.what() << "\n";
+        std::exit(1);
+    }
+
+    // Only set values that are present in the JSON (CLI overrides later)
+    auto get_str = [&](const char* key, std::string& out) {
+        if (j.contains(key) && j[key].is_string()) out = j[key].get<std::string>();
+    };
+    auto get_double = [&](const char* key, double& out) {
+        if (j.contains(key) && j[key].is_number()) out = j[key].get<double>();
+    };
+    auto get_uint64 = [&](const char* key, uint64_t& out) {
+        if (j.contains(key) && j[key].is_number_unsigned()) out = j[key].get<uint64_t>();
+    };
+    auto get_size = [&](const char* key, std::size_t& out) {
+        if (j.contains(key) && j[key].is_number_unsigned()) out = j[key].get<std::size_t>();
+    };
+    auto get_int = [&](const char* key, int& out) {
+        if (j.contains(key) && j[key].is_number_integer()) out = j[key].get<int>();
+    };
+    auto get_bool = [&](const char* key, bool& out) {
+        if (j.contains(key) && j[key].is_boolean()) out = j[key].get<bool>();
+    };
+    auto get_u16 = [&](const char* key, uint16_t& out) {
+        if (j.contains(key) && j[key].is_number_unsigned()) out = j[key].get<uint16_t>();
+    };
+
+    get_str("replay", replay_path);
+    get_str("log_events", event_log_path);
+    get_uint64("seed", seed);
+    get_str("thread_preset", thread_preset_str);
+    get_bool("no_pin", no_pin);
+    get_str("provider", provider_name);
+    get_str("path", provider_path);
+    get_str("strategy", cli_strategy);
+    get_str("format", cli_format);
+    get_size("sma_period", cli_sma_period);
+    get_str("fee", cli_fee_model);
+    get_double("fee_value", cli_fee_value);
+    get_double("maker_rate", cli_maker_rate);
+    get_double("taker_rate", cli_taker_rate);
+    get_bool("web_ui", enable_web_ui);
+    get_u16("ws_port", ws_port);
+    get_str("symbol", cli_symbol);
+    get_str("stream", cli_stream);
+    get_str("api_key", cli_api_key);
+    get_str("api_secret", cli_api_secret);
+    get_str("host", cli_host);
+    get_str("port", cli_port);
+    get_str("record", cli_record_path);
+    get_str("replay_data", cli_replay_data_path);
+    get_bool("live", cli_live);
+    get_str("mode", cli_mode);
+    get_str("db", cli_db_path);
+    get_double("balance", cli_balance);
+    get_double("risk_fraction", cli_risk_fraction);
+    get_double("sl", cli_sl_pct);
+    get_double("tp", cli_tp_pct);
+    get_int("backfill", cli_backfill);
+    get_str("backfill_interval", cli_backfill_interval);
+
+    // Risk limits
+    if (j.contains("risk") && j["risk"].is_object())
+    {
+        auto& r = j["risk"];
+        auto rd = [&](const char* key, double& out) {
+            if (r.contains(key) && r[key].is_number()) out = r[key].get<double>();
+        };
+        auto ri = [&](const char* key, int& out) {
+            if (r.contains(key) && r[key].is_number_integer()) out = r[key].get<int>();
+        };
+        rd("max_position_value", risk_max_position_value);
+        rd("max_drawdown", risk_max_drawdown);
+        rd("max_loss_per_trade", risk_max_loss_per_trade);
+        ri("max_open_orders", risk_max_open_orders);
+        rd("max_portfolio_exposure", risk_max_portfolio_exposure);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: dump resolved config as JSON to stdout
+// ---------------------------------------------------------------------------
+static void dump_config(const std::string& replay_path,
+                        const std::string& event_log_path,
+                        uint64_t seed,
+                        const std::string& thread_preset_str,
+                        bool no_pin,
+                        const std::string& provider_name,
+                        const std::string& provider_path,
+                        const std::string& cli_strategy,
+                        const std::string& cli_format,
+                        std::size_t cli_sma_period,
+                        const std::string& cli_fee_model,
+                        double cli_fee_value,
+                        double cli_maker_rate,
+                        double cli_taker_rate,
+                        bool enable_web_ui,
+                        uint16_t ws_port,
+                        const std::string& cli_symbol,
+                        const std::string& cli_stream,
+                        const std::string& cli_host,
+                        const std::string& cli_port,
+                        const std::string& cli_record_path,
+                        const std::string& cli_replay_data_path,
+                        bool cli_live,
+                        const std::string& cli_mode,
+                        const std::string& cli_db_path,
+                        double cli_balance,
+                        double cli_risk_fraction,
+                        double cli_sl_pct,
+                        double cli_tp_pct,
+                        int cli_backfill,
+                        const std::string& cli_backfill_interval,
+                        double risk_max_position_value,
+                        double risk_max_drawdown,
+                        double risk_max_loss_per_trade,
+                        int risk_max_open_orders,
+                        double risk_max_portfolio_exposure)
+{
+    nlohmann::json j;
+    j["replay"] = replay_path;
+    j["log_events"] = event_log_path;
+    j["seed"] = seed;
+    j["thread_preset"] = thread_preset_str;
+    j["no_pin"] = no_pin;
+    j["provider"] = provider_name;
+    j["path"] = provider_path;
+    j["strategy"] = cli_strategy.empty() ? "mean-reversion" : cli_strategy;
+    j["format"] = cli_format;
+    j["sma_period"] = cli_sma_period;
+    j["fee"] = cli_fee_model;
+    j["fee_value"] = cli_fee_value;
+    j["maker_rate"] = cli_maker_rate;
+    j["taker_rate"] = cli_taker_rate;
+    j["web_ui"] = enable_web_ui;
+    j["ws_port"] = ws_port;
+    j["symbol"] = cli_symbol;
+    j["stream"] = cli_stream;
+    j["host"] = cli_host;
+    j["port"] = cli_port;
+    j["record"] = cli_record_path;
+    j["replay_data"] = cli_replay_data_path;
+    j["live"] = cli_live;
+    j["mode"] = cli_mode.empty() ? "backtest" : cli_mode;
+    j["db"] = cli_db_path;
+    j["balance"] = cli_balance;
+    j["risk_fraction"] = cli_risk_fraction;
+    j["sl"] = cli_sl_pct;
+    j["tp"] = cli_tp_pct;
+    j["backfill"] = cli_backfill;
+    j["backfill_interval"] = cli_backfill_interval;
+    j["risk"] = {
+        {"max_position_value", risk_max_position_value},
+        {"max_drawdown", risk_max_drawdown},
+        {"max_loss_per_trade", risk_max_loss_per_trade},
+        {"max_open_orders", risk_max_open_orders},
+        {"max_portfolio_exposure", risk_max_portfolio_exposure}
+    };
+    std::cout << j.dump(2) << "\n";
+}
+
 int main(int argc, char* argv[])
 {
 #ifdef HAS_DEBUG
@@ -51,8 +271,11 @@ int main(int argc, char* argv[])
 
     LOG(INFO) << "TrueTest debug instrumentation enabled";
 #endif
-    // --- CLI flags ---
+
+    // --- Variable declarations (with defaults) ---
     std::string replay_path;
+    int64_t replay_from_us = 0;
+    int64_t replay_to_us = INT64_MAX;
     std::string event_log_path;
     uint64_t seed = 0;
     std::string thread_preset_str;
@@ -79,84 +302,288 @@ int main(int argc, char* argv[])
     bool cli_live = false;
     std::string cli_mode;
     std::string cli_db_path = "truetest.db";
+    bool no_db = false;
     double cli_balance = 10000.0;
     double cli_risk_fraction = 0.02;
-    double cli_sl_pct = 0.005;   // 0.5% default stop loss
-    double cli_tp_pct = 0.01;    // 1.0% default take profit
+    double cli_sl_pct = 0.005;
+    double cli_tp_pct = 0.01;
     int cli_backfill = 500;
     std::string cli_backfill_interval;
+    bool compress_log = true;
+    std::string config_file;
+    bool dump_config_flag = false;
+    bool dry_run = false;
 
-    for (int i = 1; i < argc; ++i)
-    {
-        if (std::strcmp(argv[i], "--replay") == 0 && i + 1 < argc)
-            replay_path = argv[++i];
-        else if (std::strcmp(argv[i], "--log-events") == 0 && i + 1 < argc)
-            event_log_path = argv[++i];
-        else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc)
-            seed = std::stoull(argv[++i]);
-        else if (std::strcmp(argv[i], "--thread-preset") == 0 && i + 1 < argc)
-            thread_preset_str = argv[++i];
-        else if (std::strcmp(argv[i], "--no-pin") == 0)
-            no_pin = true;
-        else if (std::strcmp(argv[i], "--provider") == 0 && i + 1 < argc)
-            provider_name = argv[++i];
-        else if (std::strcmp(argv[i], "--path") == 0 && i + 1 < argc)
-            provider_path = argv[++i];
-        else if (std::strcmp(argv[i], "--strategy") == 0 && i + 1 < argc)
-            cli_strategy = argv[++i];
-        else if (std::strcmp(argv[i], "--format") == 0 && i + 1 < argc)
-            cli_format = argv[++i];
-        else if (std::strcmp(argv[i], "--sma-period") == 0 && i + 1 < argc)
-            cli_sma_period = std::stoull(argv[++i]);
-        else if (std::strcmp(argv[i], "--fee") == 0 && i + 1 < argc)
-            cli_fee_model = argv[++i];
-        else if (std::strcmp(argv[i], "--fee-value") == 0 && i + 1 < argc)
-            cli_fee_value = std::stod(argv[++i]);
-        else if (std::strcmp(argv[i], "--maker-rate") == 0 && i + 1 < argc)
-            cli_maker_rate = std::stod(argv[++i]);
-        else if (std::strcmp(argv[i], "--taker-rate") == 0 && i + 1 < argc)
-            cli_taker_rate = std::stod(argv[++i]);
-        else if (std::strcmp(argv[i], "--web-ui") == 0)
-            enable_web_ui = true;
-        else if (std::strcmp(argv[i], "--ws-port") == 0 && i + 1 < argc)
-            ws_port = static_cast<uint16_t>(std::stoul(argv[++i]));
-        else if (std::strcmp(argv[i], "--symbol") == 0 && i + 1 < argc)
-            cli_symbol = argv[++i];
-        else if (std::strcmp(argv[i], "--stream") == 0 && i + 1 < argc)
-            cli_stream = argv[++i];
-        else if (std::strcmp(argv[i], "--api-key") == 0 && i + 1 < argc)
-            cli_api_key = argv[++i];
-        else if (std::strcmp(argv[i], "--api-secret") == 0 && i + 1 < argc)
-            cli_api_secret = argv[++i];
-        else if (std::strcmp(argv[i], "--host") == 0 && i + 1 < argc)
-            cli_host = argv[++i];
-        else if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc)
-            cli_port = argv[++i];
-        else if (std::strcmp(argv[i], "--record") == 0 && i + 1 < argc)
-            cli_record_path = argv[++i];
-        else if (std::strcmp(argv[i], "--replay-data") == 0 && i + 1 < argc)
-            cli_replay_data_path = argv[++i];
-        else if (std::strcmp(argv[i], "--live") == 0)
-            cli_live = true;
-        else if (std::strcmp(argv[i], "--mode") == 0 && i + 1 < argc)
-            cli_mode = argv[++i];
-        else if (std::strcmp(argv[i], "--db") == 0 && i + 1 < argc)
-            cli_db_path = argv[++i];
-        else if (std::strcmp(argv[i], "--no-db") == 0)
-            cli_db_path.clear();
-        else if (std::strcmp(argv[i], "--balance") == 0 && i + 1 < argc)
-            cli_balance = std::stod(argv[++i]);
-        else if (std::strcmp(argv[i], "--risk-fraction") == 0 && i + 1 < argc)
-            cli_risk_fraction = std::stod(argv[++i]);
-        else if (std::strcmp(argv[i], "--sl") == 0 && i + 1 < argc)
-            cli_sl_pct = std::stod(argv[++i]);
-        else if (std::strcmp(argv[i], "--tp") == 0 && i + 1 < argc)
-            cli_tp_pct = std::stod(argv[++i]);
-        else if (std::strcmp(argv[i], "--backfill") == 0 && i + 1 < argc)
-            cli_backfill = std::stoi(argv[++i]);
-        else if (std::strcmp(argv[i], "--backfill-interval") == 0 && i + 1 < argc)
-            cli_backfill_interval = argv[++i];
+    // Risk limit defaults (match risk_limits struct)
+    double risk_max_position_value = 1e9;
+    double risk_max_drawdown = 0.30;
+    double risk_max_loss_per_trade = 10000.0;
+    int risk_max_open_orders = 1000;
+    double risk_max_portfolio_exposure = 5e9;
+
+    // --- CLI11 setup ---
+    CLI::App app{"TrueTest — modular C++17 backtesting engine"};
+    app.set_help_all_flag("--help-all", "Show all help");
+
+    // Core
+    app.add_option("--replay", replay_path, "Path to event log for replay mode");
+    app.add_option("--replay-from", replay_from_us, "Replay from timestamp (microseconds since epoch)");
+    app.add_option("--replay-to", replay_to_us, "Replay to timestamp (microseconds since epoch)");
+    app.add_option("--log-events", event_log_path, "Path to write binary event log");
+    app.add_flag("--compress-log,!--no-compress-log", compress_log, "Compress binary event logs with zstd (default: on)");
+    app.add_option("--seed", seed, "RNG seed (0 = non-deterministic)");
+    app.add_option("--thread-preset", thread_preset_str, "Threading: inline, light, standard, full, extended");
+    app.add_flag("--no-pin", no_pin, "Disable CPU affinity pinning");
+    app.add_option("--provider", provider_name, "Provider name: local, binance");
+    app.add_option("--path", provider_path, "Data file path (for local provider)");
+    app.add_option("--strategy", cli_strategy, "Strategy: mean-reversion, sma, ma-crossover");
+    app.add_option("--format", cli_format, "Data format: tick, bar");
+    app.add_option("--sma-period", cli_sma_period, "SMA indicator period")->default_val(20);
+    app.add_option("--mode", cli_mode, "Engine mode: backtest, shadow, live");
+
+    // Fee model
+    app.add_option("--fee", cli_fee_model, "Fee model: fixed, tiered");
+    app.add_option("--fee-value", cli_fee_value, "Fixed fee per trade");
+    app.add_option("--maker-rate", cli_maker_rate, "Maker fee rate (tiered)");
+    app.add_option("--taker-rate", cli_taker_rate, "Taker fee rate (tiered)");
+
+    // WebSocket UI
+    app.add_flag("--web-ui", enable_web_ui, "Enable WebSocket UI server");
+    app.add_option("--ws-port", ws_port, "WebSocket server port")->default_val(8765);
+
+    // Provider/streaming
+    app.add_option("--symbol", cli_symbol, "Trading symbol (e.g., BTCUSDT)");
+    app.add_option("--stream", cli_stream, "Stream type: trade, kline, or interval");
+    app.add_option("--api-key", cli_api_key, "API key for exchange");
+    app.add_option("--api-secret", cli_api_secret, "API secret for exchange");
+    app.add_option("--host", cli_host, "WebSocket host");
+    app.add_option("--port", cli_port, "Port number");
+    app.add_option("--record", cli_record_path, "Record market data to file");
+    app.add_option("--replay-data", cli_replay_data_path, "Replay recorded market data");
+    app.add_flag("--live", cli_live, "Safety flag for live (real money) mode");
+
+    // Portfolio
+    app.add_option("--balance", cli_balance, "Initial account balance")->default_val(10000.0);
+    app.add_option("--risk-fraction", cli_risk_fraction, "Position size as equity fraction")->default_val(0.02);
+    app.add_option("--sl", cli_sl_pct, "Stop loss fraction of entry price")->default_val(0.005);
+    app.add_option("--tp", cli_tp_pct, "Take profit fraction of entry price")->default_val(0.01);
+
+    // Data persistence
+    app.add_option("--db", cli_db_path, "SQLite database path")->default_val("truetest.db");
+    app.add_flag("--no-db", no_db, "Disable SQLite persistence");
+
+    // Backfill
+    app.add_option("--backfill", cli_backfill, "Historical bars to fetch before streaming")->default_val(500);
+    app.add_option("--backfill-interval", cli_backfill_interval, "Kline interval for backfill");
+
+    // Config file (B2)
+    app.add_option("--config", config_file, "Load configuration from JSON file");
+    app.add_flag("--dump-config", dump_config_flag, "Print resolved config as JSON and exit");
+
+    // Dry run (B3)
+    app.add_flag("--dry-run", dry_run, "Validate config, print summary, and exit");
+
+    // Parse — reject unknown flags
+    try {
+        app.parse(argc, argv);
+    } catch (const CLI::ParseError& e) {
+        return app.exit(e);
     }
+
+    // --- Load config file first (CLI values override) ---
+    // CLI11 has already parsed CLI flags into the variables above.
+    // If --config is specified, we load the file into *temporary* copies,
+    // then only apply values that were NOT set via CLI.
+    if (!config_file.empty())
+    {
+        // Save CLI-set values, load file defaults, then restore CLI overrides
+        // Strategy: load file into the same variables (as defaults), then re-parse CLI.
+        // Simpler approach: load file values, then let CLI11 overwrite.
+        // Since CLI11 already parsed, we do: save current, load file, restore CLI-set ones.
+
+        // We need to know which options the user explicitly set on CLI.
+        // CLI11 tracks this via ->count() > 0.
+        auto was_set = [&](const std::string& name) -> bool {
+            auto opt = app.get_option_no_throw(name);
+            return opt && opt->count() > 0;
+        };
+
+        // Save CLI-set values
+        auto save_replay = replay_path;
+        auto save_event_log = event_log_path;
+        auto save_seed = seed;
+        auto save_preset = thread_preset_str;
+        auto save_no_pin = no_pin;
+        auto save_provider = provider_name;
+        auto save_path = provider_path;
+        auto save_strategy = cli_strategy;
+        auto save_format = cli_format;
+        auto save_sma = cli_sma_period;
+        auto save_fee = cli_fee_model;
+        auto save_fee_value = cli_fee_value;
+        auto save_maker = cli_maker_rate;
+        auto save_taker = cli_taker_rate;
+        auto save_webui = enable_web_ui;
+        auto save_wsport = ws_port;
+        auto save_symbol = cli_symbol;
+        auto save_stream = cli_stream;
+        auto save_apikey = cli_api_key;
+        auto save_apisecret = cli_api_secret;
+        auto save_host = cli_host;
+        auto save_port = cli_port;
+        auto save_record = cli_record_path;
+        auto save_replay_data = cli_replay_data_path;
+        auto save_live = cli_live;
+        auto save_mode = cli_mode;
+        auto save_db = cli_db_path;
+        auto save_balance = cli_balance;
+        auto save_risk_fraction = cli_risk_fraction;
+        auto save_sl = cli_sl_pct;
+        auto save_tp = cli_tp_pct;
+        auto save_backfill = cli_backfill;
+        auto save_backfill_interval = cli_backfill_interval;
+
+        // Load file (overwrites all variables)
+        load_config_file(config_file,
+            replay_path, event_log_path, seed, thread_preset_str, no_pin,
+            provider_name, provider_path, cli_strategy, cli_format, cli_sma_period,
+            cli_fee_model, cli_fee_value, cli_maker_rate, cli_taker_rate,
+            enable_web_ui, ws_port, cli_symbol, cli_stream,
+            cli_api_key, cli_api_secret, cli_host, cli_port,
+            cli_record_path, cli_replay_data_path, cli_live, cli_mode,
+            cli_db_path, cli_balance, cli_risk_fraction, cli_sl_pct, cli_tp_pct,
+            cli_backfill, cli_backfill_interval,
+            risk_max_position_value, risk_max_drawdown, risk_max_loss_per_trade,
+            risk_max_open_orders, risk_max_portfolio_exposure);
+
+        // Restore CLI-set values (CLI wins over file)
+        if (was_set("--replay")) replay_path = save_replay;
+        if (was_set("--log-events")) event_log_path = save_event_log;
+        if (was_set("--seed")) seed = save_seed;
+        if (was_set("--thread-preset")) thread_preset_str = save_preset;
+        if (was_set("--no-pin")) no_pin = save_no_pin;
+        if (was_set("--provider")) provider_name = save_provider;
+        if (was_set("--path")) provider_path = save_path;
+        if (was_set("--strategy")) cli_strategy = save_strategy;
+        if (was_set("--format")) cli_format = save_format;
+        if (was_set("--sma-period")) cli_sma_period = save_sma;
+        if (was_set("--fee")) cli_fee_model = save_fee;
+        if (was_set("--fee-value")) cli_fee_value = save_fee_value;
+        if (was_set("--maker-rate")) cli_maker_rate = save_maker;
+        if (was_set("--taker-rate")) cli_taker_rate = save_taker;
+        if (was_set("--web-ui")) enable_web_ui = save_webui;
+        if (was_set("--ws-port")) ws_port = save_wsport;
+        if (was_set("--symbol")) cli_symbol = save_symbol;
+        if (was_set("--stream")) cli_stream = save_stream;
+        if (was_set("--api-key")) cli_api_key = save_apikey;
+        if (was_set("--api-secret")) cli_api_secret = save_apisecret;
+        if (was_set("--host")) cli_host = save_host;
+        if (was_set("--port")) cli_port = save_port;
+        if (was_set("--record")) cli_record_path = save_record;
+        if (was_set("--replay-data")) cli_replay_data_path = save_replay_data;
+        if (was_set("--live")) cli_live = save_live;
+        if (was_set("--mode")) cli_mode = save_mode;
+        if (was_set("--db")) cli_db_path = save_db;
+        if (was_set("--balance")) cli_balance = save_balance;
+        if (was_set("--risk-fraction")) cli_risk_fraction = save_risk_fraction;
+        if (was_set("--sl")) cli_sl_pct = save_sl;
+        if (was_set("--tp")) cli_tp_pct = save_tp;
+        if (was_set("--backfill")) cli_backfill = save_backfill;
+        if (was_set("--backfill-interval")) cli_backfill_interval = save_backfill_interval;
+    }
+
+    // --no-db clears db path
+    if (no_db) cli_db_path.clear();
+
+    // --- --dump-config: print resolved config as JSON and exit ---
+    if (dump_config_flag)
+    {
+        dump_config(replay_path, event_log_path, seed, thread_preset_str, no_pin,
+                    provider_name, provider_path, cli_strategy, cli_format,
+                    cli_sma_period, cli_fee_model, cli_fee_value, cli_maker_rate,
+                    cli_taker_rate, enable_web_ui, ws_port, cli_symbol, cli_stream,
+                    cli_host, cli_port, cli_record_path, cli_replay_data_path,
+                    cli_live, cli_mode, cli_db_path, cli_balance, cli_risk_fraction,
+                    cli_sl_pct, cli_tp_pct, cli_backfill, cli_backfill_interval,
+                    risk_max_position_value, risk_max_drawdown, risk_max_loss_per_trade,
+                    risk_max_open_orders, risk_max_portfolio_exposure);
+        return 0;
+    }
+
+    // --- --dry-run: validate config, print summary, exit ---
+    if (dry_run)
+    {
+        std::string resolved_strategy = cli_strategy.empty() ? "mean-reversion" : cli_strategy;
+        std::string resolved_mode = cli_mode.empty() ? "backtest" : cli_mode;
+        std::string resolved_preset = thread_preset_str.empty()
+            ? preset_to_string(select_preset(detect_physical_cores()))
+            : thread_preset_str;
+
+        std::cout << "\n";
+        std::cout << "  ============================================\n";
+        std::cout << "    Dry-run config validation\n";
+        std::cout << "  ============================================\n";
+        std::cout << "    Mode:       " << resolved_mode << "\n";
+        std::cout << "    Strategy:   " << resolved_strategy << "\n";
+        std::cout << "    SMA Period: " << cli_sma_period << "\n";
+        std::cout << "    Balance:    $" << cli_balance << "\n";
+        std::cout << "    Risk:       " << (cli_risk_fraction * 100) << "% per trade\n";
+        std::cout << "    SL/TP:      " << (cli_sl_pct * 100) << "% / " << (cli_tp_pct * 100) << "%\n";
+        std::cout << "    Threading:  " << resolved_preset << "\n";
+        std::cout << "    Provider:   " << (provider_name.empty() ? "(TUI)" : provider_name) << "\n";
+        std::cout << "    Data path:  " << (provider_path.empty() ? "(none)" : provider_path) << "\n";
+        std::cout << "    DB:         " << (cli_db_path.empty() ? "(disabled)" : cli_db_path) << "\n";
+        std::cout << "    Fee model:  " << (cli_fee_model.empty() ? "zero" : cli_fee_model) << "\n";
+        std::cout << "    Web UI:     " << (enable_web_ui ? "yes" : "no") << "\n";
+        if (enable_web_ui)
+            std::cout << "    WS port:    " << ws_port << "\n";
+        std::cout << "    Seed:       " << (seed == 0 ? "random" : std::to_string(seed)) << "\n";
+        std::cout << "  ── Risk Limits ──\n";
+        std::cout << "    Max drawdown:        " << (risk_max_drawdown * 100) << "%\n";
+        std::cout << "    Max position value:  $" << risk_max_position_value << "\n";
+        std::cout << "    Max loss/trade:      $" << risk_max_loss_per_trade << "\n";
+        std::cout << "    Max open orders:     " << risk_max_open_orders << "\n";
+        std::cout << "    Max exposure:        $" << risk_max_portfolio_exposure << "\n";
+        std::cout << "  ============================================\n";
+
+        // Validate
+        bool valid = true;
+        if (!cli_strategy.empty() &&
+            cli_strategy != "mean-reversion" &&
+            cli_strategy != "sma" &&
+            cli_strategy != "ma-crossover")
+        {
+            std::cerr << "  ! Unknown strategy: " << cli_strategy << "\n";
+            valid = false;
+        }
+        if (!cli_mode.empty() &&
+            cli_mode != "backtest" &&
+            cli_mode != "shadow" &&
+            cli_mode != "live")
+        {
+            std::cerr << "  ! Unknown mode: " << cli_mode << "\n";
+            valid = false;
+        }
+        if (!cli_fee_model.empty() &&
+            cli_fee_model != "fixed" &&
+            cli_fee_model != "tiered")
+        {
+            std::cerr << "  ! Unknown fee model: " << cli_fee_model << "\n";
+            valid = false;
+        }
+        if (!thread_preset_str.empty())
+        {
+            try { string_to_preset(thread_preset_str); }
+            catch (...) {
+                std::cerr << "  ! Unknown thread preset: " << thread_preset_str << "\n";
+                valid = false;
+            }
+        }
+
+        std::cout << "\n  Config is " << (valid ? "VALID" : "INVALID") << ".\n";
+        return valid ? 0 : 1;
+    }
+
     // --- Replay mode: skip TUI, replay events from log ---
     if (!replay_path.empty())
     {
@@ -169,10 +596,11 @@ int main(int argc, char* argv[])
         engine_config cfg;
         cfg.seed = seed;
         cfg.event_log_path = event_log_path;
+        cfg.compress_log = compress_log;
 
         auto dh = std::make_shared<data_handler>();
         engine eng(dh, nullptr, strategy, std::move(cfg));
-        eng.run_replay(replay_path);
+        eng.run_replay(replay_path, replay_from_us, replay_to_us);
         eng.print_summary();
         return 0;
     }
@@ -205,6 +633,7 @@ int main(int argc, char* argv[])
         engine_config prov_cfg;
         prov_cfg.seed = seed;
         prov_cfg.event_log_path = event_log_path;
+        prov_cfg.compress_log = compress_log;
         prov_cfg.disable_pinning = no_pin;
         prov_cfg.provider = provider;
         prov_cfg.enable_web_ui = enable_web_ui;
@@ -213,6 +642,14 @@ int main(int argc, char* argv[])
         prov_cfg.db_path = cli_db_path;
         prov_cfg.backfill_bars = cli_backfill;
         prov_cfg.backfill_interval = cli_backfill_interval;
+
+        // Apply risk limits
+        prov_cfg.risk.max_position_value = risk_max_position_value;
+        prov_cfg.risk.max_drawdown = risk_max_drawdown;
+        prov_cfg.risk.max_loss_per_trade = risk_max_loss_per_trade;
+        prov_cfg.risk.max_open_orders = risk_max_open_orders;
+        prov_cfg.risk.max_portfolio_exposure = risk_max_portfolio_exposure;
+
         // Map WS host to REST host for backfill
         if (!cli_host.empty()) {
             if (cli_host.find("testnet") != std::string::npos)
@@ -532,8 +969,16 @@ int main(int argc, char* argv[])
     engine_config config;
     config.seed = seed;
     config.event_log_path = event_log_path;
+    config.compress_log = compress_log;
     config.disable_pinning = no_pin;
     config.db_path = cli_db_path;
+
+    // Apply risk limits
+    config.risk.max_position_value = risk_max_position_value;
+    config.risk.max_drawdown = risk_max_drawdown;
+    config.risk.max_loss_per_trade = risk_max_loss_per_trade;
+    config.risk.max_open_orders = risk_max_open_orders;
+    config.risk.max_portfolio_exposure = risk_max_portfolio_exposure;
 
     // Thread preset: CLI override or auto-detect
     if (!thread_preset_str.empty())

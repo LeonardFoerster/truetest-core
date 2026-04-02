@@ -2,6 +2,8 @@
 
 #include "event.h"
 
+#include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -9,6 +11,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <zstd.h>
 
 // Binary event log format:
 //   [event_type : uint8_t]
@@ -390,20 +394,63 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
 
 } // namespace event_serial
 
+// Index entry for time-based seeking in event logs.
+struct EventLogIndexEntry {
+    int64_t  timestamp_us;   // microseconds since epoch
+    uint64_t file_offset;    // byte offset in the log file
+};
 
-// Writes events to a binary log file.
+// Footer appended after the index:
+//   [index_offset : u64]  — byte offset where index entries start
+//   [entry_count  : u32]  — number of index entries
+//   [magic        : u32]  — 0x58495454 ("TTIX" little-endian)
+static constexpr uint32_t EVENT_LOG_INDEX_MAGIC = 0x58495454; // "TTIX"
+static constexpr size_t   EVENT_LOG_INDEX_INTERVAL = 1000;    // index every N events
+
+
+// Writes events to a binary log file, optionally with zstd compression.
+// Builds an in-memory index (one entry per INDEX_INTERVAL events) and
+// appends it as a footer on finalize().
 class EventLogger
 {
 public:
-    explicit EventLogger(const std::string& path)
+    explicit EventLogger(const std::string& path, bool compress = true)
         : out_(path, std::ios::binary | std::ios::trunc)
+        , compress_(compress)
+        , cctx_(nullptr)
+        , event_count_(0)
     {
         if (!out_)
             throw std::runtime_error("EventLogger: cannot open " + path);
+        if (compress_) {
+            cctx_ = ZSTD_createCCtx();
+            if (!cctx_)
+                throw std::runtime_error("EventLogger: failed to create zstd context");
+        }
     }
+
+    ~EventLogger()
+    {
+        finalize();
+        if (cctx_) ZSTD_freeCCtx(cctx_);
+    }
+
+    EventLogger(const EventLogger&) = delete;
+    EventLogger& operator=(const EventLogger&) = delete;
 
     void log(const event& e)
     {
+        // Record index entry before writing (every INDEX_INTERVAL events)
+        if (event_count_ % EVENT_LOG_INDEX_INTERVAL == 0) {
+            EventLogIndexEntry entry{};
+            auto ts = e.get_timestamp();
+            entry.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                ts.time_since_epoch()).count();
+            entry.file_offset = static_cast<uint64_t>(out_.tellp());
+            index_.push_back(entry);
+        }
+        ++event_count_;
+
         std::vector<uint8_t> payload;
 
         switch (e.get_type()) {
@@ -424,52 +471,204 @@ public:
         }
 
         event_serial::write_u8(out_, static_cast<uint8_t>(e.get_type()));
-        event_serial::write_u32(out_, static_cast<uint32_t>(payload.size()));
-        out_.write(reinterpret_cast<const char*>(payload.data()),
-                   static_cast<std::streamsize>(payload.size()));
+
+        if (compress_) {
+            size_t bound = ZSTD_compressBound(payload.size());
+            compressed_buf_.resize(bound);
+            size_t compressed_size = ZSTD_compressCCtx(
+                cctx_, compressed_buf_.data(), bound,
+                payload.data(), payload.size(), 1);
+            if (ZSTD_isError(compressed_size))
+                throw std::runtime_error(std::string("zstd compress: ") + ZSTD_getErrorName(compressed_size));
+            event_serial::write_u32(out_, static_cast<uint32_t>(compressed_size));
+            out_.write(reinterpret_cast<const char*>(compressed_buf_.data()),
+                       static_cast<std::streamsize>(compressed_size));
+        } else {
+            event_serial::write_u32(out_, static_cast<uint32_t>(payload.size()));
+            out_.write(reinterpret_cast<const char*>(payload.data()),
+                       static_cast<std::streamsize>(payload.size()));
+        }
     }
 
     void flush() { out_.flush(); }
 
+    // Write index + footer. Called automatically by destructor.
+    void finalize()
+    {
+        if (finalized_) return;
+        finalized_ = true;
+
+        uint64_t index_offset = static_cast<uint64_t>(out_.tellp());
+        for (const auto& entry : index_) {
+            event_serial::write_i64(out_, entry.timestamp_us);
+            event_serial::write_u64(out_, entry.file_offset);
+        }
+        event_serial::write_u64(out_, index_offset);
+        event_serial::write_u32(out_, static_cast<uint32_t>(index_.size()));
+        event_serial::write_u32(out_, EVENT_LOG_INDEX_MAGIC);
+        out_.flush();
+    }
+
 private:
     std::ofstream out_;
+    bool compress_;
+    ZSTD_CCtx* cctx_;
+    std::vector<uint8_t> compressed_buf_;
+    std::vector<EventLogIndexEntry> index_;
+    size_t event_count_;
+    bool finalized_ = false;
 };
 
 
 // Reads events back from a binary log file.
+// Auto-detects compressed vs uncompressed format and reads the index footer
+// (if present) for seek-by-timestamp support.
 class EventReplayer
 {
 public:
-    explicit EventReplayer(const std::string& path)
+    explicit EventReplayer(const std::string& path,
+                           int64_t replay_from_us = 0,
+                           int64_t replay_to_us = INT64_MAX)
         : in_(path, std::ios::binary)
+        , compressed_(false)
+        , dctx_(nullptr)
+        , replay_from_us_(replay_from_us)
+        , replay_to_us_(replay_to_us)
     {
         if (!in_)
             throw std::runtime_error("EventReplayer: cannot open " + path);
+
+        // Try to read index footer (last 16 bytes: u64 index_offset + u32 count + u32 magic)
+        in_.seekg(0, std::ios::end);
+        auto file_size = in_.tellg();
+        if (file_size >= 16) {
+            in_.seekg(-16, std::ios::end);
+            uint64_t index_offset = 0;
+            uint32_t entry_count = 0;
+            uint32_t magic = 0;
+            in_.read(reinterpret_cast<char*>(&index_offset), 8);
+            in_.read(reinterpret_cast<char*>(&entry_count), 4);
+            in_.read(reinterpret_cast<char*>(&magic), 4);
+            if (magic == EVENT_LOG_INDEX_MAGIC) {
+                has_index_ = true;
+                data_end_ = static_cast<std::streampos>(index_offset);
+                // Read index entries
+                if (entry_count > 0) {
+                    in_.seekg(static_cast<std::streampos>(index_offset));
+                    index_.resize(entry_count);
+                    for (uint32_t i = 0; i < entry_count; ++i) {
+                        in_.read(reinterpret_cast<char*>(&index_[i].timestamp_us), 8);
+                        in_.read(reinterpret_cast<char*>(&index_[i].file_offset), 8);
+                    }
+                }
+            } else {
+                data_end_ = file_size;
+            }
+        }
+
+        // Seek to start position using index if available
+        if (has_index_ && replay_from_us_ > 0 && !index_.empty()) {
+            // Binary search for the closest index entry <= replay_from_us_
+            auto it = std::upper_bound(index_.begin(), index_.end(), replay_from_us_,
+                [](int64_t ts, const EventLogIndexEntry& e) { return ts < e.timestamp_us; });
+            if (it != index_.begin()) --it;
+            in_.seekg(static_cast<std::streampos>(it->file_offset));
+        } else {
+            in_.seekg(0);
+        }
+
+        // Detect compression by peeking at the first event's payload
+        auto start_pos = in_.tellg();
+        uint8_t type_byte = 0;
+        in_.read(reinterpret_cast<char*>(&type_byte), 1);
+        if (in_) {
+            uint32_t payload_size = 0;
+            in_.read(reinterpret_cast<char*>(&payload_size), 4);
+            if (in_ && payload_size >= 4) {
+                uint32_t zmagic = 0;
+                in_.read(reinterpret_cast<char*>(&zmagic), 4);
+                if (zmagic == 0xFD2FB528) {
+                    compressed_ = true;
+                    dctx_ = ZSTD_createDCtx();
+                    if (!dctx_)
+                        throw std::runtime_error("EventReplayer: failed to create zstd context");
+                }
+            }
+        }
+        in_.clear();
+        in_.seekg(start_pos);
     }
+
+    ~EventReplayer()
+    {
+        if (dctx_) ZSTD_freeDCtx(dctx_);
+    }
+
+    EventReplayer(const EventReplayer&) = delete;
+    EventReplayer& operator=(const EventReplayer&) = delete;
 
     bool has_next() const
     {
-        return in_.good() && in_.peek() != std::ifstream::traits_type::eof();
+        if (!in_.good()) return false;
+        auto pos = in_.tellg();
+        if (has_index_ && pos >= data_end_) return false;
+        return in_.peek() != std::ifstream::traits_type::eof();
     }
 
+    // Returns nullptr when done or past replay_to timestamp.
     event_pointer next()
     {
-        uint8_t type_byte = 0;
-        in_.read(reinterpret_cast<char*>(&type_byte), 1);
-        if (!in_) return nullptr;
+        while (true) {
+            if (has_index_ && in_.tellg() >= data_end_) return nullptr;
 
-        uint32_t payload_size = 0;
-        in_.read(reinterpret_cast<char*>(&payload_size), 4);
-        if (!in_) return nullptr;
+            uint8_t type_byte = 0;
+            in_.read(reinterpret_cast<char*>(&type_byte), 1);
+            if (!in_) return nullptr;
 
-        std::vector<uint8_t> payload(payload_size);
-        in_.read(reinterpret_cast<char*>(payload.data()), payload_size);
-        if (!in_) return nullptr;
+            uint32_t payload_size = 0;
+            in_.read(reinterpret_cast<char*>(&payload_size), 4);
+            if (!in_) return nullptr;
 
-        return event_serial::deserialise(
-            static_cast<event_type>(type_byte), payload.data(), payload_size);
+            std::vector<uint8_t> raw(payload_size);
+            in_.read(reinterpret_cast<char*>(raw.data()), payload_size);
+            if (!in_) return nullptr;
+
+            event_pointer ev;
+            if (compressed_) {
+                unsigned long long decompressed_size = ZSTD_getFrameContentSize(raw.data(), raw.size());
+                if (decompressed_size == ZSTD_CONTENTSIZE_ERROR ||
+                    decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN) {
+                    decompressed_size = payload_size * 10;
+                }
+                std::vector<uint8_t> decompressed(static_cast<size_t>(decompressed_size));
+                size_t result = ZSTD_decompressDCtx(
+                    dctx_, decompressed.data(), decompressed.size(),
+                    raw.data(), raw.size());
+                if (ZSTD_isError(result))
+                    throw std::runtime_error(std::string("zstd decompress: ") + ZSTD_getErrorName(result));
+                ev = event_serial::deserialise(
+                    static_cast<event_type>(type_byte), decompressed.data(), result);
+            } else {
+                ev = event_serial::deserialise(
+                    static_cast<event_type>(type_byte), raw.data(), payload_size);
+            }
+
+            // Check timestamp bounds
+            auto ts_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                ev->get_timestamp().time_since_epoch()).count();
+            if (ts_us > replay_to_us_) return nullptr;
+            if (ts_us < replay_from_us_) continue; // skip until we reach from
+            return ev;
+        }
     }
 
 private:
     mutable std::ifstream in_;
+    bool compressed_;
+    ZSTD_DCtx* dctx_;
+    int64_t replay_from_us_;
+    int64_t replay_to_us_;
+    bool has_index_ = false;
+    std::streampos data_end_ = 0;
+    std::vector<EventLogIndexEntry> index_;
 };

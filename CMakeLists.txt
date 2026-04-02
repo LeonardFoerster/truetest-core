@@ -12,6 +12,67 @@ option(ENABLE_WEB_UI "Build with WebSocket UI server (requires Boost.Beast)" OFF
 option(ENABLE_BINANCE "Build with Binance exchange provider" OFF)
 option(ENABLE_SQLITE "SQLite persistence for trades/portfolio" ON)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(ENABLE_ASAN "Enable AddressSanitizer (mutually exclusive with TSAN)" OFF)
+option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (mutually exclusive with TSAN)" OFF)
+
+# ── Sanitizer mutual exclusivity ────────────────────────────────────────────
+if(ENABLE_TSAN AND (ENABLE_ASAN OR ENABLE_UBSAN))
+    message(FATAL_ERROR "TSAN cannot be combined with ASAN or UBSAN. Disable one.")
+endif()
+
+# ── Build-type optimization profiles ────────────────────────────────────────
+if(NOT MSVC)
+    # Release: full optimization + LTO
+    add_compile_options(
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:Release>:-DNDEBUG>
+        $<$<CONFIG:Release>:-flto>
+    )
+    add_link_options($<$<CONFIG:Release>:-flto>)
+
+    # RelWithDebInfo: moderate optimization + debug info
+    add_compile_options(
+        $<$<CONFIG:RelWithDebInfo>:-O2>
+        $<$<CONFIG:RelWithDebInfo>:-g>
+    )
+
+    # Debug: no optimization + debug info
+    add_compile_options(
+        $<$<CONFIG:Debug>:-O0>
+        $<$<CONFIG:Debug>:-g>
+    )
+endif()
+
+# ── CLI11 (header-only argument parser) ─────────────────────────────────────
+include(FetchContent)
+FetchContent_Declare(
+    cli11
+    GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
+    GIT_TAG        v2.4.2
+)
+FetchContent_MakeAvailable(cli11)
+
+# ── zstd (compression for binary event logs) ───────────────────────────────
+FetchContent_Declare(
+    zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG        v1.5.6
+    SOURCE_SUBDIR  build/cmake
+)
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(zstd)
+
+# ── nlohmann/json (header-only JSON library for config files) ───────────────
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+)
+set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(nlohmann_json)
 
 # ── Core engine sources (no external dependencies) ────────────────────────────
 set(SOURCES
@@ -35,6 +96,7 @@ set(SOURCES
 
 add_executable(truetest ${SOURCES})
 target_include_directories(truetest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/BacktestEngine/src")
+target_link_libraries(truetest PRIVATE CLI11::CLI11 nlohmann_json::nlohmann_json libzstd_static)
 
 # ── Optional PostgreSQL backend ───────────────────────────────────────────────
 if(ENABLE_POSTGRESQL)
@@ -279,7 +341,7 @@ if(BUILD_TESTS)
     target_compile_definitions(truetest_tests PRIVATE
         TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
     )
-    target_link_libraries(truetest_tests PRIVATE GTest::gtest)
+    target_link_libraries(truetest_tests PRIVATE GTest::gtest libzstd_static)
 
     if(NOT MSVC)
         target_compile_options(truetest_tests PRIVATE -Wall -Wextra)
@@ -308,6 +370,13 @@ if(BUILD_TESTS)
 
     include(GoogleTest)
     gtest_discover_tests(truetest_tests)
+
+    # CLI integration tests (run truetest binary as subprocess)
+    add_executable(truetest_cli_tests tests/test_cli.cpp)
+    target_link_libraries(truetest_cli_tests PRIVATE GTest::gtest GTest::gtest_main)
+    add_dependencies(truetest_cli_tests truetest)
+    # Tests invoke ./build/truetest so they must run from the project root
+    gtest_discover_tests(truetest_cli_tests WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 # ──────────────────────────-───────────────────────────────────────────────────
 
@@ -318,6 +387,26 @@ if(ENABLE_TSAN AND NOT MSVC)
     if(BUILD_TESTS)
         target_compile_options(truetest_tests PRIVATE -fsanitize=thread)
         target_link_options(truetest_tests PRIVATE -fsanitize=thread)
+    endif()
+endif()
+
+# ── AddressSanitizer ─────────────────────────────────────────────────────────
+if(ENABLE_ASAN AND NOT MSVC)
+    target_compile_options(truetest PRIVATE -fsanitize=address)
+    target_link_options(truetest PRIVATE -fsanitize=address)
+    if(BUILD_TESTS)
+        target_compile_options(truetest_tests PRIVATE -fsanitize=address)
+        target_link_options(truetest_tests PRIVATE -fsanitize=address)
+    endif()
+endif()
+
+# ── UndefinedBehaviorSanitizer ───────────────────────────────────────────────
+if(ENABLE_UBSAN AND NOT MSVC)
+    target_compile_options(truetest PRIVATE -fsanitize=undefined)
+    target_link_options(truetest PRIVATE -fsanitize=undefined)
+    if(BUILD_TESTS)
+        target_compile_options(truetest_tests PRIVATE -fsanitize=undefined)
+        target_link_options(truetest_tests PRIVATE -fsanitize=undefined)
     endif()
 endif()
 
@@ -334,3 +423,17 @@ else()
         endif()
     endif()
 endif()
+
+# ── Install rules ───────────────────────────────────────────────────────────
+install(TARGETS truetest RUNTIME DESTINATION bin)
+install(FILES web/index.html DESTINATION share/truetest/web)
+
+# ── CPack packaging ─────────────────────────────────────────────────────────
+set(CPACK_PACKAGE_NAME "truetest")
+set(CPACK_PACKAGE_VERSION "0.1.0")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "TrueTest — modular C++17 backtesting engine")
+set(CPACK_PACKAGE_CONTACT "truetest@example.com")
+set(CPACK_GENERATOR "TGZ;DEB")
+set(CPACK_DEBIAN_PACKAGE_MAINTAINER "TrueTest Maintainers")
+set(CPACK_DEBIAN_PACKAGE_SECTION "finance")
+include(CPack)

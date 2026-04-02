@@ -21,7 +21,7 @@ inline void event_sink(const event& ev, std::shared_ptr<data_handler> handler)
 		}
 		else if constexpr (std::is_same_v<E, tick>)
 		{
-			handler->tick_data.push_back(to_tick_record(e));
+			handler->add_tick(to_tick_record(e));
 		}
 		// l2_snapshot, l2_update, status: not stored in data_handler today.
 		// Future: add l2 storage to data_handler or route directly to engine.

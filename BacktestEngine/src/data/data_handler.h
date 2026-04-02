@@ -36,15 +36,21 @@ class data_handler
 
 	private:
 		size_t current_csv_row_index_ = 0;
-
+		size_t validation_error_count_ = 0;
 
 	public:
 		data_handler() = default;
 		void load_from_csv(const std::filesystem::path& path);
 
 
-		void load_into_queue(std::string date, std::string symbol, double o, double h, double l, double c, int64_t v);
+		// Returns true if the record was accepted, false if rejected by validation.
+		bool load_into_queue(std::string date, std::string symbol, double o, double h, double l, double c, int64_t v);
 
+		// Validate and append a tick record. Returns true if accepted.
+		bool add_tick(tick_record rec);
+
+		// Number of records rejected during validation.
+		size_t validation_errors() const { return validation_error_count_; }
 
 		// OHLCV bar data
 		std::vector<std::string>	db_data_date;

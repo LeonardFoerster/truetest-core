@@ -18,11 +18,12 @@ public:
 
     explicit LoggingWorker(const std::string& event_log_path = "",
                            log_sink text_sink = log_sink::none,
-                           const std::string& text_log_path = "")
+                           const std::string& text_log_path = "",
+                           bool compress_log = true)
         : text_sink_(text_sink)
     {
         if (!event_log_path.empty())
-            event_logger_ = std::make_unique<EventLogger>(event_log_path);
+            event_logger_ = std::make_unique<EventLogger>(event_log_path, compress_log);
 
         if (text_sink_ == log_sink::file_sink && !text_log_path.empty())
             text_file_.open(text_log_path, std::ios::out | std::ios::trunc);

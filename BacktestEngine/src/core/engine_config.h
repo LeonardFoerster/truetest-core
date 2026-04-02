@@ -48,6 +48,7 @@ struct engine_config
 
     // Event logging: when non-empty, all events are written to this file.
     std::string event_log_path;
+    bool compress_log = true;            // zstd-compress binary event logs
 
     // Text logging
     std::string text_log_path;

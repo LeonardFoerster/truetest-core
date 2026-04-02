@@ -159,5 +159,5 @@ inline void bar_record_sink(const bar_record& rec, std::shared_ptr<data_handler>
 
 inline void tick_record_sink(const tick_record& rec, std::shared_ptr<data_handler> handler)
 {
-	handler->tick_data.push_back(rec);
+	handler->add_tick(rec);
 }

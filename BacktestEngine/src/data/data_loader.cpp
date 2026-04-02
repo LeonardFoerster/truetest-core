@@ -9,8 +9,30 @@
 #include <vector>
 
 
-void data_handler::load_into_queue(std::string date, std::string symbol, double o, double h, double l, double c, int64_t v)
+bool data_handler::load_into_queue(std::string date, std::string symbol, double o, double h, double l, double c, int64_t v)
 {
+        size_t row = db_data_date.size() + 1;
+
+        if (o <= 0 || h <= 0 || l <= 0 || c <= 0)
+        {
+            std::cerr << "  ! Row " << row << ": non-positive price (o=" << o
+                      << " h=" << h << " l=" << l << " c=" << c << "), skipping\n";
+            ++validation_error_count_;
+            return false;
+        }
+        if (h < l)
+        {
+            std::cerr << "  ! Row " << row << ": high (" << h << ") < low (" << l << "), skipping\n";
+            ++validation_error_count_;
+            return false;
+        }
+        if (v < 0)
+        {
+            std::cerr << "  ! Row " << row << ": negative volume (" << v << "), skipping\n";
+            ++validation_error_count_;
+            return false;
+        }
+
         db_data_date.emplace_back(std::move(date));
         db_data_symbol.emplace_back(std::move(symbol));
         db_data_open_value.emplace_back(o);
@@ -18,6 +40,32 @@ void data_handler::load_into_queue(std::string date, std::string symbol, double 
         db_data_low_value.emplace_back(l);
         db_data_close_value.emplace_back(c);
         db_data_volume_value.emplace_back(v);
+        return true;
+}
+
+bool data_handler::add_tick(tick_record rec)
+{
+        if (rec.price <= 0)
+        {
+            std::cerr << "  ! Tick: non-positive price (" << rec.price << "), skipping\n";
+            ++validation_error_count_;
+            return false;
+        }
+        if (rec.quantity <= 0)
+        {
+            std::cerr << "  ! Tick: non-positive quantity (" << rec.quantity << "), skipping\n";
+            ++validation_error_count_;
+            return false;
+        }
+        if (!tick_data.empty() && rec.timestamp < tick_data.back().timestamp)
+        {
+            std::cerr << "  ! Tick: non-monotonic timestamp, skipping\n";
+            ++validation_error_count_;
+            return false;
+        }
+
+        tick_data.push_back(std::move(rec));
+        return true;
 }
 
 void data_handler::load_from_csv(const std::filesystem::path& path)

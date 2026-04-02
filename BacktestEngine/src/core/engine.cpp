@@ -243,7 +243,7 @@ std::unique_ptr<LoggingWorker> engine::make_logging_worker()
         text_sink = LoggingWorker::log_sink::file_sink;
 
     return std::make_unique<LoggingWorker>(
-        config_.event_log_path, text_sink, config_.text_log_path);
+        config_.event_log_path, text_sink, config_.text_log_path, config_.compress_log);
 }
 
 void engine::start_workers()
@@ -1212,7 +1212,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
     if (!data_handler_) throw std::runtime_error("missing dependencies");
 
     if (!config_.event_log_path.empty())
-        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path);
+        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
 
 #ifdef HAS_BINANCE
     // Create hybrid executor for paper-mode limit order fills
@@ -1360,7 +1360,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     if (!data_handler_) throw std::runtime_error("missing dependencies");
 
     if (!config_.event_log_path.empty())
-        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path);
+        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
 
 #ifdef HAS_BINANCE
     // Create hybrid executor for paper-mode limit order fills
@@ -1517,7 +1517,7 @@ void engine::run()
     }
 
     if (!config_.event_log_path.empty())
-        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path);
+        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
 
 #ifdef HAS_DEBUG
     memory_sampler_.set_start(debug::memory_snapshot::capture());
@@ -1766,7 +1766,7 @@ void engine::run()
 void engine::run_tick_data()
 {
     if (!config_.event_log_path.empty() && !event_logger_)
-        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path);
+        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
 
     // Clear shared pending state for this run
     pending_stops_.clear();
@@ -1900,9 +1900,11 @@ void engine::run_tick_data()
     stop_workers();
 }
 
-void engine::run_replay(const std::string& log_path)
+void engine::run_replay(const std::string& log_path,
+                        int64_t replay_from_us,
+                        int64_t replay_to_us)
 {
-    EventReplayer replayer(log_path);
+    EventReplayer replayer(log_path, replay_from_us, replay_to_us);
 
     start_workers();
 

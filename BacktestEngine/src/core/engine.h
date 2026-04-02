@@ -1,4 +1,6 @@
 #pragma once
+#include <climits>
+#include <cstdint>
 #include "../data/data_handler.h"
 #include "../strategy/strategy_interface.h"
 #include "../execution/portfolio.h"
@@ -257,7 +259,9 @@ public:
     OrderbookRegistry& get_orderbook_registry() { return orderbook_registry_; }
     void run();
     void run_tick_data();
-    void run_replay(const std::string& log_path);
+    void run_replay(const std::string& log_path,
+                    int64_t replay_from_us = 0,
+                    int64_t replay_to_us = INT64_MAX);
     void run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge);
     void run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge);
     void set_strategy(std::shared_ptr<IStrategy> strategy);

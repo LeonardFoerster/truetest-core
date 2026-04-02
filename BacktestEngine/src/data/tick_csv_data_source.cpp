@@ -65,8 +65,8 @@ bool TickCsvDataSource::load_data(std::shared_ptr<data_handler> handler)
         rec.price = price;
         rec.quantity = qty;
         rec.side = side;
-        handler->tick_data.push_back(std::move(rec));
-        ++count;
+        if (handler->add_tick(std::move(rec)))
+            ++count;
     }
 
     std::cout << "  Loaded " << count << " ticks from " << path_ << "\n";
