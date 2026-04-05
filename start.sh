@@ -160,7 +160,7 @@ bootstrap_vcpkg() {
     # Clone vcpkg if not present
     if [[ ! -d "$VCPKG_DIR/.git" ]]; then
         info "Cloning vcpkg (one-time setup)..."
-        git clone --depth 1 --branch 2024.11.16 \
+        git clone --depth 1 --branch 2026.03.18 \
             https://github.com/microsoft/vcpkg.git "$VCPKG_DIR" \
             || fail "Failed to clone vcpkg. Ensure git is on PATH."
     fi
