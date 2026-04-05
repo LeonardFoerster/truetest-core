@@ -61,7 +61,7 @@ TEST(Orderbook, MatchOrders_PartialFill)
     auto t = ob.add_order(ask);
     EXPECT_EQ(t.size(), 1u);
     EXPECT_EQ(t[0].get_bid_trade().quantity_, 50u);
-    EXPECT_EQ(bid->get_reamaining_quantity(), 50u);
+    EXPECT_EQ(bid->get_remaining_quantity(), 50u);
 }
 
 TEST(Orderbook, MatchOrders_MultipleFills)
@@ -75,7 +75,7 @@ TEST(Orderbook, MatchOrders_MultipleFills)
         auto ask = std::make_shared<order>(ob_order_type::good_till_cancel, 10 + i, side::sell, P(100.0), 30);
         ob.add_order(ask);
     }
-    EXPECT_EQ(bid->get_reamaining_quantity(), 10u);
+    EXPECT_EQ(bid->get_remaining_quantity(), 10u);
 }
 
 TEST(Orderbook, DuplicateOrderId)

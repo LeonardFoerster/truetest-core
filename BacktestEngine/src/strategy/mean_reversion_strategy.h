@@ -21,6 +21,27 @@ public:
 
     void update_equity(double equity) { equity_ = equity; }
 
+    std::vector<param_def> get_param_schema() const override
+    {
+        return {
+            {"period", static_cast<double>(period_), 1, 10000, "SMA lookback period"},
+            {"equity", equity_, 0, 1e18, "Account equity for position sizing"},
+            {"risk_fraction", risk_fraction_, 0, 1, "Fraction of equity per trade"},
+            {"sl_pct", sl_pct_, 0, 1, "Stop loss as fraction of entry price"},
+            {"tp_pct", tp_pct_, 0, 1, "Take profit as fraction of entry price"},
+        };
+    }
+
+    void set_param(const std::string& key, double value) override
+    {
+        if (key == "period") { period_ = static_cast<std::size_t>(value); smas_.clear(); }
+        else if (key == "equity") equity_ = value;
+        else if (key == "risk_fraction") risk_fraction_ = value;
+        else if (key == "sl_pct") sl_pct_ = value;
+        else if (key == "tp_pct") tp_pct_ = value;
+        else throw std::runtime_error("Unknown parameter: " + key);
+    }
+
     std::vector<std::pair<std::string, double>> get_indicator_values(
         const std::string& symbol) const override
     {

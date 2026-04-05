@@ -7,8 +7,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Welford's online algorithm for running mean/variance.
@@ -48,6 +50,29 @@ struct trade_record
     double intended_price;
     std::chrono::system_clock::time_point timestamp;
     double pnl;  // set on closing trade
+    std::string symbol;
+    std::string strategy_name;
+};
+
+// Per-symbol or per-strategy performance breakdown
+struct sub_analytics
+{
+    double total_pnl = 0.0;
+    std::size_t trade_count = 0;
+    std::size_t win_count = 0;
+    double total_win = 0.0;
+    double total_loss = 0.0;
+
+    double win_rate() const
+    {
+        return trade_count > 0
+            ? static_cast<double>(win_count) / static_cast<double>(trade_count) * 100.0
+            : 0.0;
+    }
+    double profit_factor() const
+    {
+        return total_loss > 0.0 ? total_win / total_loss : (total_win > 0.0 ? 1e9 : 0.0);
+    }
 };
 
 struct AnalyticsReport
@@ -83,9 +108,22 @@ struct AnalyticsReport
     double largest_winner = 0.0;
     double largest_loser = 0.0;
 
+    // Rolling metrics
+    double rolling_sharpe = 0.0;
+    double rolling_max_drawdown = 0.0;
+
     // Benchmark
     double buy_and_hold_return = 0.0;
     double strategy_vs_benchmark = 0.0;
+    double alpha = 0.0;
+    double beta = 0.0;
+    double information_ratio = 0.0;
+    double tracking_error = 0.0;
+    std::vector<equity_point> benchmark_equity_curve;
+
+    // Per-symbol and per-strategy attribution
+    std::unordered_map<std::string, sub_analytics> per_symbol;
+    std::unordered_map<std::string, sub_analytics> per_strategy;
 
     // Trade log
     std::vector<trade_record> trades;
@@ -94,7 +132,9 @@ struct AnalyticsReport
 class Analytics : public Worker
 {
 public:
-    explicit Analytics(double initial_cash = 100000.0);
+    explicit Analytics(double initial_cash = 100000.0,
+                       std::size_t rolling_window = 252,
+                       double risk_free_rate = 0.0);
 
     void on_event(const event_pointer& ev) override;
 
@@ -107,6 +147,11 @@ public:
 
     void print_report() const;
     void export_csv(const std::string& equity_path, const std::string& trades_path) const;
+    void export_json(const std::string& path) const;
+
+    // Rolling accessors
+    double rolling_sharpe() const;
+    double rolling_max_drawdown() const;
 
 private:
     void on_market(const market_event& m);
@@ -120,12 +165,23 @@ private:
     std::chrono::system_clock::time_point entry_time_;
     bool in_position_ = false;
 
+    // Configuration
+    std::size_t rolling_window_;
+    double risk_free_rate_;
+
     // Equity tracking
     double last_close_ = 0.0;
     std::vector<equity_point> equity_curve_;
 
+    // Rolling window: stores recent equity returns for rolling Sharpe/drawdown
+    std::deque<double> rolling_returns_;   // equity-to-equity returns
+    double prev_equity_ = 0.0;            // previous equity for return calc
+
     // Order → intended price for slippage
     std::map<uint64_t, double> order_prices_;
+
+    // Order → strategy name for attribution
+    std::map<uint64_t, std::string> order_strategies_;
 
     // Trade records
     std::vector<trade_record> trades_;
@@ -144,6 +200,15 @@ private:
     // Buy-and-hold benchmark
     double first_price_ = 0.0;
     bool first_price_set_ = false;
+    std::vector<equity_point> benchmark_curve_;   // full benchmark equity curve
+
+    // Benchmark return tracking for alpha/beta
+    std::vector<double> strategy_returns_;  // per-bar strategy returns
+    std::vector<double> benchmark_returns_; // per-bar benchmark returns
+
+    // Per-symbol and per-strategy attribution
+    std::unordered_map<std::string, sub_analytics> per_symbol_;
+    std::unordered_map<std::string, sub_analytics> per_strategy_;
 
     // --- Streaming / incremental accumulators ---
 

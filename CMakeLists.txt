@@ -291,6 +291,9 @@ if(BUILD_TESTS)
         tests/test_latency_model.cpp
         tests/test_fill_model.cpp
         tests/test_sma.cpp
+        tests/test_ema.cpp
+        tests/test_rsi.cpp
+        tests/test_bollinger.cpp
         tests/test_strategies.cpp
         tests/test_ring_buffer.cpp
         tests/test_bar_aggregator.cpp

@@ -1,8 +1,13 @@
 #include "mean_reversion_strategy.h"
+#include "strategy_registry.h"
 #include "../core/event.h"
 
 #include <cmath>
 #include <optional>
+
+REGISTER_STRATEGY("mean-reversion", []() {
+    return std::make_shared<mean_reversion_strategy>();
+})
 
 mean_reversion_strategy::mean_reversion_strategy(std::size_t period, double equity,
                                                    double risk_fraction, double sl_pct, double tp_pct)

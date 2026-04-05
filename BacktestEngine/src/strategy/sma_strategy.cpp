@@ -1,7 +1,12 @@
 #include "sma_strategy.h"
+#include "strategy_registry.h"
 #include "../core/event.h"
 
 #include <optional>
+
+REGISTER_STRATEGY("sma", []() {
+    return std::make_shared<sma_strategy>();
+})
 
 sma_strategy::sma_strategy(std::size_t period) : period_(period) {}
 

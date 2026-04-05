@@ -10,8 +10,9 @@
 class StatsWorker : public Worker
 {
 public:
-    explicit StatsWorker(double initial_cash = 100000.0, std::size_t snapshot_interval = 1000)
-        : analytics_(initial_cash), snapshot_interval_(snapshot_interval) {}
+    explicit StatsWorker(double initial_cash = 100000.0, std::size_t snapshot_interval = 1000,
+                         std::size_t rolling_window = 252, double risk_free_rate = 0.0)
+        : analytics_(initial_cash, rolling_window, risk_free_rate), snapshot_interval_(snapshot_interval) {}
 
     void on_event(const event_pointer& ev) override
     {

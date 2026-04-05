@@ -208,6 +208,9 @@ inline std::vector<uint8_t> serialise(const fill_event& e)
     append_f64(e.get_filled_quantity());
     append_f64(e.get_fill_price());
     append_f64(e.get_commission());
+    // New fields (backward compatible — appended at end)
+    append_f64(e.get_remaining_qty());
+    append_u64(e.get_fill_id());
     return buf;
 }
 
@@ -276,6 +279,32 @@ inline std::vector<uint8_t> serialise(const l2_snapshot_event& e)
     return buf;
 }
 
+inline std::vector<uint8_t> serialise(const cancel_event& e)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(64);
+    auto append = [&](const void* ptr, std::size_t n) {
+        const auto* b = static_cast<const uint8_t*>(ptr);
+        buf.insert(buf.end(), b, b + n);
+    };
+    auto append_ts = [&](std::chrono::system_clock::time_point tp) {
+        int64_t us = std::chrono::duration_cast<std::chrono::microseconds>(tp.time_since_epoch()).count();
+        append(&us, 8);
+    };
+    auto append_str = [&](const std::string& s) {
+        uint16_t len = static_cast<uint16_t>(s.size());
+        append(&len, 2);
+        append(s.data(), len);
+    };
+    auto append_u64 = [&](uint64_t v) { append(&v, 8); };
+
+    append_ts(e.get_timestamp());
+    append_str(e.get_symbol());
+    append_u64(e.get_order_id());
+    append_str(e.get_reason());
+    return buf;
+}
+
 inline std::vector<uint8_t> serialise(const l2_update_event& e)
 {
     std::vector<uint8_t> buf;
@@ -302,6 +331,34 @@ inline std::vector<uint8_t> serialise(const l2_update_event& e)
     append(&sd, 1);
     append_f64(e.get_price());
     append_i64(e.get_new_quantity());
+    return buf;
+}
+
+inline std::vector<uint8_t> serialise(const amend_event& e)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(64);
+    auto append = [&](const void* ptr, std::size_t n) {
+        const auto* b = static_cast<const uint8_t*>(ptr);
+        buf.insert(buf.end(), b, b + n);
+    };
+    auto append_ts = [&](std::chrono::system_clock::time_point tp) {
+        int64_t us = std::chrono::duration_cast<std::chrono::microseconds>(tp.time_since_epoch()).count();
+        append(&us, 8);
+    };
+    auto append_str = [&](const std::string& s) {
+        uint16_t len = static_cast<uint16_t>(s.size());
+        append(&len, 2);
+        append(s.data(), len);
+    };
+    auto append_u64 = [&](uint64_t v) { append(&v, 8); };
+    auto append_f64 = [&](double v) { append(&v, 8); };
+
+    append_ts(e.get_timestamp());
+    append_str(e.get_symbol());
+    append_u64(e.get_order_id());
+    append_f64(e.get_new_price());
+    append_f64(e.get_new_quantity());
     return buf;
 }
 
@@ -353,7 +410,12 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         double qty = r.read_f64();
         double price = r.read_f64();
         double commission = r.read_f64();
-        return std::make_shared<fill_event>(ts, symbol, oid, sd, qty, price, commission);
+        // New fields (backward compatible — may not be present in old logs)
+        double remaining = 0.0;
+        uint64_t fill_id = 0;
+        try { remaining = r.read_f64(); fill_id = r.read_u64(); } catch (...) {}
+        return std::make_shared<fill_event>(ts, symbol, oid, sd, qty, price,
+                                            commission, remaining, fill_id);
     }
     case event_type::tick: {
         auto ts = r.read_ts();
@@ -387,6 +449,21 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         double price = r.read_f64();
         int64_t new_qty = r.read_i64();
         return std::make_shared<l2_update_event>(ts, symbol, sd, price, new_qty);
+    }
+    case event_type::cancel: {
+        auto ts = r.read_ts();
+        auto symbol = r.read_str();
+        uint64_t oid = r.read_u64();
+        auto reason = r.read_str();
+        return std::make_shared<cancel_event>(ts, symbol, oid, reason);
+    }
+    case event_type::amend: {
+        auto ts = r.read_ts();
+        auto symbol = r.read_str();
+        uint64_t oid = r.read_u64();
+        double new_price = r.read_f64();
+        double new_qty = r.read_f64();
+        return std::make_shared<amend_event>(ts, symbol, oid, new_price, new_qty);
     }
     }
     throw std::runtime_error("event_log: unknown event type " + std::to_string(static_cast<int>(type)));
@@ -468,6 +545,10 @@ public:
             payload = event_serial::serialise(static_cast<const l2_snapshot_event&>(e)); break;
         case event_type::l2_update:
             payload = event_serial::serialise(static_cast<const l2_update_event&>(e)); break;
+        case event_type::cancel:
+            payload = event_serial::serialise(static_cast<const cancel_event&>(e)); break;
+        case event_type::amend:
+            payload = event_serial::serialise(static_cast<const amend_event&>(e)); break;
         }
 
         event_serial::write_u8(out_, static_cast<uint8_t>(e.get_type()));

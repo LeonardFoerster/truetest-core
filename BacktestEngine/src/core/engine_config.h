@@ -67,9 +67,21 @@ struct engine_config
     std::string backfill_interval;    // Kline interval for backfill (default: match stream)
     std::string backfill_host;        // REST host override (empty = auto-detect from provider)
 
+    // Rolling analytics window size (number of bars for rolling Sharpe/drawdown)
+    std::size_t rolling_window = 252;
+
+    // Risk-free rate (annualized, e.g., 0.05 = 5%)
+    double risk_free_rate = 0.0;
+
     // WebSocket UI: when enabled, streams events to browser clients
     bool enable_web_ui = false;
     uint16_t ws_port = 8765;
+
+    // Execution constants (defaults match prior hardcoded values)
+    double market_aggression = 1.1;     // market order price multiplier (buy: price*aggr, sell: price*(2-aggr))
+    double qty_scale = 1e8;             // fractional qty → integer scale factor
+    unsigned fill_rng_seed = 42;        // RNG seed for fill model
+    double spread_step_factor = 0.0001; // spread step = mid * factor
 
     // Helper
     bool is_threaded() const { return threading != thread_preset::inline_mode; }

@@ -16,6 +16,11 @@ public:
     virtual ~IExecutionAdapter() = default;
     virtual void submit_order(const order_event& o) = 0;
     virtual bool poll_fills(std::vector<fill_event>& out) = 0;
+    virtual bool cancel_order(uint64_t order_id) { (void)order_id; return false; }
+    virtual bool modify_order(uint64_t order_id, double new_price, double new_qty)
+    {
+        (void)order_id; (void)new_price; (void)new_qty; return false;
+    }
 };
 
 // Wraps the local orderbook for backtest and shadow modes.
@@ -26,12 +31,16 @@ public:
     LocalBookAdapter(std::shared_ptr<orderbook> ob,
                      std::shared_ptr<IFeeModel> fee_model,
                      std::shared_ptr<IFillModel> fill_model,
-                     unsigned rng_seed = 42)
+                     unsigned rng_seed = 42,
+                     double market_aggression = 1.1,
+                     double qty_scale = 1e8)
         : ob_(std::move(ob))
         , fee_model_(std::move(fee_model))
         , fill_model_(std::move(fill_model))
         , fill_rng_(rng_seed)
-        , fill_dist_(0.0, 1.0) {}
+        , fill_dist_(0.0, 1.0)
+        , market_aggression_(market_aggression)
+        , qty_scale_(qty_scale) {}
 
     void set_mid_price(double price) { mid_price_ = price; }
 
@@ -63,8 +72,8 @@ public:
         // Market orders use aggressive price to sweep available liquidity
         Price book_price;
         if (o.get_order_type() == order_type::market)
-            book_price = (book_side == side::buy) ? Price::from_double(o.get_price() * 1.1)
-                                                  : Price::from_double(o.get_price() * 0.9);
+            book_price = (book_side == side::buy) ? Price::from_double(o.get_price() * market_aggression_)
+                                                  : Price::from_double(o.get_price() * (2.0 - market_aggression_));
         else
             book_price = Price::from_double(o.get_price());
 
@@ -108,6 +117,8 @@ public:
                     commission = fee_model_->compute_commission(o.get_side(), fill_qty, fill_price, is_taker);
                 }
 
+                double remaining = static_cast<double>(book_order->get_remaining_quantity()) / qty_scale_;
+
                 pending_fills_.emplace_back(
                     o.get_earliest_eligible_ts(),
                     o.get_symbol(),
@@ -115,7 +126,9 @@ public:
                     o.get_side(),
                     fill_qty,
                     fill_price,
-                    commission
+                    commission,
+                    remaining,
+                    next_fill_id_++
                 );
             }
         }
@@ -133,6 +146,19 @@ public:
         return true;
     }
 
+    bool cancel_order(uint64_t order_id) override
+    {
+        ob_->cancel_order(order_id);
+        return true;
+    }
+
+    bool modify_order(uint64_t order_id, double new_price, double new_qty) override
+    {
+        Price book_price = Price::from_double(new_price);
+        quantity book_qty = static_cast<quantity>(std::round(new_qty * qty_scale_));
+        return ob_->modify_order(order_id, book_price, book_qty);
+    }
+
 private:
     std::shared_ptr<orderbook> ob_;
     std::shared_ptr<IFeeModel> fee_model_;
@@ -141,7 +167,9 @@ private:
     std::mt19937 fill_rng_;
     std::uniform_real_distribution<double> fill_dist_;
     double mid_price_ = 0.0;
-    static constexpr double qty_scale_ = 1e8;  // fractional qty → integer scale factor
+    double market_aggression_ = 1.1;
+    double qty_scale_ = 1e8;  // fractional qty → integer scale factor
+    uint64_t next_fill_id_ = 1;
 };
 
 // Stub for future live exchange execution.

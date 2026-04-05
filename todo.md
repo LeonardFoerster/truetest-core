@@ -66,23 +66,23 @@ Each item is a self-contained task with instructions for Claude Code. Execute th
 
 ## D. Execution & Order Management
 
-- [ ] **D1. Add explicit order cancellation API**
+- [x] **D1. Add explicit order cancellation API**
   Add `cancel_order(order_id) -> bool` to `IExecutionAdapter` and implement it in `LocalBookAdapter` (calls `orderbook::cancel()`), `BinanceExecutor` (REST DELETE), and the `ExchangeAdapter` stub. Add a `cancel` event type to `event.h`. Engine should emit cancel events through the ring buffers so workers and UI are notified.
   *Context: `execution_adapter.h` defines the adapter interface. `orderbook.h` already has cancel logic (marks nodes as ghost). Currently there is no way to cancel an order through the engine API — only DAY orders auto-expire. The event pipeline is: engine -> ring buffers -> workers. Add `cancel` alongside existing event types in `event.h`.*
 
-- [ ] **D2. Add order state tracking (pending/open/filled/cancelled/rejected)**
+- [x] **D2. Add order state tracking (pending/open/filled/cancelled/rejected)**
   Add an `order_status` enum and an `OrderTracker` class that maintains a `std::unordered_map<order_id, order_status>`. Update status on: submission (pending), orderbook acceptance (open), fill (filled/partially_filled), cancel (cancelled), risk rejection (rejected). Expose `get_order_status(id)` and `get_open_orders()`. Wire into engine's event loop.
   *Context: Currently orders are fire-and-forget — no tracking after submission. `order_id.h` provides the ID type. The engine processes orders in `engine.cpp`'s main loop. Add `OrderTracker` as a new file in `execution/`. Do not modify `event.h` event structs — track state separately.*
 
-- [ ] **D3. Add partial fill support**
+- [x] **D3. Add partial fill support**
   Modify `fill_event` in `event.h` to include `remaining_qty` and `fill_id` (to distinguish multiple fills for one order). Update `LocalBookAdapter::poll_fills()` to emit multiple fills when the orderbook partially matches. Update `portfolio.cpp` to handle incremental position changes from partial fills. Update analytics to track partial fills correctly.
   *Context: `fill_event` currently represents a complete fill. The orderbook already supports partial matching internally (`get_reamaining_quantity()` — note the typo). `portfolio.cpp` processes fills in `on_fill()`. `analytics.cpp` records fills for trade stats. Change must be backward-compatible with existing event log format — add new fields at the end of the binary payload.*
 
-- [ ] **D4. Fix the `get_reamaining_quantity()` typo across the codebase**
+- [x] **D4. Fix the `get_reamaining_quantity()` typo across the codebase**
   Rename `get_reamaining_quantity()` to `get_remaining_quantity()` in `orderbook.h` and all call sites. Use find-and-replace across the entire `BacktestEngine/src/` directory. Update tests too.
   *Context: Typo exists in `orderbook.h/.cpp` and propagates to `execution_adapter.h` and tests. This is a pure rename — no logic changes.*
 
-- [ ] **D5. Parameterize hardcoded execution constants**
+- [x] **D5. Parameterize hardcoded execution constants**
   Move these to `engine_config`: market order aggression factor (currently 1.1/0.9 in `LocalBookAdapter`), quantity scale (currently 1e8), RNG seed for fill model (currently 42), and the spread step formula (`mid * 0.0001`). Add corresponding CLI flags.
   *Context: Hardcoded values are in `execution_adapter.h` (LocalBookAdapter) and `engine.cpp` (spread step). `engine_config.h` is the central config struct. Add new fields with the current values as defaults so behavior doesn't change without explicit override.*
 
@@ -90,11 +90,11 @@ Each item is a self-contained task with instructions for Claude Code. Execute th
 
 ## E. Orderbook & Matching Engine
 
-- [ ] **E1. Route L2 snapshot/update events from providers to the orderbook**
+- [x] **E1. Route L2 snapshot/update events from providers to the orderbook**
   In `provider_sink.h`, implement the L2 event routing that is currently marked TODO. When an `l2_snapshot` arrives, call `orderbook::apply_snapshot()`. When an `l2_update` arrives, call `orderbook::apply_update()`. Both methods already exist in `orderbook.h`. Wire this through `engine.cpp`'s streaming event handler.
   *Context: `provider_sink.h` has a visitor for provider events. `l2_snapshot` and `l2_update` types exist in `provider_event.h`. The orderbook methods `apply_snapshot()` and `apply_update()` exist in `orderbook.h/.cpp`. The plumbing between provider events and engine/orderbook is missing.*
 
-- [ ] **E2. Add order modification (amend price/qty) to the orderbook**
+- [x] **E2. Add order modification (amend price/qty) to the orderbook**
   Add `modify_order(order_id, new_price, new_qty) -> bool` to `orderbook.h`. Implementation: cancel existing order, re-insert with same ID at new price/qty (loses time priority — standard behavior). Expose through `IExecutionAdapter` as `modify_order()`. Add an `amend` event type or reuse `order` with an `amend` flag.
   *Context: `orderbook.h` supports add and cancel but not modify. The node pool uses slab allocation with ghost marking for cancels. Re-inserting after cancel is safe. Do not change the matching algorithm.*
 
@@ -102,19 +102,19 @@ Each item is a self-contained task with instructions for Claude Code. Execute th
 
 ## F. Strategy Framework
 
-- [ ] **F1. Add runtime strategy parameter configuration**
+- [x] **F1. Add runtime strategy parameter configuration**
   Add a `set_param(string key, double value)` method to `IStrategy`. Each strategy defines its accepted params in a `get_param_schema() -> vector<param_def>` method (name, type, default, min, max, description). Wire this to CLI via `--param key=value` (repeatable) and to config file. Update `main.cpp` strategy construction to apply params after instantiation.
   *Context: `strategy_interface.h` defines `IStrategy`. Current strategies have fixed parameters set in constructors. `mean_reversion_strategy` takes period/equity/risk_fraction. `sma_strategy` takes period. Do not change constructor signatures — add `set_param` as a post-construction configuration step.*
 
-- [ ] **F2. Add EMA, RSI, and Bollinger Bands indicators**
+- [x] **F2. Add EMA, RSI, and Bollinger Bands indicators**
   Create `indicator/ema.h` (exponential moving average), `indicator/rsi.h` (relative strength index, 14-period default), `indicator/bollinger.h` (20-period SMA +/- 2 std devs). Each follows the same pattern as `sma.h`: `update(double price) -> std::optional<double>`, `ready() -> bool`, configurable period. Add unit tests for each.
   *Context: `indicator/sma.h` is the only indicator. It uses a rolling queue + sum. New indicators go in the same directory. Strategies reference indicators via member variables. Tests are in `BacktestEngine/tests/`. Follow the SMA test pattern.*
 
-- [ ] **F3. Add a strategy factory with name-based registration**
+- [x] **F3. Add a strategy factory with name-based registration**
   Create `strategy/strategy_registry.h` mirroring the `REGISTER_PROVIDER` pattern from `provider_registry.h`. Strategies self-register with a name and factory lambda. `main.cpp` looks up strategies by `--strategy <name>` instead of hardcoded if/else chains. This enables plugin-like strategy loading.
   *Context: `provider_registry.h` implements the exact pattern needed: static map, `REGISTER_PROVIDER` macro, `create()` lookup. Strategy selection in `main.cpp` is currently a manual if/else. Do not remove existing strategy classes — just register them.*
 
-- [ ] **F4. Consolidate duplicate SMA and MA Crossover strategies**
+- [x] **F4. Consolidate duplicate SMA and MA Crossover strategies**
   `sma_strategy` and `ma_crossover_strategy` are functionally identical (both buy when price > SMA, sell when price < SMA, same logic). Merge into a single `SMAStrategy` with configurable parameters. Remove `ma_crossover_strategy.h/.cpp`. Update any references in `main.cpp` and tests. If MA Crossover should differ (e.g., fast/slow SMA cross), implement that distinction.
   *Context: Both files are in `strategy/`. Compare them side by side — they have the same logic. The name "MA Crossover" implies two MAs crossing, but the implementation uses one. Either make it a true crossover (fast SMA crosses slow SMA) or delete it.*
 

@@ -63,7 +63,7 @@ public:
     Price get_price() const;
     ob_order_type get_order_type() const;
     quantity get_inital_quantity() const;
-    quantity get_reamaining_quantity() const;
+    quantity get_remaining_quantity() const;
     quantity get_filled_quantity() const;
     bool is_filled() const;
     void fill(quantity quantity);
@@ -144,7 +144,7 @@ struct price_level
         if (tail) tail->next = n;
         else      head = n;
         tail = n;
-        total_qty += n->order->get_reamaining_quantity();
+        total_qty += n->order->get_remaining_quantity();
     }
 
     void remove(order_node* n)
@@ -153,7 +153,7 @@ struct price_level
         else         head = n->next;
         if (n->next) n->next->prev = n->prev;
         else         tail = n->prev;
-        total_qty -= n->order->get_reamaining_quantity();
+        total_qty -= n->order->get_remaining_quantity();
         n->prev = n->next = nullptr;
     }
 };
@@ -166,6 +166,7 @@ public:
     trades add_order(order_pointer order);
     void cancel_order(order_id order_id);
     trades match_order(order_modify order);
+    bool modify_order(order_id id, Price new_price, quantity new_qty);
     std::size_t size() const;
     orderbook_lvl_infos get_order_infos() const;
 

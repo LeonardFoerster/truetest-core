@@ -20,6 +20,7 @@ engine::engine(std::shared_ptr<data_handler> dh,
                engine_config config)
     : config_(std::move(config)), data_handler_(std::move(dh)), strategy_(std::move(strategy)),
       portfolio_(config_.initial_balance),
+      analytics_(config_.initial_balance, config_.rolling_window, config_.risk_free_rate),
       risk_manager_(config_.risk),
       market_maker_(config_.seed != 0 ? MarketMaker(static_cast<unsigned>(config_.seed + 1))
                                       : MarketMaker())
@@ -107,7 +108,8 @@ std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol
         // Backtest + shadow mode: use local orderbook adapter
         adapter = std::make_shared<LocalBookAdapter>(
             ob, config_.fee_model, config_.fill_model,
-            config_.seed != 0 ? static_cast<unsigned>(config_.seed + 2) : 42u);
+            config_.seed != 0 ? static_cast<unsigned>(config_.seed + 2) : config_.fill_rng_seed,
+            config_.market_aggression, config_.qty_scale);
     }
 
     execution_adapters_[symbol] = adapter;
@@ -298,7 +300,8 @@ void engine::start_workers()
     case thread_preset::light:
     {
         observer_ring_ = std::make_shared<EventRing>();
-        observer_worker_ = std::make_unique<ObserverWorker>(risk_manager_, halt_flag_);
+        observer_worker_ = std::make_unique<ObserverWorker>(risk_manager_, halt_flag_,
+            config_.initial_balance, config_.rolling_window, config_.risk_free_rate);
         wire_failure(*observer_worker_);
 
         worker_threads_.emplace_back([this]() {
@@ -314,7 +317,8 @@ void engine::start_workers()
         risk_stats_ring_ = std::make_shared<EventRing>();
 
         logging_worker_ = make_logging_worker();
-        risk_stats_worker_ = std::make_unique<RiskStatsWorker>(risk_manager_, halt_flag_);
+        risk_stats_worker_ = std::make_unique<RiskStatsWorker>(risk_manager_, halt_flag_,
+            config_.initial_balance, config_.rolling_window, config_.risk_free_rate);
         wire_failure(*logging_worker_);
         wire_failure(*risk_stats_worker_);
 
@@ -337,8 +341,10 @@ void engine::start_workers()
         stats_ring_ = std::make_shared<EventRing>();
 
         logging_worker_ = make_logging_worker();
-        risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_);
-        stats_worker_ = std::make_unique<StatsWorker>();
+        risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_,
+            config_.initial_balance, config_.rolling_window, config_.risk_free_rate);
+        stats_worker_ = std::make_unique<StatsWorker>(config_.initial_balance, 1000,
+            config_.rolling_window, config_.risk_free_rate);
         wire_failure(*logging_worker_);
         wire_failure(*risk_worker_);
         wire_failure(*stats_worker_);
@@ -370,8 +376,10 @@ void engine::start_workers()
         mm_order_ring_ = std::make_shared<MMRing>();
 
         logging_worker_ = make_logging_worker();
-        risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_);
-        stats_worker_ = std::make_unique<StatsWorker>();
+        risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_,
+            config_.initial_balance, config_.rolling_window, config_.risk_free_rate);
+        stats_worker_ = std::make_unique<StatsWorker>(config_.initial_balance, 1000,
+            config_.rolling_window, config_.risk_free_rate);
         mm_worker_ = std::make_unique<MarketMakerWorker>(
             config_.seed != 0 ? static_cast<unsigned>(config_.seed + 3) : 42u,
             *mm_order_ring_);
@@ -791,6 +799,26 @@ void engine::print_summary()
         shadow_tracker_->print_report();
 }
 
+const Analytics& engine::get_analytics() const
+{
+    switch (config_.threading)
+    {
+    case thread_preset::light:
+        if (observer_worker_) return observer_worker_->analytics();
+        break;
+    case thread_preset::standard:
+        if (risk_stats_worker_) return risk_stats_worker_->analytics();
+        break;
+    case thread_preset::full:
+    case thread_preset::extended:
+        if (stats_worker_) return stats_worker_->analytics();
+        break;
+    default:
+        break;
+    }
+    return analytics_;
+}
+
 bool engine::process_order(const std::shared_ptr<order_event>& o,
                            std::size_t& event_count,
                            bool& halt_requested)
@@ -817,13 +845,16 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 #endif
             if (action == risk_action::halt)
             {
+                order_tracker_.set_status(o->get_order_id(), order_status::rejected);
                 halt_requested = true;
                 return false;
             }
+            order_tracker_.set_status(o->get_order_id(), order_status::rejected);
             return true; // reject: drop order, continue engine
         }
     }
 
+    order_tracker_.set_status(o->get_order_id(), order_status::open);
     log_event(*o);
     publish_event(o);
     if (!config_.is_threaded())
@@ -850,6 +881,8 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     {
         for (auto& f : fills)
         {
+            order_tracker_.set_status(f.get_order_id(),
+                f.is_partial() ? order_status::partially_filled : order_status::filled);
             auto fill_ptr = fill_pool_.acquire(f);
             log_event(f);
             portfolio_.on_fill(f);
@@ -919,11 +952,106 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     return true;
 }
 
+bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
+                          const std::string& reason)
+{
+    auto adapter = get_adapter(symbol);
+    bool cancelled = adapter->cancel_order(order_id);
+
+    // Also remove from pending stops
+    if (!cancelled)
+    {
+        auto it = std::remove_if(pending_stops_.begin(), pending_stops_.end(),
+            [order_id](const std::shared_ptr<order_event>& o) {
+                return o->get_order_id() == order_id;
+            });
+        if (it != pending_stops_.end())
+        {
+            pending_stops_.erase(it, pending_stops_.end());
+            cancelled = true;
+        }
+    }
+
+    if (cancelled)
+    {
+        order_tracker_.set_status(order_id, order_status::cancelled);
+        auto cancel_ev = std::make_shared<cancel_event>(
+            std::chrono::system_clock::now(), symbol, order_id, reason);
+        log_event(*cancel_ev);
+        publish_event(cancel_ev);
+        if (!config_.is_threaded())
+            analytics_.on_event(cancel_ev);
+    }
+
+    return cancelled;
+}
+
+bool engine::modify_order(const std::string& symbol, uint64_t order_id,
+                          double new_price, double new_qty)
+{
+    auto adapter = get_adapter(symbol);
+    bool modified = adapter->modify_order(order_id, new_price, new_qty);
+
+    if (modified)
+    {
+        auto amend_ev = std::make_shared<amend_event>(
+            std::chrono::system_clock::now(), symbol, order_id, new_price, new_qty);
+        log_event(*amend_ev);
+        publish_event(amend_ev);
+        if (!config_.is_threaded())
+            analytics_.on_event(amend_ev);
+    }
+
+    return modified;
+}
+
+void engine::apply_l2_snapshot(const std::string& symbol,
+                               const std::vector<l2_level>& bids,
+                               const std::vector<l2_level>& asks)
+{
+    auto ob = orderbook_registry_.get_or_create(symbol);
+
+    std::vector<std::pair<Price, quantity>> ob_bids;
+    ob_bids.reserve(bids.size());
+    for (const auto& lvl : bids)
+        ob_bids.emplace_back(Price::from_double(lvl.price),
+                             static_cast<quantity>(lvl.quantity));
+
+    std::vector<std::pair<Price, quantity>> ob_asks;
+    ob_asks.reserve(asks.size());
+    for (const auto& lvl : asks)
+        ob_asks.emplace_back(Price::from_double(lvl.price),
+                             static_cast<quantity>(lvl.quantity));
+
+    ob->apply_l2_snapshot(ob_bids, ob_asks);
+
+    auto ev = std::make_shared<l2_snapshot_event>(
+        std::chrono::system_clock::now(), symbol, bids, asks);
+    log_event(*ev);
+    publish_event(ev);
+}
+
+void engine::apply_l2_update(const std::string& symbol,
+                             tick_side ts_side, double price, int64_t new_qty)
+{
+    auto ob = orderbook_registry_.get_or_create(symbol);
+
+    side ob_side = (ts_side == tick_side::bid) ? side::buy : side::sell;
+    ob->apply_l2_update(ob_side, Price::from_double(price),
+                        static_cast<quantity>(new_qty));
+
+    auto ev = std::make_shared<l2_update_event>(
+        std::chrono::system_clock::now(), symbol, ts_side, price, new_qty);
+    log_event(*ev);
+    publish_event(ev);
+}
+
 bool engine::route_order(order_event& order,
                          const std::chrono::system_clock::time_point& sim_time,
                          std::size_t& event_count, bool& halt_requested)
 {
     order.set_order_id(OrderIdGenerator::next());
+    order_tracker_.set_status(order.get_order_id(), order_status::pending);
 
     // Stop/stop-limit orders are buffered until price triggers them
     if (order.get_order_type() == order_type::stop ||
@@ -1026,11 +1154,11 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     if (hybrid_exec_) {
         auto& hbook = hybrid_exec_->get_book();
         hbook->clear();
-        double spread_step = last_mid_price_ * 0.0001;
+        double spread_step = last_mid_price_ * config_.spread_step_factor;
         for (int i = 1; i <= 10; ++i) {
             double bid_px = last_mid_price_ - i * spread_step;
             double ask_px = last_mid_price_ + i * spread_step;
-            quantity qty = static_cast<quantity>(1e8);
+            quantity qty = static_cast<quantity>(config_.qty_scale);
             hbook->add_order(std::make_shared<order>(
                 ob_order_type::good_till_cancel, OrderIdGenerator::next(),
                 side::buy, Price::from_double(bid_px), qty));
@@ -1115,11 +1243,11 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     if (hybrid_exec_) {
         auto& hbook = hybrid_exec_->get_book();
         hbook->clear();
-        double spread_step = last_mid_price_ * 0.0001;
+        double spread_step = last_mid_price_ * config_.spread_step_factor;
         for (int i = 1; i <= 10; ++i) {
             double bid_px = last_mid_price_ - i * spread_step;
             double ask_px = last_mid_price_ + i * spread_step;
-            quantity qty = static_cast<quantity>(1e8);
+            quantity qty = static_cast<quantity>(config_.qty_scale);
             hbook->add_order(std::make_shared<order>(
                 ob_order_type::good_till_cancel, OrderIdGenerator::next(),
                 side::buy, Price::from_double(bid_px), qty));

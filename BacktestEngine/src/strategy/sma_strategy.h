@@ -14,6 +14,19 @@ public:
     std::optional<order_event> on_market(const market_event& mkt) override;
     void set_position_open(const std::string& symbol, bool open) override;
 
+    std::vector<param_def> get_param_schema() const override
+    {
+        return {
+            {"period", static_cast<double>(period_), 1, 10000, "SMA lookback period"},
+        };
+    }
+
+    void set_param(const std::string& key, double value) override
+    {
+        if (key == "period") { period_ = static_cast<std::size_t>(value); smas_.clear(); }
+        else throw std::runtime_error("Unknown parameter: " + key);
+    }
+
     std::vector<std::pair<std::string, double>> get_indicator_values(
         const std::string& symbol) const override
     {

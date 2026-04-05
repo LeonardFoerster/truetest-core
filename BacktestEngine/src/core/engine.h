@@ -5,6 +5,7 @@
 #include "../strategy/strategy_interface.h"
 #include "../execution/portfolio.h"
 #include "../execution/execution_adapter.h"
+#include "../execution/order_tracker.h"
 #include "../orderbook/orderbook.h"
 #include "../orderbook/orderbook_registry.h"
 #include "../market_maker/market_maker.h"
@@ -75,6 +76,7 @@ private:
     // Per-symbol execution adapters (created on demand)
     std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>> execution_adapters_;
     portfolio portfolio_;
+    OrderTracker order_tracker_;
     Analytics analytics_;
     RiskManager risk_manager_;
     MarketMaker market_maker_;
@@ -266,7 +268,19 @@ public:
     void run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge);
     void set_strategy(std::shared_ptr<IStrategy> strategy);
     void switch_symbol(const std::string& new_symbol);
+    bool cancel_order(const std::string& symbol, uint64_t order_id,
+                      const std::string& reason = "");
+    bool modify_order(const std::string& symbol, uint64_t order_id,
+                      double new_price, double new_qty);
+
+    // Route L2 depth data to the orderbook for a given symbol
+    void apply_l2_snapshot(const std::string& symbol,
+                           const std::vector<l2_level>& bids,
+                           const std::vector<l2_level>& asks);
+    void apply_l2_update(const std::string& symbol,
+                         tick_side side, double price, int64_t new_qty);
     void print_summary();
+    const Analytics& get_analytics() const;
 
     // Access outbound rings for wiring worker threads
     std::shared_ptr<EventRing> get_logging_ring() const { return logging_ring_; }
@@ -281,6 +295,9 @@ public:
     StatsWorker* get_stats_worker() const { return stats_worker_.get(); }
     ObserverWorker* get_observer_worker() const { return observer_worker_.get(); }
     RiskStatsWorker* get_risk_stats_worker() const { return risk_stats_worker_.get(); }
+
+    // Order state tracking
+    const OrderTracker& get_order_tracker() const { return order_tracker_; }
 
     // Halt flag for external injection (testing)
     std::atomic<bool>& get_halt_flag() { return halt_flag_; }

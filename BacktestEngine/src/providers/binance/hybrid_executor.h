@@ -45,6 +45,21 @@ public:
         return had_paper || had_book;
     }
 
+    bool cancel_order(uint64_t order_id) override
+    {
+        // Try both adapters — order could be in either
+        bool cancelled = book_adapter_->cancel_order(order_id);
+        if (!cancelled)
+            cancelled = paper_->cancel_order(order_id);
+        return cancelled;
+    }
+
+    bool modify_order(uint64_t order_id, double new_price, double new_qty) override
+    {
+        // Only book adapter supports modify (limit orders on local book)
+        return book_adapter_->modify_order(order_id, new_price, new_qty);
+    }
+
     // Forward mid-price updates to book adapter for fill probability
     void update_mid_price(double mid)
     {

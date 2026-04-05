@@ -13,8 +13,12 @@ class RiskStatsWorker : public Worker
 {
 public:
     RiskStatsWorker(const RiskManager& rm,
-                    std::atomic<bool>& halt_flag)
+                    std::atomic<bool>& halt_flag,
+                    double initial_cash = 100000.0,
+                    std::size_t rolling_window = 252,
+                    double risk_free_rate = 0.0)
         : risk_manager_(rm)
+        , analytics_(initial_cash, rolling_window, risk_free_rate)
         , halt_flag_(halt_flag) {}
 
     void on_event(const event_pointer& ev) override

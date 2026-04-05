@@ -31,7 +31,8 @@ orderbook pipeline.
 20. [WebSocket UI](#20-websocket-ui)
 21. [Event Pipeline](#21-event-pipeline)
 22. [SQLite Persistence](#22-sqlite-persistence)
-23. [Examples](#23-examples)
+23. [Analytics & Reporting](#23-analytics--reporting)
+24. [Examples](#24-examples)
 
 ---
 
@@ -290,7 +291,7 @@ TrueTest has three runtime modes determined by the flags you pass:
 |----------------------|----------|-----------------|-----------------------------------------------------------|
 | `--mode`             | string   | `backtest`      | Engine mode: `backtest`, `shadow`, or `live`               |
 | `--provider`         | string   | (none)          | Provider name: `local` or `binance`                       |
-| `--strategy`         | string   | `mean-reversion`| Strategy: `mean-reversion`, `sma`, or `ma-crossover`      |
+| `--strategy`         | string   | `mean-reversion`| Strategy name (registry-based: `mean-reversion`, `sma`, `ma-crossover`) |
 | `--path`             | string   | (none)          | Data file path (for `local` provider)                     |
 | `--replay`           | string   | (none)          | Binary event log path for replay mode                     |
 | `--replay-from`      | int64    | `0`             | Replay from timestamp (microseconds since epoch)          |
@@ -305,10 +306,11 @@ TrueTest has three runtime modes determined by the flags you pass:
 
 | Flag                 | Type     | Default  | Description                                   |
 |----------------------|----------|----------|-----------------------------------------------|
-| `--sma-period`       | size_t   | `20`     | SMA indicator period                          |
+| `--sma-period`       | size_t   | `20`     | SMA indicator period (legacy, prefer `--param period=N`) |
 | `--risk-fraction`    | double   | `0.02`   | Position size as fraction of equity (2%)      |
 | `--sl`               | double   | `0.005`  | Stop loss fraction of entry price (0.5%)      |
 | `--tp`               | double   | `0.01`   | Take profit fraction of entry price (1.0%)    |
+| `--param`            | string   | (none)   | Strategy parameter as `key=value` (repeatable) |
 
 ### Fee model flags
 
@@ -356,6 +358,24 @@ TrueTest has three runtime modes determined by the flags you pass:
 |----------------------|----------|----------|--------------------------------------------------|
 | `--web-ui`           | flag     | (off)    | Enable WebSocket UI server                       |
 | `--ws-port`          | uint16   | `8765`   | WebSocket server listen port                     |
+
+### Execution constants
+
+| Flag                 | Type     | Default  | Description                                      |
+|----------------------|----------|----------|--------------------------------------------------|
+| `--aggression`       | double   | `1.1`    | Market order aggression factor (buy: price×aggr, sell: price×(2−aggr)) |
+| `--qty-scale`        | double   | `1e8`    | Fractional quantity → integer scale factor       |
+| `--fill-rng-seed`    | unsigned | `42`     | RNG seed for fill model probability rolls        |
+| `--spread-step`      | double   | `0.0001` | Spread step factor (mid × factor per level)      |
+
+### Analytics and reporting flags
+
+| Flag                 | Type     | Default  | Description                                      |
+|----------------------|----------|----------|--------------------------------------------------|
+| `--rolling-window`   | size_t   | `252`    | Rolling metrics window size (number of bars)     |
+| `--risk-free-rate`   | double   | `0.0`    | Annual risk-free rate for excess return calcs (Sharpe/Sortino) |
+| `--output`           | string   | (none)   | Write results to file (omit for no file export)  |
+| `--output-format`    | string   | `json`   | Output format: `json` or `csv`                   |
 
 ### Configuration and diagnostics flags
 
@@ -470,7 +490,7 @@ Exit codes:
 - `1` — configuration has errors (unknown strategy, invalid mode, etc.)
 
 Validated fields:
-- `--strategy` must be one of: `mean-reversion`, `sma`, `ma-crossover`
+- `--strategy` must be a registered strategy name (built-in: `mean-reversion`, `sma`, `ma-crossover`)
 - `--mode` must be one of: `backtest`, `shadow`, `live`
 - `--fee` must be one of: `fixed`, `tiered`
 - `--thread-preset` must be a valid preset name
@@ -579,34 +599,74 @@ instead of scanning from the beginning.
 
 ## 15. Strategies
 
+Strategies are registered via the `StrategyRegistry` and looked up by name at
+runtime. All strategies support runtime parameter configuration via `--param
+key=value` (repeatable). Each strategy defines its accepted parameters through
+`get_param_schema()`, which returns the name, default, min, max, and description
+for each parameter.
+
 ### Mean Reversion (`mean-reversion`)
 
 The default strategy. Buys when the current price drops below the SMA and sells
 when it rises above it. Uses configurable stop-loss and take-profit levels.
 
-Parameters:
-- `--sma-period` — lookback period (default: 20)
-- `--risk-fraction` — equity fraction per trade (default: 0.02)
-- `--sl` — stop loss fraction (default: 0.005)
-- `--tp` — take profit fraction (default: 0.01)
+Parameters (via `--param` or legacy flags):
+- `period` (default: 20) — SMA lookback period (`--sma-period`)
+- `equity` (default: 10000) — account equity for position sizing (`--balance`)
+- `risk_fraction` (default: 0.02) — fraction of equity per trade (`--risk-fraction`)
+- `sl_pct` (default: 0.005) — stop loss as fraction of entry price (`--sl`)
+- `tp_pct` (default: 0.01) — take profit as fraction of entry price (`--tp`)
 
 ### SMA Strategy (`sma`)
 
 Generates signals based on price crossing above or below a simple moving average.
+Buys when price > SMA, sells when price < SMA.
 
 Parameters:
-- `--sma-period` — lookback period (default: 20)
+- `period` (default: 20) — SMA lookback period
 
 ### MA Crossover (`ma-crossover`)
 
-Moving average crossover strategy. Currently uses a single SMA (functionally
-similar to the SMA strategy).
+True dual-SMA crossover strategy. Generates buy signals on golden crosses (fast
+SMA crosses above slow SMA) and sell signals on death crosses (fast SMA crosses
+below slow SMA).
 
 Parameters:
-- `--sma-period` — lookback period (default: 20)
+- `fast_period` (default: 10) — fast SMA lookback period
+- `slow_period` (default: 50) — slow SMA lookback period
 
-All strategies expose their SMA indicator values (named `sma_<period>`) for use
-in analytics and the WebSocket UI.
+Example:
+```bash
+./build/truetest --strategy ma-crossover --param fast_period=5 --param slow_period=20
+```
+
+### Indicators
+
+The following indicators are available for use in strategies:
+
+| Indicator | Header | Class | Key method |
+|-----------|--------|-------|------------|
+| Simple Moving Average | `indicator/sma.h` | `simple_moving_average` | `update(price) → optional<double>` |
+| Exponential Moving Average | `indicator/ema.h` | `exponential_moving_average` | `update(price) → optional<double>` |
+| Relative Strength Index | `indicator/rsi.h` | `relative_strength_index` | `update(price) → optional<double>` |
+| Bollinger Bands | `indicator/bollinger.h` | `bollinger_bands` | `update(price) → optional<bollinger_result>` |
+
+All indicators follow the same pattern: call `update(price)` on each bar/tick,
+returns `std::nullopt` during warmup, then returns computed values once enough
+data has been accumulated. Use `ready()` to check and `value()` to get the last
+computed result.
+
+### Strategy Registry
+
+Strategies self-register via the `REGISTER_STRATEGY("name", factory)` macro
+(mirroring the provider registry pattern). To add a new strategy:
+
+1. Create the strategy class implementing `IStrategy`
+2. Add `REGISTER_STRATEGY` in the `.cpp` file with a factory lambda
+3. The strategy becomes available by name via `--strategy <name>`
+
+All strategies expose their indicator values (via `get_indicator_values()`) for
+use in analytics and the WebSocket UI.
 
 ---
 
@@ -841,8 +901,11 @@ market_event / tick_event
 IStrategy::on_market()  -->  order_event
     |
     v
-Orderbook::match()      -->  fill_event
+OrderTracker::pending    -->  order status tracking
     |
+    v
+Orderbook::match()      -->  fill_event (with remaining_qty, fill_id)
+    |                         OrderTracker::filled / partially_filled
     v
 Portfolio::on_fill()     -->  position & PnL update
     |
@@ -853,6 +916,15 @@ Workers (via ring buffers):
   - StatsWorker          -->  analytics accumulation
   - MarketMakerWorker    -->  liquidity replenishment
   - WsWorker             -->  WebSocket broadcast
+
+cancel_order()           -->  cancel_event (via ring buffers to workers)
+                              OrderTracker::cancelled
+
+modify_order()           -->  amend_event (via ring buffers to workers)
+
+l2_snapshot / l2_update  -->  orderbook::apply_l2_snapshot/update
+  (from provider)             l2_snapshot_event / l2_update_event
+                              (via ring buffers to workers)
 ```
 
 ### Event types
@@ -866,6 +938,75 @@ Workers (via ring buffers):
 | `fill`          | `fill_event`        | Trade execution confirmation          |
 | `l2_snapshot`   | `l2_snapshot_event` | Full orderbook depth snapshot         |
 | `l2_update`     | `l2_update_event`   | Incremental orderbook depth update    |
+| `cancel`        | `cancel_event`      | Order cancellation notification       |
+| `amend`         | `amend_event`       | Order modification (price/qty change) |
+
+### Order status tracking
+
+The engine tracks each order through its lifecycle via `OrderTracker`:
+
+| Status             | Description                                              |
+|--------------------|----------------------------------------------------------|
+| `pending`          | Order created, awaiting processing (e.g., latency delay) |
+| `open`             | Order accepted and placed on orderbook                   |
+| `partially_filled` | Order partially matched, remaining quantity on book      |
+| `filled`           | Order fully filled                                       |
+| `cancelled`        | Order cancelled via `cancel_order()` API                 |
+| `rejected`         | Order rejected by risk manager                           |
+
+Access via `engine::get_order_tracker()` which exposes `get_order_status(id)`,
+`get_open_orders()`, and `is_active(id)`.
+
+### Order cancellation
+
+Orders can be cancelled through `engine::cancel_order(symbol, order_id, reason)`.
+This cancels the order on the execution adapter (removes from orderbook or sends
+REST DELETE to exchange), emits a `cancel_event` through the ring buffers, and
+updates the order tracker status to `cancelled`. Pending stop orders that haven't
+triggered yet can also be cancelled.
+
+### Order modification (amend)
+
+Resting orders can be modified via `engine::modify_order(symbol, order_id,
+new_price, new_qty)`. This cancels the existing order and re-inserts it at the
+new price and quantity with the same order ID. The order loses time priority
+(standard exchange amend behavior).
+
+On success, an `amend_event` is emitted through the ring buffers and event log,
+containing the order ID, symbol, new price, and new quantity. The amend event is
+serialized in both JSON (WebSocket UI) and binary (event log) formats.
+
+The modification is exposed through `IExecutionAdapter::modify_order()`:
+- **LocalBookAdapter**: modifies the order on the local orderbook
+- **HybridExecutor**: delegates to the local book adapter (limit orders)
+- **BinanceExecutor**: not yet implemented (returns false)
+- **ExchangeAdapter**: not yet implemented (returns false)
+
+### L2 depth routing
+
+Level-2 orderbook data from providers (e.g., Binance depth stream) is routed
+directly to the matching engine's orderbook. Two paths are available:
+
+**Provider sink** (`provider_sink.h`): The `event_sink_l2()` function accepts a
+`provider::event` variant and an `orderbook` pointer. When the event is an
+`l2_snapshot`, it converts provider levels to `Price`/`quantity` pairs and calls
+`orderbook::apply_l2_snapshot()`. For `l2_update` events, it calls
+`orderbook::apply_l2_update()`.
+
+**Engine API**: `engine::apply_l2_snapshot(symbol, bids, asks)` and
+`engine::apply_l2_update(symbol, side, price, new_qty)` route L2 data to the
+correct per-symbol orderbook via the `OrderbookRegistry`, log the events, and
+publish them through ring buffers to worker threads and the WebSocket UI.
+
+L2 snapshots replace the entire orderbook state. L2 updates modify individual
+price levels (quantity of 0 removes the level).
+
+### Partial fills
+
+Fill events include `remaining_qty` (quantity still on book after this fill) and
+`fill_id` (unique identifier distinguishing multiple fills for one order). Use
+`fill_event::is_partial()` to check if the order still has remaining quantity.
+Portfolio and analytics handle partial fills incrementally.
 
 ### Order types
 
@@ -913,7 +1054,99 @@ sqlite3 truetest.db "SELECT * FROM equity_curve ORDER BY timestamp DESC LIMIT 10
 
 ---
 
-## 23. Examples
+## 23. Analytics & Reporting
+
+TrueTest computes a comprehensive set of analytics metrics during and after each
+backtest run. All metrics are computed incrementally using Welford's online
+algorithm (O(1) per update) and are available in real-time via WebSocket
+snapshots.
+
+### Cumulative metrics
+
+The analytics report includes: cumulative return, Sharpe ratio, Sortino ratio,
+max drawdown, Calmar ratio, win rate, profit factor, average win/loss, largest
+winner/loser, time in market, average holding period, and average slippage.
+
+### Rolling window metrics
+
+Rolling Sharpe ratio and rolling max drawdown are computed over a configurable
+trailing window of equity-to-equity returns. The window size defaults to 252 bars
+(~1 year of daily data) and is set via `--rolling-window`.
+
+```bash
+./build/truetest --provider local --path data.csv --strategy sma --rolling-window 100
+```
+
+Rolling metrics appear in the printed report, WebSocket analytics broadcasts,
+and JSON export.
+
+### Risk-free rate adjustment
+
+Sharpe and Sortino ratios subtract a per-period risk-free rate derived from the
+annualized `--risk-free-rate` flag. When the flag is `0.0` (default), the
+formulas reduce to the standard unadjusted versions — existing behavior is
+preserved.
+
+```bash
+./build/truetest --provider local --path data.csv --strategy sma --risk-free-rate 0.05
+```
+
+### Benchmark comparison
+
+A buy-and-hold benchmark is tracked alongside the strategy equity curve. The
+benchmark invests 100% of initial capital at the first observed price and holds.
+The report includes:
+
+- **Alpha**: strategy excess return over the benchmark per bar
+- **Beta**: sensitivity of strategy returns to benchmark returns
+- **Information ratio**: risk-adjusted excess return vs benchmark
+- **Tracking error**: standard deviation of return differences
+
+### Per-symbol and per-strategy attribution
+
+When multiple symbols are traded, the report breaks down PnL, trade count, win
+rate, and profit factor per symbol. When the `strategy_name` field is set on
+order events, per-strategy attribution is also available.
+
+Attribution data appears in the printed report, JSON export
+(`per_symbol` and `per_strategy` objects), and WebSocket analytics.
+
+### Structured result export
+
+After the engine finishes, results can be exported to a file:
+
+```bash
+# JSON export (default)
+./build/truetest --provider local --path data.csv --strategy sma --output results.json
+
+# CSV export (equity curve + trades file)
+./build/truetest --provider local --path data.csv --strategy sma --output results.csv --output-format csv
+```
+
+**JSON output** contains all scalar metrics, the full equity curve as
+`[timestamp_ms, equity]` arrays, the complete trade log, and per-symbol /
+per-strategy attribution objects.
+
+**CSV output** writes the equity curve to the specified path and a companion
+`_trades` file (e.g., `results_trades.csv`) with the trade log including symbol
+and strategy columns.
+
+### Configuration file support
+
+All analytics flags are supported in the JSON configuration file:
+
+```json
+{
+  "rolling_window": 100,
+  "risk_free_rate": 0.05,
+  "output": "results.json",
+  "output_format": "json"
+}
+```
+
+---
+
+## 24. Examples
 
 ### Basic CSV backtest
 

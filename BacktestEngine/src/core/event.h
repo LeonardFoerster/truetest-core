@@ -17,7 +17,9 @@ enum class event_type
         fill,
         tick,
         l2_snapshot,
-        l2_update
+        l2_update,
+        cancel,
+        amend
 };
 
 
@@ -207,6 +209,9 @@ public:
         time_in_force get_tif() const { return tif_; }
         double get_stop_price() const { return stop_price_; }
 
+        const std::string& get_strategy_name() const { return strategy_name_; }
+        void set_strategy_name(const std::string& name) { strategy_name_ = name; }
+
         std::chrono::system_clock::time_point get_earliest_eligible_ts() const { return earliest_eligible_ts_; }
         void set_earliest_eligible_ts(std::chrono::system_clock::time_point ts) { earliest_eligible_ts_ = ts; }
 
@@ -235,6 +240,7 @@ private:
         time_in_force tif_;
         double stop_price_;
         std::chrono::system_clock::time_point earliest_eligible_ts_;
+        std::string strategy_name_;
 };
 
 class fill_event : public event
@@ -251,7 +257,9 @@ public:
                 order_side side,
                 double filled_quantity,
                 double fill_price,
-                double commission = 0.0
+                double commission = 0.0,
+                double remaining_qty = 0.0,
+                uint64_t fill_id = 0
         )
                 : event(event_type::fill, timestamp)
                 , order_id_(order_id)
@@ -260,6 +268,8 @@ public:
                 , filled_quantity_(filled_quantity)
                 , fill_price_(fill_price)
                 , commission_(commission)
+                , remaining_qty_(remaining_qty)
+                , fill_id_(fill_id)
         {
         }
 
@@ -269,20 +279,25 @@ public:
         double get_filled_quantity() const { return filled_quantity_; }
         double get_fill_price() const { return fill_price_; }
         double get_commission() const { return commission_; }
+        double get_remaining_qty() const { return remaining_qty_; }
+        uint64_t get_fill_id() const { return fill_id_; }
+        bool is_partial() const { return remaining_qty_ > 0.0; }
 
 
-        double get_total_cost() const 
+        double get_total_cost() const
         {
                 double base = filled_quantity_ * fill_price_;
                 return (side_ == order_side::buy) ? base + commission_ : base - commission_;
         }
 
-        std::string to_string() const override 
+        std::string to_string() const override
         {
                 std::string side_str = (side_ == order_side::buy) ? "BOUGHT" : "SOLD";
-                return "FillEvent[order_id=" + std::to_string(order_id_) + " " + side_str + " " +
+                return "FillEvent[order_id=" + std::to_string(order_id_) +
+                        " fill_id=" + std::to_string(fill_id_) + " " + side_str + " " +
                         std::to_string(filled_quantity_) + " " + symbol_ +
                         " @ " + std::to_string(fill_price_) +
+                        " remaining=" + std::to_string(remaining_qty_) +
                         " commission=" + std::to_string(commission_) + "]";
         }
 
@@ -293,6 +308,8 @@ private:
         double filled_quantity_;
         double fill_price_;
         double commission_;
+        double remaining_qty_ = 0.0;
+        uint64_t fill_id_ = 0;
 };
 
 
@@ -422,4 +439,74 @@ private:
         tick_side side_;
         double price_;
         int64_t new_quantity_;
+};
+
+
+class cancel_event : public event
+{
+public:
+        cancel_event(
+                std::chrono::system_clock::time_point timestamp,
+                const std::string& symbol,
+                uint64_t order_id,
+                const std::string& reason = ""
+        )
+                : event(event_type::cancel, timestamp)
+                , symbol_(symbol)
+                , order_id_(order_id)
+                , reason_(reason)
+        { }
+
+        const std::string& get_symbol() const { return symbol_; }
+        uint64_t get_order_id() const { return order_id_; }
+        const std::string& get_reason() const { return reason_; }
+
+        std::string to_string() const override
+        {
+                return "CancelEvent[order_id=" + std::to_string(order_id_) +
+                        " " + symbol_ + " reason=" + reason_ + "]";
+        }
+
+private:
+        std::string symbol_;
+        uint64_t order_id_;
+        std::string reason_;
+};
+
+
+class amend_event : public event
+{
+public:
+        amend_event(
+                std::chrono::system_clock::time_point timestamp,
+                const std::string& symbol,
+                uint64_t order_id,
+                double new_price,
+                double new_quantity
+        )
+                : event(event_type::amend, timestamp)
+                , symbol_(symbol)
+                , order_id_(order_id)
+                , new_price_(new_price)
+                , new_quantity_(new_quantity)
+        { }
+
+        const std::string& get_symbol() const { return symbol_; }
+        uint64_t get_order_id() const { return order_id_; }
+        double get_new_price() const { return new_price_; }
+        double get_new_quantity() const { return new_quantity_; }
+
+        std::string to_string() const override
+        {
+                return "AmendEvent[order_id=" + std::to_string(order_id_) +
+                        " " + symbol_ +
+                        " new_price=" + std::to_string(new_price_) +
+                        " new_qty=" + std::to_string(new_quantity_) + "]";
+        }
+
+private:
+        std::string symbol_;
+        uint64_t order_id_;
+        double new_price_;
+        double new_quantity_;
 };

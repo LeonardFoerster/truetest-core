@@ -87,12 +87,14 @@ inline std::string to_json(const fill_event& e)
 
     char buf[512];
     std::snprintf(buf, sizeof(buf),
-        R"({"type":"fill","timestamp":%lld,"data":{"order_id":%llu,"symbol":"%s","side":"%s","quantity":%.8g,"price":%.6f,"commission":%.6f,"time":%lld}})",
+        R"({"type":"fill","timestamp":%lld,"data":{"order_id":%llu,"fill_id":%llu,"symbol":"%s","side":"%s","quantity":%.8g,"price":%.6f,"remaining":%.8g,"commission":%.6f,"time":%lld}})",
         static_cast<long long>(epoch_ms(e.get_timestamp())),
         static_cast<unsigned long long>(e.get_order_id()),
+        static_cast<unsigned long long>(e.get_fill_id()),
         e.get_symbol().c_str(),
         side_str,
         e.get_filled_quantity(), e.get_fill_price(),
+        e.get_remaining_qty(),
         e.get_commission(),
         static_cast<long long>(epoch_ms(e.get_timestamp()) / 1000));
     return buf;
@@ -115,6 +117,30 @@ inline std::string to_json(const tick_event& e)
         e.get_price(),
         static_cast<long long>(e.get_quantity()),
         side_str);
+    return buf;
+}
+
+inline std::string to_json(const cancel_event& e)
+{
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+        R"({"type":"cancel","timestamp":%lld,"data":{"order_id":%llu,"symbol":"%s","reason":"%s"}})",
+        static_cast<long long>(epoch_ms(e.get_timestamp())),
+        static_cast<unsigned long long>(e.get_order_id()),
+        e.get_symbol().c_str(),
+        e.get_reason().c_str());
+    return buf;
+}
+
+inline std::string to_json(const amend_event& e)
+{
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+        R"({"type":"amend","timestamp":%lld,"data":{"order_id":%llu,"symbol":"%s","new_price":%.6f,"new_quantity":%.8g}})",
+        static_cast<long long>(epoch_ms(e.get_timestamp())),
+        static_cast<unsigned long long>(e.get_order_id()),
+        e.get_symbol().c_str(),
+        e.get_new_price(), e.get_new_quantity());
     return buf;
 }
 
@@ -147,18 +173,22 @@ inline std::string portfolio_to_json(const portfolio& p)
 
 inline std::string analytics_to_json(const AnalyticsReport& r)
 {
-    char buf[1024];
+    char buf[2048];
     std::snprintf(buf, sizeof(buf),
         R"({"type":"analytics","data":{"initial_equity":%.2f,"final_equity":%.2f,"cumulative_return":%.6f,)"
         R"("sharpe_ratio":%.6f,"sortino_ratio":%.6f,"max_drawdown":%.6f,"calmar_ratio":%.6f,)"
+        R"("rolling_sharpe":%.6f,"rolling_max_drawdown":%.6f,)"
         R"("win_rate":%.6f,"profit_factor":%.6f,"total_trades":%zu,)"
         R"("avg_win":%.6f,"avg_loss":%.6f,"largest_winner":%.6f,"largest_loser":%.6f,)"
-        R"("time_in_market_pct":%.4f,"buy_and_hold_return":%.6f}})",
+        R"("time_in_market_pct":%.4f,"buy_and_hold_return":%.6f,)"
+        R"("alpha":%.6f,"beta":%.6f,"information_ratio":%.6f,"tracking_error":%.6f}})",
         r.initial_equity, r.final_equity, r.cumulative_return,
         r.sharpe_ratio, r.sortino_ratio, r.max_drawdown, r.calmar_ratio,
+        r.rolling_sharpe, r.rolling_max_drawdown,
         r.win_rate, r.profit_factor, r.total_trades,
         r.avg_win, r.avg_loss, r.largest_winner, r.largest_loser,
-        r.time_in_market_pct, r.buy_and_hold_return);
+        r.time_in_market_pct, r.buy_and_hold_return,
+        r.alpha, r.beta, r.information_ratio, r.tracking_error);
     return buf;
 }
 
@@ -176,6 +206,10 @@ inline std::string event_to_json(const event_pointer& ev)
         return to_json(static_cast<const fill_event&>(*ev));
     case event_type::tick:
         return to_json(static_cast<const tick_event&>(*ev));
+    case event_type::cancel:
+        return to_json(static_cast<const cancel_event&>(*ev));
+    case event_type::amend:
+        return to_json(static_cast<const amend_event&>(*ev));
     default:
         return {};
     }

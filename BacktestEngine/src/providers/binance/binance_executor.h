@@ -106,6 +106,38 @@ public:
         return true;
     }
 
+    bool cancel_order(uint64_t order_id) override
+    {
+        if (live_trading_enabled_ && rest_client_)
+        {
+            // Find the exchange order ID for this engine order
+            for (auto it = pending_live_orders_.begin(); it != pending_live_orders_.end(); ++it)
+            {
+                if (it->engine_order_id == order_id)
+                {
+                    std::string params = "symbol=" + it->symbol
+                        + "&orderId=" + it->exchange_order_id;
+                    auto resp = rest_client_->del("/api/v3/order", params);
+                    if (resp.status == 200)
+                    {
+                        pending_live_orders_.erase(it);
+                        return true;
+                    }
+                    last_error_ = "Cancel failed: HTTP " + std::to_string(resp.status);
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        // Paper mode: remove from pending fills
+        auto it = std::remove_if(pending_fills_.begin(), pending_fills_.end(),
+            [order_id](const fill_event& f) { return f.get_order_id() == order_id; });
+        bool found = (it != pending_fills_.end());
+        pending_fills_.erase(it, pending_fills_.end());
+        return found;
+    }
+
 private:
     std::string api_key_;
     std::string api_secret_;

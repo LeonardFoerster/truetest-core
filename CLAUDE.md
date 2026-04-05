@@ -39,6 +39,7 @@ hft-engine/
         │   └── data_loader.cpp         # load_from_csv + load_into_queue impl
         ├── execution/
         │   ├── execution_adapter.h     # IExecutionAdapter, LocalBookAdapter, ExchangeAdapter stub
+        │   ├── order_tracker.h         # OrderTracker: order lifecycle state tracking
         │   ├── portfolio.h/.cpp        # position tracking, PnL
         │   ├── fee_model.h             # IFeeModel (Zero, Fixed, Tiered)
         │   └── latency_model.h         # execution latency simulation

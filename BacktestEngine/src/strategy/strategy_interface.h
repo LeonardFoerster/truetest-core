@@ -3,6 +3,19 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
+#include <limits>
+#include <stdexcept>
+
+// Describes one configurable parameter a strategy accepts.
+struct param_def
+{
+    std::string name;
+    double default_value = 0.0;
+    double min_value = -std::numeric_limits<double>::max();
+    double max_value = std::numeric_limits<double>::max();
+    std::string description;
+};
 
 // Active stop loss / take profit for a position
 struct position_stops
@@ -70,6 +83,15 @@ public:
     }
 
     const std::unordered_map<std::string, position_stops>& get_stops() const { return stops_; }
+
+    // Runtime parameter configuration — override per-strategy.
+    virtual std::vector<param_def> get_param_schema() const { return {}; }
+
+    virtual void set_param(const std::string& key, double value)
+    {
+        (void)key; (void)value;
+        throw std::runtime_error("Unknown parameter: " + key);
+    }
 
     // Indicator values: strategies can expose their current indicator state
     // for UI display. Called after on_market() to collect values.

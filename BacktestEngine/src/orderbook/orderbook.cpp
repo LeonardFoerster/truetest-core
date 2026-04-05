@@ -24,7 +24,7 @@ side order::get_side() const { return side_; }
 Price order::get_price() const { return price_; }
 ob_order_type order::get_order_type() const { return order_type_; }
 quantity order::get_inital_quantity() const { return initial_quantity_; }
-quantity order::get_reamaining_quantity() const { return remaining_quantity; }
+quantity order::get_remaining_quantity() const { return remaining_quantity; }
 quantity order::get_filled_quantity() const { return initial_quantity_ - remaining_quantity; }
 bool order::is_filled() const { return remaining_quantity == 0; }
 
@@ -185,8 +185,8 @@ trades orderbook::match_orders()
         }
 
         quantity trade_qty = std::min(
-            bid_node->order->get_reamaining_quantity(),
-            ask_node->order->get_reamaining_quantity());
+            bid_node->order->get_remaining_quantity(),
+            ask_node->order->get_remaining_quantity());
 
         bid_node->order->fill(trade_qty);
         ask_node->order->fill(trade_qty);
@@ -280,7 +280,7 @@ trades orderbook::add_order(order_pointer order)
             if (crosses)
                 available += lvl.total_qty;
         }
-        if (available < order->get_reamaining_quantity())
+        if (available < order->get_remaining_quantity())
             return {};
     }
 
@@ -341,6 +341,35 @@ trades orderbook::match_order(order_modify order)
     auto existing_type = existing_node->order->get_order_type();
     cancel_order(order.get_order_id());
     return add_order(order.to_order_pointer(existing_type));
+}
+
+bool orderbook::modify_order(order_id id, Price new_price, quantity new_qty)
+{
+    auto it = order_map_.find(id);
+    if (it == order_map_.end())
+        return false;
+
+    order_node* n = it->second;
+    auto existing_side = n->order->get_side();
+    auto existing_type = n->order->get_order_type();
+
+    // Cancel existing order, re-insert with same ID at new price/qty.
+    // This loses time priority — standard exchange amend behavior.
+    cancel_order(id);
+
+    auto new_order = std::make_shared<order>(existing_type, id, existing_side,
+                                              new_price, new_qty);
+
+    // Insert directly without matching (amend is a passive action).
+    order_node* node = alloc_node();
+    node->order = new_order;
+
+    auto& levels = (existing_side == side::buy) ? bid_levels_ : ask_levels_;
+    auto& lvl = find_or_insert_level(levels, new_price, existing_side);
+    lvl.append(node);
+
+    order_map_[id] = node;
+    return true;
 }
 
 std::size_t orderbook::size() const

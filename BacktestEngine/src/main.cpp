@@ -18,6 +18,7 @@
 #include "data/tick_csv_data_source.h"
 #include "execution/fee_model.h"
 #include "orderbook/orderbook.h"
+#include "strategy/strategy_registry.h"
 #include "strategy/mean_reversion_strategy.h"
 #include "strategy/sma_strategy.h"
 #include "strategy/ma_crossover_strategy.h"
@@ -43,6 +44,55 @@
 #include "debug/debug_log.h"
 #include "absl/flags/parse.h"
 #endif
+
+// ---------------------------------------------------------------------------
+// Helper: apply --param key=value pairs to a strategy after construction
+// ---------------------------------------------------------------------------
+static void apply_strategy_params(IStrategy& strategy,
+                                  const std::vector<std::string>& params)
+{
+    for (const auto& p : params)
+    {
+        auto eq = p.find('=');
+        if (eq == std::string::npos)
+        {
+            std::cerr << "  ! Invalid --param format (expected key=value): " << p << "\n";
+            continue;
+        }
+        std::string key = p.substr(0, eq);
+        double value = std::stod(p.substr(eq + 1));
+        strategy.set_param(key, value);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: export analytics results to file (JSON or CSV)
+// ---------------------------------------------------------------------------
+static void export_results(const Analytics& analytics,
+                           const std::string& output_path,
+                           const std::string& format)
+{
+    if (output_path.empty()) return;
+
+    if (format == "csv")
+    {
+        // For CSV, derive trade path from output path
+        std::string equity_path = output_path;
+        std::string trades_path = output_path;
+        auto dot = trades_path.rfind('.');
+        if (dot != std::string::npos)
+            trades_path.insert(dot, "_trades");
+        else
+            trades_path += "_trades";
+        analytics.export_csv(equity_path, trades_path);
+        std::cout << "  Results exported to: " << equity_path << " + " << trades_path << "\n";
+    }
+    else
+    {
+        analytics.export_json(output_path);
+        std::cout << "  Results exported to: " << output_path << "\n";
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helper: load a JSON config file and apply values to locals (CLI overrides)
@@ -85,7 +135,11 @@ static void load_config_file(const std::string& path,
                              double& risk_max_drawdown,
                              double& risk_max_loss_per_trade,
                              int& risk_max_open_orders,
-                             double& risk_max_portfolio_exposure)
+                             double& risk_max_portfolio_exposure,
+                             std::size_t& cli_rolling_window,
+                             double& cli_risk_free_rate,
+                             std::string& cli_output,
+                             std::string& cli_output_format)
 {
     std::ifstream f(path);
     if (!f.is_open())
@@ -175,6 +229,12 @@ static void load_config_file(const std::string& path,
         ri("max_open_orders", risk_max_open_orders);
         rd("max_portfolio_exposure", risk_max_portfolio_exposure);
     }
+
+    // Analytics & reporting
+    get_size("rolling_window", cli_rolling_window);
+    get_double("risk_free_rate", cli_risk_free_rate);
+    get_str("output", cli_output);
+    get_str("output_format", cli_output_format);
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +373,13 @@ int main(int argc, char* argv[])
     std::string config_file;
     bool dump_config_flag = false;
     bool dry_run = false;
+    std::vector<std::string> cli_params; // --param key=value pairs
+
+    // Analytics & reporting (Step G)
+    std::size_t cli_rolling_window = 252;
+    double cli_risk_free_rate = 0.0;
+    std::string cli_output;
+    std::string cli_output_format = "json";
 
     // Risk limit defaults (match risk_limits struct)
     double risk_max_position_value = 1e9;
@@ -339,6 +406,7 @@ int main(int argc, char* argv[])
     app.add_option("--strategy", cli_strategy, "Strategy: mean-reversion, sma, ma-crossover");
     app.add_option("--format", cli_format, "Data format: tick, bar");
     app.add_option("--sma-period", cli_sma_period, "SMA indicator period")->default_val(20);
+    app.add_option("--param", cli_params, "Strategy parameter: key=value (repeatable)");
     app.add_option("--mode", cli_mode, "Engine mode: backtest, shadow, live");
 
     // Fee model
@@ -376,12 +444,28 @@ int main(int argc, char* argv[])
     app.add_option("--backfill", cli_backfill, "Historical bars to fetch before streaming")->default_val(500);
     app.add_option("--backfill-interval", cli_backfill_interval, "Kline interval for backfill");
 
+    // Execution constants
+    double cli_market_aggression = 1.1;
+    double cli_qty_scale = 1e8;
+    unsigned cli_fill_rng_seed = 42;
+    double cli_spread_step = 0.0001;
+    app.add_option("--aggression", cli_market_aggression, "Market order aggression factor")->default_val(1.1);
+    app.add_option("--qty-scale", cli_qty_scale, "Quantity scale (fractional → integer)")->default_val(1e8);
+    app.add_option("--fill-rng-seed", cli_fill_rng_seed, "RNG seed for fill model")->default_val(42);
+    app.add_option("--spread-step", cli_spread_step, "Spread step factor (mid * factor)")->default_val(0.0001);
+
     // Config file (B2)
     app.add_option("--config", config_file, "Load configuration from JSON file");
     app.add_flag("--dump-config", dump_config_flag, "Print resolved config as JSON and exit");
 
     // Dry run (B3)
     app.add_flag("--dry-run", dry_run, "Validate config, print summary, and exit");
+
+    // Analytics & reporting (Step G)
+    app.add_option("--rolling-window", cli_rolling_window, "Rolling metrics window size (bars)")->default_val(252);
+    app.add_option("--risk-free-rate", cli_risk_free_rate, "Annual risk-free rate for Sharpe/Sortino")->default_val(0.0);
+    app.add_option("--output", cli_output, "Write results to file (default: stdout)");
+    app.add_option("--output-format", cli_output_format, "Output format: json or csv")->default_val("json");
 
     // Parse — reject unknown flags
     try {
@@ -442,6 +526,10 @@ int main(int argc, char* argv[])
         auto save_tp = cli_tp_pct;
         auto save_backfill = cli_backfill;
         auto save_backfill_interval = cli_backfill_interval;
+        auto save_rolling_window = cli_rolling_window;
+        auto save_risk_free_rate = cli_risk_free_rate;
+        auto save_output = cli_output;
+        auto save_output_format = cli_output_format;
 
         // Load file (overwrites all variables)
         load_config_file(config_file,
@@ -454,7 +542,8 @@ int main(int argc, char* argv[])
             cli_db_path, cli_balance, cli_risk_fraction, cli_sl_pct, cli_tp_pct,
             cli_backfill, cli_backfill_interval,
             risk_max_position_value, risk_max_drawdown, risk_max_loss_per_trade,
-            risk_max_open_orders, risk_max_portfolio_exposure);
+            risk_max_open_orders, risk_max_portfolio_exposure,
+            cli_rolling_window, cli_risk_free_rate, cli_output, cli_output_format);
 
         // Restore CLI-set values (CLI wins over file)
         if (was_set("--replay")) replay_path = save_replay;
@@ -490,6 +579,10 @@ int main(int argc, char* argv[])
         if (was_set("--tp")) cli_tp_pct = save_tp;
         if (was_set("--backfill")) cli_backfill = save_backfill;
         if (was_set("--backfill-interval")) cli_backfill_interval = save_backfill_interval;
+        if (was_set("--rolling-window")) cli_rolling_window = save_rolling_window;
+        if (was_set("--risk-free-rate")) cli_risk_free_rate = save_risk_free_rate;
+        if (was_set("--output")) cli_output = save_output;
+        if (was_set("--output-format")) cli_output_format = save_output_format;
     }
 
     // --no-db clears db path
@@ -548,10 +641,7 @@ int main(int argc, char* argv[])
 
         // Validate
         bool valid = true;
-        if (!cli_strategy.empty() &&
-            cli_strategy != "mean-reversion" &&
-            cli_strategy != "sma" &&
-            cli_strategy != "ma-crossover")
+        if (!cli_strategy.empty() && !StrategyRegistry::instance().has(cli_strategy))
         {
             std::cerr << "  ! Unknown strategy: " << cli_strategy << "\n";
             valid = false;
@@ -592,6 +682,7 @@ int main(int argc, char* argv[])
         // Strategy still needed for replay
         std::cout << "  Using Mean Reversion strategy (default) for replay.\n";
         auto strategy = std::make_shared<mean_reversion_strategy>(20);
+        apply_strategy_params(*strategy, cli_params);
 
         engine_config cfg;
         cfg.seed = seed;
@@ -602,6 +693,7 @@ int main(int argc, char* argv[])
         engine eng(dh, nullptr, strategy, std::move(cfg));
         eng.run_replay(replay_path, replay_from_us, replay_to_us);
         eng.print_summary();
+        export_results(eng.get_analytics(), cli_output, cli_output_format);
         return 0;
     }
 
@@ -619,15 +711,20 @@ int main(int argc, char* argv[])
 
         auto provider = ProviderRegistry::instance().create(provider_name, pcfg);
 
-        // Select strategy (default: mean-reversion)
-        std::shared_ptr<IStrategy> prov_strategy;
-        if (cli_strategy == "sma")
-            prov_strategy = std::make_shared<sma_strategy>(cli_sma_period);
-        else if (cli_strategy == "ma-crossover")
-            prov_strategy = std::make_shared<ma_crossover_strategy>(cli_sma_period);
-        else
-            prov_strategy = std::make_shared<mean_reversion_strategy>(
-                cli_sma_period, cli_balance, cli_risk_fraction, cli_sl_pct, cli_tp_pct);
+        // Select strategy via registry (default: mean-reversion)
+        std::string resolved = cli_strategy.empty() ? "mean-reversion" : cli_strategy;
+        auto prov_strategy = StrategyRegistry::instance().create(resolved);
+        // Apply legacy CLI params as set_param calls
+        if (resolved == "sma" && cli_sma_period != 20)
+            prov_strategy->set_param("period", static_cast<double>(cli_sma_period));
+        if (resolved == "mean-reversion") {
+            if (cli_sma_period != 20) prov_strategy->set_param("period", static_cast<double>(cli_sma_period));
+            if (cli_balance != 10000.0) prov_strategy->set_param("equity", cli_balance);
+            if (cli_risk_fraction != 0.02) prov_strategy->set_param("risk_fraction", cli_risk_fraction);
+            if (cli_sl_pct != 0.005) prov_strategy->set_param("sl_pct", cli_sl_pct);
+            if (cli_tp_pct != 0.01) prov_strategy->set_param("tp_pct", cli_tp_pct);
+        }
+        apply_strategy_params(*prov_strategy, cli_params);
 
         // Build engine config
         engine_config prov_cfg;
@@ -642,6 +739,12 @@ int main(int argc, char* argv[])
         prov_cfg.db_path = cli_db_path;
         prov_cfg.backfill_bars = cli_backfill;
         prov_cfg.backfill_interval = cli_backfill_interval;
+        prov_cfg.market_aggression = cli_market_aggression;
+        prov_cfg.qty_scale = cli_qty_scale;
+        prov_cfg.fill_rng_seed = cli_fill_rng_seed;
+        prov_cfg.spread_step_factor = cli_spread_step;
+        prov_cfg.rolling_window = cli_rolling_window;
+        prov_cfg.risk_free_rate = cli_risk_free_rate;
 
         // Apply risk limits
         prov_cfg.risk.max_position_value = risk_max_position_value;
@@ -800,6 +903,7 @@ int main(int argc, char* argv[])
             }
 
             eng.print_summary();
+            export_results(eng.get_analytics(), cli_output, cli_output_format);
         }
         else
         {
@@ -851,6 +955,7 @@ int main(int argc, char* argv[])
                 eng.run();
 
             eng.print_summary();
+            export_results(eng.get_analytics(), cli_output, cli_output_format);
         }
         return 0;
     }
@@ -892,17 +997,13 @@ int main(int argc, char* argv[])
     std::size_t sma_period = 20;
     std::cin >> sma_period;
 
-    std::shared_ptr<IStrategy> strategy;
-    if (strategy_choice == 1)
-    {
-        strategy = std::make_shared<mean_reversion_strategy>(sma_period);
-    } else if (strategy_choice == 2)
-    {
-        strategy = std::make_shared<sma_strategy>(sma_period);
-    } else if (strategy_choice == 3)
-    {
-        strategy = std::make_shared<ma_crossover_strategy>(sma_period);
-    }
+    std::string tui_strategy_name = (strategy_choice == 1) ? "mean-reversion"
+                                   : (strategy_choice == 2) ? "sma"
+                                   : "ma-crossover";
+    auto strategy = StrategyRegistry::instance().create(tui_strategy_name);
+    if (tui_strategy_name == "sma" || tui_strategy_name == "mean-reversion")
+        strategy->set_param("period", static_cast<double>(sma_period));
+    apply_strategy_params(*strategy, cli_params);
 
     // ── Data Source Selection ────────────────────────────────────
     std::cout << "\n";
@@ -972,6 +1073,12 @@ int main(int argc, char* argv[])
     config.compress_log = compress_log;
     config.disable_pinning = no_pin;
     config.db_path = cli_db_path;
+    config.market_aggression = cli_market_aggression;
+    config.qty_scale = cli_qty_scale;
+    config.fill_rng_seed = cli_fill_rng_seed;
+    config.spread_step_factor = cli_spread_step;
+    config.rolling_window = cli_rolling_window;
+    config.risk_free_rate = cli_risk_free_rate;
 
     // Apply risk limits
     config.risk.max_position_value = risk_max_position_value;
@@ -1048,6 +1155,7 @@ int main(int argc, char* argv[])
     engine eng(dh, nullptr, strategy, std::move(config));
     eng.run();
     eng.print_summary();
+    export_results(eng.get_analytics(), cli_output, cli_output_format);
 
     return 0;
 }
