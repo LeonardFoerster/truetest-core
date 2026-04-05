@@ -11,7 +11,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$ROOT/build"
 WEB_DIR="$ROOT/web"
+VCPKG_DIR="$BUILD_DIR/_vcpkg"
 BINARY="$BUILD_DIR/truetest"
+
+# Detect OS
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=true ;;
+    *)                     IS_WINDOWS=false ;;
+esac
+
+if [[ "$IS_WINDOWS" == true ]]; then
+    BINARY="$BUILD_DIR/Debug/truetest.exe"
+    [[ -f "$BUILD_DIR/Release/truetest.exe" ]] && BINARY="$BUILD_DIR/Release/truetest.exe"
+fi
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║                         CONFIGURATION                                  ║
@@ -130,8 +142,61 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# ── Bootstrap vcpkg + install dependencies ───────────────────────────────
+bootstrap_vcpkg() {
+    # Collect which vcpkg features are needed based on enabled CMake flags
+    local features=()
+    [[ "$ENABLE_BINANCE"    == "ON" ]] && features+=(binance)
+    [[ "$ENABLE_WEB_UI"     == "ON" ]] && features+=(web-ui)
+    [[ "$ENABLE_LIVE_DATA"  == "ON" ]] && features+=(live-data)
+    [[ "$ENABLE_POSTGRESQL" == "ON" ]] && features+=(postgresql)
+    [[ "$ENABLE_SQLITE"     == "ON" ]] && features+=(sqlite)
+
+    if [[ ${#features[@]} -eq 0 ]]; then
+        info "No optional features enabled — skipping vcpkg."
+        return
+    fi
+
+    # Clone vcpkg if not present
+    if [[ ! -d "$VCPKG_DIR/.git" ]]; then
+        info "Cloning vcpkg (one-time setup)..."
+        git clone --depth 1 --branch 2024.11.16 \
+            https://github.com/microsoft/vcpkg.git "$VCPKG_DIR" \
+            || fail "Failed to clone vcpkg. Ensure git is on PATH."
+    fi
+
+    # Bootstrap vcpkg if executable missing
+    local vcpkg_exe="$VCPKG_DIR/vcpkg"
+    if [[ "$IS_WINDOWS" == true ]]; then
+        vcpkg_exe="$VCPKG_DIR/vcpkg.exe"
+        if [[ ! -f "$vcpkg_exe" ]]; then
+            info "Bootstrapping vcpkg..."
+            "$VCPKG_DIR/bootstrap-vcpkg.bat" -disableMetrics \
+                || fail "vcpkg bootstrap failed."
+        fi
+    else
+        if [[ ! -f "$vcpkg_exe" ]]; then
+            info "Bootstrapping vcpkg..."
+            sh "$VCPKG_DIR/bootstrap-vcpkg.sh" -disableMetrics \
+                || fail "vcpkg bootstrap failed."
+        fi
+    fi
+
+    ok "vcpkg ready: $vcpkg_exe"
+
+    # Build the VCPKG_MANIFEST_FEATURES list for CMake
+    # (CMake manifest mode will auto-install these on configure)
+    VCPKG_FEATURES=$(IFS=";"; echo "${features[*]}")
+    VCPKG_TOOLCHAIN="$VCPKG_DIR/scripts/buildsystems/vcpkg.cmake"
+
+    info "vcpkg features: ${features[*]}"
+}
+
 # ── Build C++ engine ──────────────────────────────────────────────────────
 build_engine() {
+    # Auto-install dependencies via vcpkg
+    bootstrap_vcpkg
+
     local cmake_flags=(
         -DENABLE_WEB_UI="$ENABLE_WEB_UI"
         -DENABLE_BINANCE="$ENABLE_BINANCE"
@@ -143,15 +208,23 @@ build_engine() {
         -DBUILD_TESTS="$BUILD_TESTS"
     )
 
+    # Pass vcpkg toolchain + features if vcpkg was bootstrapped
+    if [[ -n "${VCPKG_TOOLCHAIN:-}" ]]; then
+        cmake_flags+=(
+            "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_TOOLCHAIN"
+            "-DVCPKG_MANIFEST_FEATURES=$VCPKG_FEATURES"
+        )
+    fi
+
     info "Configuring C++ engine... (${cmake_flags[*]})"
-    cmake -B "$BUILD_DIR" "${cmake_flags[@]}" -Wno-dev "$ROOT" > /dev/null 2>&1
+    cmake -B "$BUILD_DIR" "${cmake_flags[@]}" -Wno-dev "$ROOT"
 
     info "Building C++ engine..."
     local cores
-    cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "${NUMBER_OF_PROCESSORS:-4}")
     cmake --build "$BUILD_DIR" -j "$cores" 2>&1 | tail -3
 
-    [[ -x "$BINARY" ]] || fail "Binary not found at $BINARY"
+    [[ -f "$BINARY" ]] || fail "Binary not found at $BINARY"
     ok "Engine built: $BINARY"
 }
 
@@ -238,10 +311,15 @@ start_engine() {
     build_engine_args
 
     # Kill any leftover process on the WS port from a previous run
-    if command -v fuser &>/dev/null; then
+    if [[ "$IS_WINDOWS" == true ]]; then
+        # netstat + taskkill on Windows/Git Bash
+        local pid
+        pid=$(netstat -ano 2>/dev/null | grep ":$WS_PORT " | grep LISTENING | awk '{print $5}' | head -1)
+        [[ -n "${pid:-}" ]] && taskkill //PID "$pid" //F 2>/dev/null || true
+    elif command -v fuser &>/dev/null; then
         fuser -k "$WS_PORT/tcp" 2>/dev/null || true
-        sleep 0.3
     fi
+    sleep 0.3
 
     info "Starting engine on ws://localhost:$WS_PORT ..."
     info "Engine args: ${ENGINE_ARGS[*]}"
@@ -282,7 +360,9 @@ open_browser() {
     [[ "$OPEN_BROWSER" == true ]] || return 0
     local url="http://localhost:$VITE_PORT"
     sleep 1
-    if command -v xdg-open &>/dev/null; then
+    if [[ "$IS_WINDOWS" == true ]]; then
+        start "$url" 2>/dev/null &
+    elif command -v xdg-open &>/dev/null; then
         xdg-open "$url" 2>/dev/null &
     elif command -v open &>/dev/null; then
         open "$url" 2>/dev/null &

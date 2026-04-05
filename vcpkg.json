@@ -1,15 +1,40 @@
 {
     "name": "hft-engine",
     "version-string": "1.0.0",
-    "dependencies": [
-        "libpq"
-    ],
+    "dependencies": [],
     "features": {
-        "live-data": {
-            "description": "WebSocket live data feed via Boost.Beast",
+        "binance": {
+            "description": "Binance live WebSocket streaming (Boost.Beast + OpenSSL)",
+            "dependencies": [
+                "boost-beast",
+                "boost-asio",
+                "openssl"
+            ]
+        },
+        "web-ui": {
+            "description": "WebSocket UI server (Boost.Beast)",
             "dependencies": [
                 "boost-beast",
                 "boost-asio"
+            ]
+        },
+        "live-data": {
+            "description": "Generic WebSocket data source (Boost.Beast)",
+            "dependencies": [
+                "boost-beast",
+                "boost-asio"
+            ]
+        },
+        "postgresql": {
+            "description": "PostgreSQL storage backend",
+            "dependencies": [
+                "libpq"
+            ]
+        },
+        "sqlite": {
+            "description": "SQLite persistence",
+            "dependencies": [
+                "sqlite3"
             ]
         }
     }
