@@ -169,10 +169,31 @@ bootstrap_vcpkg() {
     local vcpkg_exe="$VCPKG_DIR/vcpkg"
     if [[ "$IS_WINDOWS" == true ]]; then
         vcpkg_exe="$VCPKG_DIR/vcpkg.exe"
+        
+        # Check if compiler is visible before bootstrapping
+        if ! command -v cl.exe &>/dev/null; then
+            warn "cl.exe (MSVC) not found in PATH."
+            warn "To fix this on Windows:"
+            warn "1. Open 'Developer Command Prompt for VS 2026'"
+            warn "2. Type 'sh' or 'bash' to start this shell"
+            warn "3. Run ./start.sh again"
+            echo ""
+        fi
+
         if [[ ! -f "$vcpkg_exe" ]]; then
             info "Bootstrapping vcpkg..."
-            "$VCPKG_DIR/bootstrap-vcpkg.bat" -disableMetrics \
-                || fail "vcpkg bootstrap failed."
+            
+            # If we are in a Dev CMD, VSINSTALLDIR is usually set. 
+            # We can pass this to vcpkg to help it find the compiler.
+            if [[ -n "${VSINSTALLDIR:-}" ]]; then
+                export VCPKG_VISUAL_STUDIO_PATH="${VSINSTALLDIR}"
+                info "Using VS path from environment: $VCPKG_VISUAL_STUDIO_PATH"
+            fi
+
+            # Use cmd //c to run the batch file in a native Windows context
+            # We use temporary cd to the vcpkg dir to avoid pathing issues in bootstrap
+            (cd "$VCPKG_DIR" && cmd //c "bootstrap-vcpkg.bat -disableMetrics") \
+                || fail "vcpkg bootstrap failed. Check if 'Desktop development with C++' is installed in VS 2026."
         fi
     else
         if [[ ! -f "$vcpkg_exe" ]]; then
