@@ -108,9 +108,9 @@ if(ENABLE_POSTGRESQL)
         set(_vcpkg_dir "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg")
 
         if(NOT EXISTS "${_vcpkg_dir}/.git")
-            message(STATUS "Cloning vcpkg 2024.11.16...")
+            message(STATUS "Cloning vcpkg 2025.04.09...")
             execute_process(
-                COMMAND git clone --depth 1 --branch 2024.11.16
+                COMMAND git clone --depth 1 --branch 2025.04.09
                         https://github.com/microsoft/vcpkg.git
                         "${_vcpkg_dir}"
                 RESULT_VARIABLE _git_result
