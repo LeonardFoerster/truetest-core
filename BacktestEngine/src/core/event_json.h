@@ -144,6 +144,18 @@ inline std::string to_json(const amend_event& e)
     return buf;
 }
 
+inline std::string to_json(const rejection_event& e)
+{
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+        R"({"type":"rejection","timestamp":%lld,"data":{"order_id":%llu,"symbol":"%s","reason":"%s"}})",
+        static_cast<long long>(epoch_ms(e.get_timestamp())),
+        static_cast<unsigned long long>(e.get_order_id()),
+        e.get_symbol().c_str(),
+        e.get_reason().c_str());
+    return buf;
+}
+
 inline std::string portfolio_to_json(const portfolio& p)
 {
     std::string positions = "[";
@@ -210,6 +222,8 @@ inline std::string event_to_json(const event_pointer& ev)
         return to_json(static_cast<const cancel_event&>(*ev));
     case event_type::amend:
         return to_json(static_cast<const amend_event&>(*ev));
+    case event_type::rejection:
+        return to_json(static_cast<const rejection_event&>(*ev));
     default:
         return {};
     }

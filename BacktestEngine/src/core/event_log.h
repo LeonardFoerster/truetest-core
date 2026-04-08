@@ -362,6 +362,32 @@ inline std::vector<uint8_t> serialise(const amend_event& e)
     return buf;
 }
 
+inline std::vector<uint8_t> serialise(const rejection_event& e)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(64);
+    auto append = [&](const void* ptr, std::size_t n) {
+        const auto* b = static_cast<const uint8_t*>(ptr);
+        buf.insert(buf.end(), b, b + n);
+    };
+    auto append_ts = [&](std::chrono::system_clock::time_point tp) {
+        int64_t us = std::chrono::duration_cast<std::chrono::microseconds>(tp.time_since_epoch()).count();
+        append(&us, 8);
+    };
+    auto append_str = [&](const std::string& s) {
+        uint16_t len = static_cast<uint16_t>(s.size());
+        append(&len, 2);
+        append(s.data(), len);
+    };
+    auto append_u64 = [&](uint64_t v) { append(&v, 8); };
+
+    append_ts(e.get_timestamp());
+    append_str(e.get_symbol());
+    append_u64(e.get_order_id());
+    append_str(e.get_reason());
+    return buf;
+}
+
 // --- Deserialise from buffer ---
 
 inline event_pointer deserialise(event_type type, const uint8_t* data, std::size_t size)
@@ -465,6 +491,13 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         double new_qty = r.read_f64();
         return std::make_shared<amend_event>(ts, symbol, oid, new_price, new_qty);
     }
+    case event_type::rejection: {
+        auto ts = r.read_ts();
+        auto symbol = r.read_str();
+        uint64_t oid = r.read_u64();
+        auto reason = r.read_str();
+        return std::make_shared<rejection_event>(ts, symbol, oid, reason);
+    }
     }
     throw std::runtime_error("event_log: unknown event type " + std::to_string(static_cast<int>(type)));
 }
@@ -549,6 +582,8 @@ public:
             payload = event_serial::serialise(static_cast<const cancel_event&>(e)); break;
         case event_type::amend:
             payload = event_serial::serialise(static_cast<const amend_event&>(e)); break;
+        case event_type::rejection:
+            payload = event_serial::serialise(static_cast<const rejection_event&>(e)); break;
         }
 
         event_serial::write_u8(out_, static_cast<uint8_t>(e.get_type()));

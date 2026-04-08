@@ -377,6 +377,16 @@ TrueTest has three runtime modes determined by the flags you pass:
 | `--output`           | string   | (none)   | Write results to file (omit for no file export)  |
 | `--output-format`    | string   | `json`   | Output format: `json` or `csv`                   |
 
+### Risk management flags
+
+| Flag                    | Type     | Default  | Description                                      |
+|-------------------------|----------|----------|--------------------------------------------------|
+| `--max-daily-loss`      | double   | `0`      | Maximum daily loss before halt (0 = no limit)    |
+| `--daily-reset-hour`    | int      | `0`      | UTC hour (0-23) to reset daily loss counter      |
+| `--max-trades-per-hour` | int      | `0`      | Maximum fills per rolling hour (0 = no limit)    |
+| `--max-orders-per-minute`| int     | `0`      | Maximum orders per rolling minute (0 = no limit) |
+| `--risk-unwind`         | flag     | (off)    | On risk halt, unwind all positions before stopping |
+
 ### Configuration and diagnostics flags
 
 | Flag                 | Type     | Default  | Description                                      |
@@ -783,29 +793,78 @@ fee structure).
 ## 18. Risk Management
 
 The risk manager validates orders and fills against configurable limits. It
-returns one of three actions:
+returns one of four actions:
 
-| Action   | Effect                                    |
-|----------|-------------------------------------------|
-| `pass`   | Order/fill accepted, processing continues |
-| `reject` | Order rejected, engine continues running  |
-| `halt`   | Engine stopped immediately                |
+| Action   | Effect                                                      |
+|----------|-------------------------------------------------------------|
+| `pass`   | Order/fill accepted, processing continues                   |
+| `reject` | Order rejected (rejection event emitted), engine continues  |
+| `halt`   | Engine stopped immediately                                  |
+| `unwind` | All open positions closed via market orders, then engine halts |
 
-### Default risk limits
+Risk checks run **synchronously on the hot path** (pre-order and post-fill) to
+provide real-time rejection. When a risk check rejects an order, a `rejection`
+event is emitted through the full event pipeline (ring buffers, event log,
+WebSocket UI). The async shadow check in the risk worker thread remains as a
+secondary validation layer.
 
-| Limit                  | Default      | Triggers         |
-|------------------------|-------------|------------------|
-| Max position value     | $1,000,000,000 | Order rejection |
-| Max drawdown           | 30%         | Engine halt       |
-| Max loss per trade     | $10,000     | —                 |
-| Max open orders        | 1,000       | Order rejection   |
-| Max portfolio exposure | $5,000,000,000 | —              |
+### Static risk limits
+
+| Limit                  | Default         | CLI flag                  | Triggers         |
+|------------------------|-----------------|---------------------------|------------------|
+| Max position value     | $1,000,000,000  | (config file only)        | Order rejection  |
+| Max drawdown           | 30%             | (config file only)        | Engine halt      |
+| Max loss per trade     | $10,000         | (config file only)        | Engine halt      |
+| Max open orders        | 1,000           | (config file only)        | Order rejection  |
+| Max portfolio exposure | $5,000,000,000  | (config file only)        | Order rejection  |
+
+### Time-based risk limits
+
+| Limit                  | Default      | CLI flag                   | Triggers         |
+|------------------------|-------------|----------------------------|------------------|
+| Max daily loss         | 0 (off)     | `--max-daily-loss`         | Engine halt      |
+| Daily reset hour (UTC) | 0           | `--daily-reset-hour`       | —                |
+| Max trades per hour    | 0 (off)     | `--max-trades-per-hour`    | Engine halt      |
+| Max orders per minute  | 0 (off)     | `--max-orders-per-minute`  | Order rejection  |
+
+Time-based limits use rolling windows (trades/hour = rolling 60 minutes,
+orders/minute = rolling 60 seconds). Daily loss resets at the configured UTC
+hour (default: midnight). A value of `0` disables the limit.
+
+### Automatic position unwinding
+
+By default, a risk halt stops the engine immediately. With `--risk-unwind`, the
+engine first closes all open positions by submitting market sell orders, then
+halts. This prevents leaving orphaned positions on a live exchange.
+
+```bash
+# Halt and unwind positions if drawdown exceeds 10%
+./build/truetest --provider binance --symbol btcusdt --stream trade \
+    --max-daily-loss 500 --max-trades-per-hour 100 --risk-unwind
+```
+
+### Risk in config files
+
+All risk limits are available in the JSON config file under the `risk` key:
+
+```json
+{
+  "risk": {
+    "max_position_value": 100000,
+    "max_drawdown": 0.10,
+    "max_loss_per_trade": 500,
+    "max_open_orders": 50,
+    "max_portfolio_exposure": 500000,
+    "max_daily_loss": 1000,
+    "daily_reset_hour": 0,
+    "max_trades_per_hour": 200,
+    "max_orders_per_minute": 60
+  }
+}
+```
 
 The defaults are deliberately permissive. For production or live trading, you
-should set appropriate limits via the config.
-
-Risk checks currently run asynchronously in the risk worker thread on a shadow
-copy of the portfolio.
+should set appropriate limits via the config or CLI flags.
 
 ---
 
@@ -901,6 +960,9 @@ market_event / tick_event
 IStrategy::on_market()  -->  order_event
     |
     v
+RiskManager::check_order()  -->  rejection_event (if rejected/halted)
+    |                              risk_unwind → close all positions
+    v (pass)
 OrderTracker::pending    -->  order status tracking
     |
     v
@@ -940,6 +1002,7 @@ l2_snapshot / l2_update  -->  orderbook::apply_l2_snapshot/update
 | `l2_update`     | `l2_update_event`   | Incremental orderbook depth update    |
 | `cancel`        | `cancel_event`      | Order cancellation notification       |
 | `amend`         | `amend_event`       | Order modification (price/qty change) |
+| `rejection`     | `rejection_event`   | Order rejected by risk manager (with reason) |
 
 ### Order status tracking
 

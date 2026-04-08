@@ -823,19 +823,26 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                            std::size_t& event_count,
                            bool& halt_requested)
 {
-    // Pre-order risk check (inline only — when threaded, RiskWorker handles this)
-    if (!config_.is_threaded())
+    // Pre-order risk check (synchronous — always runs on the hot path).
+    // The async shadow check in RiskWorker remains as a secondary validation layer.
     {
         auto snap = analytics_.snapshot();
         auto action = risk_manager_.check_order(*o, portfolio_, snap);
         if (action == risk_action::halt || action == risk_action::reject)
         {
+            const char* reason = (action == risk_action::halt)
+                ? "risk limit breached - engine halted"
+                : "order rejected by risk manager";
+
+            // Emit a rejection event through the pipeline
+            auto rej = std::make_shared<rejection_event>(
+                o->get_timestamp(), o->get_symbol(), o->get_order_id(), reason);
+            log_event(*rej);
+            publish_event(rej);
+
 #ifdef HAS_WEB_UI
             if (ws_worker_)
             {
-                const char* reason = (action == risk_action::halt)
-                    ? "risk limit breached - engine halted"
-                    : "order rejected by risk manager";
                 ws_worker_->broadcast(event_json::order_response_to_json(
                     o->get_order_id(), "rejected", reason,
                     o->get_symbol(),
@@ -843,13 +850,14 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                     o->get_quantity(), o->get_price()));
             }
 #endif
+            order_tracker_.set_status(o->get_order_id(), order_status::rejected);
             if (action == risk_action::halt)
             {
-                order_tracker_.set_status(o->get_order_id(), order_status::rejected);
+                if (config_.risk_unwind)
+                    unwind_positions(event_count);
                 halt_requested = true;
                 return false;
             }
-            order_tracker_.set_status(o->get_order_id(), order_status::rejected);
             return true; // reject: drop order, continue engine
         }
     }
@@ -857,8 +865,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     order_tracker_.set_status(o->get_order_id(), order_status::open);
     log_event(*o);
     publish_event(o);
-    if (!config_.is_threaded())
-        analytics_.on_event(o);
+    analytics_.on_event(o);
 
     auto adapter = get_adapter(o->get_symbol());
 
@@ -886,13 +893,13 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             auto fill_ptr = fill_pool_.acquire(f);
             log_event(f);
             portfolio_.on_fill(f);
+            risk_manager_.on_fill(f);
 #ifdef HAS_SQLITE
             if (store_) store_->insert_fill(f);
 #endif
             strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
             publish_event(fill_ptr);
-            if (!config_.is_threaded())
-                analytics_.on_event(fill_ptr);
+            analytics_.on_event(fill_ptr);
 
             // Shadow mode: track simulated fill for comparison
             if (config_.mode == engine_mode::shadow && shadow_tracker_)
@@ -911,8 +918,8 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 
             event_count++;
 
-            // Post-fill risk check (inline only)
-            if (!config_.is_threaded())
+            // Post-fill risk check (synchronous — always runs on the hot path).
+            // The async shadow check in RiskWorker remains as secondary validation.
             {
                 auto post_snap = analytics_.snapshot();
                 auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
@@ -923,6 +930,8 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                         ws_worker_->broadcast(event_json::error_to_json(
                             "Risk manager halted engine", "risk"));
 #endif
+                    if (config_.risk_unwind)
+                        unwind_positions(event_count);
                     halt_requested = true;
                     return false;
                 }
@@ -1003,6 +1012,65 @@ bool engine::modify_order(const std::string& symbol, uint64_t order_id,
     }
 
     return modified;
+}
+
+void engine::unwind_positions(std::size_t& event_count)
+{
+    for (const auto& [symbol, pos] : portfolio_.get_positions())
+    {
+        if (pos.qty <= 0.0) continue;
+
+        // Create a market sell order to close the position
+        auto now = std::chrono::system_clock::now();
+        auto close_order = order_pool_.acquire(order_event(
+            now, symbol, order_type::market, order_side::sell,
+            pos.qty, last_mid_price_));
+        close_order->set_order_id(OrderIdGenerator::next());
+        close_order->set_strategy_name("risk_unwind");
+
+        order_tracker_.set_status(close_order->get_order_id(), order_status::open);
+        log_event(*close_order);
+        publish_event(close_order);
+        analytics_.on_event(close_order);
+
+        auto adapter = get_adapter(symbol);
+        if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
+            local->set_mid_price(last_mid_price_);
+
+        adapter->submit_order(*close_order);
+
+        std::vector<fill_event> fills;
+        if (adapter->poll_fills(fills))
+        {
+            for (auto& f : fills)
+            {
+                order_tracker_.set_status(f.get_order_id(),
+                    f.is_partial() ? order_status::partially_filled : order_status::filled);
+                auto fill_ptr = fill_pool_.acquire(f);
+                log_event(f);
+                portfolio_.on_fill(f);
+                risk_manager_.on_fill(f);
+#ifdef HAS_SQLITE
+                if (store_) store_->insert_fill(f);
+#endif
+                strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+                publish_event(fill_ptr);
+                analytics_.on_event(fill_ptr);
+
+#ifdef HAS_WEB_UI
+                if (ws_worker_)
+                {
+                    ws_worker_->broadcast(event_json::order_response_to_json(
+                        f.get_order_id(), "filled", "risk unwind",
+                        f.get_symbol(),
+                        f.get_side() == order_side::buy ? "buy" : "sell",
+                        f.get_filled_quantity(), f.get_fill_price()));
+                }
+#endif
+                event_count++;
+            }
+        }
+    }
 }
 
 void engine::apply_l2_snapshot(const std::string& symbol,
@@ -2070,12 +2138,21 @@ void engine::run_replay(const std::string& log_path,
                 order_opt->set_earliest_eligible_ts(mkt.get_timestamp());
                 auto order_ptr = order_pool_.acquire(*order_opt);
 
-                // Risk check
+                // Pre-order risk check
                 auto snap = analytics_.snapshot();
                 auto action = risk_manager_.check_order(*order_opt, portfolio_, snap);
-                if (action == risk_action::reject) break;
-                if (action == risk_action::halt) {
-                    halt_flag_.store(true, std::memory_order_release);
+                if (action == risk_action::reject || action == risk_action::halt) {
+                    const char* reason = (action == risk_action::halt)
+                        ? "risk limit breached - engine halted"
+                        : "order rejected by risk manager";
+                    auto rej = std::make_shared<rejection_event>(
+                        order_opt->get_timestamp(), order_opt->get_symbol(),
+                        order_opt->get_order_id(), reason);
+                    log_event(*rej);
+                    publish_event(rej);
+                    if (action == risk_action::halt) {
+                        halt_flag_.store(true, std::memory_order_release);
+                    }
                     break;
                 }
 

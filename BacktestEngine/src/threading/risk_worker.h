@@ -14,12 +14,12 @@
 class RiskWorker : public Worker
 {
 public:
-    RiskWorker(const RiskManager& rm,
+    RiskWorker(RiskManager rm,
                std::atomic<bool>& halt_flag,
                double initial_cash = 100000.0,
                std::size_t rolling_window = 252,
                double risk_free_rate = 0.0)
-        : risk_manager_(rm)
+        : risk_manager_(std::move(rm))
         , analytics_(initial_cash, rolling_window, risk_free_rate)
         , halt_flag_(halt_flag) {}
 
@@ -57,7 +57,7 @@ public:
     }
 
 private:
-    const RiskManager& risk_manager_;
+    RiskManager risk_manager_;
     portfolio portfolio_;
     Analytics analytics_;
     std::atomic<bool>& halt_flag_;

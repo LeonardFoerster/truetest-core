@@ -133,6 +133,10 @@ private:
                        std::size_t& event_count,
                        bool& halt_requested);
 
+    // Unwind all open positions by emitting market close orders.
+    // Called when risk_unwind is enabled and a halt condition is detected.
+    void unwind_positions(std::size_t& event_count);
+
     // Route a strategy-generated order: buffers stops, applies latency, or
     // processes immediately. Shared by all loops (bar, tick, streaming).
     // Returns false if engine should halt.

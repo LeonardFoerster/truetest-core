@@ -136,6 +136,10 @@ static void load_config_file(const std::string& path,
                              double& risk_max_loss_per_trade,
                              int& risk_max_open_orders,
                              double& risk_max_portfolio_exposure,
+                             double& risk_max_daily_loss,
+                             int& risk_daily_reset_hour,
+                             int& risk_max_trades_per_hour,
+                             int& risk_max_orders_per_minute,
                              std::size_t& cli_rolling_window,
                              double& cli_risk_free_rate,
                              std::string& cli_output,
@@ -228,6 +232,10 @@ static void load_config_file(const std::string& path,
         rd("max_loss_per_trade", risk_max_loss_per_trade);
         ri("max_open_orders", risk_max_open_orders);
         rd("max_portfolio_exposure", risk_max_portfolio_exposure);
+        rd("max_daily_loss", risk_max_daily_loss);
+        ri("daily_reset_hour", risk_daily_reset_hour);
+        ri("max_trades_per_hour", risk_max_trades_per_hour);
+        ri("max_orders_per_minute", risk_max_orders_per_minute);
     }
 
     // Analytics & reporting
@@ -275,7 +283,11 @@ static void dump_config(const std::string& replay_path,
                         double risk_max_drawdown,
                         double risk_max_loss_per_trade,
                         int risk_max_open_orders,
-                        double risk_max_portfolio_exposure)
+                        double risk_max_portfolio_exposure,
+                        double risk_max_daily_loss,
+                        int risk_daily_reset_hour,
+                        int risk_max_trades_per_hour,
+                        int risk_max_orders_per_minute)
 {
     nlohmann::json j;
     j["replay"] = replay_path;
@@ -314,7 +326,11 @@ static void dump_config(const std::string& replay_path,
         {"max_drawdown", risk_max_drawdown},
         {"max_loss_per_trade", risk_max_loss_per_trade},
         {"max_open_orders", risk_max_open_orders},
-        {"max_portfolio_exposure", risk_max_portfolio_exposure}
+        {"max_portfolio_exposure", risk_max_portfolio_exposure},
+        {"max_daily_loss", risk_max_daily_loss},
+        {"daily_reset_hour", risk_daily_reset_hour},
+        {"max_trades_per_hour", risk_max_trades_per_hour},
+        {"max_orders_per_minute", risk_max_orders_per_minute}
     };
     std::cout << j.dump(2) << "\n";
 }
@@ -387,6 +403,15 @@ int main(int argc, char* argv[])
     double risk_max_loss_per_trade = 10000.0;
     int risk_max_open_orders = 1000;
     double risk_max_portfolio_exposure = 5e9;
+
+    // Time-based risk limits (H2)
+    double risk_max_daily_loss = 0.0;
+    int risk_daily_reset_hour = 0;
+    int risk_max_trades_per_hour = 0;
+    int risk_max_orders_per_minute = 0;
+
+    // Risk unwind (H3)
+    bool risk_unwind = false;
 
     // --- CLI11 setup ---
     CLI::App app{"TrueTest — modular C++17 backtesting engine"};
@@ -464,6 +489,13 @@ int main(int argc, char* argv[])
     // Analytics & reporting (Step G)
     app.add_option("--rolling-window", cli_rolling_window, "Rolling metrics window size (bars)")->default_val(252);
     app.add_option("--risk-free-rate", cli_risk_free_rate, "Annual risk-free rate for Sharpe/Sortino")->default_val(0.0);
+
+    // Time-based risk limits (H2)
+    app.add_option("--max-daily-loss", risk_max_daily_loss, "Maximum daily loss before halt (0 = no limit)")->default_val(0.0);
+    app.add_option("--daily-reset-hour", risk_daily_reset_hour, "UTC hour (0-23) to reset daily loss counter")->default_val(0);
+    app.add_option("--max-trades-per-hour", risk_max_trades_per_hour, "Maximum fills per rolling hour (0 = no limit)")->default_val(0);
+    app.add_option("--max-orders-per-minute", risk_max_orders_per_minute, "Maximum orders per rolling minute (0 = no limit)")->default_val(0);
+    app.add_flag("--risk-unwind", risk_unwind, "On risk halt, unwind all positions before stopping");
     app.add_option("--output", cli_output, "Write results to file (default: stdout)");
     app.add_option("--output-format", cli_output_format, "Output format: json or csv")->default_val("json");
 
@@ -543,6 +575,8 @@ int main(int argc, char* argv[])
             cli_backfill, cli_backfill_interval,
             risk_max_position_value, risk_max_drawdown, risk_max_loss_per_trade,
             risk_max_open_orders, risk_max_portfolio_exposure,
+            risk_max_daily_loss, risk_daily_reset_hour,
+            risk_max_trades_per_hour, risk_max_orders_per_minute,
             cli_rolling_window, cli_risk_free_rate, cli_output, cli_output_format);
 
         // Restore CLI-set values (CLI wins over file)
@@ -599,7 +633,9 @@ int main(int argc, char* argv[])
                     cli_live, cli_mode, cli_db_path, cli_balance, cli_risk_fraction,
                     cli_sl_pct, cli_tp_pct, cli_backfill, cli_backfill_interval,
                     risk_max_position_value, risk_max_drawdown, risk_max_loss_per_trade,
-                    risk_max_open_orders, risk_max_portfolio_exposure);
+                    risk_max_open_orders, risk_max_portfolio_exposure,
+                    risk_max_daily_loss, risk_daily_reset_hour,
+                    risk_max_trades_per_hour, risk_max_orders_per_minute);
         return 0;
     }
 
@@ -637,6 +673,12 @@ int main(int argc, char* argv[])
         std::cout << "    Max loss/trade:      $" << risk_max_loss_per_trade << "\n";
         std::cout << "    Max open orders:     " << risk_max_open_orders << "\n";
         std::cout << "    Max exposure:        $" << risk_max_portfolio_exposure << "\n";
+        if (risk_max_daily_loss > 0.0)
+            std::cout << "    Max daily loss:      $" << risk_max_daily_loss << " (reset at " << risk_daily_reset_hour << ":00 UTC)\n";
+        if (risk_max_trades_per_hour > 0)
+            std::cout << "    Max trades/hour:     " << risk_max_trades_per_hour << "\n";
+        if (risk_max_orders_per_minute > 0)
+            std::cout << "    Max orders/minute:   " << risk_max_orders_per_minute << "\n";
         std::cout << "  ============================================\n";
 
         // Validate
@@ -752,6 +794,11 @@ int main(int argc, char* argv[])
         prov_cfg.risk.max_loss_per_trade = risk_max_loss_per_trade;
         prov_cfg.risk.max_open_orders = risk_max_open_orders;
         prov_cfg.risk.max_portfolio_exposure = risk_max_portfolio_exposure;
+        prov_cfg.risk.max_daily_loss = risk_max_daily_loss;
+        prov_cfg.risk.daily_reset_hour = risk_daily_reset_hour;
+        prov_cfg.risk.max_trades_per_hour = risk_max_trades_per_hour;
+        prov_cfg.risk.max_orders_per_minute = risk_max_orders_per_minute;
+        prov_cfg.risk_unwind = risk_unwind;
 
         // Map WS host to REST host for backfill
         if (!cli_host.empty()) {
@@ -1086,6 +1133,11 @@ int main(int argc, char* argv[])
     config.risk.max_loss_per_trade = risk_max_loss_per_trade;
     config.risk.max_open_orders = risk_max_open_orders;
     config.risk.max_portfolio_exposure = risk_max_portfolio_exposure;
+    config.risk.max_daily_loss = risk_max_daily_loss;
+    config.risk.daily_reset_hour = risk_daily_reset_hour;
+    config.risk.max_trades_per_hour = risk_max_trades_per_hour;
+    config.risk.max_orders_per_minute = risk_max_orders_per_minute;
+    config.risk_unwind = risk_unwind;
 
     // Thread preset: CLI override or auto-detect
     if (!thread_preset_str.empty())

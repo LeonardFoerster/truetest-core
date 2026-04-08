@@ -19,7 +19,8 @@ enum class event_type
         l2_snapshot,
         l2_update,
         cancel,
-        amend
+        amend,
+        rejection
 };
 
 
@@ -509,4 +510,36 @@ private:
         uint64_t order_id_;
         double new_price_;
         double new_quantity_;
+};
+
+
+class rejection_event : public event
+{
+public:
+        rejection_event(
+                std::chrono::system_clock::time_point timestamp,
+                const std::string& symbol,
+                uint64_t order_id,
+                const std::string& reason = ""
+        )
+                : event(event_type::rejection, timestamp)
+                , symbol_(symbol)
+                , order_id_(order_id)
+                , reason_(reason)
+        { }
+
+        const std::string& get_symbol() const { return symbol_; }
+        uint64_t get_order_id() const { return order_id_; }
+        const std::string& get_reason() const { return reason_; }
+
+        std::string to_string() const override
+        {
+                return "RejectionEvent[order_id=" + std::to_string(order_id_) +
+                        " " + symbol_ + " reason=" + reason_ + "]";
+        }
+
+private:
+        std::string symbol_;
+        uint64_t order_id_;
+        std::string reason_;
 };

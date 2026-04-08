@@ -42,6 +42,7 @@ struct engine_config
     double initial_balance = 10000.0;                 // starting cash
 
     risk_limits risk = {};                           // defaults are permissive
+    bool risk_unwind = false;                        // on halt, unwind positions instead of stopping
 
     // Deterministic mode: when non-zero, seeds all RNGs for reproducibility.
     uint64_t seed = 0;
