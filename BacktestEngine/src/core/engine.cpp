@@ -1,9 +1,7 @@
 #include "engine.h"
 #include "../data/data_handler.h"
 #include "../execution/portfolio.h"
-#include "../execution/fee_model.h"
 #include "../execution/latency_model.h"
-#include "../orderbook/fill_model.h"
 #include "../providers/provider.h"
 
 #include <algorithm>
@@ -25,11 +23,10 @@ engine::engine(std::shared_ptr<data_handler> dh,
       market_maker_(config_.seed != 0 ? MarketMaker(static_cast<unsigned>(config_.seed + 1))
                                       : MarketMaker())
 {
-    // Register the provided orderbook under a default symbol
     if (ob)
         orderbook_registry_ = OrderbookRegistry();
 
-    // Shadow mode: create tracker for simulated vs exchange fill comparison
+
     if (config_.mode == engine_mode::shadow)
         shadow_tracker_ = std::make_unique<ShadowTracker>();
 
@@ -43,7 +40,7 @@ void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
 {
     if (!strategy) return;
     strategy_ = std::move(strategy);
-    // Transfer current position state to new strategy
+
     for (const auto& [symbol, pos] : portfolio_.get_positions()) {
         strategy_->set_position_open(symbol, pos.qty > 0.0);
     }
@@ -248,20 +245,40 @@ std::unique_ptr<LoggingWorker> engine::make_logging_worker()
         config_.event_log_path, text_sink, config_.text_log_path, config_.compress_log);
 }
 
+void engine::pin_event_loop_thread()
+{
+    if (!config_.is_threaded() || config_.disable_pinning)
+        return;
+
+    int core_id = config_.pin_event_loop;
+    if (core_id < 0)
+    {
+        // Fall back to auto-detected core map
+        auto core_map = build_core_map();
+        for (const auto& ca : core_map)
+            if (ca.role == core_role::event_loop) { core_id = ca.core_id; break; }
+    }
+
+    pin_current_thread(core_id);
+}
+
 void engine::start_workers()
 {
     halt_flag_.store(false, std::memory_order_release);
     worker_failed_.store(false, std::memory_order_release);
 
-    // Helper to wire shared failure flag to any worker
-    auto wire_failure = [this](Worker& w) { w.set_failure_flag(worker_failed_); };
+    // Helper to wire shared failure flag and spin policy to any worker
+    auto wire_failure = [this](Worker& w) {
+        w.set_failure_flag(worker_failed_);
+        w.set_spin_policy(config_.worker_spin_policy);
+    };
 
 #ifdef HAS_WEB_UI
     // Start WebSocket worker if enabled (works with any threading preset)
     if (config_.enable_web_ui)
     {
         ws_ring_ = std::make_shared<EventRing>();
-        ws_worker_ = std::make_unique<WebSocketWorker>(config_.ws_port);
+        ws_worker_ = std::make_unique<WebSocketWorker>(config_.ws_port, config_.ws_compress);
         wire_failure(*ws_worker_);
 
         worker_threads_.emplace_back([this]() {
@@ -482,6 +499,27 @@ void engine::stop_workers()
                   << " risk_stats=" << risk_stats_drops_
                   << " mm=" << mm_drops_ << "\n";
     }
+
+    // Report ring buffer high watermarks (always-on metrics)
+    auto report_hwm = [](const char* name, const std::shared_ptr<EventRing>& ring) {
+        if (!ring) return;
+        auto hwm = ring->high_watermark();
+        if (hwm > 0)
+        {
+            double pct = hwm * 100.0 / ring->capacity();
+            std::cerr << "  Ring HWM: " << name << "=" << hwm
+                      << "/" << ring->capacity() << " (" << static_cast<int>(pct) << "%)\n";
+        }
+    };
+    report_hwm("logging", logging_ring_);
+    report_hwm("risk", risk_ring_);
+    report_hwm("stats", stats_ring_);
+    report_hwm("observer", observer_ring_);
+    report_hwm("risk_stats", risk_stats_ring_);
+    report_hwm("mm", mm_ring_);
+#ifdef HAS_WEB_UI
+    report_hwm("ws", ws_ring_);
+#endif
 }
 
 #ifdef HAS_WEB_UI
@@ -1426,6 +1464,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
 #endif
 
     start_workers();
+    pin_event_loop_thread();
 
 #if defined(HAS_BINANCE) && defined(HAS_WEB_UI)
     if (config_.backfill_bars > 0
@@ -1545,7 +1584,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
               << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
 
 #ifdef HAS_SQLITE
-    if (store_) store_->flush_equity_batch();
+    if (store_) store_->flush_all();
 #endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
@@ -1583,6 +1622,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 #endif
 
     start_workers();
+    pin_event_loop_thread();
 
 #if defined(HAS_BINANCE) && defined(HAS_WEB_UI)
     if (config_.backfill_bars > 0
@@ -1691,7 +1731,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 #endif
 
 #ifdef HAS_SQLITE
-    if (store_) store_->flush_equity_batch();
+    if (store_) store_->flush_all();
 #endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
@@ -1720,6 +1760,7 @@ void engine::run()
 #endif
 
     start_workers();
+    pin_event_loop_thread();
 
 #ifdef HAS_WEB_UI
     if (ws_worker_)
@@ -1908,7 +1949,7 @@ void engine::run()
 #ifdef HAS_SQLITE
     if (store_)
     {
-        store_->flush_equity_batch();
+        store_->flush_all();
         auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
@@ -1971,6 +2012,7 @@ void engine::run_tick_data()
     day_order_ids_.clear();
 
     start_workers();
+    pin_event_loop_thread();
 
     const auto& ticks = data_handler_->tick_data;
     const auto n = ticks.size();
@@ -2090,7 +2132,7 @@ void engine::run_tick_data()
     std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
 
 #ifdef HAS_SQLITE
-    if (store_) store_->flush_equity_batch();
+    if (store_) store_->flush_all();
 #endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
@@ -2103,6 +2145,7 @@ void engine::run_replay(const std::string& log_path,
     EventReplayer replayer(log_path, replay_from_us, replay_to_us);
 
     start_workers();
+    pin_event_loop_thread();
 
     const auto start = std::chrono::high_resolution_clock::now();
     std::size_t event_count = 0;

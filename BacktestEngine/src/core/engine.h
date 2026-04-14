@@ -247,6 +247,9 @@ private:
     // Worker threads
     std::vector<std::thread> worker_threads_;
 
+    // Pin the engine's event-loop thread to its assigned core (no-op when inline)
+    void pin_event_loop_thread();
+
     // Start/stop worker threads
     void start_workers();
     void stop_workers();

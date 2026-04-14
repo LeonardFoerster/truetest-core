@@ -154,6 +154,24 @@ inline std::vector<core_assignment> build_core_map()
     return map;
 }
 
+// Pin the calling thread to a specific core. No-op on unsupported platforms or if core_id == -1.
+inline bool pin_current_thread(int core_id)
+{
+    if (core_id < 0)
+        return false;
+
+#ifdef __linux__
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+    int rc = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    return rc == 0;
+#else
+    (void)core_id;
+    return false;
+#endif
+}
+
 // Pin a thread to a specific core. No-op on unsupported platforms or if core_id == -1.
 inline bool pin_to_core(std::thread& t, int core_id)
 {

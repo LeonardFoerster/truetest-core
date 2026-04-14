@@ -30,7 +30,7 @@ SqliteStore::SqliteStore(const std::string& db_path)
 
 SqliteStore::~SqliteStore()
 {
-    flush_equity_batch();
+    flush_all();
 
     if (insert_fill_stmt_)      sqlite3_finalize(insert_fill_stmt_);
     if (insert_portfolio_stmt_) sqlite3_finalize(insert_portfolio_stmt_);
@@ -110,6 +110,14 @@ void SqliteStore::prepare_statements()
 
 void SqliteStore::insert_fill(const fill_event& f)
 {
+    // Start a transaction for batching
+    if (!in_fill_transaction_)
+    {
+        sqlite3_exec(db_, "BEGIN", nullptr, nullptr, nullptr);
+        in_fill_transaction_ = true;
+        fill_batch_count_ = 0;
+    }
+
     auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         f.get_timestamp().time_since_epoch()).count();
     const char* side_str = (f.get_side() == order_side::buy) ? "buy" : "sell";
@@ -126,6 +134,10 @@ void SqliteStore::insert_fill(const fill_event& f)
     int rc = sqlite3_step(insert_fill_stmt_);
     if (rc != SQLITE_DONE)
         check(rc, "insert_fill step");
+
+    fill_batch_count_++;
+    if (fill_batch_count_ >= BATCH_SIZE)
+        flush_fill_batch();
 }
 
 void SqliteStore::insert_portfolio_snapshot(double cash, double equity,
@@ -163,8 +175,18 @@ void SqliteStore::insert_equity_point(int64_t timestamp_ms, double equity)
         check(rc, "insert_equity step");
 
     equity_batch_count_++;
-    if (equity_batch_count_ >= EQUITY_BATCH_SIZE)
+    if (equity_batch_count_ >= BATCH_SIZE)
         flush_equity_batch();
+}
+
+void SqliteStore::flush_fill_batch()
+{
+    if (in_fill_transaction_)
+    {
+        sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr);
+        in_fill_transaction_ = false;
+        fill_batch_count_ = 0;
+    }
 }
 
 void SqliteStore::flush_equity_batch()
@@ -175,6 +197,12 @@ void SqliteStore::flush_equity_batch()
         in_equity_transaction_ = false;
         equity_batch_count_ = 0;
     }
+}
+
+void SqliteStore::flush_all()
+{
+    flush_fill_batch();
+    flush_equity_batch();
 }
 
 std::string SqliteStore::query_fills_json(const std::string& symbol,

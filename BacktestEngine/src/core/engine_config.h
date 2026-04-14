@@ -2,6 +2,7 @@
 
 #include "../risk/risk_manager.h"
 #include "../threading/thread_preset.h"
+#include "../threading/spin_policy.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -31,6 +32,9 @@ struct engine_config
 
     // Override: skip all CPU affinity/pinning calls.
     bool disable_pinning = false;
+
+    // Worker thread spin policy: spin (busy-wait), yield (always yield), adaptive (exponential backoff)
+    spin_policy worker_spin_policy = spin_policy::adaptive;
 
     // Explicit core pinning overrides. -1 = auto from build_core_map().
     int pin_event_loop = -1;
@@ -77,6 +81,7 @@ struct engine_config
     // WebSocket UI: when enabled, streams events to browser clients
     bool enable_web_ui = false;
     uint16_t ws_port = 8765;
+    bool ws_compress = true;            // per-message deflate (negotiated in handshake)
 
     // Execution constants (defaults match prior hardcoded values)
     double market_aggression = 1.1;     // market order price multiplier (buy: price*aggr, sell: price*(2-aggr))

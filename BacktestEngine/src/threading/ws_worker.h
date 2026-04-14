@@ -3,10 +3,12 @@
 
 #include "worker.h"
 #include "ring_buffer.h"
+#include "http_handler.h"
 #include "../core/event_json.h"
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
+#include <boost/beast/http.hpp>
 #include <boost/beast/websocket.hpp>
 
 #include <atomic>
@@ -38,6 +40,72 @@ struct ws_command
 // Callback type: called when a new client connects (for sending state snapshot)
 using on_client_connect_fn = std::function<void()>;
 
+// Per-session event filter. When empty (default), all events pass through
+// (backward compatible). When populated, only matching events are sent.
+struct ws_event_filter
+{
+    std::set<std::string> event_types;  // e.g. {"fill", "tick", "market"}
+    std::set<std::string> symbols;      // e.g. {"BTCUSDT", "ETHUSDT"}
+
+    // Returns true if the filter is empty (accept everything).
+    bool accepts_all() const { return event_types.empty() && symbols.empty(); }
+
+    // Check if a JSON event message passes this filter.
+    // Extracts "type" and optionally "symbol" from the JSON to match.
+    bool matches(const std::string& json) const
+    {
+        if (accepts_all()) return true;
+
+        // Extract event type from JSON: look for "type":"<value>"
+        if (!event_types.empty())
+        {
+            std::string search = "\"type\":\"";
+            auto pos = json.find(search);
+            if (pos != std::string::npos)
+            {
+                pos += search.size();
+                auto end = json.find('"', pos);
+                if (end != std::string::npos)
+                {
+                    std::string type = json.substr(pos, end - pos);
+                    if (event_types.find(type) == event_types.end())
+                        return false;
+                }
+            }
+        }
+
+        // Extract symbol from JSON: look for "symbol":"<value>" in data
+        if (!symbols.empty())
+        {
+            std::string search = "\"symbol\":\"";
+            auto pos = json.find(search);
+            if (pos != std::string::npos)
+            {
+                pos += search.size();
+                auto end = json.find('"', pos);
+                if (end != std::string::npos)
+                {
+                    std::string symbol = json.substr(pos, end - pos);
+                    // Convert to uppercase for comparison
+                    std::string upper_symbol = symbol;
+                    for (auto& c : upper_symbol) c = static_cast<char>(std::toupper(c));
+                    bool found = false;
+                    for (const auto& s : symbols)
+                    {
+                        std::string upper_s = s;
+                        for (auto& c : upper_s) c = static_cast<char>(std::toupper(c));
+                        if (upper_s == upper_symbol) { found = true; break; }
+                    }
+                    if (!found) return false;
+                }
+            }
+            // If no symbol field in JSON, let it pass (status, error, etc.)
+        }
+
+        return true;
+    }
+};
+
 // A single WebSocket session, created per client connection.
 //
 // Lock-free design: the engine thread (producer) pushes messages into an SPSC
@@ -50,17 +118,28 @@ public:
     using command_callback_t = std::function<void(const std::string&)>;
 
     explicit WsSession(tcp::socket socket, net::io_context& ioc,
-                       command_callback_t on_msg = {})
+                       command_callback_t on_msg = {},
+                       bool compress = true)
         : ws_(std::move(socket))
         , ioc_(ioc)
-        , on_message_(std::move(on_msg)) {}
+        , on_message_(std::move(on_msg))
+        , compress_(compress) {}
 
     void start()
     {
-        ws_.set_option(websocket::stream_base::timeout::suggested(
-            beast::role_type::server));
-
+        apply_options();
         ws_.async_accept([self = shared_from_this()](beast::error_code ec) {
+            if (!ec)
+                self->do_read();
+        });
+    }
+
+    // Accept a WebSocket upgrade from an already-read HTTP request.
+    template<class Body, class Allocator>
+    void start_with_request(const http::request<Body, http::basic_fields<Allocator>>& req)
+    {
+        apply_options();
+        ws_.async_accept(req, [self = shared_from_this()](beast::error_code ec) {
             if (!ec)
                 self->do_read();
         });
@@ -92,6 +171,21 @@ public:
         return open_.load(std::memory_order_acquire);
     }
 
+    // Event filter: set by "subscribe" command, checked by broadcast.
+    // Thread safety: set from io_context thread (on_message), read from
+    // engine thread (broadcast). Uses a mutex since updates are rare.
+    void set_filter(const ws_event_filter& f)
+    {
+        std::lock_guard<std::mutex> lk(filter_mu_);
+        filter_ = f;
+    }
+
+    bool passes_filter(const std::string& json) const
+    {
+        std::lock_guard<std::mutex> lk(filter_mu_);
+        return filter_.matches(json);
+    }
+
 private:
     static constexpr std::size_t QUEUE_CAPACITY = 4096;
 
@@ -99,12 +193,31 @@ private:
     net::io_context& ioc_;
     beast::flat_buffer buffer_;          // for do_read (io_context thread only)
     command_callback_t on_message_;
+    bool compress_ = true;
+
+    mutable std::mutex filter_mu_;
+    ws_event_filter filter_;             // default: accept all
 
     // Lock-free outbound queue (SPSC: engine thread pushes, io_context pops)
     RingBuffer<std::string, QUEUE_CAPACITY> ring_;
     std::atomic<bool> open_{true};
     std::atomic<bool> writing_{false};   // true while an async_write chain is active
     std::string write_buf_;              // holds in-flight message (io_context thread only)
+
+    void apply_options()
+    {
+        ws_.set_option(websocket::stream_base::timeout::suggested(
+            beast::role_type::server));
+
+        if (compress_)
+        {
+            websocket::permessage_deflate pmd;
+            pmd.client_enable = true;
+            pmd.server_enable = true;
+            pmd.compLevel = 6;
+            ws_.set_option(pmd);
+        }
+    }
 
     void do_read()
     {
@@ -192,8 +305,9 @@ private:
 class WebSocketWorker : public Worker
 {
 public:
-    explicit WebSocketWorker(uint16_t port = 8765)
+    explicit WebSocketWorker(uint16_t port = 8765, bool compress = true)
         : port_(port)
+        , compress_(compress)
         , acceptor_(ioc_, tcp::endpoint(tcp::v4(), port))
     {
         // Start accepting connections
@@ -243,6 +357,8 @@ public:
     }
 
     // Broadcast a raw JSON string to all connected clients.
+    // Each session's event filter is checked — messages that don't
+    // match a session's subscription are skipped for that session.
     void broadcast(const std::string& msg)
     {
         std::lock_guard<std::mutex> lk(sessions_mu_);
@@ -253,7 +369,8 @@ public:
         {
             if ((*it)->is_open())
             {
-                (*it)->send(msg);
+                if ((*it)->passes_filter(msg))
+                    (*it)->send(msg);
                 ++it;
             }
             else
@@ -317,8 +434,21 @@ public:
         return pending_connect_.exchange(false, std::memory_order_acquire);
     }
 
+    // --- REST API ---
+
+    // Access the backtest run manager (for engine to update run status).
+    BacktestRunManager& run_manager() { return run_manager_; }
+
+    // Register callback for backtest submissions via REST API.
+    void set_on_backtest_submit(on_backtest_submit_fn fn)
+    {
+        std::lock_guard<std::mutex> lk(submit_mu_);
+        on_backtest_submit_ = std::move(fn);
+    }
+
 private:
     uint16_t port_;
+    bool compress_;
     net::io_context ioc_;
     tcp::acceptor acceptor_;
     std::thread io_thread_;
@@ -335,33 +465,17 @@ private:
     on_client_connect_fn on_client_connect_;
     std::atomic<bool> pending_connect_{false};
 
+    // REST API
+    BacktestRunManager run_manager_;
+    std::mutex submit_mu_;
+    on_backtest_submit_fn on_backtest_submit_;
+
     void do_accept()
     {
         acceptor_.async_accept(
             [this](beast::error_code ec, tcp::socket socket) {
                 if (!ec)
-                {
-                    // Create session with command callback
-                    auto session = std::make_shared<WsSession>(
-                        std::move(socket), ioc_,
-                        [this](const std::string& msg) { on_client_message(msg); }
-                    );
-                    {
-                        std::lock_guard<std::mutex> lk(sessions_mu_);
-                        sessions_.insert(session);
-                    }
-                    session->start();
-
-                    // Notify engine that a new client connected
-                    pending_connect_.store(true, std::memory_order_release);
-
-                    // Call connect callback if set
-                    {
-                        std::lock_guard<std::mutex> lk(connect_mu_);
-                        if (on_client_connect_)
-                            on_client_connect_();
-                    }
-                }
+                    handle_new_connection(std::move(socket));
 
                 // Continue accepting
                 if (acceptor_.is_open())
@@ -369,13 +483,112 @@ private:
             });
     }
 
+    // Read the initial HTTP request, then either serve REST or upgrade to WebSocket.
+    void handle_new_connection(tcp::socket socket)
+    {
+        // Shared state for the async read chain
+        struct pending_conn : public std::enable_shared_from_this<pending_conn>
+        {
+            tcp::socket socket;
+            beast::flat_buffer buffer;
+            http::request<http::string_body> req;
+            WebSocketWorker* owner;
+
+            pending_conn(tcp::socket s, WebSocketWorker* o)
+                : socket(std::move(s)), owner(o) {}
+        };
+
+        auto conn = std::make_shared<pending_conn>(std::move(socket), this);
+
+        http::async_read(conn->socket, conn->buffer, conn->req,
+            [this, conn](beast::error_code ec, std::size_t) {
+                if (ec) return;
+
+                // Check if this is a WebSocket upgrade
+                if (beast::websocket::is_upgrade(conn->req))
+                {
+                    // Upgrade to WebSocket
+                    auto session_holder = std::make_shared<std::shared_ptr<WsSession>>();
+                    *session_holder = std::make_shared<WsSession>(
+                        std::move(conn->socket), ioc_,
+                        [this, session_holder](const std::string& msg) {
+                            on_client_message(msg, *session_holder);
+                        },
+                        compress_
+                    );
+                    auto& session = *session_holder;
+                    {
+                        std::lock_guard<std::mutex> lk(sessions_mu_);
+                        sessions_.insert(session);
+                    }
+                    session->start_with_request(conn->req);
+
+                    // Notify engine
+                    pending_connect_.store(true, std::memory_order_release);
+                    {
+                        std::lock_guard<std::mutex> lk(connect_mu_);
+                        if (on_client_connect_)
+                            on_client_connect_();
+                    }
+                }
+                else
+                {
+                    // Handle as HTTP REST request
+                    http::response<http::string_body> res;
+                    res.version(conn->req.version());
+
+                    on_backtest_submit_fn submit_fn;
+                    {
+                        std::lock_guard<std::mutex> lk(submit_mu_);
+                        submit_fn = on_backtest_submit_;
+                    }
+
+                    route_http_request(conn->req, res, run_manager_, submit_fn);
+
+                    // Send HTTP response
+                    auto sp = std::make_shared<http::response<http::string_body>>(std::move(res));
+                    http::async_write(conn->socket, *sp,
+                        [conn, sp](beast::error_code, std::size_t) {
+                            beast::error_code shutdown_ec;
+                            conn->socket.shutdown(tcp::socket::shutdown_send, shutdown_ec);
+                        });
+                }
+            });
+    }
+
+    // Valid command names (used for schema validation)
+    static constexpr const char* valid_commands_[] = {
+        "start", "pause", "stop", "order", "set_timeframe",
+        "set_symbol", "set_strategy", "query_fills", "backfill",
+        "subscribe"
+    };
+
+    static bool is_valid_command(const std::string& cmd)
+    {
+        for (const auto* c : valid_commands_)
+            if (cmd == c) return true;
+        return false;
+    }
+
+    // Send an error response back to a specific session.
+    void send_error(std::shared_ptr<WsSession>& session, const std::string& message)
+    {
+        char buf[512];
+        std::snprintf(buf, sizeof(buf),
+            R"({"type":"error","data":{"message":"%s","source":"ws_validator"}})",
+            message.c_str());
+        session->send(std::string(buf));
+    }
+
     // Parse an incoming JSON command from a client.
     // Hand-rolled extraction (no JSON library, consistent with project conventions).
-    void on_client_message(const std::string& raw)
+    // Validates field presence and types per command schema before enqueuing.
+    void on_client_message(const std::string& raw,
+                           std::shared_ptr<WsSession> session = {})
     {
         ws_command cmd;
 
-        // Extract "command" field
+        // Extract string field from JSON
         auto extract = [&](const char* key) -> std::string {
             std::string search = std::string("\"") + key + "\":\"";
             auto pos = raw.find(search);
@@ -386,6 +599,7 @@ private:
             return raw.substr(pos, end - pos);
         };
 
+        // Extract numeric field from JSON
         auto extract_num = [&](const char* key) -> double {
             std::string search = std::string("\"") + key + "\":";
             auto pos = raw.find(search);
@@ -397,15 +611,150 @@ private:
             catch (...) { return 0.0; }
         };
 
+        // Check for "command" or "cmd" field (accept both)
         cmd.command = extract("command");
-        if (cmd.command.empty()) return;
+        if (cmd.command.empty())
+            cmd.command = extract("cmd");
 
-        cmd.side = extract("side");
-        cmd.order_type = extract("type");
-        cmd.quantity = extract_num("quantity");
-        cmd.price = extract_num("price");
-        cmd.timeframe = extract("timeframe");
-        cmd.value = extract("value");
+        if (cmd.command.empty())
+        {
+            if (session)
+                send_error(session, "missing required field: command");
+            std::fprintf(stderr, "[ws] rejected: missing 'command' field: %.200s\n", raw.c_str());
+            return;
+        }
+
+        if (!is_valid_command(cmd.command))
+        {
+            if (session)
+                send_error(session, "unknown command: " + cmd.command);
+            std::fprintf(stderr, "[ws] rejected: unknown command '%s'\n", cmd.command.c_str());
+            return;
+        }
+
+        // Per-command schema validation
+        if (cmd.command == "order")
+        {
+            cmd.side = extract("side");
+            cmd.order_type = extract("type");
+            cmd.quantity = extract_num("quantity");
+            cmd.price = extract_num("price");
+
+            if (cmd.side.empty())
+            {
+                if (session) send_error(session, "order: missing required field 'side'");
+                std::fprintf(stderr, "[ws] rejected order: missing 'side'\n");
+                return;
+            }
+            if (cmd.side != "buy" && cmd.side != "sell")
+            {
+                if (session) send_error(session, "order: 'side' must be 'buy' or 'sell'");
+                std::fprintf(stderr, "[ws] rejected order: invalid side '%s'\n", cmd.side.c_str());
+                return;
+            }
+            if (cmd.quantity <= 0.0)
+            {
+                if (session) send_error(session, "order: 'quantity' must be > 0");
+                std::fprintf(stderr, "[ws] rejected order: invalid quantity\n");
+                return;
+            }
+            if (cmd.order_type.empty())
+                cmd.order_type = "market";  // default
+            if (cmd.order_type != "market" && cmd.order_type != "limit")
+            {
+                if (session) send_error(session, "order: 'type' must be 'market' or 'limit'");
+                std::fprintf(stderr, "[ws] rejected order: invalid type '%s'\n", cmd.order_type.c_str());
+                return;
+            }
+            if (cmd.order_type == "limit" && cmd.price <= 0.0)
+            {
+                if (session) send_error(session, "order: limit order requires 'price' > 0");
+                std::fprintf(stderr, "[ws] rejected order: limit without price\n");
+                return;
+            }
+        }
+        else if (cmd.command == "set_timeframe")
+        {
+            cmd.timeframe = extract("timeframe");
+            if (cmd.timeframe.empty())
+            {
+                if (session) send_error(session, "set_timeframe: missing required field 'timeframe'");
+                std::fprintf(stderr, "[ws] rejected set_timeframe: missing 'timeframe'\n");
+                return;
+            }
+        }
+        else if (cmd.command == "set_symbol")
+        {
+            cmd.value = extract("value");
+            if (cmd.value.empty())
+            {
+                if (session) send_error(session, "set_symbol: missing required field 'value'");
+                std::fprintf(stderr, "[ws] rejected set_symbol: missing 'value'\n");
+                return;
+            }
+        }
+        else if (cmd.command == "set_strategy")
+        {
+            cmd.value = extract("value");
+            if (cmd.value.empty())
+            {
+                if (session) send_error(session, "set_strategy: missing required field 'value'");
+                std::fprintf(stderr, "[ws] rejected set_strategy: missing 'value'\n");
+                return;
+            }
+        }
+        else if (cmd.command == "subscribe")
+        {
+            // Handle subscribe directly — apply filter to this session,
+            // do not enqueue to the engine command queue.
+            if (session)
+            {
+                ws_event_filter filter;
+
+                // Parse "events":["fill","tick",...] — extract array items
+                auto parse_array = [&](const char* key) -> std::set<std::string> {
+                    std::set<std::string> result;
+                    std::string search = std::string("\"") + key + "\":[";
+                    auto pos = raw.find(search);
+                    if (pos == std::string::npos) return result;
+                    pos += search.size();
+                    auto end = raw.find(']', pos);
+                    if (end == std::string::npos) return result;
+                    std::string arr = raw.substr(pos, end - pos);
+                    // Extract quoted strings from the array
+                    std::size_t p = 0;
+                    while (p < arr.size())
+                    {
+                        auto q1 = arr.find('"', p);
+                        if (q1 == std::string::npos) break;
+                        auto q2 = arr.find('"', q1 + 1);
+                        if (q2 == std::string::npos) break;
+                        result.insert(arr.substr(q1 + 1, q2 - q1 - 1));
+                        p = q2 + 1;
+                    }
+                    return result;
+                };
+
+                filter.event_types = parse_array("events");
+                filter.symbols = parse_array("symbols");
+                session->set_filter(filter);
+
+                // Acknowledge
+                char buf[256];
+                std::snprintf(buf, sizeof(buf),
+                    R"({"type":"subscribed","data":{"events":%zu,"symbols":%zu}})",
+                    filter.event_types.size(), filter.symbols.size());
+                session->send(std::string(buf));
+            }
+            return;  // don't enqueue to engine
+        }
+        else
+        {
+            // Commands like start, pause, stop, query_fills, backfill — no extra fields required
+            cmd.timeframe = extract("timeframe");
+            cmd.value = extract("value");
+            cmd.price = extract_num("price");
+        }
 
         std::lock_guard<std::mutex> lk(cmd_mu_);
         command_queue_.push(std::move(cmd));

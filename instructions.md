@@ -343,6 +343,7 @@ TrueTest has three runtime modes determined by the flags you pass:
 |----------------------|----------|--------------|--------------------------------------------------|
 | `--thread-preset`    | string   | auto-detect  | Preset: `inline`, `light`, `standard`, `full`, `extended` |
 | `--no-pin`           | flag     | (off)        | Disable CPU affinity pinning                     |
+| `--spin-policy`      | string   | `adaptive`   | Worker spin policy: `spin`, `yield`, or `adaptive` |
 
 ### Logging flags
 
@@ -358,6 +359,8 @@ TrueTest has three runtime modes determined by the flags you pass:
 |----------------------|----------|----------|--------------------------------------------------|
 | `--web-ui`           | flag     | (off)    | Enable WebSocket UI server                       |
 | `--ws-port`          | uint16   | `8765`   | WebSocket server listen port                     |
+| `--ws-compress`      | flag     | on       | Enable per-message deflate compression           |
+| `--no-ws-compress`   | flag     | (off)    | Disable per-message deflate compression          |
 
 ### Execution constants
 
@@ -430,6 +433,7 @@ default values. Key names use underscores (e.g., `sma_period`, not `--sma-period
   "thread_preset": "standard",
   "web_ui": false,
   "ws_port": 8765,
+  "ws_compress": true,
   "symbol": "BTCUSDT",
   "stream": "trade",
   "backfill": 500,
@@ -890,10 +894,28 @@ explicitly with `--thread-preset`:
 
 ### CPU affinity
 
-On Linux, worker threads are pinned to specific CPU cores via
-`sched_setaffinity` to reduce context switching and cache thrashing. Use
-`--no-pin` to disable pinning (useful in containers or VMs with restricted
-CPU access).
+On Linux, both the event loop thread and all worker threads are pinned to
+specific CPU cores via `sched_setaffinity` to reduce context switching and
+cache thrashing. The event loop is pinned to Core 0 (or the core specified by
+`engine_config::pin_event_loop`). Worker threads are pinned according to the
+core map derived from the system topology.
+
+Use `--no-pin` to disable all pinning (useful in containers or VMs with
+restricted CPU access).
+
+### Worker spin policy
+
+Worker threads poll their ring buffers in a loop. The `--spin-policy` flag
+controls how workers behave when no events are available:
+
+| Policy     | Behavior                                                              |
+|------------|-----------------------------------------------------------------------|
+| `spin`     | Pure busy-wait — lowest latency, highest CPU usage                   |
+| `yield`    | Always calls `std::this_thread::yield()` — lowest CPU, higher latency |
+| `adaptive` | Exponential backoff: spin 64 iterations, then `_mm_pause` for 256, then yield (default) |
+
+The `adaptive` policy balances latency and CPU usage: sub-microsecond wake-up
+during event bursts, near-zero CPU when idle.
 
 ### Ring buffers
 
@@ -901,12 +923,23 @@ Each worker has a ring buffer with 65,536 slots (configurable via
 `engine_config::ring_buffer_capacity`). The ring buffer uses atomic
 load/store operations — no mutexes or syscalls on the hot path.
 
+**Watermark metrics** — each ring buffer tracks:
+
+- `high_watermark()` — maximum observed occupancy since construction (always-on,
+  one relaxed CAS per push)
+- `drop_count()` — number of events dropped by `DropOldest` policy
+- `on_watermark(threshold, callback)` — optional callback fired when occupancy
+  exceeds a threshold (e.g., 75% of capacity)
+
+High watermark statistics are printed at engine shutdown alongside drop counts.
+These metrics are always available, not gated behind `HAS_DEBUG`.
+
 ---
 
 ## 20. WebSocket UI
 
-When `--web-ui` is passed, TrueTest starts a Boost.Beast WebSocket server that
-broadcasts all engine events as JSON to connected browser clients.
+When `--web-ui` is passed, TrueTest starts a Boost.Beast server that handles both
+WebSocket connections and HTTP REST requests on the same port.
 
 ```bash
 ./build/truetest --provider binance --symbol btcusdt --stream trade --web-ui
@@ -921,6 +954,35 @@ dashboard connects to `ws://localhost:8765` and renders:
 - Analytics (Sharpe, Sortino, drawdown, win rate)
 - Orderbook visualization
 
+### Per-message deflate compression
+
+WebSocket messages are compressed using the permessage-deflate extension by
+default, typically reducing JSON payload size by 60-80%. The extension is
+negotiated during the WebSocket handshake — clients that don't support it
+fall back to uncompressed transparently.
+
+Disable with `--no-ws-compress` if compression overhead is undesirable (e.g.,
+very low latency requirements).
+
+### Command validation
+
+All incoming WebSocket commands are validated against a per-command schema before
+processing. Malformed commands receive an error response:
+
+```json
+{"type": "error", "data": {"message": "order: missing required field 'side'", "source": "ws_validator"}}
+```
+
+Both `"command"` and `"cmd"` field names are accepted. Unrecognized command names
+are rejected. Per-command field requirements:
+
+- **order**: requires `side` (buy/sell), `quantity` (> 0); `type` defaults to
+  "market" if omitted; limit orders require `price` > 0
+- **set_timeframe**: requires `timeframe`
+- **set_symbol**: requires `value`
+- **set_strategy**: requires `value`
+- **start**, **pause**, **stop**: no additional fields required
+
 ### Client commands
 
 The WebSocket connection is bidirectional. Clients can send JSON commands:
@@ -929,10 +991,11 @@ The WebSocket connection is bidirectional. Clients can send JSON commands:
 {"cmd": "start"}
 {"cmd": "pause"}
 {"cmd": "stop"}
-{"cmd": "order", "side": "buy", "quantity": 0.1, "price": 50000, "order_type": "limit"}
+{"cmd": "order", "side": "buy", "quantity": 0.1, "price": 50000, "type": "limit"}
 {"cmd": "set_timeframe", "timeframe": "1h"}
 {"cmd": "set_symbol", "value": "ETHUSDT"}
 {"cmd": "set_strategy", "value": "sma"}
+{"cmd": "subscribe", "events": ["fill", "tick"], "symbols": ["BTCUSDT"]}
 ```
 
 | Command         | Fields                              | Description                 |
@@ -940,10 +1003,60 @@ The WebSocket connection is bidirectional. Clients can send JSON commands:
 | `start`         | —                                   | Resume engine execution     |
 | `pause`         | —                                   | Pause engine                |
 | `stop`          | —                                   | Halt engine                 |
-| `order`         | `side`, `quantity`, `price`, `order_type` | Submit a manual order  |
+| `order`         | `side`, `quantity`, `price`, `type`  | Submit a manual order       |
 | `set_timeframe` | `timeframe`                         | Change kline interval       |
 | `set_symbol`    | `value`                             | Switch trading symbol       |
 | `set_strategy`  | `value`                             | Switch active strategy      |
+| `subscribe`     | `events`, `symbols`                 | Filter events for this session |
+
+### Event filtering (subscribe)
+
+Clients can subscribe to specific event types and/or symbols to reduce bandwidth.
+Send a `subscribe` command after connecting:
+
+```json
+{"cmd": "subscribe", "events": ["fill", "market"], "symbols": ["BTCUSDT", "ETHUSDT"]}
+```
+
+- **events**: array of event type strings to receive (e.g. `fill`, `tick`,
+  `market`, `order`, `status`, `orderbook`, `error`). Empty = all types.
+- **symbols**: array of symbol strings. Empty = all symbols. Matching is
+  case-insensitive. Messages without a symbol field (status, error) always pass.
+
+Default (no subscribe command): all events are sent (backward compatible).
+The server acknowledges with:
+
+```json
+{"type": "subscribed", "data": {"events": 2, "symbols": 1}}
+```
+
+### REST API
+
+The same port serves HTTP REST endpoints for programmatic access without
+WebSocket. All responses are JSON with CORS headers.
+
+| Method | Endpoint                       | Description                          |
+|--------|--------------------------------|--------------------------------------|
+| GET    | `/api/health`                  | Health check (`{"status":"ok"}`)     |
+| POST   | `/api/backtest`                | Submit a backtest (config JSON body) |
+| GET    | `/api/backtest`                | List all backtest runs               |
+| GET    | `/api/backtest/<id>/status`    | Get status of a specific run         |
+| GET    | `/api/backtest/<id>/results`   | Get results of a completed run       |
+
+Example:
+
+```bash
+# Submit a backtest
+curl -X POST http://localhost:8765/api/backtest \
+  -H "Content-Type: application/json" \
+  -d '{"strategy":"sma","path":"market_data.csv"}'
+
+# Check status
+curl http://localhost:8765/api/backtest/1/status
+
+# Get results
+curl http://localhost:8765/api/backtest/1/results
+```
 
 Custom port: `--ws-port 9000`.
 
@@ -1094,7 +1207,9 @@ Portfolio and analytics handle partial fills incrementally.
 ## 22. SQLite Persistence
 
 SQLite is enabled by default (`-DENABLE_SQLITE=ON`). It persists equity curve
-data and trade history to a local database file.
+data and trade history to a local database file. Both equity points and fill
+records are batched into transactions (100 rows per transaction) for
+significantly improved write throughput.
 
 ```bash
 # Default database path

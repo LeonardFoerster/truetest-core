@@ -114,6 +114,7 @@ static void load_config_file(const std::string& path,
                              double& cli_taker_rate,
                              bool& enable_web_ui,
                              uint16_t& ws_port,
+                             bool& ws_compress,
                              std::string& cli_symbol,
                              std::string& cli_stream,
                              std::string& cli_api_key,
@@ -199,6 +200,7 @@ static void load_config_file(const std::string& path,
     get_double("taker_rate", cli_taker_rate);
     get_bool("web_ui", enable_web_ui);
     get_u16("ws_port", ws_port);
+    get_bool("ws_compress", ws_compress);
     get_str("symbol", cli_symbol);
     get_str("stream", cli_stream);
     get_str("api_key", cli_api_key);
@@ -264,6 +266,7 @@ static void dump_config(const std::string& replay_path,
                         double cli_taker_rate,
                         bool enable_web_ui,
                         uint16_t ws_port,
+                        bool ws_compress,
                         const std::string& cli_symbol,
                         const std::string& cli_stream,
                         const std::string& cli_host,
@@ -306,6 +309,7 @@ static void dump_config(const std::string& replay_path,
     j["taker_rate"] = cli_taker_rate;
     j["web_ui"] = enable_web_ui;
     j["ws_port"] = ws_port;
+    j["ws_compress"] = ws_compress;
     j["symbol"] = cli_symbol;
     j["stream"] = cli_stream;
     j["host"] = cli_host;
@@ -355,6 +359,7 @@ int main(int argc, char* argv[])
     std::string event_log_path;
     uint64_t seed = 0;
     std::string thread_preset_str;
+    std::string spin_policy_str;
     bool no_pin = false;
     std::string provider_name;
     std::string provider_path;
@@ -367,6 +372,7 @@ int main(int argc, char* argv[])
     double cli_taker_rate = 0.0;
     bool enable_web_ui = false;
     uint16_t ws_port = 8765;
+    bool ws_compress = true;
     std::string cli_symbol;
     std::string cli_stream;
     std::string cli_api_key;
@@ -426,6 +432,7 @@ int main(int argc, char* argv[])
     app.add_option("--seed", seed, "RNG seed (0 = non-deterministic)");
     app.add_option("--thread-preset", thread_preset_str, "Threading: inline, light, standard, full, extended");
     app.add_flag("--no-pin", no_pin, "Disable CPU affinity pinning");
+    app.add_option("--spin-policy", spin_policy_str, "Worker spin policy: spin, yield, adaptive (default: adaptive)");
     app.add_option("--provider", provider_name, "Provider name: local, binance");
     app.add_option("--path", provider_path, "Data file path (for local provider)");
     app.add_option("--strategy", cli_strategy, "Strategy: mean-reversion, sma, ma-crossover");
@@ -443,6 +450,8 @@ int main(int argc, char* argv[])
     // WebSocket UI
     app.add_flag("--web-ui", enable_web_ui, "Enable WebSocket UI server");
     app.add_option("--ws-port", ws_port, "WebSocket server port")->default_val(8765);
+    app.add_flag("--ws-compress,!--no-ws-compress", ws_compress,
+                 "Enable per-message deflate compression (default: on)");
 
     // Provider/streaming
     app.add_option("--symbol", cli_symbol, "Trading symbol (e.g., BTCUSDT)");
@@ -541,6 +550,7 @@ int main(int argc, char* argv[])
         auto save_taker = cli_taker_rate;
         auto save_webui = enable_web_ui;
         auto save_wsport = ws_port;
+        auto save_wscompress = ws_compress;
         auto save_symbol = cli_symbol;
         auto save_stream = cli_stream;
         auto save_apikey = cli_api_key;
@@ -568,7 +578,7 @@ int main(int argc, char* argv[])
             replay_path, event_log_path, seed, thread_preset_str, no_pin,
             provider_name, provider_path, cli_strategy, cli_format, cli_sma_period,
             cli_fee_model, cli_fee_value, cli_maker_rate, cli_taker_rate,
-            enable_web_ui, ws_port, cli_symbol, cli_stream,
+            enable_web_ui, ws_port, ws_compress, cli_symbol, cli_stream,
             cli_api_key, cli_api_secret, cli_host, cli_port,
             cli_record_path, cli_replay_data_path, cli_live, cli_mode,
             cli_db_path, cli_balance, cli_risk_fraction, cli_sl_pct, cli_tp_pct,
@@ -596,6 +606,7 @@ int main(int argc, char* argv[])
         if (was_set("--taker-rate")) cli_taker_rate = save_taker;
         if (was_set("--web-ui")) enable_web_ui = save_webui;
         if (was_set("--ws-port")) ws_port = save_wsport;
+        if (was_set("--ws-compress")) ws_compress = save_wscompress;
         if (was_set("--symbol")) cli_symbol = save_symbol;
         if (was_set("--stream")) cli_stream = save_stream;
         if (was_set("--api-key")) cli_api_key = save_apikey;
@@ -628,7 +639,7 @@ int main(int argc, char* argv[])
         dump_config(replay_path, event_log_path, seed, thread_preset_str, no_pin,
                     provider_name, provider_path, cli_strategy, cli_format,
                     cli_sma_period, cli_fee_model, cli_fee_value, cli_maker_rate,
-                    cli_taker_rate, enable_web_ui, ws_port, cli_symbol, cli_stream,
+                    cli_taker_rate, enable_web_ui, ws_port, ws_compress, cli_symbol, cli_stream,
                     cli_host, cli_port, cli_record_path, cli_replay_data_path,
                     cli_live, cli_mode, cli_db_path, cli_balance, cli_risk_fraction,
                     cli_sl_pct, cli_tp_pct, cli_backfill, cli_backfill_interval,
@@ -658,7 +669,8 @@ int main(int argc, char* argv[])
         std::cout << "    Balance:    $" << cli_balance << "\n";
         std::cout << "    Risk:       " << (cli_risk_fraction * 100) << "% per trade\n";
         std::cout << "    SL/TP:      " << (cli_sl_pct * 100) << "% / " << (cli_tp_pct * 100) << "%\n";
-        std::cout << "    Threading:  " << resolved_preset << "\n";
+        std::string resolved_spin = spin_policy_str.empty() ? "adaptive" : spin_policy_str;
+        std::cout << "    Threading:  " << resolved_preset << " (" << resolved_spin << " spin)\n";
         std::cout << "    Provider:   " << (provider_name.empty() ? "(TUI)" : provider_name) << "\n";
         std::cout << "    Data path:  " << (provider_path.empty() ? "(none)" : provider_path) << "\n";
         std::cout << "    DB:         " << (cli_db_path.empty() ? "(disabled)" : cli_db_path) << "\n";
@@ -777,6 +789,7 @@ int main(int argc, char* argv[])
         prov_cfg.provider = provider;
         prov_cfg.enable_web_ui = enable_web_ui;
         prov_cfg.ws_port = ws_port;
+        prov_cfg.ws_compress = ws_compress;
         prov_cfg.initial_balance = cli_balance;
         prov_cfg.db_path = cli_db_path;
         prov_cfg.backfill_bars = cli_backfill;
@@ -812,6 +825,9 @@ int main(int argc, char* argv[])
             prov_cfg.threading = string_to_preset(thread_preset_str);
         else
             prov_cfg.threading = select_preset(detect_physical_cores());
+
+        if (!spin_policy_str.empty())
+            prov_cfg.worker_spin_policy = string_to_spin_policy(spin_policy_str);
 
         // Fee model
         if (cli_fee_model == "fixed")
@@ -1145,8 +1161,12 @@ int main(int argc, char* argv[])
     else
         config.threading = select_preset(detect_physical_cores());
 
+    if (!spin_policy_str.empty())
+        config.worker_spin_policy = string_to_spin_policy(spin_policy_str);
+
     std::cout << "  Threading: " << preset_to_string(config.threading)
-              << " (" << preset_worker_count(config.threading) << " workers)\n";
+              << " (" << preset_worker_count(config.threading) << " workers, "
+              << spin_policy_to_string(config.worker_spin_policy) << " spin)\n";
 
     if (fee_choice == 2)
     {

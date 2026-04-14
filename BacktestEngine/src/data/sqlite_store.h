@@ -30,8 +30,10 @@ public:
     std::string query_equity_json(int limit = 500);
     std::string query_last_portfolio_json();
 
-    // Flush pending equity batch
+    // Flush pending batches
     void flush_equity_batch();
+    void flush_fill_batch();
+    void flush_all();
 
 private:
     void create_tables();
@@ -45,10 +47,14 @@ private:
     sqlite3_stmt* insert_portfolio_stmt_ = nullptr;
     sqlite3_stmt* insert_equity_stmt_ = nullptr;
 
-    // Equity point batching
-    static constexpr std::size_t EQUITY_BATCH_SIZE = 100;
+    // Batching for equity and fill inserts
+    static constexpr std::size_t BATCH_SIZE = 100;
+
     std::size_t equity_batch_count_ = 0;
     bool in_equity_transaction_ = false;
+
+    std::size_t fill_batch_count_ = 0;
+    bool in_fill_transaction_ = false;
 };
 
 #endif // HAS_SQLITE
