@@ -30,6 +30,15 @@ public:
     std::string query_equity_json(int limit = 500);
     std::string query_last_portfolio_json();
 
+    // Run metadata (K1): each engine invocation gets a row in the `runs` table.
+    // begin_run() inserts the row and returns a generated id. end_run() fills in
+    // final metrics when the engine finishes. fail_run() marks a failed run.
+    std::string begin_run(const std::string& config_json);
+    void end_run(const std::string& run_id, double final_equity,
+                 double sharpe, double max_drawdown, int trade_count);
+    void fail_run(const std::string& run_id, const std::string& error);
+    std::string query_runs_json(int limit = 100);
+
     // Flush pending batches
     void flush_equity_batch();
     void flush_fill_batch();

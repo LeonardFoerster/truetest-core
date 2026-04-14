@@ -1,8 +1,10 @@
 #ifdef HAS_SQLITE
 #include "sqlite_store.h"
 
+#include <atomic>
 #include <cstdio>
 #include <stdexcept>
+#include <string>
 #include <chrono>
 
 SqliteStore::SqliteStore(const std::string& db_path)
@@ -76,9 +78,22 @@ void SqliteStore::create_tables()
             equity      REAL NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS runs (
+            run_id       TEXT PRIMARY KEY,
+            started_at   INTEGER NOT NULL,
+            ended_at     INTEGER,
+            config_json  TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            final_equity REAL,
+            sharpe       REAL,
+            max_drawdown REAL,
+            trade_count  INTEGER
+        );
+
         CREATE INDEX IF NOT EXISTS idx_fills_timestamp ON fills(timestamp);
         CREATE INDEX IF NOT EXISTS idx_fills_symbol ON fills(symbol);
         CREATE INDEX IF NOT EXISTS idx_equity_timestamp ON equity_curve(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_runs_started ON runs(started_at);
     )";
 
     char* err_msg = nullptr;
@@ -281,6 +296,127 @@ std::string SqliteStore::query_equity_json(int limit)
             R"({"timestamp":%lld,"equity":%.2f})",
             static_cast<long long>(sqlite3_column_int64(stmt, 0)),
             sqlite3_column_double(stmt, 1));
+        result += buf;
+    }
+
+    result += "]";
+    sqlite3_finalize(stmt);
+    return result;
+}
+
+std::string SqliteStore::begin_run(const std::string& config_json)
+{
+    // Generate a run id: millisecond timestamp + an autoincrement counter within
+    // the process. Good enough for ordering and uniqueness per db file.
+    static std::atomic<uint64_t> counter{0};
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    char id_buf[64];
+    std::snprintf(id_buf, sizeof(id_buf), "run_%lld_%llu",
+        static_cast<long long>(now_ms),
+        static_cast<unsigned long long>(counter.fetch_add(1)));
+    std::string run_id(id_buf);
+
+    sqlite3_stmt* stmt = nullptr;
+    check(sqlite3_prepare_v2(db_,
+        "INSERT INTO runs (run_id, started_at, config_json, status) "
+        "VALUES (?, ?, ?, 'running')",
+        -1, &stmt, nullptr), "prepare begin_run");
+
+    sqlite3_bind_text(stmt, 1, run_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, now_ms);
+    sqlite3_bind_text(stmt, 3, config_json.c_str(), -1, SQLITE_TRANSIENT);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE)
+        check(rc, "begin_run step");
+
+    return run_id;
+}
+
+void SqliteStore::end_run(const std::string& run_id, double final_equity,
+                          double sharpe, double max_drawdown, int trade_count)
+{
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    sqlite3_stmt* stmt = nullptr;
+    check(sqlite3_prepare_v2(db_,
+        "UPDATE runs SET ended_at = ?, status = 'completed', "
+        "final_equity = ?, sharpe = ?, max_drawdown = ?, trade_count = ? "
+        "WHERE run_id = ?",
+        -1, &stmt, nullptr), "prepare end_run");
+
+    sqlite3_bind_int64(stmt, 1, now_ms);
+    sqlite3_bind_double(stmt, 2, final_equity);
+    sqlite3_bind_double(stmt, 3, sharpe);
+    sqlite3_bind_double(stmt, 4, max_drawdown);
+    sqlite3_bind_int(stmt, 5, trade_count);
+    sqlite3_bind_text(stmt, 6, run_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE)
+        check(rc, "end_run step");
+}
+
+void SqliteStore::fail_run(const std::string& run_id, const std::string& error)
+{
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    sqlite3_stmt* stmt = nullptr;
+    check(sqlite3_prepare_v2(db_,
+        "UPDATE runs SET ended_at = ?, status = 'failed', "
+        "config_json = config_json || ' | error: ' || ? "
+        "WHERE run_id = ?",
+        -1, &stmt, nullptr), "prepare fail_run");
+
+    sqlite3_bind_int64(stmt, 1, now_ms);
+    sqlite3_bind_text(stmt, 2, error.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, run_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE)
+        check(rc, "fail_run step");
+}
+
+std::string SqliteStore::query_runs_json(int limit)
+{
+    sqlite3_stmt* stmt = nullptr;
+    check(sqlite3_prepare_v2(db_,
+        "SELECT run_id, started_at, ended_at, status, final_equity, sharpe, "
+        "max_drawdown, trade_count FROM runs ORDER BY started_at DESC LIMIT ?",
+        -1, &stmt, nullptr), "prepare query_runs");
+    sqlite3_bind_int(stmt, 1, limit);
+
+    std::string result = "[";
+    bool first = true;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW)
+    {
+        if (!first) result += ",";
+        first = false;
+
+        const char* id = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* status = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        bool ended_null = sqlite3_column_type(stmt, 2) == SQLITE_NULL;
+
+        char buf[768];
+        std::snprintf(buf, sizeof(buf),
+            R"({"run_id":"%s","started_at":%lld,"ended_at":%s,"status":"%s",)"
+            R"("final_equity":%.4f,"sharpe":%.4f,"max_drawdown":%.4f,"trade_count":%d})",
+            id ? id : "",
+            static_cast<long long>(sqlite3_column_int64(stmt, 1)),
+            ended_null ? "null" : std::to_string(sqlite3_column_int64(stmt, 2)).c_str(),
+            status ? status : "",
+            sqlite3_column_double(stmt, 4),
+            sqlite3_column_double(stmt, 5),
+            sqlite3_column_double(stmt, 6),
+            sqlite3_column_int(stmt, 7));
         result += buf;
     }
 

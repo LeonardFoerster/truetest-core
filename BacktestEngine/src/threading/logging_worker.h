@@ -19,11 +19,17 @@ public:
     explicit LoggingWorker(const std::string& event_log_path = "",
                            log_sink text_sink = log_sink::none,
                            const std::string& text_log_path = "",
-                           bool compress_log = true)
+                           bool compress_log = true,
+                           std::uint64_t max_bytes = 0,
+                           int max_files = 5)
         : text_sink_(text_sink)
+        , text_log_path_(text_log_path)
+        , text_max_bytes_(max_bytes)
+        , text_max_files_(max_files)
     {
         if (!event_log_path.empty())
-            event_logger_ = std::make_unique<EventLogger>(event_log_path, compress_log);
+            event_logger_ = std::make_unique<EventLogger>(
+                event_log_path, compress_log, max_bytes, max_files);
 
         if (text_sink_ == log_sink::file_sink && !text_log_path.empty())
             text_file_.open(text_log_path, std::ios::out | std::ios::trunc);
@@ -63,12 +69,41 @@ private:
     std::unique_ptr<EventLogger> event_logger_;
 
     log_sink text_sink_ = log_sink::none;
+    std::string text_log_path_;
+    std::uint64_t text_max_bytes_ = 0;
+    int text_max_files_ = 5;
     std::ofstream text_file_;
     std::ostringstream batch_buffer_;
     std::size_t batch_count_ = 0;
     static constexpr std::size_t BATCH_SIZE = 100;
 
     std::atomic<std::size_t> events_processed_{0};
+
+    // L3: rotate text log file if size exceeds text_max_bytes_.
+    void rotate_text_if_needed()
+    {
+        if (text_max_bytes_ == 0 || text_log_path_.empty())
+            return;
+        if (!text_file_.is_open())
+            return;
+        auto pos = static_cast<std::uint64_t>(text_file_.tellp());
+        if (pos < text_max_bytes_)
+            return;
+
+        text_file_.flush();
+        text_file_.close();
+
+        auto nth = [&](int i) { return text_log_path_ + "." + std::to_string(i); };
+        if (text_max_files_ > 0) {
+            std::remove(nth(text_max_files_).c_str());
+            for (int i = text_max_files_ - 1; i >= 1; --i)
+                std::rename(nth(i).c_str(), nth(i + 1).c_str());
+            std::rename(text_log_path_.c_str(), nth(1).c_str());
+        } else {
+            std::remove(text_log_path_.c_str());
+        }
+        text_file_.open(text_log_path_, std::ios::out | std::ios::trunc);
+    }
 
     void flush_batch()
     {
@@ -79,7 +114,10 @@ private:
         if (text_sink_ == log_sink::stdout_sink)
             std::cout << s << std::flush;
         else if (text_sink_ == log_sink::file_sink && text_file_.is_open())
+        {
             text_file_ << s << std::flush;
+            rotate_text_if_needed();
+        }
 
         batch_buffer_.str("");
         batch_buffer_.clear();

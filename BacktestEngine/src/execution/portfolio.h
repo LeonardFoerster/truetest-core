@@ -37,6 +37,17 @@ public:
 
     const std::unordered_map<std::string, position>& get_positions() const { return positions_; }
 
+    // K3: restore portfolio state from a checkpoint. Overwrites cash, positions,
+    // and total_trades wholesale. initial_balance is preserved (it represents the
+    // session start balance, not the restored cash).
+    void restore_state(double cash, std::size_t total_trades,
+                       std::unordered_map<std::string, position> positions)
+    {
+        cash_ = cash;
+        total_trades_ = total_trades;
+        positions_ = std::move(positions);
+    }
+
 private:
     double initial_balance_ = 10000.0;
     double cash_ = 10000.0;

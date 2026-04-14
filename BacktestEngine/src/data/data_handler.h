@@ -66,4 +66,9 @@ class data_handler
 
 		bool has_tick_data() const { return !tick_data.empty(); }
 		bool has_bar_data() const { return !db_data_symbol.empty(); }
+
+		// M2: sort parallel bar vectors by date string. Used after loading
+		// multiple CSVs into one data_handler so multi-symbol bars interleave
+		// correctly by time.
+		void sort_by_date();
 };

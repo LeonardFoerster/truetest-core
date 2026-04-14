@@ -65,6 +65,26 @@ CMAKE_BINARY_DIR = /home/leonard/work/hft-engine/build_webui
 #=============================================================================
 # Targets provided globally by CMake.
 
+# Special rule for the target package
+package: preinstall
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Run CPack packaging tool..."
+	/usr/bin/cpack --config ./CPackConfig.cmake
+.PHONY : package
+
+# Special rule for the target package
+package/fast: package
+.PHONY : package/fast
+
+# Special rule for the target package_source
+package_source:
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Run CPack packaging tool for source..."
+	/usr/bin/cpack --config ./CPackSourceConfig.cmake
+.PHONY : package_source
+
+# Special rule for the target package_source
+package_source/fast: package_source
+.PHONY : package_source/fast
+
 # Special rule for the target test
 test:
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Running tests..."
@@ -97,7 +117,7 @@ rebuild_cache/fast: rebuild_cache
 
 # Special rule for the target list_install_components
 list_install_components:
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Available install components are: \"gmock\" \"gtest\""
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Available install components are: \"Unspecified\" \"gmock\" \"gtest\""
 .PHONY : list_install_components
 
 # Special rule for the target list_install_components
@@ -196,6 +216,71 @@ truetest_tests: cmake_check_build_system
 truetest_tests/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/build
 .PHONY : truetest_tests/fast
+
+#=============================================================================
+# Target rules for targets named truetest_cli_tests
+
+# Build rule for target.
+truetest_cli_tests: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 truetest_cli_tests
+.PHONY : truetest_cli_tests
+
+# fast build rule for target.
+truetest_cli_tests/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_cli_tests.dir/build.make CMakeFiles/truetest_cli_tests.dir/build
+.PHONY : truetest_cli_tests/fast
+
+#=============================================================================
+# Target rules for targets named CLI11
+
+# Build rule for target.
+CLI11: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CLI11
+.PHONY : CLI11
+
+# fast build rule for target.
+CLI11/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/cli11-build/src/CMakeFiles/CLI11.dir/build.make _deps/cli11-build/src/CMakeFiles/CLI11.dir/build
+.PHONY : CLI11/fast
+
+#=============================================================================
+# Target rules for targets named clean-all
+
+# Build rule for target.
+clean-all: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 clean-all
+.PHONY : clean-all
+
+# fast build rule for target.
+clean-all/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/zstd-build/CMakeFiles/clean-all.dir/build.make _deps/zstd-build/CMakeFiles/clean-all.dir/build
+.PHONY : clean-all/fast
+
+#=============================================================================
+# Target rules for targets named libzstd_static
+
+# Build rule for target.
+libzstd_static: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 libzstd_static
+.PHONY : libzstd_static
+
+# fast build rule for target.
+libzstd_static/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/zstd-build/lib/CMakeFiles/libzstd_static.dir/build.make _deps/zstd-build/lib/CMakeFiles/libzstd_static.dir/build
+.PHONY : libzstd_static/fast
+
+#=============================================================================
+# Target rules for targets named uninstall
+
+# Build rule for target.
+uninstall: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 uninstall
+.PHONY : uninstall
+
+# fast build rule for target.
+uninstall/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/zstd-build/lib/CMakeFiles/uninstall.dir/build.make _deps/zstd-build/lib/CMakeFiles/uninstall.dir/build
+.PHONY : uninstall/fast
 
 #=============================================================================
 # Target rules for targets named gmock
@@ -383,6 +468,33 @@ BacktestEngine/src/data/data_loader.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest.dir/build.make CMakeFiles/truetest.dir/BacktestEngine/src/data/data_loader.cpp.s
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/data_loader.cpp.s
 .PHONY : BacktestEngine/src/data/data_loader.cpp.s
+
+BacktestEngine/src/data/sqlite_store.o: BacktestEngine/src/data/sqlite_store.cpp.o
+.PHONY : BacktestEngine/src/data/sqlite_store.o
+
+# target to build an object file
+BacktestEngine/src/data/sqlite_store.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest.dir/build.make CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o
+.PHONY : BacktestEngine/src/data/sqlite_store.cpp.o
+
+BacktestEngine/src/data/sqlite_store.i: BacktestEngine/src/data/sqlite_store.cpp.i
+.PHONY : BacktestEngine/src/data/sqlite_store.i
+
+# target to preprocess a source file
+BacktestEngine/src/data/sqlite_store.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest.dir/build.make CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.i
+.PHONY : BacktestEngine/src/data/sqlite_store.cpp.i
+
+BacktestEngine/src/data/sqlite_store.s: BacktestEngine/src/data/sqlite_store.cpp.s
+.PHONY : BacktestEngine/src/data/sqlite_store.s
+
+# target to generate assembly for a file
+BacktestEngine/src/data/sqlite_store.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest.dir/build.make CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.s
+.PHONY : BacktestEngine/src/data/sqlite_store.cpp.s
 
 BacktestEngine/src/data/tick_csv_data_source.o: BacktestEngine/src/data/tick_csv_data_source.cpp.o
 .PHONY : BacktestEngine/src/data/tick_csv_data_source.o
@@ -678,33 +790,6 @@ BacktestEngine/src/strategy/sma_strategy.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma_strategy.cpp.s
 .PHONY : BacktestEngine/src/strategy/sma_strategy.cpp.s
 
-BacktestEngine/src/utils/log/log.o: BacktestEngine/src/utils/log/log.cpp.o
-.PHONY : BacktestEngine/src/utils/log/log.o
-
-# target to build an object file
-BacktestEngine/src/utils/log/log.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest.dir/build.make CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o
-.PHONY : BacktestEngine/src/utils/log/log.cpp.o
-
-BacktestEngine/src/utils/log/log.i: BacktestEngine/src/utils/log/log.cpp.i
-.PHONY : BacktestEngine/src/utils/log/log.i
-
-# target to preprocess a source file
-BacktestEngine/src/utils/log/log.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest.dir/build.make CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.i
-.PHONY : BacktestEngine/src/utils/log/log.cpp.i
-
-BacktestEngine/src/utils/log/log.s: BacktestEngine/src/utils/log/log.cpp.s
-.PHONY : BacktestEngine/src/utils/log/log.s
-
-# target to generate assembly for a file
-BacktestEngine/src/utils/log/log.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest.dir/build.make CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.s
-.PHONY : BacktestEngine/src/utils/log/log.cpp.s
-
 tests/test_analytics.o: tests/test_analytics.cpp.o
 .PHONY : tests/test_analytics.o
 
@@ -752,6 +837,78 @@ tests/test_bar_aggregator.s: tests/test_bar_aggregator.cpp.s
 tests/test_bar_aggregator.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.s
 .PHONY : tests/test_bar_aggregator.cpp.s
+
+tests/test_binance_parser.o: tests/test_binance_parser.cpp.o
+.PHONY : tests/test_binance_parser.o
+
+# target to build an object file
+tests/test_binance_parser.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o
+.PHONY : tests/test_binance_parser.cpp.o
+
+tests/test_binance_parser.i: tests/test_binance_parser.cpp.i
+.PHONY : tests/test_binance_parser.i
+
+# target to preprocess a source file
+tests/test_binance_parser.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.i
+.PHONY : tests/test_binance_parser.cpp.i
+
+tests/test_binance_parser.s: tests/test_binance_parser.cpp.s
+.PHONY : tests/test_binance_parser.s
+
+# target to generate assembly for a file
+tests/test_binance_parser.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.s
+.PHONY : tests/test_binance_parser.cpp.s
+
+tests/test_bollinger.o: tests/test_bollinger.cpp.o
+.PHONY : tests/test_bollinger.o
+
+# target to build an object file
+tests/test_bollinger.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o
+.PHONY : tests/test_bollinger.cpp.o
+
+tests/test_bollinger.i: tests/test_bollinger.cpp.i
+.PHONY : tests/test_bollinger.i
+
+# target to preprocess a source file
+tests/test_bollinger.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.i
+.PHONY : tests/test_bollinger.cpp.i
+
+tests/test_bollinger.s: tests/test_bollinger.cpp.s
+.PHONY : tests/test_bollinger.s
+
+# target to generate assembly for a file
+tests/test_bollinger.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.s
+.PHONY : tests/test_bollinger.cpp.s
+
+tests/test_cli.o: tests/test_cli.cpp.o
+.PHONY : tests/test_cli.o
+
+# target to build an object file
+tests/test_cli.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_cli_tests.dir/build.make CMakeFiles/truetest_cli_tests.dir/tests/test_cli.cpp.o
+.PHONY : tests/test_cli.cpp.o
+
+tests/test_cli.i: tests/test_cli.cpp.i
+.PHONY : tests/test_cli.i
+
+# target to preprocess a source file
+tests/test_cli.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_cli_tests.dir/build.make CMakeFiles/truetest_cli_tests.dir/tests/test_cli.cpp.i
+.PHONY : tests/test_cli.cpp.i
+
+tests/test_cli.s: tests/test_cli.cpp.s
+.PHONY : tests/test_cli.s
+
+# target to generate assembly for a file
+tests/test_cli.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_cli_tests.dir/build.make CMakeFiles/truetest_cli_tests.dir/tests/test_cli.cpp.s
+.PHONY : tests/test_cli.cpp.s
 
 tests/test_data_bridge.o: tests/test_data_bridge.cpp.o
 .PHONY : tests/test_data_bridge.o
@@ -801,6 +958,30 @@ tests/test_data_handler.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_data_handler.cpp.s
 .PHONY : tests/test_data_handler.cpp.s
 
+tests/test_ema.o: tests/test_ema.cpp.o
+.PHONY : tests/test_ema.o
+
+# target to build an object file
+tests/test_ema.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o
+.PHONY : tests/test_ema.cpp.o
+
+tests/test_ema.i: tests/test_ema.cpp.i
+.PHONY : tests/test_ema.i
+
+# target to preprocess a source file
+tests/test_ema.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.i
+.PHONY : tests/test_ema.cpp.i
+
+tests/test_ema.s: tests/test_ema.cpp.s
+.PHONY : tests/test_ema.s
+
+# target to generate assembly for a file
+tests/test_ema.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.s
+.PHONY : tests/test_ema.cpp.s
+
 tests/test_engine.o: tests/test_engine.cpp.o
 .PHONY : tests/test_engine.o
 
@@ -848,6 +1029,30 @@ tests/test_engine_streaming.s: tests/test_engine_streaming.cpp.s
 tests/test_engine_streaming.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.s
 .PHONY : tests/test_engine_streaming.cpp.s
+
+tests/test_event_json.o: tests/test_event_json.cpp.o
+.PHONY : tests/test_event_json.o
+
+# target to build an object file
+tests/test_event_json.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o
+.PHONY : tests/test_event_json.cpp.o
+
+tests/test_event_json.i: tests/test_event_json.cpp.i
+.PHONY : tests/test_event_json.i
+
+# target to preprocess a source file
+tests/test_event_json.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.i
+.PHONY : tests/test_event_json.cpp.i
+
+tests/test_event_json.s: tests/test_event_json.cpp.s
+.PHONY : tests/test_event_json.s
+
+# target to generate assembly for a file
+tests/test_event_json.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.s
+.PHONY : tests/test_event_json.cpp.s
 
 tests/test_event_log.o: tests/test_event_log.cpp.o
 .PHONY : tests/test_event_log.o
@@ -1329,6 +1534,30 @@ tests/test_risk_manager.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_risk_manager.cpp.s
 .PHONY : tests/test_risk_manager.cpp.s
 
+tests/test_rsi.o: tests/test_rsi.cpp.o
+.PHONY : tests/test_rsi.o
+
+# target to build an object file
+tests/test_rsi.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o
+.PHONY : tests/test_rsi.cpp.o
+
+tests/test_rsi.i: tests/test_rsi.cpp.i
+.PHONY : tests/test_rsi.i
+
+# target to preprocess a source file
+tests/test_rsi.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.i
+.PHONY : tests/test_rsi.cpp.i
+
+tests/test_rsi.s: tests/test_rsi.cpp.s
+.PHONY : tests/test_rsi.s
+
+# target to generate assembly for a file
+tests/test_rsi.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/truetest_tests.dir/build.make CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.s
+.PHONY : tests/test_rsi.cpp.s
+
 tests/test_sma.o: tests/test_sma.cpp.o
 .PHONY : tests/test_sma.o
 
@@ -1436,13 +1665,20 @@ help:
 	@echo "... install/local"
 	@echo "... install/strip"
 	@echo "... list_install_components"
+	@echo "... package"
+	@echo "... package_source"
 	@echo "... rebuild_cache"
 	@echo "... test"
+	@echo "... clean-all"
+	@echo "... uninstall"
+	@echo "... CLI11"
 	@echo "... gmock"
 	@echo "... gmock_main"
 	@echo "... gtest"
 	@echo "... gtest_main"
+	@echo "... libzstd_static"
 	@echo "... truetest"
+	@echo "... truetest_cli_tests"
 	@echo "... truetest_tests"
 	@echo "... BacktestEngine/src/analytics/analytics.o"
 	@echo "... BacktestEngine/src/analytics/analytics.i"
@@ -1459,6 +1695,9 @@ help:
 	@echo "... BacktestEngine/src/data/data_loader.o"
 	@echo "... BacktestEngine/src/data/data_loader.i"
 	@echo "... BacktestEngine/src/data/data_loader.s"
+	@echo "... BacktestEngine/src/data/sqlite_store.o"
+	@echo "... BacktestEngine/src/data/sqlite_store.i"
+	@echo "... BacktestEngine/src/data/sqlite_store.s"
 	@echo "... BacktestEngine/src/data/tick_csv_data_source.o"
 	@echo "... BacktestEngine/src/data/tick_csv_data_source.i"
 	@echo "... BacktestEngine/src/data/tick_csv_data_source.s"
@@ -1492,27 +1731,39 @@ help:
 	@echo "... BacktestEngine/src/strategy/sma_strategy.o"
 	@echo "... BacktestEngine/src/strategy/sma_strategy.i"
 	@echo "... BacktestEngine/src/strategy/sma_strategy.s"
-	@echo "... BacktestEngine/src/utils/log/log.o"
-	@echo "... BacktestEngine/src/utils/log/log.i"
-	@echo "... BacktestEngine/src/utils/log/log.s"
 	@echo "... tests/test_analytics.o"
 	@echo "... tests/test_analytics.i"
 	@echo "... tests/test_analytics.s"
 	@echo "... tests/test_bar_aggregator.o"
 	@echo "... tests/test_bar_aggregator.i"
 	@echo "... tests/test_bar_aggregator.s"
+	@echo "... tests/test_binance_parser.o"
+	@echo "... tests/test_binance_parser.i"
+	@echo "... tests/test_binance_parser.s"
+	@echo "... tests/test_bollinger.o"
+	@echo "... tests/test_bollinger.i"
+	@echo "... tests/test_bollinger.s"
+	@echo "... tests/test_cli.o"
+	@echo "... tests/test_cli.i"
+	@echo "... tests/test_cli.s"
 	@echo "... tests/test_data_bridge.o"
 	@echo "... tests/test_data_bridge.i"
 	@echo "... tests/test_data_bridge.s"
 	@echo "... tests/test_data_handler.o"
 	@echo "... tests/test_data_handler.i"
 	@echo "... tests/test_data_handler.s"
+	@echo "... tests/test_ema.o"
+	@echo "... tests/test_ema.i"
+	@echo "... tests/test_ema.s"
 	@echo "... tests/test_engine.o"
 	@echo "... tests/test_engine.i"
 	@echo "... tests/test_engine.s"
 	@echo "... tests/test_engine_streaming.o"
 	@echo "... tests/test_engine_streaming.i"
 	@echo "... tests/test_engine_streaming.s"
+	@echo "... tests/test_event_json.o"
+	@echo "... tests/test_event_json.i"
+	@echo "... tests/test_event_json.s"
 	@echo "... tests/test_event_log.o"
 	@echo "... tests/test_event_log.i"
 	@echo "... tests/test_event_log.s"
@@ -1573,6 +1824,9 @@ help:
 	@echo "... tests/test_risk_manager.o"
 	@echo "... tests/test_risk_manager.i"
 	@echo "... tests/test_risk_manager.s"
+	@echo "... tests/test_rsi.o"
+	@echo "... tests/test_rsi.i"
+	@echo "... tests/test_rsi.s"
 	@echo "... tests/test_sma.o"
 	@echo "... tests/test_sma.i"
 	@echo "... tests/test_sma.s"

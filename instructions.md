@@ -1,5 +1,6 @@
 # TrueTest — User Manual
 
+
 TrueTest is a modular C++17 engine that starts as a backtesting platform but is
 designed to be reused across deployments: pure backtesting, Polymarket execution,
 MetaTrader EA, or anything that processes market data through a strategy and
@@ -33,6 +34,7 @@ orderbook pipeline.
 22. [SQLite Persistence](#22-sqlite-persistence)
 23. [Analytics & Reporting](#23-analytics--reporting)
 24. [Examples](#24-examples)
+25. [Observability & Debugging](#25-observability--debugging)
 
 ---
 
@@ -300,6 +302,9 @@ TrueTest has three runtime modes determined by the flags you pass:
 | `--balance`          | double   | `10000.0`       | Initial account balance                                   |
 | `--db`               | string   | `truetest.db`   | SQLite database path                                      |
 | `--no-db`            | flag     | (off)           | Disable SQLite persistence entirely                       |
+| `--checkpoint`       | string   | (none)          | Write periodic portfolio checkpoint to this binary file    |
+| `--checkpoint-interval` | size_t | `10000`        | Write a checkpoint every N events (0 = only at shutdown)   |
+| `--resume`           | string   | (none)          | Restore portfolio state from a checkpoint before running   |
 | `--live`             | flag     | (off)           | Safety flag required to enable live (real money) mode      |
 
 ### Strategy parameters
@@ -352,6 +357,9 @@ TrueTest has three runtime modes determined by the flags you pass:
 | `--log-events`       | string   | (none)   | Path to write binary event log                   |
 | `--compress-log`     | flag     | on       | Compress binary event logs with zstd             |
 | `--no-compress-log`  | flag     | (off)    | Disable zstd compression for event logs          |
+| `--log-file`         | string   | (none)   | Path to write operational log (L1). Default sink is stderr. |
+| `--log-max-size`     | uint     | `0`      | Max size (MB) per event/text log before rotation (0 = disabled, L3) |
+| `--log-keep`         | int      | `5`      | Number of rotated log files to retain (L3)       |
 
 ### WebSocket UI flags
 
@@ -1230,6 +1238,101 @@ sqlite3 truetest.db ".tables"
 sqlite3 truetest.db "SELECT * FROM equity_curve ORDER BY timestamp DESC LIMIT 10;"
 ```
 
+### Run metadata (`runs` table)
+
+Every invocation that writes to the SQLite database also records a row in the
+`runs` table. A row is inserted when the engine starts and updated when it
+finishes with the final metrics. This enables run history and comparison across
+backtests without parsing JSON exports.
+
+Schema:
+
+```
+runs (
+  run_id       TEXT PRIMARY KEY,    -- "run_<wall_ms>_<counter>"
+  started_at   INTEGER NOT NULL,    -- wall-clock ms since epoch
+  ended_at     INTEGER,             -- wall-clock ms since epoch (null if still running)
+  config_json  TEXT NOT NULL,       -- compact {"mode","seed","initial_balance","threading","rolling_window"}
+  status       TEXT NOT NULL,       -- "running" | "completed" | "failed"
+  final_equity REAL,                -- end-of-run equity
+  sharpe       REAL,
+  max_drawdown REAL,
+  trade_count  INTEGER
+)
+```
+
+Query past runs:
+
+```bash
+sqlite3 truetest.db \
+  "SELECT run_id, status, final_equity, sharpe, max_drawdown, trade_count
+     FROM runs ORDER BY started_at DESC LIMIT 20;"
+```
+
+When the WebSocket UI is enabled, the same data is exposed via a REST endpoint:
+
+```bash
+# List the 100 most recent runs as JSON
+curl http://localhost:8765/api/runs
+
+# Limit the result set
+curl http://localhost:8765/api/runs?limit=20
+```
+
+If SQLite persistence is disabled (`--no-db`), `GET /api/runs` returns HTTP
+503 with a JSON error body explaining that run history is unavailable.
+
+### Portfolio checkpoints (resume-after-crash)
+
+Long-running live or shadow sessions can write periodic portfolio snapshots
+to a binary checkpoint file. On the next invocation, `--resume <path>` restores
+cash, positions, and trade count before the run starts.
+
+```bash
+# Write a checkpoint every 10,000 events (the default) to /tmp/session.ckpt
+./build/truetest --provider local --path data.csv \
+  --checkpoint /tmp/session.ckpt
+
+# Smaller interval for debugging
+./build/truetest --provider local --path data.csv \
+  --checkpoint /tmp/session.ckpt --checkpoint-interval 500
+
+# Resume from an existing checkpoint
+./build/truetest --provider local --path data.csv \
+  --resume /tmp/session.ckpt
+```
+
+Checkpoint flags:
+
+- `--checkpoint <path>` — write periodic portfolio snapshots to this file. A
+  final checkpoint is also written when the engine exits cleanly.
+- `--checkpoint-interval <N>` — write a checkpoint every N events (default:
+  10000). Set to 0 to only write the final checkpoint at shutdown.
+- `--resume <path>` — restore portfolio state (cash, positions, trade count)
+  from the specified checkpoint file before running. Missing or malformed files
+  are reported to stderr; the run continues with fresh state.
+
+Checkpoints capture portfolio state only. Analytics accumulators, orderbook
+state, and in-flight pending orders are not restored — they rehydrate from the
+market data stream as usual. For fully deterministic replay, pair `--resume`
+with `--seed <n>` and a recorded event log.
+
+### Deterministic replay and RNG seeding
+
+When `--seed <n>` is passed with a non-zero value, every stochastic component
+in the engine is initialized from that seed:
+
+- `LocalBookAdapter` — fill-probability RNG (seeded with `seed + 2`).
+- `MarketMaker` — spread jitter RNG (seeded with `seed + 1`).
+- `engine::run()` — uses a fixed epoch as the base simulation timestamp
+  (`chrono::system_clock::time_point(0)`) instead of wall clock so that all
+  market event timestamps are deterministic.
+
+Re-running the same backtest with the same seed, the same config, and the same
+input data produces byte-identical results. When `seed == 0`, components fall
+back to wall-clock or hardware-derived seeds, which is the non-deterministic
+default.
+
 ---
 
 ## 23. Analytics & Reporting
@@ -1491,3 +1594,110 @@ cmake --build build
 cd build && cpack
 # Produces truetest-0.1.0-Linux.tar.gz and truetest-0.1.0-Linux.deb
 ```
+
+---
+
+## 25. Observability & Debugging
+
+TrueTest ships with a three-part observability stack (todo Step L). None of
+these features require optional CMake flags unless explicitly noted.
+
+### 25.1 Structured operational logging (L1)
+
+A zero-dependency, always-on logger lives in
+`BacktestEngine/src/utils/log/logger.h`. It emits timestamped, level-tagged
+lines to stderr by default:
+
+```
+[2026-04-14T20:35:00.337Z] [INFO] [main] truetest starting (pid=107715)
+```
+
+Redirect output to a file with `--log-file <path>`:
+
+```bash
+./build/truetest --provider local --path market_data.csv \
+                 --strategy sma --log-file /var/log/truetest.log
+```
+
+Call sites use the `LOG_INFO`, `LOG_WARN`, and `LOG_ERROR` macros, each of
+which takes a component name followed by a printf-style format string. This
+is distinct from the trading-event log handled by `LoggingWorker`: the
+operational log is for engine lifecycle, config, startup errors, and
+diagnostics, while the trading event log captures market, order, and fill
+events for replay.
+
+### 25.2 Prometheus metrics endpoint (L2)
+
+When the WebSocket UI is enabled (`-DENABLE_WEB_UI=ON` plus `--web-ui`), an
+HTTP endpoint at `GET /metrics` exposes engine state in Prometheus text
+exposition format. Scrape it the usual way:
+
+```bash
+curl http://127.0.0.1:8765/metrics
+```
+
+Example output:
+
+```
+# HELP truetest_events_processed_total Events processed by analytics
+# TYPE truetest_events_processed_total counter
+truetest_events_processed_total 12853.000000
+# HELP truetest_orders_submitted_total Total orders submitted
+# TYPE truetest_orders_submitted_total counter
+truetest_orders_submitted_total 42.000000
+# HELP truetest_fills_total Total fills executed
+# TYPE truetest_fills_total counter
+truetest_fills_total 40.000000
+# HELP truetest_equity_current Current portfolio equity (valued at last_mid_price)
+# TYPE truetest_equity_current gauge
+truetest_equity_current 10325.120000
+# HELP truetest_cash_current Current cash balance
+# TYPE truetest_cash_current gauge
+truetest_cash_current 9820.440000
+# HELP truetest_drawdown_current Current drawdown fraction
+# TYPE truetest_drawdown_current gauge
+truetest_drawdown_current 0.018000
+# HELP truetest_sharpe_ratio Sharpe ratio (point-in-time)
+# TYPE truetest_sharpe_ratio gauge
+truetest_sharpe_ratio 1.230000
+# HELP truetest_halt_flag 1 if halt flag set, 0 otherwise
+# TYPE truetest_halt_flag gauge
+truetest_halt_flag 0.000000
+```
+
+The endpoint is registered by the engine via
+`WebSocketWorker::set_on_metrics()` and returns HTTP 503 until the engine is
+running. When the web UI is disabled, the route is not served at all.
+
+### 25.3 Event log rotation (L3)
+
+The binary event log (`--log-events <path>`) and the structured text log
+(from `LoggingWorker`) can be capped and rotated once they exceed a
+configurable size threshold. Rotation is off by default.
+
+Enable it by passing a non-zero max size in megabytes:
+
+```bash
+./build/truetest --provider local --path market_data.csv --strategy sma \
+                 --log-events /var/log/truetest/events.bin \
+                 --log-max-size 100 \
+                 --log-keep 5
+```
+
+With those flags:
+
+- As soon as a completed event would push `events.bin` past 100 MB, the
+  current file is finalized (index footer written), renamed to
+  `events.bin.1`, and a new `events.bin` is opened. Older rotated copies
+  shift: `events.bin.1 → events.bin.2`, etc.
+- At most `--log-keep` rotated copies are retained (default 5). When the
+  limit is exceeded, the oldest file (`events.bin.5` in this example) is
+  deleted.
+- Rotation happens at event boundaries only — never mid-write — so replay
+  tools can safely read any single rotated file.
+- The same size limit and retention count are applied to the text log
+  produced by `LoggingWorker` when `--log-text` (file sink) is used.
+
+Rotation is opt-in: leaving `--log-max-size 0` (the default) preserves the
+old unbounded behavior, which is fine for short-lived backtests but not for
+long-running live or shadow sessions.

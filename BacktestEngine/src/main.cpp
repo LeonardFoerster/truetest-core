@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <unistd.h>
 
 #include <CLI/CLI.hpp>
 #include <nlohmann/json.hpp>
@@ -24,6 +25,7 @@
 #include "strategy/ma_crossover_strategy.h"
 #include "market_maker/market_maker.h"
 #include "threading/thread_config.h"
+#include "utils/log/logger.h"
 
 #ifdef HAS_POSTGRESQL
 #include "data/pg_data_source.h"
@@ -48,6 +50,23 @@
 // ---------------------------------------------------------------------------
 // Helper: apply --param key=value pairs to a strategy after construction
 // ---------------------------------------------------------------------------
+// M1: split "sma,mean-reversion" → ["sma","mean-reversion"]
+static std::vector<std::string> split_csv(const std::string& s)
+{
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s) {
+        if (c == ',') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
 static void apply_strategy_params(IStrategy& strategy,
                                   const std::vector<std::string>& params)
 {
@@ -357,6 +376,9 @@ int main(int argc, char* argv[])
     int64_t replay_from_us = 0;
     int64_t replay_to_us = INT64_MAX;
     std::string event_log_path;
+    std::string log_file_path;               // L1: operational log file
+    std::uint64_t log_max_size_mb = 0;       // L3: 0 = no rotation
+    int log_keep = 5;                        // L3: rotated files retained
     uint64_t seed = 0;
     std::string thread_preset_str;
     std::string spin_policy_str;
@@ -385,6 +407,10 @@ int main(int argc, char* argv[])
     std::string cli_mode;
     std::string cli_db_path = "truetest.db";
     bool no_db = false;
+    // K3: checkpoint CLI state
+    std::string cli_checkpoint_path;
+    std::string cli_resume_path;
+    std::size_t cli_checkpoint_interval = 10000;
     double cli_balance = 10000.0;
     double cli_risk_fraction = 0.02;
     double cli_sl_pct = 0.005;
@@ -428,6 +454,9 @@ int main(int argc, char* argv[])
     app.add_option("--replay-from", replay_from_us, "Replay from timestamp (microseconds since epoch)");
     app.add_option("--replay-to", replay_to_us, "Replay to timestamp (microseconds since epoch)");
     app.add_option("--log-events", event_log_path, "Path to write binary event log");
+    app.add_option("--log-file", log_file_path, "Path to write operational log (L1, default: stderr)");
+    app.add_option("--log-max-size", log_max_size_mb, "Max size (MB) per event/text log before rotation (L3, 0 = no rotation)");
+    app.add_option("--log-keep", log_keep, "Number of rotated log files to retain (L3, default: 5)");
     app.add_flag("--compress-log,!--no-compress-log", compress_log, "Compress binary event logs with zstd (default: on)");
     app.add_option("--seed", seed, "RNG seed (0 = non-deterministic)");
     app.add_option("--thread-preset", thread_preset_str, "Threading: inline, light, standard, full, extended");
@@ -474,6 +503,15 @@ int main(int argc, char* argv[])
     app.add_option("--db", cli_db_path, "SQLite database path")->default_val("truetest.db");
     app.add_flag("--no-db", no_db, "Disable SQLite persistence");
 
+    // K3: checkpointing
+    app.add_option("--checkpoint", cli_checkpoint_path,
+                   "Write periodic portfolio checkpoint to this binary file");
+    app.add_option("--checkpoint-interval", cli_checkpoint_interval,
+                   "Write a checkpoint every N events (default: 10000)")
+       ->default_val(10000);
+    app.add_option("--resume", cli_resume_path,
+                   "Restore portfolio state from a checkpoint before running");
+
     // Backfill
     app.add_option("--backfill", cli_backfill, "Historical bars to fetch before streaming")->default_val(500);
     app.add_option("--backfill-interval", cli_backfill_interval, "Kline interval for backfill");
@@ -514,6 +552,11 @@ int main(int argc, char* argv[])
     } catch (const CLI::ParseError& e) {
         return app.exit(e);
     }
+
+    // L1: Initialize structured logger sink (stderr default, file if specified).
+    if (!log_file_path.empty())
+        tt_log::Logger::instance().set_file(log_file_path);
+    LOG_INFO("main", "truetest starting (pid=%d)", static_cast<int>(getpid()));
 
     // --- Load config file first (CLI values override) ---
     // CLI11 has already parsed CLI flags into the variables above.
@@ -742,6 +785,8 @@ int main(int argc, char* argv[])
         cfg.seed = seed;
         cfg.event_log_path = event_log_path;
         cfg.compress_log = compress_log;
+        cfg.log_max_bytes = log_max_size_mb * 1024ull * 1024ull;
+        cfg.log_max_files = log_keep;
 
         auto dh = std::make_shared<data_handler>();
         engine eng(dh, nullptr, strategy, std::move(cfg));
@@ -754,8 +799,17 @@ int main(int argc, char* argv[])
     // --- Provider mode: skip TUI, use registry-based provider ---
     if (!provider_name.empty())
     {
+        // M2: for multi-file --path, pass only the first path to the provider
+        // (each additional file is loaded separately via FileTransport below).
+        std::string primary_path = provider_path;
+        {
+            auto comma = primary_path.find(',');
+            if (comma != std::string::npos)
+                primary_path = primary_path.substr(0, comma);
+        }
+
         provider_config pcfg;
-        if (!provider_path.empty()) pcfg["path"] = provider_path;
+        if (!primary_path.empty()) pcfg["path"] = primary_path;
         if (!cli_symbol.empty())    pcfg["symbol"] = cli_symbol;
         if (!cli_stream.empty())    pcfg["stream"] = cli_stream;
         if (!cli_api_key.empty())   pcfg["api_key"] = cli_api_key;
@@ -765,10 +819,15 @@ int main(int argc, char* argv[])
 
         auto provider = ProviderRegistry::instance().create(provider_name, pcfg);
 
-        // Select strategy via registry (default: mean-reversion)
-        std::string resolved = cli_strategy.empty() ? "mean-reversion" : cli_strategy;
+        // Select strategy via registry (default: mean-reversion).
+        // M1: comma-separated names create multiple strategies; the first is
+        // the primary, the rest run alongside it via engine::add_strategy().
+        std::string resolved_raw = cli_strategy.empty() ? "mean-reversion" : cli_strategy;
+        auto strategy_names = split_csv(resolved_raw);
+        if (strategy_names.empty()) strategy_names.push_back("mean-reversion");
+        const std::string& resolved = strategy_names.front();
         auto prov_strategy = StrategyRegistry::instance().create(resolved);
-        // Apply legacy CLI params as set_param calls
+        // Apply legacy CLI params as set_param calls (primary only)
         if (resolved == "sma" && cli_sma_period != 20)
             prov_strategy->set_param("period", static_cast<double>(cli_sma_period));
         if (resolved == "mean-reversion") {
@@ -780,11 +839,26 @@ int main(int argc, char* argv[])
         }
         apply_strategy_params(*prov_strategy, cli_params);
 
+        // Build additional strategies for M1 multi-strategy mode
+        std::vector<std::pair<std::string, std::shared_ptr<IStrategy>>> extra_strategies;
+        for (std::size_t si = 1; si < strategy_names.size(); ++si) {
+            const auto& nm = strategy_names[si];
+            if (!StrategyRegistry::instance().has(nm)) {
+                std::cerr << "  ! Unknown additional strategy: " << nm << "\n";
+                return 1;
+            }
+            auto extra = StrategyRegistry::instance().create(nm);
+            apply_strategy_params(*extra, cli_params);
+            extra_strategies.emplace_back(nm, std::move(extra));
+        }
+
         // Build engine config
         engine_config prov_cfg;
         prov_cfg.seed = seed;
         prov_cfg.event_log_path = event_log_path;
         prov_cfg.compress_log = compress_log;
+        prov_cfg.log_max_bytes = log_max_size_mb * 1024ull * 1024ull;
+        prov_cfg.log_max_files = log_keep;
         prov_cfg.disable_pinning = no_pin;
         prov_cfg.provider = provider;
         prov_cfg.enable_web_ui = enable_web_ui;
@@ -792,6 +866,9 @@ int main(int argc, char* argv[])
         prov_cfg.ws_compress = ws_compress;
         prov_cfg.initial_balance = cli_balance;
         prov_cfg.db_path = cli_db_path;
+        prov_cfg.checkpoint_path = cli_checkpoint_path;
+        prov_cfg.resume_checkpoint_path = cli_resume_path;
+        prov_cfg.checkpoint_interval_events = cli_checkpoint_interval;
         prov_cfg.backfill_bars = cli_backfill;
         prov_cfg.backfill_interval = cli_backfill_interval;
         prov_cfg.market_aggression = cli_market_aggression;
@@ -878,7 +955,7 @@ int main(int argc, char* argv[])
         if (!transport)
         {
             // Fallback: local file transport for providers without one
-            transport = std::make_shared<FileTransport>(provider_path);
+            transport = std::make_shared<FileTransport>(primary_path);
         }
 
 #ifdef HAS_BINANCE
@@ -935,6 +1012,9 @@ int main(int argc, char* argv[])
         {
             // Streaming path: engine processes records as they arrive
             engine eng(dh, nullptr, prov_strategy, std::move(prov_cfg));
+            eng.set_primary_strategy_name(resolved);
+            for (auto& es : extra_strategies)
+                eng.add_strategy(es.second, es.first);
 
             if (is_tick)
             {
@@ -1000,17 +1080,45 @@ int main(int argc, char* argv[])
 #endif
                     parser = std::make_shared<CsvBarParser>();
 
-                auto bridge = std::make_shared<DataBridge<bar_record>>(
-                    transport, parser, bar_record_sink);
-
-                if (!bridge->load_data(dh))
+                // M2: comma-separated --path loads multiple CSVs into the
+                // same data_handler for multi-symbol backtesting. Only works
+                // for the local provider (each path needs its own transport).
+                auto paths = split_csv(provider_path);
+                if (paths.size() > 1 && provider_name == "local")
                 {
-                    std::cerr << "  ! Failed to load bar data via provider bridge.\n";
-                    return 1;
+                    for (const auto& p : paths)
+                    {
+                        auto file_transport = std::make_shared<FileTransport>(p);
+                        auto sub_bridge = std::make_shared<DataBridge<bar_record>>(
+                            file_transport, parser, bar_record_sink);
+                        if (!sub_bridge->load_data(dh))
+                        {
+                            std::cerr << "  ! Failed to load bar data from " << p << "\n";
+                            return 1;
+                        }
+                    }
+                    dh->sort_by_date();
+                    std::cout << "    Multi-symbol: loaded " << paths.size()
+                              << " files, " << dh->db_data_symbol.size()
+                              << " total bars\n";
+                }
+                else
+                {
+                    auto bridge = std::make_shared<DataBridge<bar_record>>(
+                        transport, parser, bar_record_sink);
+
+                    if (!bridge->load_data(dh))
+                    {
+                        std::cerr << "  ! Failed to load bar data via provider bridge.\n";
+                        return 1;
+                    }
                 }
             }
 
             engine eng(dh, nullptr, prov_strategy, std::move(prov_cfg));
+            eng.set_primary_strategy_name(resolved);
+            for (auto& es : extra_strategies)
+                eng.add_strategy(es.second, es.first);
 
             if (is_tick)
                 eng.run_tick_data();
@@ -1134,8 +1242,13 @@ int main(int argc, char* argv[])
     config.seed = seed;
     config.event_log_path = event_log_path;
     config.compress_log = compress_log;
+    config.log_max_bytes = log_max_size_mb * 1024ull * 1024ull;
+    config.log_max_files = log_keep;
     config.disable_pinning = no_pin;
     config.db_path = cli_db_path;
+    config.checkpoint_path = cli_checkpoint_path;
+    config.resume_checkpoint_path = cli_resume_path;
+    config.checkpoint_interval_events = cli_checkpoint_interval;
     config.market_aggression = cli_market_aggression;
     config.qty_scale = cli_qty_scale;
     config.fill_rng_seed = cli_fill_rng_seed;

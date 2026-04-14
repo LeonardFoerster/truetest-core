@@ -446,6 +446,20 @@ public:
         on_backtest_submit_ = std::move(fn);
     }
 
+    // Register callback for GET /api/runs (historical run list from SQLite).
+    void set_on_list_runs(on_list_runs_fn fn)
+    {
+        std::lock_guard<std::mutex> lk(submit_mu_);
+        on_list_runs_ = std::move(fn);
+    }
+
+    // L2: Register callback for GET /metrics (Prometheus text format).
+    void set_on_metrics(on_metrics_fn fn)
+    {
+        std::lock_guard<std::mutex> lk(submit_mu_);
+        on_metrics_ = std::move(fn);
+    }
+
 private:
     uint16_t port_;
     bool compress_;
@@ -469,6 +483,8 @@ private:
     BacktestRunManager run_manager_;
     std::mutex submit_mu_;
     on_backtest_submit_fn on_backtest_submit_;
+    on_list_runs_fn on_list_runs_;
+    on_metrics_fn on_metrics_;
 
     void do_accept()
     {
@@ -538,12 +554,16 @@ private:
                     res.version(conn->req.version());
 
                     on_backtest_submit_fn submit_fn;
+                    on_list_runs_fn list_runs_fn;
+                    on_metrics_fn metrics_fn;
                     {
                         std::lock_guard<std::mutex> lk(submit_mu_);
                         submit_fn = on_backtest_submit_;
+                        list_runs_fn = on_list_runs_;
+                        metrics_fn = on_metrics_;
                     }
 
-                    route_http_request(conn->req, res, run_manager_, submit_fn);
+                    route_http_request(conn->req, res, run_manager_, submit_fn, list_runs_fn, metrics_fn);
 
                     // Send HTTP response
                     auto sp = std::make_shared<http::response<http::string_body>>(std::move(res));

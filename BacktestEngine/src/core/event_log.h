@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -524,11 +525,22 @@ static constexpr size_t   EVENT_LOG_INDEX_INTERVAL = 1000;    // index every N e
 class EventLogger
 {
 public:
-    explicit EventLogger(const std::string& path, bool compress = true)
-        : out_(path, std::ios::binary | std::ios::trunc)
+    // max_bytes == 0 disables rotation (default). When rotation is enabled,
+    // each time the file exceeds max_bytes (after a full event write, never
+    // mid-event), the current file is finalized, renamed to path.1, and
+    // existing path.i are shifted to path.(i+1). At most max_files rotated
+    // copies are retained (older ones are deleted).
+    explicit EventLogger(const std::string& path,
+                         bool compress = true,
+                         std::uint64_t max_bytes = 0,
+                         int max_files = 5)
+        : path_(path)
+        , out_(path, std::ios::binary | std::ios::trunc)
         , compress_(compress)
         , cctx_(nullptr)
         , event_count_(0)
+        , max_bytes_(max_bytes)
+        , max_files_(max_files)
     {
         if (!out_)
             throw std::runtime_error("EventLogger: cannot open " + path);
@@ -604,6 +616,13 @@ public:
             out_.write(reinterpret_cast<const char*>(payload.data()),
                        static_cast<std::streamsize>(payload.size()));
         }
+
+        // L3: rotate at end of event if configured size exceeded
+        if (max_bytes_ > 0 &&
+            static_cast<std::uint64_t>(out_.tellp()) >= max_bytes_)
+        {
+            rotate();
+        }
     }
 
     void flush() { out_.flush(); }
@@ -626,6 +645,7 @@ public:
     }
 
 private:
+    std::string path_;
     std::ofstream out_;
     bool compress_;
     ZSTD_CCtx* cctx_;
@@ -633,6 +653,39 @@ private:
     std::vector<EventLogIndexEntry> index_;
     size_t event_count_;
     bool finalized_ = false;
+    std::uint64_t max_bytes_ = 0;
+    int max_files_ = 5;
+
+    // Rotate the current log file: finalize, close, shift backups, reopen.
+    void rotate()
+    {
+        // Write footer to close out the current file cleanly.
+        finalize();
+        out_.close();
+
+        // Shift existing rotated copies: .N-1 -> .N, .N-2 -> .N-1, ..., path -> .1.
+        // Remove the oldest if it would exceed retention.
+        auto nth = [&](int i) -> std::string {
+            return path_ + "." + std::to_string(i);
+        };
+        if (max_files_ > 0) {
+            std::string oldest = nth(max_files_);
+            std::remove(oldest.c_str());
+            for (int i = max_files_ - 1; i >= 1; --i)
+                std::rename(nth(i).c_str(), nth(i + 1).c_str());
+            std::rename(path_.c_str(), nth(1).c_str());
+        } else {
+            std::remove(path_.c_str());
+        }
+
+        // Reopen fresh file and reset per-file state.
+        out_.open(path_, std::ios::binary | std::ios::trunc);
+        if (!out_)
+            throw std::runtime_error("EventLogger: reopen after rotate failed: " + path_);
+        index_.clear();
+        event_count_ = 0;
+        finalized_ = false;
+    }
 };
 
 

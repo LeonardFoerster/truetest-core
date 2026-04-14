@@ -10,6 +10,8 @@ file(REMOVE_RECURSE
   "CMakeFiles/truetest.dir/BacktestEngine/src/data/csv_data_source.cpp.o.d"
   "CMakeFiles/truetest.dir/BacktestEngine/src/data/data_loader.cpp.o"
   "CMakeFiles/truetest.dir/BacktestEngine/src/data/data_loader.cpp.o.d"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o"
+  "CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o.d"
   "CMakeFiles/truetest.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o"
   "CMakeFiles/truetest.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o.d"
   "CMakeFiles/truetest.dir/BacktestEngine/src/execution/portfolio.cpp.o"
@@ -32,8 +34,6 @@ file(REMOVE_RECURSE
   "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma.cpp.o.d"
   "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o"
   "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o.d"
-  "CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o"
-  "CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o.d"
   "truetest"
   "truetest.pdb"
 )

@@ -184,10 +184,52 @@ CMakeFiles/truetest_tests.dir/tests/test_sma.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest_tests.dir/tests/test_sma.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/tests/test_sma.cpp -o CMakeFiles/truetest_tests.dir/tests/test_sma.cpp.s
 
+CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
+CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o: /home/leonard/work/hft-engine/tests/test_ema.cpp
+CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o -c /home/leonard/work/hft-engine/tests/test_ema.cpp
+
+CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/leonard/work/hft-engine/tests/test_ema.cpp > CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.i
+
+CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/tests/test_ema.cpp -o CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.s
+
+CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
+CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o: /home/leonard/work/hft-engine/tests/test_rsi.cpp
+CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o -c /home/leonard/work/hft-engine/tests/test_rsi.cpp
+
+CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/leonard/work/hft-engine/tests/test_rsi.cpp > CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.i
+
+CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/tests/test_rsi.cpp -o CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.s
+
+CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
+CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o: /home/leonard/work/hft-engine/tests/test_bollinger.cpp
+CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o -c /home/leonard/work/hft-engine/tests/test_bollinger.cpp
+
+CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/leonard/work/hft-engine/tests/test_bollinger.cpp > CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.i
+
+CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/tests/test_bollinger.cpp -o CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.s
+
 CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o: /home/leonard/work/hft-engine/tests/test_strategies.cpp
 CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o -c /home/leonard/work/hft-engine/tests/test_strategies.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.i: cmake_force
@@ -201,7 +243,7 @@ CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o: /home/leonard/work/hft-engine/tests/test_ring_buffer.cpp
 CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_13) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o -c /home/leonard/work/hft-engine/tests/test_ring_buffer.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.i: cmake_force
@@ -215,7 +257,7 @@ CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.o: /home/leonard/work/hft-engine/tests/test_bar_aggregator.cpp
 CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_14) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.o -c /home/leonard/work/hft-engine/tests/test_bar_aggregator.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.i: cmake_force
@@ -229,7 +271,7 @@ CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_analytics.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_analytics.cpp.o: /home/leonard/work/hft-engine/tests/test_analytics.cpp
 CMakeFiles/truetest_tests.dir/tests/test_analytics.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_analytics.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_15) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_analytics.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_analytics.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_analytics.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_analytics.cpp.o -c /home/leonard/work/hft-engine/tests/test_analytics.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_analytics.cpp.i: cmake_force
@@ -243,7 +285,7 @@ CMakeFiles/truetest_tests.dir/tests/test_analytics.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_market_maker.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_market_maker.cpp.o: /home/leonard/work/hft-engine/tests/test_market_maker.cpp
 CMakeFiles/truetest_tests.dir/tests/test_market_maker.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_13) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_market_maker.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_16) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_market_maker.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_market_maker.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_market_maker.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_market_maker.cpp.o -c /home/leonard/work/hft-engine/tests/test_market_maker.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_market_maker.cpp.i: cmake_force
@@ -257,7 +299,7 @@ CMakeFiles/truetest_tests.dir/tests/test_market_maker.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_data_handler.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_data_handler.cpp.o: /home/leonard/work/hft-engine/tests/test_data_handler.cpp
 CMakeFiles/truetest_tests.dir/tests/test_data_handler.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_14) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_data_handler.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_17) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_data_handler.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_data_handler.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_data_handler.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_data_handler.cpp.o -c /home/leonard/work/hft-engine/tests/test_data_handler.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_data_handler.cpp.i: cmake_force
@@ -271,7 +313,7 @@ CMakeFiles/truetest_tests.dir/tests/test_data_handler.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_execution_adapter.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_execution_adapter.cpp.o: /home/leonard/work/hft-engine/tests/test_execution_adapter.cpp
 CMakeFiles/truetest_tests.dir/tests/test_execution_adapter.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_15) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_execution_adapter.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_18) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_execution_adapter.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_execution_adapter.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_execution_adapter.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_execution_adapter.cpp.o -c /home/leonard/work/hft-engine/tests/test_execution_adapter.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_execution_adapter.cpp.i: cmake_force
@@ -285,7 +327,7 @@ CMakeFiles/truetest_tests.dir/tests/test_execution_adapter.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_engine.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_engine.cpp.o: /home/leonard/work/hft-engine/tests/test_engine.cpp
 CMakeFiles/truetest_tests.dir/tests/test_engine.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_16) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_engine.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_19) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_engine.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_engine.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_engine.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_engine.cpp.o -c /home/leonard/work/hft-engine/tests/test_engine.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_engine.cpp.i: cmake_force
@@ -299,7 +341,7 @@ CMakeFiles/truetest_tests.dir/tests/test_engine.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_order_id.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_order_id.cpp.o: /home/leonard/work/hft-engine/tests/test_order_id.cpp
 CMakeFiles/truetest_tests.dir/tests/test_order_id.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_17) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_order_id.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_20) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_order_id.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_order_id.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_order_id.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_order_id.cpp.o -c /home/leonard/work/hft-engine/tests/test_order_id.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_order_id.cpp.i: cmake_force
@@ -313,7 +355,7 @@ CMakeFiles/truetest_tests.dir/tests/test_order_id.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_price.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_price.cpp.o: /home/leonard/work/hft-engine/tests/test_price.cpp
 CMakeFiles/truetest_tests.dir/tests/test_price.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_18) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_price.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_21) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_price.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_price.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_price.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_price.cpp.o -c /home/leonard/work/hft-engine/tests/test_price.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_price.cpp.i: cmake_force
@@ -327,7 +369,7 @@ CMakeFiles/truetest_tests.dir/tests/test_price.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_orderbook_registry.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_orderbook_registry.cpp.o: /home/leonard/work/hft-engine/tests/test_orderbook_registry.cpp
 CMakeFiles/truetest_tests.dir/tests/test_orderbook_registry.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_19) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_orderbook_registry.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_22) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_orderbook_registry.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_orderbook_registry.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_orderbook_registry.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_orderbook_registry.cpp.o -c /home/leonard/work/hft-engine/tests/test_orderbook_registry.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_orderbook_registry.cpp.i: cmake_force
@@ -341,7 +383,7 @@ CMakeFiles/truetest_tests.dir/tests/test_orderbook_registry.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_order_types.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_order_types.cpp.o: /home/leonard/work/hft-engine/tests/test_order_types.cpp
 CMakeFiles/truetest_tests.dir/tests/test_order_types.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_20) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_order_types.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_23) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_order_types.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_order_types.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_order_types.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_order_types.cpp.o -c /home/leonard/work/hft-engine/tests/test_order_types.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_order_types.cpp.i: cmake_force
@@ -355,7 +397,7 @@ CMakeFiles/truetest_tests.dir/tests/test_order_types.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_object_pool.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_object_pool.cpp.o: /home/leonard/work/hft-engine/tests/test_object_pool.cpp
 CMakeFiles/truetest_tests.dir/tests/test_object_pool.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_21) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_object_pool.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_24) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_object_pool.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_object_pool.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_object_pool.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_object_pool.cpp.o -c /home/leonard/work/hft-engine/tests/test_object_pool.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_object_pool.cpp.i: cmake_force
@@ -369,7 +411,7 @@ CMakeFiles/truetest_tests.dir/tests/test_object_pool.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_risk_manager.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_risk_manager.cpp.o: /home/leonard/work/hft-engine/tests/test_risk_manager.cpp
 CMakeFiles/truetest_tests.dir/tests/test_risk_manager.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_22) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_risk_manager.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_25) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_risk_manager.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_risk_manager.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_risk_manager.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_risk_manager.cpp.o -c /home/leonard/work/hft-engine/tests/test_risk_manager.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_risk_manager.cpp.i: cmake_force
@@ -383,7 +425,7 @@ CMakeFiles/truetest_tests.dir/tests/test_risk_manager.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_event_log.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_event_log.cpp.o: /home/leonard/work/hft-engine/tests/test_event_log.cpp
 CMakeFiles/truetest_tests.dir/tests/test_event_log.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_23) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_event_log.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_26) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_event_log.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_event_log.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_event_log.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_event_log.cpp.o -c /home/leonard/work/hft-engine/tests/test_event_log.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_event_log.cpp.i: cmake_force
@@ -397,7 +439,7 @@ CMakeFiles/truetest_tests.dir/tests/test_event_log.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o: /home/leonard/work/hft-engine/tests/test_thread_preset.cpp
 CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_24) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_27) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o -c /home/leonard/work/hft-engine/tests/test_thread_preset.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.i: cmake_force
@@ -411,7 +453,7 @@ CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o: /home/leonard/work/hft-engine/tests/test_threading_correctness.cpp
 CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_25) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_28) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o -c /home/leonard/work/hft-engine/tests/test_threading_correctness.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.i: cmake_force
@@ -425,7 +467,7 @@ CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.s: cmake_forc
 CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o: /home/leonard/work/hft-engine/tests/test_engine_streaming.cpp
 CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_26) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_29) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o -c /home/leonard/work/hft-engine/tests/test_engine_streaming.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.i: cmake_force
@@ -436,10 +478,38 @@ CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/tests/test_engine_streaming.cpp -o CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.s
 
+CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
+CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o: /home/leonard/work/hft-engine/tests/test_event_json.cpp
+CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_30) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o -c /home/leonard/work/hft-engine/tests/test_event_json.cpp
+
+CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/leonard/work/hft-engine/tests/test_event_json.cpp > CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.i
+
+CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/tests/test_event_json.cpp -o CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.s
+
+CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
+CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o: /home/leonard/work/hft-engine/tests/test_binance_parser.cpp
+CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_31) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o -c /home/leonard/work/hft-engine/tests/test_binance_parser.cpp
+
+CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/leonard/work/hft-engine/tests/test_binance_parser.cpp > CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.i
+
+CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/tests/test_binance_parser.cpp -o CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.s
+
 CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o: /home/leonard/work/hft-engine/tests/test_provider_transport.cpp
 CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_27) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_32) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o -c /home/leonard/work/hft-engine/tests/test_provider_transport.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.i: cmake_force
@@ -453,7 +523,7 @@ CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.o: /home/leonard/work/hft-engine/tests/test_data_bridge.cpp
 CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_28) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_33) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.o -c /home/leonard/work/hft-engine/tests/test_data_bridge.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.i: cmake_force
@@ -467,7 +537,7 @@ CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.o: /home/leonard/work/hft-engine/tests/test_provider_event.cpp
 CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_29) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_34) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.o -c /home/leonard/work/hft-engine/tests/test_provider_event.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.i: cmake_force
@@ -481,7 +551,7 @@ CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/tests/test_provider_registry.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/tests/test_provider_registry.cpp.o: /home/leonard/work/hft-engine/tests/test_provider_registry.cpp
 CMakeFiles/truetest_tests.dir/tests/test_provider_registry.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_30) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_provider_registry.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_35) "Building CXX object CMakeFiles/truetest_tests.dir/tests/test_provider_registry.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/tests/test_provider_registry.cpp.o -MF CMakeFiles/truetest_tests.dir/tests/test_provider_registry.cpp.o.d -o CMakeFiles/truetest_tests.dir/tests/test_provider_registry.cpp.o -c /home/leonard/work/hft-engine/tests/test_provider_registry.cpp
 
 CMakeFiles/truetest_tests.dir/tests/test_provider_registry.cpp.i: cmake_force
@@ -495,7 +565,7 @@ CMakeFiles/truetest_tests.dir/tests/test_provider_registry.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/core/engine.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/core/engine.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/core/engine.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/core/engine.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_31) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/core/engine.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_36) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/core/engine.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/core/engine.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/core/engine.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/core/engine.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/core/engine.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/core/engine.cpp.i: cmake_force
@@ -509,7 +579,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/core/engine.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/analytics/analytics.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/analytics/analytics.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/analytics/analytics.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/analytics/analytics.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_32) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/analytics/analytics.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_37) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/analytics/analytics.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/analytics/analytics.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/analytics/analytics.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/analytics/analytics.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/analytics/analytics.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/analytics/analytics.cpp.i: cmake_force
@@ -523,7 +593,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/analytics/analytics.cpp.s: cmak
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/data_loader.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/data_loader.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/data/data_loader.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/data_loader.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_33) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/data_loader.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_38) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/data_loader.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/data_loader.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/data_loader.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/data_loader.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/data/data_loader.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/data_loader.cpp.i: cmake_force
@@ -537,7 +607,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/data_loader.cpp.s: cmake_f
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/csv_data_source.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/csv_data_source.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/data/csv_data_source.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/csv_data_source.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_34) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/csv_data_source.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_39) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/csv_data_source.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/csv_data_source.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/csv_data_source.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/csv_data_source.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/data/csv_data_source.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/csv_data_source.cpp.i: cmake_force
@@ -551,7 +621,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/csv_data_source.cpp.s: cma
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/binary_cache_source.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/binary_cache_source.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/data/binary_cache_source.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/binary_cache_source.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_35) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/binary_cache_source.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_40) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/binary_cache_source.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/binary_cache_source.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/binary_cache_source.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/binary_cache_source.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/data/binary_cache_source.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/binary_cache_source.cpp.i: cmake_force
@@ -565,7 +635,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/binary_cache_source.cpp.s:
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/data/tick_csv_data_source.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_36) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_41) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/data/tick_csv_data_source.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.i: cmake_force
@@ -579,7 +649,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.s
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/execution/portfolio.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/execution/portfolio.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/execution/portfolio.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/execution/portfolio.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_37) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/execution/portfolio.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_42) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/execution/portfolio.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/execution/portfolio.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/execution/portfolio.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/execution/portfolio.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/execution/portfolio.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/execution/portfolio.cpp.i: cmake_force
@@ -593,7 +663,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/execution/portfolio.cpp.s: cmak
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/orderbook/orderbook.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/orderbook/orderbook.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/orderbook/orderbook.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/orderbook/orderbook.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_38) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/orderbook/orderbook.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_43) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/orderbook/orderbook.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/orderbook/orderbook.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/orderbook/orderbook.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/orderbook/orderbook.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/orderbook/orderbook.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/orderbook/orderbook.cpp.i: cmake_force
@@ -607,7 +677,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/orderbook/orderbook.cpp.s: cmak
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/strategy/mean_reversion_strategy.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_39) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_44) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/strategy/mean_reversion_strategy.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.i: cmake_force
@@ -621,7 +691,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/mean_reversion_strateg
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/strategy/sma_strategy.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_40) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_45) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/strategy/sma_strategy.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma_strategy.cpp.i: cmake_force
@@ -635,7 +705,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma_strategy.cpp.s: cm
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/ma_crossover_strategy.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/ma_crossover_strategy.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/strategy/ma_crossover_strategy.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/ma_crossover_strategy.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_41) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/ma_crossover_strategy.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_46) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/ma_crossover_strategy.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/ma_crossover_strategy.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/ma_crossover_strategy.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/ma_crossover_strategy.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/strategy/ma_crossover_strategy.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/ma_crossover_strategy.cpp.i: cmake_force
@@ -649,7 +719,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/ma_crossover_strategy.
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/strategy/sma.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_42) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_47) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/strategy/sma.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma.cpp.i: cmake_force
@@ -663,7 +733,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma.cpp.s: cmake_force
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/market_maker/market_maker.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_43) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_48) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/market_maker/market_maker.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.i: cmake_force
@@ -677,7 +747,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.s
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/risk/risk_manager.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_44) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_49) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/risk/risk_manager.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.i: cmake_force
@@ -691,7 +761,7 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.s: cmake_
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/providers/local/local_register.cpp
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_45) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_50) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/providers/local/local_register.cpp
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.i: cmake_force
@@ -702,19 +772,19 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/BacktestEngine/src/providers/local/local_register.cpp -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.s
 
-CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
-CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/utils/log/log.cpp
-CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_46) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/utils/log/log.cpp
+CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o: CMakeFiles/truetest_tests.dir/flags.make
+CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/data/sqlite_store.cpp
+CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o: CMakeFiles/truetest_tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_51) "Building CXX object CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o -MF CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o.d -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/data/sqlite_store.cpp
 
-CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.i: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/leonard/work/hft-engine/BacktestEngine/src/utils/log/log.cpp > CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.i
+CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/leonard/work/hft-engine/BacktestEngine/src/data/sqlite_store.cpp > CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.i
 
-CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.s: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/BacktestEngine/src/utils/log/log.cpp -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.s
+CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/BacktestEngine/src/data/sqlite_store.cpp -o CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.s
 
 # Object files for target truetest_tests
 truetest_tests_OBJECTS = \
@@ -726,6 +796,9 @@ truetest_tests_OBJECTS = \
 "CMakeFiles/truetest_tests.dir/tests/test_latency_model.cpp.o" \
 "CMakeFiles/truetest_tests.dir/tests/test_fill_model.cpp.o" \
 "CMakeFiles/truetest_tests.dir/tests/test_sma.cpp.o" \
+"CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o" \
+"CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o" \
+"CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o" \
 "CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o" \
 "CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o" \
 "CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.o" \
@@ -744,6 +817,8 @@ truetest_tests_OBJECTS = \
 "CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o" \
 "CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o" \
 "CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o" \
+"CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o" \
+"CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o" \
 "CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o" \
 "CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.o" \
 "CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.o" \
@@ -763,7 +838,7 @@ truetest_tests_OBJECTS = \
 "CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.o" \
 "CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o" \
 "CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o" \
-"CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o"
+"CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o"
 
 # External object files for target truetest_tests
 truetest_tests_EXTERNAL_OBJECTS =
@@ -776,6 +851,9 @@ truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_fee_model.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_latency_model.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_fill_model.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_sma.cpp.o
+truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o
+truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o
+truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.o
@@ -794,6 +872,8 @@ truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_event_log.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o
+truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o
+truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.o
@@ -813,12 +893,14 @@ truetest_tests: CMakeFiles/truetest_tests.dir/BacktestEngine/src/strategy/sma.cp
 truetest_tests: CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o
-truetest_tests: CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o
+truetest_tests: CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o
 truetest_tests: CMakeFiles/truetest_tests.dir/build.make
 truetest_tests: CMakeFiles/truetest_tests.dir/compiler_depend.ts
 truetest_tests: lib/libgtest.a
+truetest_tests: _deps/zstd-build/lib/libzstd.a
+truetest_tests: /usr/lib/libsqlite3.so
 truetest_tests: CMakeFiles/truetest_tests.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_47) "Linking CXX executable truetest_tests"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_52) "Linking CXX executable truetest_tests"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/truetest_tests.dir/link.txt --verbose=$(VERBOSE)
 	/usr/bin/cmake -D TEST_TARGET=truetest_tests -D TEST_EXECUTABLE=/home/leonard/work/hft-engine/build_webui/truetest_tests -D TEST_EXECUTOR= -D TEST_WORKING_DIR=/home/leonard/work/hft-engine/build_webui -D TEST_EXTRA_ARGS= -D TEST_PROPERTIES= -D TEST_PREFIX= -D TEST_SUFFIX= -D TEST_FILTER= -D NO_PRETTY_TYPES=FALSE -D NO_PRETTY_VALUES=FALSE -D TEST_LIST=truetest_tests_TESTS -D CTEST_FILE=/home/leonard/work/hft-engine/build_webui/truetest_tests[1]_tests.cmake -D TEST_DISCOVERY_TIMEOUT=5 -D TEST_DISCOVERY_EXTRA_ARGS= -D TEST_XML_OUTPUT_DIR= -P /usr/share/cmake/Modules/GoogleTestAddTests.cmake
 

@@ -146,6 +146,14 @@ private:
 // spawning the backtest and updating the run manager.
 using on_backtest_submit_fn = std::function<std::string(const std::string& config_json)>;
 
+// Callback for listing persisted historical runs (from SqliteStore).
+// Returns a JSON array of run metadata. Empty string means unavailable.
+using on_list_runs_fn = std::function<std::string(int limit)>;
+
+// L2: callback building Prometheus text-exposition metrics body.
+// Returning an empty string means metrics are unavailable (503).
+using on_metrics_fn = std::function<std::string()>;
+
 // Route an HTTP request and produce a response.
 // Returns true if the request was handled (not a WebSocket upgrade).
 // Returns false if this is a WebSocket upgrade request (caller should proceed with WS).
@@ -154,7 +162,9 @@ bool route_http_request(
     const http::request<Body, http::basic_fields<Allocator>>& req,
     http::response<http::string_body>& res,
     BacktestRunManager& run_manager,
-    const on_backtest_submit_fn& on_submit)
+    const on_backtest_submit_fn& on_submit,
+    const on_list_runs_fn& on_list_runs = nullptr,
+    const on_metrics_fn& on_metrics = nullptr)
 {
     auto target = std::string(req.target());
 
@@ -276,11 +286,71 @@ bool route_http_request(
         return true;
     }
 
+    // GET /api/runs — list persisted historical runs from SQLite (K1)
+    if (req.method() == http::verb::get && target.rfind("/api/runs", 0) == 0)
+    {
+        int limit = 100;
+        // Optional query string: /api/runs?limit=50
+        auto qpos = target.find('?');
+        if (qpos != std::string::npos)
+        {
+            auto qs = target.substr(qpos + 1);
+            auto eq = qs.find("limit=");
+            if (eq != std::string::npos)
+            {
+                try { limit = std::stoi(qs.substr(eq + 6)); } catch (...) {}
+                if (limit <= 0 || limit > 1000) limit = 100;
+            }
+        }
+
+        if (on_list_runs)
+        {
+            auto body = on_list_runs(limit);
+            if (body.empty()) body = "[]";
+            res.result(http::status::ok);
+            res.body() = body;
+        }
+        else
+        {
+            res.result(http::status::service_unavailable);
+            res.body() = R"X({"error":"run history not available (SQLite disabled)"})X";
+        }
+        res.prepare_payload();
+        return true;
+    }
+
     // GET /api/health — simple health check
     if (req.method() == http::verb::get && target == "/api/health")
     {
         res.result(http::status::ok);
         res.body() = R"({"status":"ok"})";
+        res.prepare_payload();
+        return true;
+    }
+
+    // L2: GET /metrics — Prometheus text exposition
+    if (req.method() == http::verb::get && target == "/metrics")
+    {
+        res.set(http::field::content_type, "text/plain; version=0.0.4");
+        if (on_metrics)
+        {
+            auto body = on_metrics();
+            if (body.empty())
+            {
+                res.result(http::status::service_unavailable);
+                res.body() = "# metrics unavailable\n";
+            }
+            else
+            {
+                res.result(http::status::ok);
+                res.body() = std::move(body);
+            }
+        }
+        else
+        {
+            res.result(http::status::service_unavailable);
+            res.body() = "# metrics callback not registered\n";
+        }
         res.prepare_payload();
         return true;
     }

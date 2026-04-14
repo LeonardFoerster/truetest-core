@@ -296,19 +296,19 @@ CMakeFiles/truetest.dir/BacktestEngine/src/providers/local/local_register.cpp.s:
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest.dir/BacktestEngine/src/providers/local/local_register.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/BacktestEngine/src/providers/local/local_register.cpp -o CMakeFiles/truetest.dir/BacktestEngine/src/providers/local/local_register.cpp.s
 
-CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o: CMakeFiles/truetest.dir/flags.make
-CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/utils/log/log.cpp
-CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o: CMakeFiles/truetest.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_17) "Building CXX object CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o -MF CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o.d -o CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/utils/log/log.cpp
+CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o: CMakeFiles/truetest.dir/flags.make
+CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o: /home/leonard/work/hft-engine/BacktestEngine/src/data/sqlite_store.cpp
+CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o: CMakeFiles/truetest.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_17) "Building CXX object CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o -MF CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o.d -o CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o -c /home/leonard/work/hft-engine/BacktestEngine/src/data/sqlite_store.cpp
 
-CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.i: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/leonard/work/hft-engine/BacktestEngine/src/utils/log/log.cpp > CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.i
+CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/leonard/work/hft-engine/BacktestEngine/src/data/sqlite_store.cpp > CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.i
 
-CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.s: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/BacktestEngine/src/utils/log/log.cpp -o CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.s
+CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/leonard/work/hft-engine/BacktestEngine/src/data/sqlite_store.cpp -o CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.s
 
 # Object files for target truetest
 truetest_OBJECTS = \
@@ -328,7 +328,7 @@ truetest_OBJECTS = \
 "CMakeFiles/truetest.dir/BacktestEngine/src/market_maker/market_maker.cpp.o" \
 "CMakeFiles/truetest.dir/BacktestEngine/src/risk/risk_manager.cpp.o" \
 "CMakeFiles/truetest.dir/BacktestEngine/src/providers/local/local_register.cpp.o" \
-"CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o"
+"CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o"
 
 # External object files for target truetest
 truetest_EXTERNAL_OBJECTS =
@@ -349,9 +349,11 @@ truetest: CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma.cpp.o
 truetest: CMakeFiles/truetest.dir/BacktestEngine/src/market_maker/market_maker.cpp.o
 truetest: CMakeFiles/truetest.dir/BacktestEngine/src/risk/risk_manager.cpp.o
 truetest: CMakeFiles/truetest.dir/BacktestEngine/src/providers/local/local_register.cpp.o
-truetest: CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o
+truetest: CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o
 truetest: CMakeFiles/truetest.dir/build.make
 truetest: CMakeFiles/truetest.dir/compiler_depend.ts
+truetest: _deps/zstd-build/lib/libzstd.a
+truetest: /usr/lib/libsqlite3.so
 truetest: CMakeFiles/truetest.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/leonard/work/hft-engine/build_webui/CMakeFiles --progress-num=$(CMAKE_PROGRESS_18) "Linking CXX executable truetest"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/truetest.dir/link.txt --verbose=$(VERBOSE)

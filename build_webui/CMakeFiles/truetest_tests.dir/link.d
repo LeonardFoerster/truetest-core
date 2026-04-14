@@ -10,6 +10,9 @@ truetest_tests: \
   CMakeFiles/truetest_tests.dir/tests/test_latency_model.cpp.o \
   CMakeFiles/truetest_tests.dir/tests/test_fill_model.cpp.o \
   CMakeFiles/truetest_tests.dir/tests/test_sma.cpp.o \
+  CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o \
+  CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o \
+  CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o \
   CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o \
   CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o \
   CMakeFiles/truetest_tests.dir/tests/test_bar_aggregator.cpp.o \
@@ -28,6 +31,8 @@ truetest_tests: \
   CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o \
   CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o \
   CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o \
+  CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o \
+  CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o \
   CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o \
   CMakeFiles/truetest_tests.dir/tests/test_data_bridge.cpp.o \
   CMakeFiles/truetest_tests.dir/tests/test_provider_event.cpp.o \
@@ -47,8 +52,10 @@ truetest_tests: \
   CMakeFiles/truetest_tests.dir/BacktestEngine/src/market_maker/market_maker.cpp.o \
   CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o \
   CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o \
-  CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o \
+  CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o \
   lib/libgtest.a \
+  _deps/zstd-build/lib/libzstd.a \
+  /usr/lib/libsqlite3.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libstdc++.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libm.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libm.so \
@@ -99,6 +106,12 @@ CMakeFiles/truetest_tests.dir/tests/test_fill_model.cpp.o:
 
 CMakeFiles/truetest_tests.dir/tests/test_sma.cpp.o:
 
+CMakeFiles/truetest_tests.dir/tests/test_ema.cpp.o:
+
+CMakeFiles/truetest_tests.dir/tests/test_rsi.cpp.o:
+
+CMakeFiles/truetest_tests.dir/tests/test_bollinger.cpp.o:
+
 CMakeFiles/truetest_tests.dir/tests/test_strategies.cpp.o:
 
 CMakeFiles/truetest_tests.dir/tests/test_ring_buffer.cpp.o:
@@ -134,6 +147,10 @@ CMakeFiles/truetest_tests.dir/tests/test_thread_preset.cpp.o:
 CMakeFiles/truetest_tests.dir/tests/test_threading_correctness.cpp.o:
 
 CMakeFiles/truetest_tests.dir/tests/test_engine_streaming.cpp.o:
+
+CMakeFiles/truetest_tests.dir/tests/test_event_json.cpp.o:
+
+CMakeFiles/truetest_tests.dir/tests/test_binance_parser.cpp.o:
 
 CMakeFiles/truetest_tests.dir/tests/test_provider_transport.cpp.o:
 
@@ -173,9 +190,13 @@ CMakeFiles/truetest_tests.dir/BacktestEngine/src/risk/risk_manager.cpp.o:
 
 CMakeFiles/truetest_tests.dir/BacktestEngine/src/providers/local/local_register.cpp.o:
 
-CMakeFiles/truetest_tests.dir/BacktestEngine/src/utils/log/log.cpp.o:
+CMakeFiles/truetest_tests.dir/BacktestEngine/src/data/sqlite_store.cpp.o:
 
 lib/libgtest.a:
+
+_deps/zstd-build/lib/libzstd.a:
+
+/usr/lib/libsqlite3.so:
 
 /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libstdc++.so:
 

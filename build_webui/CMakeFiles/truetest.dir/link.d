@@ -18,7 +18,9 @@ truetest: \
   CMakeFiles/truetest.dir/BacktestEngine/src/market_maker/market_maker.cpp.o \
   CMakeFiles/truetest.dir/BacktestEngine/src/risk/risk_manager.cpp.o \
   CMakeFiles/truetest.dir/BacktestEngine/src/providers/local/local_register.cpp.o \
-  CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o \
+  CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o \
+  _deps/zstd-build/lib/libzstd.a \
+  /usr/lib/libsqlite3.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libstdc++.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libm.so \
   /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libm.so \
@@ -85,7 +87,11 @@ CMakeFiles/truetest.dir/BacktestEngine/src/risk/risk_manager.cpp.o:
 
 CMakeFiles/truetest.dir/BacktestEngine/src/providers/local/local_register.cpp.o:
 
-CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o:
+CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o:
+
+_deps/zstd-build/lib/libzstd.a:
+
+/usr/lib/libsqlite3.so:
 
 /usr/lib/gcc/x86_64-pc-linux-gnu/15.2.1/../../../../lib/libstdc++.so:
 

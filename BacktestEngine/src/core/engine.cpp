@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "checkpoint.h"
 #include "../data/data_handler.h"
 #include "../execution/portfolio.h"
 #include "../execution/latency_model.h"
@@ -34,7 +35,98 @@ engine::engine(std::shared_ptr<data_handler> dh,
     if (!config_.db_path.empty())
         store_ = std::make_unique<SqliteStore>(config_.db_path);
 #endif
+
+    // K3: if a resume checkpoint was requested, rehydrate portfolio state now
+    // (before run() is invoked). Any errors are reported to stderr and the
+    // engine continues with the fresh state — we do not hard-fail the run.
+    restore_from_checkpoint();
 }
+
+void engine::write_checkpoint_if_due(std::size_t event_count)
+{
+    if (config_.checkpoint_path.empty()) return;
+    if (config_.checkpoint_interval_events == 0) return;
+    if (event_count == 0 || event_count % config_.checkpoint_interval_events != 0) return;
+
+    try {
+        auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        checkpoint::write_file(config_.checkpoint_path, portfolio_,
+                               static_cast<uint64_t>(event_count), wall_ms);
+    } catch (const std::exception& e) {
+        std::cerr << "[checkpoint] write failed: " << e.what() << std::endl;
+    }
+}
+
+void engine::restore_from_checkpoint()
+{
+    if (config_.resume_checkpoint_path.empty()) return;
+
+    try {
+        auto cp = checkpoint::read_file(config_.resume_checkpoint_path);
+        std::unordered_map<std::string, position> pos_map;
+        pos_map.reserve(cp.positions.size());
+        for (const auto& e : cp.positions)
+        {
+            position p;
+            p.qty = e.qty;
+            p.cost_basis = e.cost_basis;
+            pos_map.emplace(e.symbol, p);
+        }
+        portfolio_.restore_state(cp.cash, static_cast<std::size_t>(cp.total_trades),
+                                 std::move(pos_map));
+        std::cerr << "[checkpoint] resumed from " << config_.resume_checkpoint_path
+                  << " at event " << cp.event_count << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[checkpoint] restore failed: " << e.what() << std::endl;
+    }
+}
+
+#ifdef HAS_SQLITE
+void engine::record_run_begin()
+{
+    if (!store_) return;
+
+    // Minimal config summary: mode, seed, initial balance, db path, threading.
+    char buf[1024];
+    const char* mode_str =
+        (config_.mode == engine_mode::backtest) ? "backtest" :
+        (config_.mode == engine_mode::shadow)   ? "shadow"   : "live";
+    std::snprintf(buf, sizeof(buf),
+        R"({"mode":"%s","seed":%llu,"initial_balance":%.4f,"threading":"%s","rolling_window":%zu})",
+        mode_str,
+        static_cast<unsigned long long>(config_.seed),
+        config_.initial_balance,
+        preset_to_string(config_.threading).c_str(),
+        config_.rolling_window);
+
+    try {
+        current_run_id_ = store_->begin_run(buf);
+    } catch (const std::exception& e) {
+        std::cerr << "[runs] begin_run failed: " << e.what() << std::endl;
+        current_run_id_.clear();
+    }
+}
+
+void engine::record_run_end()
+{
+    if (!store_ || current_run_id_.empty()) return;
+
+    try {
+        const auto& a = get_analytics();
+        auto report = a.snapshot();
+        report.final_equity = portfolio_.get_equity(last_mid_price_);
+        store_->end_run(current_run_id_,
+                        report.final_equity,
+                        report.sharpe_ratio,
+                        report.max_drawdown,
+                        static_cast<int>(portfolio_.get_total_trades()));
+    } catch (const std::exception& e) {
+        std::cerr << "[runs] end_run failed: " << e.what() << std::endl;
+    }
+    current_run_id_.clear();
+}
+#endif
 
 void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
 {
@@ -242,7 +334,8 @@ std::unique_ptr<LoggingWorker> engine::make_logging_worker()
         text_sink = LoggingWorker::log_sink::file_sink;
 
     return std::make_unique<LoggingWorker>(
-        config_.event_log_path, text_sink, config_.text_log_path, config_.compress_log);
+        config_.event_log_path, text_sink, config_.text_log_path, config_.compress_log,
+        config_.log_max_bytes, config_.log_max_files);
 }
 
 void engine::pin_event_loop_thread()
@@ -280,6 +373,59 @@ void engine::start_workers()
         ws_ring_ = std::make_shared<EventRing>();
         ws_worker_ = std::make_unique<WebSocketWorker>(config_.ws_port, config_.ws_compress);
         wire_failure(*ws_worker_);
+
+#ifdef HAS_SQLITE
+        // K1: expose GET /api/runs from SQLite store, if enabled.
+        if (store_)
+        {
+            ws_worker_->set_on_list_runs([this](int limit) -> std::string {
+                if (!store_) return {};
+                try { return store_->query_runs_json(limit); }
+                catch (const std::exception& e) {
+                    std::cerr << "[runs] query_runs failed: " << e.what() << std::endl;
+                    return {};
+                }
+            });
+        }
+#endif
+
+        // L2: Prometheus metrics endpoint. Snapshot engine state into text format.
+        ws_worker_->set_on_metrics([this]() -> std::string {
+            auto snap = analytics_.snapshot();
+            char buf[2048];
+            std::size_t n = 0;
+            auto w = [&](const char* name, const char* help, const char* type,
+                         double value) {
+                n += std::snprintf(buf + n, sizeof(buf) - n,
+                    "# HELP %s %s\n# TYPE %s %s\n%s %.6f\n",
+                    name, help, name, type, name, value);
+            };
+            w("truetest_events_processed_total",
+              "Events processed by analytics", "counter",
+              static_cast<double>(snap.total_orders + snap.total_fills));
+            w("truetest_orders_submitted_total",
+              "Total orders submitted", "counter",
+              static_cast<double>(snap.total_orders));
+            w("truetest_fills_total",
+              "Total fills executed", "counter",
+              static_cast<double>(snap.total_fills));
+            w("truetest_equity_current",
+              "Current portfolio equity (valued at last_mid_price)", "gauge",
+              portfolio_.get_equity(last_mid_price_));
+            w("truetest_cash_current",
+              "Current cash balance", "gauge",
+              portfolio_.get_cash());
+            w("truetest_drawdown_current",
+              "Current drawdown fraction", "gauge",
+              snap.max_drawdown);
+            w("truetest_sharpe_ratio",
+              "Sharpe ratio (point-in-time)", "gauge",
+              snap.sharpe_ratio);
+            w("truetest_halt_flag",
+              "1 if halt flag set, 0 otherwise", "gauge",
+              halt_flag_.load(std::memory_order_relaxed) ? 1.0 : 0.0);
+            return std::string(buf, n);
+        });
 
         worker_threads_.emplace_back([this]() {
             ws_worker_->run(*ws_ring_);
@@ -935,7 +1081,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 #ifdef HAS_SQLITE
             if (store_) store_->insert_fill(f);
 #endif
-            strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+            notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
             publish_event(fill_ptr);
             analytics_.on_event(fill_ptr);
 
@@ -1091,7 +1237,7 @@ void engine::unwind_positions(std::size_t& event_count)
 #ifdef HAS_SQLITE
                 if (store_) store_->insert_fill(f);
 #endif
-                strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+                notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
                 analytics_.on_event(fill_ptr);
 
@@ -1235,6 +1381,71 @@ void engine::check_pending_stops(double high, double low,
     }
 }
 
+void engine::notify_position_change_all(const std::string& symbol, bool open)
+{
+    if (strategy_) strategy_->set_position_open(symbol, open);
+    for (auto& s : additional_strategies_)
+        if (s) s->set_position_open(symbol, open);
+}
+
+void engine::dispatch_extras_on_market(const market_event& mkt,
+                                       const std::chrono::system_clock::time_point& ts,
+                                       std::size_t& event_count)
+{
+    if (additional_strategies_.empty()) return;
+    for (std::size_t i = 0; i < additional_strategies_.size(); ++i)
+    {
+        auto& s = additional_strategies_[i];
+        if (!s) continue;
+
+        // SL/TP for this extra strategy (tagged with its name).
+        if (auto sl_tp = s->check_stops(mkt.get_symbol(), mkt.get_close(), ts))
+        {
+            sl_tp->set_strategy_name(additional_strategy_names_[i]);
+            bool halt = false;
+            route_order(*sl_tp, ts, event_count, halt);
+            if (halt) return;
+        }
+
+        // New orders from the strategy's on_market handler.
+        if (auto o = s->on_market(mkt))
+        {
+            o->set_strategy_name(additional_strategy_names_[i]);
+            bool halt = false;
+            route_order(*o, ts, event_count, halt);
+            if (halt) return;
+        }
+    }
+}
+
+void engine::dispatch_extras_on_tick(const tick_event& te,
+                                     const std::chrono::system_clock::time_point& ts,
+                                     std::size_t& event_count)
+{
+    if (additional_strategies_.empty()) return;
+    for (std::size_t i = 0; i < additional_strategies_.size(); ++i)
+    {
+        auto& s = additional_strategies_[i];
+        if (!s) continue;
+
+        if (auto sl_tp = s->check_stops(te.get_symbol(), te.get_price(), ts))
+        {
+            sl_tp->set_strategy_name(additional_strategy_names_[i]);
+            bool halt = false;
+            route_order(*sl_tp, ts, event_count, halt);
+            if (halt) return;
+        }
+
+        if (auto o = s->on_tick(te))
+        {
+            o->set_strategy_name(additional_strategy_names_[i]);
+            bool halt = false;
+            route_order(*o, ts, event_count, halt);
+            if (halt) return;
+        }
+    }
+}
+
 void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                                 const std::chrono::system_clock::time_point& timestamp)
 {
@@ -1281,7 +1492,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
             for (auto& f : limit_fills) {
                 auto fill_ptr = fill_pool_.acquire(f);
                 portfolio_.on_fill(f);
-                strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+                notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
                 if (!config_.is_threaded())
                     analytics_.on_event(fill_ptr);
@@ -1324,9 +1535,12 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
     if (order_opt)
     {
+        if (!primary_strategy_name_.empty())
+            order_opt->set_strategy_name(primary_strategy_name_);
         bool halt = false;
         route_order(*order_opt, timestamp, event_count, halt);
     }
+    dispatch_extras_on_market(mkt, timestamp, event_count);
 }
 
 void engine::process_single_tick(const tick_record& rec, std::size_t& event_count)
@@ -1370,7 +1584,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
             for (auto& f : limit_fills) {
                 auto fill_ptr = fill_pool_.acquire(f);
                 portfolio_.on_fill(f);
-                strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+                notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
                 if (!config_.is_threaded())
                     analytics_.on_event(fill_ptr);
@@ -1432,13 +1646,22 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     // Check strategy SL/TP against current tick price
     auto sl_tp_order = strategy_->check_stops(rec.symbol, rec.price, rec.timestamp);
     if (sl_tp_order)
+    {
+        if (!primary_strategy_name_.empty())
+            sl_tp_order->set_strategy_name(primary_strategy_name_);
         route_order(*sl_tp_order, rec.timestamp, event_count, halt);
+    }
     if (halt) return;
 
     // Dispatch to strategy's tick handler
     auto order_opt = strategy_->on_tick(te);
     if (order_opt)
+    {
+        if (!primary_strategy_name_.empty())
+            order_opt->set_strategy_name(primary_strategy_name_);
         route_order(*order_opt, rec.timestamp, event_count, halt);
+    }
+    dispatch_extras_on_tick(te, rec.timestamp, event_count);
 }
 
 void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
@@ -1447,6 +1670,10 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
 
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
+
+#ifdef HAS_SQLITE
+    record_run_begin();
+#endif
 
 #ifdef HAS_BINANCE
     // Create hybrid executor for paper-mode limit order fills
@@ -1585,6 +1812,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
 
 #ifdef HAS_SQLITE
     if (store_) store_->flush_all();
+    record_run_end();
 #endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
@@ -1596,6 +1824,10 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
+
+#ifdef HAS_SQLITE
+    record_run_begin();
+#endif
 
 #ifdef HAS_BINANCE
     // Create hybrid executor for paper-mode limit order fills
@@ -1732,6 +1964,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 
 #ifdef HAS_SQLITE
     if (store_) store_->flush_all();
+    record_run_end();
 #endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
@@ -1751,6 +1984,10 @@ void engine::run()
     if (!data_handler_->has_bar_data()) {
         throw std::runtime_error("no data loaded — call IDataSource::load_data() before run()");
     }
+
+#ifdef HAS_SQLITE
+    record_run_begin();
+#endif
 
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
@@ -1892,8 +2129,11 @@ void engine::run()
 
         if (order_opt)
         {
+            if (!primary_strategy_name_.empty())
+                order_opt->set_strategy_name(primary_strategy_name_);
             route_order(*order_opt, sim_time, event_count, halt_requested);
         }
+        dispatch_extras_on_market(mkt, sim_time, event_count);
 
         {
             auto now_report = std::chrono::steady_clock::now();
@@ -1906,6 +2146,9 @@ void engine::run()
                 last_report_time = now_report;
             }
         }
+
+        // K3: periodic portfolio checkpoint (no-op if checkpoint_path empty)
+        write_checkpoint_if_due(event_count);
     }
 
 #ifdef HAS_WEB_UI
@@ -1973,7 +2216,21 @@ void engine::run()
             portfolio_.get_cash(), portfolio_.get_equity(last_mid_price_),
             pos_json, portfolio_.get_total_trades(), ts_ms);
     }
+    record_run_end();
 #endif
+
+    // K3: final checkpoint write (force — bypass interval check)
+    if (!config_.checkpoint_path.empty())
+    {
+        try {
+            auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            checkpoint::write_file(config_.checkpoint_path, portfolio_,
+                                   static_cast<uint64_t>(event_count), wall_ms);
+        } catch (const std::exception& e) {
+            std::cerr << "[checkpoint] final write failed: " << e.what() << std::endl;
+        }
+    }
 
     if (event_logger_) event_logger_->flush();
     stop_workers();
@@ -2005,6 +2262,10 @@ void engine::run_tick_data()
     if (!config_.event_log_path.empty() && !event_logger_)
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
 
+#ifdef HAS_SQLITE
+    if (current_run_id_.empty()) record_run_begin();
+#endif
+
     // Clear shared pending state for this run
     pending_stops_.clear();
     while (!pending_orders_.empty()) pending_orders_.pop();
@@ -2035,7 +2296,12 @@ void engine::run_tick_data()
             analytics_.on_event(bar_ptr);
 
         if (order_opt)
+        {
+            if (!primary_strategy_name_.empty())
+                order_opt->set_strategy_name(primary_strategy_name_);
             route_order(*order_opt, bar.get_timestamp(), event_count, halt_requested);
+        }
+        dispatch_extras_on_market(bar, bar.get_timestamp(), event_count);
     });
 
     for (std::size_t i = 0; i < n && !halt_requested
@@ -2085,13 +2351,22 @@ void engine::run_tick_data()
         // Check strategy SL/TP against current tick price
         auto sl_tp_order = strategy_->check_stops(tick.symbol, tick.price, tick.timestamp);
         if (sl_tp_order)
+        {
+            if (!primary_strategy_name_.empty())
+                sl_tp_order->set_strategy_name(primary_strategy_name_);
             route_order(*sl_tp_order, tick.timestamp, event_count, halt_requested);
+        }
         if (halt_requested) break;
 
         // Dispatch to strategy's tick handler
         auto order_opt = strategy_->on_tick(te);
         if (order_opt)
+        {
+            if (!primary_strategy_name_.empty())
+                order_opt->set_strategy_name(primary_strategy_name_);
             route_order(*order_opt, tick.timestamp, event_count, halt_requested);
+        }
+        dispatch_extras_on_tick(te, tick.timestamp, event_count);
         if (halt_requested) break;
 
         // Feed tick into bar aggregator for bar-based strategies
@@ -2133,6 +2408,7 @@ void engine::run_tick_data()
 
 #ifdef HAS_SQLITE
     if (store_) store_->flush_all();
+    record_run_end();
 #endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
@@ -2215,7 +2491,7 @@ void engine::run_replay(const std::string& log_path,
                     {
                         auto fill_ptr = fill_pool_.acquire(f);
                         portfolio_.on_fill(f);
-                        strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+                        notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                         publish_event(fill_ptr);
                         if (!config_.is_threaded())
                             analytics_.on_event(fill_ptr);
@@ -2253,7 +2529,7 @@ void engine::run_replay(const std::string& log_path,
                     {
                         auto fill_ptr = fill_pool_.acquire(f);
                         portfolio_.on_fill(f);
-                        strategy_->set_position_open(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+                        notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                         publish_event(fill_ptr);
                         if (!config_.is_threaded())
                             analytics_.on_event(fill_ptr);

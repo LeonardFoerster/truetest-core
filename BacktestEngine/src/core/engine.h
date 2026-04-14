@@ -73,6 +73,14 @@ private:
     std::shared_ptr<data_handler> data_handler_;
     OrderbookRegistry orderbook_registry_;
     std::shared_ptr<IStrategy> strategy_;
+    // M1: additional strategies that run alongside the primary strategy_.
+    // On each market/tick event all strategies are dispatched; emitted orders
+    // are tagged with the originating strategy name and routed through the
+    // normal order pipeline. Portfolio is shared; per-strategy analytics are
+    // attributed by order_event::strategy_name.
+    std::vector<std::shared_ptr<IStrategy>> additional_strategies_;
+    std::vector<std::string> additional_strategy_names_;
+    std::string primary_strategy_name_;
     // Per-symbol execution adapters (created on demand)
     std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>> execution_adapters_;
     portfolio portfolio_;
@@ -113,7 +121,15 @@ private:
 
 #ifdef HAS_SQLITE
     std::unique_ptr<SqliteStore> store_;
+    // K1: run metadata tracking — assigned by record_run_begin(), consumed by record_run_end().
+    std::string current_run_id_;
+    void record_run_begin();
+    void record_run_end();
 #endif
+
+    // K3: portfolio-state checkpointing for crash resume.
+    void write_checkpoint_if_due(std::size_t event_count);
+    void restore_from_checkpoint();
 
     // Optional event logger (created when event_log_path is set)
     std::unique_ptr<EventLogger> event_logger_;
@@ -149,6 +165,20 @@ private:
     void check_pending_stops(double high, double low,
                              const std::chrono::system_clock::time_point& sim_time,
                              std::size_t& event_count, bool& halt_requested);
+
+    // M1 helpers: dispatch market/tick events to all additional strategies
+    // and route any orders they generate through the normal pipeline. Also
+    // runs their SL/TP check_stops(). Primary strategy is handled inline by
+    // the existing call sites — these helpers cover the *extras* only.
+    void dispatch_extras_on_market(const market_event& mkt,
+                                   const std::chrono::system_clock::time_point& ts,
+                                   std::size_t& event_count);
+    void dispatch_extras_on_tick(const tick_event& te,
+                                 const std::chrono::system_clock::time_point& ts,
+                                 std::size_t& event_count);
+    // Notify primary + all additional strategies of a position state change
+    // after a fill.
+    void notify_position_change_all(const std::string& symbol, bool open);
 
     // Process a single market event through the strategy → order → fill pipeline.
     // Used by both batch run() and streaming run_streaming().
@@ -274,6 +304,19 @@ public:
     void run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge);
     void run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge);
     void set_strategy(std::shared_ptr<IStrategy> strategy);
+
+    // M1: register the primary strategy's name (for order_event tagging).
+    // Optional — when unset, primary orders are left with an empty name.
+    void set_primary_strategy_name(const std::string& name) { primary_strategy_name_ = name; }
+
+    // M1: attach an additional strategy that runs alongside the primary.
+    // The name is used to tag generated orders for per-strategy attribution.
+    void add_strategy(std::shared_ptr<IStrategy> strategy, const std::string& name)
+    {
+        if (!strategy) return;
+        additional_strategies_.push_back(std::move(strategy));
+        additional_strategy_names_.push_back(name);
+    }
     void switch_symbol(const std::string& new_symbol);
     bool cancel_order(const std::string& symbol, uint64_t order_id,
                       const std::string& reason = "");

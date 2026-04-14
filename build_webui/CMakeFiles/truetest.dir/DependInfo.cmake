@@ -13,6 +13,7 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/leonard/work/hft-engine/BacktestEngine/src/data/binary_cache_source.cpp" "CMakeFiles/truetest.dir/BacktestEngine/src/data/binary_cache_source.cpp.o" "gcc" "CMakeFiles/truetest.dir/BacktestEngine/src/data/binary_cache_source.cpp.o.d"
   "/home/leonard/work/hft-engine/BacktestEngine/src/data/csv_data_source.cpp" "CMakeFiles/truetest.dir/BacktestEngine/src/data/csv_data_source.cpp.o" "gcc" "CMakeFiles/truetest.dir/BacktestEngine/src/data/csv_data_source.cpp.o.d"
   "/home/leonard/work/hft-engine/BacktestEngine/src/data/data_loader.cpp" "CMakeFiles/truetest.dir/BacktestEngine/src/data/data_loader.cpp.o" "gcc" "CMakeFiles/truetest.dir/BacktestEngine/src/data/data_loader.cpp.o.d"
+  "/home/leonard/work/hft-engine/BacktestEngine/src/data/sqlite_store.cpp" "CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o" "gcc" "CMakeFiles/truetest.dir/BacktestEngine/src/data/sqlite_store.cpp.o.d"
   "/home/leonard/work/hft-engine/BacktestEngine/src/data/tick_csv_data_source.cpp" "CMakeFiles/truetest.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o" "gcc" "CMakeFiles/truetest.dir/BacktestEngine/src/data/tick_csv_data_source.cpp.o.d"
   "/home/leonard/work/hft-engine/BacktestEngine/src/execution/portfolio.cpp" "CMakeFiles/truetest.dir/BacktestEngine/src/execution/portfolio.cpp.o" "gcc" "CMakeFiles/truetest.dir/BacktestEngine/src/execution/portfolio.cpp.o.d"
   "/home/leonard/work/hft-engine/BacktestEngine/src/main.cpp" "CMakeFiles/truetest.dir/BacktestEngine/src/main.cpp.o" "gcc" "CMakeFiles/truetest.dir/BacktestEngine/src/main.cpp.o.d"
@@ -24,7 +25,6 @@ set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/leonard/work/hft-engine/BacktestEngine/src/strategy/mean_reversion_strategy.cpp" "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o" "gcc" "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/mean_reversion_strategy.cpp.o.d"
   "/home/leonard/work/hft-engine/BacktestEngine/src/strategy/sma.cpp" "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma.cpp.o" "gcc" "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma.cpp.o.d"
   "/home/leonard/work/hft-engine/BacktestEngine/src/strategy/sma_strategy.cpp" "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o" "gcc" "CMakeFiles/truetest.dir/BacktestEngine/src/strategy/sma_strategy.cpp.o.d"
-  "/home/leonard/work/hft-engine/BacktestEngine/src/utils/log/log.cpp" "CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o" "gcc" "CMakeFiles/truetest.dir/BacktestEngine/src/utils/log/log.cpp.o.d"
   "" "truetest" "gcc" "CMakeFiles/truetest.dir/link.d"
   )
 

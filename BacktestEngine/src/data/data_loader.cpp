@@ -1,5 +1,7 @@
 #include "data_handler.h"
 
+#include <algorithm>
+#include <numeric>
 #include <sstream>
 #include <iostream>
 #include <fstream>
@@ -66,6 +68,44 @@ bool data_handler::add_tick(tick_record rec)
 
         tick_data.push_back(std::move(rec));
         return true;
+}
+
+void data_handler::sort_by_date()
+{
+    const std::size_t n = db_data_date.size();
+    if (n < 2) return;
+
+    // Build index permutation sorted by date (stable so same-date rows keep load order)
+    std::vector<std::size_t> idx(n);
+    std::iota(idx.begin(), idx.end(), 0u);
+    std::stable_sort(idx.begin(), idx.end(),
+                     [this](std::size_t a, std::size_t b) {
+                         return db_data_date[a] < db_data_date[b];
+                     });
+
+    // Apply permutation to all parallel vectors
+    auto reorder_str    = [&](std::vector<std::string>& v) {
+        std::vector<std::string> out; out.reserve(n);
+        for (auto i : idx) out.push_back(std::move(v[i]));
+        v = std::move(out);
+    };
+    auto reorder_double = [&](std::vector<double>& v) {
+        std::vector<double> out; out.reserve(n);
+        for (auto i : idx) out.push_back(v[i]);
+        v = std::move(out);
+    };
+    auto reorder_int    = [&](std::vector<int64_t>& v) {
+        std::vector<int64_t> out; out.reserve(n);
+        for (auto i : idx) out.push_back(v[i]);
+        v = std::move(out);
+    };
+    reorder_str(db_data_date);
+    reorder_str(db_data_symbol);
+    reorder_double(db_data_open_value);
+    reorder_double(db_data_high_value);
+    reorder_double(db_data_low_value);
+    reorder_double(db_data_close_value);
+    reorder_int(db_data_volume_value);
 }
 
 void data_handler::load_from_csv(const std::filesystem::path& path)

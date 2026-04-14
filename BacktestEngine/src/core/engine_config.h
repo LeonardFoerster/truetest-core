@@ -59,6 +59,12 @@ struct engine_config
     std::string text_log_path;
     bool log_to_stdout = false;
 
+    // L3: log rotation. 0 = disabled. When enabled, both the binary event log
+    // and the text log are rotated when they exceed log_max_bytes, keeping
+    // log_max_files rotated copies.
+    std::uint64_t log_max_bytes = 0;
+    int log_max_files = 5;
+
     // Provider: when set, the engine uses this provider's transport and
     // execution adapter instead of manually wired sources.
     // This is scaffolding — full provider-based engine wiring comes later.
@@ -66,6 +72,15 @@ struct engine_config
 
     // SQLite persistence: when non-empty, trades/portfolio/equity are stored
     std::string db_path;
+
+    // K3: portfolio checkpointing for resume-after-crash. When checkpoint_path
+    // is non-empty, the engine writes a binary snapshot of portfolio state
+    // every `checkpoint_interval_events` events. When resume_checkpoint_path
+    // is non-empty at engine construction, the portfolio is pre-populated from
+    // the referenced checkpoint file before the run starts.
+    std::string checkpoint_path;
+    std::string resume_checkpoint_path;
+    std::size_t checkpoint_interval_events = 10000;
 
     // Historical backfill: fetch N bars from REST API before streaming starts
     int backfill_bars = 500;          // Number of historical bars to fetch on start

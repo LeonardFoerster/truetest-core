@@ -198,15 +198,15 @@ Each item is a self-contained task with instructions for Claude Code. Execute th
 
 ## K. Data Persistence & State
 
-- [ ] **K1. Add backtest run metadata persistence (SQLite)**
+- [x] **K1. Add backtest run metadata persistence (SQLite)**
   Create a `runs` table: `(run_id TEXT PK, started_at INT, ended_at INT, config_json TEXT, status TEXT, final_equity REAL, sharpe REAL, max_drawdown REAL, trade_count INT)`. Insert a row at engine start, update at engine end. Add `GET /api/runs` endpoint (from J3) to list past runs. This enables run history and comparison.
   *Context: SQLite is already used in `engine.cpp` for equity/trade storage (`ENABLE_SQLITE`, on by default). The `db_path` config field points to the SQLite file. Add the new table alongside existing ones. Use the same db handle.*
 
-- [ ] **K2. Add deterministic replay guarantee — seed all RNG sources**
+- [x] **K2. Add deterministic replay guarantee — seed all RNG sources**
   Audit all `std::mt19937` / `std::rand()` usage. Ensure every RNG is seeded from `engine_config.seed`. Currently: `LocalBookAdapter` uses seed 42 (hardcoded), `StochasticLatencyModel` uses seed 42, `MarketMaker` uses `std::rand()`. Route all through `engine_config.seed`. When `seed == 0`, use `std::random_device`. Add a test that runs the same backtest twice with the same seed and asserts identical results.
   *Context: `engine_config.h` has a `seed` field. `main.cpp` passes `--seed` from CLI. But individual components ignore it and use their own hardcoded seeds. Search for `mt19937`, `rand()`, `random_device` across all source files.*
 
-- [ ] **K3. Add portfolio state snapshots for resume-after-crash**
+- [x] **K3. Add portfolio state snapshots for resume-after-crash**
   Every N events (configurable, default 10000), serialize the full engine state to a checkpoint file: portfolio positions, cash, analytics state, orderbook state, event counter. On startup, if `--resume <checkpoint>` is passed, restore state and continue from the last event. Use the binary serialization pattern from `event_log.h`.
   *Context: `portfolio.h` has all position state. `analytics.h` has equity curve and metric accumulators. The engine processes events sequentially with a counter. Checkpoint = snapshot of these at a known event index. Store as a binary file alongside the event log. This is important for long-running live/shadow mode sessions.*
 
