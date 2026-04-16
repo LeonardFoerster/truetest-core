@@ -2,6 +2,7 @@
 #ifdef HAS_BINANCE
 
 #include "providers/transport.h"
+#include "utils/retry.h"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -172,21 +173,17 @@ private:
     std::atomic<bool> open_{false};
     std::atomic<bool> stopped_{false};
 
-    int reconnect_attempts_ = 0;
-    static constexpr int MAX_RECONNECTS = 5;
+    static constexpr unsigned MAX_RECONNECTS = 5;
 
     bool reconnect()
     {
-        if (reconnect_attempts_ >= MAX_RECONNECTS)
-            return false;
-        reconnect_attempts_++;
-
-        int delay_ms = 1000 * (1 << (reconnect_attempts_ - 1));
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-
-        ioc_.restart();
-        ws_.reset();
-        return open();
+        return retry_with_backoff([this]() {
+            ioc_.restart();
+            ws_.reset();
+            return open();
+        }, MAX_RECONNECTS,
+           std::chrono::milliseconds(1000),
+           std::chrono::milliseconds(16000));
     }
 };
 

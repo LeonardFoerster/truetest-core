@@ -2,6 +2,7 @@
 #ifdef HAS_POSTGRESQL
 
 #include "data_source.h"
+#include "../utils/retry.h"
 #include <optional>
 #include <pqxx/pqxx>
 #include <memory>

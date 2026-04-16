@@ -52,7 +52,30 @@ void WebSocketDataSource::io_thread_main()
         {
             std::cerr << "  WebSocket error: " << e.what() << "\n";
             connected_.store(false, std::memory_order_release);
-            schedule_reconnect();
+
+            if (!running_.load(std::memory_order_acquire))
+                return;
+
+            // Use shared retry utility to reconnect with exponential backoff
+            retry_config cfg;
+            cfg.max_attempts = 10;
+            cfg.initial_delay = std::chrono::duration_cast<std::chrono::milliseconds>(config_.initial_backoff);
+            cfg.max_delay = std::chrono::duration_cast<std::chrono::milliseconds>(config_.max_backoff);
+            cfg.on_retry = [](unsigned attempt, std::exception_ptr) {
+                std::cerr << "  WebSocket reconnect attempt " << attempt << "\n";
+            };
+
+            bool ok = retry_with_backoff([this]() {
+                if (!running_.load(std::memory_order_acquire)) return true; // exit loop
+                try { connect(); return true; }
+                catch (...) {
+                    connected_.store(false, std::memory_order_release);
+                    return false;
+                }
+            }, cfg);
+
+            if (!ok)
+                std::cerr << "  WebSocket reconnect failed after all attempts\n";
         }
     }
 }

@@ -14,6 +14,7 @@ option(ENABLE_SQLITE "SQLite persistence for trades/portfolio" ON)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(ENABLE_ASAN "Enable AddressSanitizer (mutually exclusive with TSAN)" OFF)
 option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer (mutually exclusive with TSAN)" OFF)
+option(BUILD_SHARED_LIB "Build libtruetest shared library with C API for embedding" OFF)
 
 # ── Sanitizer mutual exclusivity ────────────────────────────────────────────
 if(ENABLE_TSAN AND (ENABLE_ASAN OR ENABLE_UBSAN))
@@ -268,8 +269,70 @@ if(ENABLE_DEBUG)
 endif()
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ── Shared library (libtruetest) with C API for embedding ──────────────────
+# Provides a stable extern "C" ABI so host languages (Python via ctypes,
+# Node.js via ffi-napi, etc.) can drive the engine without linking against
+# the full C++ API. Uses the same production sources as the CLI binary.
+if(BUILD_SHARED_LIB)
+    set(TRUETEST_LIB_SOURCES
+        BacktestEngine/src/api/truetest_api.cpp
+        BacktestEngine/src/core/engine.cpp
+        BacktestEngine/src/analytics/analytics.cpp
+        BacktestEngine/src/data/data_loader.cpp
+        BacktestEngine/src/data/csv_data_source.cpp
+        BacktestEngine/src/data/binary_cache_source.cpp
+        BacktestEngine/src/data/tick_csv_data_source.cpp
+        BacktestEngine/src/execution/portfolio.cpp
+        BacktestEngine/src/orderbook/orderbook.cpp
+        BacktestEngine/src/strategy/mean_reversion_strategy.cpp
+        BacktestEngine/src/strategy/sma_strategy.cpp
+        BacktestEngine/src/strategy/ma_crossover_strategy.cpp
+        BacktestEngine/src/strategy/sma.cpp
+        BacktestEngine/src/market_maker/market_maker.cpp
+        BacktestEngine/src/risk/risk_manager.cpp
+        BacktestEngine/src/providers/local/local_register.cpp
+    )
+
+    add_library(truetest_shared SHARED ${TRUETEST_LIB_SOURCES})
+    set_target_properties(truetest_shared PROPERTIES
+        OUTPUT_NAME truetest
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
+        VERSION 0.1.0
+        SOVERSION 0
+    )
+    target_include_directories(truetest_shared PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/BacktestEngine/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/BacktestEngine/src/api"
+    )
+    target_link_libraries(truetest_shared PRIVATE
+        nlohmann_json::nlohmann_json libzstd_static
+    )
+    target_compile_definitions(truetest_shared PRIVATE TRUETEST_API_BUILDING)
+
+    if(ENABLE_SQLITE)
+        target_sources(truetest_shared PRIVATE
+            BacktestEngine/src/data/sqlite_store.cpp)
+        target_link_libraries(truetest_shared PRIVATE SQLite3::SQLite3)
+        target_compile_definitions(truetest_shared PRIVATE HAS_SQLITE)
+    endif()
+
+    if(NOT MSVC)
+        target_compile_options(truetest_shared PRIVATE -Wall -Wextra)
+    endif()
+
+    install(TARGETS truetest_shared
+        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin)
+    install(FILES BacktestEngine/src/api/truetest_api.h
+        DESTINATION include/truetest)
+endif()
+
 # ── Unit Tests (GoogleTest) ──────────────────────────────────────────────────
 option(BUILD_TESTS "Build unit tests" OFF)
+option(ENABLE_BENCHMARKS "Build performance benchmarks (Google Benchmark)" OFF)
 
 if(BUILD_TESTS)
     enable_testing()
@@ -312,6 +375,8 @@ if(BUILD_TESTS)
         tests/test_thread_preset.cpp
         tests/test_threading_correctness.cpp
         tests/test_engine_streaming.cpp
+        tests/test_engine_integration.cpp
+        tests/test_golden_regression.cpp
         tests/test_event_json.cpp
         tests/test_binance_parser.cpp
         tests/test_provider_transport.cpp
@@ -344,7 +409,7 @@ if(BUILD_TESTS)
     target_compile_definitions(truetest_tests PRIVATE
         TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures"
     )
-    target_link_libraries(truetest_tests PRIVATE GTest::gtest libzstd_static)
+    target_link_libraries(truetest_tests PRIVATE GTest::gtest libzstd_static nlohmann_json::nlohmann_json)
 
     if(NOT MSVC)
         target_compile_options(truetest_tests PRIVATE -Wall -Wextra)
@@ -382,6 +447,53 @@ if(BUILD_TESTS)
     gtest_discover_tests(truetest_cli_tests WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 # ──────────────────────────-───────────────────────────────────────────────────
+
+# ── Performance benchmarks (Google Benchmark) ───────────────────────────────
+if(ENABLE_BENCHMARKS)
+    include(FetchContent)
+    FetchContent_Declare(
+        benchmark
+        GIT_REPOSITORY https://github.com/google/benchmark.git
+        GIT_TAG        v1.8.5
+    )
+    set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_WERROR OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(benchmark)
+
+    add_executable(truetest_benchmarks
+        benchmarks/bench_main.cpp
+        # Production sources needed to link the engine (no main.cpp)
+        BacktestEngine/src/core/engine.cpp
+        BacktestEngine/src/analytics/analytics.cpp
+        BacktestEngine/src/data/data_loader.cpp
+        BacktestEngine/src/data/csv_data_source.cpp
+        BacktestEngine/src/data/binary_cache_source.cpp
+        BacktestEngine/src/data/tick_csv_data_source.cpp
+        BacktestEngine/src/execution/portfolio.cpp
+        BacktestEngine/src/orderbook/orderbook.cpp
+        BacktestEngine/src/strategy/mean_reversion_strategy.cpp
+        BacktestEngine/src/strategy/sma_strategy.cpp
+        BacktestEngine/src/strategy/ma_crossover_strategy.cpp
+        BacktestEngine/src/strategy/sma.cpp
+        BacktestEngine/src/market_maker/market_maker.cpp
+        BacktestEngine/src/risk/risk_manager.cpp
+        BacktestEngine/src/providers/local/local_register.cpp
+    )
+    target_include_directories(truetest_benchmarks PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/BacktestEngine/src"
+    )
+    target_link_libraries(truetest_benchmarks PRIVATE
+        benchmark::benchmark libzstd_static nlohmann_json::nlohmann_json
+    )
+
+    if(ENABLE_SQLITE)
+        target_sources(truetest_benchmarks PRIVATE
+            BacktestEngine/src/data/sqlite_store.cpp)
+        target_link_libraries(truetest_benchmarks PRIVATE SQLite3::SQLite3)
+        target_compile_definitions(truetest_benchmarks PRIVATE HAS_SQLITE)
+    endif()
+endif()
 
 # ── ThreadSanitizer ──────────────────────────────────────────────────────────
 if(ENABLE_TSAN AND NOT MSVC)

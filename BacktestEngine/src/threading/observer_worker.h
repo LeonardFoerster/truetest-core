@@ -22,6 +22,8 @@ public:
         , analytics_(initial_cash, rolling_window, risk_free_rate)
         , halt_flag_(halt_flag) {}
 
+    const char* worker_name() const override { return "observer"; }
+
     void on_event(const event_pointer& ev) override
     {
         events_processed_.fetch_add(1, std::memory_order_relaxed);

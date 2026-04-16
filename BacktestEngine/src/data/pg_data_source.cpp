@@ -15,24 +15,41 @@
 #include <algorithm>
 
 pqxx::connection& PgDataSource::establish_connection() {
-    try {
-        std::cout << "pgpass.conf file path:" << std::endl;
-        std::string password_file;
-        std::cin >> password_file;
+    std::cout << "pgpass.conf file path:" << std::endl;
+    std::string password_file;
+    std::cin >> password_file;
 
-        std::string conn_string =
-            "dbname=storage user=leonard host=localhost port=5433 "
-            "passfile='" + password_file + "'";
+    std::string conn_string =
+        "dbname=storage user=leonard host=localhost port=5433 "
+        "passfile='" + password_file + "'";
 
-        connection_.emplace(conn_string);
+    retry_config cfg;
+    cfg.max_attempts = 5;
+    cfg.initial_delay = std::chrono::milliseconds(1000);
+    cfg.max_delay = std::chrono::milliseconds(16000);
+    cfg.on_retry = [](unsigned attempt, std::exception_ptr ex) {
+        std::cerr << "PostgreSQL connection attempt " << attempt << " failed";
+        if (ex) {
+            try { std::rethrow_exception(ex); }
+            catch (const std::exception& e) { std::cerr << ": " << e.what(); }
+            catch (...) {}
+        }
+        std::cerr << ", retrying...\n";
+    };
 
-        std::cout << "Connected to database: " << connection_->dbname() << std::endl;
-        return *connection_;
-    } catch (const std::exception& e) {
-        std::cerr << "Connection error: " << e.what() << std::endl;
+    bool ok = retry_with_backoff([&]() {
         connection_.reset();
-        throw;
+        connection_.emplace(conn_string);
+        return connection_->is_open();
+    }, cfg);
+
+    if (!ok || !connection_ || !connection_->is_open()) {
+        connection_.reset();
+        throw std::runtime_error("PostgreSQL connection failed after retries");
     }
+
+    std::cout << "Connected to database: " << connection_->dbname() << std::endl;
+    return *connection_;
 }
 
 void PgDataSource::test_connection() {

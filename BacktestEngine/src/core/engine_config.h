@@ -104,6 +104,10 @@ struct engine_config
     unsigned fill_rng_seed = 42;        // RNG seed for fill model
     double spread_step_factor = 0.0001; // spread step = mid * factor
 
+    // N1: worker error tolerance. After this many consecutive on_event()
+    // exceptions a worker sets the halt flag. 0 = halt on first error.
+    unsigned max_consecutive_worker_errors = 5;
+
     // Helper
     bool is_threaded() const { return threading != thread_preset::inline_mode; }
 };

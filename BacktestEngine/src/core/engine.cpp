@@ -360,10 +360,11 @@ void engine::start_workers()
     halt_flag_.store(false, std::memory_order_release);
     worker_failed_.store(false, std::memory_order_release);
 
-    // Helper to wire shared failure flag and spin policy to any worker
+    // Helper to wire shared failure flag, spin policy, and error tolerance to any worker
     auto wire_failure = [this](Worker& w) {
         w.set_failure_flag(worker_failed_);
         w.set_spin_policy(config_.worker_spin_policy);
+        w.set_max_consecutive_errors(config_.max_consecutive_worker_errors);
     };
 
 #ifdef HAS_WEB_UI
@@ -2453,6 +2454,8 @@ void engine::run_replay(const std::string& log_path,
 
             if (order_opt)
             {
+                if (!primary_strategy_name_.empty())
+                    order_opt->set_strategy_name(primary_strategy_name_);
                 order_opt->set_order_id(OrderIdGenerator::next());
                 order_opt->set_earliest_eligible_ts(mkt.get_timestamp());
                 auto order_ptr = order_pool_.acquire(*order_opt);
@@ -2498,6 +2501,7 @@ void engine::run_replay(const std::string& log_path,
                     }
                 }
             }
+            dispatch_extras_on_market(mkt, mkt.get_timestamp(), event_count);
             break;
         }
         case event_type::tick: {
@@ -2510,6 +2514,8 @@ void engine::run_replay(const std::string& log_path,
             auto order_opt = strategy_->on_tick(te);
             if (order_opt)
             {
+                if (!primary_strategy_name_.empty())
+                    order_opt->set_strategy_name(primary_strategy_name_);
                 order_opt->set_order_id(OrderIdGenerator::next());
                 order_opt->set_earliest_eligible_ts(te.get_timestamp());
                 auto adapter = get_adapter(te.get_symbol());

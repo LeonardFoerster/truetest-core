@@ -2,6 +2,7 @@
 #ifdef HAS_LIVE_DATA
 
 #include "../core/event.h"
+#include "../utils/retry.h"
 
 #include <atomic>
 #include <chrono>

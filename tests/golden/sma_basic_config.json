@@ -1,0 +1,10 @@
+{
+  "strategy": "sma",
+  "sma_period": 5,
+  "seed": 424242,
+  "initial_balance": 10000.0,
+  "mm_initial_price": 100.0,
+  "mm_initial_orders": 40,
+  "threading": "inline",
+  "comment": "Fixture config for tests/test_golden_regression.cpp — do not edit without regenerating sma_basic_expected.json."
+}

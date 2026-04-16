@@ -1,0 +1,13 @@
+{
+  "buy_and_hold_return": 0.0475247524752475,
+  "cumulative_return": 0.011,
+  "final_equity": 10110.0,
+  "max_drawdown": 3.3696729435084243,
+  "profit_factor": 0.0,
+  "sharpe_ratio": 0.0,
+  "sortino_ratio": 0.0,
+  "total_fills": 3,
+  "total_orders": 12,
+  "total_trades": 1,
+  "win_rate": 0.0
+}

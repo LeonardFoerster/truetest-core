@@ -2,6 +2,7 @@
 #ifdef HAS_BINANCE
 
 #include "providers/transport.h"
+#include "utils/retry.h"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -199,7 +200,6 @@ public:
 
         // Reset state
         stopped_ = false;
-        reconnect_attempts_ = 0;
 
         // Reconnect
         ioc_.restart();
@@ -221,29 +221,24 @@ private:
     std::atomic<bool> open_{false};
     std::atomic<bool> stopped_{false};
 
-    int reconnect_attempts_ = 0;
-    static constexpr int MAX_RECONNECTS = 5;
+    static constexpr unsigned MAX_RECONNECTS = 5;
 
     bool reconnect()
     {
-        if (reconnect_attempts_ >= MAX_RECONNECTS)
-        {
-            std::cerr << "BinanceTransport: max reconnect attempts reached\n";
-            return false;
-        }
-        reconnect_attempts_++;
+        retry_config cfg;
+        cfg.max_attempts = MAX_RECONNECTS;
+        cfg.initial_delay = std::chrono::milliseconds(1000);
+        cfg.max_delay = std::chrono::milliseconds(16000);
+        cfg.on_retry = [](unsigned attempt, std::exception_ptr) {
+            std::cerr << "BinanceTransport: reconnecting (attempt "
+                      << attempt << "/" << MAX_RECONNECTS << ")\n";
+        };
 
-        // Exponential backoff: 1s, 2s, 4s, 8s, 16s
-        int delay_ms = 1000 * (1 << (reconnect_attempts_ - 1));
-        std::cerr << "BinanceTransport: reconnecting in " << delay_ms << "ms (attempt "
-                  << reconnect_attempts_ << "/" << MAX_RECONNECTS << ")\n";
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
-
-        // Re-create io_context and try again
-        ioc_.restart();
-        ws_.reset();
-        return open();
+        return retry_with_backoff([this]() {
+            ioc_.restart();
+            ws_.reset();
+            return open();
+        }, cfg);
     }
 };
 

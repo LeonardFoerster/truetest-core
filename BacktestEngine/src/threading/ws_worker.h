@@ -5,6 +5,7 @@
 #include "ring_buffer.h"
 #include "http_handler.h"
 #include "../core/event_json.h"
+#include "../utils/log/logger.h"
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -327,6 +328,8 @@ public:
             io_thread_.join();
     }
 
+    const char* worker_name() const override { return "websocket"; }
+
     void on_event(const event_pointer& ev) override
     {
         auto json = event_json::event_to_json(ev);
@@ -600,12 +603,40 @@ private:
         session->send(std::string(buf));
     }
 
+    // N2: Check that a string value contains no control characters (< 0x20
+    // except tab). Prevents injection of newlines, null bytes, etc.
+    static bool has_control_chars(const std::string& s)
+    {
+        for (unsigned char c : s)
+            if (c < 0x20 && c != '\t') return true;
+        return false;
+    }
+
     // Parse an incoming JSON command from a client.
     // Hand-rolled extraction (no JSON library, consistent with project conventions).
     // Validates field presence and types per command schema before enqueuing.
     void on_client_message(const std::string& raw,
                            std::shared_ptr<WsSession> session = {})
     {
+        // N2: Message length limit (4 KB)
+        static constexpr std::size_t MAX_MSG_LEN = 4096;
+        if (raw.size() > MAX_MSG_LEN)
+        {
+            if (session)
+                send_error(session, "message too large (max 4096 bytes)");
+            LOG_WARN("ws", "rejected: message too large (%zu bytes)", raw.size());
+            return;
+        }
+
+        // N2: Reject messages containing null bytes
+        if (raw.find('\0') != std::string::npos)
+        {
+            if (session)
+                send_error(session, "message contains null bytes");
+            LOG_WARN("ws", "rejected: message contains null bytes");
+            return;
+        }
+
         ws_command cmd;
 
         // Extract string field from JSON
@@ -619,16 +650,26 @@ private:
             return raw.substr(pos, end - pos);
         };
 
-        // Extract numeric field from JSON
-        auto extract_num = [&](const char* key) -> double {
+        // Extract numeric field from JSON — returns NaN if the field is present
+        // but not a valid number, 0.0 if absent.
+        auto extract_num = [&](const char* key, bool& valid) -> double {
+            valid = true;
             std::string search = std::string("\"") + key + "\":";
             auto pos = raw.find(search);
             if (pos == std::string::npos) return 0.0;
             pos += search.size();
             // Skip whitespace
             while (pos < raw.size() && (raw[pos] == ' ' || raw[pos] == '\t')) pos++;
+            if (pos >= raw.size()) { valid = false; return 0.0; }
+            // Reject non-numeric starts (but allow '-' for negatives)
+            char first = raw[pos];
+            if (first != '-' && first != '.' && !(first >= '0' && first <= '9'))
+            {
+                valid = false;
+                return 0.0;
+            }
             try { return std::stod(raw.substr(pos)); }
-            catch (...) { return 0.0; }
+            catch (...) { valid = false; return 0.0; }
         };
 
         // Check for "command" or "cmd" field (accept both)
@@ -652,44 +693,77 @@ private:
             return;
         }
 
+        // N2: Reject command names with control characters
+        if (has_control_chars(cmd.command))
+        {
+            if (session) send_error(session, "command contains control characters");
+            LOG_WARN("ws", "rejected: command contains control characters");
+            return;
+        }
+
         // Per-command schema validation
         if (cmd.command == "order")
         {
             cmd.side = extract("side");
             cmd.order_type = extract("type");
-            cmd.quantity = extract_num("quantity");
-            cmd.price = extract_num("price");
+            bool qty_valid = true, price_valid = true;
+            cmd.quantity = extract_num("quantity", qty_valid);
+            cmd.price = extract_num("price", price_valid);
 
+            if (!qty_valid)
+            {
+                if (session) send_error(session, "order: 'quantity' is not a valid number");
+                LOG_WARN("ws", "rejected order: non-numeric quantity");
+                return;
+            }
+            if (!price_valid)
+            {
+                if (session) send_error(session, "order: 'price' is not a valid number");
+                LOG_WARN("ws", "rejected order: non-numeric price");
+                return;
+            }
             if (cmd.side.empty())
             {
                 if (session) send_error(session, "order: missing required field 'side'");
-                std::fprintf(stderr, "[ws] rejected order: missing 'side'\n");
+                LOG_WARN("ws", "rejected order: missing 'side'");
+                return;
+            }
+            if (has_control_chars(cmd.side))
+            {
+                if (session) send_error(session, "order: 'side' contains control characters");
+                LOG_WARN("ws", "rejected order: side contains control characters");
                 return;
             }
             if (cmd.side != "buy" && cmd.side != "sell")
             {
                 if (session) send_error(session, "order: 'side' must be 'buy' or 'sell'");
-                std::fprintf(stderr, "[ws] rejected order: invalid side '%s'\n", cmd.side.c_str());
+                LOG_WARN("ws", "rejected order: invalid side '%s'", cmd.side.c_str());
                 return;
             }
             if (cmd.quantity <= 0.0)
             {
                 if (session) send_error(session, "order: 'quantity' must be > 0");
-                std::fprintf(stderr, "[ws] rejected order: invalid quantity\n");
+                LOG_WARN("ws", "rejected order: invalid quantity");
                 return;
             }
             if (cmd.order_type.empty())
                 cmd.order_type = "market";  // default
+            if (has_control_chars(cmd.order_type))
+            {
+                if (session) send_error(session, "order: 'type' contains control characters");
+                LOG_WARN("ws", "rejected order: type contains control characters");
+                return;
+            }
             if (cmd.order_type != "market" && cmd.order_type != "limit")
             {
                 if (session) send_error(session, "order: 'type' must be 'market' or 'limit'");
-                std::fprintf(stderr, "[ws] rejected order: invalid type '%s'\n", cmd.order_type.c_str());
+                LOG_WARN("ws", "rejected order: invalid type '%s'", cmd.order_type.c_str());
                 return;
             }
             if (cmd.order_type == "limit" && cmd.price <= 0.0)
             {
                 if (session) send_error(session, "order: limit order requires 'price' > 0");
-                std::fprintf(stderr, "[ws] rejected order: limit without price\n");
+                LOG_WARN("ws", "rejected order: limit without price");
                 return;
             }
         }
@@ -699,7 +773,13 @@ private:
             if (cmd.timeframe.empty())
             {
                 if (session) send_error(session, "set_timeframe: missing required field 'timeframe'");
-                std::fprintf(stderr, "[ws] rejected set_timeframe: missing 'timeframe'\n");
+                LOG_WARN("ws", "rejected set_timeframe: missing 'timeframe'");
+                return;
+            }
+            if (has_control_chars(cmd.timeframe))
+            {
+                if (session) send_error(session, "set_timeframe: 'timeframe' contains control characters");
+                LOG_WARN("ws", "rejected set_timeframe: control characters");
                 return;
             }
         }
@@ -709,7 +789,13 @@ private:
             if (cmd.value.empty())
             {
                 if (session) send_error(session, "set_symbol: missing required field 'value'");
-                std::fprintf(stderr, "[ws] rejected set_symbol: missing 'value'\n");
+                LOG_WARN("ws", "rejected set_symbol: missing 'value'");
+                return;
+            }
+            if (has_control_chars(cmd.value))
+            {
+                if (session) send_error(session, "set_symbol: 'value' contains control characters");
+                LOG_WARN("ws", "rejected set_symbol: control characters");
                 return;
             }
         }
@@ -719,7 +805,13 @@ private:
             if (cmd.value.empty())
             {
                 if (session) send_error(session, "set_strategy: missing required field 'value'");
-                std::fprintf(stderr, "[ws] rejected set_strategy: missing 'value'\n");
+                LOG_WARN("ws", "rejected set_strategy: missing 'value'");
+                return;
+            }
+            if (has_control_chars(cmd.value))
+            {
+                if (session) send_error(session, "set_strategy: 'value' contains control characters");
+                LOG_WARN("ws", "rejected set_strategy: control characters");
                 return;
             }
         }
@@ -773,7 +865,8 @@ private:
             // Commands like start, pause, stop, query_fills, backfill — no extra fields required
             cmd.timeframe = extract("timeframe");
             cmd.value = extract("value");
-            cmd.price = extract_num("price");
+            bool price_ok = true;
+            cmd.price = extract_num("price", price_ok);
         }
 
         std::lock_guard<std::mutex> lk(cmd_mu_);

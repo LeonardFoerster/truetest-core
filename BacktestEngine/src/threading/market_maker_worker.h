@@ -21,6 +21,8 @@ public:
     MarketMakerWorker(unsigned seed, MMRing& order_ring)
         : mm_(seed), order_ring_(order_ring) {}
 
+    const char* worker_name() const override { return "market_maker"; }
+
     void on_event(const event_pointer& ev) override
     {
         events_processed_.fetch_add(1, std::memory_order_relaxed);

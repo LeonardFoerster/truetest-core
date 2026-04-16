@@ -35,6 +35,10 @@ orderbook pipeline.
 23. [Analytics & Reporting](#23-analytics--reporting)
 24. [Examples](#24-examples)
 25. [Observability & Debugging](#25-observability--debugging)
+26. [Error Handling & Resilience](#26-error-handling--resilience)
+27. [Testing](#27-testing)
+28. [Performance Benchmarks](#28-performance-benchmarks)
+29. [Embedding: C API and Python Bindings](#29-embedding-c-api-and-python-bindings)
 
 ---
 
@@ -114,6 +118,8 @@ are compiled in.
 | `ENABLE_LIVE_DATA`     | OFF     | `HAS_LIVE_DATA`      | Generic WebSocket data source for custom feeds               | Boost.System            |
 | `ENABLE_DEBUG`         | OFF     | `HAS_DEBUG`          | Performance instrumentation (stage timer, memory sampler)    | Abseil (auto-fetched)   |
 | `BUILD_TESTS`          | OFF     | —                    | Build GoogleTest unit test binary (`truetest_tests`)         | GoogleTest (auto-fetched) |
+| `ENABLE_BENCHMARKS`    | OFF     | —                    | Build Google Benchmark performance suite (`truetest_benchmarks`) | google/benchmark (auto-fetched) |
+| `BUILD_SHARED_LIB`     | OFF     | —                    | Build `libtruetest` shared library with C API for embedding  | (none)                  |
 
 ### Sanitizer flags
 
@@ -690,6 +696,37 @@ Strategies self-register via the `REGISTER_STRATEGY("name", factory)` macro
 All strategies expose their indicator values (via `get_indicator_values()`) for
 use in analytics and the WebSocket UI.
 
+### Running Multiple Strategies Simultaneously
+
+`--strategy` accepts a comma-separated list of registered strategy names. The
+first entry becomes the **primary** strategy; subsequent entries run alongside
+it and share the same portfolio, orderbook registry, and risk manager.
+
+```bash
+./build/truetest --provider local --path market_data.csv \
+  --strategy mean-reversion,sma,ma-crossover \
+  --param period=20 --param fast_period=10 --param slow_period=50
+```
+
+Behaviour:
+
+- On every market/tick event, the primary strategy is dispatched first, then
+  each additional strategy in order.
+- Orders emitted by each strategy are tagged with the originating strategy
+  name via `order_event::strategy_name`. Fills inherit the tag, which enables
+  per-strategy attribution in analytics and the event log.
+- SL/TP stops (`check_stops()`) are evaluated independently for every
+  strategy — each manages its own position state via `set_position_open()`.
+- `--param key=value` flags apply to **all** strategies in the list. Strategies
+  silently ignore parameters they don't recognize, so the same flag set can
+  target a heterogeneous mix.
+- Risk checks, fees, and the orderbook are global; combined exposure is what
+  the risk manager sees, not per-strategy exposure.
+
+Multi-strategy mode works in batch, streaming, tick, and replay loops. The
+primary strategy's name is also passed to `engine::set_primary_strategy_name()`
+so its own orders are tagged for attribution.
+
 ---
 
 ## 16. Data Sources
@@ -769,6 +806,39 @@ Fields:
 
 The source includes automatic reconnection with exponential backoff, heartbeat
 keepalive, and sequence number gap detection.
+
+### Multi-Symbol Backtesting
+
+The engine supports running a single strategy (or a multi-strategy ensemble)
+across multiple symbols in the same run. Every symbol gets its own orderbook
+automatically via the `OrderbookRegistry`, and bars/ticks are routed to the
+correct book by their `symbol` field.
+
+For the **local** provider, comma-separated `--path` loads several CSV files
+into the same `data_handler`:
+
+```bash
+./build/truetest --provider local \
+  --path btcusdt.csv,ethusdt.csv,solusdt.csv \
+  --strategy mean-reversion
+```
+
+Each file is parsed in sequence, then all bars are stably sorted by their
+`timestamp` column so events interleave chronologically across symbols. The
+engine's main loop iterates the merged timeline and dispatches each bar to
+the strategy; strategies that keep per-symbol state (e.g. SMA windows in
+`unordered_map<string, ...>`) transparently track every symbol they see.
+
+Notes:
+
+- The risk manager, portfolio, analytics, and fee model are **global** — all
+  symbols share the same cash, exposure, and PnL accounting.
+- Per-symbol analytics attribution is available via `fill_event::get_symbol()`
+  in the event log.
+- For streaming providers (Binance), multiple symbols require subscribing to
+  multiple websocket streams; currently only a single `--symbol` is honored
+  in streaming mode. Use batch mode with multi-file `--path` for multi-symbol
+  backtests today.
 
 ---
 
@@ -1701,3 +1771,363 @@ With those flags:
 Rotation is opt-in: leaving `--log-max-size 0` (the default) preserves the
 old unbounded behavior, which is fine for short-lived backtests but not for
 long-running live or shadow sessions.
+
+---
+
+## 26. Error Handling & Resilience
+
+### 26.1 Graceful worker recovery (N1)
+
+Worker threads no longer halt the engine on the first exception. When a
+worker's `on_event()` handler throws, the error is caught, logged via the
+structured logger, and the consecutive error counter is incremented. The
+worker continues processing the next event. Only when
+`max_consecutive_worker_errors` consecutive failures occur without a
+successful event in between does the worker set the halt flag and stop.
+
+The default is 5 consecutive errors. Configure via `engine_config`:
+
+```cpp
+engine_config cfg;
+cfg.max_consecutive_worker_errors = 10;  // more tolerant
+```
+
+A successful `on_event()` call resets the consecutive error counter to zero.
+Total error counts are available via `Worker::error_count()`. Each worker
+subclass provides a human-readable name through `worker_name()` which
+appears in log messages (e.g., `[WARN] [logging] on_event exception ...`).
+
+### 26.2 WebSocket input sanitization (N2)
+
+All incoming WebSocket commands are sanitized at the system boundary before
+any processing occurs:
+
+- **Message length**: messages exceeding 4 KB are rejected with an error
+  response and logged.
+- **Null bytes**: messages containing `\0` are rejected.
+- **Control characters**: string fields (command, side, type, timeframe,
+  value) are checked for ASCII control characters (< 0x20, except tab).
+  Messages with control characters in string fields are rejected.
+- **Numeric validation**: numeric fields (quantity, price) are validated to
+  contain actual numeric data. Non-numeric values are rejected with a
+  descriptive error rather than silently defaulting to 0.
+
+All rejections produce a structured error response to the client:
+
+```json
+{"type": "error", "data": {"message": "message too large (max 4096 bytes)", "source": "ws_validator"}}
+```
+
+Rejections are also logged via the structured logger under the `ws`
+component.
+
+### 26.3 Unified connection retry (N3)
+
+A shared retry-with-exponential-backoff utility lives in
+`BacktestEngine/src/utils/retry.h`. All external connection points use this
+utility instead of implementing their own retry logic:
+
+```cpp
+#include "utils/retry.h"
+
+// Simple form
+bool ok = retry_with_backoff(
+    []() { return try_connect(); },  // returns true on success
+    5,                                // max_attempts
+    std::chrono::milliseconds(1000),  // initial_delay
+    std::chrono::milliseconds(30000)  // max_delay
+);
+
+// With logging callback
+retry_config cfg;
+cfg.max_attempts = 5;
+cfg.initial_delay = std::chrono::milliseconds(1000);
+cfg.max_delay = std::chrono::milliseconds(16000);
+cfg.on_retry = [](unsigned attempt, std::exception_ptr ex) {
+    std::cerr << "Retry attempt " << attempt << "\n";
+};
+bool ok = retry_with_backoff([]() { return try_connect(); }, cfg);
+```
+
+Components using the shared utility:
+
+| Component                | File                              | Behavior                          |
+|--------------------------|-----------------------------------|-----------------------------------|
+| Binance WebSocket        | `binance_transport.h`             | 5 attempts, 1s → 16s backoff     |
+| Binance combined stream  | `binance_combined_transport.h`    | 5 attempts, 1s → 16s backoff     |
+| Generic WebSocket source | `websocket_data_source.cpp`       | 10 attempts, configurable delays  |
+| PostgreSQL               | `pg_data_source.cpp`              | 5 attempts, 1s → 16s backoff     |
+
+The callable should return `true` on success, `false` on failure. If the
+callable throws, the exception counts as a failure and is forwarded to the
+`on_retry` callback. After all attempts are exhausted, the last exception
+is rethrown.
+
+---
+
+## 27. Testing
+
+TrueTest ships with three layers of automated tests, all built by a single
+CMake flag:
+
+```bash
+cmake -B build -DBUILD_TESTS=ON
+cmake --build build --target truetest_tests
+./build/truetest_tests
+```
+
+### 27.1 Unit tests
+
+Per-component correctness tests: orderbook matching, ring buffer semantics,
+indicators (SMA/EMA/RSI/Bollinger), portfolio accounting, strategies, object
+pool, risk manager, etc. These live in `tests/test_*.cpp` and are the
+majority of the suite.
+
+Filter by suite or test name:
+
+```bash
+./build/truetest_tests --gtest_filter='Orderbook.*'
+./build/truetest_tests --gtest_filter='*Sharpe*'
+```
+
+### 27.2 Integration tests — `tests/test_engine_integration.cpp`
+
+End-to-end tests that exercise the full event pipeline
+(`market_event → strategy → order → orderbook → fill → portfolio`) by
+calling `engine::run()` on synthetic data and inspecting the resulting
+`portfolio` / `Analytics` state. Unlike unit tests, these do not mock the
+event loop; they construct a real `engine_config` programmatically.
+
+Covered scenarios:
+
+| Test                                          | What it verifies                                            |
+|-----------------------------------------------|-------------------------------------------------------------|
+| `SmaPipelineIsDeterministicWithFixedSeed`     | Two runs with the same seed produce bit-identical reports    |
+| `OrderProducesFillAndUpdatesAnalytics`        | Strategy-emitted orders reach the orderbook and produce fills, portfolio/analytics update |
+| `RiskDrawdownLimitHaltsEngine`                | `risk_limits.max_drawdown` breach halts the run before data is exhausted |
+
+All three rely on `engine_config.seed` (K2) for determinism and
+`thread_preset::inline_mode` to avoid cross-thread non-determinism.
+
+### 27.3 Golden-file regression — `tests/test_golden_regression.cpp`
+
+Runs a deterministic backtest against a checked-in fixture CSV and diffs
+the resulting metrics against a committed golden JSON file. Any code change
+that alters backtest outputs will fail this test, surfacing unintended
+behavior drift.
+
+Fixture layout under `tests/golden/`:
+
+| File                         | Purpose                                           |
+|------------------------------|---------------------------------------------------|
+| `sma_basic.csv`              | 30 OHLCV bars for symbol `GOLD`, oscillating ~$100–106 |
+| `sma_basic_config.json`      | Human-readable record of the engine configuration  |
+| `sma_basic_expected.json`    | Golden metrics — compared against on every test run |
+
+Metrics compared (via `EXPECT_NEAR` with `1e-6` tolerance for floats,
+`EXPECT_EQ` for counts): `final_equity`, `cumulative_return`,
+`max_drawdown`, `sharpe_ratio`, `sortino_ratio`, `win_rate`,
+`profit_factor`, `buy_and_hold_return`, `total_trades`, `total_orders`,
+`total_fills`.
+
+**Regenerating after an intentional behavior change:**
+
+```bash
+TRUETEST_REGENERATE_GOLDEN=1 ./build/truetest_tests \
+    --gtest_filter='GoldenRegression.*'
+git diff tests/golden/sma_basic_expected.json   # review the delta
+git add tests/golden/sma_basic_expected.json
+```
+
+Before each assertion run, the test also runs the same pipeline twice and
+asserts byte-identical outputs — a prerequisite for any meaningful golden
+comparison. If that pre-check fails, non-determinism has crept in and the
+golden comparison is disabled until fixed.
+
+---
+
+## 28. Performance Benchmarks
+
+Google Benchmark suite for the hot-path components. Opt-in via
+`-DENABLE_BENCHMARKS=ON`. Builds a separate binary `truetest_benchmarks`
+that does not ship in release packaging.
+
+```bash
+cmake -B build -DENABLE_BENCHMARKS=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target truetest_benchmarks
+./build/truetest_benchmarks
+./build/truetest_benchmarks --benchmark_filter=Orderbook
+./build/truetest_benchmarks --benchmark_format=json > bench.json
+```
+
+Benchmarks (`benchmarks/bench_main.cpp`):
+
+| Benchmark                          | What it measures                                           |
+|------------------------------------|------------------------------------------------------------|
+| `BM_Orderbook_InsertCancel`        | Non-crossing insert + cancel round trip (flat-array price levels + node pool) |
+| `BM_Orderbook_Match`               | Aggressive crossing order against a pre-seeded ask ladder  |
+| `BM_RingBuffer_PushPop`            | SPSC `RingBuffer` single-thread push+pop cycle             |
+| `BM_EventJson_Market`              | `market_event` → JSON (`snprintf` hot path)                |
+| `BM_EventJson_Fill`                | `fill_event` → JSON                                        |
+| `BM_SMA_Update`                    | `simple_moving_average::update()` per tick                  |
+| `BM_Engine_Throughput_100k`        | End-to-end engine run over 100 000 synthetic bars (bars/sec) |
+
+The full-engine benchmark uses `thread_preset::inline_mode` so the number
+reflects single-threaded hot-path throughput; enable a worker preset in
+`engine_config` to measure multithreaded scaling.
+
+Always build with `-DCMAKE_BUILD_TYPE=Release` for meaningful numbers —
+the default Debug profile is ~100× slower. If Google Benchmark warns about
+CPU scaling, pin frequency with `cpupower frequency-set -g performance`
+before capturing baselines.
+
+---
+
+## 29. Embedding: C API and Python Bindings
+
+TrueTest ships a stable `extern "C"` API and a ctypes-based Python wrapper so
+the engine can be driven from host languages without linking the full C++
+interface. The native surface lives in
+`BacktestEngine/src/api/truetest_api.h`; the Python module is
+`python/truetest.py`.
+
+### 29.1 Building `libtruetest`
+
+```bash
+cmake -B build -DBUILD_SHARED_LIB=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target truetest_shared
+# produces build/libtruetest.so (linux), build/libtruetest.dylib (macOS),
+# or build/truetest.dll (windows).
+```
+
+`BUILD_SHARED_LIB` is independent of the CLI target — the two can be built
+together or separately. The shared library uses the same production sources
+as `truetest`, plus `BacktestEngine/src/api/truetest_api.cpp`. Symbol
+visibility defaults to hidden; only `tt_*` functions are exported.
+
+Installing via `cmake --install build` drops the library into `lib/` and the
+public header into `include/truetest/truetest_api.h`.
+
+### 29.2 C API reference
+
+All functions use `extern "C"` linkage and opaque handles. Errors are signaled
+via `NULL` return values or non-zero status codes; the last message is
+available through `tt_last_error()` (thread-local).
+
+| Function                              | Returns                                               | Notes                               |
+|---------------------------------------|-------------------------------------------------------|-------------------------------------|
+| `tt_version()`                        | `const char*` — library version (`"0.1.0"`)           | Always non-null                     |
+| `tt_create_engine(config_json)`       | `tt_engine_handle` or `NULL` on error                 | `config_json` is a UTF-8 JSON string |
+| `tt_run(handle)`                      | `0` on success, non-zero on error                     | Synchronous; blocks until done      |
+| `tt_get_results(handle)`              | Heap `const char*` JSON or `NULL`                     | Must be freed with `tt_free_string` |
+| `tt_free_string(str)`                 | void                                                  | `NULL`-safe                          |
+| `tt_destroy(handle)`                  | void                                                  | `NULL`-safe                          |
+| `tt_last_error()`                     | Thread-local `const char*` (possibly empty)           | Valid until the next API call       |
+
+**Config JSON schema** (fields optional unless noted):
+
+| Field               | Type     | Default           | Purpose                                                    |
+|---------------------|----------|-------------------|------------------------------------------------------------|
+| `data_path`         | string   | — (**required**)  | Path to OHLCV CSV (consumed by `CsvDataSource`)            |
+| `strategy`          | string   | `"mean-reversion"`| Registered strategy name (`sma`, `mean-reversion`, `ma-crossover`) |
+| `initial_balance`   | number   | `10000.0`         | Starting cash                                              |
+| `seed`              | uint     | `0`               | RNG seed for deterministic replays                         |
+| `rolling_window`    | uint     | `252`             | Rolling Sharpe/drawdown window                             |
+| `risk_free_rate`    | number   | `0.0`             | Annualized risk-free rate                                  |
+| `market_aggression` | number   | `1.1`             | Market order price multiplier                              |
+| `qty_scale`         | number   | `1e8`             | Fractional-quantity scale factor                           |
+| `fill_rng_seed`     | uint     | `42`              | Fill model RNG seed                                        |
+| `spread_step_factor`| number   | `0.0001`          | Spread step (as a fraction of mid)                         |
+| `db_path`           | string   | `""`              | Optional SQLite persistence path                           |
+| `event_log_path`    | string   | `""`              | Optional binary event log path                             |
+| `params`            | object   | `{}`              | `{key: number}` pairs forwarded to `strategy.set_param()`  |
+
+**Results JSON** — the object returned from `tt_get_results()` contains the
+same headline metrics as `Analytics::export_json` plus `equity_curve`,
+`per_symbol`, and `per_strategy` breakdowns.
+
+### 29.3 Minimal C usage
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include "truetest/truetest_api.h"
+
+int main(void) {
+    const char* cfg =
+        "{\"data_path\":\"market_data.csv\","
+        "\"strategy\":\"sma\","
+        "\"params\":{\"period\":10}}";
+
+    tt_engine_handle h = tt_create_engine(cfg);
+    if (!h) { fprintf(stderr, "%s\n", tt_last_error()); return 1; }
+
+    if (tt_run(h) != 0) { fprintf(stderr, "%s\n", tt_last_error()); return 2; }
+
+    const char* json = tt_get_results(h);
+    if (json) { printf("%s\n", json); tt_free_string(json); }
+
+    tt_destroy(h);
+    return 0;
+}
+```
+
+Link with `-ltruetest` after installing, or `-L build -ltruetest` against a
+dev build.
+
+### 29.4 Python bindings
+
+The Python module is a zero-dependency ctypes wrapper — no numpy/pandas, so
+it installs cleanly on minimal targets. Install in editable mode from a
+development checkout:
+
+```bash
+cmake -B build -DBUILD_SHARED_LIB=ON
+cmake --build build --target truetest_shared
+pip install -e python/
+```
+
+Library-discovery order in `python/truetest.py`:
+
+1. The `TRUETEST_LIB` environment variable (absolute path override).
+2. Alongside the module (for wheels that bundle the `.so`).
+3. `<repo>/build/libtruetest.so` (development checkout default).
+4. The system loader's default search path.
+
+**Example:**
+
+```python
+from truetest import Engine, version
+
+print(version())  # "0.1.0"
+
+results = Engine({
+    "data_path": "market_data.csv",
+    "strategy":  "sma",
+    "seed":      1,
+    "params":    {"period": 10},
+}).run()
+
+print(results["sharpe_ratio"], results["final_equity"])
+```
+
+The `Engine` class supports the context-manager protocol, so
+`with Engine(cfg) as eng: eng.run()` guarantees the native handle is
+released even on exceptions. `Engine.close()` is idempotent.
+
+`TrueTestError` wraps any non-zero C API status, including malformed config,
+missing CSV files, unknown strategies, and runtime exceptions inside
+`engine::run()`. The exception message includes `tt_last_error()` for
+diagnostics.
+
+A runnable example lives at `python/example.py`.
+
+### 29.5 Limitations
+
+The C API intentionally covers the batch-backtest use case only. Live
+streaming, WebSocket UI, provider-based execution, replay, and multi-symbol
+runs are driven through the CLI binary — callers that need those features
+today should shell out to `truetest` rather than the shared library. The
+API surface is deliberately small so it can stay stable while the internal
+engine evolves.
+

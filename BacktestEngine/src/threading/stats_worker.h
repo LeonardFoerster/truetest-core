@@ -14,6 +14,8 @@ public:
                          std::size_t rolling_window = 252, double risk_free_rate = 0.0)
         : analytics_(initial_cash, rolling_window, risk_free_rate), snapshot_interval_(snapshot_interval) {}
 
+    const char* worker_name() const override { return "stats"; }
+
     void on_event(const event_pointer& ev) override
     {
         events_processed_.fetch_add(1, std::memory_order_relaxed);

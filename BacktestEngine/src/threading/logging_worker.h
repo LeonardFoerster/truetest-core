@@ -42,6 +42,8 @@ public:
             event_logger_->flush();
     }
 
+    const char* worker_name() const override { return "logging"; }
+
     void on_event(const event_pointer& ev) override
     {
         events_processed_.fetch_add(1, std::memory_order_relaxed);
