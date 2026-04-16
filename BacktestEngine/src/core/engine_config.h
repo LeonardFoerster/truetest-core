@@ -65,9 +65,11 @@ struct engine_config
     std::uint64_t log_max_bytes = 0;
     int log_max_files = 5;
 
-    // Provider: when set, the engine uses this provider's transport and
-    // execution adapter instead of manually wired sources.
-    // This is scaffolding — full provider-based engine wiring comes later.
+    // Provider: supplies the data feed and (optionally) the execution adapter
+    // the engine uses. This is the only supported way to attach market data
+    // and execution in live/shadow/paper modes. Backtest mode may still be
+    // run without a provider by populating data_handler directly and calling
+    // engine::run().
     std::shared_ptr<IProvider> provider;
 
     // SQLite persistence: when non-empty, trades/portfolio/equity are stored

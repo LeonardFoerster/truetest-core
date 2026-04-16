@@ -34,11 +34,6 @@
 #include "../data/sqlite_store.h"
 #endif
 
-#ifdef HAS_BINANCE
-#include "../providers/binance/hybrid_executor.h"
-#include "../providers/binance/binance_backfill.h"
-#endif
-
 #ifdef HAS_WEB_UI
 #include "../threading/ws_worker.h"
 #endif
@@ -89,11 +84,6 @@ private:
     RiskManager risk_manager_;
     MarketMaker market_maker_;
     double last_mid_price_ = 0.0;
-
-#ifdef HAS_BINANCE
-    // Hybrid executor for paper-mode limit order fills via local orderbook
-    std::shared_ptr<HybridExecutor> hybrid_exec_;
-#endif
 
     // Tick-to-bar aggregator for WebSocket UI when streaming tick data.
     // Collects ticks into OHLCV bars at tick_bar_interval_ and broadcasts

@@ -8,6 +8,8 @@
 #include <memory>
 #include <string>
 
+class engine_config;
+
 // IProvider: a venue that can deliver market data AND accept orders.
 //
 // Not all providers support both — a CSV file is data-only, a paper
@@ -18,6 +20,15 @@
 class IProvider
 {
 public:
+	// Connection lifecycle state, queryable by the engine for logging.
+	enum class lifecycle
+	{
+		closed,
+		opening,
+		open,
+		error
+	};
+
 	virtual ~IProvider() = default;
 
 	// Identity
@@ -30,6 +41,23 @@ public:
 	// Lifecycle
 	virtual bool open() = 0;
 	virtual void close() = 0;
+
+	// Current lifecycle state. Default implementation never reports any
+	// state — providers that care should track this themselves.
+	virtual lifecycle lifecycle_state() const { return lifecycle::closed; }
+
+	// Configure the provider with engine-level settings (mode, fee/fill
+	// models, backfill, execution constants). Called by the host before
+	// open(). Default implementation is a no-op; providers that embed
+	// execution adapters (e.g. BinanceProvider's hybrid executor) override
+	// this to capture the inputs they need.
+	virtual void configure(const engine_config&) {}
+
+	// Notify the provider of a mid-price update for a symbol. Used by
+	// providers that maintain internal book-seeded execution adapters;
+	// the default is a no-op.
+	virtual void on_mid_price(const std::string& /*symbol*/,
+	                          double /*mid_price*/) {}
 
 	// Data feed: returns a transport that the bridge can consume.
 	// Returns nullptr if !has_data_feed().

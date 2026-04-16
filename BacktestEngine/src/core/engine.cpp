@@ -173,28 +173,21 @@ void engine::switch_symbol(const std::string& new_symbol)
 
 std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol)
 {
-#ifdef HAS_BINANCE
-    // Paper-mode hybrid executor handles both market and limit orders
-    if (hybrid_exec_)
-        return hybrid_exec_;
-#endif
-
     auto it = execution_adapters_.find(symbol);
     if (it != execution_adapters_.end())
         return it->second;
 
-    auto ob = orderbook_registry_.get_or_create(symbol);
-
     std::shared_ptr<IExecutionAdapter> adapter;
-    if (config_.mode == engine_mode::live && config_.provider &&
-        config_.provider->get_execution_adapter())
+    if (config_.provider && config_.provider->has_execution())
     {
-        // Live mode: use provider's execution adapter (e.g. Binance REST API)
+        // Provider owns execution (live venue, hybrid paper executor,
+        // Polymarket AMM, etc.). Engine does not care which flavour.
         adapter = config_.provider->get_execution_adapter();
     }
-    else
+    if (!adapter)
     {
-        // Backtest + shadow mode: use local orderbook adapter
+        // Backtest + shadow without a provider adapter: use local orderbook.
+        auto ob = orderbook_registry_.get_or_create(symbol);
         adapter = std::make_shared<LocalBookAdapter>(
             ob, config_.fee_model, config_.fill_model,
             config_.seed != 0 ? static_cast<unsigned>(config_.seed + 2) : config_.fill_rng_seed,
@@ -809,41 +802,10 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
         }
         else if (cmd.command == "backfill")
         {
-#ifdef HAS_BINANCE
-            int count = cmd.price > 0 ? static_cast<int>(cmd.price) : 500;
-            std::string interval = cmd.value.empty() ? "1m" : cmd.value;
-
-            std::thread([this, count, interval]() {
-                std::string rest_host = "api.binance.com";
-                if (!config_.backfill_host.empty())
-                    rest_host = config_.backfill_host;
-
-                BinanceBackfill backfiller(rest_host);
-                std::string symbol = data_handler_->db_data_symbol.empty()
-                    ? "btcusdt" : data_handler_->db_data_symbol.back();
-
-                auto bars = backfiller.fetch(symbol, interval, count);
-                if (bars.empty()) return;
-
-                std::vector<std::string> jsons;
-                for (const auto& b : bars) {
-                    int64_t ts_sec = b.open_time / 1000;
-                    char buf[512];
-                    std::snprintf(buf, sizeof(buf),
-                        R"({"type":"market","data":{"time":%lld,"open":%.8g,"high":%.8g,"low":%.8g,"close":%.8g,"volume":%.2f,"indicators":{}}})",
-                        static_cast<long long>(ts_sec),
-                        b.open, b.high, b.low, b.close, b.volume);
-                    jsons.push_back(buf);
-                }
-
-                if (ws_worker_) {
-                    ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
-                    for (const auto& json : jsons) {
-                        ws_worker_->broadcast(json);
-                    }
-                }
-            }).detach();
-#endif
+            // WS-triggered backfill is a provider-specific concern. Static
+            // backfill is handled by the provider at open() time and
+            // already reaches the UI through the normal bar pipeline.
+            (void)cmd;
         }
     }
 }
@@ -1467,30 +1429,18 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     if (!preset_has_mm_worker(config_.threading))
         market_maker_.replenish(ob, last_mid_price_);
 
-#ifdef HAS_BINANCE
-    // Seed the hybrid executor's orderbook and check pending limit fills
-    if (hybrid_exec_) {
-        auto& hbook = hybrid_exec_->get_book();
-        hbook->clear();
-        double spread_step = last_mid_price_ * config_.spread_step_factor;
-        for (int i = 1; i <= 10; ++i) {
-            double bid_px = last_mid_price_ - i * spread_step;
-            double ask_px = last_mid_price_ + i * spread_step;
-            quantity qty = static_cast<quantity>(config_.qty_scale);
-            hbook->add_order(std::make_shared<order>(
-                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
-                side::buy, Price::from_double(bid_px), qty));
-            hbook->add_order(std::make_shared<order>(
-                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
-                side::sell, Price::from_double(ask_px), qty));
-        }
-        hybrid_exec_->update_mid_price(last_mid_price_);
-        hybrid_exec_->update_last_price(last_mid_price_);
-
-        // Poll for any limit fills triggered by the new price levels
-        std::vector<fill_event> limit_fills;
-        if (hybrid_exec_->poll_fills(limit_fills)) {
-            for (auto& f : limit_fills) {
+    // Let the provider react to the mid-price update (e.g. reseed a
+    // synthetic book for paper-mode limit fills) and drain any fills
+    // that result.
+    if (config_.provider && config_.provider->has_execution())
+    {
+        config_.provider->on_mid_price(mkt.get_symbol(), last_mid_price_);
+        auto adapter = get_adapter(mkt.get_symbol());
+        std::vector<fill_event> provider_fills;
+        if (adapter && adapter->poll_fills(provider_fills))
+        {
+            for (auto& f : provider_fills)
+            {
                 auto fill_ptr = fill_pool_.acquire(f);
                 portfolio_.on_fill(f);
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
@@ -1510,7 +1460,6 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
             }
         }
     }
-#endif
 
     // Process market event through strategy
     auto mkt_ptr = market_pool_.acquire(mkt);
@@ -1559,30 +1508,17 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     auto ob = orderbook_registry_.get_or_create(rec.symbol);
     market_maker_.replenish(ob, last_mid_price_);
 
-#ifdef HAS_BINANCE
-    // Seed the hybrid executor's orderbook and check pending limit fills
-    if (hybrid_exec_) {
-        auto& hbook = hybrid_exec_->get_book();
-        hbook->clear();
-        double spread_step = last_mid_price_ * config_.spread_step_factor;
-        for (int i = 1; i <= 10; ++i) {
-            double bid_px = last_mid_price_ - i * spread_step;
-            double ask_px = last_mid_price_ + i * spread_step;
-            quantity qty = static_cast<quantity>(config_.qty_scale);
-            hbook->add_order(std::make_shared<order>(
-                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
-                side::buy, Price::from_double(bid_px), qty));
-            hbook->add_order(std::make_shared<order>(
-                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
-                side::sell, Price::from_double(ask_px), qty));
-        }
-        hybrid_exec_->update_mid_price(last_mid_price_);
-        hybrid_exec_->update_last_price(last_mid_price_);
-
-        // Poll for any limit fills triggered by the new price levels
-        std::vector<fill_event> limit_fills;
-        if (hybrid_exec_->poll_fills(limit_fills)) {
-            for (auto& f : limit_fills) {
+    // Let the provider react to the tick-derived mid price and poll
+    // any fills that result.
+    if (config_.provider && config_.provider->has_execution())
+    {
+        config_.provider->on_mid_price(rec.symbol, last_mid_price_);
+        auto adapter = get_adapter(rec.symbol);
+        std::vector<fill_event> provider_fills;
+        if (adapter && adapter->poll_fills(provider_fills))
+        {
+            for (auto& f : provider_fills)
+            {
                 auto fill_ptr = fill_pool_.acquire(f);
                 portfolio_.on_fill(f);
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
@@ -1602,7 +1538,6 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
             }
         }
     }
-#endif
 
     bool halt = false;
 
@@ -1676,72 +1611,8 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
     record_run_begin();
 #endif
 
-#ifdef HAS_BINANCE
-    // Create hybrid executor for paper-mode limit order fills
-    if (config_.provider && config_.provider->name() == "binance"
-        && config_.mode != engine_mode::live)
-    {
-        auto binance_exec = std::dynamic_pointer_cast<BinanceExecutor>(
-            config_.provider->get_execution_adapter());
-        if (binance_exec) {
-            auto book = std::make_shared<orderbook>();
-            hybrid_exec_ = std::make_shared<HybridExecutor>(
-                binance_exec, book, config_.fee_model, config_.fill_model);
-        }
-    }
-#endif
-
     start_workers();
     pin_event_loop_thread();
-
-#if defined(HAS_BINANCE) && defined(HAS_WEB_UI)
-    if (config_.backfill_bars > 0
-        && config_.provider && config_.provider->name() == "binance")
-    {
-        std::string interval = config_.backfill_interval;
-        if (interval.empty()) interval = "1m";
-
-        // Determine REST host (match testnet if configured)
-        std::string rest_host = "api.binance.com";
-        if (!config_.backfill_host.empty()) {
-            rest_host = config_.backfill_host;
-        }
-
-        BinanceBackfill backfiller(rest_host);
-        std::string symbol = data_handler_->db_data_symbol.empty()
-            ? "btcusdt" : data_handler_->db_data_symbol.back();
-
-        std::cerr << "  Backfilling " << config_.backfill_bars
-                  << " bars for " << symbol << " (" << interval << ")...\n";
-
-        auto bars = backfiller.fetch(symbol, interval, config_.backfill_bars);
-
-        if (!bars.empty()) {
-            std::cerr << "  Backfill: " << bars.size() << " bars loaded\n";
-
-            for (const auto& b : bars) {
-                int64_t ts_sec = b.open_time / 1000;
-
-                char buf[512];
-                std::snprintf(buf, sizeof(buf),
-                    R"({"type":"market","data":{"time":%lld,"open":%.8g,"high":%.8g,"low":%.8g,"close":%.8g,"volume":%.2f,"indicators":{}}})",
-                    static_cast<long long>(ts_sec),
-                    b.open, b.high, b.low, b.close, b.volume);
-
-                if (bar_history_.size() >= MAX_BAR_HISTORY)
-                    bar_history_.erase(bar_history_.begin());
-                bar_history_.push_back(buf);
-            }
-
-            if (ws_worker_) {
-                ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
-                for (const auto& json : bar_history_) {
-                    ws_worker_->broadcast(json);
-                }
-            }
-        }
-    }
-#endif
 
     const auto start = std::chrono::high_resolution_clock::now();
     std::size_t event_count = 0;
@@ -1830,21 +1701,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     record_run_begin();
 #endif
 
-#ifdef HAS_BINANCE
-    // Create hybrid executor for paper-mode limit order fills
-    if (config_.provider && config_.provider->name() == "binance"
-        && config_.mode != engine_mode::live)
-    {
-        auto binance_exec = std::dynamic_pointer_cast<BinanceExecutor>(
-            config_.provider->get_execution_adapter());
-        if (binance_exec) {
-            auto book = std::make_shared<orderbook>();
-            hybrid_exec_ = std::make_shared<HybridExecutor>(
-                binance_exec, book, config_.fee_model, config_.fill_model);
-        }
-    }
-#endif
-
     // Create tick-to-bar aggregator for WebSocket UI charting
 #ifdef HAS_WEB_UI
     tick_aggregator_ = std::make_unique<BarAggregator>(
@@ -1856,54 +1712,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 
     start_workers();
     pin_event_loop_thread();
-
-#if defined(HAS_BINANCE) && defined(HAS_WEB_UI)
-    if (config_.backfill_bars > 0
-        && config_.provider && config_.provider->name() == "binance")
-    {
-        std::string interval = config_.backfill_interval;
-        if (interval.empty()) interval = "1m";
-
-        std::string rest_host = "api.binance.com";
-        if (!config_.backfill_host.empty()) {
-            rest_host = config_.backfill_host;
-        }
-
-        BinanceBackfill backfiller(rest_host);
-        std::string symbol = data_handler_->db_data_symbol.empty()
-            ? "btcusdt" : data_handler_->db_data_symbol.back();
-
-        std::cerr << "  Backfilling " << config_.backfill_bars
-                  << " bars for " << symbol << " (" << interval << ")...\n";
-
-        auto bars = backfiller.fetch(symbol, interval, config_.backfill_bars);
-
-        if (!bars.empty()) {
-            std::cerr << "  Backfill: " << bars.size() << " bars loaded\n";
-
-            for (const auto& b : bars) {
-                int64_t ts_sec = b.open_time / 1000;
-
-                char buf[512];
-                std::snprintf(buf, sizeof(buf),
-                    R"({"type":"market","data":{"time":%lld,"open":%.8g,"high":%.8g,"low":%.8g,"close":%.8g,"volume":%.2f,"indicators":{}}})",
-                    static_cast<long long>(ts_sec),
-                    b.open, b.high, b.low, b.close, b.volume);
-
-                if (bar_history_.size() >= MAX_BAR_HISTORY)
-                    bar_history_.erase(bar_history_.begin());
-                bar_history_.push_back(buf);
-            }
-
-            if (ws_worker_) {
-                ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
-                for (const auto& json : bar_history_) {
-                    ws_worker_->broadcast(json);
-                }
-            }
-        }
-    }
-#endif
 
     const auto start = std::chrono::high_resolution_clock::now();
     std::size_t event_count = 0;

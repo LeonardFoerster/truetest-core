@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -flto -Wl,--dependency-file=CMakeFiles/truetest_cli_tests.dir/link.d CMakeFiles/truetest_cli_tests.dir/tests/test_cli.cpp.o -o truetest_cli_tests  lib/libgtest.a lib/libgtest_main.a lib/libgtest.a

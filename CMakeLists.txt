@@ -383,6 +383,7 @@ if(BUILD_TESTS)
         tests/test_data_bridge.cpp
         tests/test_provider_event.cpp
         tests/test_provider_registry.cpp
+        tests/test_provider_engine_wiring.cpp
         # Production sources (no main.cpp)
         BacktestEngine/src/core/engine.cpp
         BacktestEngine/src/analytics/analytics.cpp

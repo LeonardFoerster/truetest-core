@@ -943,6 +943,10 @@ int main(int argc, char* argv[])
             }
         }
 
+        // Hand the engine config to the provider so it can wire fees, fills,
+        // backfill, and mode-dependent execution before opening.
+        provider->configure(prov_cfg);
+
         // Open the provider (connects WebSocket, initializes transport, etc.)
         if (provider->has_data_feed() && !provider->open())
         {

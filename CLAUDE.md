@@ -4,9 +4,10 @@
 
 TrueTest — a modular C++17 engine that starts as a backtesting platform but is
 designed to be reused as the foundation for different deployments: pure backtesting,
-Polymarket execution, MetaTrader EA, or anything else that processes market data
-through a strategy and orderbook pipeline. Each deployment attaches different
-"blocks" (storage backends, execution targets, data feeds) to the same core.
+Binance spot execution, Polymarket AMM, MetaTrader EA, or anything else that
+processes market data through a strategy and orderbook pipeline. Each deployment
+attaches different "blocks" (storage backends, execution targets, data feeds) to
+the same core.
 
 ## Project structure
 
@@ -14,52 +15,80 @@ through a strategy and orderbook pipeline. Each deployment attaches different
 hft-engine/
 ├── CMakeLists.txt                      # build config, multiple opt-in flags
 ├── vcpkg.json                          # only matters when ENABLE_POSTGRESQL=ON
+├── Dockerfile / .dockerignore          # containerized build
+├── start.sh                            # launcher script
+├── .github/workflows/ci.yml            # CI pipeline
 ├── market_data.csv                     # sample OHLCV data
-├── web/
-│   └── index.html                      # live WebSocket dashboard (single-file)
+├── docs/
+│   ├── flowchart.md
+│   ├── 01-persistent-state.md … 05-historical-backfill.md
+│   └── refactor/00-overview.md … 15-keep-as-is.md   # roadmap / refactor plans
+├── web/                                # React 19 + TypeScript + Vite + Tailwind SPA
+│   ├── src/
+│   │   ├── App.tsx, main.tsx
+│   │   ├── components/ (Chart, Sidebar, BottomPanel, TopBar, Toast)
+│   │   ├── contexts/WebSocketContext.tsx
+│   │   ├── services/websocket.ts
+│   │   └── store/ (Engine, Market, OrderBook, Portfolio, Fill, Analytics)
+│   ├── index.html                      # Vite entry
+│   └── index.legacy.html               # old single-file dashboard (kept for reference)
+├── tests/                              # 39 test files, ~310 cases (GoogleTest)
 └── BacktestEngine/
-    ├── docs/
-    │   └── multithreading.md           # threading design doc (implemented)
     └── src/
         ├── main.cpp                    # entry point: TUI, CLI, provider, replay modes
+        ├── api/
+        │   └── truetest_api.h/.cpp     # C API for embedding (BUILD_SHARED_LIB)
         ├── core/
         │   ├── engine.h/.cpp           # event loop orchestrator (batch + streaming)
-        │   ├── engine_config.h         # engine_config struct (mode, fees, threading, risk, WS)
+        │   ├── engine_config.h         # engine_config struct (mode, fees, threading,
+        │   │                           #   risk, WS, SQLite, checkpoint, backfill,
+        │   │                           #   execution constants, log rotation, provider)
         │   ├── event.h                 # event types: market, order, fill, tick
-        │   ├── event_json.h            # snprintf-based JSON for all event types
-        │   └── event_log.h             # binary event log (write + replay)
+        │   ├── event_json.h            # snprintf-based JSON for event types
+        │   ├── event_log.h             # binary event log (write + replay, zstd)
+        │   └── checkpoint.h            # portfolio-state snapshot format
         ├── data/
-        │   ├── data_source.h           # IDataSource interface (pure virtual)
+        │   ├── data_source.h           # IDataSource interface
         │   ├── csv_data_source.h/.cpp  # CSV OHLCV backend (default, zero deps)
         │   ├── tick_csv_data_source.h/.cpp # tick-level CSV backend
         │   ├── binary_cache_source.h/.cpp # caching decorator for any IDataSource
         │   ├── pg_data_source.h/.cpp   # PostgreSQL backend (#ifdef HAS_POSTGRESQL)
         │   ├── websocket_data_source.h/.cpp # WebSocket feed (#ifdef HAS_LIVE_DATA)
+        │   ├── sqlite_store.h/.cpp     # trade/portfolio/equity persistence (#ifdef HAS_SQLITE)
         │   ├── data_handler.h          # in-memory OHLCV column vectors
         │   └── data_loader.cpp         # load_from_csv + load_into_queue impl
         ├── execution/
-        │   ├── execution_adapter.h     # IExecutionAdapter, LocalBookAdapter, ExchangeAdapter stub
-        │   ├── order_tracker.h         # OrderTracker: order lifecycle state tracking
-        │   ├── portfolio.h/.cpp        # position tracking, PnL
-        │   ├── fee_model.h             # IFeeModel (Zero, Fixed, Tiered)
-        │   └── latency_model.h         # execution latency simulation
+        │   ├── execution_adapter.h    # IExecutionAdapter, LocalBookAdapter
+        │   ├── order_tracker.h        # lifecycle state tracking
+        │   ├── portfolio.h/.cpp       # position tracking, PnL
+        │   ├── fee_model.h            # IFeeModel (Zero, Fixed, Tiered)
+        │   └── latency_model.h        # execution latency simulation
         ├── orderbook/
         │   ├── orderbook.h/.cpp        # price-time priority matching engine
         │   ├── orderbook_registry.h    # multi-symbol orderbook management
-        │   └── fill_model.h            # partial fill probability modeling
+        │   └── fill_model.h            # partial-fill probability modeling
         ├── strategy/
         │   ├── strategy_interface.h    # IStrategy interface
+        │   ├── strategy_registry.h     # factory + REGISTER_STRATEGY macro
+        │   ├── strategy_factory.h
         │   ├── mean_reversion_strategy.h/.cpp
         │   ├── sma_strategy.h/.cpp
         │   └── ma_crossover_strategy.h/.cpp
+        ├── indicator/
+        │   ├── sma.h
+        │   ├── ema.h
+        │   ├── rsi.h
+        │   └── bollinger.h
         ├── analytics/
         │   ├── analytics.h/.cpp        # Welford online algo, Sharpe/Sortino/drawdown/win rate
-        │   └── bar_aggregator.h        # tick-to-bar aggregation
+        │   ├── bar_aggregator.h        # tick-to-bar aggregation
+        │   └── shadow_tracker.h        # shadow-vs-exchange fill comparison (shadow mode)
         ├── risk/
         │   └── risk_manager.h/.cpp     # pre/post-fill checks, halt signaling
         ├── threading/
         │   ├── thread_preset.h         # 5 presets: inline, light, standard, full, extended
         │   ├── thread_config.h         # CPU affinity detection + pinning
+        │   ├── spin_policy.h           # spin / yield / adaptive backoff
         │   ├── worker.h                # Worker base class
         │   ├── ring_buffer.h           # lock-free SPSC ring buffer
         │   ├── logging_worker.h        # event logging (text + binary sinks)
@@ -68,9 +97,10 @@ hft-engine/
         │   ├── observer_worker.h       # combined observer (light preset)
         │   ├── risk_stats_worker.h     # combined risk+stats (standard preset)
         │   ├── market_maker_worker.h   # MM replenish orders (extended preset)
-        │   └── ws_worker.h             # WebSocket UI broadcaster (#ifdef HAS_WEB_UI)
+        │   ├── ws_worker.h             # WebSocket UI broadcaster (#ifdef HAS_WEB_UI)
+        │   └── http_handler.h          # HTTP helpers for WS handshake / control
         ├── providers/
-        │   ├── provider.h              # IProvider interface
+        │   ├── provider.h              # IProvider (lifecycle, configure, on_mid_price)
         │   ├── provider_registry.h     # factory registry + REGISTER_PROVIDER macro
         │   ├── transport.h             # IDataTransport (batch + streaming)
         │   ├── parser.h                # IDataParser<T> template
@@ -78,12 +108,28 @@ hft-engine/
         │   ├── provider_event.h        # normalized event variant (bar, tick, l2, status)
         │   ├── provider_convert.h      # type conversion helpers
         │   ├── provider_sink.h         # event sink functions
+        │   ├── prepend_transport.h     # decorator that injects lines before delegating
         │   ├── local/                  # file-based data (CSV bar + tick)
+        │   │   ├── local_provider.h
+        │   │   ├── local_register.cpp
+        │   │   ├── file_transport.h
+        │   │   └── csv_parser.h
         │   ├── binance/                # live spot market (#ifdef HAS_BINANCE)
+        │   │   ├── binance_provider.h
+        │   │   ├── binance_register.cpp
+        │   │   ├── binance_transport.h
+        │   │   ├── binance_parser.h
+        │   │   ├── binance_executor.h         # paper + live REST order submission
+        │   │   ├── binance_auth.h             # HMAC-SHA256 signing
+        │   │   ├── binance_rest_client.h      # signed REST client
+        │   │   ├── binance_backfill.h         # historical klines via REST
+        │   │   ├── hybrid_executor.h          # paper-market + book-limit fills
+        │   │   ├── binance_combined_transport.h / _parser.h  # multi-stream
+        │   │   ├── binance_depth_parser.h     # L2 depth
+        │   │   ├── binance_recorder.h         # record live WS to file
+        │   │   └── binance_replay_transport.h # replay recorded WS file
         │   ├── metatrader/             # planned: EA bridge via named pipe/socket
         │   └── polymarket/             # planned: AMM execution
-        ├── indicator/
-        │   └── sma.h                   # simple moving average
         ├── market_maker/
         │   └── market_maker.h/.cpp     # liquidity seeding
         ├── types/
@@ -91,13 +137,24 @@ hft-engine/
         │   ├── price.h                 # fixed-point price representation
         │   ├── object_pool.h           # pre-allocated event pool
         │   └── aliases.h               # type aliases
-        └── debug/                      # stage timer, memory sampler, ring stats (#ifdef HAS_DEBUG)
+        ├── utils/
+        │   ├── log/logger.h
+        │   └── retry.h
+        └── debug/                      # (#ifdef HAS_DEBUG)
+            ├── stage_timer.h/.cpp
+            ├── memory_info.h/.cpp
+            ├── hardware_info.h/.cpp
+            ├── thread_stats.h
+            ├── ring_stats.h
+            ├── copy_tracker.h
+            ├── debug_log.h
+            └── debug_report.h/.cpp     # aggregate end-of-run report
 ```
 
 ## Build
 
 ```bash
-# Default — no external dependencies, CSV-only
+# Default — CSV + SQLite persistence on, no network deps
 cmake -B build
 cmake --build build
 
@@ -105,11 +162,17 @@ cmake --build build
 cmake -B build \
   -DENABLE_POSTGRESQL=ON \    # PostgreSQL via libpqxx (auto-fetches vcpkg)
   -DENABLE_WEB_UI=ON \        # WebSocket dashboard (requires Boost headers)
-  -DENABLE_BINANCE=ON \       # Binance live streaming (Boost.Beast + OpenSSL)
+  -DENABLE_BINANCE=ON \       # Binance live streaming + REST execution (Boost.Beast + OpenSSL)
   -DENABLE_LIVE_DATA=ON \     # Generic WebSocket data source
-  -DENABLE_DEBUG=ON \          # Performance instrumentation (Abseil)
-  -DENABLE_TSAN=ON \           # ThreadSanitizer
-  -DBUILD_TESTS=ON             # GoogleTest suite (283 tests, 2 known crashers in EngineStreaming tick tests)
+  -DENABLE_DEBUG=ON \         # Performance instrumentation (Abseil)
+  -DENABLE_SQLITE=OFF \       # Disable SQLite persistence (default ON)
+  -DENABLE_TSAN=ON \          # ThreadSanitizer (mutually exclusive with ASAN/UBSAN)
+  -DENABLE_ASAN=ON \          # AddressSanitizer
+  -DENABLE_UBSAN=ON \         # UndefinedBehaviorSanitizer
+  -DENABLE_BENCHMARKS=ON \    # Google Benchmark suite
+  -DBUILD_SHARED_LIB=ON \     # libtruetest shared library + C API (src/api/truetest_api.h)
+  -DBUILD_TESTS=ON            # GoogleTest suite (~310 cases; a few EngineStreaming
+                              #   streaming tests crash at teardown — known issue)
 cmake --build build
 
 # Run
@@ -117,9 +180,12 @@ cmake --build build
 ./build/truetest --provider local --path market_data.csv --strategy sma
 ./build/truetest --provider binance --symbol btcusdt --stream trade --web-ui
 ./build/truetest --replay event_log.bin
+./build/truetest --provider binance --symbol btcusdt --stream kline_1m \
+  --live --api-key KEY --api-secret SECRET                # REAL orders (confirmation prompt)
 ```
 
-The binary is `build/truetest`.
+The binary is `build/truetest`. The shared library (when `BUILD_SHARED_LIB=ON`)
+is `build/libtruetest.so` with its C header at `BacktestEngine/src/api/truetest_api.h`.
 
 ## Architecture decisions
 
@@ -130,15 +196,29 @@ self-register via `REGISTER_PROVIDER()` macro at static init. Each provider owns
 - `IDataParser<T>` — how to parse it (CSV, JSON, binary)
 - `IExecutionAdapter` — how to submit orders (local orderbook, exchange API)
 
+`IProvider` also exposes `configure(engine_config&)`, `on_mid_price(sym, px)`,
+and `lifecycle_state()` so provider-specific wiring (backfill, hybrid executor
+book-seeding, WebSocket state) stays out of the core engine.
+
 `DataBridge<T>` orchestrates transport + parser for both batch and streaming modes.
+`PrependTransport` is a decorator that yields a fixed set of lines before
+delegating to an inner transport (used by `BinanceProvider` to inject historical
+backfill bars as synthetic kline JSON, invisible to the engine).
+
+### Strategies self-register too
+`REGISTER_STRATEGY()` in `strategy/strategy_registry.h` mirrors the provider
+registry. `sma`, `mean-reversion`, and `ma-crossover` register at static init.
+`main.cpp` supports multi-strategy mode via `--strategy sma,mean-reversion`.
 
 ### Storage is pluggable via IDataSource
 All data backends implement `IDataSource::load_data(shared_ptr<data_handler>)`.
 The core engine never touches storage directly.
 
-### PostgreSQL is opt-in, not required
-Gated behind `-DENABLE_POSTGRESQL=ON`. The `#ifdef HAS_POSTGRESQL` guard controls
-both compilation and TUI menu visibility.
+### Persistence backends are opt-in
+- PostgreSQL via `-DENABLE_POSTGRESQL=ON` (`HAS_POSTGRESQL`) — auto-fetches vcpkg
+  if `pg_config` is not on PATH.
+- SQLite via `-DENABLE_SQLITE=ON` (default on, `HAS_SQLITE`) — trades, portfolio,
+  and equity snapshots persisted to the path given by `--db-path`.
 
 ### BinaryCacheSource is a decorator
 Wraps any `IDataSource` and caches results to a binary file.
@@ -146,10 +226,10 @@ Wraps any `IDataSource` and caches results to a binary file.
 ### Engine owns no data loading
 `engine::run()` expects `data_handler` to already be populated. Loading happens
 before `run()` in `main.cpp`. Streaming mode (`run_streaming()`) receives records
-via `DataBridge` callback.
+via `DataBridge` callback. Replay mode (`run_replay()`) reads a binary event log.
 
 ### Event-driven pipeline
-`market_event → IStrategy → order_event → orderbook → fill_event → portfolio`
+`market_event → IStrategy → order_event → orderbook / provider_adapter → fill_event → portfolio`
 Hot-path events use pre-allocated object pools to avoid heap pressure.
 
 ### Multithreaded worker architecture
@@ -165,14 +245,30 @@ buffers (65536 slots). Five auto-detected presets scale with physical core count
 | extended | 8+ | + MarketMakerWorker |
 
 CPU affinity pinning via `sched_setaffinity` (Linux). Each worker holds a shadow
-copy of portfolio/analytics to avoid data races.
+copy of portfolio/analytics to avoid data races. Worker spin policy is
+configurable (`spin`, `yield`, `adaptive`).
+
+### Portfolio checkpointing
+When `checkpoint_path` is set, the engine writes a binary snapshot of portfolio
+state every N events (default 10k). Setting `resume_checkpoint_path` at
+construction pre-populates the portfolio from the referenced file, enabling
+resume-after-crash workflows.
 
 ### WebSocket UI (bidirectional)
-When `--web-ui` is passed, a Boost.Beast WebSocket server (default port 8765)
-broadcasts all events as JSON to connected browsers. `web/index.html` renders a
-live dashboard with equity curve, fills, positions, and analytics. Clients can
-send JSON commands back to the engine (start, pause, stop, order, set_timeframe,
-set_symbol, set_strategy) via `ws_command` structs polled by the engine.
+When `--web-ui` is passed, a Boost.Beast WebSocket server (default port 8765,
+per-message deflate negotiated) broadcasts all events as JSON to connected
+browsers. The frontend under `web/` is a React 19 + TypeScript + Vite + Tailwind
+SPA using `lightweight-charts`; build with `npm run build` in `web/` and serve
+`web/dist/`. The legacy single-file dashboard is preserved as
+`web/index.legacy.html`. Clients send JSON commands back to the engine (start,
+pause, stop, order, set_timeframe, set_symbol, set_strategy) via `ws_command`
+structs polled by the engine.
+
+### C API for embedding
+`src/api/truetest_api.h` exposes an opaque handle + JSON-config surface
+(`tt_create_engine`, `tt_run`, `tt_get_results`, `tt_last_error`, `tt_destroy`)
+intended for Python (ctypes/cffi) or Node.js (ffi-napi) host processes. Built
+as `libtruetest.so` when `-DBUILD_SHARED_LIB=ON`.
 
 ## Implemented providers
 
@@ -180,29 +276,46 @@ set_symbol, set_strategy) via `ws_command` structs polled by the engine.
 File-based CSV provider. Supports bar (OHLCV) and tick formats. Batch mode only.
 
 ### Binance (ENABLE_BINANCE=ON)
-Live WebSocket streaming from Binance spot market. Supports `trade` and `kline_1m`
-streams. Parser is pure C++ (no JSON library). Executor has paper mode (working)
-and live mode (stub — REST API submission not implemented).
+Live WebSocket streaming from Binance spot market. Supports `trade`, `kline_*`,
+combined, and depth (L2) streams. Parser is pure C++ (no JSON library on the
+hot path — only nlohmann/json is linked, and only for static config files).
+Historical-bar backfill via REST, injected into the live stream through
+`PrependTransport`.
+
+Execution modes:
+- **Paper** (default): orders logged, fills simulated from last price.
+- **Hybrid**: paper market orders + local-book limit fills (default for
+  backtest/shadow/paper modes). Owns synthetic book-seeding around the mid
+  price.
+- **Live**: signed REST order submission against `/api/v3/order` via
+  `BinanceRestClient`. `poll_live_fills()` polls order status for fills. Cancel
+  and modify are wired. Requires `--live` flag, `--api-key`, `--api-secret`,
+  and explicit "YES" confirmation.
+
+Live WS recording + replay: `BinanceRecorder` captures a live stream to file;
+`BinanceReplayTransport` replays it as a transport — useful for deterministic
+testing against real exchange data.
 
 ## Not yet implemented
 
-- **Binance live execution** — REST API order submission. Paper mode works, live
-  mode is a stub in `binance_executor.h`.
 - **MetaTrader provider** — EA bridge via named pipe or socket. README stub only
   at `providers/metatrader/`.
 - **Polymarket provider** — WebSocket/API client for AMM. README stub only at
   `providers/polymarket/`.
 - **Risk resume** — `halt_flag_` stops the engine but there's no resume channel.
-- **ExchangeAdapter** — generic live exchange execution stub in `execution_adapter.h`.
+- **Generic ExchangeAdapter** — Binance is the only live venue adapter today.
 
 ## Conventions
 
 - C++17 standard, enforced via `CMAKE_CXX_STANDARD_REQUIRED`
-- Interfaces are prefixed with `I` (`IDataSource`, `IStrategy`)
+- Interfaces are prefixed with `I` (`IDataSource`, `IStrategy`, `IProvider`)
 - New optional dependencies get their own `ENABLE_*` CMake flag + `HAS_*` define
-- The core engine must always compile with zero external dependencies
+- The core engine must always compile with zero external dependencies; no
+  `HAS_*` guards are allowed in `core/engine.{h,cpp}` or `core/engine_config.h`
 - Source files that depend on an optional library are wrapped in `#ifdef HAS_*`
   and added via `target_sources()` inside the CMake `if()` block
-- No external JSON library — snprintf for serialization, hand-rolled extraction for parsing
+- JSON on the hot path is hand-rolled (snprintf for serialization, string
+  extraction for parsing). `nlohmann/json` is linked only for static config
+  files in `main.cpp` and the C API
 - Lock-free SPSC rings for all inter-thread communication
 - Object pools for hot-path event allocation
