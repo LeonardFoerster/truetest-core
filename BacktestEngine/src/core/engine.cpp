@@ -1364,6 +1364,7 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
         // SL/TP for this extra strategy (tagged with its name).
         if (auto sl_tp = s->check_stops(mkt.get_symbol(), mkt.get_close(), ts))
         {
+            sl_tp->set_recv_ns(mkt.get_recv_ns());
             sl_tp->set_strategy_name(additional_strategy_names_[i]);
             bool halt = false;
             route_order(*sl_tp, ts, event_count, halt);
@@ -1373,6 +1374,7 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
         // New orders from the strategy's on_market handler.
         if (auto o = s->on_market(mkt))
         {
+            o->set_recv_ns(mkt.get_recv_ns());
             o->set_strategy_name(additional_strategy_names_[i]);
             bool halt = false;
             route_order(*o, ts, event_count, halt);
@@ -1393,6 +1395,7 @@ void engine::dispatch_extras_on_tick(const tick_event& te,
 
         if (auto sl_tp = s->check_stops(te.get_symbol(), te.get_price(), ts))
         {
+            sl_tp->set_recv_ns(te.get_recv_ns());
             sl_tp->set_strategy_name(additional_strategy_names_[i]);
             bool halt = false;
             route_order(*sl_tp, ts, event_count, halt);
@@ -1401,6 +1404,7 @@ void engine::dispatch_extras_on_tick(const tick_event& te,
 
         if (auto o = s->on_tick(te))
         {
+            o->set_recv_ns(te.get_recv_ns());
             o->set_strategy_name(additional_strategy_names_[i]);
             bool halt = false;
             route_order(*o, ts, event_count, halt);
@@ -1421,6 +1425,8 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         rec.close,
         rec.volume
     );
+    mkt.set_recv_ns(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
 
     last_mid_price_ = mkt.get_close();
 
@@ -1464,6 +1470,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     // Process market event through strategy
     auto mkt_ptr = market_pool_.acquire(mkt);
     auto order_opt = strategy_->on_market(mkt);
+    if (order_opt) order_opt->set_recv_ns(mkt.get_recv_ns());
     log_event(mkt);
     publish_event(mkt_ptr);
     if (!config_.is_threaded())
@@ -1500,6 +1507,8 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     else if (rec.side == data_tick_side::ask) ts = tick_side::ask;
 
     tick_event te(rec.timestamp, rec.symbol, rec.price, rec.quantity, ts);
+    te.set_recv_ns(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
 
     last_mid_price_ = rec.price;
 
@@ -1583,6 +1592,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     auto sl_tp_order = strategy_->check_stops(rec.symbol, rec.price, rec.timestamp);
     if (sl_tp_order)
     {
+        sl_tp_order->set_recv_ns(te.get_recv_ns());
         if (!primary_strategy_name_.empty())
             sl_tp_order->set_strategy_name(primary_strategy_name_);
         route_order(*sl_tp_order, rec.timestamp, event_count, halt);
@@ -1593,6 +1603,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     auto order_opt = strategy_->on_tick(te);
     if (order_opt)
     {
+        order_opt->set_recv_ns(te.get_recv_ns());
         if (!primary_strategy_name_.empty())
             order_opt->set_strategy_name(primary_strategy_name_);
         route_order(*order_opt, rec.timestamp, event_count, halt);
@@ -1853,6 +1864,8 @@ void engine::run()
             data_handler_->db_data_close_value[i],
             data_handler_->db_data_volume_value[i]
         );
+        mkt.set_recv_ns(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
 
         auto sim_time = mkt.get_timestamp();
         const auto& symbol = mkt.get_symbol();
@@ -1942,6 +1955,7 @@ void engine::run()
 
         if (order_opt)
         {
+            order_opt->set_recv_ns(mkt.get_recv_ns());
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
             route_order(*order_opt, sim_time, event_count, halt_requested);
@@ -2102,7 +2116,10 @@ void engine::run_tick_data()
     // Uses route_order() so bar-originated orders get proper stop/latency handling
     BarAggregator bar_agg(std::chrono::seconds(1), [&](const market_event& bar)
     {
+        int64_t bar_recv_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
         auto bar_ptr = market_pool_.acquire(bar);
+        bar_ptr->set_recv_ns(bar_recv_ns);
         auto order_opt = strategy_->on_market(bar);
         publish_event(bar_ptr);
         if (!config_.is_threaded())
@@ -2110,6 +2127,7 @@ void engine::run_tick_data()
 
         if (order_opt)
         {
+            order_opt->set_recv_ns(bar_recv_ns);
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
             route_order(*order_opt, bar.get_timestamp(), event_count, halt_requested);
@@ -2152,6 +2170,8 @@ void engine::run_tick_data()
         else if (tick.side == data_tick_side::ask) ts = tick_side::ask;
 
         tick_event te(tick.timestamp, tick.symbol, tick.price, tick.quantity, ts);
+        te.set_recv_ns(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
 
         // Publish tick event
         auto tick_ptr = tick_pool_.acquire(te);
@@ -2165,6 +2185,7 @@ void engine::run_tick_data()
         auto sl_tp_order = strategy_->check_stops(tick.symbol, tick.price, tick.timestamp);
         if (sl_tp_order)
         {
+            sl_tp_order->set_recv_ns(te.get_recv_ns());
             if (!primary_strategy_name_.empty())
                 sl_tp_order->set_strategy_name(primary_strategy_name_);
             route_order(*sl_tp_order, tick.timestamp, event_count, halt_requested);
@@ -2175,6 +2196,7 @@ void engine::run_tick_data()
         auto order_opt = strategy_->on_tick(te);
         if (order_opt)
         {
+            order_opt->set_recv_ns(te.get_recv_ns());
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
             route_order(*order_opt, tick.timestamp, event_count, halt_requested);

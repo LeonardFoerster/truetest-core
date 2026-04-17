@@ -95,6 +95,13 @@ struct AnalyticsReport
     std::size_t total_orders = 0;
     std::size_t total_fills = 0;
 
+    // Tick-to-trade latency (time from engine observing the bar/tick that
+    // triggered a signal to the fill being recorded). Nanoseconds.
+    double avg_tick_to_trade_ns = 0.0;
+    int64_t min_tick_to_trade_ns = 0;
+    int64_t max_tick_to_trade_ns = 0;
+    std::size_t tick_to_trade_samples = 0;
+
     // Exposure
     double time_in_market_pct = 0.0;
     double avg_holding_period_ms = 0.0;
@@ -228,4 +235,9 @@ private:
     double total_loss_ = 0.0;
     double largest_winner_ = 0.0;
     double largest_loser_ = 0.0;
+
+    // Tick-to-trade latency (nanoseconds, steady_clock monotonic)
+    welford_state tick_to_trade_ns_;
+    int64_t tick_to_trade_min_ns_ = 0;
+    int64_t tick_to_trade_max_ns_ = 0;
 };

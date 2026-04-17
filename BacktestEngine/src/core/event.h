@@ -37,11 +37,15 @@ public:
         event_type get_type() const { return type_; }
         std::chrono::system_clock::time_point get_timestamp() const { return timestamp_; }
 
+        int64_t get_recv_ns() const { return recv_ns_; }
+        void set_recv_ns(int64_t ns) { recv_ns_ = ns; }
+
         virtual std::string to_string() const { return "Event[type=" + std::to_string(static_cast<int>(type_)) + "]"; }
 
 protected:
         event_type type_;
         std::chrono::system_clock::time_point timestamp_;
+        int64_t recv_ns_ = 0;
 };
 
 

@@ -110,6 +110,22 @@ void Analytics::on_fill(const fill_event& f)
 {
     total_fills_++;
 
+    // Tick-to-trade latency: now - time we stamped the triggering market/tick event
+    if (f.get_recv_ns() > 0)
+    {
+        int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        int64_t lat = now_ns - f.get_recv_ns();
+        if (lat >= 0)
+        {
+            tick_to_trade_ns_.update(static_cast<double>(lat));
+            if (tick_to_trade_ns_.n == 1 || lat < tick_to_trade_min_ns_)
+                tick_to_trade_min_ns_ = lat;
+            if (lat > tick_to_trade_max_ns_)
+                tick_to_trade_max_ns_ = lat;
+        }
+    }
+
     // Slippage: intended vs actual fill price
     double intended = 0.0;
     auto it = order_prices_.find(f.get_order_id());
@@ -278,6 +294,12 @@ AnalyticsReport Analytics::snapshot() const
 
     // Slippage
     r.avg_slippage = (slippage_count_ > 0) ? total_slippage_ / static_cast<double>(slippage_count_) : 0.0;
+
+    // Tick-to-trade latency
+    r.tick_to_trade_samples = static_cast<std::size_t>(tick_to_trade_ns_.n);
+    r.avg_tick_to_trade_ns = tick_to_trade_ns_.mean;
+    r.min_tick_to_trade_ns = tick_to_trade_min_ns_;
+    r.max_tick_to_trade_ns = tick_to_trade_max_ns_;
 
     // Exposure
     r.time_in_market_pct = (market_events_total_ > 0)

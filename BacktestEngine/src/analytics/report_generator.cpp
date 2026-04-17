@@ -47,6 +47,17 @@ std::string format_timestamp(std::chrono::system_clock::time_point tp)
     return buf;
 }
 
+std::string format_latency_ns(double ns)
+{
+    if (ns <= 0.0 || !std::isfinite(ns)) return "-";
+    char buf[32];
+    if (ns < 1000.0)             std::snprintf(buf, sizeof(buf), "%.0f ns", ns);
+    else if (ns < 1'000'000.0)   std::snprintf(buf, sizeof(buf), "%.2f us", ns / 1000.0);
+    else if (ns < 1'000'000'000.0) std::snprintf(buf, sizeof(buf), "%.2f ms", ns / 1'000'000.0);
+    else                         std::snprintf(buf, sizeof(buf), "%.2f s",  ns / 1'000'000'000.0);
+    return buf;
+}
+
 std::string format_duration_ms(double ms)
 {
     if (ms < 0.0 || !std::isfinite(ms)) return "-";
@@ -143,6 +154,12 @@ std::string render_execution_section(const AnalyticsReport& r, const report_opti
     oss << metric("avg slippage",  fmt_fixed(r.avg_slippage, 4));
     oss << metric("total orders",  std::to_string(r.total_orders));
     oss << metric("total fills",   std::to_string(r.total_fills));
+    if (r.tick_to_trade_samples > 0)
+    {
+        oss << metric("avg tick→trade", format_latency_ns(r.avg_tick_to_trade_ns));
+        oss << metric("min tick→trade", format_latency_ns(static_cast<double>(r.min_tick_to_trade_ns)));
+        oss << metric("max tick→trade", format_latency_ns(static_cast<double>(r.max_tick_to_trade_ns)));
+    }
     return oss.str();
 }
 

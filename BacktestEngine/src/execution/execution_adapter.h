@@ -130,6 +130,7 @@ public:
                     remaining,
                     next_fill_id_++
                 );
+                pending_fills_.back().set_recv_ns(o.get_recv_ns());
             }
         }
     }
