@@ -1668,8 +1668,10 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
         auto now_report = std::chrono::steady_clock::now();
         if (now_report - last_report_time >= std::chrono::milliseconds(200))
         {
-            std::cout << "\rStreaming: " << bar_index << " bars | Trades: "
-                      << portfolio_.get_total_trades() << std::flush;
+            std::cout << "\rStreaming: " << bar_index
+                      << " bars | Fills: " << portfolio_.get_total_fills()
+                      << " | Round-trips: " << portfolio_.get_total_trades()
+                      << std::flush;
             last_report_time = now_report;
         }
     });
@@ -1753,8 +1755,10 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
         auto now_report = std::chrono::steady_clock::now();
         if (now_report - last_report_time >= std::chrono::milliseconds(200))
         {
-            std::cout << "\rStreaming: " << tick_count << " ticks | Trades: "
-                      << portfolio_.get_total_trades() << std::flush;
+            std::cout << "\rStreaming: " << tick_count
+                      << " ticks | Fills: " << portfolio_.get_total_fills()
+                      << " | Round-trips: " << portfolio_.get_total_trades()
+                      << std::flush;
             last_report_time = now_report;
         }
     });

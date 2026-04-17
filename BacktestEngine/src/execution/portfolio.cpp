@@ -11,6 +11,7 @@ portfolio::portfolio(double initial_balance)
 
 void portfolio::on_fill(const fill_event& fill)
 {
+    total_fills_++;
     auto& pos = positions_[fill.get_symbol()];
     double fill_qty = fill.get_filled_quantity();
 

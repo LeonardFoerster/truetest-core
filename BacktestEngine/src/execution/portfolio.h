@@ -31,6 +31,7 @@ public:
     double compute_quantity(double price, double risk_fraction) const;
 
     std::size_t get_total_trades() const { return total_trades_; }
+    std::size_t get_total_fills() const { return total_fills_; }
     double get_cash() const { return cash_; }
     double get_initial_balance() const { return initial_balance_; }
     double get_equity(double last_price) const;
@@ -53,4 +54,5 @@ private:
     double cash_ = 10000.0;
     std::unordered_map<std::string, position> positions_;
     std::size_t total_trades_ = 0;
+    std::size_t total_fills_ = 0;
 };
