@@ -5,6 +5,7 @@
 #include "../orderbook/fill_model.h"
 #include "fee_model.h"
 
+#include <chrono>
 #include <cmath>
 #include <memory>
 #include <random>
@@ -130,7 +131,17 @@ public:
                     remaining,
                     next_fill_id_++
                 );
+                // Hot-path tick-to-trade: stamp elapsed ns from the triggering
+                // market/tick event to this fill's construction. Read by Analytics
+                // without further clock calls, so SPSC queue/worker delay does not
+                // inflate the reported latency.
                 pending_fills_.back().set_recv_ns(o.get_recv_ns());
+                if (o.get_recv_ns() > 0)
+                {
+                    int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    pending_fills_.back().set_latency_ns(now_ns - o.get_recv_ns());
+                }
             }
         }
     }

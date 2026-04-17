@@ -110,20 +110,17 @@ void Analytics::on_fill(const fill_event& f)
 {
     total_fills_++;
 
-    // Tick-to-trade latency: now - time we stamped the triggering market/tick event
-    if (f.get_recv_ns() > 0)
+    // Tick-to-trade latency: read the hot-path stamp set when the book matched.
+    // We deliberately do not re-sample the clock here — in threaded presets
+    // this runs on the stats worker after the event crossed a ring buffer.
+    if (f.get_latency_ns() > 0)
     {
-        int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        int64_t lat = now_ns - f.get_recv_ns();
-        if (lat >= 0)
-        {
-            tick_to_trade_ns_.update(static_cast<double>(lat));
-            if (tick_to_trade_ns_.n == 1 || lat < tick_to_trade_min_ns_)
-                tick_to_trade_min_ns_ = lat;
-            if (lat > tick_to_trade_max_ns_)
-                tick_to_trade_max_ns_ = lat;
-        }
+        int64_t lat = f.get_latency_ns();
+        tick_to_trade_ns_.update(static_cast<double>(lat));
+        if (tick_to_trade_ns_.n == 1 || lat < tick_to_trade_min_ns_)
+            tick_to_trade_min_ns_ = lat;
+        if (lat > tick_to_trade_max_ns_)
+            tick_to_trade_max_ns_ = lat;
     }
 
     // Slippage: intended vs actual fill price

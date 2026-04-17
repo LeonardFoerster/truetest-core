@@ -40,12 +40,19 @@ public:
         int64_t get_recv_ns() const { return recv_ns_; }
         void set_recv_ns(int64_t ns) { recv_ns_ = ns; }
 
+        // Hot-path latency stamp (set on fill_event when the book matches,
+        // representing now - originating market/tick recv_ns). Zero on other
+        // event types.
+        int64_t get_latency_ns() const { return latency_ns_; }
+        void set_latency_ns(int64_t ns) { latency_ns_ = ns; }
+
         virtual std::string to_string() const { return "Event[type=" + std::to_string(static_cast<int>(type_)) + "]"; }
 
 protected:
         event_type type_;
         std::chrono::system_clock::time_point timestamp_;
         int64_t recv_ns_ = 0;
+        int64_t latency_ns_ = 0;
 };
 
 
