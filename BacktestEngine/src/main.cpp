@@ -817,7 +817,24 @@ int main(int argc, char* argv[])
         if (!cli_host.empty())      pcfg["host"] = cli_host;
         if (!cli_port.empty())      pcfg["port"] = cli_port;
 
-        auto provider = ProviderRegistry::instance().create(provider_name, pcfg);
+        std::shared_ptr<IProvider> provider;
+        try {
+            provider = ProviderRegistry::instance().create(provider_name, pcfg);
+        } catch (const std::exception& e) {
+            std::cerr << "  ! " << e.what() << "\n";
+            if (provider_name == "binance")
+                std::cerr << "    Example: --provider binance --symbol btcusdt --stream trade\n";
+            else if (provider_name == "local")
+                std::cerr << "    Example: --provider local --path market_data.csv\n";
+            else
+            {
+                std::cerr << "    Available providers:";
+                for (const auto& n : ProviderRegistry::instance().available())
+                    std::cerr << " " << n;
+                std::cerr << "\n";
+            }
+            return 1;
+        }
 
         // Select strategy via registry (default: mean-reversion).
         // M1: comma-separated names create multiple strategies; the first is

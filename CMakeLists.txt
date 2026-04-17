@@ -80,6 +80,8 @@ set(SOURCES
     BacktestEngine/src/main.cpp
     BacktestEngine/src/core/engine.cpp
     BacktestEngine/src/analytics/analytics.cpp
+    BacktestEngine/src/analytics/ascii_widgets.cpp
+    BacktestEngine/src/analytics/report_generator.cpp
     BacktestEngine/src/data/data_loader.cpp
     BacktestEngine/src/data/csv_data_source.cpp
     BacktestEngine/src/data/binary_cache_source.cpp
@@ -278,6 +280,8 @@ if(BUILD_SHARED_LIB)
         BacktestEngine/src/api/truetest_api.cpp
         BacktestEngine/src/core/engine.cpp
         BacktestEngine/src/analytics/analytics.cpp
+        BacktestEngine/src/analytics/ascii_widgets.cpp
+        BacktestEngine/src/analytics/report_generator.cpp
         BacktestEngine/src/data/data_loader.cpp
         BacktestEngine/src/data/csv_data_source.cpp
         BacktestEngine/src/data/binary_cache_source.cpp
@@ -361,6 +365,7 @@ if(BUILD_TESTS)
         tests/test_ring_buffer.cpp
         tests/test_bar_aggregator.cpp
         tests/test_analytics.cpp
+        tests/test_report_generator.cpp
         tests/test_market_maker.cpp
         tests/test_data_handler.cpp
         tests/test_execution_adapter.cpp
@@ -387,6 +392,8 @@ if(BUILD_TESTS)
         # Production sources (no main.cpp)
         BacktestEngine/src/core/engine.cpp
         BacktestEngine/src/analytics/analytics.cpp
+        BacktestEngine/src/analytics/ascii_widgets.cpp
+        BacktestEngine/src/analytics/report_generator.cpp
         BacktestEngine/src/data/data_loader.cpp
         BacktestEngine/src/data/csv_data_source.cpp
         BacktestEngine/src/data/binary_cache_source.cpp
@@ -467,6 +474,8 @@ if(ENABLE_BENCHMARKS)
         # Production sources needed to link the engine (no main.cpp)
         BacktestEngine/src/core/engine.cpp
         BacktestEngine/src/analytics/analytics.cpp
+        BacktestEngine/src/analytics/ascii_widgets.cpp
+        BacktestEngine/src/analytics/report_generator.cpp
         BacktestEngine/src/data/data_loader.cpp
         BacktestEngine/src/data/csv_data_source.cpp
         BacktestEngine/src/data/binary_cache_source.cpp

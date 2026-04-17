@@ -563,6 +563,14 @@ File-based CSV data. Batch mode only.
 Supports OHLCV bar format and tick format. The format is auto-detected from the
 CSV headers. Use `--format tick` to force tick parsing.
 
+```bash
+./build/truetest \
+  --provider local \
+  --path ticks.csv \
+  --format tick \
+  --strategy mean-reversion
+```
+
 ### Binance provider
 
 Live WebSocket streaming from Binance spot market. Requires
@@ -589,9 +597,81 @@ Live WebSocket streaming from Binance spot market. Requires
 Supported streams:
 - `trade` — individual trade ticks
 - `kline_1m` — 1-minute candlestick aggregation
+- `depth` — L2 orderbook depth (used by `HybridExecutor` for realistic
+  paper-mode limit fills against real exchange depth)
 
-Live mode (`--mode live --live`) is stubbed — REST API order submission is not
-yet implemented. Shadow mode (paper trading) works fully.
+### L2 depth stream (paper fills against real book)
+
+```bash
+./build/truetest \
+  --provider binance \
+  --symbol btcusdt \
+  --stream depth \
+  --mode shadow \
+  --strategy mean-reversion \
+  --backfill 200 \
+  --web-ui
+```
+
+The local orderbook receives live snapshots and incremental updates, so
+limit orders are matched against the real book instead of the synthetic
+MarketMaker-seeded one.
+
+### Recording live data to a file
+
+```bash
+./build/truetest \
+  --provider binance \
+  --symbol btcusdt \
+  --stream trade \
+  --mode shadow \
+  --strategy sma \
+  --record captured_ws.bin
+```
+
+Captures the raw WebSocket stream to `captured_ws.bin` while the engine
+runs. Useful for building deterministic fixtures from real exchange data.
+
+### Replaying a recorded WebSocket file
+
+```bash
+./build/truetest \
+  --provider binance \
+  --symbol btcusdt \
+  --stream trade \
+  --mode shadow \
+  --strategy sma \
+  --replay-data captured_ws.bin
+```
+
+Replays the captured file as if it were the live feed — same parser,
+provider, and executor paths as the live run. Pairs well with
+`--seed <n>` for fully deterministic shadow runs against real data.
+
+### Live trading (real orders)
+
+```bash
+./build/truetest \
+  --provider binance \
+  --symbol btcusdt \
+  --stream kline_1m \
+  --mode live \
+  --live \
+  --api-key "$BINANCE_API_KEY" \
+  --api-secret "$BINANCE_API_SECRET" \
+  --strategy sma \
+  --balance 1000 \
+  --max-daily-loss 50 \
+  --risk-unwind
+```
+
+**This submits real orders against Binance.** Both the `--mode live` flag
+and the `--live` safety flag are required, and the CLI prints an explicit
+confirmation prompt that requires typing `YES` before proceeding. Orders
+are signed with HMAC-SHA256 via `BinanceRestClient` and submitted to
+`/api/v3/order`. Always pair with tight `--max-daily-loss`,
+`--max-trades-per-hour`, and `--risk-unwind` so a bug cannot drain the
+account.
 
 ---
 
@@ -645,6 +725,16 @@ Parameters (via `--param` or legacy flags):
 - `sl_pct` (default: 0.005) — stop loss as fraction of entry price (`--sl`)
 - `tp_pct` (default: 0.01) — take profit as fraction of entry price (`--tp`)
 
+```bash
+./build/truetest \
+  --provider local --path market_data.csv \
+  --strategy mean-reversion \
+  --param period=30 \
+  --param risk_fraction=0.01 \
+  --param sl_pct=0.003 \
+  --param tp_pct=0.006
+```
+
 ### SMA Strategy (`sma`)
 
 Generates signals based on price crossing above or below a simple moving average.
@@ -652,6 +742,13 @@ Buys when price > SMA, sells when price < SMA.
 
 Parameters:
 - `period` (default: 20) — SMA lookback period
+
+```bash
+./build/truetest \
+  --provider local --path market_data.csv \
+  --strategy sma \
+  --param period=50
+```
 
 ### MA Crossover (`ma-crossover`)
 
@@ -776,11 +873,29 @@ Cache files use a versioned binary format with integrity checking:
 - On read, the magic, version, and checksum are verified. Incompatible or corrupt
   cache files are automatically deleted and regenerated from the fallback source.
 
+The cache is transparent: no CLI flag is required. A `<path>.cache` file is
+written alongside the data file on first run and picked up automatically on
+subsequent runs with the same `--path`.
+
+```bash
+# First run — populates market_data.csv.cache as a side effect
+./build/truetest --provider local --path market_data.csv --strategy sma
+
+# Second run — loads from the binary cache (much faster startup)
+./build/truetest --provider local --path market_data.csv --strategy sma
+```
+
 ### PostgreSQL
 
 Available when built with `-DENABLE_POSTGRESQL=ON`. Connects to a PostgreSQL
-database and loads OHLCV data via SQL queries. Connection parameters are prompted
-in TUI mode.
+database and loads OHLCV data via SQL queries. Connection parameters are
+prompted in TUI mode — there is no dedicated CLI flag set yet, so launch
+without `--provider` to reach the interactive menu:
+
+```bash
+./build/truetest
+# Select: Data source → PostgreSQL, then enter host/db/user/password/query
+```
 
 ### WebSocket data source
 
@@ -806,6 +921,15 @@ Fields:
 
 The source includes automatic reconnection with exponential backoff, heartbeat
 keepalive, and sequence number gap detection.
+
+The generic WebSocket data source is wired through the TUI rather than a
+dedicated CLI flag set; launch without `--provider` and choose it from the
+data source menu:
+
+```bash
+./build/truetest
+# Select: Data source → Live WebSocket, then enter host/port/symbol
+```
 
 ### Multi-Symbol Backtesting
 
@@ -980,6 +1104,14 @@ core map derived from the system topology.
 
 Use `--no-pin` to disable all pinning (useful in containers or VMs with
 restricted CPU access).
+
+```bash
+./build/truetest \
+  --provider local --path market_data.csv --strategy sma \
+  --thread-preset standard \
+  --no-pin \
+  --spin-policy yield
+```
 
 ### Worker spin policy
 
@@ -1462,6 +1594,99 @@ order events, per-strategy attribution is also available.
 Attribution data appears in the printed report, JSON export
 (`per_symbol` and `per_strategy` objects), and WebSocket analytics.
 
+### Console report output
+
+At the end of every run, TrueTest prints a formatted report to stdout. The
+output is produced by `analytics/report_generator.{h,cpp}` and uses small
+reusable ASCII widgets from `analytics/ascii_widgets.{h,cpp}` — horizontal
+bars, sparklines, histograms, and aligned tables. All widgets are UTF-8 aware
+and stdlib-only; no new dependencies.
+
+The report is divided into sections, rendered in this order:
+
+1. **Returns** — initial / final equity, total return, buy & hold, strategy
+   vs. benchmark, with bars comparing strategy to buy-and-hold.
+2. **Risk** — Sharpe, Sortino, max drawdown, Calmar, rolling Sharpe,
+   rolling max drawdown.
+3. **Equity Curve** — one-line sparkline (`▁▂▃▄▅▆▇█`) across the full run,
+   with min / max / point count.
+4. **Trades** — total trades, win rate (with bar), profit factor, avg win /
+   loss, largest winner / loser.
+5. **Per-Trade PnL Distribution** — equal-width histogram of per-trade PnL
+   across configurable bins (default 8).
+6. **Execution Quality** — avg slippage, total orders, total fills.
+7. **Exposure** — time in market (with bar), avg holding period.
+8. **Benchmark** — alpha, beta, information ratio, tracking error.
+9. **Per-Symbol / Per-Strategy Attribution** — tables of PnL, trades, win%,
+   profit factor per symbol/strategy.
+10. **Worst Trades** — top N worst closing trades sorted by PnL ascending
+    (default 5).
+
+Example:
+
+```
+════════════════════════════════════════════════════════════════════════
+  Analytics Report
+════════════════════════════════════════════════════════════════════════
+
+━━━ Returns ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  initial equity             10,000.00
+  final equity               11,842.00
+  total return                 +18.42%  ████████████████████████
+  buy & hold                   +10.00%  █████████████░░░░░░░░░░░
+  vs benchmark                  +8.42%
+
+━━━ Equity Curve ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ▁▂▃▃▄▅▆▇▇█
+  min 10,000.00   max 11,842.00   points 10
+```
+
+#### Programmatic access
+
+The renderer is reusable beyond the default end-of-run print. Public entry
+points in `analytics/report_generator.h`:
+
+```cpp
+#include "analytics/report_generator.h"
+
+AnalyticsReport r = analytics.generate_report();
+
+// Full report, default options.
+std::string text = tt::render_report(r);
+
+// Customize sections and widths.
+tt::report_options opts;
+opts.width = 100;
+opts.bar_width = 40;
+opts.distribution_bins = 12;
+opts.include_per_symbol = false;
+std::string partial = tt::render_report(r, opts);
+
+// Or render individual sections — useful for streaming partial output
+// over the WebSocket bridge or composing a custom layout.
+std::string risk  = tt::render_risk_section(r, opts);
+std::string worst = tt::render_worst_trades_section(r, opts);
+```
+
+Every section function returns a `std::string`, so the same output can feed
+the CLI, a `<pre>` panel in the web UI, a file, or a Slack paste without
+modification.
+
+#### Reusable widgets
+
+`analytics/ascii_widgets.h` exposes primitives that are useful whenever a
+component needs deterministic formatted text output:
+
+| Widget                         | Purpose                                    |
+|--------------------------------|--------------------------------------------|
+| `hbar(value, max, width)`      | Horizontal bar with 1/8-block precision    |
+| `sparkline(values, max_width)` | One-line trend chart (`▁▂▃▄▅▆▇█`)          |
+| `equal_width_bins(values, n)`  | Bucket continuous values for histogram use |
+| `horizontal_histogram(bins)`   | Labelled horizontal bar chart              |
+| `section_header(title, width)` | `━━━ Title ━━━━━━━━━━` section divider     |
+| `table(headers, rows, align)`  | Aligned table with per-column alignment    |
+| `fmt_money` / `fmt_signed_pct` | `12,345.67` / `+18.42%` number formatting  |
+
 ### Structured result export
 
 After the engine finishes, results can be exported to a file:
@@ -1664,6 +1889,74 @@ cmake --build build
 cd build && cpack
 # Produces truetest-0.1.0-Linux.tar.gz and truetest-0.1.0-Linux.deb
 ```
+
+### Checkpoint + resume round-trip
+
+```bash
+# First run — snapshot portfolio every 1000 events
+./build/truetest \
+  --provider local \
+  --path first_half.csv \
+  --strategy sma \
+  --sma-period 50 \
+  --checkpoint /tmp/session.ckpt \
+  --checkpoint-interval 1000
+
+# Second run — resume from the saved snapshot against the next slice
+./build/truetest \
+  --provider local \
+  --path second_half.csv \
+  --strategy sma \
+  --sma-period 50 \
+  --resume /tmp/session.ckpt
+```
+
+Pair with `--seed <n>` and a recorded event log for fully deterministic
+resume-after-crash behaviour.
+
+### Multi-strategy run with analytics export
+
+```bash
+./build/truetest \
+  --provider local \
+  --path market_data.csv \
+  --strategy mean-reversion,sma,ma-crossover \
+  --param period=20 \
+  --param fast_period=10 \
+  --param slow_period=50 \
+  --output results.json
+```
+
+`results.json` contains scalar metrics, the full equity curve, the per-trade
+log, and per-strategy / per-symbol attribution — ready to ingest from Python
+or a notebook.
+
+### Production-style live run
+
+```bash
+./build/truetest \
+  --provider binance \
+  --symbol btcusdt \
+  --stream kline_1m \
+  --mode live \
+  --live \
+  --api-key "$BINANCE_API_KEY" \
+  --api-secret "$BINANCE_API_SECRET" \
+  --strategy sma \
+  --sma-period 50 \
+  --balance 1000 \
+  --max-daily-loss 50 \
+  --max-trades-per-hour 20 \
+  --risk-unwind \
+  --checkpoint /var/lib/truetest/live.ckpt \
+  --log-events /var/log/truetest/events.bin \
+  --output /var/log/truetest/results.json \
+  --web-ui --ws-port 8765
+```
+
+Combines tight risk caps with automatic unwind, periodic checkpointing,
+compressed event logging, and a JSON analytics export — the shape of a run
+you would actually leave unattended.
 
 ---
 

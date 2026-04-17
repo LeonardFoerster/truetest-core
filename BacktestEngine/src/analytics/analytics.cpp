@@ -1,4 +1,5 @@
 #include "analytics.h"
+#include "report_generator.h"
 
 #include <algorithm>
 #include <cmath>
@@ -402,103 +403,7 @@ AnalyticsReport Analytics::generate_report() const
 
 void Analytics::print_report() const
 {
-    auto r = generate_report();
-
-    std::cout << "\n";
-    std::cout << "  ============================================\n";
-    std::cout << "    Analytics Report\n";
-    std::cout << "  ============================================\n\n";
-
-    std::cout << std::fixed << std::setprecision(2);
-
-    std::cout << "  Returns\n";
-    std::cout << "  -------\n";
-    std::cout << "    Initial Equity:      " << r.initial_equity << "\n";
-    std::cout << "    Final Equity:        " << r.final_equity << "\n";
-    std::cout << "    Cumulative Return:   " << r.cumulative_return * 100.0 << "%\n";
-    std::cout << "    Buy & Hold Return:   " << r.buy_and_hold_return * 100.0 << "%\n";
-    std::cout << "    Strategy vs B&H:     " << r.strategy_vs_benchmark * 100.0 << "%\n";
-    std::cout << "\n";
-
-    std::cout << "  Risk\n";
-    std::cout << "  ----\n";
-    std::cout << std::setprecision(4);
-    std::cout << "    Sharpe Ratio:        " << r.sharpe_ratio << "\n";
-    std::cout << "    Sortino Ratio:       " << r.sortino_ratio << "\n";
-    std::cout << std::setprecision(2);
-    std::cout << "    Max Drawdown:        " << r.max_drawdown << "%\n";
-    std::cout << std::setprecision(4);
-    std::cout << "    Calmar Ratio:        " << r.calmar_ratio << "\n";
-    std::cout << "    Rolling Sharpe:      " << r.rolling_sharpe << "\n";
-    std::cout << std::setprecision(2);
-    std::cout << "    Rolling Max DD:      " << r.rolling_max_drawdown << "%\n";
-    std::cout << "\n";
-
-    std::cout << "  Benchmark\n";
-    std::cout << "  ---------\n";
-    std::cout << std::setprecision(6);
-    std::cout << "    Alpha:               " << r.alpha << "\n";
-    std::cout << "    Beta:                " << r.beta << "\n";
-    std::cout << "    Information Ratio:   " << r.information_ratio << "\n";
-    std::cout << "    Tracking Error:      " << r.tracking_error << "\n";
-    std::cout << "\n";
-
-    std::cout << "  Execution Quality\n";
-    std::cout << "  -----------------\n";
-    std::cout << "    Avg Slippage:        " << r.avg_slippage << "\n";
-    std::cout << "    Total Orders:        " << r.total_orders << "\n";
-    std::cout << "    Total Fills:         " << r.total_fills << "\n";
-    std::cout << "\n";
-
-    std::cout << "  Exposure\n";
-    std::cout << "  --------\n";
-    std::cout << std::setprecision(2);
-    std::cout << "    Time in Market:      " << r.time_in_market_pct << "%\n";
-    std::cout << "    Avg Holding Period:  " << r.avg_holding_period_ms << " ms\n";
-    std::cout << "\n";
-
-    std::cout << "  Trade Breakdown\n";
-    std::cout << "  ---------------\n";
-    std::cout << "    Total Trades:        " << r.total_trades << "\n";
-    std::cout << "    Win Rate:            " << r.win_rate << "%\n";
-    std::cout << "    Avg Win:             " << r.avg_win << "\n";
-    std::cout << "    Avg Loss:            " << r.avg_loss << "\n";
-    std::cout << std::setprecision(4);
-    std::cout << "    Profit Factor:       " << r.profit_factor << "\n";
-    std::cout << std::setprecision(2);
-    std::cout << "    Largest Winner:      " << r.largest_winner << "\n";
-    std::cout << "    Largest Loser:       " << r.largest_loser << "\n";
-    std::cout << "\n";
-
-    // Per-symbol attribution
-    if (!r.per_symbol.empty())
-    {
-        std::cout << "  Per-Symbol Attribution\n";
-        std::cout << "  ----------------------\n";
-        for (const auto& [sym, sa] : r.per_symbol)
-        {
-            std::cout << "    " << sym << ": PnL=" << std::setprecision(2) << sa.total_pnl
-                      << " Trades=" << sa.trade_count
-                      << " WinRate=" << std::setprecision(1) << sa.win_rate() << "%"
-                      << " PF=" << std::setprecision(2) << sa.profit_factor() << "\n";
-        }
-        std::cout << "\n";
-    }
-
-    // Per-strategy attribution
-    if (!r.per_strategy.empty())
-    {
-        std::cout << "  Per-Strategy Attribution\n";
-        std::cout << "  ------------------------\n";
-        for (const auto& [name, sa] : r.per_strategy)
-        {
-            std::cout << "    " << name << ": PnL=" << std::setprecision(2) << sa.total_pnl
-                      << " Trades=" << sa.trade_count
-                      << " WinRate=" << std::setprecision(1) << sa.win_rate() << "%"
-                      << " PF=" << std::setprecision(2) << sa.profit_factor() << "\n";
-        }
-        std::cout << "\n";
-    }
+    std::cout << tt::render_report(generate_report());
 }
 
 void Analytics::export_csv(const std::string& equity_path, const std::string& trades_path) const
