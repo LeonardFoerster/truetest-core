@@ -19,6 +19,7 @@ mono_crash.*
 
 # Build results
 [Dd]ebug/
+!BacktestEngine/src/debug/
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/
