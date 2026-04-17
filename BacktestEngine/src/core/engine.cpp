@@ -178,7 +178,13 @@ std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol
         return it->second;
 
     std::shared_ptr<IExecutionAdapter> adapter;
-    if (config_.provider && config_.provider->has_execution())
+    // Shadow mode keeps the primary local (simulation-of-truth) and consults
+    // the provider's adapter only for the shadow comparison side
+    // (see process_order: exchange_adapter = config_.provider->get_execution_adapter()).
+    // Without this guard, the primary and the shadow point at the same object
+    // and submit_order runs twice on the same adapter.
+    if (config_.mode != engine_mode::shadow &&
+        config_.provider && config_.provider->has_execution())
     {
         // Provider owns execution (live venue, hybrid paper executor,
         // Polymarket AMM, etc.). Engine does not care which flavour.

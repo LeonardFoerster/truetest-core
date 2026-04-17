@@ -282,3 +282,103 @@ TEST(Analytics, Snapshot_MidRun_ReturnsPartialMetrics)
     EXPECT_EQ(full.total_trades, snap.total_trades);
     EXPECT_DOUBLE_EQ(full.sharpe_ratio, snap.sharpe_ratio);
 }
+
+// --- Signed-position model: shorts, pyramiding, flipping ---
+
+TEST(Analytics, ShortRoundTrip_ProfitsWhenPriceFalls)
+{
+    Analytics a;
+    auto mkt = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
+    a.on_event(mkt);
+
+    // Sell 10 @ 100 to open short
+    auto so = std::make_shared<order_event>(epoch_ms(1), "X", order_type::limit, order_side::sell, 10, 100.0);
+    so->set_order_id(1);
+    a.on_event(so);
+    auto sf = std::make_shared<fill_event>(epoch_ms(1), "X", 1, order_side::sell, 10, 100.0, 0.0);
+    a.on_event(sf);
+
+    // Buy 10 @ 80 to close short → profit 10 * (100 - 80) = 200
+    auto bo = std::make_shared<order_event>(epoch_ms(2), "X", order_type::limit, order_side::buy, 10, 80.0);
+    bo->set_order_id(2);
+    a.on_event(bo);
+    auto bf = std::make_shared<fill_event>(epoch_ms(2), "X", 2, order_side::buy, 10, 80.0, 0.0);
+    a.on_event(bf);
+
+    auto r = a.generate_report();
+    EXPECT_EQ(r.total_trades, 1u);
+    ASSERT_EQ(r.trade_returns.size(), 1u);
+    EXPECT_NEAR(r.trade_returns[0], 200.0, 1e-9);
+    EXPECT_DOUBLE_EQ(r.win_rate, 100.0);
+}
+
+TEST(Analytics, Pyramiding_WeightedAverageEntry)
+{
+    Analytics a;
+    auto mkt = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
+    a.on_event(mkt);
+
+    // Buy 10 @ 100, then buy 10 @ 120 → avg entry = 110 on 20 units
+    auto bo1 = std::make_shared<order_event>(epoch_ms(1), "X", order_type::limit, order_side::buy, 10, 100.0);
+    bo1->set_order_id(1);
+    a.on_event(bo1);
+    auto bf1 = std::make_shared<fill_event>(epoch_ms(1), "X", 1, order_side::buy, 10, 100.0, 0.0);
+    a.on_event(bf1);
+
+    auto bo2 = std::make_shared<order_event>(epoch_ms(2), "X", order_type::limit, order_side::buy, 10, 120.0);
+    bo2->set_order_id(2);
+    a.on_event(bo2);
+    auto bf2 = std::make_shared<fill_event>(epoch_ms(2), "X", 2, order_side::buy, 10, 120.0, 0.0);
+    a.on_event(bf2);
+
+    // Sell 20 @ 130 → pnl = 20 * (130 - 110) = 400
+    auto so = std::make_shared<order_event>(epoch_ms(3), "X", order_type::limit, order_side::sell, 20, 130.0);
+    so->set_order_id(3);
+    a.on_event(so);
+    auto sf = std::make_shared<fill_event>(epoch_ms(3), "X", 3, order_side::sell, 20, 130.0, 0.0);
+    a.on_event(sf);
+
+    auto r = a.generate_report();
+    EXPECT_EQ(r.total_trades, 1u);
+    ASSERT_EQ(r.trade_returns.size(), 1u);
+    EXPECT_NEAR(r.trade_returns[0], 400.0, 1e-9);
+}
+
+TEST(Analytics, Flipping_LongToShortInOneFill)
+{
+    Analytics a;
+    auto mkt = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
+    a.on_event(mkt);
+
+    // Buy 10 @ 100 → long 10
+    auto bo = std::make_shared<order_event>(epoch_ms(1), "X", order_type::limit, order_side::buy, 10, 100.0);
+    bo->set_order_id(1);
+    a.on_event(bo);
+    auto bf = std::make_shared<fill_event>(epoch_ms(1), "X", 1, order_side::buy, 10, 100.0, 0.0);
+    a.on_event(bf);
+
+    // Sell 15 @ 120 → closes 10 (pnl = 10 * 20 = 200), opens short 5 @ 120
+    auto so = std::make_shared<order_event>(epoch_ms(2), "X", order_type::limit, order_side::sell, 15, 120.0);
+    so->set_order_id(2);
+    a.on_event(so);
+    auto sf = std::make_shared<fill_event>(epoch_ms(2), "X", 2, order_side::sell, 15, 120.0, 0.0);
+    a.on_event(sf);
+
+    auto r = a.generate_report();
+    // One closed round-trip so far
+    EXPECT_EQ(r.total_trades, 1u);
+    ASSERT_EQ(r.trade_returns.size(), 1u);
+    EXPECT_NEAR(r.trade_returns[0], 200.0, 1e-9);
+
+    // Buy 5 @ 100 → closes short (pnl = 5 * (120 - 100) = 100)
+    auto bo2 = std::make_shared<order_event>(epoch_ms(3), "X", order_type::limit, order_side::buy, 5, 100.0);
+    bo2->set_order_id(3);
+    a.on_event(bo2);
+    auto bf2 = std::make_shared<fill_event>(epoch_ms(3), "X", 3, order_side::buy, 5, 100.0, 0.0);
+    a.on_event(bf2);
+
+    r = a.generate_report();
+    EXPECT_EQ(r.total_trades, 2u);
+    ASSERT_EQ(r.trade_returns.size(), 2u);
+    EXPECT_NEAR(r.trade_returns[1], 100.0, 1e-9);
+}

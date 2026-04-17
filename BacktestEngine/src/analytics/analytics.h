@@ -162,15 +162,20 @@ public:
 
 private:
     void on_market(const market_event& m);
+    void on_tick(const tick_event& t);
     void on_order(const order_event& o);
     void on_fill(const fill_event& f);
 
     double initial_cash_;
     double cash_;
-    double position_qty_ = 0;
-    double entry_price_ = 0.0;
+    // Signed position: positive = long, negative = short, zero = flat.
+    // Weighted-avg entry price over adds/pyramids. total_open_commission_
+    // accumulates commissions paid to build the current position so realized
+    // PnL on close subtracts a pro-rata share.
+    double position_qty_ = 0.0;
+    double avg_entry_price_ = 0.0;
+    double total_open_commission_ = 0.0;
     std::chrono::system_clock::time_point entry_time_;
-    bool in_position_ = false;
 
     // Configuration
     std::size_t rolling_window_;

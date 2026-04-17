@@ -21,6 +21,9 @@ void Analytics::on_event(const event_pointer& ev)
         case event_type::market:
             on_market(*std::static_pointer_cast<market_event>(ev));
             break;
+        case event_type::tick:
+            on_tick(*std::static_pointer_cast<tick_event>(ev));
+            break;
         case event_type::order:
             on_order(*std::static_pointer_cast<order_event>(ev));
             break;
@@ -28,11 +31,11 @@ void Analytics::on_event(const event_pointer& ev)
             on_fill(*std::static_pointer_cast<fill_event>(ev));
             break;
         case event_type::signal:
-        case event_type::tick:
         case event_type::l2_snapshot:
         case event_type::l2_update:
         case event_type::cancel:
         case event_type::amend:
+        case event_type::rejection:
             break;
     }
 }
@@ -48,12 +51,13 @@ void Analytics::on_market(const market_event& m)
     }
 
     market_events_total_++;
-    if (in_position_)
+    bool has_position = std::abs(position_qty_) > 1e-12;
+    if (has_position)
         market_events_in_position_++;
 
-    // Record equity: cash + mark-to-market of open position
+    // Mark-to-market works for both long (qty > 0) and short (qty < 0).
     double equity = cash_;
-    if (in_position_)
+    if (has_position)
         equity += position_qty_ * last_close_;
 
     equity_curve_.push_back({m.get_timestamp(), equity});
@@ -95,6 +99,22 @@ void Analytics::on_market(const market_event& m)
         double dd = (peak_equity_ - equity) / peak_equity_;
         if (dd > max_drawdown_)
             max_drawdown_ = dd;
+    }
+}
+
+void Analytics::on_tick(const tick_event& t)
+{
+    // In tick-streaming mode on_market never fires, so without this arm
+    // last_close_ stays 0 (making final_equity ignore open-position MtM) and
+    // first_price_ is never set (zeroing out buy_and_hold_return). We update
+    // only those two fields here — equity_curve_/strategy_returns_ stay bar-
+    // granular because per-tick pushes would explode the report on live feeds
+    // with 10^5+ ticks/min.
+    last_close_ = t.get_price();
+    if (!first_price_set_)
+    {
+        first_price_ = t.get_price();
+        first_price_set_ = true;
     }
 }
 
@@ -152,53 +172,63 @@ void Analytics::on_fill(const fill_event& f)
     rec.symbol = f.get_symbol();
     rec.strategy_name = strat_name;
 
-    if (f.get_side() == order_side::buy && !in_position_)
-    {
-        in_position_ = true;
-        entry_price_ = f.get_fill_price();
-        position_qty_ = f.get_filled_quantity();
-        entry_time_ = f.get_timestamp();
-        cash_ -= f.get_total_cost();
-    }
-    else if (f.get_side() == order_side::sell && in_position_)
-    {
-        double exit_cost = f.get_total_cost();
-        double entry_cost = position_qty_ * entry_price_;
-        double pnl = exit_cost - entry_cost - f.get_commission();
+    const double filled_qty = f.get_filled_quantity();
+    const double fill_price = f.get_fill_price();
+    const double commission = f.get_commission();
+    const double side_sign = (f.get_side() == order_side::buy) ? +1.0 : -1.0;
+    double qty_left = filled_qty;
 
-        // Find the matching buy's commission from trades
-        for (auto rit = trades_.rbegin(); rit != trades_.rend(); ++rit)
+    // Closing leg: existing position sign is opposite to the fill side.
+    // Handles long→sell-close, short→buy-close, and partial/full closes.
+    // A flip (e.g. long 3, sell 5) is handled by the opening leg below
+    // running after qty_left is decremented by close_qty.
+    if (std::abs(position_qty_) > 1e-12 && position_qty_ * side_sign < 0.0)
+    {
+        double pos_sign = (position_qty_ > 0.0) ? 1.0 : -1.0;
+        double prev_abs = std::abs(position_qty_);
+        double close_qty = std::min(prev_abs, qty_left);
+
+        // Gross: long profits when exit > entry, short profits when exit < entry.
+        double gross = (fill_price - avg_entry_price_) * close_qty * pos_sign;
+
+        // Pro-rata commissions: split this fill's commission across close/open
+        // legs, and charge the share of open-side commissions accumulated while
+        // building the closed portion.
+        double close_comm = commission * (close_qty / filled_qty);
+        double open_comm_share = total_open_commission_ * (close_qty / prev_abs);
+        double pnl = gross - close_comm - open_comm_share;
+
+        total_open_commission_ -= open_comm_share;
+
+        // Cash flow: sell-to-close-long adds proceeds; buy-to-close-short spends.
+        cash_ += -side_sign * close_qty * fill_price - close_comm;
+
+        position_qty_ += side_sign * close_qty;
+        qty_left -= close_qty;
+        if (std::abs(position_qty_) < 1e-12)
         {
-            if (rit->side == order_side::buy && rit->order_id != f.get_order_id())
-            {
-                pnl -= rit->commission;
-                break;
-            }
+            position_qty_ = 0.0;
+            avg_entry_price_ = 0.0;
+            total_open_commission_ = 0.0;
         }
 
         rec.pnl = pnl;
         trade_returns_.push_back(pnl);
-
-        // Update streaming accumulators
         return_stats_.update(pnl);
-        if (pnl < 0.0)
-            downside_stats_.update(pnl);
+        if (pnl < 0.0) downside_stats_.update(pnl);
 
         if (pnl > 0.0)
         {
             win_count_++;
             total_win_ += pnl;
-            if (pnl > largest_winner_)
-                largest_winner_ = pnl;
+            if (pnl > largest_winner_) largest_winner_ = pnl;
         }
         else
         {
             total_loss_ += std::abs(pnl);
-            if (pnl < largest_loser_)
-                largest_loser_ = pnl;
+            if (pnl < largest_loser_) largest_loser_ = pnl;
         }
 
-        // Per-symbol attribution
         {
             auto& sa = per_symbol_[f.get_symbol()];
             sa.total_pnl += pnl;
@@ -206,8 +236,6 @@ void Analytics::on_fill(const fill_event& f)
             if (pnl > 0.0) { sa.win_count++; sa.total_win += pnl; }
             else { sa.total_loss += std::abs(pnl); }
         }
-
-        // Per-strategy attribution
         if (!strat_name.empty())
         {
             auto& sa = per_strategy_[strat_name];
@@ -217,16 +245,30 @@ void Analytics::on_fill(const fill_event& f)
             else { sa.total_loss += std::abs(pnl); }
         }
 
-        // Holding period
         auto hold_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             f.get_timestamp() - entry_time_).count();
         total_holding_ms_ += static_cast<double>(hold_ms);
         holding_count_++;
+    }
 
-        cash_ += f.get_total_cost();
-        in_position_ = false;
-        position_qty_ = 0;
-        entry_price_ = 0.0;
+    // Opening / adding / flipping leg: any remaining qty opens or adds to a
+    // position in the fill's direction (long on buy, short on sell).
+    if (qty_left > 1e-12)
+    {
+        double open_comm = commission * (qty_left / filled_qty);
+        double prev_abs = std::abs(position_qty_);
+
+        avg_entry_price_ = (avg_entry_price_ * prev_abs + fill_price * qty_left)
+                         / (prev_abs + qty_left);
+        position_qty_ += side_sign * qty_left;
+        total_open_commission_ += open_comm;
+
+        // Stamp entry_time_ only when starting from flat (prev_abs ≈ 0).
+        if (prev_abs < 1e-12)
+            entry_time_ = f.get_timestamp();
+
+        // Cash: opening long spends, opening short receives proceeds.
+        cash_ -= side_sign * qty_left * fill_price + open_comm;
     }
 
     trades_.push_back(rec);
@@ -281,7 +323,7 @@ AnalyticsReport Analytics::snapshot() const
     AnalyticsReport r;
     r.initial_equity = initial_cash_;
     r.final_equity = cash_;
-    if (in_position_)
+    if (std::abs(position_qty_) > 1e-12)
         r.final_equity += position_qty_ * last_close_;
 
     r.cumulative_return = (r.final_equity - initial_cash_) / initial_cash_;
