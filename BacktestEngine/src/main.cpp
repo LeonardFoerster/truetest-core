@@ -1,4 +1,6 @@
+#include <atomic>
 #include <climits>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -45,6 +47,23 @@
 #ifdef HAS_DEBUG
 #include "debug/debug_log.h"
 #endif
+
+// SIGINT-driven graceful shutdown for streaming mode. The signal handler
+// flips an atomic flag on the transport, which unblocks the read loop and
+// lets run_streaming() return normally so print_summary() can run.
+static std::atomic<DataBridge<tick_record>*> g_tick_bridge{nullptr};
+static std::atomic<DataBridge<bar_record>*> g_bar_bridge{nullptr};
+static void install_shutdown_handler()
+{
+    std::signal(SIGINT, [](int) {
+        if (auto* tb = g_tick_bridge.load(std::memory_order_acquire)) tb->stop();
+        if (auto* bb = g_bar_bridge.load(std::memory_order_acquire)) bb->stop();
+    });
+    std::signal(SIGTERM, [](int) {
+        if (auto* tb = g_tick_bridge.load(std::memory_order_acquire)) tb->stop();
+        if (auto* bb = g_bar_bridge.load(std::memory_order_acquire)) bb->stop();
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Helper: apply --param key=value pairs to a strategy after construction
@@ -1035,6 +1054,8 @@ int main(int argc, char* argv[])
             for (auto& es : extra_strategies)
                 eng.add_strategy(es.second, es.first);
 
+            install_shutdown_handler();
+
             if (is_tick)
             {
                 std::shared_ptr<IDataParser<tick_record>> parser;
@@ -1047,7 +1068,9 @@ int main(int argc, char* argv[])
 
                 auto bridge = std::make_shared<DataBridge<tick_record>>(
                     transport, parser, tick_record_sink);
+                g_tick_bridge.store(bridge.get(), std::memory_order_release);
                 eng.run_streaming(bridge);
+                g_tick_bridge.store(nullptr, std::memory_order_release);
             }
             else
             {
@@ -1061,7 +1084,9 @@ int main(int argc, char* argv[])
 
                 auto bridge = std::make_shared<DataBridge<bar_record>>(
                     transport, parser, bar_record_sink);
+                g_bar_bridge.store(bridge.get(), std::memory_order_release);
                 eng.run_streaming(bridge);
+                g_bar_bridge.store(nullptr, std::memory_order_release);
             }
 
             eng.print_summary();
