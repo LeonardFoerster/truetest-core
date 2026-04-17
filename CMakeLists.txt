@@ -271,10 +271,6 @@ if(ENABLE_DEBUG)
 endif()
 # ──────────────────────────────────────────────────────────────────────────────
 
-# ── Shared library (libtruetest) with C API for embedding ──────────────────
-# Provides a stable extern "C" ABI so host languages (Python via ctypes,
-# Node.js via ffi-napi, etc.) can drive the engine without linking against
-# the full C++ API. Uses the same production sources as the CLI binary.
 if(BUILD_SHARED_LIB)
     set(TRUETEST_LIB_SOURCES
         BacktestEngine/src/api/truetest_api.cpp

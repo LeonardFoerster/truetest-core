@@ -33,6 +33,7 @@ bld/
 [Oo]bj/
 [Oo]ut/
 [Ll]og/
+!BacktestEngine/src/utils/log/
 [Ll]ogs/
 build/
 
