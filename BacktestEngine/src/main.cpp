@@ -44,7 +44,6 @@
 
 #ifdef HAS_DEBUG
 #include "debug/debug_log.h"
-#include "absl/flags/parse.h"
 #endif
 
 // ---------------------------------------------------------------------------
@@ -361,7 +360,6 @@ static void dump_config(const std::string& replay_path,
 int main(int argc, char* argv[])
 {
 #ifdef HAS_DEBUG
-    absl::ParseCommandLine(argc, argv);
     debug::init();
 
     // Optional: log to file as well as stderr
