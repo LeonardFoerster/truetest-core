@@ -90,8 +90,16 @@ struct AnalyticsReport
     double max_drawdown = 0.0;
     double calmar_ratio = 0.0;
 
-    // Execution quality
+    // Execution quality. avg_slippage is the mean absolute price deviation.
+    // signed/adverse/favorable break that down by direction: signed_cost =
+    // (fill - intended) * side_sign, positive means we paid/received worse
+    // than intended.
     double avg_slippage = 0.0;
+    double avg_slippage_signed = 0.0;
+    double avg_adverse_slippage = 0.0;
+    double avg_favorable_slippage = 0.0;
+    std::size_t adverse_slippage_count = 0;
+    std::size_t favorable_slippage_count = 0;
     std::size_t total_orders = 0;
     std::size_t total_fills = 0;
 
@@ -198,8 +206,13 @@ private:
     // Trade records
     std::vector<trade_record> trades_;
     std::vector<double> trade_returns_;
-    double total_slippage_ = 0.0;
+    double total_slippage_ = 0.0;           // running sum of |slip|
+    double total_slippage_signed_ = 0.0;    // running sum of signed slip (side-adjusted)
+    double total_adverse_slippage_ = 0.0;
+    double total_favorable_slippage_ = 0.0;
     std::size_t slippage_count_ = 0;
+    std::size_t adverse_count_ = 0;
+    std::size_t favorable_count_ = 0;
     std::size_t total_orders_ = 0;
     std::size_t total_fills_ = 0;
 

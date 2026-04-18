@@ -143,14 +143,20 @@ void Analytics::on_fill(const fill_event& f)
             tick_to_trade_max_ns_ = lat;
     }
 
-    // Slippage: intended vs actual fill price
+    // Slippage: intended vs actual fill price. Direction-adjust so positive
+    // = adverse (paid more on a buy, received less on a sell).
     double intended = 0.0;
     auto it = order_prices_.find(f.get_order_id());
     if (it != order_prices_.end())
     {
         intended = it->second;
-        double slip = std::abs(f.get_fill_price() - intended);
-        total_slippage_ += slip;
+        double raw = f.get_fill_price() - intended;
+        double side_sign = (f.get_side() == order_side::buy) ? +1.0 : -1.0;
+        double signed_slip = raw * side_sign;
+        total_slippage_ += std::abs(raw);
+        total_slippage_signed_ += signed_slip;
+        if (signed_slip > 0.0) { total_adverse_slippage_ += signed_slip; adverse_count_++; }
+        else if (signed_slip < 0.0) { total_favorable_slippage_ += -signed_slip; favorable_count_++; }
         slippage_count_++;
     }
 
@@ -333,6 +339,14 @@ AnalyticsReport Analytics::snapshot() const
 
     // Slippage
     r.avg_slippage = (slippage_count_ > 0) ? total_slippage_ / static_cast<double>(slippage_count_) : 0.0;
+    r.avg_slippage_signed = (slippage_count_ > 0)
+        ? total_slippage_signed_ / static_cast<double>(slippage_count_) : 0.0;
+    r.avg_adverse_slippage = (adverse_count_ > 0)
+        ? total_adverse_slippage_ / static_cast<double>(adverse_count_) : 0.0;
+    r.avg_favorable_slippage = (favorable_count_ > 0)
+        ? total_favorable_slippage_ / static_cast<double>(favorable_count_) : 0.0;
+    r.adverse_slippage_count = adverse_count_;
+    r.favorable_slippage_count = favorable_count_;
 
     // Tick-to-trade latency
     r.tick_to_trade_samples = static_cast<std::size_t>(tick_to_trade_ns_.n);

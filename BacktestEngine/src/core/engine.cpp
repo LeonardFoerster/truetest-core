@@ -6,6 +6,7 @@
 #include "../providers/provider.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <iostream>
 #include <vector>
@@ -134,7 +135,9 @@ void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
     strategy_ = std::move(strategy);
 
     for (const auto& [symbol, pos] : portfolio_.get_positions()) {
-        strategy_->set_position_open(symbol, pos.qty > 0.0);
+        // Use |qty| so shorts (qty < 0) aren't silently treated as flat —
+        // matches portfolio_.position_open() everywhere else.
+        strategy_->set_position_open(symbol, std::abs(pos.qty) > 1e-12);
     }
 }
 
@@ -1443,16 +1446,25 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
     // Let the provider react to the mid-price update (e.g. reseed a
     // synthetic book for paper-mode limit fills) and drain any fills
-    // that result.
+    // that result. Poll the provider's adapter directly — in shadow mode
+    // get_adapter() returns the LocalBookAdapter, so these provider fills
+    // would be lost if we used it.
     if (config_.provider && config_.provider->has_execution())
     {
         config_.provider->on_mid_price(mkt.get_symbol(), last_mid_price_);
-        auto adapter = get_adapter(mkt.get_symbol());
+        auto provider_adapter = config_.provider->get_execution_adapter();
         std::vector<fill_event> provider_fills;
-        if (adapter && adapter->poll_fills(provider_fills))
+        if (provider_adapter && provider_adapter->poll_fills(provider_fills))
         {
             for (auto& f : provider_fills)
             {
+                if (config_.mode == engine_mode::shadow)
+                {
+                    // Shadow comparison only: primary PnL runs on LocalBookAdapter.
+                    if (shadow_tracker_)
+                        shadow_tracker_->on_exchange_fill(f);
+                    continue;
+                }
                 auto fill_ptr = fill_pool_.acquire(f);
                 portfolio_.on_fill(f);
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
@@ -1523,17 +1535,25 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     auto ob = orderbook_registry_.get_or_create(rec.symbol);
     market_maker_.replenish(ob, last_mid_price_);
 
-    // Let the provider react to the tick-derived mid price and poll
-    // any fills that result.
+    // Let the provider react to the tick-derived mid price and poll any
+    // fills that result. Poll the provider's adapter directly — in shadow
+    // mode get_adapter() returns the LocalBookAdapter and the provider's
+    // fills would be lost.
     if (config_.provider && config_.provider->has_execution())
     {
         config_.provider->on_mid_price(rec.symbol, last_mid_price_);
-        auto adapter = get_adapter(rec.symbol);
+        auto provider_adapter = config_.provider->get_execution_adapter();
         std::vector<fill_event> provider_fills;
-        if (adapter && adapter->poll_fills(provider_fills))
+        if (provider_adapter && provider_adapter->poll_fills(provider_fills))
         {
             for (auto& f : provider_fills)
             {
+                if (config_.mode == engine_mode::shadow)
+                {
+                    if (shadow_tracker_)
+                        shadow_tracker_->on_exchange_fill(f);
+                    continue;
+                }
                 auto fill_ptr = fill_pool_.acquire(f);
                 portfolio_.on_fill(f);
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));

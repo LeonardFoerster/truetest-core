@@ -151,7 +151,14 @@ std::string render_execution_section(const AnalyticsReport& r, const report_opti
 {
     std::ostringstream oss;
     oss << "\n" << ascii::section_header("Execution Quality", o.width) << "\n";
-    oss << metric("avg slippage",  fmt_fixed(r.avg_slippage, 4));
+    oss << metric("avg slippage",        fmt_fixed(r.avg_slippage, 4));
+    oss << metric("avg slippage (signed)", fmt_fixed(r.avg_slippage_signed, 4));
+    if (r.adverse_slippage_count > 0)
+        oss << metric("avg adverse",     fmt_fixed(r.avg_adverse_slippage, 4)
+                                       + "  n=" + std::to_string(r.adverse_slippage_count));
+    if (r.favorable_slippage_count > 0)
+        oss << metric("avg favorable",   fmt_fixed(r.avg_favorable_slippage, 4)
+                                       + "  n=" + std::to_string(r.favorable_slippage_count));
     oss << metric("total orders",  std::to_string(r.total_orders));
     oss << metric("total fills",   std::to_string(r.total_fills));
     if (r.tick_to_trade_samples > 0)
