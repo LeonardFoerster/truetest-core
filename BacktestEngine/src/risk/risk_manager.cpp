@@ -16,7 +16,6 @@ void RiskManager::update_daily_reset(std::chrono::system_clock::time_point now)
 {
     if (daily_reset_tp_ == std::chrono::system_clock::time_point{})
     {
-        // Initialize: find the next reset boundary
         auto tt = std::chrono::system_clock::to_time_t(now);
         std::tm utc{};
         gmtime_r(&tt, &utc);
@@ -32,8 +31,7 @@ void RiskManager::update_daily_reset(std::chrono::system_clock::time_point now)
     if (now >= daily_reset_tp_)
     {
         daily_loss_ = 0.0;
-        daily_start_equity_ = 0.0; // will be re-captured on next check
-        // Advance to next reset boundary
+        daily_start_equity_ = 0.0;
         while (daily_reset_tp_ <= now)
             daily_reset_tp_ += std::chrono::hours(24);
     }
@@ -43,15 +41,12 @@ risk_action RiskManager::check_order(const order_event& order,
                                      const portfolio& port,
                                      const AnalyticsReport& snap)
 {
-    // 1. Max drawdown check → halt
     if (snap.max_drawdown / 100.0 >= limits_.max_drawdown)
         return risk_action::halt;
 
-    // 2. Max open orders check → reject
     if (static_cast<int>(snap.total_orders - snap.total_fills) >= limits_.max_open_orders)
         return risk_action::reject;
 
-    // 3. Max position value check (per-symbol notional) → reject
     if (order.get_side() == order_side::buy)
     {
         const auto& positions = port.get_positions();
@@ -65,7 +60,6 @@ risk_action RiskManager::check_order(const order_event& order,
             return risk_action::reject;
     }
 
-    // 4. Max portfolio exposure check → reject
     if (order.get_side() == order_side::buy)
     {
         double total_exposure = 0.0;
@@ -77,7 +71,6 @@ risk_action RiskManager::check_order(const order_event& order,
             return risk_action::reject;
     }
 
-    // 5. Max orders per minute (rolling window) → reject
     if (limits_.max_orders_per_minute > 0)
     {
         auto cutoff = order.get_timestamp() - std::chrono::seconds(60);
@@ -87,7 +80,6 @@ risk_action RiskManager::check_order(const order_event& order,
         order_timestamps_.push_back({order.get_timestamp()});
     }
 
-    // 6. Daily loss limit check → halt
     if (limits_.max_daily_loss > 0.0)
     {
         update_daily_reset(order.get_timestamp());
@@ -102,11 +94,9 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
                                          const portfolio& /* port */,
                                          const AnalyticsReport& snap)
 {
-    // 1. Max drawdown check → halt
     if (snap.max_drawdown / 100.0 >= limits_.max_drawdown)
         return risk_action::halt;
 
-    // 2. Single trade loss limit → halt
     if (!snap.trades.empty())
     {
         const auto& last_trade = snap.trades.back();
@@ -114,12 +104,10 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
             return risk_action::halt;
     }
 
-    // 3. Max trades per hour → halt
     if (limits_.max_trades_per_hour > 0 &&
         static_cast<int>(trade_timestamps_.size()) >= limits_.max_trades_per_hour)
         return risk_action::halt;
 
-    // 4. Daily loss limit → halt
     if (limits_.max_daily_loss > 0.0)
     {
         update_daily_reset(fill.get_timestamp());
@@ -132,7 +120,6 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
 
 void RiskManager::on_fill(const fill_event& fill)
 {
-    // Track trade timestamps for max_trades_per_hour
     if (limits_.max_trades_per_hour > 0)
     {
         auto cutoff = fill.get_timestamp() - std::chrono::hours(1);
@@ -140,11 +127,9 @@ void RiskManager::on_fill(const fill_event& fill)
         trade_timestamps_.push_back({fill.get_timestamp()});
     }
 
-    // Track daily realized loss from completed trades
     if (limits_.max_daily_loss > 0.0)
     {
         update_daily_reset(fill.get_timestamp());
-        // Commission always counts as loss
         daily_loss_ += fill.get_commission();
     }
 }

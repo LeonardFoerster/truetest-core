@@ -2,15 +2,22 @@
 #ifdef HAS_BINANCE
 
 #include "providers/binance/binance_auth.h"
+#include "providers/binance/binance_parser.h"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/beast.hpp>
 #include <boost/beast/ssl.hpp>
 
+#include <atomic>
+#include <chrono>
+#include <climits>
+#include <cstdint>
+#include <functional>
 #include <iostream>
 #include <string>
 #include <stdexcept>
+#include <thread>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -18,13 +25,6 @@ namespace net = boost::asio;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
-// BinanceRestClient: synchronous HTTP client for Binance REST API.
-//
-// Handles:
-// - GET/POST/PUT/DELETE requests with HMAC-SHA256 signing
-// - TLS connection to api.binance.com or testnet.binance.vision
-// - Rate limit tracking via X-MBX-USED-WEIGHT headers
-// - Error response parsing (400/401/403/429)
 class BinanceRestClient
 {
 public:
@@ -47,10 +47,9 @@ public:
     {
         int status;
         std::string body;
-        int used_weight = 0; // from X-MBX-USED-WEIGHT-1M header
+        int used_weight = 0;
     };
 
-    // POST a signed request (e.g., new order).
     response post(const std::string& endpoint, const std::string& params)
     {
         auto query = params + "&timestamp=" + std::to_string(binance::server_time_ms())
@@ -59,7 +58,6 @@ public:
         return execute(http::verb::post, endpoint, signed_query);
     }
 
-    // GET a signed request (e.g., account info, trade history).
     response get(const std::string& endpoint, const std::string& params)
     {
         auto query = params + "&timestamp=" + std::to_string(binance::server_time_ms())
@@ -68,7 +66,6 @@ public:
         return execute(http::verb::get, endpoint + "?" + signed_query, "");
     }
 
-    // DELETE a signed request (e.g., cancel order).
     response del(const std::string& endpoint, const std::string& params)
     {
         auto query = params + "&timestamp=" + std::to_string(binance::server_time_ms())
@@ -77,19 +74,78 @@ public:
         return execute(http::verb::delete_, endpoint + "?" + signed_query, "");
     }
 
-    // POST an unsigned request (e.g., listen key creation).
     response post_unsigned(const std::string& endpoint)
     {
         return execute(http::verb::post, endpoint, "");
     }
 
-    // PUT an unsigned request (e.g., listen key keepalive).
     response put_unsigned(const std::string& endpoint, const std::string& params = "")
     {
         return execute(http::verb::put, endpoint + (params.empty() ? "" : "?" + params), "");
     }
 
-    int last_used_weight() const { return last_used_weight_; }
+    int last_used_weight() const { return last_used_weight_.load(); }
+
+    // returns server_time_ms - local_time_ms; negative means we are ahead.
+    // On any failure returns LLONG_MIN so callers can detect it.
+    using get_fn_t = std::function<response(const std::string&, const std::string&)>;
+
+    static long long server_time_offset_ms(const get_fn_t& get_fn)
+    {
+        if (!get_fn) return LLONG_MIN;
+        try
+        {
+            auto resp = get_fn("/api/v3/time", "");
+            if (resp.status < 200 || resp.status >= 300) return LLONG_MIN;
+            auto sv = binance::extract_sv_number(resp.body, "serverTime");
+            long long server_ms = 0;
+            int64_t parsed = 0;
+            if (!binance::parse_int64_sv(sv, parsed)) return LLONG_MIN;
+            server_ms = static_cast<long long>(parsed);
+            long long local_ms = static_cast<long long>(binance::server_time_ms());
+            return server_ms - local_ms;
+        }
+        catch (...)
+        {
+            return LLONG_MIN;
+        }
+    }
+
+    long long server_time_offset_ms()
+    {
+        return server_time_offset_ms(
+            [this](const std::string& ep, const std::string& p) {
+                // unsigned GET: do not sign, do not add timestamp.
+                return execute(http::verb::get,
+                               ep + (p.empty() ? "" : "?" + p),
+                               "");
+            });
+    }
+
+    // Throttle policy knobs (exposed for tests; not wired through config yet).
+    void set_weight_cap(int cap) { weight_cap_ = cap; }
+    void set_soft_threshold_pct(int pct) { soft_threshold_pct_ = pct; }
+
+    // Pure helper so tests can exercise the decision without a network.
+    // Returns number of milliseconds to sleep before the next request;
+    // 0 means no throttle needed.
+    static long long throttle_delay_ms(int used_weight,
+                                       long long anchor_ms,
+                                       long long now_ms,
+                                       int cap,
+                                       int pct)
+    {
+        if (cap <= 0 || pct <= 0) return 0;
+        if (used_weight <= 0) return 0;
+        long long since = now_ms - anchor_ms;
+        if (since < 0 || since >= 60'000) return 0;
+        if (static_cast<long long>(used_weight) * 100 <
+            static_cast<long long>(cap) * pct)
+            return 0;
+        long long remaining = 60'000 - since;
+        if (remaining < 0) remaining = 0;
+        return remaining;
+    }
 
 private:
     std::string api_key_;
@@ -97,10 +153,41 @@ private:
     std::string host_;
     std::string port_;
     ssl::context ctx_;
-    int last_used_weight_ = 0;
+    std::atomic<int> last_used_weight_{0};
+    std::atomic<long long> window_anchor_ms_{0};
+    int weight_cap_ = 6000;
+    int soft_threshold_pct_ = 80;
 
     response execute(http::verb method, const std::string& target, const std::string& body)
     {
+        return execute_with_retry(method, target, body, /*retry_on_429=*/true);
+    }
+
+    response execute_with_retry(http::verb method,
+                                const std::string& target,
+                                const std::string& body,
+                                bool retry_on_429)
+    {
+        // Proactive throttle: if we are near the weight cap, wait for the
+        // 1-minute window to roll before firing the request.
+        {
+            long long now_ms = static_cast<long long>(binance::server_time_ms());
+            long long delay = throttle_delay_ms(
+                last_used_weight_.load(),
+                window_anchor_ms_.load(),
+                now_ms,
+                weight_cap_,
+                soft_threshold_pct_);
+            if (delay > 0)
+            {
+                std::cerr << "BinanceRestClient: near weight cap, pausing "
+                          << delay << " ms\n";
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                // Clear the anchor so a stale window does not throttle us again.
+                window_anchor_ms_.store(0);
+            }
+        }
+
         try
         {
             net::io_context ioc;
@@ -138,23 +225,42 @@ private:
             r.status = static_cast<int>(res.result_int());
             r.body = res.body();
 
-            // Track rate limit weight
             auto weight_it = res.find("X-MBX-USED-WEIGHT-1M");
             if (weight_it != res.end())
             {
                 try { r.used_weight = std::stoi(std::string(weight_it->value())); }
                 catch (...) {}
-                last_used_weight_ = r.used_weight;
+                last_used_weight_.store(r.used_weight);
+                window_anchor_ms_.store(
+                    static_cast<long long>(binance::server_time_ms()));
             }
 
-            // Graceful shutdown
             beast::error_code ec;
             stream.shutdown(ec);
 
             if (r.status == 429)
             {
+                long long sleep_ms = 2000;
+                auto retry_after = res.find("Retry-After");
+                if (retry_after != res.end())
+                {
+                    try
+                    {
+                        long long sec = std::stoll(
+                            std::string(retry_after->value()));
+                        if (sec > 0) sleep_ms = std::min<long long>(sec * 1000,
+                                                                    60'000);
+                    }
+                    catch (...) {}
+                }
                 std::cerr << "BinanceRestClient: rate limited (429). "
-                          << "Weight used: " << r.used_weight << "\n";
+                          << "Weight used: " << r.used_weight
+                          << ", sleeping " << sleep_ms << " ms\n";
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(sleep_ms));
+                if (retry_on_429)
+                    return execute_with_retry(method, target, body, false);
+                return r;
             }
             else if (r.status >= 400)
             {

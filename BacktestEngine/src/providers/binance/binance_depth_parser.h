@@ -8,30 +8,15 @@
 #include <string>
 #include <vector>
 
-// BinanceDepthParser: parses Binance @depth and @depth@100ms messages
-// into provider::l2_snapshot or provider::l2_update events.
-//
-// Full depth snapshot format (from REST /api/v3/depth or initial stream):
-//   {"lastUpdateId":123,"bids":[["price","qty"],...],"asks":[["price","qty"],...]}
-//
-// Diff depth update format (from @depth stream):
-//   {"e":"depthUpdate","E":123456789,"s":"BTCUSDT","U":157,"u":160,
-//    "b":[["price","qty"],...], "a":[["price","qty"],...]}
-//
-// Quantity of 0 means the price level should be removed.
 
 namespace binance {
 
-// Parse a depth update message into an l2_snapshot (contains both bids and asks).
-// We model each depth message as a snapshot since it contains full bid/ask arrays.
 inline std::optional<provider::l2_snapshot> parse_depth_snapshot(const std::string& json)
 {
     provider::l2_snapshot snap;
 
-    // Extract symbol if present
     snap.symbol = extract_string(json, "s");
 
-    // Extract timestamp
     auto ts_str = extract_number(json, "E");
     if (!ts_str.empty())
     {
@@ -44,21 +29,17 @@ inline std::optional<provider::l2_snapshot> parse_depth_snapshot(const std::stri
         snap.timestamp = std::chrono::system_clock::now();
     }
 
-    // Parse bids array: "bids":[["price","qty"],...]  or "b":[...]
     auto parse_levels = [&](const std::string& key) -> std::vector<provider::l2_snapshot::level>
     {
         std::vector<provider::l2_snapshot::level> levels;
 
-        // Find the array
         std::string search = "\"" + key + "\":[";
         auto pos = json.find(search);
         if (pos == std::string::npos) return levels;
         pos += search.size();
 
-        // Parse each [price, qty] pair
         while (pos < json.size())
         {
-            // Skip whitespace
             while (pos < json.size() && (json[pos] == ' ' || json[pos] == ','))
                 pos++;
 
@@ -67,9 +48,8 @@ inline std::optional<provider::l2_snapshot> parse_depth_snapshot(const std::stri
 
             if (json[pos] != '[')
                 break;
-            pos++; // skip '['
+            pos++;
 
-            // Extract price (quoted string)
             if (pos >= json.size() || json[pos] != '"') break;
             pos++;
             auto price_end = json.find('"', pos);
@@ -77,11 +57,9 @@ inline std::optional<provider::l2_snapshot> parse_depth_snapshot(const std::stri
             std::string price_str = json.substr(pos, price_end - pos);
             pos = price_end + 1;
 
-            // Skip comma
             while (pos < json.size() && (json[pos] == ',' || json[pos] == ' '))
                 pos++;
 
-            // Extract qty (quoted string)
             if (pos >= json.size() || json[pos] != '"') break;
             pos++;
             auto qty_end = json.find('"', pos);
@@ -89,15 +67,13 @@ inline std::optional<provider::l2_snapshot> parse_depth_snapshot(const std::stri
             std::string qty_str = json.substr(pos, qty_end - pos);
             pos = qty_end + 1;
 
-            // Skip closing ']'
             while (pos < json.size() && json[pos] != ']') pos++;
             if (pos < json.size()) pos++;
 
             double price = std::stod(price_str);
             double qty = std::stod(qty_str);
-            levels.push_back({price, static_cast<int64_t>(qty * 1e8)}); // qty in satoshis for precision
+            levels.push_back({price, static_cast<int64_t>(qty * 1e8)});
 
-            // Skip comma between pairs
             while (pos < json.size() && (json[pos] == ',' || json[pos] == ' '))
                 pos++;
 
@@ -108,7 +84,6 @@ inline std::optional<provider::l2_snapshot> parse_depth_snapshot(const std::stri
         return levels;
     };
 
-    // Try both "bids"/"asks" (REST snapshot) and "b"/"a" (stream diff)
     snap.bids = parse_levels("bids");
     if (snap.bids.empty())
         snap.bids = parse_levels("b");
@@ -123,8 +98,6 @@ inline std::optional<provider::l2_snapshot> parse_depth_snapshot(const std::stri
     return snap;
 }
 
-// Parse individual level updates from a depth message into l2_update events.
-// Returns a vector since one depth message contains multiple level updates.
 inline std::vector<provider::l2_update> parse_depth_updates(const std::string& json)
 {
     std::vector<provider::l2_update> updates;
@@ -138,7 +111,7 @@ inline std::vector<provider::l2_update> parse_depth_updates(const std::string& j
         provider::l2_update upd;
         upd.timestamp = snap.timestamp;
         upd.symbol = snap.symbol;
-        upd.side = 0; // bid
+        upd.side = 0;
         upd.price = lvl.price;
         upd.new_quantity = lvl.quantity;
         updates.push_back(upd);
@@ -149,7 +122,7 @@ inline std::vector<provider::l2_update> parse_depth_updates(const std::string& j
         provider::l2_update upd;
         upd.timestamp = snap.timestamp;
         upd.symbol = snap.symbol;
-        upd.side = 1; // ask
+        upd.side = 1;
         upd.price = lvl.price;
         upd.new_quantity = lvl.quantity;
         updates.push_back(upd);
@@ -160,7 +133,6 @@ inline std::vector<provider::l2_update> parse_depth_updates(const std::string& j
 
 } // namespace binance
 
-// BinanceDepthSnapshotParser: IDataParser adapter for depth messages → l2_snapshot.
 class BinanceDepthSnapshotParser : public IDataParser<provider::l2_snapshot>
 {
 public:

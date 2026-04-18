@@ -1,0 +1,296 @@
+#pragma once
+
+#include "execution_adapter.h"
+#include "order_transport.h"
+#include "fill_transport.h"
+#include "order_encoder.h"
+#include "fill_parser.h"
+#include "../core/event.h"
+
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+class ExecutionBridge : public IExecutionAdapter
+{
+public:
+    struct deps
+    {
+        std::shared_ptr<IOrderTransport> order_tx;
+        std::shared_ptr<IFillTransport>  fill_tx;
+        std::shared_ptr<IOrderEncoder>   encoder;
+        std::shared_ptr<IFillParser>     parser;
+    };
+
+    struct status_event
+    {
+        IFillTransport::lifecycle state = IFillTransport::lifecycle::closed;
+        std::string note;
+    };
+
+    explicit ExecutionBridge(deps d)
+        : d_(std::move(d))
+    {
+        if (d_.fill_tx)
+        {
+            d_.fill_tx->set_on_message([this](std::string_view raw) {
+                handle_message(raw);
+            });
+            d_.fill_tx->set_on_status([this](IFillTransport::lifecycle st,
+                                             std::string_view note) {
+                handle_status(st, note);
+            });
+        }
+    }
+
+    bool open()
+    {
+        if (!d_.order_tx || !d_.fill_tx)
+        {
+            set_error("ExecutionBridge: missing transport");
+            return false;
+        }
+        if (!d_.order_tx->open())
+        {
+            set_error("ExecutionBridge: order transport open failed");
+            return false;
+        }
+        if (!d_.fill_tx->open())
+        {
+            d_.order_tx->close();
+            set_error("ExecutionBridge: fill transport open failed");
+            return false;
+        }
+        return true;
+    }
+
+    void close()
+    {
+        if (d_.fill_tx)  d_.fill_tx->close();
+        if (d_.order_tx) d_.order_tx->close();
+    }
+
+    void submit_order(const order_event& o) override
+    {
+        clear_error();
+
+        if (!d_.encoder || !d_.order_tx)
+        {
+            set_error("ExecutionBridge: not configured");
+            return;
+        }
+
+        const std::string client_id = make_client_id(o.get_order_id());
+        auto enc = d_.encoder->encode_submit(o, client_id);
+
+        tracked_order t;
+        t.engine_id = o.get_order_id();
+        t.client_id = client_id;
+        t.symbol    = o.get_symbol();
+        t.side      = o.get_side();
+        t.total_qty = o.get_quantity();
+
+        {
+            std::lock_guard<std::mutex> lk(map_mu_);
+            by_engine_id_[t.engine_id] = t;
+            by_client_id_[t.client_id] = t.engine_id;
+        }
+
+        auto res = d_.order_tx->submit(enc.endpoint, enc.wire_payload);
+        if (!res.ok)
+        {
+            set_error("submit failed: " + res.error);
+            std::lock_guard<std::mutex> lk(map_mu_);
+            by_engine_id_.erase(t.engine_id);
+            by_client_id_.erase(t.client_id);
+            return;
+        }
+
+        if (!res.exchange_order_id.empty())
+        {
+            std::lock_guard<std::mutex> lk(map_mu_);
+            auto it = by_engine_id_.find(t.engine_id);
+            if (it != by_engine_id_.end())
+                it->second.exchange_id = res.exchange_order_id;
+        }
+    }
+
+    bool poll_fills(std::vector<fill_event>& out) override
+    {
+        std::lock_guard<std::mutex> lk(fills_mu_);
+        if (pending_fills_.empty()) return false;
+        out.insert(out.end(),
+                   std::make_move_iterator(pending_fills_.begin()),
+                   std::make_move_iterator(pending_fills_.end()));
+        pending_fills_.clear();
+        return true;
+    }
+
+    bool cancel_order(uint64_t engine_order_id) override
+    {
+        std::string exchange_id, symbol, client_id;
+        {
+            std::lock_guard<std::mutex> lk(map_mu_);
+            auto it = by_engine_id_.find(engine_order_id);
+            if (it == by_engine_id_.end()) return false;
+            exchange_id = it->second.exchange_id;
+            symbol      = it->second.symbol;
+            client_id   = it->second.client_id;
+        }
+
+        if (!d_.encoder || !d_.order_tx) return false;
+
+        auto enc = d_.encoder->encode_cancel(symbol, exchange_id, client_id);
+        auto res = d_.order_tx->cancel(enc.endpoint, enc.wire_payload);
+        if (!res.ok)
+        {
+            set_error("cancel failed: " + res.error);
+            return false;
+        }
+        return true;
+    }
+
+    bool poll_status(std::vector<status_event>& out)
+    {
+        std::lock_guard<std::mutex> lk(status_mu_);
+        if (pending_status_.empty()) return false;
+        out.insert(out.end(),
+                   std::make_move_iterator(pending_status_.begin()),
+                   std::make_move_iterator(pending_status_.end()));
+        pending_status_.clear();
+        return true;
+    }
+
+    std::string last_error() const
+    {
+        std::lock_guard<std::mutex> lk(error_mu_);
+        return last_error_;
+    }
+
+private:
+    struct tracked_order
+    {
+        uint64_t    engine_id     = 0;
+        std::string client_id;
+        std::string exchange_id;
+        std::string symbol;
+        order_side  side           = order_side::buy;
+        double      total_qty      = 0.0;
+        double      cumulative_qty = 0.0;
+    };
+
+    void handle_message(std::string_view raw)
+    {
+        if (!d_.parser) return;
+        parsed_exec msg;
+        if (!d_.parser->parse(raw, msg)) return;
+
+        uint64_t engine_id = 0;
+        double total_qty = 0.0;
+        double tracked_cumulative = 0.0;
+        {
+            std::lock_guard<std::mutex> lk(map_mu_);
+            auto cit = by_client_id_.find(msg.client_order_id);
+            if (cit == by_client_id_.end()) return;
+            engine_id = cit->second;
+            auto eit = by_engine_id_.find(engine_id);
+            if (eit == by_engine_id_.end()) return;
+
+            if (!msg.exchange_order_id.empty() && eit->second.exchange_id.empty())
+                eit->second.exchange_id = msg.exchange_order_id;
+
+            if (msg.k == parsed_exec::kind::partial_fill ||
+                msg.k == parsed_exec::kind::full_fill)
+            {
+                eit->second.cumulative_qty += msg.last_fill_qty;
+            }
+
+            total_qty = eit->second.total_qty;
+            tracked_cumulative = eit->second.cumulative_qty;
+
+            if (msg.k == parsed_exec::kind::full_fill   ||
+                msg.k == parsed_exec::kind::canceled    ||
+                msg.k == parsed_exec::kind::rejected    ||
+                msg.k == parsed_exec::kind::expired)
+            {
+                by_client_id_.erase(msg.client_order_id);
+                by_engine_id_.erase(engine_id);
+            }
+        }
+
+        if (msg.k != parsed_exec::kind::partial_fill &&
+            msg.k != parsed_exec::kind::full_fill)
+            return;
+
+        auto ts = (msg.ts.time_since_epoch().count() != 0)
+                    ? msg.ts
+                    : std::chrono::system_clock::now();
+
+        double remaining = 0.0;
+        if (msg.k == parsed_exec::kind::partial_fill && total_qty > 0.0)
+            remaining = std::max(0.0, total_qty - tracked_cumulative);
+
+        uint64_t fill_id;
+        {
+            std::lock_guard<std::mutex> lk(fills_mu_);
+            fill_id = next_fill_id_++;
+
+            fill_event fe(
+                ts,
+                msg.symbol,
+                engine_id,
+                msg.side,
+                msg.last_fill_qty,
+                msg.last_fill_price,
+                msg.commission,
+                remaining,
+                fill_id
+            );
+            fe.set_source(fill_source::exchange);
+            pending_fills_.push_back(std::move(fe));
+        }
+    }
+
+    void handle_status(IFillTransport::lifecycle st, std::string_view note)
+    {
+        std::lock_guard<std::mutex> lk(status_mu_);
+        pending_status_.push_back({st, std::string(note)});
+    }
+
+    static std::string make_client_id(uint64_t engine_order_id)
+    {
+        return "tt-" + std::to_string(engine_order_id);
+    }
+
+    void set_error(std::string msg)
+    {
+        std::lock_guard<std::mutex> lk(error_mu_);
+        last_error_ = std::move(msg);
+    }
+
+    void clear_error()
+    {
+        std::lock_guard<std::mutex> lk(error_mu_);
+        last_error_.clear();
+    }
+
+    deps d_;
+
+    mutable std::mutex map_mu_;
+    std::unordered_map<uint64_t, tracked_order> by_engine_id_;
+    std::unordered_map<std::string, uint64_t>   by_client_id_;
+
+    std::mutex fills_mu_;
+    std::vector<fill_event> pending_fills_;
+    uint64_t next_fill_id_ = 1;
+
+    std::mutex status_mu_;
+    std::vector<status_event> pending_status_;
+
+    mutable std::mutex error_mu_;
+    std::string last_error_;
+};

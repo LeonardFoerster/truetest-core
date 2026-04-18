@@ -1,10 +1,4 @@
-// TrueTest C API implementation (P1).
-//
-// Wraps the existing C++ engine behind an opaque handle + JSON interface.
-// The engine is constructed lazily inside tt_run() so that tt_create_engine()
-// can stay cheap and purely declarative.
 
-// TRUETEST_API_BUILDING is set by the CMake target for the shared lib.
 #include "truetest_api.h"
 
 #include "../core/engine.h"
@@ -41,8 +35,6 @@ struct EngineWrapper
     bool has_run = false;
 };
 
-// Copy a std::string into a C-style heap allocation that can be freed by
-// tt_free_string() regardless of host language.
 char* dup_c_string(const std::string& s)
 {
     char* out = static_cast<char*>(std::malloc(s.size() + 1));
@@ -52,9 +44,6 @@ char* dup_c_string(const std::string& s)
     return out;
 }
 
-// Render an AnalyticsReport as JSON. Kept local to the API layer so we
-// don't couple the core Analytics class to the C ABI. Uses nlohmann::json
-// (already a project dependency) for correctness over raw snprintf.
 std::string report_to_json(const AnalyticsReport& r)
 {
     nlohmann::json j;
@@ -85,7 +74,6 @@ std::string report_to_json(const AnalyticsReport& r)
     j["information_ratio"]    = r.information_ratio;
     j["tracking_error"]       = r.tracking_error;
 
-    // Equity curve as [[timestamp_ms, equity], ...] for easy plotting.
     nlohmann::json eq = nlohmann::json::array();
     for (const auto& p : r.equity_curve)
     {
@@ -95,7 +83,6 @@ std::string report_to_json(const AnalyticsReport& r)
     }
     j["equity_curve"] = std::move(eq);
 
-    // Per-symbol / per-strategy attribution
     nlohmann::json per_sym = nlohmann::json::object();
     for (const auto& [sym, sa] : r.per_symbol)
     {
@@ -274,4 +261,4 @@ void tt_destroy(tt_engine_handle handle)
     delete static_cast<EngineWrapper*>(handle);
 }
 
-} // extern "C"
+}

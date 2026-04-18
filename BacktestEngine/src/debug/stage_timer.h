@@ -10,15 +10,15 @@ namespace debug {
 
 enum class stage : uint8_t
 {
-    market_create,      // constructing the market_event
-    strategy,           // IStrategy::on_market() / on_tick()
-    orderbook,          // orderbook add + match
-    fill_processing,    // portfolio::on_fill() + fill event creation
-    ring_publish,       // publishing to worker ring buffers
-    risk_check,         // inline risk check (non-threaded mode)
-    mm_replenish,       // market maker replenishment
-    stop_check,         // pending stop order scan
-    pending_drain,      // pending latency-delayed order drain
+    market_create,
+    strategy,
+    orderbook,
+    fill_processing,
+    ring_publish,
+    risk_check,
+    mm_replenish,
+    stop_check,
+    pending_drain,
     COUNT
 };
 
@@ -45,7 +45,7 @@ public:
     };
 
     void record(stage s, std::chrono::high_resolution_clock::time_point start);
-    void log() const;  // logs via DBG_PERF()
+    void log() const;
     void reset();
 
 private:
@@ -54,7 +54,6 @@ private:
 
 } // namespace debug
 
-// Convenience macro — vanishes when HAS_DEBUG is off
 #define DEBUG_STAGE(timer, s) debug::StageTimer::scoped _stage_##s(timer, debug::stage::s)
 
 #else

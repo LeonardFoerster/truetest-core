@@ -58,8 +58,8 @@ private:
     std::size_t period_;
     double equity_;
     double risk_fraction_;
-    double sl_pct_;   // stop loss as fraction of entry price (e.g. 0.005 = 0.5%)
-    double tp_pct_;   // take profit as fraction of entry price (e.g. 0.01 = 1%)
+    double sl_pct_;
+    double tp_pct_;
     std::unordered_map<std::string, simple_moving_average> smas_;
     std::unordered_map<std::string, bool> position_open_;
 

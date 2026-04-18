@@ -52,7 +52,6 @@ std::optional<order_event> mean_reversion_strategy::on_market(const market_event
 
 std::optional<order_event> mean_reversion_strategy::on_tick(const tick_event& te)
 {
-    // Check SL/TP first — these take priority over new signals
     auto stop_order = check_stops(te.get_symbol(), te.get_price(), te.get_timestamp());
     if (stop_order) return stop_order;
 
@@ -65,11 +64,10 @@ std::optional<order_event> mean_reversion_strategy::on_tick(const tick_event& te
     if (qty <= 0.0) return std::nullopt;
 
     if (!is_open && te.get_price() < *sma_value) {
-        // Set SL/TP for the new position
         double entry = te.get_price();
         set_stops(te.get_symbol(),
-                  entry * (1.0 - sl_pct_),   // SL below entry
-                  entry * (1.0 + tp_pct_),    // TP above entry
+                  entry * (1.0 - sl_pct_),
+                  entry * (1.0 + tp_pct_),
                   qty);
         return order_event(te.get_timestamp(), te.get_symbol(), order_type::market, order_side::buy, qty, entry);
     }

@@ -18,23 +18,19 @@ namespace http = beast::http;
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
 
-// Backtest run status tracking (used by REST API)
 struct backtest_run
 {
     std::string id;
     std::string config_json;
-    std::string status;         // "pending", "running", "completed", "failed"
-    std::string results_json;   // populated on completion
+    std::string status;
+    std::string results_json;
     std::chrono::system_clock::time_point started_at;
     std::chrono::system_clock::time_point ended_at;
 };
 
-// Manages backtest runs submitted via REST API.
-// Thread-safe: runs are submitted from HTTP threads, updated from engine threads.
 class BacktestRunManager
 {
 public:
-    // Create a new run entry and return its ID.
     std::string create_run(const std::string& config_json)
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -48,7 +44,6 @@ public:
         return id;
     }
 
-    // Update run status (called from engine thread).
     void update_status(const std::string& id, const std::string& status)
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -57,7 +52,6 @@ public:
             it->second.status = status;
     }
 
-    // Store results and mark completed.
     void complete_run(const std::string& id, const std::string& results_json)
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -70,7 +64,6 @@ public:
         }
     }
 
-    // Mark run as failed.
     void fail_run(const std::string& id, const std::string& error)
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -83,7 +76,6 @@ public:
         }
     }
 
-    // Get status JSON for a run. Returns empty string if not found.
     std::string get_status_json(const std::string& id) const
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -101,7 +93,6 @@ public:
         return buf;
     }
 
-    // Get results JSON for a run. Returns empty string if not found or not completed.
     std::string get_results_json(const std::string& id) const
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -112,7 +103,6 @@ public:
         return it->second.results_json;
     }
 
-    // List all runs as JSON array.
     std::string list_runs_json() const
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -141,22 +131,12 @@ private:
     uint64_t next_id_ = 1;
 };
 
-// Callback type: engine registers this to handle backtest submissions.
-// Takes config JSON, returns run ID. The engine is responsible for
-// spawning the backtest and updating the run manager.
 using on_backtest_submit_fn = std::function<std::string(const std::string& config_json)>;
 
-// Callback for listing persisted historical runs (from SqliteStore).
-// Returns a JSON array of run metadata. Empty string means unavailable.
 using on_list_runs_fn = std::function<std::string(int limit)>;
 
-// L2: callback building Prometheus text-exposition metrics body.
-// Returning an empty string means metrics are unavailable (503).
 using on_metrics_fn = std::function<std::string()>;
 
-// Route an HTTP request and produce a response.
-// Returns true if the request was handled (not a WebSocket upgrade).
-// Returns false if this is a WebSocket upgrade request (caller should proceed with WS).
 template<class Body, class Allocator>
 bool route_http_request(
     const http::request<Body, http::basic_fields<Allocator>>& req,
@@ -168,11 +148,9 @@ bool route_http_request(
 {
     auto target = std::string(req.target());
 
-    // WebSocket upgrade — let the caller handle it
     if (beast::websocket::is_upgrade(req))
         return false;
 
-    // Set common headers
     res.set(http::field::server, "TrueTest");
     res.set(http::field::content_type, "application/json");
     res.set(http::field::access_control_allow_origin, "*");
@@ -180,7 +158,6 @@ bool route_http_request(
     res.set(http::field::access_control_allow_headers, "Content-Type");
     res.keep_alive(req.keep_alive());
 
-    // CORS preflight
     if (req.method() == http::verb::options)
     {
         res.result(http::status::no_content);
@@ -188,7 +165,6 @@ bool route_http_request(
         return true;
     }
 
-    // POST /api/backtest — submit a new backtest
     if (req.method() == http::verb::post && target == "/api/backtest")
     {
         auto body = req.body();
@@ -223,7 +199,6 @@ bool route_http_request(
         return true;
     }
 
-    // GET /api/backtest — list all runs
     if (req.method() == http::verb::get && target == "/api/backtest")
     {
         res.result(http::status::ok);
@@ -232,11 +207,9 @@ bool route_http_request(
         return true;
     }
 
-    // GET /api/backtest/<id>/status
     if (req.method() == http::verb::get && target.rfind("/api/backtest/", 0) == 0)
     {
-        // Extract ID from path
-        auto rest = target.substr(14); // after "/api/backtest/"
+        auto rest = target.substr(14);
         auto slash = rest.find('/');
         std::string id = (slash == std::string::npos) ? rest : rest.substr(0, slash);
         std::string action = (slash == std::string::npos) ? "" : rest.substr(slash + 1);
@@ -286,11 +259,9 @@ bool route_http_request(
         return true;
     }
 
-    // GET /api/runs — list persisted historical runs from SQLite (K1)
     if (req.method() == http::verb::get && target.rfind("/api/runs", 0) == 0)
     {
         int limit = 100;
-        // Optional query string: /api/runs?limit=50
         auto qpos = target.find('?');
         if (qpos != std::string::npos)
         {
@@ -319,7 +290,6 @@ bool route_http_request(
         return true;
     }
 
-    // GET /api/health — simple health check
     if (req.method() == http::verb::get && target == "/api/health")
     {
         res.result(http::status::ok);
@@ -328,7 +298,6 @@ bool route_http_request(
         return true;
     }
 
-    // L2: GET /metrics — Prometheus text exposition
     if (req.method() == http::verb::get && target == "/metrics")
     {
         res.set(http::field::content_type, "text/plain; version=0.0.4");
@@ -355,7 +324,6 @@ bool route_http_request(
         return true;
     }
 
-    // 404 for everything else
     res.result(http::status::not_found);
     res.body() = R"({"error":"not found"})";
     res.prepare_payload();

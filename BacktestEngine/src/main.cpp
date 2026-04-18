@@ -50,9 +50,6 @@
 #include "debug/debug_log.h"
 #endif
 
-// SIGINT-driven graceful shutdown for streaming mode. The signal handler
-// flips an atomic flag on the transport, which unblocks the read loop and
-// lets run_streaming() return normally so print_summary() can run.
 static std::atomic<DataBridge<tick_record>*> g_tick_bridge{nullptr};
 static std::atomic<DataBridge<bar_record>*> g_bar_bridge{nullptr};
 static void install_shutdown_handler()
@@ -67,13 +64,8 @@ static void install_shutdown_handler()
     });
 }
 
-// ---------------------------------------------------------------------------
-// cli_options: every knob main() consumes lives here. Defaults mirror what
-// the old argc/argv-era code initialised inline in main().
-// ---------------------------------------------------------------------------
 struct cli_options
 {
-    // Core
     std::string replay_path;
     int64_t replay_from_us = 0;
     int64_t replay_to_us = INT64_MAX;
@@ -87,7 +79,6 @@ struct cli_options
     std::string spin_policy_str;
     bool no_pin = false;
 
-    // Provider / strategy
     std::string provider_name;
     std::string provider_path;
     std::string strategy;
@@ -96,18 +87,15 @@ struct cli_options
     std::vector<std::string> params;
     std::string mode;
 
-    // Fee
     std::string fee_model;
     double fee_value = 0.0;
     double maker_rate = 0.0;
     double taker_rate = 0.0;
 
-    // Web UI
     bool enable_web_ui = false;
     uint16_t ws_port = 8765;
     bool ws_compress = true;
 
-    // Streaming / connection
     std::string symbol;
     std::string stream;
     std::string api_key;
@@ -117,44 +105,40 @@ struct cli_options
     std::string record_path;
     std::string replay_data_path;
     bool live = false;
+    bool testnet = false;
 
-    // Portfolio
     double balance = 10000.0;
     double risk_fraction = 0.02;
     double sl_pct = 0.005;
     double tp_pct = 0.01;
 
-    // Persistence
     std::string db_path = "truetest.db";
     bool no_db = false;
 
-    // Checkpoints
     std::string checkpoint_path;
     std::string resume_path;
     std::size_t checkpoint_interval = 10000;
 
-    // Backfill
     int backfill = 500;
     std::string backfill_interval;
 
-    // Execution constants
     double market_aggression = 1.1;
     double qty_scale = 1e8;
     unsigned fill_rng_seed = 42;
     double spread_step = 0.0001;
 
-    // Config file handling
+    bool debug_fills = false;
+    int debug_fills_budget = 20;
+
     std::string config_file;
     bool dump_config_flag = false;
     bool dry_run = false;
 
-    // Analytics & reporting
     std::size_t rolling_window = 252;
     double risk_free_rate = 0.0;
     std::string output;
     std::string output_format = "json";
 
-    // Risk limits
     double risk_max_position_value = 1e9;
     double risk_max_drawdown = 0.30;
     double risk_max_loss_per_trade = 10000.0;
@@ -167,9 +151,6 @@ struct cli_options
     bool risk_unwind = false;
 };
 
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
 static std::vector<std::string> split_csv(const std::string& s)
 {
     std::vector<std::string> out;
@@ -228,11 +209,6 @@ static void export_results(const Analytics& analytics,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Config file: load JSON into a cli_options struct. Only fields present in
-// the JSON are overwritten; missing fields retain whatever they already had
-// (usually the struct defaults).
-// ---------------------------------------------------------------------------
 static void load_config_file(const std::string& path, cli_options& o)
 {
     std::ifstream f(path);
@@ -298,6 +274,7 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_str("record", o.record_path);
     get_str("replay_data", o.replay_data_path);
     get_bool("live", o.live);
+    get_bool("testnet", o.testnet);
     get_str("mode", o.mode);
     get_str("db", o.db_path);
     get_double("balance", o.balance);
@@ -360,6 +337,7 @@ static void dump_config(const cli_options& o)
     j["record"] = o.record_path;
     j["replay_data"] = o.replay_data_path;
     j["live"] = o.live;
+    j["testnet"] = o.testnet;
     j["mode"] = o.mode.empty() ? "backtest" : o.mode;
     j["db"] = o.db_path;
     j["balance"] = o.balance;
@@ -382,12 +360,8 @@ static void dump_config(const cli_options& o)
     std::cout << j.dump(2) << "\n";
 }
 
-// ---------------------------------------------------------------------------
-// Register every CLI11 option against its cli_options field.
-// ---------------------------------------------------------------------------
 static void register_cli_options(CLI::App& app, cli_options& o)
 {
-    // Core
     app.add_option("--replay", o.replay_path, "Path to event log for replay mode");
     app.add_option("--replay-from", o.replay_from_us, "Replay from timestamp (microseconds since epoch)");
     app.add_option("--replay-to", o.replay_to_us, "Replay to timestamp (microseconds since epoch)");
@@ -408,19 +382,16 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--param", o.params, "Strategy parameter: key=value (repeatable)");
     app.add_option("--mode", o.mode, "Engine mode: backtest, shadow, live");
 
-    // Fee model
     app.add_option("--fee", o.fee_model, "Fee model: fixed, tiered");
     app.add_option("--fee-value", o.fee_value, "Fixed fee per trade");
     app.add_option("--maker-rate", o.maker_rate, "Maker fee rate (tiered)");
     app.add_option("--taker-rate", o.taker_rate, "Taker fee rate (tiered)");
 
-    // WebSocket UI
     app.add_flag("--web-ui", o.enable_web_ui, "Enable WebSocket UI server");
     app.add_option("--ws-port", o.ws_port, "WebSocket server port")->default_val(8765);
     app.add_flag("--ws-compress,!--no-ws-compress", o.ws_compress,
                  "Enable per-message deflate compression (default: on)");
 
-    // Provider/streaming
     app.add_option("--symbol", o.symbol, "Trading symbol (e.g., BTCUSDT)");
     app.add_option("--stream", o.stream, "Stream type: trade, kline, or interval");
     app.add_option("--api-key", o.api_key, "API key for exchange");
@@ -430,18 +401,17 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--record", o.record_path, "Record market data to file");
     app.add_option("--replay-data", o.replay_data_path, "Replay recorded market data");
     app.add_flag("--live", o.live, "Safety flag for live (real money) mode");
+    app.add_flag("--testnet", o.testnet,
+                 "Route Binance provider to the spot testnet (stream.testnet.binance.vision / testnet.binance.vision)");
 
-    // Portfolio
     app.add_option("--balance", o.balance, "Initial account balance")->default_val(10000.0);
     app.add_option("--risk-fraction", o.risk_fraction, "Position size as equity fraction")->default_val(0.02);
     app.add_option("--sl", o.sl_pct, "Stop loss fraction of entry price")->default_val(0.005);
     app.add_option("--tp", o.tp_pct, "Take profit fraction of entry price")->default_val(0.01);
 
-    // Data persistence
     app.add_option("--db", o.db_path, "SQLite database path")->default_val("truetest.db");
     app.add_flag("--no-db", o.no_db, "Disable SQLite persistence");
 
-    // Checkpointing
     app.add_option("--checkpoint", o.checkpoint_path,
                    "Write periodic portfolio checkpoint to this binary file");
     app.add_option("--checkpoint-interval", o.checkpoint_interval,
@@ -450,28 +420,27 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--resume", o.resume_path,
                    "Restore portfolio state from a checkpoint before running");
 
-    // Backfill
     app.add_option("--backfill", o.backfill, "Historical bars to fetch before streaming")->default_val(500);
     app.add_option("--backfill-interval", o.backfill_interval, "Kline interval for backfill");
 
-    // Execution constants
     app.add_option("--aggression", o.market_aggression, "Market order aggression factor")->default_val(1.1);
     app.add_option("--qty-scale", o.qty_scale, "Quantity scale (fractional → integer)")->default_val(1e8);
     app.add_option("--fill-rng-seed", o.fill_rng_seed, "RNG seed for fill model")->default_val(42);
     app.add_option("--spread-step", o.spread_step, "Spread step factor (mid * factor)")->default_val(0.0001);
 
-    // Config file
+    app.add_flag("--debug-fills", o.debug_fills,
+                 "Log the first N fills via LocalBookAdapter with book state (intended/book/fill, best bid/ask)");
+    app.add_option("--debug-fills-budget", o.debug_fills_budget,
+                   "How many fills to log when --debug-fills is on")->default_val(20);
+
     app.add_option("--config", o.config_file, "Load configuration from JSON file");
     app.add_flag("--dump-config", o.dump_config_flag, "Print resolved config as JSON and exit");
 
-    // Dry run
     app.add_flag("--dry-run", o.dry_run, "Validate config, print summary, and exit");
 
-    // Analytics & reporting
     app.add_option("--rolling-window", o.rolling_window, "Rolling metrics window size (bars)")->default_val(252);
     app.add_option("--risk-free-rate", o.risk_free_rate, "Annual risk-free rate for Sharpe/Sortino")->default_val(0.0);
 
-    // Time-based risk limits
     app.add_option("--max-daily-loss", o.risk_max_daily_loss, "Maximum daily loss before halt (0 = no limit)")->default_val(0.0);
     app.add_option("--daily-reset-hour", o.risk_daily_reset_hour, "UTC hour (0-23) to reset daily loss counter")->default_val(0);
     app.add_option("--max-trades-per-hour", o.risk_max_trades_per_hour, "Maximum fills per rolling hour (0 = no limit)")->default_val(0);
@@ -481,11 +450,6 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--output-format", o.output_format, "Output format: json or csv")->default_val("json");
 }
 
-// ---------------------------------------------------------------------------
-// If --config was passed, load the file into a fresh cli_options and copy
-// each field back into the primary opts only when the user did NOT set it
-// explicitly on the command line. CLI wins over file.
-// ---------------------------------------------------------------------------
 static void apply_config_overlay(CLI::App& app, cli_options& opts)
 {
     if (opts.config_file.empty()) return;
@@ -524,6 +488,7 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--record")) opts.record_path = file_opts.record_path;
     if (!was_set("--replay-data")) opts.replay_data_path = file_opts.replay_data_path;
     if (!was_set("--live")) opts.live = file_opts.live;
+    if (!was_set("--testnet")) opts.testnet = file_opts.testnet;
     if (!was_set("--mode")) opts.mode = file_opts.mode;
     if (!was_set("--db")) opts.db_path = file_opts.db_path;
     if (!was_set("--balance")) opts.balance = file_opts.balance;
@@ -537,8 +502,6 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--output")) opts.output = file_opts.output;
     if (!was_set("--output-format")) opts.output_format = file_opts.output_format;
 
-    // Risk block: these live only in the config file (no CLI counterparts)
-    // for the value-style limits; time-based limits do have CLI flags.
     opts.risk_max_position_value = file_opts.risk_max_position_value;
     opts.risk_max_drawdown = file_opts.risk_max_drawdown;
     opts.risk_max_loss_per_trade = file_opts.risk_max_loss_per_trade;
@@ -550,9 +513,6 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--max-orders-per-minute")) opts.risk_max_orders_per_minute = file_opts.risk_max_orders_per_minute;
 }
 
-// ---------------------------------------------------------------------------
-// --dry-run: print the resolved config summary and validate known fields.
-// ---------------------------------------------------------------------------
 static int run_dry_run(const cli_options& o)
 {
     std::string resolved_strategy = o.strategy.empty() ? "mean-reversion" : o.strategy;
@@ -624,9 +584,6 @@ static int run_dry_run(const cli_options& o)
     return valid ? 0 : 1;
 }
 
-// ---------------------------------------------------------------------------
-// Replay mode: event log → engine, skip data source.
-// ---------------------------------------------------------------------------
 static int run_replay_mode(const cli_options& o)
 {
     std::cout << "\n  Replaying events from: " << o.replay_path << "\n";
@@ -650,14 +607,8 @@ static int run_replay_mode(const cli_options& o)
     return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Provider mode: registry-based data feed → engine (batch or streaming).
-// Owns the SIGINT bridge wiring.
-// ---------------------------------------------------------------------------
 static int run_provider_mode(const cli_options& o)
 {
-    // M2: for multi-file --path, pass only the first path to the provider
-    // (each additional file is loaded separately via FileTransport below).
     std::string primary_path = o.provider_path;
     {
         auto comma = primary_path.find(',');
@@ -673,6 +624,7 @@ static int run_provider_mode(const cli_options& o)
     if (!o.api_secret.empty())  pcfg["api_secret"] = o.api_secret;
     if (!o.host.empty())        pcfg["host"] = o.host;
     if (!o.port.empty())        pcfg["port"] = o.port;
+    if (o.testnet)              pcfg["testnet"] = "1";
 
     std::shared_ptr<IProvider> provider;
     try {
@@ -693,9 +645,6 @@ static int run_provider_mode(const cli_options& o)
         return 1;
     }
 
-    // Select strategy via registry (default: mean-reversion).
-    // M1: comma-separated names create multiple strategies; the first is
-    // the primary, the rest run alongside it via engine::add_strategy().
     std::string resolved_raw = o.strategy.empty() ? "mean-reversion" : o.strategy;
     auto strategy_names = split_csv(resolved_raw);
     if (strategy_names.empty()) strategy_names.push_back("mean-reversion");
@@ -760,8 +709,10 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
     prov_cfg.risk_unwind = o.risk_unwind;
 
-    // Map WS host to REST host for backfill
-    if (!o.host.empty()) {
+    if (o.testnet)
+        prov_cfg.backfill_host = "testnet.binance.vision";
+    else if (!o.host.empty())
+    {
         if (o.host.find("testnet") != std::string::npos)
             prov_cfg.backfill_host = "testnet.binance.vision";
         else
@@ -776,7 +727,6 @@ static int run_provider_mode(const cli_options& o)
     if (!o.spin_policy_str.empty())
         prov_cfg.worker_spin_policy = string_to_spin_policy(o.spin_policy_str);
 
-    // Fee model
     if (o.fee_model == "fixed")
         prov_cfg.fee_model = std::make_shared<FixedFeeModel>(o.fee_value);
     else if (o.fee_model == "tiered")
@@ -784,13 +734,11 @@ static int run_provider_mode(const cli_options& o)
     else if (o.provider_name == "binance")
         prov_cfg.fee_model = std::make_shared<TieredFeeModel>(0.001, 0.001);
 
-    // Engine mode
     if (o.mode == "shadow")
         prov_cfg.mode = engine_mode::shadow;
     else if (o.mode == "live" || o.live)
         prov_cfg.mode = engine_mode::live;
 
-    // Live-mode safety confirmation
     if (prov_cfg.mode == engine_mode::live)
     {
         if (!o.live)
@@ -803,18 +751,27 @@ static int run_provider_mode(const cli_options& o)
             std::cerr << "  ! Live mode requires --api-key and --api-secret.\n";
             return 1;
         }
-        std::cout << "  WARNING: You are about to submit REAL orders. Type YES to continue: ";
-        std::string confirm;
-        std::getline(std::cin, confirm);
-        if (confirm != "YES")
+        if (o.testnet)
         {
-            std::cout << "  Aborted.\n";
-            return 0;
+            std::cout << "  [TESTNET] Live mode will submit orders to the Binance spot testnet.\n";
+        }
+        else
+        {
+            std::cout << "  WARNING: You are about to submit REAL orders. Type YES to continue: ";
+            std::string confirm;
+            std::getline(std::cin, confirm);
+            if (confirm != "YES")
+            {
+                std::cout << "  Aborted.\n";
+                return 0;
+            }
         }
     }
+    else if (o.testnet)
+    {
+        std::cout << "  [TESTNET] Routing Binance provider to the spot testnet.\n";
+    }
 
-    // Hand the engine config to the provider so it can wire fees, fills,
-    // backfill, and mode-dependent execution before opening.
     provider->configure(prov_cfg);
 
     if (provider->has_data_feed() && !provider->open())
@@ -915,7 +872,6 @@ static int run_provider_mode(const cli_options& o)
     }
     else
     {
-        // Batch path: load all data first, then run engine
         if (is_tick)
         {
             std::shared_ptr<IDataParser<tick_record>> parser;
@@ -945,9 +901,6 @@ static int run_provider_mode(const cli_options& o)
 #endif
                 parser = std::make_shared<CsvBarParser>();
 
-            // M2: comma-separated --path loads multiple CSVs into the same
-            // data_handler for multi-symbol backtesting. Only supported for
-            // the local provider (each path needs its own transport).
             auto paths = split_csv(o.provider_path);
             if (paths.size() > 1 && o.provider_name == "local")
             {
@@ -996,9 +949,6 @@ static int run_provider_mode(const cli_options& o)
     return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Legacy interactive TUI (no provider/replay supplied → prompt the user).
-// ---------------------------------------------------------------------------
 static int run_tui_mode(const cli_options& o)
 {
     std::cout << "\n";
@@ -1011,7 +961,6 @@ static int run_tui_mode(const cli_options& o)
     std::cout << "    Backtesting Engine v0.1\n";
     std::cout << "\n";
 
-    // ── Strategy Selection ───────────────────────────────────────
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  |  Strategy                                 |\n";
     std::cout << "  +-------------------------------------------+\n";
@@ -1029,7 +978,6 @@ static int run_tui_mode(const cli_options& o)
         strategy_choice = 1;
     }
 
-    // ── SMA Period ───────────────────────────────────────────────
     std::cout << "\n";
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  |  SMA Period                               |\n";
@@ -1046,7 +994,6 @@ static int run_tui_mode(const cli_options& o)
         strategy->set_param("period", static_cast<double>(sma_period));
     apply_strategy_params(*strategy, o.params);
 
-    // ── Data Source Selection ────────────────────────────────────
     std::cout << "\n";
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  |  Data Source                               |\n";
@@ -1095,7 +1042,6 @@ static int run_tui_mode(const cli_options& o)
         return 1;
     }
 
-    // ── Fee Model Selection ─────────────────────────────────────
     std::cout << "\n";
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  |  Fee Model                                |\n";
@@ -1123,6 +1069,8 @@ static int run_tui_mode(const cli_options& o)
     config.qty_scale = o.qty_scale;
     config.fill_rng_seed = o.fill_rng_seed;
     config.spread_step_factor = o.spread_step;
+    config.debug_fills = o.debug_fills;
+    config.debug_fills_budget = o.debug_fills_budget;
     config.rolling_window = o.rolling_window;
     config.risk_free_rate = o.risk_free_rate;
 
@@ -1167,7 +1115,6 @@ static int run_tui_mode(const cli_options& o)
         config.fee_model = std::make_shared<TieredFeeModel>(maker, taker);
     }
 
-    // ── Engine Mode Selection ────────────────────────────────────
     std::cout << "\n";
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  |  Engine Mode                              |\n";
@@ -1185,7 +1132,6 @@ static int run_tui_mode(const cli_options& o)
     else if (mode_choice == 3)
         config.mode = engine_mode::live;
 
-    // ── Run ──────────────────────────────────────────────────────
     std::cout << "\n";
     std::cout << "  ============================================\n";
     if (config.mode == engine_mode::backtest)
@@ -1211,9 +1157,6 @@ static int run_tui_mode(const cli_options& o)
     return 0;
 }
 
-// ---------------------------------------------------------------------------
-// Orchestrator: parse → overlay config → dispatch.
-// ---------------------------------------------------------------------------
 int main(int argc, char* argv[])
 {
 #ifdef HAS_DEBUG

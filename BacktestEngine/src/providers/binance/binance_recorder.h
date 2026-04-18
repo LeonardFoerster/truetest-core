@@ -9,15 +9,6 @@
 #include <optional>
 #include <string>
 
-// RecordingTransport: decorator that wraps any IDataTransport and writes
-// each received message + timestamp to a file for later replay.
-//
-// File format: <epoch_ms>\t<raw_message>\n
-//
-// Usage:
-//   auto live = std::make_shared<BinanceTransport>(...);
-//   auto recording = std::make_shared<RecordingTransport>(live, "/tmp/btc.log");
-//   // Use recording as the transport — it passes through all data while saving it.
 class RecordingTransport : public IDataTransport
 {
 public:
@@ -92,7 +83,6 @@ private:
 
         std::lock_guard<std::mutex> lk(mu_);
         out_ << ms << '\t' << msg << '\n';
-        // Flush periodically for crash safety — every write for simplicity
         out_.flush();
     }
 };

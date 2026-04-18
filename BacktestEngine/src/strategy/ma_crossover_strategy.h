@@ -48,7 +48,7 @@ private:
     std::unordered_map<std::string, simple_moving_average> fast_smas_;
     std::unordered_map<std::string, simple_moving_average> slow_smas_;
     std::unordered_map<std::string, bool> position_open_;
-    std::unordered_map<std::string, bool> prev_fast_above_; // for crossover detection
+    std::unordered_map<std::string, bool> prev_fast_above_;
 
     simple_moving_average& get_fast_sma(const std::string& symbol);
     simple_moving_average& get_slow_sma(const std::string& symbol);

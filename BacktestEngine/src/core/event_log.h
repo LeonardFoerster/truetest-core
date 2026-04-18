@@ -15,17 +15,9 @@
 
 #include <zstd.h>
 
-// Binary event log format:
-//   [event_type : uint8_t]
-//   [payload_size : uint32_t]
-//   [payload bytes ...]
-//
-// Timestamp is stored as int64_t microseconds since epoch.
-// Strings are stored as [uint16_t length][bytes...].
 
 namespace event_serial {
 
-// --- Low-level helpers ---
 
 inline void write_u8(std::ostream& out, uint8_t v)  { out.write(reinterpret_cast<const char*>(&v), 1); }
 inline void write_u16(std::ostream& out, uint16_t v) { out.write(reinterpret_cast<const char*>(&v), 2); }
@@ -48,7 +40,6 @@ inline void write_ts(std::ostream& out, std::chrono::system_clock::time_point tp
     write_i64(out, us);
 }
 
-// --- Readers (from raw buffer) ---
 
 class BufReader {
     const uint8_t* p_;
@@ -86,7 +77,6 @@ public:
     }
 };
 
-// --- Serialise individual event types into a buffer ---
 
 inline std::vector<uint8_t> serialise(const market_event& e)
 {
@@ -209,9 +199,10 @@ inline std::vector<uint8_t> serialise(const fill_event& e)
     append_f64(e.get_filled_quantity());
     append_f64(e.get_fill_price());
     append_f64(e.get_commission());
-    // New fields (backward compatible — appended at end)
     append_f64(e.get_remaining_qty());
     append_u64(e.get_fill_id());
+    uint8_t src = static_cast<uint8_t>(e.get_source());
+    append(&src, 1);
     return buf;
 }
 
@@ -389,7 +380,6 @@ inline std::vector<uint8_t> serialise(const rejection_event& e)
     return buf;
 }
 
-// --- Deserialise from buffer ---
 
 inline event_pointer deserialise(event_type type, const uint8_t* data, std::size_t size)
 {
@@ -437,12 +427,18 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         double qty = r.read_f64();
         double price = r.read_f64();
         double commission = r.read_f64();
-        // New fields (backward compatible — may not be present in old logs)
         double remaining = 0.0;
         uint64_t fill_id = 0;
-        try { remaining = r.read_f64(); fill_id = r.read_u64(); } catch (...) {}
-        return std::make_shared<fill_event>(ts, symbol, oid, sd, qty, price,
-                                            commission, remaining, fill_id);
+        fill_source src = fill_source::unknown;
+        try {
+            remaining = r.read_f64();
+            fill_id = r.read_u64();
+            src = static_cast<fill_source>(r.read_u8());
+        } catch (...) {}
+        auto ev = std::make_shared<fill_event>(ts, symbol, oid, sd, qty, price,
+                                               commission, remaining, fill_id);
+        ev->set_source(src);
+        return ev;
     }
     case event_type::tick: {
         auto ts = r.read_ts();
@@ -505,31 +501,18 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
 
 } // namespace event_serial
 
-// Index entry for time-based seeking in event logs.
 struct EventLogIndexEntry {
-    int64_t  timestamp_us;   // microseconds since epoch
-    uint64_t file_offset;    // byte offset in the log file
+    int64_t  timestamp_us;
+    uint64_t file_offset;
 };
 
-// Footer appended after the index:
-//   [index_offset : u64]  — byte offset where index entries start
-//   [entry_count  : u32]  — number of index entries
-//   [magic        : u32]  — 0x58495454 ("TTIX" little-endian)
-static constexpr uint32_t EVENT_LOG_INDEX_MAGIC = 0x58495454; // "TTIX"
-static constexpr size_t   EVENT_LOG_INDEX_INTERVAL = 1000;    // index every N events
+static constexpr uint32_t EVENT_LOG_INDEX_MAGIC = 0x58495454;
+static constexpr size_t   EVENT_LOG_INDEX_INTERVAL = 1000;
 
 
-// Writes events to a binary log file, optionally with zstd compression.
-// Builds an in-memory index (one entry per INDEX_INTERVAL events) and
-// appends it as a footer on finalize().
 class EventLogger
 {
 public:
-    // max_bytes == 0 disables rotation (default). When rotation is enabled,
-    // each time the file exceeds max_bytes (after a full event write, never
-    // mid-event), the current file is finalized, renamed to path.1, and
-    // existing path.i are shifted to path.(i+1). At most max_files rotated
-    // copies are retained (older ones are deleted).
     explicit EventLogger(const std::string& path,
                          bool compress = true,
                          std::uint64_t max_bytes = 0,
@@ -562,7 +545,6 @@ public:
 
     void log(const event& e)
     {
-        // Record index entry before writing (every INDEX_INTERVAL events)
         if (event_count_ % EVENT_LOG_INDEX_INTERVAL == 0) {
             EventLogIndexEntry entry{};
             auto ts = e.get_timestamp();
@@ -617,7 +599,6 @@ public:
                        static_cast<std::streamsize>(payload.size()));
         }
 
-        // L3: rotate at end of event if configured size exceeded
         if (max_bytes_ > 0 &&
             static_cast<std::uint64_t>(out_.tellp()) >= max_bytes_)
         {
@@ -627,7 +608,6 @@ public:
 
     void flush() { out_.flush(); }
 
-    // Write index + footer. Called automatically by destructor.
     void finalize()
     {
         if (finalized_) return;
@@ -656,15 +636,11 @@ private:
     std::uint64_t max_bytes_ = 0;
     int max_files_ = 5;
 
-    // Rotate the current log file: finalize, close, shift backups, reopen.
     void rotate()
     {
-        // Write footer to close out the current file cleanly.
         finalize();
         out_.close();
 
-        // Shift existing rotated copies: .N-1 -> .N, .N-2 -> .N-1, ..., path -> .1.
-        // Remove the oldest if it would exceed retention.
         auto nth = [&](int i) -> std::string {
             return path_ + "." + std::to_string(i);
         };
@@ -678,7 +654,6 @@ private:
             std::remove(path_.c_str());
         }
 
-        // Reopen fresh file and reset per-file state.
         out_.open(path_, std::ios::binary | std::ios::trunc);
         if (!out_)
             throw std::runtime_error("EventLogger: reopen after rotate failed: " + path_);
@@ -689,9 +664,6 @@ private:
 };
 
 
-// Reads events back from a binary log file.
-// Auto-detects compressed vs uncompressed format and reads the index footer
-// (if present) for seek-by-timestamp support.
 class EventReplayer
 {
 public:
@@ -707,7 +679,6 @@ public:
         if (!in_)
             throw std::runtime_error("EventReplayer: cannot open " + path);
 
-        // Try to read index footer (last 16 bytes: u64 index_offset + u32 count + u32 magic)
         in_.seekg(0, std::ios::end);
         auto file_size = in_.tellg();
         if (file_size >= 16) {
@@ -721,7 +692,6 @@ public:
             if (magic == EVENT_LOG_INDEX_MAGIC) {
                 has_index_ = true;
                 data_end_ = static_cast<std::streampos>(index_offset);
-                // Read index entries
                 if (entry_count > 0) {
                     in_.seekg(static_cast<std::streampos>(index_offset));
                     index_.resize(entry_count);
@@ -735,9 +705,7 @@ public:
             }
         }
 
-        // Seek to start position using index if available
         if (has_index_ && replay_from_us_ > 0 && !index_.empty()) {
-            // Binary search for the closest index entry <= replay_from_us_
             auto it = std::upper_bound(index_.begin(), index_.end(), replay_from_us_,
                 [](int64_t ts, const EventLogIndexEntry& e) { return ts < e.timestamp_us; });
             if (it != index_.begin()) --it;
@@ -746,7 +714,6 @@ public:
             in_.seekg(0);
         }
 
-        // Detect compression by peeking at the first event's payload
         auto start_pos = in_.tellg();
         uint8_t type_byte = 0;
         in_.read(reinterpret_cast<char*>(&type_byte), 1);
@@ -784,7 +751,6 @@ public:
         return in_.peek() != std::ifstream::traits_type::eof();
     }
 
-    // Returns nullptr when done or past replay_to timestamp.
     event_pointer next()
     {
         while (true) {
@@ -822,11 +788,10 @@ public:
                     static_cast<event_type>(type_byte), raw.data(), payload_size);
             }
 
-            // Check timestamp bounds
             auto ts_us = std::chrono::duration_cast<std::chrono::microseconds>(
                 ev->get_timestamp().time_since_epoch()).count();
             if (ts_us > replay_to_us_) return nullptr;
-            if (ts_us < replay_from_us_) continue; // skip until we reach from
+            if (ts_us < replay_from_us_) continue;
             return ev;
         }
     }

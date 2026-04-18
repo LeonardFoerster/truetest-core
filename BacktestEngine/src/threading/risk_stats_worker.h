@@ -7,8 +7,6 @@
 
 #include <atomic>
 
-// Combined risk + stats worker for the Standard preset.
-// Handles risk checking and analytics, but NOT logging (that gets its own thread).
 class RiskStatsWorker : public Worker
 {
 public:
@@ -27,10 +25,8 @@ public:
     {
         events_processed_.fetch_add(1, std::memory_order_relaxed);
 
-        // Stats accumulation
         analytics_.on_event(ev);
 
-        // Risk checking
         if (ev->get_type() == event_type::fill)
         {
             auto& fill = static_cast<const fill_event&>(*ev);

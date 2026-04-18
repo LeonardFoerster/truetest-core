@@ -13,9 +13,9 @@ struct memory_snapshot
     uint64_t vm_bytes = 0;
     uint64_t peak_rss_bytes = 0;
     uint64_t heap_bytes = 0;
-    uint64_t pool_bytes = 0;     // sum of all object pools
-    uint64_t ring_bytes = 0;     // sum of all active ring buffers
-    uint64_t data_bytes = 0;     // data_handler column vectors
+    uint64_t pool_bytes = 0;
+    uint64_t ring_bytes = 0;
+    uint64_t data_bytes = 0;
     std::chrono::steady_clock::time_point timestamp;
 
     static memory_snapshot capture();
@@ -27,7 +27,7 @@ public:
     void set_start(const memory_snapshot& snap) { start_ = snap; }
     void set_end(const memory_snapshot& snap)   { end_ = snap; }
 
-    void log() const;  // logs via DBG_MEM()
+    void log() const;
 
 private:
     memory_snapshot start_;

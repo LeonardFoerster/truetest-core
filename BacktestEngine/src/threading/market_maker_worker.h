@@ -12,9 +12,6 @@
 static constexpr std::size_t MM_RING_SIZE = 65536;
 using MMRing = RingBuffer<event_pointer, MM_RING_SIZE>;
 
-// Market maker worker for the Extended preset.
-// Receives market events on the outbound MM ring, computes replenish orders,
-// and pushes them into an inbound ring that Core 0 drains.
 class MarketMakerWorker : public Worker
 {
 public:
@@ -27,7 +24,6 @@ public:
     {
         events_processed_.fetch_add(1, std::memory_order_relaxed);
 
-        // Only care about market events for replenish decisions
         if (ev->get_type() != event_type::market)
             return;
 

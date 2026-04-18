@@ -30,12 +30,9 @@ struct report_options
     std::string title = "Analytics Report";
 };
 
-// Render the full report as multi-line formatted text.
 std::string render_report(const AnalyticsReport& report,
                           const report_options& opts = {});
 
-// Individual sections — useful for streaming partial output over WS
-// or composing a custom layout.
 std::string render_returns_section          (const AnalyticsReport& r, const report_options& o);
 std::string render_risk_section             (const AnalyticsReport& r, const report_options& o);
 std::string render_trades_section           (const AnalyticsReport& r, const report_options& o);

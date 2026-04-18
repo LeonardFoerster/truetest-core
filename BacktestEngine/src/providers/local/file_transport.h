@@ -5,7 +5,6 @@
 #include <fstream>
 #include <filesystem>
 
-// FileTransport: reads lines from a local file.
 class FileTransport : public IDataTransport
 {
 public:
@@ -17,7 +16,6 @@ public:
 	{
 		if (file_.is_open())
 		{
-			// Already open — rewind to beginning so it can be re-read
 			file_.clear();
 			file_.seekg(0);
 			return file_.good();

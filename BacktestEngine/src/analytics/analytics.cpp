@@ -55,21 +55,18 @@ void Analytics::on_market(const market_event& m)
     if (has_position)
         market_events_in_position_++;
 
-    // Mark-to-market works for both long (qty > 0) and short (qty < 0).
     double equity = cash_;
     if (has_position)
         equity += position_qty_ * last_close_;
 
     equity_curve_.push_back({m.get_timestamp(), equity});
 
-    // Benchmark equity curve (buy-and-hold from initial_cash_)
     if (first_price_set_ && first_price_ > 0.0)
     {
         double bh_equity = initial_cash_ * (m.get_close() / first_price_);
         benchmark_curve_.push_back({m.get_timestamp(), bh_equity});
     }
 
-    // Per-bar returns for alpha/beta calculation
     if (prev_equity_ > 0.0 && equity_curve_.size() > 1)
     {
         double strat_ret = (equity - prev_equity_) / prev_equity_;
@@ -83,14 +80,12 @@ void Analytics::on_market(const market_event& m)
             benchmark_returns_.push_back(bh_ret);
         }
 
-        // Rolling window: track equity returns
         rolling_returns_.push_back(strat_ret);
         if (rolling_returns_.size() > rolling_window_)
             rolling_returns_.pop_front();
     }
     prev_equity_ = equity;
 
-    // Running max drawdown
     if (equity > peak_equity_)
         peak_equity_ = equity;
 
@@ -104,12 +99,6 @@ void Analytics::on_market(const market_event& m)
 
 void Analytics::on_tick(const tick_event& t)
 {
-    // In tick-streaming mode on_market never fires, so without this arm
-    // last_close_ stays 0 (making final_equity ignore open-position MtM) and
-    // first_price_ is never set (zeroing out buy_and_hold_return). We update
-    // only those two fields here — equity_curve_/strategy_returns_ stay bar-
-    // granular because per-tick pushes would explode the report on live feeds
-    // with 10^5+ ticks/min.
     last_close_ = t.get_price();
     if (!first_price_set_)
     {
@@ -130,9 +119,6 @@ void Analytics::on_fill(const fill_event& f)
 {
     total_fills_++;
 
-    // Tick-to-trade latency: read the hot-path stamp set when the book matched.
-    // We deliberately do not re-sample the clock here — in threaded presets
-    // this runs on the stats worker after the event crossed a ring buffer.
     if (f.get_latency_ns() > 0)
     {
         int64_t lat = f.get_latency_ns();
@@ -143,8 +129,6 @@ void Analytics::on_fill(const fill_event& f)
             tick_to_trade_max_ns_ = lat;
     }
 
-    // Slippage: intended vs actual fill price. Direction-adjust so positive
-    // = adverse (paid more on a buy, received less on a sell).
     double intended = 0.0;
     auto it = order_prices_.find(f.get_order_id());
     if (it != order_prices_.end())
@@ -160,7 +144,6 @@ void Analytics::on_fill(const fill_event& f)
         slippage_count_++;
     }
 
-    // Resolve strategy name from order
     std::string strat_name;
     auto strat_it = order_strategies_.find(f.get_order_id());
     if (strat_it != order_strategies_.end())
@@ -184,29 +167,20 @@ void Analytics::on_fill(const fill_event& f)
     const double side_sign = (f.get_side() == order_side::buy) ? +1.0 : -1.0;
     double qty_left = filled_qty;
 
-    // Closing leg: existing position sign is opposite to the fill side.
-    // Handles long→sell-close, short→buy-close, and partial/full closes.
-    // A flip (e.g. long 3, sell 5) is handled by the opening leg below
-    // running after qty_left is decremented by close_qty.
     if (std::abs(position_qty_) > 1e-12 && position_qty_ * side_sign < 0.0)
     {
         double pos_sign = (position_qty_ > 0.0) ? 1.0 : -1.0;
         double prev_abs = std::abs(position_qty_);
         double close_qty = std::min(prev_abs, qty_left);
 
-        // Gross: long profits when exit > entry, short profits when exit < entry.
         double gross = (fill_price - avg_entry_price_) * close_qty * pos_sign;
 
-        // Pro-rata commissions: split this fill's commission across close/open
-        // legs, and charge the share of open-side commissions accumulated while
-        // building the closed portion.
         double close_comm = commission * (close_qty / filled_qty);
         double open_comm_share = total_open_commission_ * (close_qty / prev_abs);
         double pnl = gross - close_comm - open_comm_share;
 
         total_open_commission_ -= open_comm_share;
 
-        // Cash flow: sell-to-close-long adds proceeds; buy-to-close-short spends.
         cash_ += -side_sign * close_qty * fill_price - close_comm;
 
         position_qty_ += side_sign * close_qty;
@@ -257,8 +231,6 @@ void Analytics::on_fill(const fill_event& f)
         holding_count_++;
     }
 
-    // Opening / adding / flipping leg: any remaining qty opens or adds to a
-    // position in the fill's direction (long on buy, short on sell).
     if (qty_left > 1e-12)
     {
         double open_comm = commission * (qty_left / filled_qty);
@@ -269,11 +241,9 @@ void Analytics::on_fill(const fill_event& f)
         position_qty_ += side_sign * qty_left;
         total_open_commission_ += open_comm;
 
-        // Stamp entry_time_ only when starting from flat (prev_abs ≈ 0).
         if (prev_abs < 1e-12)
             entry_time_ = f.get_timestamp();
 
-        // Cash: opening long spends, opening short receives proceeds.
         cash_ -= side_sign * qty_left * fill_price + open_comm;
     }
 
@@ -288,7 +258,6 @@ double Analytics::rolling_sharpe() const
     for (double r : rolling_returns_) sum += r;
     double mean = sum / static_cast<double>(rolling_returns_.size());
 
-    // Per-bar risk-free rate
     double rf_per_bar = (rolling_window_ > 0) ? risk_free_rate_ / static_cast<double>(rolling_window_) : 0.0;
     double excess_mean = mean - rf_per_bar;
 
@@ -306,7 +275,6 @@ double Analytics::rolling_max_drawdown() const
 {
     if (rolling_returns_.empty()) return 0.0;
 
-    // Reconstruct relative equity from rolling returns
     double peak = 1.0;
     double equity = 1.0;
     double max_dd = 0.0;
@@ -337,7 +305,6 @@ AnalyticsReport Analytics::snapshot() const
     r.total_fills = total_fills_;
     r.total_trades = trade_returns_.size();
 
-    // Slippage
     r.avg_slippage = (slippage_count_ > 0) ? total_slippage_ / static_cast<double>(slippage_count_) : 0.0;
     r.avg_slippage_signed = (slippage_count_ > 0)
         ? total_slippage_signed_ / static_cast<double>(slippage_count_) : 0.0;
@@ -348,19 +315,16 @@ AnalyticsReport Analytics::snapshot() const
     r.adverse_slippage_count = adverse_count_;
     r.favorable_slippage_count = favorable_count_;
 
-    // Tick-to-trade latency
     r.tick_to_trade_samples = static_cast<std::size_t>(tick_to_trade_ns_.n);
     r.avg_tick_to_trade_ns = tick_to_trade_ns_.mean;
     r.min_tick_to_trade_ns = tick_to_trade_min_ns_;
     r.max_tick_to_trade_ns = tick_to_trade_max_ns_;
 
-    // Exposure
     r.time_in_market_pct = (market_events_total_ > 0)
         ? (static_cast<double>(market_events_in_position_) / static_cast<double>(market_events_total_)) * 100.0
         : 0.0;
     r.avg_holding_period_ms = (holding_count_ > 0) ? total_holding_ms_ / static_cast<double>(holding_count_) : 0.0;
 
-    // Trade breakdown from running accumulators
     if (!trade_returns_.empty())
     {
         r.win_rate = static_cast<double>(win_count_) / static_cast<double>(trade_returns_.size()) * 100.0;
@@ -372,12 +336,10 @@ AnalyticsReport Analytics::snapshot() const
         r.largest_loser = largest_loser_;
     }
 
-    // Per-bar risk-free rate for Sharpe/Sortino adjustment
     double rf_per_trade = 0.0;
     if (risk_free_rate_ != 0.0 && market_events_total_ > 0)
         rf_per_trade = risk_free_rate_ / static_cast<double>(market_events_total_);
 
-    // Sharpe and Sortino from Welford accumulators (O(1), no iteration)
     if (return_stats_.n > 1)
     {
         double excess_mean = return_stats_.mean - rf_per_trade;
@@ -395,30 +357,24 @@ AnalyticsReport Analytics::snapshot() const
         r.sortino_ratio = 1e9;
     }
 
-    // Max drawdown from running accumulator
     r.max_drawdown = max_drawdown_ * 100.0;
 
-    // Calmar ratio
     r.calmar_ratio = (r.max_drawdown > 0.0)
         ? (r.cumulative_return * 100.0) / r.max_drawdown
         : 0.0;
 
-    // Rolling metrics
     r.rolling_sharpe = rolling_sharpe();
     r.rolling_max_drawdown = rolling_max_drawdown() * 100.0;
 
-    // Buy-and-hold benchmark
     if (first_price_set_ && last_close_ > 0.0 && first_price_ > 0.0)
         r.buy_and_hold_return = (last_close_ - first_price_) / first_price_;
 
     r.strategy_vs_benchmark = r.cumulative_return - r.buy_and_hold_return;
 
-    // Alpha, beta, information ratio, tracking error
     if (strategy_returns_.size() > 1 && benchmark_returns_.size() == strategy_returns_.size())
     {
         std::size_t n = strategy_returns_.size();
 
-        // Means
         double s_mean = 0.0, b_mean = 0.0;
         for (std::size_t i = 0; i < n; ++i)
         {
@@ -428,7 +384,6 @@ AnalyticsReport Analytics::snapshot() const
         s_mean /= static_cast<double>(n);
         b_mean /= static_cast<double>(n);
 
-        // Covariance(strategy, benchmark) and Var(benchmark)
         double cov = 0.0, var_b = 0.0;
         for (std::size_t i = 0; i < n; ++i)
         {
@@ -443,7 +398,6 @@ AnalyticsReport Analytics::snapshot() const
         r.beta = (var_b > 0.0) ? cov / var_b : 0.0;
         r.alpha = s_mean - r.beta * b_mean;
 
-        // Tracking error and information ratio
         double te_sum = 0.0;
         for (std::size_t i = 0; i < n; ++i)
         {
@@ -455,7 +409,6 @@ AnalyticsReport Analytics::snapshot() const
             ? (s_mean - b_mean) / r.tracking_error : 0.0;
     }
 
-    // Per-symbol and per-strategy attribution
     r.per_symbol = per_symbol_;
     r.per_strategy = per_strategy_;
 
@@ -464,10 +417,8 @@ AnalyticsReport Analytics::snapshot() const
 
 AnalyticsReport Analytics::generate_report() const
 {
-    // Start with snapshot (all scalar metrics)
     AnalyticsReport r = snapshot();
 
-    // Add full vectors (only in final report, not mid-run snapshots)
     r.equity_curve = equity_curve_;
     r.trade_returns = trade_returns_;
     r.trades = trades_;
@@ -483,7 +434,6 @@ void Analytics::print_report() const
 
 void Analytics::export_csv(const std::string& equity_path, const std::string& trades_path) const
 {
-    // Equity curve CSV
     {
         std::ofstream f(equity_path);
         f << "timestamp_ms,equity\n";
@@ -495,7 +445,6 @@ void Analytics::export_csv(const std::string& equity_path, const std::string& tr
         }
     }
 
-    // Trade log CSV
     {
         std::ofstream f(trades_path);
         f << "timestamp_ms,order_id,side,quantity,fill_price,intended_price,commission,pnl,symbol,strategy\n";
@@ -547,9 +496,8 @@ void Analytics::export_json(const std::string& path) const
         r.buy_and_hold_return, r.strategy_vs_benchmark,
         r.alpha, r.beta, r.information_ratio, r.tracking_error);
 
-    f << "{" << (buf + 1);  // skip the leading '{' from buf since we write our own
+    f << "{" << (buf + 1);
 
-    // Equity curve array
     f << ",\"equity_curve\":[";
     for (std::size_t i = 0; i < r.equity_curve.size(); ++i)
     {
@@ -563,7 +511,6 @@ void Analytics::export_json(const std::string& path) const
     }
     f << "]";
 
-    // Trade log array
     f << ",\"trades\":[";
     for (std::size_t i = 0; i < r.trades.size(); ++i)
     {
@@ -583,7 +530,6 @@ void Analytics::export_json(const std::string& path) const
     }
     f << "]";
 
-    // Per-symbol attribution
     f << ",\"per_symbol\":{";
     {
         bool first = true;
@@ -600,7 +546,6 @@ void Analytics::export_json(const std::string& path) const
     }
     f << "}";
 
-    // Per-strategy attribution
     f << ",\"per_strategy\":{";
     {
         bool first = true;

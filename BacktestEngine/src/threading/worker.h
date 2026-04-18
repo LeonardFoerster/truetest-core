@@ -25,7 +25,6 @@ public:
 
     virtual void on_event(const event_pointer& ev) = 0;
 
-    // Optional: override to provide a human-readable name for log messages.
     virtual const char* worker_name() const { return "worker"; }
 
     void set_spin_policy(spin_policy p) { spin_policy_ = p; }
@@ -61,7 +60,7 @@ public:
                 try
                 {
                     on_event(ev);
-                    consecutive_errors = 0; // reset on success
+                    consecutive_errors = 0;
                 }
                 catch (const std::exception& e)
                 {
@@ -120,11 +119,10 @@ public:
             }
         }
 
-        // Drain remaining events after shutdown signal
         while (inbound.try_pop(ev))
         {
             try { on_event(ev); }
-            catch (...) {} // best-effort during drain
+            catch (...) {}
         }
     }
 
@@ -135,7 +133,6 @@ public:
     std::exception_ptr get_exception() const { return exception_; }
     unsigned error_count() const { return error_count_.load(std::memory_order_relaxed); }
 
-    // Set shared failure flag (engine checks this alongside halt_flag)
     void set_failure_flag(std::atomic<bool>& flag) { failure_flag_ = &flag; }
 
 #ifdef HAS_DEBUG
@@ -157,7 +154,6 @@ private:
         switch (spin_policy_)
         {
         case spin_policy::spin:
-            // Pure busy-wait — do nothing
             break;
 
         case spin_policy::yield:
@@ -167,21 +163,17 @@ private:
         case spin_policy::adaptive:
             if (idle_count < 64)
             {
-                // Phase 1: spin (do nothing, ~64 iterations)
             }
             else if (idle_count < 320)
             {
-                // Phase 2: pause hint to reduce power/pipeline pressure
 #ifdef __x86_64__
                 _mm_pause();
 #else
-                // ARM or other: compiler fence as lightweight pause
                 std::atomic_signal_fence(std::memory_order_seq_cst);
 #endif
             }
             else
             {
-                // Phase 3: yield to OS scheduler
                 std::this_thread::yield();
             }
             break;

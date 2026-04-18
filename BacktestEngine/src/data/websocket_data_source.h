@@ -12,9 +12,6 @@
 #include <string>
 #include <thread>
 
-// Streaming data source for live/shadow modes.
-// Does NOT implement IDataSource (that's batch-load for backtesting).
-// Instead provides a callback-based streaming interface.
 class WebSocketDataSource
 {
 public:
@@ -26,21 +23,17 @@ public:
         std::string auth_token;
         bool binary_format = false;
 
-        // Reconnection
         std::chrono::seconds initial_backoff{1};
         std::chrono::seconds max_backoff{30};
 
-        // Heartbeat
         std::chrono::seconds ping_interval{15};
     };
 
     explicit WebSocketDataSource(config cfg);
     ~WebSocketDataSource();
 
-    // Start streaming. Callback is invoked from the IO thread for each event.
     void start(event_callback cb);
 
-    // Stop streaming and join the IO thread.
     void stop();
 
     bool is_connected() const { return connected_.load(std::memory_order_acquire); }
@@ -62,7 +55,6 @@ private:
     std::atomic<uint64_t> last_seq_{0};
     std::atomic<uint64_t> gap_count_{0};
 
-    // Reconnection state
     std::chrono::seconds current_backoff_;
 };
 

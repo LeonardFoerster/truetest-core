@@ -25,20 +25,9 @@ namespace net = boost::asio;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
-// BinanceTransport: WebSocket client connecting to Binance's stream API.
-//
-// Endpoint: wss://stream.binance.com:9443/ws/<streamName>
-// Stream names: <symbol>@trade, <symbol>@kline_<interval>, <symbol>@depth
-//
-// This is a streaming transport — is_streaming() returns true.
-// read_line_blocking() blocks on ws.read() until data arrives.
-// request_stop() closes the WebSocket to unblock.
 class BinanceTransport : public IDataTransport
 {
 public:
-    // symbol: lowercase, e.g. "btcusdt"
-    // stream_type: "trade", "kline_1m", "depth", etc.
-    // host/port: override for testnet usage
     BinanceTransport(
         const std::string& symbol,
         const std::string& stream_type,
@@ -58,19 +47,15 @@ public:
     {
         try
         {
-            // Resolve
             tcp::resolver resolver(ioc_);
             auto results = resolver.resolve(host_, port_);
 
-            // Create the SSL+WS stream
             ws_ = std::make_unique<
                 websocket::stream<beast::ssl_stream<tcp::socket>>>(ioc_, ctx_);
 
-            // Connect TCP
             auto& lowest = beast::get_lowest_layer(*ws_);
             net::connect(lowest, results);
 
-            // SNI hostname
             if (!SSL_set_tlsext_host_name(
                     ws_->next_layer().native_handle(), host_.c_str()))
             {
@@ -78,25 +63,18 @@ public:
                 return false;
             }
 
-            // TLS handshake
             ws_->next_layer().handshake(ssl::stream_base::client);
 
-            // Set WebSocket options
             ws_->set_option(websocket::stream_base::decorator(
                 [](websocket::request_type& req) {
                     req.set(boost::beast::http::field::user_agent, "TrueTest/1.0");
                 }));
 
-            // Enable automatic pong responses to server pings.
-            // Binance requires responding to pings within 10 minutes.
             ws_->control_callback(
                 [](websocket::frame_type kind, beast::string_view) {
-                    // Beast auto-responds to pings with pongs when using
-                    // synchronous reads. This callback is informational.
                     (void)kind;
                 });
 
-            // WebSocket handshake
             std::string target = "/ws/" + symbol_ + "@" + stream_type_;
             ws_->handshake(host_ + ":" + port_, target);
 
@@ -141,39 +119,52 @@ public:
 
     std::optional<std::string> read_line_blocking() override
     {
-        if (!ws_ || stopped_.load())
+        std::string_view view;
+        if (!read_frame_blocking(view))
             return std::nullopt;
+        return std::string(view);
+    }
+
+    bool read_frame_blocking(std::string_view& out) override
+    {
+        if (!ws_ || stopped_.load())
+            return false;
 
         try
         {
-            beast::flat_buffer buffer;
-            ws_->read(buffer);
+            if (frame_buffer_.size() > 0)
+                frame_buffer_.consume(frame_buffer_.size());
+
+            ws_->read(frame_buffer_);
 
             if (stopped_.load())
-                return std::nullopt;
+                return false;
 
-            return beast::buffers_to_string(buffer.data());
+            auto const_buf = frame_buffer_.data();
+            out = std::string_view(
+                static_cast<const char*>(const_buf.data()),
+                const_buf.size());
+            return true;
         }
         catch (const beast::system_error& se)
         {
             if (se.code() == websocket::error::closed)
             {
                 open_ = false;
-                return std::nullopt;
+                return false;
             }
 
-            // Connection lost — attempt reconnect
             if (!stopped_.load() && reconnect())
-                return read_line_blocking(); // retry after reconnect
+                return read_frame_blocking(out);
 
             open_ = false;
-            return std::nullopt;
+            return false;
         }
         catch (const std::exception& e)
         {
             std::cerr << "BinanceTransport: read error: " << e.what() << "\n";
             open_ = false;
-            return std::nullopt;
+            return false;
         }
     }
 
@@ -183,25 +174,18 @@ public:
         close();
     }
 
-    // Reconnect to a different symbol/stream without creating a new transport.
-    // Called from the streaming thread when a symbol switch is requested.
     bool reconnect_stream(const std::string& new_symbol,
                           const std::string& new_stream_type)
     {
-        // Close existing connection
         request_stop();
 
-        // Wait for close to complete
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        // Update stream parameters
         symbol_ = new_symbol;
         stream_type_ = new_stream_type;
 
-        // Reset state
         stopped_ = false;
 
-        // Reconnect
         ioc_.restart();
         ws_.reset();
         return open();
@@ -216,6 +200,8 @@ private:
     net::io_context ioc_;
     ssl::context ctx_;
     std::unique_ptr<websocket::stream<beast::ssl_stream<tcp::socket>>> ws_;
+
+    beast::flat_buffer frame_buffer_;
 
     std::mutex mu_;
     std::atomic<bool> open_{false};

@@ -54,13 +54,11 @@ std::optional<order_event> ma_crossover_strategy::on_market(const market_event& 
     bool was_above = prev_it->second;
     prev_it->second = fast_above;
 
-    // Golden cross: fast crosses above slow → buy
     if (!is_open && fast_above && !was_above)
     {
         return order_event(mkt.get_timestamp(), mkt.get_symbol(),
                            order_type::limit, order_side::buy, 100.0, mkt.get_close());
     }
-    // Death cross: fast crosses below slow → sell
     if (is_open && !fast_above && was_above)
     {
         return order_event(mkt.get_timestamp(), mkt.get_symbol(),

@@ -37,9 +37,6 @@ engine::engine(std::shared_ptr<data_handler> dh,
         store_ = std::make_unique<SqliteStore>(config_.db_path);
 #endif
 
-    // K3: if a resume checkpoint was requested, rehydrate portfolio state now
-    // (before run() is invoked). Any errors are reported to stderr and the
-    // engine continues with the fresh state — we do not hard-fail the run.
     restore_from_checkpoint();
 }
 
@@ -88,7 +85,6 @@ void engine::record_run_begin()
 {
     if (!store_) return;
 
-    // Minimal config summary: mode, seed, initial balance, db path, threading.
     char buf[1024];
     const char* mode_str =
         (config_.mode == engine_mode::backtest) ? "backtest" :
@@ -135,8 +131,6 @@ void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
     strategy_ = std::move(strategy);
 
     for (const auto& [symbol, pos] : portfolio_.get_positions()) {
-        // Use |qty| so shorts (qty < 0) aren't silently treated as flat —
-        // matches portfolio_.position_open() everywhere else.
         strategy_->set_position_open(symbol, std::abs(pos.qty) > 1e-12);
     }
 }
@@ -144,7 +138,6 @@ void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
 void engine::switch_symbol(const std::string& new_symbol)
 {
 #ifdef HAS_WEB_UI
-    // Reset bar aggregator
     if (tick_aggregator_) {
         tick_aggregator_->flush();
         tick_aggregator_ = std::make_unique<BarAggregator>(
@@ -156,15 +149,12 @@ void engine::switch_symbol(const std::string& new_symbol)
     bar_history_.clear();
 #endif
 
-    // Update data handler symbol
     data_handler_->db_data_symbol.clear();
     data_handler_->db_data_symbol.push_back(new_symbol);
 
-    // Notify strategy of new symbol context
     strategy_->set_position_open(new_symbol, false);
 
 #ifdef HAS_WEB_UI
-    // Broadcast chart reset and status update to UI
     if (ws_worker_) {
         ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
         ws_worker_->broadcast_status("running",
@@ -181,26 +171,21 @@ std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol
         return it->second;
 
     std::shared_ptr<IExecutionAdapter> adapter;
-    // Shadow mode keeps the primary local (simulation-of-truth) and consults
-    // the provider's adapter only for the shadow comparison side
-    // (see process_order: exchange_adapter = config_.provider->get_execution_adapter()).
-    // Without this guard, the primary and the shadow point at the same object
-    // and submit_order runs twice on the same adapter.
     if (config_.mode != engine_mode::shadow &&
         config_.provider && config_.provider->has_execution())
     {
-        // Provider owns execution (live venue, hybrid paper executor,
-        // Polymarket AMM, etc.). Engine does not care which flavour.
         adapter = config_.provider->get_execution_adapter();
     }
     if (!adapter)
     {
-        // Backtest + shadow without a provider adapter: use local orderbook.
         auto ob = orderbook_registry_.get_or_create(symbol);
-        adapter = std::make_shared<LocalBookAdapter>(
+        auto local = std::make_shared<LocalBookAdapter>(
             ob, config_.fee_model, config_.fill_model,
             config_.seed != 0 ? static_cast<unsigned>(config_.seed + 2) : config_.fill_rng_seed,
             config_.market_aggression, config_.qty_scale);
+        if (config_.debug_fills)
+            local->set_debug_fills(true, config_.debug_fills_budget);
+        adapter = local;
     }
 
     execution_adapters_[symbol] = adapter;
@@ -209,7 +194,6 @@ std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol
 
 void engine::log_event(const event& ev)
 {
-    // When threaded, logging happens in the logging/observer worker
     if (config_.is_threaded())
         return;
     if (event_logger_)
@@ -320,7 +304,6 @@ void engine::publish_event(const event_pointer& ev)
     if (ws_ring_ && !ws_ring_->try_push(ev))
     {
         ws_drops_++;
-        // Warn on first drop and then every 1000 drops
         if (ws_drops_ == 1 || ws_drops_ % 1000 == 0)
             std::cerr << "  WS ring: " << ws_drops_ << " events dropped\n";
     }
@@ -348,7 +331,6 @@ void engine::pin_event_loop_thread()
     int core_id = config_.pin_event_loop;
     if (core_id < 0)
     {
-        // Fall back to auto-detected core map
         auto core_map = build_core_map();
         for (const auto& ca : core_map)
             if (ca.role == core_role::event_loop) { core_id = ca.core_id; break; }
@@ -362,7 +344,6 @@ void engine::start_workers()
     halt_flag_.store(false, std::memory_order_release);
     worker_failed_.store(false, std::memory_order_release);
 
-    // Helper to wire shared failure flag, spin policy, and error tolerance to any worker
     auto wire_failure = [this](Worker& w) {
         w.set_failure_flag(worker_failed_);
         w.set_spin_policy(config_.worker_spin_policy);
@@ -370,7 +351,6 @@ void engine::start_workers()
     };
 
 #ifdef HAS_WEB_UI
-    // Start WebSocket worker if enabled (works with any threading preset)
     if (config_.enable_web_ui)
     {
         ws_ring_ = std::make_shared<EventRing>();
@@ -378,7 +358,6 @@ void engine::start_workers()
         wire_failure(*ws_worker_);
 
 #ifdef HAS_SQLITE
-        // K1: expose GET /api/runs from SQLite store, if enabled.
         if (store_)
         {
             ws_worker_->set_on_list_runs([this](int limit) -> std::string {
@@ -392,7 +371,6 @@ void engine::start_workers()
         }
 #endif
 
-        // L2: Prometheus metrics endpoint. Snapshot engine state into text format.
         ws_worker_->set_on_metrics([this]() -> std::string {
             auto snap = analytics_.snapshot();
             char buf[2048];
@@ -439,12 +417,10 @@ void engine::start_workers()
     if (!config_.is_threaded())
         return;
 
-    // Build core map for pinning
     auto core_map = build_core_map();
 
     auto find_core = [&](core_role role) -> int {
         if (config_.disable_pinning) return -1;
-        // Check explicit overrides first
         switch (role) {
         case core_role::event_loop: if (config_.pin_event_loop >= 0) return config_.pin_event_loop; break;
         case core_role::logging:    if (config_.pin_logging >= 0)    return config_.pin_logging; break;
@@ -452,7 +428,6 @@ void engine::start_workers()
         case core_role::stats:      if (config_.pin_stats >= 0)      return config_.pin_stats; break;
         case core_role::market_maker: if (config_.pin_mm >= 0)       return config_.pin_mm; break;
         }
-        // Fall back to auto-detected core map
         for (const auto& ca : core_map)
             if (ca.role == role) return ca.core_id;
         return -1;
@@ -534,7 +509,6 @@ void engine::start_workers()
 
     case thread_preset::extended:
     {
-        // Full + market maker worker
         logging_ring_ = std::make_shared<EventRing>();
         risk_ring_ = std::make_shared<EventRing>();
         stats_ring_ = std::make_shared<EventRing>();
@@ -580,7 +554,6 @@ void engine::start_workers()
 
 void engine::stop_workers()
 {
-    // Signal all active workers to stop
     if (observer_worker_) observer_worker_->stop();
     if (logging_worker_) logging_worker_->stop();
     if (risk_worker_) risk_worker_->stop();
@@ -591,7 +564,6 @@ void engine::stop_workers()
     if (ws_worker_) ws_worker_->stop();
 #endif
 
-    // Join all threads
     for (auto& t : worker_threads_)
     {
         if (t.joinable())
@@ -599,15 +571,12 @@ void engine::stop_workers()
     }
     worker_threads_.clear();
 
-    // Drain any remaining events from MM inbound ring to avoid
-    // use-after-free when the ring outlives the worker's object pool.
     if (mm_order_ring_)
     {
         event_pointer ev;
         while (mm_order_ring_->try_pop(ev)) {}
     }
 
-    // Report worker exceptions
     Worker* all_workers[] = {
         logging_worker_.get(), risk_worker_.get(), stats_worker_.get(),
         observer_worker_.get(), risk_stats_worker_.get(), mm_worker_.get(),
@@ -631,7 +600,6 @@ void engine::stop_workers()
         }
     }
 
-    // Report drop counts
     std::size_t ws_d = 0;
 #ifdef HAS_WEB_UI
     ws_d = ws_drops_;
@@ -649,7 +617,6 @@ void engine::stop_workers()
                   << " mm=" << mm_drops_ << "\n";
     }
 
-    // Report ring buffer high watermarks (always-on metrics)
     auto report_hwm = [](const char* name, const std::shared_ptr<EventRing>& ring) {
         if (!ring) return;
         auto hwm = ring->high_watermark();
@@ -688,7 +655,6 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
         }
         else if (cmd.command == "order")
         {
-            // Validate order parameters
             if (cmd.side.empty() || cmd.quantity <= 0.0)
             {
                 ws_worker_->broadcast(event_json::order_response_to_json(
@@ -696,12 +662,10 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
                 continue;
             }
 
-            // Build and process an order from the UI
             auto otype = (cmd.order_type == "limit") ? order_type::limit : order_type::market;
             auto oside = (cmd.side == "sell") ? order_side::sell : order_side::buy;
             double price = (otype == order_type::limit && cmd.price > 0.0) ? cmd.price : last_mid_price_;
 
-            // Use the first known symbol, or empty string
             std::string symbol;
             if (!data_handler_->db_data_symbol.empty())
                 symbol = data_handler_->db_data_symbol.back();
@@ -712,7 +676,6 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
             o->set_order_id(OrderIdGenerator::next());
             o->set_earliest_eligible_ts(ts);
 
-            // Broadcast acceptance
             ws_worker_->broadcast(event_json::order_response_to_json(
                 o->get_order_id(), "accepted", "",
                 symbol, cmd.side, cmd.quantity, price));
@@ -727,7 +690,6 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
         }
         else if (cmd.command == "set_timeframe" && !cmd.timeframe.empty())
         {
-            // Parse timeframe string (e.g. "1m", "5m", "15m", "1h") to milliseconds
             int value = 0;
             char unit = 0;
             if (std::sscanf(cmd.timeframe.c_str(), "%d%c", &value, &unit) == 2 && value > 0)
@@ -745,7 +707,6 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
                 {
                     tick_bar_interval_ = new_interval;
 
-                    // Flush current aggregator and recreate with new interval
                     if (tick_aggregator_)
                     {
                         tick_aggregator_->flush();
@@ -756,13 +717,11 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
                             });
                     }
 
-                    // Tell the UI to clear its chart data
                     ws_worker_->broadcast(R"({"type":"chart_reset","data":{"timeframe":")"
                         + cmd.timeframe + R"("}})");
                 }
             }
         }
-        // "start" and "pause" are informational — the engine is already running in its loop
 #ifdef HAS_SQLITE
         else if (cmd.command == "query_fills")
         {
@@ -777,7 +736,6 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
         else if (cmd.command == "set_symbol" && !cmd.value.empty())
         {
             std::string new_symbol = cmd.value;
-            // Convert to lowercase (Binance requires lowercase)
             std::transform(new_symbol.begin(), new_symbol.end(),
                            new_symbol.begin(), ::tolower);
 
@@ -791,7 +749,6 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
         {
             std::string new_strategy = cmd.value;
 
-            // Validate against available strategies
             auto available = StrategyFactory::available();
             bool valid = std::find(available.begin(), available.end(), new_strategy)
                          != available.end();
@@ -811,9 +768,6 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
         }
         else if (cmd.command == "backfill")
         {
-            // WS-triggered backfill is a provider-specific concern. Static
-            // backfill is handled by the provider at open() time and
-            // already reaches the UI through the normal bar pipeline.
             (void)cmd;
         }
     }
@@ -861,18 +815,15 @@ void engine::send_state_snapshot()
 {
     if (!ws_worker_) return;
 
-    // 1. Engine status
     ws_worker_->broadcast_status("running",
         config_.provider ? config_.provider->name() : "",
         (!data_handler_->db_data_symbol.empty()) ? data_handler_->db_data_symbol.back() : "");
 
-    // 2. Portfolio snapshot
     {
         auto json = event_json::portfolio_to_json(portfolio_);
         ws_worker_->broadcast(json);
     }
 
-    // 3. Analytics snapshot
     {
         auto report = analytics_.snapshot();
         report.final_equity = portfolio_.get_equity(last_mid_price_);
@@ -880,14 +831,11 @@ void engine::send_state_snapshot()
         ws_worker_->broadcast(json);
     }
 
-    // 4. Replay bar history so the chart is populated immediately
-    //    Send a chart_reset first so the client clears stale bars
     ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
     for (const auto& bar_json : bar_history_)
         ws_worker_->broadcast(bar_json);
 
 #ifdef HAS_SQLITE
-    // 5. Send persisted trade and equity history
     if (store_)
     {
         ws_worker_->broadcast(
@@ -897,7 +845,6 @@ void engine::send_state_snapshot()
     }
 #endif
 
-    // 6. Broadcast available strategies list
     {
         auto names = StrategyFactory::available();
         std::string json = R"({"type":"strategies","data":[)";
@@ -917,11 +864,9 @@ void engine::broadcast_market_with_indicators(const market_event& mkt)
     auto indicators = strategy_ ? strategy_->get_indicator_values(mkt.get_symbol())
                                 : std::vector<std::pair<std::string, double>>{};
 
-    // Broadcast market event (with indicators when available) via WS worker
     auto json = event_json::to_json_with_indicators(mkt, indicators);
     ws_worker_->broadcast(json);
 
-    // Store in bar history for replaying to reconnecting clients
     if (bar_history_.size() >= MAX_BAR_HISTORY)
         bar_history_.erase(bar_history_.begin());
     bar_history_.push_back(json);
@@ -950,7 +895,6 @@ void engine::print_summary()
         break;
     }
 
-    // Shadow mode: print comparison report
     if (shadow_tracker_)
         shadow_tracker_->print_report();
 }
@@ -979,8 +923,6 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                            std::size_t& event_count,
                            bool& halt_requested)
 {
-    // Pre-order risk check (synchronous — always runs on the hot path).
-    // The async shadow check in RiskWorker remains as a secondary validation layer.
     {
         auto snap = analytics_.snapshot();
         auto action = risk_manager_.check_order(*o, portfolio_, snap);
@@ -990,7 +932,6 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                 ? "risk limit breached - engine halted"
                 : "order rejected by risk manager";
 
-            // Emit a rejection event through the pipeline
             auto rej = std::make_shared<rejection_event>(
                 o->get_timestamp(), o->get_symbol(), o->get_order_id(), reason);
             log_event(*rej);
@@ -1014,7 +955,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                 halt_requested = true;
                 return false;
             }
-            return true; // reject: drop order, continue engine
+            return true;
         }
     }
 
@@ -1025,13 +966,11 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 
     auto adapter = get_adapter(o->get_symbol());
 
-    // Update mid price on the adapter (for fill model distance calculations)
     if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
         local->set_mid_price(last_mid_price_);
 
     adapter->submit_order(*o);
 
-    // Shadow mode: also forward order to provider's execution adapter
     if (config_.mode == engine_mode::shadow && config_.provider)
     {
         auto exchange_adapter = config_.provider->get_execution_adapter();
@@ -1057,7 +996,6 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             publish_event(fill_ptr);
             analytics_.on_event(fill_ptr);
 
-            // Shadow mode: track simulated fill for comparison
             if (config_.mode == engine_mode::shadow && shadow_tracker_)
                 shadow_tracker_->on_simulated_fill(f);
 
@@ -1074,8 +1012,6 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 
             event_count++;
 
-            // Post-fill risk check (synchronous — always runs on the hot path).
-            // The async shadow check in RiskWorker remains as secondary validation.
             {
                 auto post_snap = analytics_.snapshot();
                 auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
@@ -1095,7 +1031,6 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         }
     }
 
-    // Shadow mode: poll exchange fills for comparison
     if (config_.mode == engine_mode::shadow && config_.provider)
     {
         auto exchange_adapter = config_.provider->get_execution_adapter();
@@ -1123,7 +1058,6 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
     auto adapter = get_adapter(symbol);
     bool cancelled = adapter->cancel_order(order_id);
 
-    // Also remove from pending stops
     if (!cancelled)
     {
         auto it = std::remove_if(pending_stops_.begin(), pending_stops_.end(),
@@ -1176,7 +1110,6 @@ void engine::unwind_positions(std::size_t& event_count)
     {
         if (pos.qty <= 0.0) continue;
 
-        // Create a market sell order to close the position
         auto now = std::chrono::system_clock::now();
         auto close_order = order_pool_.acquire(order_event(
             now, symbol, order_type::market, order_side::sell,
@@ -1277,7 +1210,6 @@ bool engine::route_order(order_event& order,
     order.set_order_id(OrderIdGenerator::next());
     order_tracker_.set_status(order.get_order_id(), order_status::pending);
 
-    // Stop/stop-limit orders are buffered until price triggers them
     if (order.get_order_type() == order_type::stop ||
         order.get_order_type() == order_type::stop_limit)
     {
@@ -1285,7 +1217,6 @@ bool engine::route_order(order_event& order,
         return true;
     }
 
-    // Apply latency model if configured
     if (config_.latency_model)
     {
         auto latency = config_.latency_model->get_order_latency();
@@ -1294,7 +1225,6 @@ bool engine::route_order(order_event& order,
         return true;
     }
 
-    // No latency — process immediately
     order.set_earliest_eligible_ts(sim_time);
     auto order_ptr = order_pool_.acquire(order);
     if (order.get_tif() == time_in_force::day)
@@ -1321,7 +1251,6 @@ void engine::check_pending_stops(double high, double low,
         {
             if (stop->get_order_type() == order_type::stop)
             {
-                // Convert to market order
                 auto market_order = order_pool_.acquire(
                     sim_time, stop->get_symbol(), order_type::market,
                     stop->get_side(), stop->get_quantity(), stop->get_stop_price(),
@@ -1332,7 +1261,7 @@ void engine::check_pending_stops(double high, double low,
                     day_order_ids_.push_back({market_order->get_symbol(), market_order->get_order_id()});
                 process_order(market_order, event_count, halt_requested);
             }
-            else // stop_limit
+            else
             {
                 auto limit_order = order_pool_.acquire(
                     sim_time, stop->get_symbol(), order_type::limit,
@@ -1370,7 +1299,6 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
         auto& s = additional_strategies_[i];
         if (!s) continue;
 
-        // SL/TP for this extra strategy (tagged with its name).
         if (auto sl_tp = s->check_stops(mkt.get_symbol(), mkt.get_close(), ts))
         {
             sl_tp->set_recv_ns(mkt.get_recv_ns());
@@ -1380,7 +1308,6 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
             if (halt) return;
         }
 
-        // New orders from the strategy's on_market handler.
         if (auto o = s->on_market(mkt))
         {
             o->set_recv_ns(mkt.get_recv_ns());
@@ -1439,16 +1366,10 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
     last_mid_price_ = mkt.get_close();
 
-    // Replenish orderbook for this symbol
     auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
     if (!preset_has_mm_worker(config_.threading))
         market_maker_.replenish(ob, last_mid_price_);
 
-    // Let the provider react to the mid-price update (e.g. reseed a
-    // synthetic book for paper-mode limit fills) and drain any fills
-    // that result. Poll the provider's adapter directly — in shadow mode
-    // get_adapter() returns the LocalBookAdapter, so these provider fills
-    // would be lost if we used it.
     if (config_.provider && config_.provider->has_execution())
     {
         config_.provider->on_mid_price(mkt.get_symbol(), last_mid_price_);
@@ -1460,7 +1381,6 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
             {
                 if (config_.mode == engine_mode::shadow)
                 {
-                    // Shadow comparison only: primary PnL runs on LocalBookAdapter.
                     if (shadow_tracker_)
                         shadow_tracker_->on_exchange_fill(f);
                     continue;
@@ -1485,7 +1405,6 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         }
     }
 
-    // Process market event through strategy
     auto mkt_ptr = market_pool_.acquire(mkt);
     auto order_opt = strategy_->on_market(mkt);
     if (order_opt) order_opt->set_recv_ns(mkt.get_recv_ns());
@@ -1530,15 +1449,9 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 
     last_mid_price_ = rec.price;
 
-    // Replenish orderbook with liquidity around current price.
-    // Always inline for tick data — the MM worker only handles bar-driven replenish.
     auto ob = orderbook_registry_.get_or_create(rec.symbol);
     market_maker_.replenish(ob, last_mid_price_);
 
-    // Let the provider react to the tick-derived mid price and poll any
-    // fills that result. Poll the provider's adapter directly — in shadow
-    // mode get_adapter() returns the LocalBookAdapter and the provider's
-    // fills would be lost.
     if (config_.provider && config_.provider->has_execution())
     {
         config_.provider->on_mid_price(rec.symbol, last_mid_price_);
@@ -1576,7 +1489,6 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 
     bool halt = false;
 
-    // Drain eligible pending (latency-delayed) orders
     while (!pending_orders_.empty() &&
            pending_orders_.top().order->get_earliest_eligible_ts() <= rec.timestamp)
     {
@@ -1588,7 +1500,6 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     }
     if (halt) return;
 
-    // Check pending stop orders against tick price
     check_pending_stops(rec.price, rec.price, rec.timestamp, event_count, halt);
     if (halt) return;
 
@@ -1609,12 +1520,10 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 #endif
 
 #ifdef HAS_WEB_UI
-    // Feed tick into bar aggregator for charting (emits bars via callback)
     if (tick_aggregator_)
         tick_aggregator_->on_tick(rec.symbol, rec.price, rec.quantity, rec.timestamp);
 #endif
 
-    // Check strategy SL/TP against current tick price
     auto sl_tp_order = strategy_->check_stops(rec.symbol, rec.price, rec.timestamp);
     if (sl_tp_order)
     {
@@ -1625,7 +1534,6 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     }
     if (halt) return;
 
-    // Dispatch to strategy's tick handler
     auto order_opt = strategy_->on_tick(te);
     if (order_opt)
     {
@@ -1660,13 +1568,11 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
     auto last_report_time = std::chrono::steady_clock::now();
 
     bridge->run_streaming(data_handler_, [&](const bar_record& rec) {
-        // Use the bar's own timestamp when available (e.g. Binance kline open time
-        // stored as epoch-ms string in rec.date), fall back to wall clock.
         auto timestamp = [&]() {
             if (!rec.date.empty()) {
                 try {
                     int64_t ts_ms = std::stoll(rec.date);
-                    if (ts_ms > 1000000000000LL) // looks like epoch ms
+                    if (ts_ms > 1000000000000LL)
                         return std::chrono::system_clock::time_point(
                             std::chrono::milliseconds(ts_ms));
                 } catch (...) {}
@@ -1677,7 +1583,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
         bar_index++;
 
 #ifdef HAS_WEB_UI
-        // Broadcast orderbook + WS commands in streaming mode
         broadcast_orderbook_snapshot(rec.symbol);
         bool halt = false;
         process_ws_commands(halt, event_count);
@@ -1685,7 +1590,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
             send_state_snapshot();
 #endif
 
-        // Apply pending runtime switches
         {
             std::lock_guard<std::mutex> lk(switch_mu_);
             if (!pending_symbol_.empty()) {
@@ -1740,7 +1644,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     record_run_begin();
 #endif
 
-    // Create tick-to-bar aggregator for WebSocket UI charting
 #ifdef HAS_WEB_UI
     tick_aggregator_ = std::make_unique<BarAggregator>(
         tick_bar_interval_,
@@ -1772,7 +1675,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
             send_state_snapshot();
 #endif
 
-        // Apply pending runtime switches
         {
             std::lock_guard<std::mutex> lk(switch_mu_);
             if (!pending_symbol_.empty()) {
@@ -1824,7 +1726,6 @@ void engine::run()
 {
     if (!data_handler_) throw std::runtime_error("missing dependencies");
 
-    // Dispatch to tick-based loop if tick data is available
     if (data_handler_->has_tick_data())
     {
         run_tick_data();
@@ -1857,7 +1758,6 @@ void engine::run()
     }
 #endif
 
-    // Use a fixed epoch when seed is set for deterministic replay
     const auto base_ts = (config_.seed != 0)
         ? std::chrono::system_clock::time_point(std::chrono::milliseconds(0))
         : std::chrono::system_clock::now();
@@ -1868,7 +1768,6 @@ void engine::run()
     std::size_t event_count = 0;
     auto last_report_time = std::chrono::steady_clock::now();
 
-    // Clear shared pending state for this run
     pending_stops_.clear();
     while (!pending_orders_.empty()) pending_orders_.pop();
     order_seq_ = 0;
@@ -1896,7 +1795,6 @@ void engine::run()
         auto sim_time = mkt.get_timestamp();
         const auto& symbol = mkt.get_symbol();
 
-        // Drain eligible pending orders before processing this market event
         {
             DEBUG_STAGE(stage_timer_, pending_drain);
             while (!pending_orders_.empty() &&
@@ -1911,16 +1809,13 @@ void engine::run()
         }
         if (halt_requested) break;
 
-        // Track mid price for fill model distance calculations
         last_mid_price_ = mkt.get_close();
 
-        // Check pending stop orders for triggers
         {
             DEBUG_STAGE(stage_timer_, stop_check);
             check_pending_stops(mkt.get_high(), mkt.get_low(), sim_time, event_count, halt_requested);
         }
 
-        // Reactive market maker: replenish depleted book levels per symbol
         {
             DEBUG_STAGE(stage_timer_, mm_replenish);
             auto ob = orderbook_registry_.get_or_create(symbol);
@@ -1928,7 +1823,6 @@ void engine::run()
                 market_maker_.replenish(ob, last_mid_price_);
         }
 
-        // Drain market maker inbound orders (extended preset only)
         if (mm_order_ring_)
         {
             event_pointer mm_ev;
@@ -1948,7 +1842,6 @@ void engine::run()
             }
         }
 
-        // Process market event
         auto mkt_ptr = market_pool_.acquire(mkt);
         std::optional<order_event> order_opt;
         {
@@ -1965,16 +1858,12 @@ void engine::run()
         event_count++;
 
 #ifdef HAS_WEB_UI
-        // Broadcast indicator-enriched market event to WS clients
         broadcast_market_with_indicators(mkt);
 
-        // Broadcast orderbook depth snapshot (throttled to 250ms)
         broadcast_orderbook_snapshot(symbol);
 
-        // Process inbound WS commands
         process_ws_commands(halt_requested, event_count);
 
-        // Send state snapshot if a new client just connected
         if (ws_worker_ && ws_worker_->has_pending_connect())
             send_state_snapshot();
 #endif
@@ -2000,7 +1889,6 @@ void engine::run()
             }
         }
 
-        // K3: periodic portfolio checkpoint (no-op if checkpoint_path empty)
         write_checkpoint_if_due(event_count);
     }
 
@@ -2014,7 +1902,6 @@ void engine::run()
     }
 #endif
 
-    // Drain any remaining pending orders after all market data
     while (!pending_orders_.empty())
     {
         auto entry = pending_orders_.top();
@@ -2024,7 +1911,6 @@ void engine::run()
         process_order(entry.order, event_count, halt_requested);
     }
 
-    // Cancel all day orders at session end
     for (const auto& [symbol, oid] : day_order_ids_)
     {
         auto ob = orderbook_registry_.get(symbol);
@@ -2049,7 +1935,6 @@ void engine::run()
         auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
-        // Build positions JSON array
         std::string pos_json = "[";
         bool first = true;
         for (const auto& [sym, pos] : portfolio_.get_positions())
@@ -2072,7 +1957,6 @@ void engine::run()
     record_run_end();
 #endif
 
-    // K3: final checkpoint write (force — bypass interval check)
     if (!config_.checkpoint_path.empty())
     {
         try {
@@ -2119,7 +2003,6 @@ void engine::run_tick_data()
     if (current_run_id_.empty()) record_run_begin();
 #endif
 
-    // Clear shared pending state for this run
     pending_stops_.clear();
     while (!pending_orders_.empty()) pending_orders_.pop();
     order_seq_ = 0;
@@ -2138,8 +2021,6 @@ void engine::run_tick_data()
     bool halt_requested = false;
     auto last_report_time = std::chrono::steady_clock::now();
 
-    // Bar aggregator: converts ticks into OHLCV bars for on_market()
-    // Uses route_order() so bar-originated orders get proper stop/latency handling
     BarAggregator bar_agg(std::chrono::seconds(1), [&](const market_event& bar)
     {
         int64_t bar_recv_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2167,14 +2048,11 @@ void engine::run_tick_data()
     {
         const auto& tick = ticks[i];
 
-        // Track mid price
         last_mid_price_ = tick.price;
 
-        // Replenish orderbook
         auto ob = orderbook_registry_.get_or_create(tick.symbol);
         market_maker_.replenish(ob, last_mid_price_);
 
-        // Drain eligible pending orders
         while (!pending_orders_.empty() &&
                pending_orders_.top().order->get_earliest_eligible_ts() <= tick.timestamp)
         {
@@ -2186,11 +2064,9 @@ void engine::run_tick_data()
         }
         if (halt_requested) break;
 
-        // Check pending stop orders against tick price
         check_pending_stops(tick.price, tick.price, tick.timestamp, event_count, halt_requested);
         if (halt_requested) break;
 
-        // Convert data_tick_side to tick_side for event
         tick_side ts = tick_side::unknown;
         if (tick.side == data_tick_side::bid) ts = tick_side::bid;
         else if (tick.side == data_tick_side::ask) ts = tick_side::ask;
@@ -2199,7 +2075,6 @@ void engine::run_tick_data()
         te.set_recv_ns(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
 
-        // Publish tick event
         auto tick_ptr = tick_pool_.acquire(te);
         log_event(te);
         publish_event(tick_ptr);
@@ -2207,7 +2082,6 @@ void engine::run_tick_data()
             analytics_.on_event(tick_ptr);
         event_count++;
 
-        // Check strategy SL/TP against current tick price
         auto sl_tp_order = strategy_->check_stops(tick.symbol, tick.price, tick.timestamp);
         if (sl_tp_order)
         {
@@ -2218,7 +2092,6 @@ void engine::run_tick_data()
         }
         if (halt_requested) break;
 
-        // Dispatch to strategy's tick handler
         auto order_opt = strategy_->on_tick(te);
         if (order_opt)
         {
@@ -2230,7 +2103,6 @@ void engine::run_tick_data()
         dispatch_extras_on_tick(te, tick.timestamp, event_count);
         if (halt_requested) break;
 
-        // Feed tick into bar aggregator for bar-based strategies
         bar_agg.on_tick(tick.symbol, tick.price, tick.quantity, tick.timestamp);
 
         {
@@ -2246,10 +2118,8 @@ void engine::run_tick_data()
         }
     }
 
-    // Flush any partial bar
     bar_agg.flush();
 
-    // Drain remaining pending orders
     while (!pending_orders_.empty())
     {
         auto entry = pending_orders_.top();
@@ -2302,11 +2172,9 @@ void engine::run_replay(const std::string& log_path,
             auto& mkt = static_cast<market_event&>(*ev);
             last_mid_price_ = mkt.get_close();
 
-            // Replenish book
             auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
             market_maker_.replenish(ob, last_mid_price_);
 
-            // Feed to strategy
             auto order_opt = strategy_->on_market(mkt);
             publish_event(ev);
             if (!config_.is_threaded())
@@ -2320,7 +2188,6 @@ void engine::run_replay(const std::string& log_path,
                 order_opt->set_earliest_eligible_ts(mkt.get_timestamp());
                 auto order_ptr = order_pool_.acquire(*order_opt);
 
-                // Pre-order risk check
                 auto snap = analytics_.snapshot();
                 auto action = risk_manager_.check_order(*order_opt, portfolio_, snap);
                 if (action == risk_action::reject || action == risk_action::halt) {
@@ -2405,7 +2272,6 @@ void engine::run_replay(const std::string& log_path,
             break;
         }
         default:
-            // Other event types (signal, l2, etc.) just pass through analytics
             publish_event(ev);
             if (!config_.is_threaded())
                 analytics_.on_event(ev);

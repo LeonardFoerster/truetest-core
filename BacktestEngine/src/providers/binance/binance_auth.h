@@ -10,8 +10,6 @@
 
 namespace binance {
 
-// HMAC-SHA256 signing for Binance API authentication.
-// All signed endpoints require: signature = HMAC-SHA256(secretKey, queryString)
 inline std::string hmac_sha256(const std::string& key, const std::string& data)
 {
     unsigned char digest[EVP_MAX_MD_SIZE];
@@ -31,14 +29,12 @@ inline std::string hmac_sha256(const std::string& key, const std::string& data)
     return ss.str();
 }
 
-// Sign a query string with the API secret and append the signature parameter.
 inline std::string sign_query(const std::string& query_string, const std::string& secret)
 {
     auto sig = hmac_sha256(secret, query_string);
     return query_string + "&signature=" + sig;
 }
 
-// Get current server timestamp in milliseconds (local clock).
 inline int64_t server_time_ms()
 {
     auto now = std::chrono::system_clock::now();
@@ -46,7 +42,6 @@ inline int64_t server_time_ms()
         now.time_since_epoch()).count();
 }
 
-// URL-encode a string (minimal: spaces + special chars).
 inline std::string url_encode(const std::string& value)
 {
     std::ostringstream ss;

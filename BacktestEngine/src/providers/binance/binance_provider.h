@@ -2,11 +2,19 @@
 #ifdef HAS_BINANCE
 
 #include "core/engine_config.h"
+#include "execution/execution_bridge.h"
 #include "providers/provider.h"
 #include "providers/prepend_transport.h"
 #include "providers/binance/binance_transport.h"
 #include "providers/binance/binance_executor.h"
 #include "providers/binance/binance_backfill.h"
+#include "providers/binance/binance_endpoints.h"
+#include "providers/binance/binance_order_encoder.h"
+#include "providers/binance/binance_rest_client.h"
+#include "providers/binance/binance_rest_order_transport.h"
+#include "providers/binance/binance_time_sync.h"
+#include "providers/binance/binance_user_data_parser.h"
+#include "providers/binance/binance_user_data_transport.h"
 #include "providers/binance/hybrid_executor.h"
 #include "orderbook/orderbook.h"
 
@@ -16,23 +24,6 @@
 #include <string>
 #include <vector>
 
-// BinanceProvider: live exchange provider for Binance spot market data + execution.
-//
-// Data feed: WebSocket streaming via BinanceTransport. When backfill_bars > 0
-//   is configured and the stream is a kline stream, historical bars are
-//   prepended to the live stream through a PrependTransport decorator so the
-//   engine sees a single continuous feed and never needs to know backfill
-//   exists.
-// Execution:
-//   - Live mode: BinanceExecutor with REST order submission.
-//   - Paper/backtest/shadow: HybridExecutor (market → paper BinanceExecutor,
-//     limit → local synthetic book). The hybrid executor owns book seeding;
-//     on_mid_price() forwards mid-price updates into it.
-//
-// Usage:
-//   auto provider = std::make_shared<BinanceProvider>("btcusdt", "kline_1m");
-//   provider->configure(engine_cfg);
-//   provider->open();
 class BinanceProvider : public IProvider
 {
 public:
@@ -49,7 +40,19 @@ public:
         , api_secret_(api_secret)
         , host_(host)
         , port_(port)
-    {}
+        , endpoints_(binance::from_host(host))
+    {
+        if (!port.empty()) endpoints_.ws_port = port;
+    }
+
+    void set_endpoints(binance::endpoints ep)
+    {
+        endpoints_ = std::move(ep);
+        host_ = endpoints_.ws_host;
+        port_ = endpoints_.ws_port;
+    }
+
+    bool is_testnet() const { return endpoints_.is_testnet; }
 
     std::string name() const override { return "binance"; }
 
@@ -75,16 +78,11 @@ public:
     {
         state_ = lifecycle::opening;
 
-        // Build the live WebSocket transport
         auto live_transport = std::make_shared<BinanceTransport>(
-            symbol_, stream_type_, host_, port_);
+            symbol_, stream_type_, endpoints_.ws_host, endpoints_.ws_port);
 
-        // Map WebSocket host to matching REST host
         std::string rest_host = rest_host_for_stream();
 
-        // Backfill: fetch historical klines and prepend them as JSON lines
-        // on the stream. Only supported for kline streams — trade streams
-        // would need a different prepended record shape.
         std::vector<std::string> prepend;
         if (backfill_bars_ > 0 && is_kline_stream())
         {
@@ -113,17 +111,39 @@ public:
         else
             transport_ = live_transport;
 
-        // Build the execution adapter. Live mode goes straight to
-        // BinanceExecutor with live trading enabled. Every other mode
-        // uses a HybridExecutor wrapping a paper BinanceExecutor.
-        binance_exec_ = std::make_shared<BinanceExecutor>(
-            api_key_, api_secret_, rest_host, "443");
+        binance_exec_ = std::make_shared<BinanceExecutor>();
         binance_exec_->set_symbol(symbol_);
 
         if (mode_ == engine_mode::live && !api_key_.empty())
         {
-            binance_exec_->set_live_trading(true);
-            executor_ = binance_exec_;
+            auto rest = std::make_shared<BinanceRestClient>(
+                api_key_, api_secret_, rest_host, endpoints_.rest_port);
+
+            auto check = binance::verify_clock_skew(*rest);
+            if (!check.ok)
+            {
+                std::cerr << "BinanceProvider: refusing to go live — "
+                          << check.note << "\n";
+                state_ = lifecycle::error;
+                return false;
+            }
+
+            ExecutionBridge::deps d;
+            d.order_tx = make_binance_rest_order_transport(rest);
+            d.fill_tx  = std::make_shared<BinanceUserDataTransport>(
+                             rest, endpoints_.ws_host, endpoints_.ws_port);
+            d.encoder  = std::make_shared<BinanceOrderEncoder>(symbol_);
+            d.parser   = std::make_shared<BinanceUserDataParser>();
+
+            bridge_ = std::make_shared<ExecutionBridge>(std::move(d));
+            if (!bridge_->open())
+            {
+                std::cerr << "BinanceProvider: ExecutionBridge open failed: "
+                          << bridge_->last_error() << "\n";
+                state_ = lifecycle::error;
+                return false;
+            }
+            executor_ = bridge_;
         }
         else
         {
@@ -146,6 +166,7 @@ public:
     void close() override
     {
         if (transport_) transport_->close();
+        if (bridge_)    bridge_->close();
         state_ = lifecycle::closed;
     }
 
@@ -170,15 +191,6 @@ public:
     const std::string& symbol() const { return symbol_; }
     const std::string& stream_type() const { return stream_type_; }
 
-    // Enable live trading on the executor (requires API keys).
-    // Normally driven by configure() + mode=live, but kept for
-    // compatibility with direct callers.
-    void set_live_trading(bool enabled)
-    {
-        if (binance_exec_)
-            binance_exec_->set_live_trading(enabled);
-    }
-
 private:
     std::string symbol_;
     std::string stream_type_;
@@ -186,8 +198,8 @@ private:
     std::string api_secret_;
     std::string host_;
     std::string port_;
+    binance::endpoints endpoints_;
 
-    // Configuration (from configure())
     bool configured_ = false;
     engine_mode mode_ = engine_mode::backtest;
     std::shared_ptr<IFeeModel> fee_model_;
@@ -198,26 +210,20 @@ private:
     std::string backfill_interval_;
     std::string backfill_host_override_;
 
-    // Lifecycle
     lifecycle state_ = lifecycle::closed;
 
-    // Transport (wraps live transport with an optional PrependTransport
-    // for backfilled bars).
     std::shared_ptr<IDataTransport> transport_;
 
-    // Execution: either hybrid_exec_ (paper/shadow/backtest) OR
-    // binance_exec_ directly (live). executor_ aliases the active one.
     std::shared_ptr<BinanceExecutor> binance_exec_;
     std::shared_ptr<HybridExecutor> hybrid_exec_;
+    std::shared_ptr<ExecutionBridge> bridge_;
     std::shared_ptr<IExecutionAdapter> executor_;
 
     std::string rest_host_for_stream() const
     {
         if (!backfill_host_override_.empty())
             return backfill_host_override_;
-        if (host_.find("testnet") != std::string::npos)
-            return "testnet.binance.vision";
-        return "api.binance.com";
+        return endpoints_.rest_host;
     }
 
     bool is_kline_stream() const
@@ -227,14 +233,11 @@ private:
 
     std::string kline_interval_from_stream() const
     {
-        // stream_type like "kline_1m" → "1m"
         auto pos = stream_type_.find('_');
         if (pos == std::string::npos) return "";
         return stream_type_.substr(pos + 1);
     }
 
-    // Format a backfilled bar as a Binance kline WebSocket JSON message
-    // so the stream parser (BinanceKlineParser) handles it uniformly.
     static std::string encode_kline_json(const backfill_bar& b,
                                          const std::string& interval)
     {

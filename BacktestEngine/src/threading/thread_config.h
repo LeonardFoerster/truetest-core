@@ -15,25 +15,22 @@
 
 enum class core_role
 {
-    event_loop,     // Core 0
-    logging,        // Core 1
-    risk,           // Core 2
-    market_maker,   // Core 3
-    stats           // Core 4
+    event_loop,
+    logging,
+    risk,
+    market_maker,
+    stats
 };
 
 struct core_assignment
 {
     core_role role;
-    int core_id;    // -1 = no pinning (let OS schedule)
+    int core_id;
 };
 
-// Detect the number of physical cores by reading sysfs topology on Linux,
-// falling back to hardware_concurrency().
 inline std::size_t detect_physical_cores()
 {
 #ifdef __linux__
-    // Read unique (physical_package_id, core_id) pairs from sysfs
     std::map<std::pair<int, int>, int> physical_cores;
     for (int i = 0; i < 1024; ++i)
     {
@@ -51,7 +48,7 @@ inline std::size_t detect_physical_cores()
 
         auto key = std::make_pair(pkg_id, core_id);
         if (physical_cores.find(key) == physical_cores.end())
-            physical_cores[key] = i; // store first logical core for this physical core
+            physical_cores[key] = i;
     }
 
     if (!physical_cores.empty())
@@ -62,7 +59,6 @@ inline std::size_t detect_physical_cores()
     return (n > 0) ? n : 1;
 }
 
-// Get a list of one logical core per physical core (avoids HT siblings)
 inline std::vector<int> get_physical_core_ids()
 {
 #ifdef __linux__
@@ -96,7 +92,6 @@ inline std::vector<int> get_physical_core_ids()
     }
 #endif
 
-    // Fallback: just use sequential IDs
     auto n = std::thread::hardware_concurrency();
     if (n == 0) n = 1;
     std::vector<int> ids(n);
@@ -105,8 +100,6 @@ inline std::vector<int> get_physical_core_ids()
     return ids;
 }
 
-// Build core assignment map based on available physical cores
-// Follows the scaling table from docs/multithreading.md
 inline std::vector<core_assignment> build_core_map()
 {
     auto core_ids = get_physical_core_ids();
@@ -116,7 +109,6 @@ inline std::vector<core_assignment> build_core_map()
 
     if (n < 2)
     {
-        // Single core: everything on core 0, no pinning
         map.push_back({core_role::event_loop, -1});
         map.push_back({core_role::logging,    -1});
         map.push_back({core_role::risk,       -1});
@@ -125,7 +117,6 @@ inline std::vector<core_assignment> build_core_map()
     }
     else if (n <= 3)
     {
-        // 2-3 cores: event loop isolated, workers share the rest
         map.push_back({core_role::event_loop,   core_ids[0]});
         map.push_back({core_role::logging,      core_ids[1]});
         map.push_back({core_role::risk,         core_ids[1]});
@@ -134,7 +125,6 @@ inline std::vector<core_assignment> build_core_map()
     }
     else if (n <= 5)
     {
-        // 4-5 cores: event loop isolated, risk isolated, others share
         map.push_back({core_role::event_loop,   core_ids[0]});
         map.push_back({core_role::logging,      core_ids[1]});
         map.push_back({core_role::risk,         core_ids[2]});
@@ -143,7 +133,6 @@ inline std::vector<core_assignment> build_core_map()
     }
     else
     {
-        // 6+ cores: full 1:1 pinning
         map.push_back({core_role::event_loop,   core_ids[0]});
         map.push_back({core_role::logging,      core_ids[1]});
         map.push_back({core_role::risk,         core_ids[2]});
@@ -154,7 +143,6 @@ inline std::vector<core_assignment> build_core_map()
     return map;
 }
 
-// Pin the calling thread to a specific core. No-op on unsupported platforms or if core_id == -1.
 inline bool pin_current_thread(int core_id)
 {
     if (core_id < 0)
@@ -172,7 +160,6 @@ inline bool pin_current_thread(int core_id)
 #endif
 }
 
-// Pin a thread to a specific core. No-op on unsupported platforms or if core_id == -1.
 inline bool pin_to_core(std::thread& t, int core_id)
 {
     if (core_id < 0)

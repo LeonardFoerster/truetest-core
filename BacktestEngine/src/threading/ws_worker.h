@@ -26,38 +26,30 @@ namespace websocket = beast::websocket;
 namespace net = boost::asio;
 using tcp = net::ip::tcp;
 
-// Command received from a WebSocket client.
 struct ws_command
 {
-    std::string command;    // "start", "pause", "stop", "order", "set_timeframe", "set_symbol", "set_strategy"
-    std::string side;       // for order commands
+    std::string command;
+    std::string side;
     double quantity = 0.0;
     double price = 0.0;
-    std::string order_type; // "market" or "limit"
-    std::string timeframe;  // for set_timeframe (e.g. "1m", "5m", "1h")
-    std::string value;      // generic value for set_symbol, set_strategy
+    std::string order_type;
+    std::string timeframe;
+    std::string value;
 };
 
-// Callback type: called when a new client connects (for sending state snapshot)
 using on_client_connect_fn = std::function<void()>;
 
-// Per-session event filter. When empty (default), all events pass through
-// (backward compatible). When populated, only matching events are sent.
 struct ws_event_filter
 {
-    std::set<std::string> event_types;  // e.g. {"fill", "tick", "market"}
-    std::set<std::string> symbols;      // e.g. {"BTCUSDT", "ETHUSDT"}
+    std::set<std::string> event_types;
+    std::set<std::string> symbols;
 
-    // Returns true if the filter is empty (accept everything).
     bool accepts_all() const { return event_types.empty() && symbols.empty(); }
 
-    // Check if a JSON event message passes this filter.
-    // Extracts "type" and optionally "symbol" from the JSON to match.
     bool matches(const std::string& json) const
     {
         if (accepts_all()) return true;
 
-        // Extract event type from JSON: look for "type":"<value>"
         if (!event_types.empty())
         {
             std::string search = "\"type\":\"";
@@ -75,7 +67,6 @@ struct ws_event_filter
             }
         }
 
-        // Extract symbol from JSON: look for "symbol":"<value>" in data
         if (!symbols.empty())
         {
             std::string search = "\"symbol\":\"";
@@ -87,7 +78,6 @@ struct ws_event_filter
                 if (end != std::string::npos)
                 {
                     std::string symbol = json.substr(pos, end - pos);
-                    // Convert to uppercase for comparison
                     std::string upper_symbol = symbol;
                     for (auto& c : upper_symbol) c = static_cast<char>(std::toupper(c));
                     bool found = false;
@@ -100,19 +90,12 @@ struct ws_event_filter
                     if (!found) return false;
                 }
             }
-            // If no symbol field in JSON, let it pass (status, error, etc.)
         }
 
         return true;
     }
 };
 
-// A single WebSocket session, created per client connection.
-//
-// Lock-free design: the engine thread (producer) pushes messages into an SPSC
-// ring buffer via send(). The Boost.Asio io_context thread (consumer) pops
-// messages and feeds them to async_write. An atomic writing_ flag coordinates
-// the async_write chain startup between the two threads.
 class WsSession : public std::enable_shared_from_this<WsSession>
 {
 public:
@@ -135,7 +118,6 @@ public:
         });
     }
 
-    // Accept a WebSocket upgrade from an already-read HTTP request.
     template<class Body, class Allocator>
     void start_with_request(const http::request<Body, http::basic_fields<Allocator>>& req)
     {
@@ -146,17 +128,13 @@ public:
         });
     }
 
-    // Called from the engine thread (single producer).
-    // Lock-free: pushes to SPSC ring, uses CAS + net::post to kick the
-    // async_write chain on the io_context thread when needed.
     void send(const std::string& msg)
     {
         if (!open_.load(std::memory_order_acquire)) return;
 
         if (!ring_.try_push(msg))
-            return;  // ring full — drop (backpressure)
+            return;
 
-        // If no async_write chain is active, start one on the io_context thread
         bool expected = false;
         if (writing_.compare_exchange_strong(expected, true,
                                              std::memory_order_acq_rel))
@@ -172,9 +150,6 @@ public:
         return open_.load(std::memory_order_acquire);
     }
 
-    // Event filter: set by "subscribe" command, checked by broadcast.
-    // Thread safety: set from io_context thread (on_message), read from
-    // engine thread (broadcast). Uses a mutex since updates are rare.
     void set_filter(const ws_event_filter& f)
     {
         std::lock_guard<std::mutex> lk(filter_mu_);
@@ -192,18 +167,17 @@ private:
 
     websocket::stream<tcp::socket> ws_;
     net::io_context& ioc_;
-    beast::flat_buffer buffer_;          // for do_read (io_context thread only)
+    beast::flat_buffer buffer_;
     command_callback_t on_message_;
     bool compress_ = true;
 
     mutable std::mutex filter_mu_;
-    ws_event_filter filter_;             // default: accept all
+    ws_event_filter filter_;
 
-    // Lock-free outbound queue (SPSC: engine thread pushes, io_context pops)
     RingBuffer<std::string, QUEUE_CAPACITY> ring_;
     std::atomic<bool> open_{true};
-    std::atomic<bool> writing_{false};   // true while an async_write chain is active
-    std::string write_buf_;              // holds in-flight message (io_context thread only)
+    std::atomic<bool> writing_{false};
+    std::string write_buf_;
 
     void apply_options()
     {
@@ -229,7 +203,6 @@ private:
                     self->close();
                     return;
                 }
-                // Process incoming message
                 if (bytes > 0 && self->on_message_)
                 {
                     auto data = beast::buffers_to_string(self->buffer_.data());
@@ -240,10 +213,6 @@ private:
             });
     }
 
-    // Runs exclusively on the io_context thread (single consumer).
-    // Pops one message from the ring, writes it, then chains to itself.
-    // When the ring is empty, releases writing_ and posts a deferred
-    // recheck to close the push-between-pop-and-release race window.
     void do_write()
     {
         if (!open_.load(std::memory_order_acquire))
@@ -254,14 +223,8 @@ private:
 
         if (!ring_.try_pop(write_buf_))
         {
-            // Ring appears empty. Release the writing flag.
             writing_.store(false, std::memory_order_release);
 
-            // A send() may have pushed between our try_pop and the flag
-            // release, with its CAS failing because writing_ was still true.
-            // Post a deferred recheck on the io_context to catch this case.
-            // This runs after any pending net::post from send(), ensuring
-            // we see the pushed data.
             net::post(ioc_, [self = shared_from_this()]() {
                 if (self->ring_.empty()) return;
                 bool expected = false;
@@ -284,7 +247,7 @@ private:
                     self->writing_.store(false, std::memory_order_release);
                     return;
                 }
-                self->do_write();  // chain next message
+                self->do_write();
             });
     }
 
@@ -294,15 +257,6 @@ private:
     }
 };
 
-// WebSocketWorker: consumes events from a ring buffer, serializes them
-// to JSON, and broadcasts to all connected WebSocket clients.
-//
-// Bidirectional: also accepts incoming JSON commands from clients
-// and queues them for the engine to poll via poll_command().
-//
-// Runs a Boost.Asio io_context on a separate internal thread for the
-// WS server. The worker's main thread (from the engine) processes
-// events and posts broadcasts to the io_context.
 class WebSocketWorker : public Worker
 {
 public:
@@ -311,10 +265,8 @@ public:
         , compress_(compress)
         , acceptor_(ioc_, tcp::endpoint(tcp::v4(), port))
     {
-        // Start accepting connections
         do_accept();
 
-        // Run io_context on its own thread
         io_thread_ = std::thread([this]() {
             ioc_.run();
         });
@@ -322,7 +274,6 @@ public:
 
     ~WebSocketWorker()
     {
-        // Stop the io_context and join
         ioc_.stop();
         if (io_thread_.joinable())
             io_thread_.join();
@@ -346,10 +297,7 @@ public:
         return sessions_.size();
     }
 
-    // --- Bidirectional command interface ---
 
-    // Poll for the next command from a WebSocket client.
-    // Returns true if a command was dequeued, false if the queue is empty.
     bool poll_command(ws_command& cmd)
     {
         std::lock_guard<std::mutex> lk(cmd_mu_);
@@ -359,14 +307,10 @@ public:
         return true;
     }
 
-    // Broadcast a raw JSON string to all connected clients.
-    // Each session's event filter is checked — messages that don't
-    // match a session's subscription are skipped for that session.
     void broadcast(const std::string& msg)
     {
         std::lock_guard<std::mutex> lk(sessions_mu_);
 
-        // Clean up closed sessions while iterating
         auto it = sessions_.begin();
         while (it != sessions_.end())
         {
@@ -383,7 +327,6 @@ public:
         }
     }
 
-    // Broadcast a status update to all clients.
     void broadcast_status(const std::string& state,
                           const std::string& strategy = "",
                           const std::string& symbol = "")
@@ -395,7 +338,6 @@ public:
         broadcast(std::string(buf));
     }
 
-    // Broadcast an orderbook snapshot (top N levels).
     void broadcast_orderbook(const std::vector<std::pair<double, double>>& bids,
                              const std::vector<std::pair<double, double>>& asks,
                              double spread)
@@ -424,39 +366,32 @@ public:
         broadcast(json);
     }
 
-    // Set callback for when a new client connects (used for state snapshot)
     void set_on_client_connect(on_client_connect_fn fn)
     {
         std::lock_guard<std::mutex> lk(connect_mu_);
         on_client_connect_ = std::move(fn);
     }
 
-    // Check if a new client connected recently (for engine to send snapshot)
     bool has_pending_connect()
     {
         return pending_connect_.exchange(false, std::memory_order_acquire);
     }
 
-    // --- REST API ---
 
-    // Access the backtest run manager (for engine to update run status).
     BacktestRunManager& run_manager() { return run_manager_; }
 
-    // Register callback for backtest submissions via REST API.
     void set_on_backtest_submit(on_backtest_submit_fn fn)
     {
         std::lock_guard<std::mutex> lk(submit_mu_);
         on_backtest_submit_ = std::move(fn);
     }
 
-    // Register callback for GET /api/runs (historical run list from SQLite).
     void set_on_list_runs(on_list_runs_fn fn)
     {
         std::lock_guard<std::mutex> lk(submit_mu_);
         on_list_runs_ = std::move(fn);
     }
 
-    // L2: Register callback for GET /metrics (Prometheus text format).
     void set_on_metrics(on_metrics_fn fn)
     {
         std::lock_guard<std::mutex> lk(submit_mu_);
@@ -473,16 +408,13 @@ private:
     mutable std::mutex sessions_mu_;
     std::set<std::shared_ptr<WsSession>> sessions_;
 
-    // Command queue: WS clients → engine
     std::mutex cmd_mu_;
     std::queue<ws_command> command_queue_;
 
-    // Client connect notification
     std::mutex connect_mu_;
     on_client_connect_fn on_client_connect_;
     std::atomic<bool> pending_connect_{false};
 
-    // REST API
     BacktestRunManager run_manager_;
     std::mutex submit_mu_;
     on_backtest_submit_fn on_backtest_submit_;
@@ -496,16 +428,13 @@ private:
                 if (!ec)
                     handle_new_connection(std::move(socket));
 
-                // Continue accepting
                 if (acceptor_.is_open())
                     do_accept();
             });
     }
 
-    // Read the initial HTTP request, then either serve REST or upgrade to WebSocket.
     void handle_new_connection(tcp::socket socket)
     {
-        // Shared state for the async read chain
         struct pending_conn : public std::enable_shared_from_this<pending_conn>
         {
             tcp::socket socket;
@@ -523,10 +452,8 @@ private:
             [this, conn](beast::error_code ec, std::size_t) {
                 if (ec) return;
 
-                // Check if this is a WebSocket upgrade
                 if (beast::websocket::is_upgrade(conn->req))
                 {
-                    // Upgrade to WebSocket
                     auto session_holder = std::make_shared<std::shared_ptr<WsSession>>();
                     *session_holder = std::make_shared<WsSession>(
                         std::move(conn->socket), ioc_,
@@ -542,7 +469,6 @@ private:
                     }
                     session->start_with_request(conn->req);
 
-                    // Notify engine
                     pending_connect_.store(true, std::memory_order_release);
                     {
                         std::lock_guard<std::mutex> lk(connect_mu_);
@@ -552,7 +478,6 @@ private:
                 }
                 else
                 {
-                    // Handle as HTTP REST request
                     http::response<http::string_body> res;
                     res.version(conn->req.version());
 
@@ -568,7 +493,6 @@ private:
 
                     route_http_request(conn->req, res, run_manager_, submit_fn, list_runs_fn, metrics_fn);
 
-                    // Send HTTP response
                     auto sp = std::make_shared<http::response<http::string_body>>(std::move(res));
                     http::async_write(conn->socket, *sp,
                         [conn, sp](beast::error_code, std::size_t) {
@@ -579,7 +503,6 @@ private:
             });
     }
 
-    // Valid command names (used for schema validation)
     static constexpr const char* valid_commands_[] = {
         "start", "pause", "stop", "order", "set_timeframe",
         "set_symbol", "set_strategy", "query_fills", "backfill",
@@ -593,7 +516,6 @@ private:
         return false;
     }
 
-    // Send an error response back to a specific session.
     void send_error(std::shared_ptr<WsSession>& session, const std::string& message)
     {
         char buf[512];
@@ -603,8 +525,6 @@ private:
         session->send(std::string(buf));
     }
 
-    // N2: Check that a string value contains no control characters (< 0x20
-    // except tab). Prevents injection of newlines, null bytes, etc.
     static bool has_control_chars(const std::string& s)
     {
         for (unsigned char c : s)
@@ -612,13 +532,9 @@ private:
         return false;
     }
 
-    // Parse an incoming JSON command from a client.
-    // Hand-rolled extraction (no JSON library, consistent with project conventions).
-    // Validates field presence and types per command schema before enqueuing.
     void on_client_message(const std::string& raw,
                            std::shared_ptr<WsSession> session = {})
     {
-        // N2: Message length limit (4 KB)
         static constexpr std::size_t MAX_MSG_LEN = 4096;
         if (raw.size() > MAX_MSG_LEN)
         {
@@ -628,7 +544,6 @@ private:
             return;
         }
 
-        // N2: Reject messages containing null bytes
         if (raw.find('\0') != std::string::npos)
         {
             if (session)
@@ -639,7 +554,6 @@ private:
 
         ws_command cmd;
 
-        // Extract string field from JSON
         auto extract = [&](const char* key) -> std::string {
             std::string search = std::string("\"") + key + "\":\"";
             auto pos = raw.find(search);
@@ -650,18 +564,14 @@ private:
             return raw.substr(pos, end - pos);
         };
 
-        // Extract numeric field from JSON — returns NaN if the field is present
-        // but not a valid number, 0.0 if absent.
         auto extract_num = [&](const char* key, bool& valid) -> double {
             valid = true;
             std::string search = std::string("\"") + key + "\":";
             auto pos = raw.find(search);
             if (pos == std::string::npos) return 0.0;
             pos += search.size();
-            // Skip whitespace
             while (pos < raw.size() && (raw[pos] == ' ' || raw[pos] == '\t')) pos++;
             if (pos >= raw.size()) { valid = false; return 0.0; }
-            // Reject non-numeric starts (but allow '-' for negatives)
             char first = raw[pos];
             if (first != '-' && first != '.' && !(first >= '0' && first <= '9'))
             {
@@ -672,7 +582,6 @@ private:
             catch (...) { valid = false; return 0.0; }
         };
 
-        // Check for "command" or "cmd" field (accept both)
         cmd.command = extract("command");
         if (cmd.command.empty())
             cmd.command = extract("cmd");
@@ -693,7 +602,6 @@ private:
             return;
         }
 
-        // N2: Reject command names with control characters
         if (has_control_chars(cmd.command))
         {
             if (session) send_error(session, "command contains control characters");
@@ -701,7 +609,6 @@ private:
             return;
         }
 
-        // Per-command schema validation
         if (cmd.command == "order")
         {
             cmd.side = extract("side");
@@ -747,7 +654,7 @@ private:
                 return;
             }
             if (cmd.order_type.empty())
-                cmd.order_type = "market";  // default
+                cmd.order_type = "market";
             if (has_control_chars(cmd.order_type))
             {
                 if (session) send_error(session, "order: 'type' contains control characters");
@@ -817,13 +724,10 @@ private:
         }
         else if (cmd.command == "subscribe")
         {
-            // Handle subscribe directly — apply filter to this session,
-            // do not enqueue to the engine command queue.
             if (session)
             {
                 ws_event_filter filter;
 
-                // Parse "events":["fill","tick",...] — extract array items
                 auto parse_array = [&](const char* key) -> std::set<std::string> {
                     std::set<std::string> result;
                     std::string search = std::string("\"") + key + "\":[";
@@ -833,7 +737,6 @@ private:
                     auto end = raw.find(']', pos);
                     if (end == std::string::npos) return result;
                     std::string arr = raw.substr(pos, end - pos);
-                    // Extract quoted strings from the array
                     std::size_t p = 0;
                     while (p < arr.size())
                     {
@@ -851,18 +754,16 @@ private:
                 filter.symbols = parse_array("symbols");
                 session->set_filter(filter);
 
-                // Acknowledge
                 char buf[256];
                 std::snprintf(buf, sizeof(buf),
                     R"({"type":"subscribed","data":{"events":%zu,"symbols":%zu}})",
                     filter.event_types.size(), filter.symbols.size());
                 session->send(std::string(buf));
             }
-            return;  // don't enqueue to engine
+            return;
         }
         else
         {
-            // Commands like start, pause, stop, query_fills, backfill — no extra fields required
             cmd.timeframe = extract("timeframe");
             cmd.value = extract("value");
             bool price_ok = true;

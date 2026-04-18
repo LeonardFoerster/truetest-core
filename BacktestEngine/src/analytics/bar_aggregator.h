@@ -6,12 +6,6 @@
 #include <functional>
 #include <limits>
 
-// Accumulates tick events into OHLCV bars at a configurable interval.
-// Outputs completed bars as market_event via a callback, allowing bar-based
-// strategies to run unmodified on tick feeds.
-//
-// Also emits partial bar updates (same timestamp) so the UI can show
-// live-updating candles before the bar interval completes.
 class BarAggregator
 {
 public:
@@ -30,20 +24,19 @@ public:
             volume_ = volume;
             symbol_ = symbol;
             bar_open_ = true;
-            emit_bar();  // emit immediately so the UI gets the first data point
+            emit_bar();
             return;
         }
 
-        // Check if this tick belongs to the next bar
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(timestamp - bar_start_);
         if (elapsed >= interval_)
         {
-            emit_bar();  // emit final version of completed bar
+            emit_bar();
             bar_start_ = timestamp;
             open_ = high_ = low_ = close_ = price;
             volume_ = volume;
             symbol_ = symbol;
-            emit_bar();  // emit first tick of new bar
+            emit_bar();
             return;
         }
 
@@ -52,8 +45,6 @@ public:
         close_ = price;
         volume_ += volume;
 
-        // Throttle partial bar updates to avoid flooding the UI.
-        // Emit at most once per 250ms within a bar interval.
         auto now = std::chrono::steady_clock::now();
         if (now - last_partial_emit_ >= std::chrono::milliseconds(250))
         {
@@ -62,7 +53,6 @@ public:
         }
     }
 
-    // Flush any partial bar (call at end of data)
     void flush()
     {
         if (bar_open_)

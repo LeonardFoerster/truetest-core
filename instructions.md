@@ -2156,6 +2156,96 @@ callable throws, the exception counts as a failure and is forwarded to the
 `on_retry` callback. After all attempts are exhausted, the last exception
 is rethrown.
 
+### 26.4 Binance reliability hardening (Tier 1)
+
+Five independent hardening passes landed on `providers/binance/` to let a
+live session survive long-running operation without silent stalls. Every
+item is on by default; there is no CLI flag to disable them.
+
+**Clock-skew guard.** `BinanceProvider::open()` now calls
+`binance::verify_clock_skew()` before constructing the `ExecutionBridge`
+on the live branch. It hits `/api/v3/time` unsigned and compares the
+server clock to the local clock. If the drift exceeds 2000 ms — or the
+fetch fails — `open()` logs the reason, sets the provider state to
+`lifecycle::error`, and refuses to go live. Paper and hybrid modes are
+unaffected. This prevents the classic `-1021 "Timestamp for this request
+is outside of the recvWindow"` rejection from silently breaking every
+signed order.
+
+Header: `providers/binance/binance_time_sync.h`. The pure decision helper
+`verify_clock_skew_offset(offset_ms, tolerance_ms)` is unit-tested in
+`tests/test_binance_rest_client_time.cpp`.
+
+**Proactive rate-limit backoff.** `BinanceRestClient` tracks
+`X-MBX-USED-WEIGHT-1M` across requests. Before each `execute()`, a pure
+function `throttle_delay_ms(used, anchor, now, cap, pct)` returns a sleep
+duration if the 1-minute window is still active and weight use is at or
+above 80% of the 6000 cap. On `HTTP 429`, the client sleeps (honoring
+`Retry-After`, clamped to 60 s) and retries once. The soft threshold and
+cap are compile-time defaults but can be overridden via
+`set_weight_cap()` / `set_soft_threshold_pct()` (the settings surface is
+intentionally not wired through `engine_config` yet).
+
+Tests: `tests/test_binance_rest_client_rate_limit.cpp`.
+
+**listenKey keepalive hardening.** `BinanceUserDataTransport`'s
+keepalive loop now takes a `binance_keepalive_policy` (30 min interval,
+15 s retry delay, 3 retries by default). The per-tick decision lives in
+`binance_keepalive_detail::keepalive_tick`, a pure templated helper:
+
+- PUT `/api/v3/userDataStream?listenKey=…` succeeds → stay `open`.
+- All PUT retries fail → POST `/api/v3/userDataStream` to rotate the
+  listenKey. A rotated key is swapped in under a mutex. State goes to
+  `degraded`.
+- Rotation also fails → state goes to `error`, reader thread is told to
+  stop. No silent loss of the user-data stream.
+
+Cancellable at every sleep via the existing `cv_` / `stop_flag_` pair.
+
+Tests: `tests/test_binance_user_data_transport_keepalive.cpp` drive the
+pure tick function with injected callables — no network required.
+
+**User-data WebSocket reconnect.** Previously, any transient WS read
+error put the user-data stream into `lifecycle::error` forever. The
+transport now runs the socket loop inside a retry envelope:
+
+- `run_once()` returns `stopped`, `network_error`, or `handshake_error`.
+- `run()` reconnects up to 10 attempts with exponential backoff
+  (1 s → 30 s), cancellable via the existing stop signal.
+- If the prior session was open for >5 minutes, the reconnect counter
+  resets — a long-lived stream that hiccups isn't treated as flapping.
+- Before reconnecting, if the previous session lasted longer than the
+  keepalive interval, the transport best-effort refreshes the listenKey
+  (PUT, fallback to POST) so a reconnect against an expired key doesn't
+  silently fail.
+- Status notes include the current attempt (`"reconnecting user-data
+  stream (attempt 3/10)"`), which `ExecutionBridge::poll_status` forwards
+  to the engine.
+
+The loop-control decision is isolated in
+`BinanceUserDataTransport::decide_next(state, last_result, max_attempts,
+now_ms, reset_threshold_ms)` and exercised in
+`tests/test_binance_user_data_transport_reconnect.cpp`. Socket-level
+behavior is intentionally not unit-tested here; rely on the
+record-and-replay transport for end-to-end coverage.
+
+**ExecutionBridge concurrency audit.** `ExecutionBridge` was reviewed
+for thread safety. Every non-const, non-injected data member is now
+explicitly documented as guarded by a specific mutex:
+
+| Member                                          | Mutex       |
+|-------------------------------------------------|-------------|
+| `by_engine_id_`, `by_client_id_`                | `map_mu_`   |
+| `pending_fills_`, `next_fill_id_`               | `fills_mu_` |
+| `pending_status_`                               | `status_mu_`|
+| `last_error_`                                   | `error_mu_` |
+
+No method holds two of these locks at once. A regression test
+`ExecutionBridge.ConcurrentFillIngestAndPoll` drives `handle_message`
+from 4 feeder threads (1000 messages total) against a concurrent
+`poll_fills` loop and asserts zero loss and zero duplicate fill IDs. The
+test is suitable for running under `-DENABLE_TSAN=ON`.
+
 ---
 
 ## 27. Testing

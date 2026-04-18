@@ -24,10 +24,7 @@ public:
         return std::nullopt;
     }
 
-    // Whether enough data has been accumulated to produce a value.
     bool ready() const { return last_value_.has_value(); }
-
-    // Last computed SMA value. Only valid when ready() is true.
     double value() const { return last_value_.value(); }
 
 private:

@@ -24,17 +24,9 @@ namespace net = boost::asio;
 namespace ssl = net::ssl;
 using tcp = net::ip::tcp;
 
-// BinanceCombinedTransport: connects to Binance's combined stream endpoint
-// to subscribe to multiple streams on one WebSocket connection.
-//
-// Endpoint: wss://stream.binance.com:9443/stream?streams=<s1>/<s2>/...
-//
-// Combined messages are wrapped: {"stream":"btcusdt@trade","data":{...}}
-// read_line_blocking() returns the full combined message (caller dispatches).
 class BinanceCombinedTransport : public IDataTransport
 {
 public:
-    // streams: e.g. {"btcusdt@trade", "btcusdt@depth@100ms"}
     BinanceCombinedTransport(
         const std::vector<std::string>& streams,
         const std::string& host = "stream.binance.com",
@@ -72,7 +64,6 @@ public:
                     req.set(boost::beast::http::field::user_agent, "TrueTest/1.0");
                 }));
 
-            // Build combined stream path
             std::string target = "/stream?streams=";
             for (size_t i = 0; i < streams_.size(); ++i)
             {

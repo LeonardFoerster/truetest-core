@@ -7,9 +7,6 @@
 
 #include <atomic>
 
-// Combined worker for the Light preset.
-// Runs risk checking, stats accumulation, and logging on one thread.
-// Consumes from a single shared ring buffer.
 class ObserverWorker : public Worker
 {
 public:
@@ -28,10 +25,8 @@ public:
     {
         events_processed_.fetch_add(1, std::memory_order_relaxed);
 
-        // Stats accumulation
         analytics_.on_event(ev);
 
-        // Risk checking
         if (ev->get_type() == event_type::fill)
         {
             auto& fill = static_cast<const fill_event&>(*ev);

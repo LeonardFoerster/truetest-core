@@ -8,19 +8,9 @@
 #include <string>
 #include <thread>
 
-// ReplayTransport: reads recorded WebSocket messages from a file and
-// replays them as if they came from a live transport.
-//
-// File format (produced by RecordingTransport): <epoch_ms>\t<raw_json>\n
-//
-// In batch mode (default), is_streaming() returns false — all records are
-// delivered immediately via read_line(). In paced mode, is_streaming()
-// returns true and read_line_blocking() sleeps to simulate original timing.
 class ReplayTransport : public IDataTransport
 {
 public:
-    // pace: if true, simulate original arrival timing (streaming mode).
-    //        if false, deliver all records immediately (batch mode for backtesting).
     explicit ReplayTransport(const std::string& file_path, bool pace = false)
         : path_(file_path)
         , pace_(pace)
@@ -95,10 +85,9 @@ private:
         if (line.empty())
             return std::nullopt;
 
-        // Parse: <epoch_ms>\t<raw_json>
         auto tab_pos = line.find('\t');
         if (tab_pos == std::string::npos)
-            return line; // malformed, return raw
+            return line;
 
         int64_t ts_ms = std::stoll(line.substr(0, tab_pos));
         std::string payload = line.substr(tab_pos + 1);
@@ -111,7 +100,6 @@ private:
                 replay_start_ = std::chrono::steady_clock::now();
             }
 
-            // Calculate when this record should be delivered
             auto offset_ms = ts_ms - first_record_ts_;
             auto target = replay_start_ + std::chrono::milliseconds(offset_ms);
             auto now = std::chrono::steady_clock::now();

@@ -15,7 +15,6 @@ bool BinaryCacheSource::load_data(std::shared_ptr<data_handler> handler) {
         std::cout << "Loading from cache..." << std::endl;
         std::ifstream ifs(cache_path_, std::ios::binary);
 
-        // Read and validate header
         BinaryCacheHeader hdr{};
         ifs.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
         if (!ifs || hdr.magic[0] != 'T' || hdr.magic[1] != 'T' ||
@@ -23,14 +22,12 @@ bool BinaryCacheSource::load_data(std::shared_ptr<data_handler> handler) {
             std::cerr << "Cache file has invalid magic — deleting stale cache.\n";
             ifs.close();
             std::filesystem::remove(cache_path_);
-            // Fall through to fallback below
         } else if (hdr.version != 1) {
             std::cerr << "Cache file version " << hdr.version
                       << " is not supported (expected 1) — deleting stale cache.\n";
             ifs.close();
             std::filesystem::remove(cache_path_);
         } else {
-            // Read payload into memory for CRC check
             std::ostringstream payload_buf;
             payload_buf << ifs.rdbuf();
             std::string payload_str = payload_buf.str();
@@ -41,7 +38,6 @@ bool BinaryCacheSource::load_data(std::shared_ptr<data_handler> handler) {
                 ifs.close();
                 std::filesystem::remove(cache_path_);
             } else {
-                // Parse the payload
                 const char* p = payload_str.data();
                 size_t remaining = payload_str.size();
 
@@ -101,7 +97,6 @@ bool BinaryCacheSource::load_data(std::shared_ptr<data_handler> handler) {
         return false;
     }
 
-    // Build payload in memory so we can compute CRC before writing
     std::cout << "Saving to cache..." << std::endl;
     std::ostringstream payload_buf(std::ios::binary);
     size_t size = handler->db_data_symbol.size();
@@ -127,7 +122,6 @@ bool BinaryCacheSource::load_data(std::shared_ptr<data_handler> handler) {
 
     std::string payload_str = payload_buf.str();
 
-    // Write header + payload
     BinaryCacheHeader hdr{};
     hdr.crc64 = crc64_update(0, payload_str.data(), payload_str.size());
 

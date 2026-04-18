@@ -9,8 +9,6 @@
 #include <sstream>
 #include <string>
 
-// Consumes events from the logging ring and writes them to configured sinks.
-// Supports binary event logging (EventLogger) and/or structured text logging.
 class LoggingWorker : public Worker
 {
 public:
@@ -48,11 +46,9 @@ public:
     {
         events_processed_.fetch_add(1, std::memory_order_relaxed);
 
-        // Binary event log
         if (event_logger_)
             event_logger_->log(*ev);
 
-        // Text logging with batching
         if (text_sink_ != log_sink::none)
         {
             batch_buffer_ << format_event(*ev) << '\n';
@@ -81,7 +77,6 @@ private:
 
     std::atomic<std::size_t> events_processed_{0};
 
-    // L3: rotate text log file if size exceeds text_max_bytes_.
     void rotate_text_if_needed()
     {
         if (text_max_bytes_ == 0 || text_log_path_.empty())

@@ -5,8 +5,6 @@
 
 #include <atomic>
 
-// Consumes events from the stats ring and feeds them to its own Analytics instance.
-// Periodically captures a snapshot() for monitoring / early stopping.
 class StatsWorker : public Worker
 {
 public:
@@ -21,7 +19,6 @@ public:
         events_processed_.fetch_add(1, std::memory_order_relaxed);
         analytics_.on_event(ev);
 
-        // Periodically take a snapshot (available via last_snapshot())
         if (snapshot_interval_ > 0 &&
             events_processed_.load(std::memory_order_relaxed) % snapshot_interval_ == 0)
         {
@@ -36,7 +33,6 @@ public:
 
     AnalyticsReport last_snapshot() const { return last_snapshot_; }
 
-    // Access the worker's own analytics instance (for final report after shutdown)
     const Analytics& analytics() const { return analytics_; }
 
 private:

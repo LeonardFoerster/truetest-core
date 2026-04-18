@@ -40,9 +40,6 @@ public:
         int64_t get_recv_ns() const { return recv_ns_; }
         void set_recv_ns(int64_t ns) { recv_ns_ = ns; }
 
-        // Hot-path latency stamp (set on fill_event when the book matches,
-        // representing now - originating market/tick recv_ns). Zero on other
-        // event types.
         int64_t get_latency_ns() const { return latency_ns_; }
         void set_latency_ns(int64_t ns) { latency_ns_ = ns; }
 
@@ -166,10 +163,10 @@ enum class order_type
 
 enum class time_in_force
 {
-        ioc,    // immediate-or-cancel: fill what you can, cancel rest
-        fok,    // fill-or-kill: all or nothing
-        gtc,    // good-till-cancel: stays on book
-        day     // good-till-end-of-session
+        ioc,
+        fok,
+        gtc,
+        day
 };
 
 enum class order_side
@@ -205,7 +202,6 @@ public:
                 , stop_price_(stop_price)
                 , earliest_eligible_ts_(timestamp)
         {
-                // Default TIF based on order type if caller used gtc (the default)
                 if (tif == time_in_force::gtc && order_type == order_type::market)
                         tif_ = time_in_force::ioc;
         }
@@ -255,6 +251,13 @@ private:
         std::string strategy_name_;
 };
 
+enum class fill_source
+{
+        unknown,
+        simulated,
+        exchange
+};
+
 class fill_event : public event
 #ifdef HAS_DEBUG
     , public debug::CopyTracker<fill_event>
@@ -295,6 +298,9 @@ public:
         uint64_t get_fill_id() const { return fill_id_; }
         bool is_partial() const { return remaining_qty_ > 0.0; }
 
+        fill_source get_source() const { return source_; }
+        void set_source(fill_source s) { source_ = s; }
+
 
         double get_total_cost() const
         {
@@ -322,6 +328,7 @@ private:
         double commission_;
         double remaining_qty_ = 0.0;
         uint64_t fill_id_ = 0;
+        fill_source source_ = fill_source::unknown;
 };
 
 

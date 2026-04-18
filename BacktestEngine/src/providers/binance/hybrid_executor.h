@@ -11,14 +11,6 @@
 #include <memory>
 #include <vector>
 
-// HybridExecutor: combines paper market fills (via BinanceExecutor) with
-// book-based limit fills (via LocalBookAdapter) for realistic paper-mode
-// limit order simulation.
-//
-// Owns the synthetic orderbook seeding that was previously driven by the
-// engine. on_mid_price() rebuilds a narrow synthetic book around the given
-// mid-price, updates both paper/book executors, and triggers any limit
-// fills that the new levels make possible.
 class HybridExecutor : public IExecutionAdapter
 {
 public:
@@ -57,7 +49,6 @@ public:
 
     bool cancel_order(uint64_t order_id) override
     {
-        // Try both adapters — order could be in either
         bool cancelled = book_adapter_->cancel_order(order_id);
         if (!cancelled)
             cancelled = paper_->cancel_order(order_id);
@@ -66,13 +57,9 @@ public:
 
     bool modify_order(uint64_t order_id, double new_price, double new_qty) override
     {
-        // Only book adapter supports modify (limit orders on local book)
         return book_adapter_->modify_order(order_id, new_price, new_qty);
     }
 
-    // Reseed the synthetic book around `mid` and forward the mid/last
-    // prices to the internal adapters. Called by the provider whenever
-    // a new market event updates the mid-price.
     void on_mid_price(double mid)
     {
         if (!(mid > 0.0) || !book_) return;

@@ -3,9 +3,6 @@
 #include "data_source.h"
 #include <string>
 
-// Loads tick-level data from CSV files.
-// Expected CSV format: timestamp_ms,symbol,price,quantity,side
-// Where side is: B (bid/buy aggressor), A (ask/sell aggressor), or empty/U (unknown)
 class TickCsvDataSource : public IDataSource
 {
 public:

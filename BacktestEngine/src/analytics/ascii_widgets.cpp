@@ -9,15 +9,13 @@ namespace tt::ascii {
 
 namespace {
 
-// 1/8 through 8/8 left-fill blocks: ▏▎▍▌▋▊▉█ (first slot is blank).
 constexpr const char* EIGHTHS[9] = {
     " ",
     "\xe2\x96\x8f", "\xe2\x96\x8e", "\xe2\x96\x8d", "\xe2\x96\x8c",
     "\xe2\x96\x8b", "\xe2\x96\x8a", "\xe2\x96\x89", "\xe2\x96\x88",
 };
-constexpr const char* BAR_EMPTY = "\xe2\x96\x91";  // ░
+constexpr const char* BAR_EMPTY = "\xe2\x96\x91";
 
-// Sparkline 1/8 through 8/8: ▁▂▃▄▅▆▇█
 constexpr const char* SPARK[8] = {
     "\xe2\x96\x81", "\xe2\x96\x82", "\xe2\x96\x83", "\xe2\x96\x84",
     "\xe2\x96\x85", "\xe2\x96\x86", "\xe2\x96\x87", "\xe2\x96\x88",

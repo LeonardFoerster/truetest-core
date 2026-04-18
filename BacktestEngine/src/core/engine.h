@@ -26,8 +26,6 @@
 #include "../types/order_id.h"
 #include "../types/object_pool.h"
 
-// stage_timer.h included unconditionally — provides DEBUG_STAGE macro
-// that compiles to ((void)0) when HAS_DEBUG is off
 #include "../debug/stage_timer.h"
 
 #ifdef HAS_SQLITE
@@ -56,7 +54,6 @@
 #include <queue>
 #include <thread>
 
-// Default ring buffer size for outbound worker channels
 static constexpr std::size_t DEFAULT_RING_SIZE = 65536;
 
 using EventRing = RingBuffer<event_pointer, DEFAULT_RING_SIZE>;
@@ -68,15 +65,9 @@ private:
     std::shared_ptr<data_handler> data_handler_;
     OrderbookRegistry orderbook_registry_;
     std::shared_ptr<IStrategy> strategy_;
-    // M1: additional strategies that run alongside the primary strategy_.
-    // On each market/tick event all strategies are dispatched; emitted orders
-    // are tagged with the originating strategy name and routed through the
-    // normal order pipeline. Portfolio is shared; per-strategy analytics are
-    // attributed by order_event::strategy_name.
     std::vector<std::shared_ptr<IStrategy>> additional_strategies_;
     std::vector<std::string> additional_strategy_names_;
     std::string primary_strategy_name_;
-    // Per-symbol execution adapters (created on demand)
     std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>> execution_adapters_;
     portfolio portfolio_;
     OrderTracker order_tracker_;
@@ -85,103 +76,71 @@ private:
     MarketMaker market_maker_;
     double last_mid_price_ = 0.0;
 
-    // Tick-to-bar aggregator for WebSocket UI when streaming tick data.
-    // Collects ticks into OHLCV bars at tick_bar_interval_ and broadcasts
-    // completed bars to the web UI so lightweight-charts gets proper candles.
     std::unique_ptr<BarAggregator> tick_aggregator_;
-    std::chrono::milliseconds tick_bar_interval_{60000}; // default 1m
+    std::chrono::milliseconds tick_bar_interval_{60000};
 
-    // Object pools for hot-path event allocation (avoid heap pressure)
     ObjectPool<market_event> market_pool_;
     ObjectPool<order_event>  order_pool_;
     ObjectPool<fill_event>   fill_pool_;
     ObjectPool<tick_event>   tick_pool_;
 
-    // Outbound ring buffers (only the ones used by the active preset are non-null)
-    std::shared_ptr<EventRing> logging_ring_;       // standard, full, extended
-    std::shared_ptr<EventRing> risk_ring_;           // full, extended
-    std::shared_ptr<EventRing> stats_ring_;          // full, extended
-    std::shared_ptr<EventRing> observer_ring_;       // light
-    std::shared_ptr<EventRing> risk_stats_ring_;     // standard
-    std::shared_ptr<EventRing> mm_ring_;             // extended (outbound to MM)
-    std::shared_ptr<MMRing> mm_order_ring_;          // extended (inbound from MM)
+    std::shared_ptr<EventRing> logging_ring_;
+    std::shared_ptr<EventRing> risk_ring_;
+    std::shared_ptr<EventRing> stats_ring_;
+    std::shared_ptr<EventRing> observer_ring_;
+    std::shared_ptr<EventRing> risk_stats_ring_;
+    std::shared_ptr<EventRing> mm_ring_;
+    std::shared_ptr<MMRing> mm_order_ring_;
 
-    // Publish an event to all outbound rings (no-op when threading disabled)
     void publish_event(const event_pointer& ev);
 
 #ifdef HAS_SQLITE
     std::unique_ptr<SqliteStore> store_;
-    // K1: run metadata tracking — assigned by record_run_begin(), consumed by record_run_end().
     std::string current_run_id_;
     void record_run_begin();
     void record_run_end();
 #endif
 
-    // K3: portfolio-state checkpointing for crash resume.
     void write_checkpoint_if_due(std::size_t event_count);
     void restore_from_checkpoint();
 
-    // Optional event logger (created when event_log_path is set)
     std::unique_ptr<EventLogger> event_logger_;
 
-    // Shadow mode: tracks simulated vs exchange fills for comparison
     std::unique_ptr<ShadowTracker> shadow_tracker_;
 
-    // Log an event to the event log (no-op when logger is null)
     void log_event(const event& ev);
 
-    // Get or create execution adapter for a symbol
     std::shared_ptr<IExecutionAdapter> get_adapter(const std::string& symbol);
 
-    // Shared order-processing pipeline: submit order, poll fills, update portfolio.
-    // Returns false if risk manager requested halt.
     bool process_order(const std::shared_ptr<order_event>& o,
                        std::size_t& event_count,
                        bool& halt_requested);
 
-    // Unwind all open positions by emitting market close orders.
-    // Called when risk_unwind is enabled and a halt condition is detected.
     void unwind_positions(std::size_t& event_count);
 
-    // Route a strategy-generated order: buffers stops, applies latency, or
-    // processes immediately. Shared by all loops (bar, tick, streaming).
-    // Returns false if engine should halt.
     bool route_order(order_event& order,
                      const std::chrono::system_clock::time_point& sim_time,
                      std::size_t& event_count, bool& halt_requested);
 
-    // Check pending stop orders against a price range. Triggers any that
-    // cross the stop_price. Works for both bar (high/low) and tick (price/price).
     void check_pending_stops(double high, double low,
                              const std::chrono::system_clock::time_point& sim_time,
                              std::size_t& event_count, bool& halt_requested);
 
-    // M1 helpers: dispatch market/tick events to all additional strategies
-    // and route any orders they generate through the normal pipeline. Also
-    // runs their SL/TP check_stops(). Primary strategy is handled inline by
-    // the existing call sites — these helpers cover the *extras* only.
     void dispatch_extras_on_market(const market_event& mkt,
                                    const std::chrono::system_clock::time_point& ts,
                                    std::size_t& event_count);
     void dispatch_extras_on_tick(const tick_event& te,
                                  const std::chrono::system_clock::time_point& ts,
                                  std::size_t& event_count);
-    // Notify primary + all additional strategies of a position state change
-    // after a fill.
     void notify_position_change_all(const std::string& symbol, bool open);
 
-    // Process a single market event through the strategy → order → fill pipeline.
-    // Used by both batch run() and streaming run_streaming().
     void process_single_bar(const bar_record& rec, std::size_t& event_count,
                             const std::chrono::system_clock::time_point& timestamp);
 
-    // Process a single tick record through the strategy → order → fill pipeline.
     void process_single_tick(const tick_record& rec, std::size_t& event_count);
 
-    // Pending stop orders (shared across all loop types)
     std::vector<std::shared_ptr<order_event>> pending_stops_;
 
-    // Pending latency-delayed orders (shared across all loop types)
     struct pending_entry
     {
         std::shared_ptr<order_event> order;
@@ -197,16 +156,11 @@ private:
                         decltype(&engine::pending_cmp)> pending_orders_{&engine::pending_cmp};
     uint64_t order_seq_ = 0;
 
-    // Day order tracking for session-end cancellation
     std::vector<std::pair<std::string, uint64_t>> day_order_ids_;
 
-    // Threading: shared halt flag (risk worker → engine loop)
     std::atomic<bool> halt_flag_{false};
-
-    // Worker failure flag (any worker exception → engine loop stops)
     std::atomic<bool> worker_failed_{false};
 
-    // Ring buffer drop counters
     std::size_t logging_drops_ = 0;
     std::size_t risk_drops_ = 0;
     std::size_t stats_drops_ = 0;
@@ -225,7 +179,6 @@ private:
     debug::ring_diagnostics mm_diag_{"mm_ring", DEFAULT_RING_SIZE};
 #endif
 
-    // Worker instances (only the ones used by the active preset are non-null)
     std::unique_ptr<LoggingWorker> logging_worker_;
     std::unique_ptr<RiskWorker> risk_worker_;
     std::unique_ptr<StatsWorker> stats_worker_;
@@ -234,57 +187,40 @@ private:
     std::unique_ptr<MarketMakerWorker> mm_worker_;
 
 #ifdef HAS_WEB_UI
-    // WebSocket UI: ring buffer + worker for browser streaming
     std::shared_ptr<EventRing> ws_ring_;
     std::unique_ptr<WebSocketWorker> ws_worker_;
     std::size_t ws_drops_ = 0;
 
-    // Process inbound WS commands (start/pause/stop/order)
     void process_ws_commands(bool& halt_requested, std::size_t& event_count);
-
-    // Broadcast orderbook depth snapshot to WS clients
     void broadcast_orderbook_snapshot(const std::string& symbol);
-
-    // Send full state snapshot to newly connected WS clients
     void send_state_snapshot();
-
-    // Broadcast market event with indicator values via WS
     void broadcast_market_with_indicators(const market_event& mkt);
 
-    // Track last orderbook snapshot time for throttling
     std::chrono::steady_clock::time_point last_ob_snapshot_time_;
 
-    // Recent bar history for replaying to newly connected clients
     static constexpr std::size_t MAX_BAR_HISTORY = 1000;
-    std::vector<std::string> bar_history_;  // JSON strings
+    std::vector<std::string> bar_history_;
 #endif
 
-    // Pending runtime switches (set by WS command, applied in streaming loop)
     std::mutex switch_mu_;
     std::string pending_symbol_;
     std::string pending_strategy_;
 
-    // Worker threads
     std::vector<std::thread> worker_threads_;
 
-    // Pin the engine's event-loop thread to its assigned core (no-op when inline)
     void pin_event_loop_thread();
 
-    // Start/stop worker threads
     void start_workers();
     void stop_workers();
 
-    // Create logging worker with config-based sink selection
     std::unique_ptr<LoggingWorker> make_logging_worker();
 
 public:
-    // Construct with a pre-built orderbook (backward compatible, single-symbol)
     engine(std::shared_ptr<data_handler> dh,
            std::shared_ptr<orderbook> ob,
            std::shared_ptr<IStrategy> strategy,
            engine_config config = {});
 
-    // Access the orderbook registry
     OrderbookRegistry& get_orderbook_registry() { return orderbook_registry_; }
     void run();
     void run_tick_data();
@@ -295,12 +231,8 @@ public:
     void run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge);
     void set_strategy(std::shared_ptr<IStrategy> strategy);
 
-    // M1: register the primary strategy's name (for order_event tagging).
-    // Optional — when unset, primary orders are left with an empty name.
     void set_primary_strategy_name(const std::string& name) { primary_strategy_name_ = name; }
 
-    // M1: attach an additional strategy that runs alongside the primary.
-    // The name is used to tag generated orders for per-strategy attribution.
     void add_strategy(std::shared_ptr<IStrategy> strategy, const std::string& name)
     {
         if (!strategy) return;
@@ -313,7 +245,6 @@ public:
     bool modify_order(const std::string& symbol, uint64_t order_id,
                       double new_price, double new_qty);
 
-    // Route L2 depth data to the orderbook for a given symbol
     void apply_l2_snapshot(const std::string& symbol,
                            const std::vector<l2_level>& bids,
                            const std::vector<l2_level>& asks);
@@ -322,23 +253,19 @@ public:
     void print_summary();
     const Analytics& get_analytics() const;
 
-    // Access outbound rings for wiring worker threads
     std::shared_ptr<EventRing> get_logging_ring() const { return logging_ring_; }
     std::shared_ptr<EventRing> get_risk_ring() const { return risk_ring_; }
     std::shared_ptr<EventRing> get_stats_ring() const { return stats_ring_; }
     std::shared_ptr<EventRing> get_observer_ring() const { return observer_ring_; }
     std::shared_ptr<EventRing> get_risk_stats_ring() const { return risk_stats_ring_; }
 
-    // Access workers for testing / monitoring
     LoggingWorker* get_logging_worker() const { return logging_worker_.get(); }
     RiskWorker* get_risk_worker() const { return risk_worker_.get(); }
     StatsWorker* get_stats_worker() const { return stats_worker_.get(); }
     ObserverWorker* get_observer_worker() const { return observer_worker_.get(); }
     RiskStatsWorker* get_risk_stats_worker() const { return risk_stats_worker_.get(); }
 
-    // Order state tracking
     const OrderTracker& get_order_tracker() const { return order_tracker_; }
 
-    // Halt flag for external injection (testing)
     std::atomic<bool>& get_halt_flag() { return halt_flag_; }
 };

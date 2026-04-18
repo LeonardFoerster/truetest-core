@@ -36,7 +36,6 @@ double MarketMaker::compute_volatility() const
     if (price_history_.size() < 2)
         return 0.0;
 
-    // Compute standard deviation of returns
     std::vector<double> returns;
     returns.reserve(price_history_.size() - 1);
     for (std::size_t i = 1; i < price_history_.size(); ++i)
@@ -64,16 +63,13 @@ std::vector<mm_order> MarketMaker::compute_replenish(double current_price)
     if (current_price <= 0.0)
         return orders;
 
-    // Update price history for volatility
     price_history_.push_back(current_price);
     if (price_history_.size() > volatility_window_)
         price_history_.pop_front();
 
-    // Compute spread: base spread widened by recent volatility
     double vol = compute_volatility();
     double half_spread = base_spread_pct_ + vol * vol_spread_mult_;
 
-    // Place orders at multiple levels away from mid
     for (int i = 1; i <= levels_per_side_; ++i)
     {
         double distance = half_spread * i;
@@ -81,7 +77,6 @@ std::vector<mm_order> MarketMaker::compute_replenish(double current_price)
         double bid_price = current_price * (1.0 - distance);
         double ask_price = current_price * (1.0 + distance);
 
-        // Depth increases with distance from mid (more liquidity further out)
         double depth = static_cast<double>(base_depth_ * i);
 
         if (Price::from_double(bid_price) > Price())

@@ -8,16 +8,6 @@
 #include <optional>
 #include <string>
 
-// BinanceCombinedParser: dispatches combined stream messages to the
-// appropriate sub-parser based on the event type.
-//
-// Combined stream messages are wrapped:
-//   {"stream":"btcusdt@trade","data":{"e":"trade",...}}
-//
-// This parser unwraps the "data" field and examines the "e" key to route
-// to the correct parser (trade, kline, depthUpdate).
-//
-// Returns provider::event variant.
 class BinanceCombinedParser : public IDataParser<provider::event>
 {
 public:
@@ -28,15 +18,12 @@ public:
 
     std::optional<provider::event> parse_record(const std::string& line) override
     {
-        // Extract the "data" object from combined stream wrapper
         std::string data_json = extract_data(line);
         if (data_json.empty())
         {
-            // Not a combined message — try parsing directly
             data_json = line;
         }
 
-        // Determine event type from "e" field
         auto event_type = binance::extract_string(data_json, "e");
 
         if (event_type == "trade")
@@ -79,7 +66,6 @@ public:
     }
 
 private:
-    // Extract the inner "data" JSON object from a combined stream message.
     static std::string extract_data(const std::string& json)
     {
         std::string search = "\"data\":";
@@ -87,12 +73,10 @@ private:
         if (pos == std::string::npos) return "";
         pos += search.size();
 
-        // Skip whitespace
         while (pos < json.size() && json[pos] == ' ') pos++;
 
         if (pos >= json.size() || json[pos] != '{') return "";
 
-        // Find matching closing brace
         int depth = 0;
         size_t start = pos;
         for (size_t i = pos; i < json.size(); ++i)

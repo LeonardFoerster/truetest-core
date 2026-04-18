@@ -1,15 +1,5 @@
 #pragma once
 
-// Structured, zero-dependency, always-on logger.
-//
-// Usage:
-//   LOG_INFO("component", "message %s", arg);
-//   LOG_WARN("engine", "queue near full: %zu", n);
-//   LOG_ERROR("http", "bind failed: %s", err);
-//
-// Output format: [YYYY-MM-DDTHH:MM:SS.mmmZ] [LEVEL] [component] message
-// Sink: stderr by default, or a file if Logger::instance().set_file(path) is called.
-// This is for operational logs only. Trading/event logs go through LoggingWorker.
 
 #include <atomic>
 #include <chrono>
@@ -44,8 +34,6 @@ public:
         return inst;
     }
 
-    // Redirect log output to a file (in addition to or instead of stderr).
-    // Passing an empty path resets to stderr-only.
     void set_file(const std::string& path)
     {
         std::lock_guard<std::mutex> lk(mu_);

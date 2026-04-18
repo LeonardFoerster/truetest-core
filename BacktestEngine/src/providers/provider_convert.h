@@ -6,7 +6,6 @@
 
 namespace provider {
 
-// Convert provider::bar to bar_record (for legacy data_handler storage)
 inline bar_record to_bar_record(const bar& b)
 {
 	bar_record rec;
@@ -20,7 +19,6 @@ inline bar_record to_bar_record(const bar& b)
 	return rec;
 }
 
-// Convert provider::tick to tick_record
 inline tick_record to_tick_record(const tick& t)
 {
 	tick_record rec;
@@ -32,13 +30,11 @@ inline tick_record to_tick_record(const tick& t)
 	return rec;
 }
 
-// Convert bar_record to provider::bar (for bridge compatibility)
 inline bar from_bar_record(const bar_record& r)
 {
 	return bar{r.date, r.symbol, r.open, r.high, r.low, r.close, r.volume};
 }
 
-// Convert tick_record to provider::tick
 inline tick from_tick_record(const tick_record& r)
 {
 	return tick{r.timestamp, r.symbol, r.price, r.quantity,

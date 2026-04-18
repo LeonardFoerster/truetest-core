@@ -10,11 +10,9 @@
 #include <string>
 #include <algorithm>
 
-// Forward declarations
 class order;
 class order_modify;
 
-// Orderbook-specific order type
 enum class ob_order_type
 {
     good_till_cancel,
@@ -116,24 +114,19 @@ private:
 
 using trades = std::vector<trade>;
 
-// ── Flat orderbook internals ────────────────────────────────────────────────
-
-// Intrusive doubly-linked node representing one resting order at a price level.
-// Stored contiguously in block-allocated slabs for cache friendliness.
 struct order_node
 {
-    order_pointer order;       // original order object (kept alive for caller access)
+    order_pointer order;
     order_node* next = nullptr;
     order_node* prev = nullptr;
 };
 
-// One price level: a price + total resting quantity + time-ordered queue of nodes.
 struct price_level
 {
     Price price;
     quantity total_qty = 0;
-    order_node* head = nullptr;  // oldest (front of queue)
-    order_node* tail = nullptr;  // newest (back of queue)
+    order_node* head = nullptr;
+    order_node* tail = nullptr;
 
     bool empty() const { return head == nullptr; }
 
@@ -158,8 +151,6 @@ struct price_level
     }
 };
 
-// ── Flat orderbook ──────────────────────────────────────────────────────────
-
 class orderbook
 {
 public:
@@ -176,7 +167,6 @@ public:
     void clear();
 
 private:
-    // --- Node pool (block-allocated slab) ---
     static constexpr std::size_t NODE_BLOCK_SIZE = 4096;
     struct node_block { order_node nodes[NODE_BLOCK_SIZE]; };
     std::vector<std::unique_ptr<node_block>> node_blocks_;
@@ -185,19 +175,12 @@ private:
     order_node* alloc_node();
     void free_node(order_node* n);
 
-    // --- Price levels: sorted flat arrays ---
-    // Bids: sorted descending (best bid = front). Asks: sorted ascending (best ask = front).
     std::vector<price_level> bid_levels_;
     std::vector<price_level> ask_levels_;
 
-    // --- O(1) order lookup ---
     std::unordered_map<order_id, order_node*> order_map_;
 
-    // Find or insert a price level in the correct sorted position.
-    // Returns reference to the level.
     price_level& find_or_insert_level(std::vector<price_level>& levels, Price price, side s);
-
-    // Remove a level if it's empty. Caller passes the side's level vector.
     void remove_level_if_empty(std::vector<price_level>& levels, Price price);
 
     bool can_match(side side, Price price) const;

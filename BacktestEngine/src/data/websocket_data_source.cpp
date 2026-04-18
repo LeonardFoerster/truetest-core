@@ -5,7 +5,6 @@
 #include <iostream>
 #include <thread>
 
-// Boost.Beast / Asio includes
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
 #include <boost/asio/connect.hpp>
@@ -56,7 +55,6 @@ void WebSocketDataSource::io_thread_main()
             if (!running_.load(std::memory_order_acquire))
                 return;
 
-            // Use shared retry utility to reconnect with exponential backoff
             retry_config cfg;
             cfg.max_attempts = 10;
             cfg.initial_delay = std::chrono::duration_cast<std::chrono::milliseconds>(config_.initial_backoff);
@@ -66,7 +64,7 @@ void WebSocketDataSource::io_thread_main()
             };
 
             bool ok = retry_with_backoff([this]() {
-                if (!running_.load(std::memory_order_acquire)) return true; // exit loop
+                if (!running_.load(std::memory_order_acquire)) return true;
                 try { connect(); return true; }
                 catch (...) {
                     connected_.store(false, std::memory_order_release);
@@ -85,8 +83,6 @@ void WebSocketDataSource::connect()
     net::io_context ioc;
     tcp::resolver resolver(ioc);
 
-    // Parse URL into host:port (simplified — assumes ws://host:port/path)
-    // A production implementation would use a proper URL parser
     std::string host = config_.endpoint_url;
     std::string port = "443";
     std::string path = "/";
@@ -98,7 +94,7 @@ void WebSocketDataSource::connect()
 
     ws.handshake(host, path);
     connected_.store(true, std::memory_order_release);
-    current_backoff_ = config_.initial_backoff; // reset backoff on success
+    current_backoff_ = config_.initial_backoff;
 
     beast::flat_buffer buffer;
     while (running_.load(std::memory_order_acquire))
@@ -109,13 +105,11 @@ void WebSocketDataSource::connect()
         on_message(payload);
     }
 
-    // Clean shutdown
     beast::error_code ec;
     ws.close(websocket::close_code::normal, ec);
     connected_.store(false, std::memory_order_release);
 }
 
-// ── Lightweight JSON extraction (same pattern as BinanceParser) ────────────
 namespace {
 
 inline std::string ws_extract_string(const std::string& json, const std::string& key)
@@ -134,9 +128,7 @@ inline std::string ws_extract_number(const std::string& json, const std::string&
     auto pos = json.find(needle);
     if (pos == std::string::npos) return {};
     pos += needle.size();
-    // Skip whitespace
     while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) ++pos;
-    // If quoted number
     if (pos < json.size() && json[pos] == '"') {
         ++pos;
         auto end = json.find('"', pos);
@@ -146,13 +138,12 @@ inline std::string ws_extract_number(const std::string& json, const std::string&
     return (end == std::string::npos) ? json.substr(pos) : json.substr(pos, end - pos);
 }
 
-} // anonymous namespace
+}
 
 void WebSocketDataSource::on_message(const std::string& payload)
 {
     if (payload.empty() || !callback_) return;
 
-    // Sequence number gap detection
     auto seq_str = ws_extract_number(payload, "seq");
     if (!seq_str.empty()) {
         uint64_t seq = std::stoull(seq_str);
@@ -165,7 +156,6 @@ void WebSocketDataSource::on_message(const std::string& payload)
     auto msg_type = ws_extract_string(payload, "type");
 
     if (msg_type == "tick") {
-        // {"type":"tick","symbol":"...","price":...,"qty":...,"ts":...}
         auto symbol = ws_extract_string(payload, "symbol");
         auto price_str = ws_extract_number(payload, "price");
         auto qty_str = ws_extract_number(payload, "qty");
@@ -181,13 +171,11 @@ void WebSocketDataSource::on_message(const std::string& payload)
             ? std::chrono::system_clock::time_point(std::chrono::milliseconds(ts_ms))
             : std::chrono::system_clock::now();
 
-        // Create a market_event with the tick price as OHLC (single-point bar)
         market_event ev(timestamp, symbol, price, price, price, price,
                         static_cast<int64_t>(qty));
         callback_(ev);
     }
     else if (msg_type == "bar") {
-        // {"type":"bar","symbol":"...","o":...,"h":...,"l":...,"c":...,"v":...,"ts":...}
         auto symbol = ws_extract_string(payload, "symbol");
         auto o_str = ws_extract_number(payload, "o");
         auto h_str = ws_extract_number(payload, "h");
@@ -213,7 +201,6 @@ void WebSocketDataSource::on_message(const std::string& payload)
         market_event ev(timestamp, symbol, o, h, l, c, v);
         callback_(ev);
     }
-    // Unrecognized message types are silently ignored (e.g., heartbeats)
 }
 
 void WebSocketDataSource::schedule_reconnect()
@@ -224,7 +211,6 @@ void WebSocketDataSource::schedule_reconnect()
     std::cerr << "  Reconnecting in " << current_backoff_.count() << "s...\n";
     std::this_thread::sleep_for(current_backoff_);
 
-    // Exponential backoff with cap
     current_backoff_ = std::min(current_backoff_ * 2, config_.max_backoff);
 }
 

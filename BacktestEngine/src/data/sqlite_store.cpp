@@ -18,7 +18,6 @@ SqliteStore::SqliteStore(const std::string& db_path)
         throw std::runtime_error("SQLite open failed: " + err);
     }
 
-    // WAL mode for better concurrent read/write performance
     char* err_msg = nullptr;
     sqlite3_exec(db_, "PRAGMA journal_mode=WAL;", nullptr, nullptr, &err_msg);
     if (err_msg) sqlite3_free(err_msg);
@@ -125,7 +124,6 @@ void SqliteStore::prepare_statements()
 
 void SqliteStore::insert_fill(const fill_event& f)
 {
-    // Start a transaction for batching
     if (!in_fill_transaction_)
     {
         sqlite3_exec(db_, "BEGIN", nullptr, nullptr, nullptr);
@@ -173,7 +171,6 @@ void SqliteStore::insert_portfolio_snapshot(double cash, double equity,
 
 void SqliteStore::insert_equity_point(int64_t timestamp_ms, double equity)
 {
-    // Start a transaction for batching
     if (!in_equity_transaction_)
     {
         sqlite3_exec(db_, "BEGIN", nullptr, nullptr, nullptr);
@@ -306,8 +303,6 @@ std::string SqliteStore::query_equity_json(int limit)
 
 std::string SqliteStore::begin_run(const std::string& config_json)
 {
-    // Generate a run id: millisecond timestamp + an autoincrement counter within
-    // the process. Good enough for ordering and uniqueness per db file.
     static std::atomic<uint64_t> counter{0};
     auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();

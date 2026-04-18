@@ -14,22 +14,12 @@
 
 namespace debug {
 
-// ── Severity aliases ────────────────────────────────────────────────
-// Use these throughout debug code for consistency:
-//   debug::info("message")   → LOG(INFO)
-//   debug::warn("message")   → LOG(WARNING)
-//   debug::perf("message")   → LOG(INFO) with [PERF] prefix
-//
-// Direct LOG() calls are also fine — these are convenience only.
 
 inline void init()
 {
     absl::InitializeLog();
 }
 
-// ── Custom file sink ────────────────────────────────────────────────
-// Writes all debug log output to a file in addition to stderr.
-// Created once at engine startup, registered globally.
 
 class FileSink : public absl::LogSink
 {
@@ -42,7 +32,6 @@ public:
         if (!file_.is_open()) return;
         std::lock_guard<std::mutex> lock(mu_);
         file_ << entry.text_message_with_prefix_and_newline();
-        // Flush every 100 lines to amortize I/O
         if (++count_ % 100 == 0) file_.flush();
     }
 
@@ -60,8 +49,6 @@ private:
 
 } // namespace debug
 
-// ── Convenience macros ──────────────────────────────────────────────
-// All debug output uses these. When HAS_DEBUG is off they vanish.
 
 #define DBG_INFO(...)  LOG(INFO) << absl::StrFormat(__VA_ARGS__)
 #define DBG_WARN(...)  LOG(WARNING) << absl::StrFormat(__VA_ARGS__)
@@ -74,7 +61,6 @@ private:
 
 #else
 
-// All macros vanish when debug is off — zero overhead
 #define DBG_INFO(...)  ((void)0)
 #define DBG_WARN(...)  ((void)0)
 #define DBG_PERF(...)  ((void)0)

@@ -9,29 +9,9 @@
 #include <stdexcept>
 #include <string>
 
-// K3: minimal portfolio-state checkpoint for resume-after-crash. Captures
-// enough state for long-running live/shadow sessions to pick up where they
-// left off without losing position tracking and trade count. Analytics and
-// orderbook state are intentionally NOT checkpointed yet — they rehydrate from
-// the event log or from the fresh market data stream on resume.
-//
-// Format (little-endian, fixed layout):
-//   magic       uint32  = 0x43484b50 ("PKHC")
-//   version     uint32  = 1
-//   event_count uint64
-//   wall_ms     int64   (std::chrono::system_clock ms since epoch when written)
-//   cash        double
-//   initial     double
-//   total_trades uint64
-//   position_count uint32
-//   repeat position_count times:
-//       sym_len  uint16
-//       sym      char[sym_len]
-//       qty      double
-//       basis    double
 namespace checkpoint {
 
-constexpr uint32_t kMagic   = 0x43484b50; // 'PKHC'
+constexpr uint32_t kMagic   = 0x43484b50;
 constexpr uint32_t kVersion = 1;
 
 struct CheckpointData
@@ -65,7 +45,6 @@ inline void write_file(const std::string& path, const portfolio& p,
     write_u64(static_cast<uint64_t>(p.get_total_trades()));
 
     const auto& positions = p.get_positions();
-    // Count non-empty positions
     uint32_t live = 0;
     for (const auto& [_, pos] : positions)
         if (std::abs(pos.qty) > 1e-12) ++live;

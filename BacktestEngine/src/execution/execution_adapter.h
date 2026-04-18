@@ -7,6 +7,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <memory>
 #include <random>
 #include <vector>
@@ -24,8 +25,6 @@ public:
     }
 };
 
-// Wraps the local orderbook for backtest and shadow modes.
-// Orders are matched immediately against the simulated book.
 class LocalBookAdapter : public IExecutionAdapter
 {
 public:
@@ -45,22 +44,25 @@ public:
 
     void set_mid_price(double price) { mid_price_ = price; }
 
+    void set_debug_fills(bool enabled, int budget = 20)
+    {
+        debug_fills_ = enabled;
+        debug_fills_left_ = budget;
+    }
+
     void submit_order(const order_event& o) override
     {
-        // Stop and stop-limit orders are handled by the engine, not the book
         if (o.get_order_type() == order_type::stop || o.get_order_type() == order_type::stop_limit)
             return;
 
-        // Fill probability check for limit orders
         if (fill_model_ && o.get_order_type() == order_type::limit && mid_price_ > 0.0)
         {
             double distance = std::abs(o.get_price() - mid_price_) / mid_price_;
             double prob = fill_model_->get_fill_probability(o.get_side(), distance);
             if (fill_dist_(fill_rng_) > prob)
-                return; // missed fill probability roll
+                return;
         }
 
-        // Map time_in_force to ob_order_type
         ob_order_type book_order_type;
         switch (o.get_tif()) {
         case time_in_force::fok: book_order_type = ob_order_type::fill_or_kill; break;
@@ -70,7 +72,6 @@ public:
 
         side book_side = (o.get_side() == order_side::buy) ? side::buy : side::sell;
 
-        // Market orders use aggressive price to sweep available liquidity
         Price book_price;
         if (o.get_order_type() == order_type::market)
             book_price = (book_side == side::buy) ? Price::from_double(o.get_price() * market_aggression_)
@@ -78,11 +79,20 @@ public:
         else
             book_price = Price::from_double(o.get_price());
 
-        // Scale fractional qty to integer for the orderbook (1e8 scale, like satoshis)
         quantity book_quantity = static_cast<quantity>(std::round(o.get_quantity() * qty_scale_));
 
         auto book_order = std::make_shared<order>(
             book_order_type, o.get_order_id(), book_side, book_price, book_quantity);
+
+        double pre_bid = 0.0, pre_ask = 0.0;
+        if (debug_fills_ && debug_fills_left_ > 0)
+        {
+            auto infos = ob_->get_order_infos();
+            if (!infos.get_bids().empty())
+                pre_bid = infos.get_bids().front().price_.to_double();
+            if (!infos.get_asks().empty())
+                pre_ask = infos.get_asks().front().price_.to_double();
+        }
 
         trades resulting_trades = ob_->add_order(book_order);
 
@@ -97,7 +107,6 @@ public:
             if (our_trade_info.orderId_ == o.get_order_id())
             {
                 double fill_price = our_trade_info.price_.to_double();
-                // Unscale from orderbook integer qty back to fractional
                 double fill_qty = static_cast<double>(our_trade_info.quantity_) / qty_scale_;
 
                 if (fade_rate > 0.0)
@@ -110,8 +119,6 @@ public:
                 double commission = 0.0;
                 if (fee_model_)
                 {
-                    // An order is a taker if it crosses the spread (market orders,
-                    // or limit orders priced through the opposite side)
                     bool is_taker = (o.get_order_type() == order_type::market) ||
                         (o.get_side() == order_side::buy && mid_price_ > 0.0 && o.get_price() >= mid_price_) ||
                         (o.get_side() == order_side::sell && mid_price_ > 0.0 && o.get_price() <= mid_price_);
@@ -131,16 +138,30 @@ public:
                     remaining,
                     next_fill_id_++
                 );
-                // Hot-path tick-to-trade: stamp elapsed ns from the triggering
-                // market/tick event to this fill's construction. Read by Analytics
-                // without further clock calls, so SPSC queue/worker delay does not
-                // inflate the reported latency.
                 pending_fills_.back().set_recv_ns(o.get_recv_ns());
                 if (o.get_recv_ns() > 0)
                 {
                     int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count();
                     pending_fills_.back().set_latency_ns(now_ns - o.get_recv_ns());
+                }
+
+                if (debug_fills_ && debug_fills_left_ > 0)
+                {
+                    const char* side_str = (o.get_side() == order_side::buy) ? "BUY " : "SELL";
+                    std::fprintf(stderr,
+                        "[debug-fills] id=%llu %s intended=%.4f book=%.4f fill=%.4f "
+                        "bid=%.4f ask=%.4f mid=%.4f qty=%.6f\n",
+                        (unsigned long long)o.get_order_id(),
+                        side_str,
+                        o.get_price(),
+                        book_price.to_double(),
+                        fill_price,
+                        pre_bid,
+                        pre_ask,
+                        mid_price_,
+                        fill_qty);
+                    --debug_fills_left_;
                 }
             }
         }
@@ -180,24 +201,15 @@ private:
     std::uniform_real_distribution<double> fill_dist_;
     double mid_price_ = 0.0;
     double market_aggression_ = 1.1;
-    double qty_scale_ = 1e8;  // fractional qty → integer scale factor
+    double qty_scale_ = 1e8;
     uint64_t next_fill_id_ = 1;
+    bool debug_fills_ = false;
+    int debug_fills_left_ = 0;
 };
 
-// Stub for future live exchange execution.
-// submit_order would forward to exchange REST/WS API.
-// poll_fills would check for execution reports.
 class ExchangeAdapter : public IExecutionAdapter
 {
 public:
-    void submit_order(const order_event& /*o*/) override
-    {
-        // TODO: forward to exchange API
-    }
-
-    bool poll_fills(std::vector<fill_event>& /*out*/) override
-    {
-        // TODO: poll exchange for fill reports
-        return false;
-    }
+    void submit_order(const order_event& /*o*/) override {}
+    bool poll_fills(std::vector<fill_event>& /*out*/) override { return false; }
 };

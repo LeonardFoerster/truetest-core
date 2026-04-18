@@ -24,7 +24,6 @@ std::string read_file_line(const std::string& path)
 
 uint64_t parse_size_string(const std::string& s)
 {
-    // e.g. "32K", "512K", "32768K", "16M"
     if (s.empty()) return 0;
     uint64_t val = 0;
     std::size_t pos = 0;
@@ -53,19 +52,18 @@ uint64_t parse_meminfo_field(const std::string& field)
             std::string key;
             uint64_t val;
             ss >> key >> val;
-            return val * 1024; // /proc/meminfo reports in kB
+            return val * 1024;
         }
     }
     return 0;
 }
 
-} // anonymous namespace
+}
 
 hardware_info hardware_info::detect()
 {
     hardware_info info;
 
-    // CPU model
     {
         std::ifstream f("/proc/cpuinfo");
         std::string line;
@@ -83,10 +81,8 @@ hardware_info hardware_info::detect()
         }
     }
 
-    // Logical cores
     info.logical_cores = std::thread::hardware_concurrency();
 
-    // Physical cores: count unique core_id values
     {
         std::set<int> core_ids;
         for (unsigned i = 0; i < info.logical_cores; ++i)
@@ -104,7 +100,6 @@ hardware_info hardware_info::detect()
                                                : static_cast<unsigned>(core_ids.size());
     }
 
-    // HT siblings
     {
         std::set<std::string> seen;
         for (unsigned i = 0; i < info.logical_cores; ++i)
@@ -120,7 +115,6 @@ hardware_info hardware_info::detect()
         }
     }
 
-    // NUMA nodes
     {
         unsigned count = 0;
         for (unsigned i = 0; i < 64; ++i)
@@ -133,7 +127,6 @@ hardware_info hardware_info::detect()
         info.numa_nodes = count > 0 ? count : 1;
     }
 
-    // Cache info
     {
         const char* cache_types[] = {"Data", "Instruction", "Unified", "Unified"};
         const char* cache_labels[] = {"L1d", "L1i", "L2", "L3"};
@@ -150,17 +143,14 @@ hardware_info hardware_info::detect()
                 info.caches.push_back(ci);
             }
         }
-        (void)cache_types; // suppress unused warning
+        (void)cache_types;
     }
 
-    // RAM
     info.total_ram_bytes = parse_meminfo_field("MemTotal:");
     info.available_ram_bytes = parse_meminfo_field("MemAvailable:");
 
-    // Page size
     info.page_size = static_cast<uint64_t>(sysconf(_SC_PAGESIZE));
 
-    // Isolated cores
     {
         std::string val = read_file_line("/sys/devices/system/cpu/isolated");
         info.isolated_cores = val.empty() ? "none" : val;
@@ -176,7 +166,6 @@ void hardware_info::log() const
     DBG_HW("  Physical cores  : %u", physical_cores);
     DBG_HW("  Logical cores   : %u", logical_cores);
 
-    // HT siblings
     std::string siblings;
     for (const auto& s : ht_siblings)
         siblings += s + " ";
@@ -185,7 +174,6 @@ void hardware_info::log() const
 
     DBG_HW("  NUMA nodes      : %u", numa_nodes);
 
-    // Cache sizes
     std::string cache_str;
     for (std::size_t i = 0; i < caches.size(); ++i)
     {
@@ -206,7 +194,6 @@ void hardware_info::log() const
         DBG_HW("  %-16s: %s", labels.c_str(), cache_str.c_str());
     }
 
-    // RAM
     double total_gib = total_ram_bytes / (1024.0 * 1024.0 * 1024.0);
     double avail_gib = available_ram_bytes / (1024.0 * 1024.0 * 1024.0);
     DBG_HW("  System RAM      : %.1f GiB (%.1f GiB available)", total_gib, avail_gib);

@@ -26,7 +26,6 @@ public:
             return std::make_shared<sma_strategy>(params.sma_period);
         if (name == "ma-crossover")
             return std::make_shared<ma_crossover_strategy>(params.sma_period);
-        // Default: mean-reversion
         return std::make_shared<mean_reversion_strategy>(
             params.sma_period, params.balance, params.risk_fraction,
             params.sl_pct, params.tp_pct);

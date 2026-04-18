@@ -11,7 +11,6 @@
 #include "debug/copy_tracker.h"
 #endif
 
-// Tick side for aggressor identification
 enum class data_tick_side : uint8_t
 {
 	bid = 0,
@@ -43,16 +42,12 @@ class data_handler
 		void load_from_csv(const std::filesystem::path& path);
 
 
-		// Returns true if the record was accepted, false if rejected by validation.
 		bool load_into_queue(std::string date, std::string symbol, double o, double h, double l, double c, int64_t v);
 
-		// Validate and append a tick record. Returns true if accepted.
 		bool add_tick(tick_record rec);
 
-		// Number of records rejected during validation.
 		size_t validation_errors() const { return validation_error_count_; }
 
-		// OHLCV bar data
 		std::vector<std::string>	db_data_date;
 		std::vector<std::string>	db_data_symbol;
 		std::vector<double>		db_data_open_value;
@@ -61,14 +56,10 @@ class data_handler
 		std::vector<double>		db_data_close_value;
 		std::vector<int64_t>		db_data_volume_value;
 
-		// Tick data (populated by tick data sources)
 		std::vector<tick_record>	tick_data;
 
 		bool has_tick_data() const { return !tick_data.empty(); }
 		bool has_bar_data() const { return !db_data_symbol.empty(); }
 
-		// M2: sort parallel bar vectors by date string. Used after loading
-		// multiple CSVs into one data_handler so multi-symbol bars interleave
-		// correctly by time.
 		void sort_by_date();
 };

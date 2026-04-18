@@ -34,8 +34,6 @@ public:
 
     double get_fade_rate() const override { return fade_rate_; }
 
-    // Fill probability decreases with distance from mid-price.
-    // P(fill) = base_prob * exp(-decay * |distance|)
     double get_fill_probability(order_side /*side*/, double distance_from_mid) const override
     {
         return base_fill_prob_ * std::exp(-distance_decay_ * std::abs(distance_from_mid));

@@ -75,7 +75,6 @@ void data_handler::sort_by_date()
     const std::size_t n = db_data_date.size();
     if (n < 2) return;
 
-    // Build index permutation sorted by date (stable so same-date rows keep load order)
     std::vector<std::size_t> idx(n);
     std::iota(idx.begin(), idx.end(), 0u);
     std::stable_sort(idx.begin(), idx.end(),
@@ -83,7 +82,6 @@ void data_handler::sort_by_date()
                          return db_data_date[a] < db_data_date[b];
                      });
 
-    // Apply permutation to all parallel vectors
     auto reorder_str    = [&](std::vector<std::string>& v) {
         std::vector<std::string> out; out.reserve(n);
         for (auto i : idx) out.push_back(std::move(v[i]));

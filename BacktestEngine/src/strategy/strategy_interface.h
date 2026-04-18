@@ -7,7 +7,6 @@
 #include <limits>
 #include <stdexcept>
 
-// Describes one configurable parameter a strategy accepts.
 struct param_def
 {
     std::string name;
@@ -17,12 +16,11 @@ struct param_def
     std::string description;
 };
 
-// Active stop loss / take profit for a position
 struct position_stops
 {
-    double stop_loss = 0.0;     // exit if price falls below (for longs)
-    double take_profit = 0.0;   // exit if price rises above (for longs)
-    double quantity = 0.0;      // position quantity for the exit order
+    double stop_loss = 0.0;
+    double take_profit = 0.0;
+    double quantity = 0.0;
     bool active = false;
 };
 
@@ -33,13 +31,9 @@ public:
     virtual std::optional<order_event> on_tick(const tick_event&) { return std::nullopt; }
     virtual std::optional<order_event> on_l2_update(const l2_update_event&) { return std::nullopt; }
 
-    // Per-symbol position tracking
     virtual void set_position_open(const std::string& symbol, bool open) = 0;
-
-    // Legacy single-symbol convenience (delegates to per-symbol with empty string)
     virtual void set_position_open(bool open) { set_position_open("", open); }
 
-    // SL/TP management — engine calls check_stops() on every tick/bar
     void set_stops(const std::string& symbol, double sl, double tp, double qty)
     {
         stops_[symbol] = {sl, tp, qty, true};
@@ -50,7 +44,6 @@ public:
         stops_.erase(symbol);
     }
 
-    // Check if current price triggers any SL/TP. Returns exit order if triggered.
     std::optional<order_event> check_stops(
         const std::string& symbol, double price,
         std::chrono::system_clock::time_point ts)
@@ -61,7 +54,6 @@ public:
 
         auto& s = it->second;
 
-        // Stop loss: price dropped below SL
         if (s.stop_loss > 0.0 && price <= s.stop_loss)
         {
             auto order = order_event(ts, symbol, order_type::market,
@@ -70,7 +62,6 @@ public:
             return order;
         }
 
-        // Take profit: price rose above TP
         if (s.take_profit > 0.0 && price >= s.take_profit)
         {
             auto order = order_event(ts, symbol, order_type::market,
@@ -84,7 +75,6 @@ public:
 
     const std::unordered_map<std::string, position_stops>& get_stops() const { return stops_; }
 
-    // Runtime parameter configuration — override per-strategy.
     virtual std::vector<param_def> get_param_schema() const { return {}; }
 
     virtual void set_param(const std::string& key, double value)
@@ -93,8 +83,6 @@ public:
         throw std::runtime_error("Unknown parameter: " + key);
     }
 
-    // Indicator values: strategies can expose their current indicator state
-    // for UI display. Called after on_market() to collect values.
     virtual std::vector<std::pair<std::string, double>> get_indicator_values(
         const std::string& /*symbol*/) const
     {

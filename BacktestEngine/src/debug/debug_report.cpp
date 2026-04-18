@@ -19,7 +19,6 @@ void DebugReport::log_copy_stats()
     DBG_COPY("%s", "═══ Copy/Move Report ══════════════════════════════");
     DBG_COPY("  %-20s  %-8s  %-8s  %-8s  %-8s", "Type", "copies", "moves", "copy==", "move==");
 
-    // Log stats for each tracked type inline
     CopyTracker<market_event>::stats().log("market_event");
     CopyTracker<order_event>::stats().log("order_event");
     CopyTracker<fill_event>::stats().log("fill_event");

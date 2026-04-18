@@ -7,12 +7,6 @@
 #include <utility>
 #include <vector>
 
-// PrependTransport: decorates another IDataTransport by yielding a fixed set
-// of "prepend" lines first, then falling through to the inner transport.
-//
-// Useful for providers that need to inject historical/backfilled data into a
-// live stream transparently to the engine. The engine sees a single ordered
-// stream and does not need to know backfill exists.
 class PrependTransport : public IDataTransport
 {
 public:
@@ -54,6 +48,26 @@ public:
 		if (idx_ < prepend_.size())
 			return prepend_[idx_++];
 		return inner_ ? inner_->read_line_blocking() : std::nullopt;
+	}
+
+	bool read_frame(std::string_view& out) override
+	{
+		if (idx_ < prepend_.size())
+		{
+			out = prepend_[idx_++];
+			return true;
+		}
+		return inner_ ? inner_->read_frame(out) : false;
+	}
+
+	bool read_frame_blocking(std::string_view& out) override
+	{
+		if (idx_ < prepend_.size())
+		{
+			out = prepend_[idx_++];
+			return true;
+		}
+		return inner_ ? inner_->read_frame_blocking(out) : false;
 	}
 
 	void request_stop() override

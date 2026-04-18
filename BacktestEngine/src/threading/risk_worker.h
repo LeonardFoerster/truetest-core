@@ -7,10 +7,6 @@
 
 #include <atomic>
 
-// Consumes events from the risk ring and runs risk checks.
-// Owns its own shadow portfolio and analytics to avoid data races with Core 0.
-// When a halt condition is detected, sets a shared atomic flag
-// that the engine loop checks each iteration.
 class RiskWorker : public Worker
 {
 public:
@@ -29,10 +25,8 @@ public:
     {
         events_processed_.fetch_add(1, std::memory_order_relaxed);
 
-        // Feed all events to our own analytics for equity tracking
         analytics_.on_event(ev);
 
-        // Update shadow portfolio on fills
         if (ev->get_type() == event_type::fill)
         {
             auto& fill = static_cast<const fill_event&>(*ev);

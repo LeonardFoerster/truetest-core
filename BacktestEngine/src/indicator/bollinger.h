@@ -5,9 +5,9 @@
 
 struct bollinger_result
 {
-    double middle;  // SMA
-    double upper;   // SMA + k * stddev
-    double lower;   // SMA - k * stddev
+    double middle;
+    double upper;
+    double lower;
 };
 
 class bollinger_bands
@@ -35,7 +35,7 @@ public:
             double n = static_cast<double>(period_);
             double mean = sum_ / n;
             double variance = (sum_sq_ / n) - (mean * mean);
-            if (variance < 0.0) variance = 0.0; // numerical guard
+            if (variance < 0.0) variance = 0.0;
             double stddev = std::sqrt(variance);
 
             last_value_ = {mean, mean + num_std_ * stddev, mean - num_std_ * stddev};

@@ -15,7 +15,6 @@
 #include "debug/copy_tracker.h"
 #endif
 
-// ── Bar record ──────────────────────────────────────────────────────────────
 
 struct bar_record
 #ifdef HAS_DEBUG
@@ -31,8 +30,6 @@ struct bar_record
 	int64_t volume;
 };
 
-// CsvBarParser: parses OHLCV bar CSV lines.
-// Expected columns: date (opt), symbol (opt), open, high, low, close, volume (opt)
 class CsvBarParser : public IDataParser<bar_record>
 {
 public:
@@ -96,10 +93,7 @@ private:
 };
 
 
-// ── Tick record sink helper ─────────────────────────────────────────────────
 
-// CsvTickParser: parses tick-level CSV lines.
-// Expected columns: timestamp_ms,symbol,price,quantity,side
 class CsvTickParser : public IDataParser<tick_record>
 {
 public:
@@ -110,23 +104,18 @@ public:
 		std::istringstream ss(line);
 		std::string token;
 
-		// timestamp_ms
 		if (!std::getline(ss, token, ',')) return std::nullopt;
 		int64_t ts_ms = std::stoll(token);
 
-		// symbol
 		std::string symbol;
 		if (!std::getline(ss, symbol, ',')) return std::nullopt;
 
-		// price
 		if (!std::getline(ss, token, ',')) return std::nullopt;
 		double price = std::stod(token);
 
-		// quantity
 		if (!std::getline(ss, token, ',')) return std::nullopt;
 		int64_t qty = std::stoll(token);
 
-		// side (optional)
 		data_tick_side side = data_tick_side::unknown;
 		if (std::getline(ss, token, ',') && !token.empty())
 		{
@@ -149,8 +138,6 @@ public:
 };
 
 
-// ── Sink functions ──────────────────────────────────────────────────────────
-// These connect parsed records to data_handler's storage.
 
 inline void bar_record_sink(const bar_record& rec, std::shared_ptr<data_handler> handler)
 {

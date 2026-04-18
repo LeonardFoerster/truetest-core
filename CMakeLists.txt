@@ -365,6 +365,7 @@ if(BUILD_TESTS)
         tests/test_market_maker.cpp
         tests/test_data_handler.cpp
         tests/test_execution_adapter.cpp
+        tests/test_execution_bridge.cpp
         tests/test_engine.cpp
         tests/test_order_id.cpp
         tests/test_price.cpp
@@ -380,6 +381,15 @@ if(BUILD_TESTS)
         tests/test_golden_regression.cpp
         tests/test_event_json.cpp
         tests/test_binance_parser.cpp
+        tests/test_binance_order_encoder.cpp
+        tests/test_binance_rest_order_transport.cpp
+        tests/test_binance_user_data_parser.cpp
+        tests/test_binance_user_data_transport.cpp
+        tests/test_binance_rest_client_time.cpp
+        tests/test_binance_rest_client_rate_limit.cpp
+        tests/test_binance_user_data_transport_keepalive.cpp
+        tests/test_binance_user_data_transport_reconnect.cpp
+        tests/test_binance_endpoints.cpp
         tests/test_provider_transport.cpp
         tests/test_data_bridge.cpp
         tests/test_provider_event.cpp
@@ -423,6 +433,14 @@ if(BUILD_TESTS)
         target_sources(truetest_tests PRIVATE BacktestEngine/src/data/sqlite_store.cpp)
         target_link_libraries(truetest_tests PRIVATE SQLite3::SQLite3)
         target_compile_definitions(truetest_tests PRIVATE HAS_SQLITE)
+    endif()
+
+    if(ENABLE_BINANCE)
+        find_package(Boost REQUIRED)
+        find_package(OpenSSL REQUIRED)
+        target_link_libraries(truetest_tests PRIVATE
+            Boost::headers OpenSSL::SSL OpenSSL::Crypto)
+        target_compile_definitions(truetest_tests PRIVATE HAS_BINANCE)
     endif()
 
     if(ENABLE_DEBUG)

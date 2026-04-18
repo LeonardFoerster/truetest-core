@@ -4,11 +4,6 @@
 #include <string>
 #include <memory>
 
-// Binary cache file header (16 bytes):
-//   [0..3]  magic:    "TTBC"
-//   [4..5]  version:  uint16_t (currently 1)
-//   [6..7]  reserved: 0
-//   [8..15] crc64:    CRC-64/ECMA of the payload after the header
 struct BinaryCacheHeader {
     char     magic[4]  = {'T','T','B','C'};
     uint16_t version   = 1;
@@ -17,7 +12,6 @@ struct BinaryCacheHeader {
 };
 static_assert(sizeof(BinaryCacheHeader) == 16, "header must be 16 bytes");
 
-// CRC-64/ECMA-182
 inline uint64_t crc64_update(uint64_t crc, const void* data, size_t len)
 {
     static const uint64_t poly = 0x42F0E1EBA9EA3693ULL;

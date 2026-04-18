@@ -5,11 +5,11 @@
 
 enum class thread_preset
 {
-    inline_mode,  // 1-2 cores: no worker threads
-    light,        // 3 cores:   1 combined observer worker
-    standard,     // 4-5 cores: logging + combined risk/stats worker
-    full,         // 6-7 cores: logging + risk + stats (separate)
-    extended      // 8+ cores:  logging + risk + stats + market maker
+    inline_mode,
+    light,
+    standard,
+    full,
+    extended
 };
 
 inline thread_preset select_preset(std::size_t physical_cores)

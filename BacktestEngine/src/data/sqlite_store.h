@@ -17,29 +17,23 @@ public:
     SqliteStore(const SqliteStore&) = delete;
     SqliteStore& operator=(const SqliteStore&) = delete;
 
-    // Write path
     void insert_fill(const fill_event& f);
     void insert_portfolio_snapshot(double cash, double equity,
         const std::string& positions_json, std::size_t total_trades,
         int64_t timestamp_ms);
     void insert_equity_point(int64_t timestamp_ms, double equity);
 
-    // Read path
     std::string query_fills_json(const std::string& symbol = "",
         int limit = 200, int64_t since_ms = 0);
     std::string query_equity_json(int limit = 500);
     std::string query_last_portfolio_json();
 
-    // Run metadata (K1): each engine invocation gets a row in the `runs` table.
-    // begin_run() inserts the row and returns a generated id. end_run() fills in
-    // final metrics when the engine finishes. fail_run() marks a failed run.
     std::string begin_run(const std::string& config_json);
     void end_run(const std::string& run_id, double final_equity,
                  double sharpe, double max_drawdown, int trade_count);
     void fail_run(const std::string& run_id, const std::string& error);
     std::string query_runs_json(int limit = 100);
 
-    // Flush pending batches
     void flush_equity_batch();
     void flush_fill_batch();
     void flush_all();
@@ -51,12 +45,10 @@ private:
 
     sqlite3* db_ = nullptr;
 
-    // Prepared statements
     sqlite3_stmt* insert_fill_stmt_ = nullptr;
     sqlite3_stmt* insert_portfolio_stmt_ = nullptr;
     sqlite3_stmt* insert_equity_stmt_ = nullptr;
 
-    // Batching for equity and fill inserts
     static constexpr std::size_t BATCH_SIZE = 100;
 
     std::size_t equity_batch_count_ = 0;

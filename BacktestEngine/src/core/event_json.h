@@ -8,8 +8,6 @@
 #include <string>
 #include <chrono>
 
-// Simple JSON serialization for engine events.
-// No external JSON library — uses snprintf for speed.
 
 namespace event_json {
 
@@ -32,7 +30,6 @@ inline std::string to_json(const market_event& e)
     return buf;
 }
 
-// Market event with indicator values attached (Phase 5.5)
 inline std::string to_json_with_indicators(
     const market_event& e,
     const std::vector<std::pair<std::string, double>>& indicators)
@@ -40,7 +37,6 @@ inline std::string to_json_with_indicators(
     auto base = to_json(e);
     if (indicators.empty()) return base;
 
-    // Insert indicators object before the closing }}
     std::string ind_json = R"(,"indicators":{)";
     for (std::size_t i = 0; i < indicators.size(); ++i)
     {
@@ -52,7 +48,6 @@ inline std::string to_json_with_indicators(
     }
     ind_json += "}";
 
-    // Insert before the last two closing braces
     auto pos = base.rfind("}}");
     if (pos != std::string::npos)
         base.insert(pos, ind_json);
@@ -81,13 +76,23 @@ inline std::string to_json(const order_event& e)
     return buf;
 }
 
+inline const char* fill_source_str(fill_source s)
+{
+    switch (s) {
+    case fill_source::simulated: return "simulated";
+    case fill_source::exchange:  return "exchange";
+    case fill_source::unknown:
+    default:                     return "unknown";
+    }
+}
+
 inline std::string to_json(const fill_event& e)
 {
     const char* side_str = (e.get_side() == order_side::buy) ? "buy" : "sell";
 
     char buf[512];
     std::snprintf(buf, sizeof(buf),
-        R"({"type":"fill","timestamp":%lld,"data":{"order_id":%llu,"fill_id":%llu,"symbol":"%s","side":"%s","quantity":%.8g,"price":%.6f,"remaining":%.8g,"commission":%.6f,"time":%lld}})",
+        R"({"type":"fill","timestamp":%lld,"data":{"order_id":%llu,"fill_id":%llu,"symbol":"%s","side":"%s","quantity":%.8g,"price":%.6f,"remaining":%.8g,"commission":%.6f,"source":"%s","time":%lld}})",
         static_cast<long long>(epoch_ms(e.get_timestamp())),
         static_cast<unsigned long long>(e.get_order_id()),
         static_cast<unsigned long long>(e.get_fill_id()),
@@ -96,6 +101,7 @@ inline std::string to_json(const fill_event& e)
         e.get_filled_quantity(), e.get_fill_price(),
         e.get_remaining_qty(),
         e.get_commission(),
+        fill_source_str(e.get_source()),
         static_cast<long long>(epoch_ms(e.get_timestamp()) / 1000));
     return buf;
 }
@@ -204,8 +210,6 @@ inline std::string analytics_to_json(const AnalyticsReport& r)
     return buf;
 }
 
-// Generic dispatch: serialize any event_pointer to JSON.
-// Returns empty string for unhandled event types.
 inline std::string event_to_json(const event_pointer& ev)
 {
     switch (ev->get_type())
@@ -229,7 +233,6 @@ inline std::string event_to_json(const event_pointer& ev)
     }
 }
 
-// Order response: feedback for UI-submitted orders (accept/fill/reject/error)
 inline std::string order_response_to_json(
     uint64_t order_id,
     const std::string& status,
@@ -248,7 +251,6 @@ inline std::string order_response_to_json(
     return buf;
 }
 
-// Generic engine error broadcast
 inline std::string error_to_json(const std::string& message,
                                   const std::string& source = "engine")
 {
@@ -260,7 +262,6 @@ inline std::string error_to_json(const std::string& message,
     return buf;
 }
 
-// Wraps pre-built JSON arrays from SqliteStore queries
 inline std::string fills_history_to_json(const std::string& fills_array) {
     return R"({"type":"fills_history","data":)" + fills_array + "}";
 }

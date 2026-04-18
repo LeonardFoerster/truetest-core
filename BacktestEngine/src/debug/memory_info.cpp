@@ -22,13 +22,13 @@ uint64_t parse_proc_status_field(const std::string& field)
             std::string key;
             uint64_t val;
             ss >> key >> val;
-            return val * 1024; // /proc reports in kB
+            return val * 1024;
         }
     }
     return 0;
 }
 
-} // anonymous namespace
+}
 
 memory_snapshot memory_snapshot::capture()
 {
@@ -38,14 +38,13 @@ memory_snapshot memory_snapshot::capture()
     snap.vm_bytes = parse_proc_status_field("VmSize:");
     snap.peak_rss_bytes = parse_proc_status_field("VmHWM:");
 
-    // Heap usage via /proc/self/statm (field 5 = data+stack pages)
     {
         std::ifstream f("/proc/self/statm");
         if (f.is_open())
         {
             uint64_t size, resident, shared, text, lib, data, dt;
             f >> size >> resident >> shared >> text >> lib >> data >> dt;
-            snap.heap_bytes = data * 4096; // assume 4K pages
+            snap.heap_bytes = data * 4096;
         }
     }
 

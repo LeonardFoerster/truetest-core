@@ -36,7 +36,6 @@ public:
             return std::nullopt;
         }
 
-        // Smoothed (Wilder's) moving average
         double dp = static_cast<double>(period_);
         avg_gain_ = (avg_gain_ * (dp - 1.0) + gain) / dp;
         avg_loss_ = (avg_loss_ * (dp - 1.0) + loss) / dp;

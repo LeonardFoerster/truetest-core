@@ -278,7 +278,7 @@ std::string render_report(const AnalyticsReport& r, const report_options& o)
 {
     std::ostringstream oss;
 
-    oss << "\n" << ascii::rule(o.width, "\xe2\x95\x90") << "\n";   // ═
+    oss << "\n" << ascii::rule(o.width, "\xe2\x95\x90") << "\n";
     oss << "  " << o.title << "\n";
     oss << ascii::rule(o.width, "\xe2\x95\x90") << "\n";
 

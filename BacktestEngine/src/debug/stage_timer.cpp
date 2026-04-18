@@ -23,7 +23,7 @@ const char* stage_name(stage s)
     }
 }
 
-} // anonymous namespace
+}
 
 void StageTimer::record(stage s, std::chrono::high_resolution_clock::time_point start)
 {
@@ -40,7 +40,6 @@ void StageTimer::record(stage s, std::chrono::high_resolution_clock::time_point 
 
 void StageTimer::log() const
 {
-    // Find total iterations from market_create calls
     uint64_t iterations = stats_[static_cast<size_t>(stage::market_create)].call_count;
     DBG_PERF("═══ Stage Latency (bar loop, %lu iterations) ════", iterations);
     DBG_PERF("  %-18s  %-8s  %-12s  %-10s  %-10s  %-10s",
@@ -55,7 +54,6 @@ void StageTimer::log() const
         uint64_t avg_ns = st.total_ns / st.call_count;
         uint64_t min_display = (st.min_ns == UINT64_MAX) ? 0 : st.min_ns;
 
-        // Warn if max_ns > 10x avg_ns (jitter)
         if (st.max_ns > avg_ns * 10)
             DBG_WARN("  %-18s  %-8lu  %-12.1f  %-10lu  %-10lu  %-10lu  *** JITTER ***",
                      stage_name(static_cast<stage>(i)), st.call_count,

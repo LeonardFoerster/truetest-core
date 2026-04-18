@@ -19,10 +19,9 @@ void portfolio::on_fill(const fill_event& fill)
     {
         if (pos.qty < 0.0)
         {
-            // Closing (or flipping) a short position
             double close_qty = std::min(fill_qty, -pos.qty);
-            double avg_entry = pos.cost_basis / pos.qty; // negative qty → negative basis per unit
-            double cost_of_closed = avg_entry * close_qty; // portion of basis being closed
+            double avg_entry = pos.cost_basis / pos.qty;
+            double cost_of_closed = avg_entry * close_qty;
 
             cash_ -= close_qty * fill.get_fill_price() + fill.get_commission();
             pos.qty += close_qty;
@@ -40,16 +39,14 @@ void portfolio::on_fill(const fill_event& fill)
                 return;
         }
 
-        // Opening or adding to a long position
         pos.qty += fill_qty;
         pos.cost_basis += fill_qty * fill.get_fill_price() + fill.get_commission();
         cash_ -= fill_qty * fill.get_fill_price() + fill.get_commission();
     }
-    else // sell
+    else
     {
         if (pos.qty > 0.0)
         {
-            // Closing (or flipping) a long position
             double close_qty = std::min(fill_qty, pos.qty);
             double avg_entry = (pos.qty > 0.0) ? pos.cost_basis / pos.qty : 0.0;
             double cost_of_closed = avg_entry * close_qty;
@@ -70,8 +67,6 @@ void portfolio::on_fill(const fill_event& fill)
                 return;
         }
 
-        // Opening or adding to a short position
-        // cost_basis tracks the entry value (negative qty, negative basis)
         pos.qty -= fill_qty;
         pos.cost_basis -= fill_qty * fill.get_fill_price() - fill.get_commission();
         cash_ += fill_qty * fill.get_fill_price() - fill.get_commission();
@@ -95,7 +90,6 @@ bool portfolio::can_afford(order_side side, double quantity, double price) const
 {
     if (side == order_side::buy)
         return cash_ >= quantity * price;
-    // For sells without symbol context, check if any position suffices
     for (const auto& [_, pos] : positions_)
         if (pos.qty >= quantity) return true;
     return false;
@@ -122,7 +116,6 @@ double portfolio::get_equity(double last_price) const
     double equity = cash_;
     for (const auto& [_, pos] : positions_)
     {
-        // Works for both long (qty > 0) and short (qty < 0) positions
         if (std::abs(pos.qty) > 1e-12)
             equity += pos.qty * last_price;
     }

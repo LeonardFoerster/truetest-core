@@ -10,31 +10,22 @@
 #include <unordered_map>
 #include <vector>
 
-// ShadowTracker: compares simulated fills (from local orderbook) against
-// exchange fills (from live execution adapter) to measure slippage,
-// fill rate differences, and latency.
-//
-// Used in shadow mode: the engine submits orders to both the local book
-// and the exchange adapter, then feeds both sets of fills to this tracker.
 struct shadow_fill
 {
     uint64_t order_id;
     std::string symbol;
     order_side side;
 
-    // Simulated fill (from local orderbook)
     double sim_price = 0.0;
     double sim_quantity = 0.0;
     std::chrono::system_clock::time_point sim_timestamp;
     bool sim_filled = false;
 
-    // Exchange fill (from live/paper executor)
     double exchange_price = 0.0;
     double exchange_quantity = 0.0;
     std::chrono::system_clock::time_point exchange_timestamp;
     bool exchange_filled = false;
 
-    // Computed metrics
     double slippage() const
     {
         if (!sim_filled || !exchange_filled) return 0.0;
@@ -130,7 +121,6 @@ public:
             std::cout << "    Avg |slippage|:          " << avg_abs_slippage << "\n";
             std::cout << "    Avg latency (ms):        " << avg_latency << "\n";
 
-            // Fill rate comparison
             double sim_fill_rate = static_cast<double>(both_filled + sim_only) / total * 100.0;
             double exch_fill_rate = static_cast<double>(both_filled + exchange_only) / total * 100.0;
             std::cout << std::fixed << std::setprecision(1);

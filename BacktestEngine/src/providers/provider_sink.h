@@ -25,12 +25,9 @@ inline void event_sink(const event& ev, std::shared_ptr<data_handler> handler)
 		{
 			handler->add_tick(to_tick_record(e));
 		}
-		// l2_snapshot, l2_update, status: routed via event_sink_l2 overload.
 	}, ev);
 }
 
-// Route L2 events to the orderbook. Call this alongside event_sink when
-// provider events may contain depth data (e.g. Binance depth stream).
 inline void event_sink_l2(const event& ev, std::shared_ptr<orderbook> ob)
 {
 	if (!ob) return;
@@ -60,7 +57,6 @@ inline void event_sink_l2(const event& ev, std::shared_ptr<orderbook> ob)
 			ob->apply_l2_update(ob_side, Price::from_double(e.price),
 			                    static_cast<quantity>(e.new_quantity));
 		}
-		// bar, tick, status: handled by event_sink or ignored.
 	}, ev);
 }
 

@@ -8,7 +8,6 @@
 
 namespace provider {
 
-// Bar data (OHLCV) — from CSV, database, or aggregated from ticks.
 struct bar
 {
 	std::string date;
@@ -20,17 +19,15 @@ struct bar
 	int64_t volume;
 };
 
-// Single trade/tick — from exchange WebSocket, tick CSV, etc.
 struct tick
 {
 	std::chrono::system_clock::time_point timestamp;
 	std::string symbol;
 	double price;
 	int64_t quantity;
-	uint8_t side;  // 0=bid, 1=ask, 2=unknown
+	uint8_t side;
 };
 
-// Level-2 orderbook snapshot — from exchange depth stream.
 struct l2_snapshot
 {
 	std::chrono::system_clock::time_point timestamp;
@@ -40,17 +37,15 @@ struct l2_snapshot
 	std::vector<level> asks;
 };
 
-// Level-2 orderbook update — incremental depth update.
 struct l2_update
 {
 	std::chrono::system_clock::time_point timestamp;
 	std::string symbol;
-	uint8_t side;  // 0=bid, 1=ask
+	uint8_t side;
 	double price;
-	int64_t new_quantity;  // 0 = level removed
+	int64_t new_quantity;
 };
 
-// Status/control event — provider connection state, market status, etc.
 struct status
 {
 	std::chrono::system_clock::time_point timestamp;
@@ -60,7 +55,6 @@ struct status
 	kind type;
 };
 
-// The unified provider event type.
 using event = std::variant<bar, tick, l2_snapshot, l2_update, status>;
 
 } // namespace provider

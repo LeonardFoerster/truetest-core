@@ -2,6 +2,7 @@
 
 #include "providers/provider_registry.h"
 #include "providers/binance/binance_provider.h"
+#include "providers/binance/binance_endpoints.h"
 
 #include <stdexcept>
 
@@ -18,21 +19,29 @@ REGISTER_PROVIDER("binance", [](const provider_config& cfg) {
 
     auto stream = get("stream");
     if (stream.empty())
-        stream = "trade";  // default to trade stream
+        stream = "trade";
 
-    auto host = get("host");
-    if (host.empty())
-        host = "stream.binance.com";
+    const auto host_cfg = get("host");
+    const auto port_cfg = get("port");
+    const auto testnet_cfg = get("testnet");
+    const bool want_testnet =
+        testnet_cfg == "1" || testnet_cfg == "true" ||
+        binance::looks_like_testnet_host(host_cfg);
 
-    auto port = get("port");
-    if (port.empty())
-        port = "9443";
+    binance::endpoints ep = want_testnet
+        ? binance::spot_testnet()
+        : binance::spot_mainnet();
 
-    return std::make_shared<BinanceProvider>(
+    if (!host_cfg.empty()) ep.ws_host = host_cfg;
+    if (!port_cfg.empty()) ep.ws_port = port_cfg;
+
+    auto provider = std::make_shared<BinanceProvider>(
         symbol, stream,
         get("api_key"), get("api_secret"),
-        host, port
+        ep.ws_host, ep.ws_port
     );
+    provider->set_endpoints(ep);
+    return provider;
 });
 
 #endif // HAS_BINANCE
