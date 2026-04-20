@@ -5,10 +5,14 @@
 #include <filesystem>
 #include <sstream>
 
+namespace {
+// Same-named struct with a different layout exists in other test TUs;
+// anonymous-namespace scope prevents LTO ODR-merging from picking the
+// wrong definition.
 struct SilenceOutput {
+    std::ostringstream sink;
     std::streambuf* orig_out;
     std::streambuf* orig_err;
-    std::ostringstream sink;
     SilenceOutput()
         : orig_out(std::cout.rdbuf(sink.rdbuf()))
         , orig_err(std::cerr.rdbuf(sink.rdbuf())) {}
@@ -17,6 +21,7 @@ struct SilenceOutput {
         std::cerr.rdbuf(orig_err);
     }
 };
+} // namespace
 
 // Helper: path to test fixtures relative to the test binary
 // We use an absolute path since ctest may run from build dir

@@ -11,13 +11,18 @@
 #include <chrono>
 #include <atomic>
 
-// RAII helper to silence cout during noisy engine runs
+namespace {
+// RAII helper to silence cout during noisy engine runs.
+// Anonymous namespace: same struct name exists in other test TUs with a
+// different layout, and under LTO ODR-merging those definitions crashes at
+// teardown. Anonymous-namespace scope gives each TU its own distinct type.
 struct SilenceOutput {
-    std::streambuf* orig;
     std::ostringstream sink;
+    std::streambuf* orig;
     SilenceOutput() : orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceOutput() { std::cout.rdbuf(orig); }
 };
+} // namespace
 
 // Test strategy: buys on bar 3, sells on bar 6
 class StreamTestStrategy : public IStrategy

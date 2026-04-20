@@ -101,39 +101,46 @@ public:
 	{
 		if (line.empty()) return std::nullopt;
 
-		std::istringstream ss(line);
-		std::string token;
-
-		if (!std::getline(ss, token, ',')) return std::nullopt;
-		int64_t ts_ms = std::stoll(token);
-
-		std::string symbol;
-		if (!std::getline(ss, symbol, ',')) return std::nullopt;
-
-		if (!std::getline(ss, token, ',')) return std::nullopt;
-		double price = std::stod(token);
-
-		if (!std::getline(ss, token, ',')) return std::nullopt;
-		int64_t qty = std::stoll(token);
-
-		data_tick_side side = data_tick_side::unknown;
-		if (std::getline(ss, token, ',') && !token.empty())
+		try
 		{
-			char c = token[0];
-			if (c == 'B' || c == 'b') side = data_tick_side::bid;
-			else if (c == 'A' || c == 'a') side = data_tick_side::ask;
+			std::istringstream ss(line);
+			std::string token;
+
+			if (!std::getline(ss, token, ',')) return std::nullopt;
+			int64_t ts_ms = std::stoll(token);
+
+			std::string symbol;
+			if (!std::getline(ss, symbol, ',')) return std::nullopt;
+
+			if (!std::getline(ss, token, ',')) return std::nullopt;
+			double price = std::stod(token);
+
+			if (!std::getline(ss, token, ',')) return std::nullopt;
+			int64_t qty = std::stoll(token);
+
+			data_tick_side side = data_tick_side::unknown;
+			if (std::getline(ss, token, ',') && !token.empty())
+			{
+				char c = token[0];
+				if (c == 'B' || c == 'b') side = data_tick_side::bid;
+				else if (c == 'A' || c == 'a') side = data_tick_side::ask;
+			}
+
+			auto timestamp = std::chrono::system_clock::time_point(
+				std::chrono::milliseconds(ts_ms));
+
+			tick_record rec;
+			rec.timestamp = timestamp;
+			rec.symbol = symbol;
+			rec.price = price;
+			rec.quantity = qty;
+			rec.side = side;
+			return rec;
 		}
-
-		auto timestamp = std::chrono::system_clock::time_point(
-			std::chrono::milliseconds(ts_ms));
-
-		tick_record rec;
-		rec.timestamp = timestamp;
-		rec.symbol = symbol;
-		rec.price = price;
-		rec.quantity = qty;
-		rec.side = side;
-		return rec;
+		catch (const std::exception&)
+		{
+			return std::nullopt;
+		}
 	}
 };
 
