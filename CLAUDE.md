@@ -312,6 +312,20 @@ testing against real exchange data.
 - **Risk resume** — `halt_flag_` stops the engine but there's no resume channel.
 - **Generic ExchangeAdapter** — Binance is the only live venue adapter today.
 
+## Stack decisions
+
+- **JSON library: `nlohmann/json` (config-time only).** Used in two files
+  (`src/main.cpp` CLI config, `src/api/truetest_api.cpp` C API config + result
+  serialization). Zero hot-path usage — verified by grep across `core/`,
+  `engine/`, `execution/`, `strategy/`, and `providers/binance/`. A hot-path
+  parser (simdjson or hand-rolled) is a later swap; for now nlohmann stays.
+- **Persistence: SQLite (`ENABLE_SQLITE=ON` by default).** PostgreSQL+Timescale
+  remains an opt-in backend (`ENABLE_POSTGRESQL=ON`) but is not the default
+  path. Migrating the default to Timescale is deferred.
+- **Live venue: Binance.** Bitstamp (referenced in the deepdive) is a future
+  `IProvider` addition, not a replacement. The `providers/` directory
+  structure is built to accommodate new venues without touching the core.
+
 ## Conventions
 
 - C++23 standard, enforced via `CMAKE_CXX_STANDARD_REQUIRED` in
