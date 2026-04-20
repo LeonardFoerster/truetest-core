@@ -158,7 +158,7 @@ function(tt_wire_optional_backends target)
         endif()
 
         target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/BacktestEngine/src/data/pg_data_source.cpp)
+            ${CMAKE_SOURCE_DIR}/src/data/pg_data_source.cpp)
         target_include_directories(${target} PUBLIC ${PostgreSQL_INCLUDE_DIRS})
         target_link_libraries(${target} PUBLIC pqxx ${PostgreSQL_LIBRARIES})
         target_compile_definitions(${target} PUBLIC HAS_POSTGRESQL)
@@ -171,7 +171,7 @@ function(tt_wire_optional_backends target)
     if(ENABLE_LIVE_DATA)
         find_package(Boost REQUIRED COMPONENTS system)
         target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/BacktestEngine/src/data/websocket_data_source.cpp)
+            ${CMAKE_SOURCE_DIR}/src/data/websocket_data_source.cpp)
         target_link_libraries(${target} PUBLIC Boost::system)
         target_compile_definitions(${target} PUBLIC HAS_LIVE_DATA)
     endif()
@@ -188,8 +188,8 @@ function(tt_wire_optional_backends target)
         find_package(Boost REQUIRED)
         find_package(OpenSSL REQUIRED)
         target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/BacktestEngine/src/providers/binance/binance_register.cpp
-            ${CMAKE_SOURCE_DIR}/BacktestEngine/src/providers/binance/binance_backfill.h)
+            ${CMAKE_SOURCE_DIR}/src/providers/binance/binance_register.cpp
+            ${CMAKE_SOURCE_DIR}/src/providers/binance/binance_backfill.h)
         target_link_libraries(${target} PUBLIC
             Boost::headers OpenSSL::SSL OpenSSL::Crypto)
         target_compile_definitions(${target} PUBLIC HAS_BINANCE)
@@ -199,7 +199,7 @@ function(tt_wire_optional_backends target)
     if(ENABLE_SQLITE)
         find_package(SQLite3 REQUIRED)
         target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/BacktestEngine/src/data/sqlite_store.cpp)
+            ${CMAKE_SOURCE_DIR}/src/data/sqlite_store.cpp)
         target_link_libraries(${target} PUBLIC SQLite3::SQLite3)
         target_compile_definitions(${target} PUBLIC HAS_SQLITE)
     endif()
@@ -218,10 +218,10 @@ function(tt_wire_optional_backends target)
         endif()
 
         target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/BacktestEngine/src/debug/hardware_info.cpp
-            ${CMAKE_SOURCE_DIR}/BacktestEngine/src/debug/stage_timer.cpp
-            ${CMAKE_SOURCE_DIR}/BacktestEngine/src/debug/memory_info.cpp
-            ${CMAKE_SOURCE_DIR}/BacktestEngine/src/debug/debug_report.cpp)
+            ${CMAKE_SOURCE_DIR}/src/debug/hardware_info.cpp
+            ${CMAKE_SOURCE_DIR}/src/debug/stage_timer.cpp
+            ${CMAKE_SOURCE_DIR}/src/debug/memory_info.cpp
+            ${CMAKE_SOURCE_DIR}/src/debug/debug_report.cpp)
         target_link_libraries(${target} PUBLIC
             absl::log absl::log_initialize absl::log_severity
             absl::log_sink absl::log_sink_registry

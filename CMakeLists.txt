@@ -29,28 +29,28 @@ tt_fetch_dependencies()
 # main.cpp is intentionally NOT part of engine_core — each executable owns
 # its own copy, compiled with a distinct TT_TARGET define.
 set(ENGINE_CORE_SOURCES
-    BacktestEngine/src/core/engine.cpp
-    BacktestEngine/src/analytics/analytics.cpp
-    BacktestEngine/src/analytics/ascii_widgets.cpp
-    BacktestEngine/src/analytics/report_generator.cpp
-    BacktestEngine/src/data/data_loader.cpp
-    BacktestEngine/src/data/csv_data_source.cpp
-    BacktestEngine/src/data/binary_cache_source.cpp
-    BacktestEngine/src/data/tick_csv_data_source.cpp
-    BacktestEngine/src/execution/portfolio.cpp
-    BacktestEngine/src/orderbook/orderbook.cpp
-    BacktestEngine/src/strategy/mean_reversion_strategy.cpp
-    BacktestEngine/src/strategy/sma_strategy.cpp
-    BacktestEngine/src/strategy/ma_crossover_strategy.cpp
-    BacktestEngine/src/strategy/sma.cpp
-    BacktestEngine/src/market_maker/market_maker.cpp
-    BacktestEngine/src/risk/risk_manager.cpp
-    BacktestEngine/src/providers/local/local_register.cpp
+    src/core/engine.cpp
+    src/analytics/analytics.cpp
+    src/analytics/ascii_widgets.cpp
+    src/analytics/report_generator.cpp
+    src/data/data_loader.cpp
+    src/data/csv_data_source.cpp
+    src/data/binary_cache_source.cpp
+    src/data/tick_csv_data_source.cpp
+    src/execution/portfolio.cpp
+    src/orderbook/orderbook.cpp
+    src/strategy/mean_reversion_strategy.cpp
+    src/strategy/sma_strategy.cpp
+    src/strategy/ma_crossover_strategy.cpp
+    src/strategy/sma.cpp
+    src/market_maker/market_maker.cpp
+    src/risk/risk_manager.cpp
+    src/providers/local/local_register.cpp
 )
 
 add_library(engine_core OBJECT ${ENGINE_CORE_SOURCES})
 target_include_directories(engine_core PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/BacktestEngine/src")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(engine_core PUBLIC
     CLI11::CLI11 nlohmann_json::nlohmann_json libzstd_static)
 tt_apply_common_flags(engine_core)
@@ -62,7 +62,7 @@ tt_wire_optional_backends(engine_core)
 # Produces engine_backtest / engine_shadow / engine_live from the same main.cpp
 # linked against engine_core, differing only in compile-time define.
 function(_tt_add_engine_binary name target_id)
-    add_executable(${name} BacktestEngine/src/main.cpp)
+    add_executable(${name} src/main.cpp)
     target_compile_definitions(${name} PRIVATE TT_TARGET=${target_id})
     target_link_libraries(${name} PRIVATE engine_core)
     tt_apply_common_flags(${name})
@@ -78,7 +78,7 @@ tt_apply_live_flags(engine_live)
 # ── Shared library (C API for language bindings) ────────────────────────────
 if(BUILD_SHARED_LIB)
     add_library(truetest_shared SHARED
-        BacktestEngine/src/api/truetest_api.cpp)
+        src/api/truetest_api.cpp)
     set_target_properties(truetest_shared PROPERTIES
         OUTPUT_NAME truetest
         POSITION_INDEPENDENT_CODE ON
@@ -87,7 +87,7 @@ if(BUILD_SHARED_LIB)
         VERSION                   ${PROJECT_VERSION}
         SOVERSION                 0)
     target_include_directories(truetest_shared PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/BacktestEngine/src/api")
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/api")
     target_link_libraries(truetest_shared PRIVATE engine_core)
     target_compile_definitions(truetest_shared PRIVATE TRUETEST_API_BUILDING)
     tt_apply_common_flags(truetest_shared)
@@ -96,7 +96,7 @@ if(BUILD_SHARED_LIB)
         LIBRARY DESTINATION lib
         ARCHIVE DESTINATION lib
         RUNTIME DESTINATION bin)
-    install(FILES BacktestEngine/src/api/truetest_api.h
+    install(FILES src/api/truetest_api.h
         DESTINATION include/truetest)
 endif()
 
