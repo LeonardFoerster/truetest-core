@@ -8,7 +8,7 @@
 // Helper: run truetest with args, capture stdout+stderr, return exit code
 static int run_truetest(const std::string& args, std::string& output)
 {
-    std::string cmd = "./build/truetest " + args + " 2>&1";
+    std::string cmd = "./build/engine_backtest " + args + " 2>&1";
     std::array<char, 4096> buf;
     output.clear();
 

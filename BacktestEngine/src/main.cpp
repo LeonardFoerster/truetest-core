@@ -17,6 +17,7 @@
 #include "core/engine.h"
 #include "core/engine_config.h"
 #include "core/event_log.h"
+#include "core/tt_target.h"
 #include "data/data_source.h"
 #include "data/csv_data_source.h"
 #include "data/binary_cache_source.h"
@@ -338,7 +339,7 @@ static void dump_config(const cli_options& o)
     j["replay_data"] = o.replay_data_path;
     j["live"] = o.live;
     j["testnet"] = o.testnet;
-    j["mode"] = o.mode.empty() ? "backtest" : o.mode;
+    j["mode"] = o.mode.empty() ? TT_DEFAULT_MODE : o.mode;
     j["db"] = o.db_path;
     j["balance"] = o.balance;
     j["risk_fraction"] = o.risk_fraction;
@@ -516,7 +517,7 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
 static int run_dry_run(const cli_options& o)
 {
     std::string resolved_strategy = o.strategy.empty() ? "mean-reversion" : o.strategy;
-    std::string resolved_mode = o.mode.empty() ? "backtest" : o.mode;
+    std::string resolved_mode = o.mode.empty() ? TT_DEFAULT_MODE : o.mode;
     std::string resolved_preset = o.thread_preset_str.empty()
         ? preset_to_string(select_preset(detect_physical_cores()))
         : o.thread_preset_str;
@@ -564,6 +565,12 @@ static int run_dry_run(const cli_options& o)
     if (!o.mode.empty() && o.mode != "backtest" && o.mode != "shadow" && o.mode != "live")
     {
         std::cerr << "  ! Unknown mode: " << o.mode << "\n";
+        valid = false;
+    }
+    if (o.mode == "live" && !truetest::target_allows_live_orders())
+    {
+        std::cerr << "  ! --mode=live is only permitted on the engine_live binary "
+                     "(this is " << truetest::target_name() << ").\n";
         valid = false;
     }
     if (!o.fee_model.empty() && o.fee_model != "fixed" && o.fee_model != "tiered")
@@ -741,6 +748,12 @@ static int run_provider_mode(const cli_options& o)
 
     if (prov_cfg.mode == engine_mode::live)
     {
+        if (!truetest::target_allows_live_orders())
+        {
+            std::cerr << "  ! Live mode is only permitted on the engine_live binary "
+                         "(this is " << truetest::target_name() << ").\n";
+            return 1;
+        }
         if (!o.live)
         {
             std::cerr << "  ! Live mode requires --live flag.\n";
@@ -1168,7 +1181,7 @@ int main(int argc, char* argv[])
 
     cli_options opts;
 
-    CLI::App app{"TrueTest — modular C++17 backtesting engine"};
+    CLI::App app{"TrueTest — modular C++23 backtesting / shadow / live engine"};
     app.set_help_all_flag("--help-all", "Show all help");
     register_cli_options(app, opts);
 
