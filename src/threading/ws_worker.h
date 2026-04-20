@@ -4,8 +4,8 @@
 #include "worker.h"
 #include "ring_buffer.h"
 #include "http_handler.h"
-#include "../core/event_json.h"
-#include "../utils/log/logger.h"
+#include "engine/event_json.h"
+#include "utils/log/logger.h"
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>

@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
-#include "core/engine.h"
-#include "core/engine_config.h"
+#include "engine/engine.h"
+#include "engine/engine_config.h"
 #include "data/data_handler.h"
 #include "orderbook/orderbook.h"
 #include "execution/latency_model.h"

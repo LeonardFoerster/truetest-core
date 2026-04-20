@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "core/event_log.h"
-#include "core/engine.h"
-#include "core/engine_config.h"
+#include "engine/engine.h"
+#include "engine/engine_config.h"
 #include "data/data_handler.h"
 #include "orderbook/orderbook.h"
 #include "market_maker/market_maker.h"

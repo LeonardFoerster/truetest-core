@@ -1,9 +1,9 @@
 #include "engine.h"
 #include "checkpoint.h"
-#include "../data/data_handler.h"
-#include "../execution/portfolio.h"
-#include "../execution/latency_model.h"
-#include "../providers/provider.h"
+#include "data/data_handler.h"
+#include "execution/portfolio.h"
+#include "execution/latency_model.h"
+#include "providers/provider.h"
 
 #include <algorithm>
 #include <cmath>

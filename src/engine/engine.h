@@ -1,52 +1,52 @@
 #pragma once
 #include <climits>
 #include <cstdint>
-#include "../data/data_handler.h"
-#include "../strategy/strategy_interface.h"
-#include "../execution/portfolio.h"
-#include "../execution/execution_adapter.h"
-#include "../execution/order_tracker.h"
-#include "../orderbook/orderbook.h"
-#include "../orderbook/orderbook_registry.h"
-#include "../market_maker/market_maker.h"
-#include "../analytics/analytics.h"
-#include "../analytics/bar_aggregator.h"
-#include "../risk/risk_manager.h"
-#include "../threading/ring_buffer.h"
-#include "../threading/thread_config.h"
-#include "../threading/logging_worker.h"
-#include "../threading/risk_worker.h"
-#include "../threading/stats_worker.h"
-#include "../threading/observer_worker.h"
-#include "../threading/risk_stats_worker.h"
-#include "../threading/market_maker_worker.h"
+#include "data/data_handler.h"
+#include "strategy/strategy_interface.h"
+#include "execution/portfolio.h"
+#include "execution/execution_adapter.h"
+#include "execution/order_tracker.h"
+#include "orderbook/orderbook.h"
+#include "orderbook/orderbook_registry.h"
+#include "market_maker/market_maker.h"
+#include "analytics/analytics.h"
+#include "analytics/bar_aggregator.h"
+#include "risk/risk_manager.h"
+#include "threading/ring_buffer.h"
+#include "threading/thread_config.h"
+#include "threading/logging_worker.h"
+#include "threading/risk_worker.h"
+#include "threading/stats_worker.h"
+#include "threading/observer_worker.h"
+#include "threading/risk_stats_worker.h"
+#include "threading/market_maker_worker.h"
 #include "engine_config.h"
-#include "event.h"
-#include "event_log.h"
-#include "../types/order_id.h"
-#include "../types/object_pool.h"
+#include "core/event.h"
+#include "core/event_log.h"
+#include "types/order_id.h"
+#include "types/object_pool.h"
 
-#include "../debug/stage_timer.h"
+#include "debug/stage_timer.h"
 
 #ifdef HAS_SQLITE
-#include "../data/sqlite_store.h"
+#include "data/sqlite_store.h"
 #endif
 
 #ifdef HAS_WEB_UI
-#include "../threading/ws_worker.h"
+#include "threading/ws_worker.h"
 #endif
 
 #ifdef HAS_DEBUG
-#include "../debug/debug_log.h"
-#include "../debug/memory_info.h"
-#include "../debug/ring_stats.h"
-#include "../debug/debug_report.h"
+#include "debug/debug_log.h"
+#include "debug/memory_info.h"
+#include "debug/ring_stats.h"
+#include "debug/debug_report.h"
 #endif
 
-#include "../providers/data_bridge.h"
-#include "../providers/local/csv_parser.h"
-#include "../analytics/shadow_tracker.h"
-#include "../strategy/strategy_factory.h"
+#include "providers/data_bridge.h"
+#include "providers/local/csv_parser.h"
+#include "analytics/shadow_tracker.h"
+#include "strategy/strategy_factory.h"
 
 #include <atomic>
 #include <memory>

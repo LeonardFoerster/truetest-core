@@ -1,11 +1,11 @@
 
 #include "truetest_api.h"
 
-#include "../core/engine.h"
-#include "../core/engine_config.h"
-#include "../data/csv_data_source.h"
-#include "../data/data_handler.h"
-#include "../strategy/strategy_registry.h"
+#include "engine/engine.h"
+#include "engine/engine_config.h"
+#include "data/csv_data_source.h"
+#include "data/data_handler.h"
+#include "strategy/strategy_registry.h"
 
 #include <nlohmann/json.hpp>
 

@@ -14,8 +14,8 @@
 #include <CLI/CLI.hpp>
 #include <nlohmann/json.hpp>
 
-#include "core/engine.h"
-#include "core/engine_config.h"
+#include "engine/engine.h"
+#include "engine/engine_config.h"
 #include "core/event_log.h"
 #include "core/tt_target.h"
 #include "data/data_source.h"

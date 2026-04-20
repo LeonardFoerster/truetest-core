@@ -1,8 +1,8 @@
 #pragma once
 
-#include "../risk/risk_manager.h"
-#include "../threading/thread_preset.h"
-#include "../threading/spin_policy.h"
+#include "risk/risk_manager.h"
+#include "threading/thread_preset.h"
+#include "threading/spin_policy.h"
 
 #include <cstddef>
 #include <cstdint>

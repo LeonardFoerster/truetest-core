@@ -11,10 +11,10 @@
 
 #include <benchmark/benchmark.h>
 
-#include "core/engine.h"
-#include "core/engine_config.h"
+#include "engine/engine.h"
+#include "engine/engine_config.h"
 #include "core/event.h"
-#include "core/event_json.h"
+#include "engine/event_json.h"
 #include "data/data_handler.h"
 #include "indicator/sma.h"
 #include "market_maker/market_maker.h"

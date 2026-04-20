@@ -29,7 +29,7 @@ tt_fetch_dependencies()
 # main.cpp is intentionally NOT part of engine_core — each executable owns
 # its own copy, compiled with a distinct TT_TARGET define.
 set(ENGINE_CORE_SOURCES
-    src/core/engine.cpp
+    src/engine/engine.cpp
     src/analytics/analytics.cpp
     src/analytics/ascii_widgets.cpp
     src/analytics/report_generator.cpp
