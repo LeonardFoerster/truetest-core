@@ -1,0 +1,44 @@
+---
+# Conservative check set for an established codebase. Expand as the refactor
+# lands; keep the bar green before adding categories.
+Checks: >
+  -*,
+  bugprone-dangling-handle,
+  bugprone-use-after-move,
+  bugprone-unused-raii,
+  bugprone-infinite-loop,
+  modernize-use-override,
+  modernize-use-nullptr,
+  performance-move-const-arg,
+  performance-unnecessary-value-param,
+  readability-identifier-naming
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(src|tests)/'
+FormatStyle: file
+
+# Deepdive naming: snake_case for free functions + variables, PascalCase for
+# classes/structs. Interfaces prefixed with I (IDataSource, IStrategy).
+CheckOptions:
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumCase
+    value: lower_case
+  - key: readability-identifier-naming.EnumConstantCase
+    value: lower_case
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: _
+  - key: readability-identifier-naming.ProtectedMemberSuffix
+    value: _
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE
+  - key: readability-identifier-naming.AbstractClassPrefix
+    value: I
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case

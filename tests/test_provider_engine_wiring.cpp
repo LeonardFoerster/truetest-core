@@ -20,9 +20,9 @@ namespace {
 
 struct SilenceCout
 {
-    std::streambuf* orig;
     std::ostringstream sink;
-    SilenceCout() : orig(std::cout.rdbuf(sink.rdbuf())) {}
+    std::streambuf* orig;
+    SilenceCout() : sink(), orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceCout() { std::cout.rdbuf(orig); }
 };
 

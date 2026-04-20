@@ -9,19 +9,23 @@ static std::string fixture_path(const std::string& name)
 	return std::string(TEST_FIXTURES_DIR) + "/" + name;
 }
 
-// RAII helper to silence stdout/stderr
+// RAII helper to silence stdout/stderr.
+// Members declared in init order to avoid using `sink` before construction.
+namespace {
 struct SilenceRegistry {
+	std::ostringstream sink;
 	std::streambuf* orig_out;
 	std::streambuf* orig_err;
-	std::ostringstream sink;
 	SilenceRegistry()
-		: orig_out(std::cout.rdbuf(sink.rdbuf()))
+		: sink()
+		, orig_out(std::cout.rdbuf(sink.rdbuf()))
 		, orig_err(std::cerr.rdbuf(sink.rdbuf())) {}
 	~SilenceRegistry() {
 		std::cout.rdbuf(orig_out);
 		std::cerr.rdbuf(orig_err);
 	}
 };
+} // namespace
 
 TEST(ProviderRegistry, CreateThrowsForUnregistered)
 {

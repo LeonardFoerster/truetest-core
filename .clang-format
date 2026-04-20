@@ -1,0 +1,80 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+
+# Deepdive style: 4-space, trailing commas in C++20, snake_case free functions,
+# PascalCase types. The file codifies formatting only; naming is enforced via
+# .clang-tidy.
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+
+ColumnLimit: 100
+
+# Braces on their own line for functions/classes/namespaces — matches the
+# existing engine.cpp / strategy / orderbook layout. Control-flow keeps
+# attached braces to avoid churn in short `if (...) return;` patterns.
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: true
+  AfterControlStatement: Never
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: false
+  AfterStruct: true
+  AfterUnion: true
+  AfterExternBlock: false
+  BeforeCatch: false
+  BeforeElse: false
+  IndentBraces: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: true
+
+# Constructor init lists: one member per line, comma first (matches engine.cpp
+# and strategy ctors).
+BreakConstructorInitializers: BeforeComma
+ConstructorInitializerIndentWidth: 4
+PackConstructorInitializers: Never
+
+# Short statements — keep tight to preserve single-line patterns already in
+# the source (e.g. `if (!store_) return;`).
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortLambdasOnASingleLine: All
+
+# Trailing commas in C++20 initializer lists (deepdive style) are allowed
+# by the language, but clang-format's InsertTrailingCommas requires
+# BinPackArguments=false, which would mass-reformat every multi-arg call in
+# the codebase. Left disabled; developers may write trailing commas by hand.
+
+# Pointer alignment: `int* p` — matches existing code.
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Includes: leave the existing order alone — the engine.h preamble is a
+# deliberate dependency-ordered list (engine → storage → providers).
+SortIncludes: Never
+IncludeBlocks: Preserve
+
+# Spaces.
+SpacesBeforeTrailingComments: 2
+SpaceBeforeParens: ControlStatements
+SpacesInAngles: Never
+SpacesInCStyleCastParentheses: false
+SpacesInParentheses: false
+
+# Empty lines.
+MaxEmptyLinesToKeep: 2
+KeepEmptyLinesAtTheStartOfBlocks: false
+
+# Modernizations that don't change semantics.
+FixNamespaceComments: true
+ShortNamespaceLines: 1
+DerivePointerAlignment: false
+Cpp11BracedListStyle: true

@@ -6,13 +6,16 @@
 #include "market_maker/market_maker.h"
 #include <sstream>
 
-// Silence stdout during engine runs
+// Silence stdout during engine runs.
+// Anonymous namespace avoids ODR clashes with the same helper in other TUs.
+namespace {
 struct SilenceCout {
-    std::streambuf* orig;
     std::ostringstream sink;
-    SilenceCout() : orig(std::cout.rdbuf(sink.rdbuf())) {}
+    std::streambuf* orig;
+    SilenceCout() : sink(), orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceCout() { std::cout.rdbuf(orig); }
 };
+} // namespace
 
 // Strategy: buys on bar 3, sells on bar 6 (deterministic)
 class CorrectnessStrategy : public IStrategy

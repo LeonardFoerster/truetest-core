@@ -6,13 +6,17 @@
 #include "market_maker/market_maker.h"
 #include <sstream>
 
-// RAII helper to silence cout during noisy backtest runs
+// RAII helper to silence cout during noisy backtest runs.
+// Anonymous namespace + members declared in init order avoid ODR clashes
+// and construction-order UB surfaced by UBSAN vptr checks.
+namespace {
 struct SilenceCout_OT {
-    std::streambuf* orig;
     std::ostringstream sink;
-    SilenceCout_OT() : orig(std::cout.rdbuf(sink.rdbuf())) {}
+    std::streambuf* orig;
+    SilenceCout_OT() : sink(), orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceCout_OT() { std::cout.rdbuf(orig); }
 };
+} // namespace
 
 static auto epoch_ms(int64_t ms)
 {

@@ -26,13 +26,17 @@ struct TempFile {
     ~TempFile() { std::remove(path.c_str()); }
 };
 
-// RAII helper to silence cout
+// RAII helper to silence cout.
+// Anonymous namespace prevents ODR clashes with identically-named helpers in
+// other test TUs.
+namespace {
 struct SilenceCout {
-    std::streambuf* orig;
     std::ostringstream sink;
-    SilenceCout() : orig(std::cout.rdbuf(sink.rdbuf())) {}
+    std::streambuf* orig;
+    SilenceCout() : sink(), orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceCout() { std::cout.rdbuf(orig); }
 };
+} // namespace
 
 // ─── Round-trip tests for each event type ───────────────────────────────────
 

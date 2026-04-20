@@ -34,9 +34,9 @@ namespace {
 // Silence std::cout during runs so the test log stays readable.
 struct silence_cout
 {
-    std::streambuf* orig;
     std::ostringstream sink;
-    silence_cout() : orig(std::cout.rdbuf(sink.rdbuf())) {}
+    std::streambuf* orig;
+    silence_cout() : sink(), orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~silence_cout() { std::cout.rdbuf(orig); }
 };
 

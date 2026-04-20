@@ -9,19 +9,23 @@
 #include <atomic>
 #include <sstream>
 
-// RAII helper to silence stdout/stderr
+// RAII helper to silence stdout/stderr.
+// Members declared in init order to avoid using `sink` before construction.
+namespace {
 struct SilenceBridge {
+	std::ostringstream sink;
 	std::streambuf* orig_out;
 	std::streambuf* orig_err;
-	std::ostringstream sink;
 	SilenceBridge()
-		: orig_out(std::cout.rdbuf(sink.rdbuf()))
+		: sink()
+		, orig_out(std::cout.rdbuf(sink.rdbuf()))
 		, orig_err(std::cerr.rdbuf(sink.rdbuf())) {}
 	~SilenceBridge() {
 		std::cout.rdbuf(orig_out);
 		std::cerr.rdbuf(orig_err);
 	}
 };
+} // namespace
 
 // --- Batch mode tests ---
 

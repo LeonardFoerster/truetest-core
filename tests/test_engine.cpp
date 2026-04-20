@@ -9,13 +9,18 @@
 #include <thread>
 #include <chrono>
 
-// RAII helper to silence cout during noisy backtest runs
+// RAII helper to silence cout during noisy backtest runs.
+// Anonymous namespace: same struct name exists in other test TUs; without
+// this scope, UBSAN/LTO can pick the wrong definition across translation
+// units and fault during destruction.
+namespace {
 struct SilenceCout {
-    std::streambuf* orig;
     std::ostringstream sink;
-    SilenceCout() : orig(std::cout.rdbuf(sink.rdbuf())) {}
+    std::streambuf* orig;
+    SilenceCout() : sink(), orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceCout() { std::cout.rdbuf(orig); }
 };
+} // namespace
 
 static auto epoch_ms(int64_t ms)
 {
