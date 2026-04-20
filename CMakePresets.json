@@ -25,18 +25,6 @@
       }
     },
     {
-      "name": "windows-vs-2026",
-      "displayName": "Windows (Visual Studio 2026)",
-      "description": "MSBuild via Visual Studio 18 2026",
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
-      "generator": "Visual Studio 18 2026",
-      "architecture": "x64",
-      "binaryDir": "${sourceDir}/out/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_CONFIGURATION_TYPES": "Debug;Release"
-      }
-    },
-    {
       "name": "linux-default",
       "displayName": "Linux (Unix Makefiles)",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },

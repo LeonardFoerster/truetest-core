@@ -388,6 +388,10 @@ CMakeFiles/
 Testing/
 cmake_test_discovery_*.json
 CTestTestfile.cmake
+compile_commands.json
+.cache/
+_deps/
+out/
 
 # SQLite test artefacts
 truetest.db
