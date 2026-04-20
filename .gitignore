@@ -377,7 +377,26 @@ features.md
 docs/
 
 
-# CMake build directory
+.claude/
+
+# CMake build directory — single canonical build dir only
 build/
+build-*/
+build_*/
+cmake-build-*/
+CMakeFiles/
+Testing/
+cmake_test_discovery_*.json
+CTestTestfile.cmake
+
+# SQLite test artefacts
+truetest.db
+truetest.db-*
+*.db-shm
+*.db-wal
+
+# Debug logs
+truetest_debug.log
+
 
 
