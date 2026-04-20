@@ -16,29 +16,28 @@ orderbook pipeline.
 4. [Build Types and Optimization](#4-build-types-and-optimization)
 5. [Sanitizers](#5-sanitizers)
 6. [Install and Packaging](#6-install-and-packaging)
-7. [Docker](#7-docker)
-8. [Running TrueTest](#8-running-truetest)
-9. [CLI Flags Reference](#9-cli-flags-reference)
-10. [Configuration File](#10-configuration-file)
-11. [Dry Run Mode](#11-dry-run-mode)
-12. [Interactive TUI Mode](#12-interactive-tui-mode)
-13. [Provider Mode](#13-provider-mode)
-14. [Replay Mode](#14-replay-mode)
-15. [Strategies](#15-strategies)
-16. [Data Sources](#16-data-sources)
-17. [Fee Models](#17-fee-models)
-18. [Risk Management](#18-risk-management)
-19. [Threading Model](#19-threading-model)
-20. [WebSocket UI](#20-websocket-ui)
-21. [Event Pipeline](#21-event-pipeline)
-22. [SQLite Persistence](#22-sqlite-persistence)
-23. [Analytics & Reporting](#23-analytics--reporting)
-24. [Examples](#24-examples)
-25. [Observability & Debugging](#25-observability--debugging)
-26. [Error Handling & Resilience](#26-error-handling--resilience)
-27. [Testing](#27-testing)
-28. [Performance Benchmarks](#28-performance-benchmarks)
-29. [Embedding: C API and Python Bindings](#29-embedding-c-api-and-python-bindings)
+7. [Running TrueTest](#7-running-truetest)
+8. [CLI Flags Reference](#8-cli-flags-reference)
+9. [Configuration File](#9-configuration-file)
+10. [Dry Run Mode](#10-dry-run-mode)
+11. [Interactive TUI Mode](#11-interactive-tui-mode)
+12. [Provider Mode](#12-provider-mode)
+13. [Replay Mode](#13-replay-mode)
+14. [Strategies](#14-strategies)
+15. [Data Sources](#15-data-sources)
+16. [Fee Models](#16-fee-models)
+17. [Risk Management](#17-risk-management)
+18. [Threading Model](#18-threading-model)
+19. [WebSocket UI](#19-websocket-ui)
+20. [Event Pipeline](#20-event-pipeline)
+21. [SQLite Persistence](#21-sqlite-persistence)
+22. [Analytics & Reporting](#22-analytics--reporting)
+23. [Examples](#23-examples)
+24. [Observability & Debugging](#24-observability--debugging)
+25. [Error Handling & Resilience](#25-error-handling--resilience)
+26. [Testing](#26-testing)
+27. [Performance Benchmarks](#27-performance-benchmarks)
+28. [Embedding: C API and Python Bindings](#28-embedding-c-api-and-python-bindings)
 
 ---
 
@@ -232,43 +231,7 @@ sudo dpkg -i truetest-0.1.0-Linux.deb
 
 ---
 
-## 7. Docker
-
-A multi-stage Dockerfile is provided for reproducible builds and deployment.
-
-### Building the image
-
-```bash
-docker build -t truetest .
-```
-
-The build stage compiles with `Release` optimization and enables `WEB_UI`,
-`BINANCE`, and `SQLITE`. The runtime image is based on `debian:bookworm-slim`
-and contains only the binary, web assets, and minimal runtime libraries.
-
-### Running
-
-```bash
-# Start with WebSocket UI (default)
-docker run -p 8765:8765 truetest
-
-# Backtest with a mounted CSV file
-docker run -v /path/to/data:/data truetest \
-  ./truetest --provider local --path /data/market_data.csv --strategy sma
-
-# Custom port
-docker run -p 9000:9000 truetest \
-  ./truetest --web-ui --ws-port 9000
-```
-
-Port 8765 is exposed by default for the WebSocket UI.
-
-The `.dockerignore` excludes `build/`, `.git/`, and `.idea/` from the build
-context.
-
----
-
-## 8. Running TrueTest
+## 7. Running TrueTest
 
 TrueTest has three runtime modes determined by the flags you pass:
 
@@ -291,7 +254,7 @@ TrueTest has three runtime modes determined by the flags you pass:
 
 ---
 
-## 9. CLI Flags Reference
+## 8. CLI Flags Reference
 
 ### Core flags
 
@@ -418,7 +381,7 @@ defaults, or `--help-all` for expanded help.
 
 ---
 
-## 10. Configuration File
+## 9. Configuration File
 
 TrueTest supports loading configuration from a JSON file via `--config <path>`.
 CLI flags always override values from the config file.
@@ -485,7 +448,7 @@ template from your current CLI flags.
 
 ---
 
-## 11. Dry Run Mode
+## 10. Dry Run Mode
 
 The `--dry-run` flag validates the resolved configuration, prints a human-readable
 summary, and exits without running the engine.
@@ -528,7 +491,7 @@ without starting the engine or requiring data files.
 
 ---
 
-## 12. Interactive TUI Mode
+## 11. Interactive TUI Mode
 
 When launched without `--provider` or `--replay`, TrueTest presents an interactive
 text menu. The menus walk you through:
@@ -547,7 +510,7 @@ PostgreSQL appears in the data source menu only when built with
 
 ---
 
-## 13. Provider Mode
+## 12. Provider Mode
 
 Providers are self-registering modules that handle data sourcing and execution.
 Use `--provider <name>` to bypass the TUI and run headless.
@@ -675,7 +638,7 @@ account.
 
 ---
 
-## 14. Replay Mode
+## 13. Replay Mode
 
 Replay a previously recorded binary event log:
 
@@ -705,7 +668,7 @@ instead of scanning from the beginning.
 
 ---
 
-## 15. Strategies
+## 14. Strategies
 
 Strategies are registered via the `StrategyRegistry` and looked up by name at
 runtime. All strategies support runtime parameter configuration via `--param
@@ -826,7 +789,7 @@ so its own orders are tagged for attribution.
 
 ---
 
-## 16. Data Sources
+## 15. Data Sources
 
 ### Data Validation
 
@@ -966,7 +929,7 @@ Notes:
 
 ---
 
-## 17. Fee Models
+## 16. Fee Models
 
 Fee models are applied to every fill event to calculate commission.
 
@@ -996,7 +959,7 @@ fee structure).
 
 ---
 
-## 18. Risk Management
+## 17. Risk Management
 
 The risk manager validates orders and fills against configurable limits. It
 returns one of four actions:
@@ -1074,7 +1037,7 @@ should set appropriate limits via the config or CLI flags.
 
 ---
 
-## 19. Threading Model
+## 18. Threading Model
 
 TrueTest uses a lock-free architecture with SPSC (single-producer,
 single-consumer) ring buffers for inter-thread communication. The event loop
@@ -1146,7 +1109,7 @@ These metrics are always available, not gated behind `HAS_DEBUG`.
 
 ---
 
-## 20. WebSocket UI
+## 19. WebSocket UI
 
 When `--web-ui` is passed, TrueTest starts a Boost.Beast server that handles both
 WebSocket connections and HTTP REST requests on the same port.
@@ -1272,7 +1235,7 @@ Custom port: `--ws-port 9000`.
 
 ---
 
-## 21. Event Pipeline
+## 20. Event Pipeline
 
 The engine processes data through a sequential event-driven pipeline:
 
@@ -1414,7 +1377,7 @@ Portfolio and analytics handle partial fills incrementally.
 
 ---
 
-## 22. SQLite Persistence
+## 21. SQLite Persistence
 
 SQLite is enabled by default (`-DENABLE_SQLITE=ON`). It persists equity curve
 data and trade history to a local database file. Both equity points and fill
@@ -1537,7 +1500,7 @@ default.
 
 ---
 
-## 23. Analytics & Reporting
+## 22. Analytics & Reporting
 
 TrueTest computes a comprehensive set of analytics metrics during and after each
 backtest run. All metrics are computed incrementally using Welford's online
@@ -1722,7 +1685,7 @@ All analytics flags are supported in the JSON configuration file:
 
 ---
 
-## 24. Examples
+## 23. Examples
 
 ### Basic CSV backtest
 
@@ -1834,13 +1797,6 @@ Fetches 500 historical 1-minute candles before switching to live streaming.
   --strategy sma \
   --thread-preset full \
   --log-events events.bin
-```
-
-### Docker deployment
-
-```bash
-docker build -t truetest .
-docker run -p 8765:8765 truetest
 ```
 
 ### Using a JSON config file
@@ -1960,7 +1916,7 @@ you would actually leave unattended.
 
 ---
 
-## 25. Observability & Debugging
+## 24. Observability & Debugging
 
 TrueTest ships with a three-part observability stack (todo Step L). None of
 these features require optional CMake flags unless explicitly noted.
@@ -2067,7 +2023,7 @@ long-running live or shadow sessions.
 
 ---
 
-## 26. Error Handling & Resilience
+## 25. Error Handling & Resilience
 
 ### 26.1 Graceful worker recovery (N1)
 
@@ -2248,7 +2204,7 @@ test is suitable for running under `-DENABLE_TSAN=ON`.
 
 ---
 
-## 27. Testing
+## 26. Testing
 
 TrueTest ships with three layers of automated tests, all built by a single
 CMake flag:
@@ -2329,7 +2285,7 @@ golden comparison is disabled until fixed.
 
 ---
 
-## 28. Performance Benchmarks
+## 27. Performance Benchmarks
 
 Google Benchmark suite for the hot-path components. Opt-in via
 `-DENABLE_BENCHMARKS=ON`. Builds a separate binary `truetest_benchmarks`
@@ -2366,7 +2322,7 @@ before capturing baselines.
 
 ---
 
-## 29. Embedding: C API and Python Bindings
+## 28. Embedding: C API and Python Bindings
 
 TrueTest ships a stable `extern "C"` API and a ctypes-based Python wrapper so
 the engine can be driven from host languages without linking the full C++

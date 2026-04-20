@@ -25,7 +25,6 @@ hft-engine/
 │   ├── CompilerFlags.cmake             # C++23, per-config opt, tt_apply_* helpers
 │   └── Dependencies.cmake              # tt_fetch_* + tt_wire_optional_backends
 ├── vcpkg.json                          # only matters when ENABLE_POSTGRESQL=ON
-├── Dockerfile / .dockerignore          # containerized build
 ├── start.sh                            # launcher script
 ├── .github/workflows/ci.yml            # CI pipeline
 ├── market_data.csv                     # sample OHLCV data
@@ -40,8 +39,7 @@ hft-engine/
 │   │   ├── contexts/WebSocketContext.tsx
 │   │   ├── services/websocket.ts
 │   │   └── store/ (Engine, Market, OrderBook, Portfolio, Fill, Analytics)
-│   ├── index.html                      # Vite entry
-│   └── index.legacy.html               # old single-file dashboard (kept for reference)
+│   └── index.html                      # Vite entry
 ├── tests/                              # 39 test files, ~310 cases (GoogleTest)
 └── BacktestEngine/
     └── src/
@@ -140,8 +138,6 @@ hft-engine/
         │   │   ├── binance_depth_parser.h     # L2 depth
         │   │   ├── binance_recorder.h         # record live WS to file
         │   │   └── binance_replay_transport.h # replay recorded WS file
-        │   ├── metatrader/             # planned: EA bridge via named pipe/socket
-        │   └── polymarket/             # planned: AMM execution
         ├── market_maker/
         │   └── market_maker.h/.cpp     # liquidity seeding
         ├── types/
@@ -275,10 +271,9 @@ When `--web-ui` is passed, a Boost.Beast WebSocket server (default port 8765,
 per-message deflate negotiated) broadcasts all events as JSON to connected
 browsers. The frontend under `web/` is a React 19 + TypeScript + Vite + Tailwind
 SPA using `lightweight-charts`; build with `npm run build` in `web/` and serve
-`web/dist/`. The legacy single-file dashboard is preserved as
-`web/index.legacy.html`. Clients send JSON commands back to the engine (start,
-pause, stop, order, set_timeframe, set_symbol, set_strategy) via `ws_command`
-structs polled by the engine.
+`web/dist/`. Clients send JSON commands back to the engine (start, pause, stop,
+order, set_timeframe, set_symbol, set_strategy) via `ws_command` structs polled
+by the engine.
 
 ### C API for embedding
 `src/api/truetest_api.h` exposes an opaque handle + JSON-config surface
@@ -314,10 +309,6 @@ testing against real exchange data.
 
 ## Not yet implemented
 
-- **MetaTrader provider** — EA bridge via named pipe or socket. README stub only
-  at `providers/metatrader/`.
-- **Polymarket provider** — WebSocket/API client for AMM. README stub only at
-  `providers/polymarket/`.
 - **Risk resume** — `halt_flag_` stops the engine but there's no resume channel.
 - **Generic ExchangeAdapter** — Binance is the only live venue adapter today.
 
