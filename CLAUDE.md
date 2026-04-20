@@ -2,18 +2,28 @@
 
 ## What this is
 
-TrueTest — a modular C++17 engine that starts as a backtesting platform but is
+TrueTest — a modular C++23 engine that starts as a backtesting platform but is
 designed to be reused as the foundation for different deployments: pure backtesting,
 Binance spot execution, Polymarket AMM, MetaTrader EA, or anything else that
 processes market data through a strategy and orderbook pipeline. Each deployment
 attaches different "blocks" (storage backends, execution targets, data feeds) to
 the same core.
 
+The build produces three binaries from the same source tree —
+`engine_backtest`, `engine_shadow`, `engine_live` — differing only in a
+compile-time `TT_TARGET` define. Live-order paths are gated at compile time,
+so only `engine_live` can ever place real orders (the others hard-reject
+`--mode=live`).
+
 ## Project structure
 
 ```
 hft-engine/
 ├── CMakeLists.txt                      # build config, multiple opt-in flags
+├── CMakePresets.json                   # linux-default + Windows presets
+├── cmake/
+│   ├── CompilerFlags.cmake             # C++23, per-config opt, tt_apply_* helpers
+│   └── Dependencies.cmake              # tt_fetch_* + tt_wire_optional_backends
 ├── vcpkg.json                          # only matters when ENABLE_POSTGRESQL=ON
 ├── Dockerfile / .dockerignore          # containerized build
 ├── start.sh                            # launcher script
@@ -46,7 +56,9 @@ hft-engine/
         │   ├── event.h                 # event types: market, order, fill, tick
         │   ├── event_json.h            # snprintf-based JSON for event types
         │   ├── event_log.h             # binary event log (write + replay, zstd)
-        │   └── checkpoint.h            # portfolio-state snapshot format
+        │   ├── checkpoint.h            # portfolio-state snapshot format
+        │   └── tt_target.h             # compile-time target id (TT_TARGET), default
+        │                               #   mode, target_allows_live_orders() gate
         ├── data/
         │   ├── data_source.h           # IDataSource interface
         │   ├── csv_data_source.h/.cpp  # CSV OHLCV backend (default, zero deps)
@@ -169,23 +181,27 @@ cmake -B build \
   -DENABLE_TSAN=ON \          # ThreadSanitizer (mutually exclusive with ASAN/UBSAN)
   -DENABLE_ASAN=ON \          # AddressSanitizer
   -DENABLE_UBSAN=ON \         # UndefinedBehaviorSanitizer
+  -DENABLE_NATIVE_OPT=ON \    # -march=native + unroll on engine_live only (Release)
   -DENABLE_BENCHMARKS=ON \    # Google Benchmark suite
   -DBUILD_SHARED_LIB=ON \     # libtruetest shared library + C API (src/api/truetest_api.h)
   -DBUILD_TESTS=ON            # GoogleTest suite (~310 cases; a few EngineStreaming
                               #   streaming tests crash at teardown — known issue)
 cmake --build build
 
-# Run
-./build/truetest                                        # interactive TUI
-./build/truetest --provider local --path market_data.csv --strategy sma
-./build/truetest --provider binance --symbol btcusdt --stream trade --web-ui
-./build/truetest --replay event_log.bin
-./build/truetest --provider binance --symbol btcusdt --stream kline_1m \
+# Run — three binaries, same source tree, distinct TT_TARGET at compile time
+./build/engine_backtest                                   # interactive TUI, backtest default
+./build/engine_backtest --provider local --path market_data.csv --strategy sma
+./build/engine_shadow   --provider binance --symbol btcusdt --stream trade --web-ui
+./build/engine_backtest --replay event_log.bin
+./build/engine_live     --provider binance --symbol btcusdt --stream kline_1m \
   --live --api-key KEY --api-secret SECRET                # REAL orders (confirmation prompt)
 ```
 
-The binary is `build/truetest`. The shared library (when `BUILD_SHARED_LIB=ON`)
-is `build/libtruetest.so` with its C header at `BacktestEngine/src/api/truetest_api.h`.
+Each binary links the shared `engine_core` OBJECT library and differs only
+in its `TT_TARGET` define. `--mode=live` is rejected by any binary whose
+`target_allows_live_orders()` returns `false` (i.e. everything except
+`engine_live`). The shared library (when `BUILD_SHARED_LIB=ON`) is
+`build/libtruetest.so`, C header at `BacktestEngine/src/api/truetest_api.h`.
 
 ## Architecture decisions
 
@@ -307,13 +323,22 @@ testing against real exchange data.
 
 ## Conventions
 
-- C++17 standard, enforced via `CMAKE_CXX_STANDARD_REQUIRED`
+- C++23 standard, enforced via `CMAKE_CXX_STANDARD_REQUIRED` in
+  `cmake/CompilerFlags.cmake`
 - Interfaces are prefixed with `I` (`IDataSource`, `IStrategy`, `IProvider`)
 - New optional dependencies get their own `ENABLE_*` CMake flag + `HAS_*` define
+- Optional deps are wired into `engine_core` (OBJECT library) exactly once via
+  `tt_wire_optional_backends()` in `cmake/Dependencies.cmake`, with PUBLIC
+  link / compile-definition scope so `HAS_*` reaches `main.cpp` in every
+  executable that links `engine_core`
 - The core engine must always compile with zero external dependencies; no
   `HAS_*` guards are allowed in `core/engine.{h,cpp}` or `core/engine_config.h`
 - Source files that depend on an optional library are wrapped in `#ifdef HAS_*`
-  and added via `target_sources()` inside the CMake `if()` block
+  and added via `target_sources()` inside `tt_wire_optional_backends`
+- Runtime mode switching (`--mode backtest|shadow|live`) is kept ONLY at the
+  argument-parsing edge; everywhere else, the compile-time `TT_TARGET` id
+  from `core/tt_target.h` (and helpers like `target_allows_live_orders()`)
+  is the source of truth
 - JSON on the hot path is hand-rolled (snprintf for serialization, string
   extraction for parsing). `nlohmann/json` is linked only for static config
   files in `main.cpp` and the C API
