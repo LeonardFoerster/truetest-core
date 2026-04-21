@@ -24,6 +24,39 @@ include(Dependencies)    # provides tt_fetch_* and tt_wire_optional_backends
 
 tt_fetch_dependencies()
 
+# ── Generated build-audit header ────────────────────────────────────────────
+# Captures commit SHA + build timestamp at configure time so every binary
+# emits a reproducible AUDIT log line on startup. See docs/migration.md
+# Step 11 notes and cmake/truetest_version.h.in for rationale.
+execute_process(
+    COMMAND           git rev-parse --short=12 HEAD
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE   TRUETEST_GIT_SHA
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT TRUETEST_GIT_SHA)
+    set(TRUETEST_GIT_SHA "unknown")
+endif()
+
+execute_process(
+    COMMAND           git status --porcelain
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE   _tt_git_status
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(_tt_git_status)
+    set(TRUETEST_GIT_DIRTY "dirty")
+else()
+    set(TRUETEST_GIT_DIRTY "clean")
+endif()
+
+string(TIMESTAMP TRUETEST_BUILD_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
+
+configure_file(
+    "${CMAKE_SOURCE_DIR}/cmake/truetest_version.h.in"
+    "${CMAKE_BINARY_DIR}/generated/tt/truetest_version.h"
+    @ONLY)
+
 # ── Shared engine core (OBJECT library) ─────────────────────────────────────
 # Every source file that is identical across the three binaries lives here.
 # main.cpp is intentionally NOT part of engine_core — each executable owns
@@ -50,7 +83,8 @@ set(ENGINE_CORE_SOURCES
 
 add_library(engine_core OBJECT ${ENGINE_CORE_SOURCES})
 target_include_directories(engine_core PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_BINARY_DIR}/generated")
 target_link_libraries(engine_core PUBLIC
     CLI11::CLI11 nlohmann_json::nlohmann_json libzstd_static)
 tt_apply_common_flags(engine_core)
@@ -59,10 +93,13 @@ tt_apply_common_flags(engine_core)
 tt_wire_optional_backends(engine_core)
 
 # ── Executable factory ──────────────────────────────────────────────────────
-# Produces engine_backtest / engine_shadow / engine_live from the same
-# translation-unit body (src/bin/main.inc), linked against engine_core.
-# Each binary owns a thin wrapper under src/bin/<target>/main.cpp that
-# #includes main.inc — per Step 10, entry points live with their target.
+# Produces engine_backtest / engine_shadow / engine_live. Each binary owns
+# its own translation unit under src/bin/<target>/main.cpp per Step 10's
+# directive (prerequisites.md §10 "Binaries live under src/bin/"). The
+# per-target main.cpp currently #includes the shared src/bin/main.inc so all
+# three compile the same implementation with a distinct TT_TARGET define;
+# as deepdive phases land, live-only code migrates out of the shared .inc
+# into src/bin/engine_live/ directly, making the wrappers diverge.
 function(_tt_add_engine_binary name target_id entry)
     add_executable(${name} ${entry})
     target_compile_definitions(${name} PRIVATE TT_TARGET=${target_id})

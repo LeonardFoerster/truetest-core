@@ -2,9 +2,20 @@ name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches: ['**']
   pull_request:
-    branches: [master, main]
+    branches: ['**']
+
+# Shared build-cache settings (prerequisites.md §11 "Build caching"):
+#   * ccache — compiler cache, keyed per job + CMakeLists hash. Survives
+#     across PRs on the same runner OS so cold rebuilds are minutes faster.
+#   * FETCHCONTENT_BASE_DIR — shared root for FetchContent downloads
+#     (CLI11, zstd, nlohmann, GTest, Benchmark, Abseil, libpqxx). Keyed
+#     per FetchContent pin set; one cache entry serves every job.
+env:
+  FETCHCONTENT_BASE_DIR: ${{ github.workspace }}/.cache/ttsrc
+  CCACHE_DIR:            ${{ github.workspace }}/.cache/ccache
+  CCACHE_MAXSIZE:        500M
 
 jobs:
   build:
@@ -22,8 +33,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build libsqlite3-dev \
+            cmake ninja-build ccache libsqlite3-dev \
             ${{ matrix.compiler == 'gcc-13' && 'g++-13' || 'clang-17' }}
+
+      - name: Restore FetchContent cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FETCHCONTENT_BASE_DIR }}
+          key:  fetchcontent-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key:  ccache-${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}-
 
       - name: Configure
         run: |
@@ -33,6 +58,8 @@ jobs:
             export CC=clang-17 CXX=clang++-17
           fi
           cmake -B build -G Ninja \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
             -DBUILD_TESTS=ON \
             -DENABLE_SQLITE=ON
@@ -43,11 +70,8 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-      - name: Cache build
-        uses: actions/cache@v4
-        with:
-          path: build
-          key: ${{ runner.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}-${{ hashFiles('CMakeLists.txt') }}
+      - name: ccache stats
+        run: ccache -s
 
   asan:
     runs-on: ubuntu-latest
@@ -58,12 +82,27 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build g++-13 libsqlite3-dev
+            cmake ninja-build ccache g++-13 libsqlite3-dev
+
+      - name: Restore FetchContent cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FETCHCONTENT_BASE_DIR }}
+          key:  fetchcontent-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key:  ccache-${{ runner.os }}-asan-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-asan-
 
       - name: Configure with ASAN+UBSAN
         run: |
           export CC=gcc-13 CXX=g++-13
           cmake -B build -G Ninja \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_BUILD_TYPE=Debug \
             -DBUILD_TESTS=ON \
             -DENABLE_SQLITE=ON \
@@ -82,7 +121,6 @@ jobs:
   # TSAN lives in .github/workflows/nightly.yml (runs on a cron schedule
   # against pre_transform). Per-PR TSAN is too slow — see docs/branch-policy.md.
 
-
   binance:
     runs-on: ubuntu-latest
     steps:
@@ -92,13 +130,28 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build g++-13 libsqlite3-dev \
+            cmake ninja-build ccache g++-13 libsqlite3-dev \
             libboost-dev libboost-system-dev libssl-dev
+
+      - name: Restore FetchContent cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FETCHCONTENT_BASE_DIR }}
+          key:  fetchcontent-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key:  ccache-${{ runner.os }}-binance-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-binance-
 
       - name: Configure with Binance
         run: |
           export CC=gcc-13 CXX=g++-13
           cmake -B build -G Ninja \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTS=ON \
             -DENABLE_SQLITE=ON \
@@ -119,13 +172,28 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build g++-13 libsqlite3-dev \
+            cmake ninja-build ccache g++-13 libsqlite3-dev \
             libpq-dev postgresql-server-dev-all
+
+      - name: Restore FetchContent cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FETCHCONTENT_BASE_DIR }}
+          key:  fetchcontent-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key:  ccache-${{ runner.os }}-pg-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-pg-
 
       - name: Configure with PostgreSQL
         run: |
           export CC=gcc-13 CXX=g++-13
           cmake -B build -G Ninja \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTS=ON \
             -DENABLE_SQLITE=ON \
@@ -136,6 +204,112 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-format-17
+
+      - name: Check formatting
+        run: |
+          shopt -s globstar nullglob
+          files=(src/**/*.{h,hpp,cpp,cc} tests/**/*.{h,hpp,cpp,cc} benchmarks/**/*.{h,hpp,cpp,cc})
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No source files found"; exit 0
+          fi
+          clang-format-17 --style=file --dry-run --Werror "${files[@]}"
+
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build ccache g++-13 clang-tidy-17 libsqlite3-dev
+
+      - name: Restore FetchContent cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FETCHCONTENT_BASE_DIR }}
+          key:  fetchcontent-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key:  ccache-${{ runner.os }}-tidy-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-tidy-
+
+      - name: Configure (compile_commands.json)
+        run: |
+          export CC=gcc-13 CXX=g++-13
+          cmake -B build -G Ninja \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DBUILD_TESTS=ON \
+            -DENABLE_SQLITE=ON
+
+      - name: Build (generate any codegen)
+        run: cmake --build build --parallel
+
+      - name: Run clang-tidy
+        run: |
+          shopt -s globstar nullglob
+          files=(src/**/*.cpp)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No .cpp files found"; exit 0
+          fi
+          clang-tidy-17 -p build --warnings-as-errors='*' --quiet "${files[@]}"
+
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build ccache g++-13 libsqlite3-dev
+
+      - name: Restore FetchContent cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FETCHCONTENT_BASE_DIR }}
+          key:  fetchcontent-${{ runner.os }}-${{ hashFiles('cmake/Dependencies.cmake') }}
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key:  ccache-${{ runner.os }}-bench-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-bench-
+
+      - name: Configure with benchmarks
+        run: |
+          export CC=gcc-13 CXX=g++-13
+          cmake -B build -G Ninja \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_SQLITE=ON \
+            -DENABLE_BENCHMARKS=ON
+
+      - name: Build benchmarks target
+        run: cmake --build build --parallel --target truetest_benchmarks
+
+      - name: Smoke-run benchmarks
+        run: ./build/truetest_benchmarks --benchmark_min_time=0.01s --benchmark_repetitions=1
 
   layer-deps:
     runs-on: ubuntu-latest
@@ -150,3 +324,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Enforce credential isolation
         run: ./scripts/check-credentials.sh
+
+  hotpath-json-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce nlohmann/json allow-list
+        run: ./scripts/check-hotpath-json.sh

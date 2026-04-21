@@ -31,6 +31,7 @@
 #include "market_maker/market_maker.h"
 #include "threading/thread_config.h"
 #include "utils/log/logger.h"
+#include <tt/truetest_version.h>
 
 #ifdef HAS_POSTGRESQL
 #include "data/pg_data_source.h"
@@ -1194,6 +1195,17 @@ int main(int argc, char* argv[])
     if (!opts.log_file_path.empty())
         tt_log::Logger::instance().set_file(opts.log_file_path);
     LOG_INFO("main", "truetest starting (pid=%d)", static_cast<int>(getpid()));
+    LOG_INFO("audit",
+             "build version=%s sha=%s (%s) built=%s type=%s cxx=%s",
+             TRUETEST_VERSION, TRUETEST_GIT_SHA, TRUETEST_GIT_DIRTY,
+             TRUETEST_BUILD_TIMESTAMP, TRUETEST_BUILD_TYPE,
+             TRUETEST_CXX_COMPILER);
+    LOG_INFO("audit",
+             "deps cli11=%s zstd=%s nlohmann=%s gtest=%s bench=%s "
+             "libpqxx=%s abseil=%s",
+             TRUETEST_DEP_CLI11, TRUETEST_DEP_ZSTD, TRUETEST_DEP_NLOHMANN,
+             TRUETEST_DEP_GTEST, TRUETEST_DEP_BENCHMARK,
+             TRUETEST_DEP_LIBPQXX, TRUETEST_DEP_ABSEIL);
 
     apply_config_overlay(app, opts);
 
