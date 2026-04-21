@@ -14,12 +14,12 @@
 #include "risk/risk_manager.h"
 #include "threading/ring_buffer.h"
 #include "threading/thread_config.h"
-#include "threading/logging_worker.h"
-#include "threading/risk_worker.h"
-#include "threading/stats_worker.h"
-#include "threading/observer_worker.h"
-#include "threading/risk_stats_worker.h"
-#include "threading/market_maker_worker.h"
+#include "logging_worker.h"
+#include "risk_worker.h"
+#include "stats_worker.h"
+#include "observer_worker.h"
+#include "risk_stats_worker.h"
+#include "market_maker_worker.h"
 #include "engine_config.h"
 #include "core/event.h"
 #include "core/event_log.h"
@@ -33,7 +33,7 @@
 #endif
 
 #ifdef HAS_WEB_UI
-#include "threading/ws_worker.h"
+#include "ws_worker.h"
 #endif
 
 #ifdef HAS_DEBUG

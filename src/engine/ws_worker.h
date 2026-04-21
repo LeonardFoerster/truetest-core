@@ -1,11 +1,11 @@
 #pragma once
 #ifdef HAS_WEB_UI
 
-#include "worker.h"
-#include "ring_buffer.h"
-#include "http_handler.h"
-#include "engine/event_json.h"
-#include "utils/log/logger.h"
+#include "../threading/worker.h"
+#include "../threading/ring_buffer.h"
+#include "../threading/http_handler.h"
+#include "event_json.h"
+#include "../utils/log/logger.h"
 
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>

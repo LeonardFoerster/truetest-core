@@ -1,7 +1,7 @@
 #pragma once
 
-#include "worker.h"
-#include "ring_buffer.h"
+#include "../threading/worker.h"
+#include "../threading/ring_buffer.h"
 #include "../market_maker/market_maker.h"
 #include "../types/object_pool.h"
 #include "../types/order_id.h"

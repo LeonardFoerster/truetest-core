@@ -59,18 +59,20 @@ tt_apply_common_flags(engine_core)
 tt_wire_optional_backends(engine_core)
 
 # ── Executable factory ──────────────────────────────────────────────────────
-# Produces engine_backtest / engine_shadow / engine_live from the same main.cpp
-# linked against engine_core, differing only in compile-time define.
-function(_tt_add_engine_binary name target_id)
-    add_executable(${name} src/main.cpp)
+# Produces engine_backtest / engine_shadow / engine_live from the same
+# translation-unit body (src/bin/main.inc), linked against engine_core.
+# Each binary owns a thin wrapper under src/bin/<target>/main.cpp that
+# #includes main.inc — per Step 10, entry points live with their target.
+function(_tt_add_engine_binary name target_id entry)
+    add_executable(${name} ${entry})
     target_compile_definitions(${name} PRIVATE TT_TARGET=${target_id})
     target_link_libraries(${name} PRIVATE engine_core)
     tt_apply_common_flags(${name})
 endfunction()
 
-_tt_add_engine_binary(engine_backtest TT_TARGET_BACKTEST)
-_tt_add_engine_binary(engine_shadow   TT_TARGET_SHADOW)
-_tt_add_engine_binary(engine_live     TT_TARGET_LIVE)
+_tt_add_engine_binary(engine_backtest TT_TARGET_BACKTEST src/bin/engine_backtest/main.cpp)
+_tt_add_engine_binary(engine_shadow   TT_TARGET_SHADOW   src/bin/engine_shadow/main.cpp)
+_tt_add_engine_binary(engine_live     TT_TARGET_LIVE     src/bin/engine_live/main.cpp)
 
 # Native microarchitecture tuning applies ONLY to engine_live.
 tt_apply_live_flags(engine_live)

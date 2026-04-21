@@ -1,25 +1,25 @@
 #pragma once
 
-#include "worker.h"
+#include "../threading/worker.h"
 #include "../risk/risk_manager.h"
 #include "../execution/portfolio.h"
 #include "../analytics/analytics.h"
 
 #include <atomic>
 
-class RiskWorker : public Worker
+class RiskStatsWorker : public Worker
 {
 public:
-    RiskWorker(RiskManager rm,
-               std::atomic<bool>& halt_flag,
-               double initial_cash = 100000.0,
-               std::size_t rolling_window = 252,
-               double risk_free_rate = 0.0)
+    RiskStatsWorker(RiskManager rm,
+                    std::atomic<bool>& halt_flag,
+                    double initial_cash = 100000.0,
+                    std::size_t rolling_window = 252,
+                    double risk_free_rate = 0.0)
         : risk_manager_(std::move(rm))
         , analytics_(initial_cash, rolling_window, risk_free_rate)
         , halt_flag_(halt_flag) {}
 
-    const char* worker_name() const override { return "risk"; }
+    const char* worker_name() const override { return "risk_stats"; }
 
     void on_event(const event_pointer& ev) override
     {
@@ -51,6 +51,8 @@ public:
     {
         return events_processed_.load(std::memory_order_relaxed);
     }
+
+    const Analytics& analytics() const { return analytics_; }
 
 private:
     RiskManager risk_manager_;

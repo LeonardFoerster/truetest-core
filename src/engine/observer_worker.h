@@ -1,6 +1,6 @@
 #pragma once
 
-#include "worker.h"
+#include "../threading/worker.h"
 #include "../risk/risk_manager.h"
 #include "../execution/portfolio.h"
 #include "../analytics/analytics.h"

@@ -409,3 +409,8 @@ secret*
 .env
 .env.*
 !.env.example
+
+# src/bin/ must stay tracked — the VS-era [Bb]in/ pattern above would
+# otherwise swallow the per-binary entry wrappers added in Step 10.
+!src/bin/
+!src/bin/**

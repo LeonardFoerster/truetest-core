@@ -1,6 +1,6 @@
 #pragma once
 
-#include "worker.h"
+#include "../threading/worker.h"
 #include "../analytics/analytics.h"
 
 #include <atomic>

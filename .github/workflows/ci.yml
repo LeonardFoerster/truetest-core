@@ -136,3 +136,17 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  layer-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce layered dependency graph
+        run: ./scripts/check-layer-deps.sh
+
+  credentials-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce credential isolation
+        run: ./scripts/check-credentials.sh
