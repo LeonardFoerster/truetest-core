@@ -1,10 +1,15 @@
 # TrueTest — User Manual
 
+> **Status:** Operator-facing manual. Covers CLI usage, flags, provider modes,
+> and runtime behaviour of the three engine binaries (`engine_backtest`,
+> `engine_shadow`, `engine_live`). For the authoritative build/architecture
+> spec see [`../CLAUDE.md`](../CLAUDE.md); for the long-term target
+> architecture see [`target-architecture.md`](target-architecture.md).
 
-TrueTest is a modular C++17 engine that starts as a backtesting platform but is
-designed to be reused across deployments: pure backtesting, Polymarket execution,
-MetaTrader EA, or anything that processes market data through a strategy and
-orderbook pipeline.
+TrueTest is a modular C++23 engine that starts as a backtesting platform but is
+designed to be reused across deployments: pure backtesting, Binance spot
+execution, Polymarket, MetaTrader EA, or anything that processes market data
+through a strategy and orderbook pipeline.
 
 ---
 

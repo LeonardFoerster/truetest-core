@@ -373,10 +373,6 @@ to_do.md
 CLAUDE.MD
 features.md
 
-# Docs
-docs/
-
-
 .claude/
 
 # CMake build directory — single canonical build dir only
