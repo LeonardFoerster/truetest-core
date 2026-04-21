@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Pre-commit hook: reject credential files.
+#
+# Enable this hook once per clone:
+#   git config core.hooksPath scripts
+#
+# The patterns below mirror the credential entries in .gitignore. Anything
+# matching is rejected even if the developer adds it with `git add -f`.
+#
+# If you need to commit a file that legitimately matches one of these
+# patterns (e.g. a test fixture), bypass is *not* supported — rename the
+# file instead. `--no-verify` is explicitly forbidden by project policy.
+
+set -euo pipefail
+
+DENY_PATTERNS=(
+    'config/live.*\.toml$'
+    'config/.*secret.*'
+    '.*\.pem$'
+    '.*secret.*'
+    '^\.env(\..*)?$'
+)
+
+# --allow-empty permits sentinels like .env.example that we want tracked.
+ALLOW_EXACT=(
+    '.env.example'
+)
+
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+if [[ -z "$staged" ]]; then
+    exit 0
+fi
+
+bad=()
+while IFS= read -r f; do
+    # Skip explicit allow-list.
+    skip=0
+    for a in "${ALLOW_EXACT[@]}"; do
+        if [[ "$f" == "$a" ]]; then
+            skip=1
+            break
+        fi
+    done
+    [[ $skip -eq 1 ]] && continue
+
+    for pat in "${DENY_PATTERNS[@]}"; do
+        if [[ "$f" =~ $pat ]]; then
+            bad+=("$f (matches: $pat)")
+            break
+        fi
+    done
+done <<<"$staged"
+
+if ((${#bad[@]})); then
+    printf '\n\033[31m[pre-commit] Refusing to commit credential-shaped files:\033[0m\n' >&2
+    for b in "${bad[@]}"; do
+        printf '  - %s\n' "$b" >&2
+    done
+    printf '\nIf this is a false positive, rename the file. --no-verify is forbidden.\n' >&2
+    exit 1
+fi
+
+exit 0

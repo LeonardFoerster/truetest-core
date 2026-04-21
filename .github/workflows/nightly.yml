@@ -1,0 +1,43 @@
+name: Nightly
+
+# TSAN is slow (~15 min) and high-signal only — running it on every PR is a
+# tax on review latency. Per docs/branch-policy.md we run it nightly on the
+# long-lived integration branch (pre_transform) and require a green run in
+# the previous 7 days before a phase branch fast-forwards into master.
+
+on:
+  schedule:
+    # 02:30 UTC daily — quiet hour for the shared runner pool.
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pre_transform
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build g++-13 libsqlite3-dev
+
+      - name: Configure with TSAN
+        run: |
+          export CC=gcc-13 CXX=g++-13
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DBUILD_TESTS=ON \
+            -DENABLE_SQLITE=ON \
+            -DENABLE_TSAN=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+        env:
+          TSAN_OPTIONS: "halt_on_error=1"

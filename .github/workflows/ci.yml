@@ -79,33 +79,9 @@ jobs:
           ASAN_OPTIONS: "halt_on_error=1:detect_leaks=0"
           UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
 
-  tsan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  # TSAN lives in .github/workflows/nightly.yml (runs on a cron schedule
+  # against pre_transform). Per-PR TSAN is too slow — see docs/branch-policy.md.
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build g++-13 libsqlite3-dev
-
-      - name: Configure with TSAN
-        run: |
-          export CC=gcc-13 CXX=g++-13
-          cmake -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DBUILD_TESTS=ON \
-            -DENABLE_SQLITE=ON \
-            -DENABLE_TSAN=ON
-
-      - name: Build
-        run: cmake --build build --parallel
-
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
-        env:
-          TSAN_OPTIONS: "halt_on_error=1"
 
   binance:
     runs-on: ubuntu-latest

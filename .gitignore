@@ -398,5 +398,14 @@ truetest.db-*
 # Debug logs
 truetest_debug.log
 
-
-
+# Credentials / secrets — nothing matching these patterns may be committed.
+# Enforced by scripts/pre-commit (see docs/branch-policy.md).
+config/live*.toml
+config/*secret*
+config/*.pem
+*.pem
+*secret*
+secret*
+.env
+.env.*
+!.env.example
