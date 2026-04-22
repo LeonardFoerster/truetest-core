@@ -214,6 +214,9 @@ public:
         order_side get_side() const { return side_; }
         double get_quantity() const { return quantity_; }
         double get_price() const { return price_; }
+        void set_quantity(double q) { quantity_ = q; }
+        void set_price(double p) { price_ = p; }
+        void set_stop_price(double p) { stop_price_ = p; }
         time_in_force get_tif() const { return tif_; }
         double get_stop_price() const { return stop_price_; }
 

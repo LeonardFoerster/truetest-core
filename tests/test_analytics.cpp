@@ -143,60 +143,85 @@ TEST(Analytics, EventDispatch_UnknownType)
 
 // --- Step 7: Streaming / Incremental Analytics tests ---
 
-TEST(Analytics, Welford_AccuracyVsBatch)
+TEST(Analytics, Sharpe_BarReturns_Annualized)
 {
-    // Feed known trade returns through Analytics, then compare Welford-derived
-    // mean/stddev against a batch calculation.  Tolerance: 1e-10.
-    Analytics a;
-    auto mkt = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
-    a.on_event(mkt);
+    // Sharpe is computed from bar-over-bar equity returns (not trade P&L) and
+    // annualized by sqrt(periods_per_year). Feed a flat cash position (no
+    // trades) and drive equity via mark-to-market of a pre-existing position,
+    // then verify against a batch calculation with the same annualization.
+    const std::size_t ppy = 252;
+    Analytics a(100000.0, 252, 0.0, ppy);
 
-    // Returns we will inject via buy/sell round-trips
-    const std::vector<double> prices = {110.0, 95.0, 130.0, 85.0, 120.0, 105.0, 90.0, 115.0};
-    const double entry_price = 100.0;
-    const int qty = 10;
+    // Seed a long position so equity tracks price moves: buy 100 @ 100.
+    auto mkt0 = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
+    a.on_event(mkt0);
+    auto bo = std::make_shared<order_event>(epoch_ms(0), "X", order_type::limit, order_side::buy, 100, 100.0);
+    bo->set_order_id(1);
+    a.on_event(bo);
+    auto bf = std::make_shared<fill_event>(epoch_ms(0), "X", 1, order_side::buy, 100, 100.0, 0.0);
+    a.on_event(bf);
+    // Now cash = 100000 - 10000 = 90000, pos = 100.
 
-    // Compute expected returns (pnl = qty * (exit - entry))
-    std::vector<double> expected_returns;
-    for (double exit : prices)
-        expected_returns.push_back(qty * (exit - entry_price));
+    // Walk the price; each market_event produces a bar-over-bar equity return.
+    const std::vector<double> prices = {102.0, 101.0, 105.0, 103.0, 108.0, 106.0, 110.0, 107.0};
 
-    uint64_t oid = 1;
-    for (std::size_t i = 0; i < prices.size(); ++i)
+    // Build expected equity curve and bar-over-bar returns.
+    std::vector<double> equities;
+    equities.push_back(90000.0 + 100.0 * 100.0); // prev_equity after mkt0 = 100000
+    for (double p : prices) equities.push_back(90000.0 + 100.0 * p);
+
+    std::vector<double> expected_rets;
+    for (std::size_t i = 1; i < equities.size(); ++i)
+        expected_rets.push_back((equities[i] - equities[i - 1]) / equities[i - 1]);
+
+    int64_t t = 1;
+    for (double p : prices)
     {
-        auto bo = std::make_shared<order_event>(epoch_ms(static_cast<int64_t>(i * 10 + 1)), "X",
-            order_type::limit, order_side::buy, qty, entry_price);
-        bo->set_order_id(oid);
-        a.on_event(bo);
-        auto bf = std::make_shared<fill_event>(epoch_ms(static_cast<int64_t>(i * 10 + 1)), "X",
-            oid, order_side::buy, qty, entry_price, 0.0);
-        a.on_event(bf);
-        oid++;
-
-        auto so = std::make_shared<order_event>(epoch_ms(static_cast<int64_t>(i * 10 + 2)), "X",
-            order_type::limit, order_side::sell, qty, prices[i]);
-        so->set_order_id(oid);
-        a.on_event(so);
-        auto sf = std::make_shared<fill_event>(epoch_ms(static_cast<int64_t>(i * 10 + 2)), "X",
-            oid, order_side::sell, qty, prices[i], 0.0);
-        a.on_event(sf);
-        oid++;
+        auto m = std::make_shared<market_event>(epoch_ms(t++), "X", p, p, p, p);
+        a.on_event(m);
     }
 
-    // Batch calculation
-    double sum = 0.0;
-    for (double r : expected_returns) sum += r;
-    double batch_mean = sum / static_cast<double>(expected_returns.size());
-
-    double sum_sq = 0.0;
-    for (double r : expected_returns)
-        sum_sq += (r - batch_mean) * (r - batch_mean);
-    double batch_stddev = std::sqrt(sum_sq / static_cast<double>(expected_returns.size() - 1));
+    double mean = 0.0;
+    for (double r : expected_rets) mean += r;
+    mean /= static_cast<double>(expected_rets.size());
+    double sq = 0.0;
+    for (double r : expected_rets) sq += (r - mean) * (r - mean);
+    double stddev = std::sqrt(sq / static_cast<double>(expected_rets.size() - 1));
+    double expected_sharpe = (stddev > 0.0)
+        ? (mean / stddev) * std::sqrt(static_cast<double>(ppy))
+        : 0.0;
 
     auto report = a.generate_report();
-    double sharpe = (batch_stddev > 0.0) ? batch_mean / batch_stddev : 0.0;
+    EXPECT_NEAR(report.sharpe_ratio, expected_sharpe, 1e-9);
+    EXPECT_GT(report.sharpe_ratio, 0.0);
+}
 
-    EXPECT_NEAR(report.sharpe_ratio, sharpe, 1e-10);
+TEST(Analytics, AnnualizedReturn_MatchesCompoundingFormula)
+{
+    // Eight daily bars with ppy=252 => annualization exponent 252/8 = 31.5
+    const std::size_t ppy = 252;
+    Analytics a(100000.0, 252, 0.0, ppy);
+
+    auto mkt0 = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
+    a.on_event(mkt0);
+    auto bo = std::make_shared<order_event>(epoch_ms(0), "X", order_type::limit, order_side::buy, 100, 100.0);
+    bo->set_order_id(1);
+    a.on_event(bo);
+    auto bf = std::make_shared<fill_event>(epoch_ms(0), "X", 1, order_side::buy, 100, 100.0, 0.0);
+    a.on_event(bf);
+
+    const std::vector<double> prices = {101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0};
+    int64_t t = 1;
+    for (double p : prices)
+    {
+        auto m = std::make_shared<market_event>(epoch_ms(t++), "X", p, p, p, p);
+        a.on_event(m);
+    }
+
+    auto r = a.generate_report();
+    double expected_ann = std::pow(1.0 + r.cumulative_return,
+                                    static_cast<double>(ppy) / static_cast<double>(prices.size())) - 1.0;
+    EXPECT_NEAR(r.annualized_return, expected_ann, 1e-12);
 }
 
 TEST(Analytics, RunningDrawdown_MatchesPostHoc)

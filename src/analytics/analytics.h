@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/event.h"
+#include "../risk/risk_manager.h"
 #include "../threading/worker.h"
 
 #include <chrono>
@@ -77,6 +78,7 @@ struct AnalyticsReport
     double initial_equity = 0.0;
     double final_equity = 0.0;
     double cumulative_return = 0.0;
+    double annualized_return = 0.0;
     std::vector<equity_point> equity_curve;
     std::vector<double> trade_returns;
 
@@ -132,13 +134,36 @@ class Analytics : public Worker
 public:
     explicit Analytics(double initial_cash = 100000.0,
                        std::size_t rolling_window = 252,
-                       double risk_free_rate = 0.0);
+                       double risk_free_rate = 0.0,
+                       std::size_t periods_per_year = 252,
+                       std::size_t max_equity_points = 100000);
+
+    // Pre-size the hot-growth vectors when the engine already knows the
+    // bar count. Bounded by max_equity_points_ so we don't reserve the
+    // full 10M for a casually-huge CSV.
+    void reserve_hint(std::size_t expected_bars);
 
     void on_event(const event_pointer& ev) override;
 
     AnalyticsReport generate_report() const;
 
     AnalyticsReport snapshot() const;
+
+    // Cheap (O(1)) read of the handful of fields the RiskManager consumes.
+    // Replaces per-order snapshot() on the engine's hot path.
+    risk_snapshot risk_view() const
+    {
+        risk_snapshot r;
+        r.max_drawdown   = max_drawdown_ * 100.0;
+        r.total_orders   = total_orders_;
+        r.total_fills    = total_fills_;
+        if (!trades_.empty())
+        {
+            r.has_last_trade = true;
+            r.last_trade_pnl = trades_.back().pnl;
+        }
+        return r;
+    }
 
     void print_report() const;
     void export_csv(const std::string& equity_path, const std::string& trades_path) const;
@@ -162,6 +187,18 @@ private:
 
     std::size_t rolling_window_;
     double risk_free_rate_;
+    std::size_t periods_per_year_;
+    std::size_t max_equity_points_;
+
+    std::size_t equity_stride_ = 1;
+    std::size_t equity_counter_ = 0;
+    std::size_t bench_stride_ = 1;
+    std::size_t bench_counter_ = 0;
+
+    void record_equity_point(std::vector<equity_point>& curve,
+                             std::size_t& stride,
+                             std::size_t& counter,
+                             const equity_point& pt);
 
     double last_close_ = 0.0;
     std::vector<equity_point> equity_curve_;
@@ -193,6 +230,7 @@ private:
     double first_price_ = 0.0;
     bool first_price_set_ = false;
     std::vector<equity_point> benchmark_curve_;
+    double prev_bh_equity_ = 0.0;
 
     std::vector<double> strategy_returns_;
     std::vector<double> benchmark_returns_;

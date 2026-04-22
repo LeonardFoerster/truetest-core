@@ -25,6 +25,7 @@
 #include "data/binary_cache_source.h"
 #include "data/tick_csv_data_source.h"
 #include "execution/fee_model.h"
+#include "execution/latency_model.h"
 #include "orderbook/orderbook.h"
 #include "strategy/strategy_registry.h"
 #include "strategy/mean_reversion_strategy.h"
@@ -41,8 +42,10 @@
 
 #include "providers/provider_registry.h"
 #include "providers/data_bridge.h"
+#include "providers/provider_sink.h"
 #include "providers/local/csv_parser.h"
 #include "providers/local/file_transport.h"
+#include "ui/console_dashboard.h"
 
 #ifdef HAS_BINANCE
 #include "providers/binance/binance_parser.h"
@@ -160,6 +163,7 @@ struct cli_options
     std::string api_secret;
     std::string host;
     std::string port;
+    std::string depth_stream;
     std::string record_path;
     std::string replay_data_path;
     bool live = false;
@@ -194,8 +198,19 @@ struct cli_options
 
     std::size_t rolling_window = 252;
     double risk_free_rate = 0.0;
+    std::size_t periods_per_year = 252;
+    std::size_t max_equity_points = 100000;
+    std::size_t exec_bar_delay = 1;
+    int wire_latency_us = 0;
+    std::vector<std::string> instrument_specs;
+    double reconcile_tolerance_bps = 10.0;
+    long kill_switch_deadline_ms = 5000;
     std::string output;
     std::string output_format = "json";
+
+    // Dashboard: auto (tui if tty, else plain), or force a mode.
+    std::string status_format = "auto";
+    bool no_tui = false;
 
     double risk_max_position_value = 1e9;
     double risk_max_drawdown = 0.30;
@@ -240,6 +255,52 @@ static void apply_strategy_params(IStrategy& strategy,
         double value = std::stod(p.substr(eq + 1));
         strategy.set_param(key, value);
     }
+}
+
+// Parse one --instrument entry (e.g. "BTCUSDT:tick=0.01,lot=0.00001,minn=5").
+// Unknown fields are ignored so the syntax stays extensible.
+static bool parse_instrument_arg(const std::string& arg, instrument_spec& out)
+{
+    auto colon = arg.find(':');
+    if (colon == std::string::npos) return false;
+    out.symbol = arg.substr(0, colon);
+    std::string rest = arg.substr(colon + 1);
+    std::size_t pos = 0;
+    while (pos < rest.size())
+    {
+        auto next = rest.find(',', pos);
+        if (next == std::string::npos) next = rest.size();
+        auto kv = rest.substr(pos, next - pos);
+        auto eq = kv.find('=');
+        if (eq != std::string::npos)
+        {
+            std::string k = kv.substr(0, eq);
+            double v = std::stod(kv.substr(eq + 1));
+            if      (k == "tick")  out.tick_size = v;
+            else if (k == "lot")   out.lot_size = v;
+            else if (k == "minq")  out.min_qty = v;
+            else if (k == "minn")  out.min_notional = v;
+            else if (k == "maker") out.maker_rate = v;
+            else if (k == "taker") out.taker_rate = v;
+        }
+        pos = next + 1;
+    }
+    return !out.symbol.empty();
+}
+
+static std::unordered_map<std::string, instrument_spec>
+parse_instrument_specs(const std::vector<std::string>& args)
+{
+    std::unordered_map<std::string, instrument_spec> out;
+    for (const auto& a : args)
+    {
+        instrument_spec s;
+        if (parse_instrument_arg(a, s))
+            out.emplace(s.symbol, std::move(s));
+        else
+            std::cerr << "  ! Invalid --instrument arg (expected SYM:k=v[,k=v]): " << a << "\n";
+    }
+    return out;
 }
 
 static void export_results(const Analytics& analytics,
@@ -364,6 +425,10 @@ static void load_config_file(const std::string& path, cli_options& o)
 
     get_size("rolling_window", o.rolling_window);
     get_double("risk_free_rate", o.risk_free_rate);
+    get_size("periods_per_year", o.periods_per_year);
+    get_size("max_equity_points", o.max_equity_points);
+    get_size("exec_bar_delay", o.exec_bar_delay);
+    get_int("wire_latency_us", o.wire_latency_us);
     get_str("output", o.output);
     get_str("output_format", o.output_format);
 }
@@ -404,6 +469,7 @@ static void dump_config(const cli_options& o)
     j["tp"] = o.tp_pct;
     j["backfill"] = o.backfill;
     j["backfill_interval"] = o.backfill_interval;
+    j["wire_latency_us"] = o.wire_latency_us;
     j["risk"] = {
         {"max_position_value", o.risk_max_position_value},
         {"max_drawdown", o.risk_max_drawdown},
@@ -452,6 +518,12 @@ static void register_cli_options(CLI::App& app, cli_options& o)
 
     app.add_option("--symbol", o.symbol, "Trading symbol (e.g., BTCUSDT)");
     app.add_option("--stream", o.stream, "Stream type: trade, kline, or interval");
+    app.add_option("--depth-stream", o.depth_stream,
+                   "Optional L2 depth stream subscribed alongside --stream "
+                   "on a single combined WebSocket. Example: depth20@100ms. "
+                   "When set, the provider's orderbook_registry_ is driven "
+                   "by real exchange levels (LocalBookAdapter in shadow "
+                   "stops matching against paper-seeded MM liquidity).");
     app.add_option("--api-key", o.api_key, "API key for exchange");
     app.add_option("--api-secret", o.api_secret, "API secret for exchange");
     app.add_option("--host", o.host, "WebSocket host");
@@ -498,6 +570,38 @@ static void register_cli_options(CLI::App& app, cli_options& o)
 
     app.add_option("--rolling-window", o.rolling_window, "Rolling metrics window size (bars)")->default_val(252);
     app.add_option("--risk-free-rate", o.risk_free_rate, "Annual risk-free rate for Sharpe/Sortino")->default_val(0.0);
+    app.add_option("--periods-per-year", o.periods_per_year,
+                   "Bars per year for Sharpe/Sortino/Calmar annualization "
+                   "(252 daily, 252*390 US-equities minute, 525600 crypto minute, 31536000 crypto second)")
+        ->default_val(252);
+    app.add_option("--max-equity-points", o.max_equity_points,
+                   "Max points retained in equity/benchmark curves before decimation")
+        ->default_val(100000);
+    app.add_option("--exec-bar-delay", o.exec_bar_delay,
+                   "Bars of simulated execution delay for backtest/shadow. "
+                   "1 (default) parks orders until next bar's open — kills same-bar look-ahead. "
+                   "0 disables. Ignored when --mode live or a latency model is configured.")
+        ->default_val(1);
+    app.add_option("--wire-latency-us", o.wire_latency_us,
+                   "Extra wire + exchange-ingest latency (microseconds) applied by the "
+                   "execution adapter on top of any engine-side latency model. "
+                   "Shadow mode: gates real trade prints matching open orders. "
+                   "Backtest with paper-hybrid exec: delays fill visibility by this window. "
+                   "0 (default) = none.")
+        ->default_val(0);
+    app.add_option("--instrument", o.instrument_specs,
+                   "Per-symbol trading rules. Repeatable. Format: "
+                   "SYMBOL:tick=X,lot=Y,minq=Q,minn=N,maker=M,taker=T "
+                   "(any field optional). Used to quantize prices/qtys and reject "
+                   "orders below min_qty or min_notional before they reach the adapter.");
+    app.add_option("--reconcile-tolerance-bps", o.reconcile_tolerance_bps,
+                   "Acceptable local/exchange divergence (basis points) on startup "
+                   "reconciliation. Live mode only. Engine refuses to start on larger drift.")
+        ->default_val(10.0);
+    app.add_option("--kill-switch-deadline-ms", o.kill_switch_deadline_ms,
+                   "Deadline for cancel-all + flatten on shutdown. Live mode only. "
+                   "A missed deadline prints a warning so operators know to intervene.")
+        ->default_val(5000);
 
     app.add_option("--max-daily-loss", o.risk_max_daily_loss, "Maximum daily loss before halt (0 = no limit)")->default_val(0.0);
     app.add_option("--daily-reset-hour", o.risk_daily_reset_hour, "UTC hour (0-23) to reset daily loss counter")->default_val(0);
@@ -506,6 +610,11 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_flag("--risk-unwind", o.risk_unwind, "On risk halt, unwind all positions before stopping");
     app.add_option("--output", o.output, "Write results to file (default: stdout)");
     app.add_option("--output-format", o.output_format, "Output format: json or csv")->default_val("json");
+
+    app.add_option("--status-format", o.status_format,
+                   "Live status display: auto, tui, plain, ndjson, off (default: auto)")
+        ->default_val("auto");
+    app.add_flag("--no-tui", o.no_tui, "Shortcut for --status-format=plain");
 }
 
 static void apply_config_overlay(CLI::App& app, cli_options& opts)
@@ -557,6 +666,10 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--backfill-interval")) opts.backfill_interval = file_opts.backfill_interval;
     if (!was_set("--rolling-window")) opts.rolling_window = file_opts.rolling_window;
     if (!was_set("--risk-free-rate")) opts.risk_free_rate = file_opts.risk_free_rate;
+    if (!was_set("--periods-per-year")) opts.periods_per_year = file_opts.periods_per_year;
+    if (!was_set("--max-equity-points")) opts.max_equity_points = file_opts.max_equity_points;
+    if (!was_set("--exec-bar-delay")) opts.exec_bar_delay = file_opts.exec_bar_delay;
+    if (!was_set("--wire-latency-us")) opts.wire_latency_us = file_opts.wire_latency_us;
     if (!was_set("--output")) opts.output = file_opts.output;
     if (!was_set("--output-format")) opts.output_format = file_opts.output_format;
 
@@ -671,6 +784,29 @@ static int run_replay_mode(const cli_options& o)
     return 0;
 }
 
+// Resolve exchange credentials. Environment variables win over CLI arguments;
+// argv-supplied secrets trigger a warning because they leak via `ps` and shell
+// history. Returns the resolved (key, secret) pair.
+static std::pair<std::string, std::string> resolve_exchange_credentials(
+    const std::string& arg_key, const std::string& arg_secret)
+{
+    const char* env_key    = std::getenv("TRUETEST_BINANCE_API_KEY");
+    const char* env_secret = std::getenv("TRUETEST_BINANCE_API_SECRET");
+
+    std::string key    = env_key    ? env_key    : arg_key;
+    std::string secret = env_secret ? env_secret : arg_secret;
+
+    if (!arg_key.empty() && !env_key)
+        std::cerr << "  WARNING: --api-key was passed on the command line. "
+                     "Prefer env var TRUETEST_BINANCE_API_KEY — argv is visible "
+                     "to other processes and shell history.\n";
+    if (!arg_secret.empty() && !env_secret)
+        std::cerr << "  WARNING: --api-secret was passed on the command line. "
+                     "Prefer env var TRUETEST_BINANCE_API_SECRET.\n";
+
+    return {std::move(key), std::move(secret)};
+}
+
 static int run_provider_mode(const cli_options& o)
 {
     std::string primary_path = o.provider_path;
@@ -680,12 +816,15 @@ static int run_provider_mode(const cli_options& o)
             primary_path = primary_path.substr(0, comma);
     }
 
+    auto [resolved_key, resolved_secret] = resolve_exchange_credentials(o.api_key, o.api_secret);
+
     provider_config pcfg;
     if (!primary_path.empty())  pcfg["path"] = primary_path;
     if (!o.symbol.empty())      pcfg["symbol"] = o.symbol;
     if (!o.stream.empty())      pcfg["stream"] = o.stream;
-    if (!o.api_key.empty())     pcfg["api_key"] = o.api_key;
-    if (!o.api_secret.empty())  pcfg["api_secret"] = o.api_secret;
+    if (!o.depth_stream.empty()) pcfg["depth_stream"] = o.depth_stream;
+    if (!resolved_key.empty())     pcfg["api_key"] = resolved_key;
+    if (!resolved_secret.empty())  pcfg["api_secret"] = resolved_secret;
     if (!o.host.empty())        pcfg["host"] = o.host;
     if (!o.port.empty())        pcfg["port"] = o.port;
     if (o.testnet)              pcfg["testnet"] = "1";
@@ -761,6 +900,16 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.spread_step_factor = o.spread_step;
     prov_cfg.rolling_window = o.rolling_window;
     prov_cfg.risk_free_rate = o.risk_free_rate;
+    prov_cfg.periods_per_year = o.periods_per_year;
+    prov_cfg.max_equity_points = o.max_equity_points;
+    prov_cfg.execution_bar_delay = (o.mode == "live" || o.live) ? 0 : o.exec_bar_delay;
+    if (o.wire_latency_us > 0 && o.mode != "live" && !o.live) {
+        prov_cfg.wire_latency_model = std::make_shared<FixedLatencyModel>(
+            latency_duration(o.wire_latency_us));
+    }
+    prov_cfg.instrument_overrides = parse_instrument_specs(o.instrument_specs);
+    prov_cfg.reconcile_tolerance_bps = o.reconcile_tolerance_bps;
+    prov_cfg.kill_switch_deadline = std::chrono::milliseconds(o.kill_switch_deadline_ms);
 
     prov_cfg.risk.max_position_value = o.risk_max_position_value;
     prov_cfg.risk.max_drawdown = o.risk_max_drawdown;
@@ -803,6 +952,12 @@ static int run_provider_mode(const cli_options& o)
     else if (o.mode == "live" || o.live)
         prov_cfg.mode = engine_mode::live;
 
+    // Ring-buffer drops silently corrupt the shadow portfolio / halt path
+    // — unacceptable when real money or real dry-run validation is on the
+    // line. Backtest keeps the lenient default (allow).
+    if (prov_cfg.mode != engine_mode::backtest)
+        prov_cfg.drop_policy = ring_drop_policy::halt_on_drop;
+
     if (prov_cfg.mode == engine_mode::live)
     {
         if (!truetest::target_allows_live_orders())
@@ -816,9 +971,11 @@ static int run_provider_mode(const cli_options& o)
             std::cerr << "  ! Live mode requires --live flag.\n";
             return 1;
         }
-        if (o.api_key.empty() || o.api_secret.empty())
+        if (resolved_key.empty() || resolved_secret.empty())
         {
-            std::cerr << "  ! Live mode requires --api-key and --api-secret.\n";
+            std::cerr << "  ! Live mode requires credentials via env vars "
+                         "TRUETEST_BINANCE_API_KEY / TRUETEST_BINANCE_API_SECRET "
+                         "(or as a fallback, --api-key / --api-secret).\n";
             return 1;
         }
         if (o.testnet)
@@ -889,6 +1046,51 @@ static int run_provider_mode(const cli_options& o)
         std::cout << "    Replay:    " << o.replay_data_path << "\n";
     std::cout << "  ============================================\n\n";
 
+    // Construct the live dashboard for streaming runs only. In non-streaming
+    // modes (batch replay, historical CSV backtest) the engine's own
+    // progress printing is fine and we want to avoid competing for stdout
+    // with the summary report emitted at the end.
+    std::shared_ptr<truetest::ui::ConsoleDashboard> dashboard;
+    if (is_streaming)
+    {
+        truetest::ui::dashboard_config dcfg;
+        // --no-tui overrides --status-format.
+        const std::string& sf = o.no_tui ? std::string("plain") : o.status_format;
+        if      (sf == "auto")   dcfg.mode = truetest::ui::output_mode::auto_detect;
+        else if (sf == "tui")    dcfg.mode = truetest::ui::output_mode::tui;
+        else if (sf == "plain")  dcfg.mode = truetest::ui::output_mode::plain;
+        else if (sf == "ndjson") dcfg.mode = truetest::ui::output_mode::ndjson;
+        else if (sf == "off")    dcfg.mode = truetest::ui::output_mode::off;
+        else {
+            std::cerr << "  ! unknown --status-format: " << sf
+                      << " (expected auto|tui|plain|ndjson|off)\n";
+            return 1;
+        }
+        dcfg.title = "TrueTest";
+        dcfg.target = truetest::target_name();
+        dcfg.feed = o.provider_name;
+        if (!o.symbol.empty())
+        {
+            dcfg.feed += "/";
+            dcfg.feed += o.symbol;
+            if (!o.stream.empty())
+            {
+                dcfg.feed += "@";
+                dcfg.feed += o.stream;
+            }
+        }
+        dcfg.risk_max_open_orders = o.risk_max_open_orders;
+        dcfg.risk_max_daily_loss = o.risk_max_daily_loss;
+        dcfg.initial_balance = o.balance;
+        dashboard = std::make_shared<truetest::ui::ConsoleDashboard>(std::move(dcfg));
+        prov_cfg.dashboard = dashboard;
+        // Re-push the config so the provider can wire the dashboard into
+        // its already-created executor. Without this the BinanceExecutor
+        // never learns about the dashboard and every paper order falls
+        // through to the std::cout fallback in submit_order().
+        provider->configure(prov_cfg);
+    }
+
     if (is_streaming)
     {
         engine eng(dh, nullptr, prov_strategy, std::move(prov_cfg));
@@ -898,7 +1100,29 @@ static int run_provider_mode(const cli_options& o)
 
         install_shutdown_handler();
 
-        if (is_tick)
+        if (dashboard)
+        {
+            dashboard->render_banner();
+            dashboard->push_event(
+                truetest::ui::event_severity::notice,
+                "engine starting");
+            dashboard->start();
+        }
+
+        // Unified event-stream path — provider-agnostic. When the provider
+        // advertises it (currently: Binance with --depth-stream set), build
+        // a single DataBridge<provider::event>; L2 frames populate the
+        // engine's orderbook_registry_ directly so LocalBookAdapter can
+        // match against real exchange levels. Otherwise fall back to the
+        // existing specialized bar/tick bridges.
+        if (provider && provider->supports_event_stream())
+        {
+            auto parser = provider->get_event_parser();
+            auto bridge = std::make_shared<DataBridge<provider::event>>(
+                transport, parser, provider::event_sink);
+            eng.run_streaming(bridge);
+        }
+        else if (is_tick)
         {
             std::shared_ptr<IDataParser<tick_record>> parser;
 #ifdef HAS_BINANCE
@@ -931,7 +1155,18 @@ static int run_provider_mode(const cli_options& o)
             g_bar_bridge.store(nullptr, std::memory_order_release);
         }
 
-        eng.print_summary();
+        if (dashboard)
+        {
+            dashboard->stop();
+        }
+
+        // Skip the multi-line analytics report when the TUI owns stdout —
+        // the box on screen is already the report surface, and dumping
+        // another fixed-width report below it was the "final analysis
+        // windows" complaint. Non-TUI runs still print it. File export
+        // via --output is unaffected in either case.
+        if (!dashboard || !dashboard->is_tui())
+            eng.print_summary();
         export_results(eng.get_analytics(), o.output, o.output_format);
     }
     else
@@ -1137,6 +1372,16 @@ static int run_tui_mode(const cli_options& o)
     config.debug_fills_budget = o.debug_fills_budget;
     config.rolling_window = o.rolling_window;
     config.risk_free_rate = o.risk_free_rate;
+    config.periods_per_year = o.periods_per_year;
+    config.max_equity_points = o.max_equity_points;
+    config.execution_bar_delay = (o.mode == "live" || o.live) ? 0 : o.exec_bar_delay;
+    if (o.wire_latency_us > 0 && o.mode != "live" && !o.live) {
+        config.wire_latency_model = std::make_shared<FixedLatencyModel>(
+            latency_duration(o.wire_latency_us));
+    }
+    config.instrument_overrides = parse_instrument_specs(o.instrument_specs);
+    config.reconcile_tolerance_bps = o.reconcile_tolerance_bps;
+    config.kill_switch_deadline = std::chrono::milliseconds(o.kill_switch_deadline_ms);
 
     config.risk.max_position_value = o.risk_max_position_value;
     config.risk.max_drawdown = o.risk_max_drawdown;
@@ -1206,6 +1451,9 @@ static int run_tui_mode(const cli_options& o)
             return 0;
         config.mode = engine_mode::live;
     }
+
+    if (config.mode != engine_mode::backtest)
+        config.drop_policy = ring_drop_policy::halt_on_drop;
 
     std::cout << "\n";
     std::cout << "  ============================================\n";

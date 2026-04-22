@@ -9,10 +9,44 @@
 #include <iostream>
 #include <numeric>
 
-Analytics::Analytics(double initial_cash, std::size_t rolling_window, double risk_free_rate)
+Analytics::Analytics(double initial_cash, std::size_t rolling_window, double risk_free_rate,
+                     std::size_t periods_per_year, std::size_t max_equity_points)
     : initial_cash_(initial_cash), cash_(initial_cash),
       rolling_window_(rolling_window), risk_free_rate_(risk_free_rate),
+      periods_per_year_(periods_per_year > 0 ? periods_per_year : 252),
+      max_equity_points_(max_equity_points > 4 ? max_equity_points : 4),
       prev_equity_(initial_cash), peak_equity_(initial_cash) {}
+
+void Analytics::reserve_hint(std::size_t expected_bars)
+{
+    // Cap equity curves at the decimation ceiling; returns vectors take
+    // the raw hint — they're doubles, 8 bytes each, so even 10M entries
+    // is 80 MB, acceptable for backtests at that scale.
+    const std::size_t curve_cap = std::min(expected_bars, max_equity_points_);
+    equity_curve_.reserve(curve_cap);
+    benchmark_curve_.reserve(curve_cap);
+    strategy_returns_.reserve(expected_bars);
+    benchmark_returns_.reserve(expected_bars);
+}
+
+void Analytics::record_equity_point(std::vector<equity_point>& curve,
+                                    std::size_t& stride,
+                                    std::size_t& counter,
+                                    const equity_point& pt)
+{
+    ++counter;
+    if (counter % stride != 0) return;
+    curve.push_back(pt);
+    if (curve.size() > max_equity_points_)
+    {
+        std::vector<equity_point> reduced;
+        reduced.reserve(curve.size() / 2 + 1);
+        for (std::size_t i = 0; i < curve.size(); i += 2)
+            reduced.push_back(curve[i]);
+        curve = std::move(reduced);
+        stride *= 2;
+    }
+}
 
 void Analytics::on_event(const event_pointer& ev)
 {
@@ -59,24 +93,28 @@ void Analytics::on_market(const market_event& m)
     if (has_position)
         equity += position_qty_ * last_close_;
 
-    equity_curve_.push_back({m.get_timestamp(), equity});
+    record_equity_point(equity_curve_, equity_stride_, equity_counter_,
+                        {m.get_timestamp(), equity});
 
+    double bh_equity_now = 0.0;
+    bool have_bh_now = false;
     if (first_price_set_ && first_price_ > 0.0)
     {
-        double bh_equity = initial_cash_ * (m.get_close() / first_price_);
-        benchmark_curve_.push_back({m.get_timestamp(), bh_equity});
+        bh_equity_now = initial_cash_ * (m.get_close() / first_price_);
+        have_bh_now = true;
     }
 
-    if (prev_equity_ > 0.0 && equity_curve_.size() > 1)
+    if (prev_equity_ > 0.0 && market_events_total_ > 1)
     {
         double strat_ret = (equity - prev_equity_) / prev_equity_;
         strategy_returns_.push_back(strat_ret);
 
-        if (benchmark_curve_.size() > 1)
+        return_stats_.update(strat_ret);
+        if (strat_ret < 0.0) downside_stats_.update(strat_ret);
+
+        if (have_bh_now && prev_bh_equity_ > 0.0)
         {
-            double prev_bh = benchmark_curve_[benchmark_curve_.size() - 2].equity;
-            double curr_bh = benchmark_curve_.back().equity;
-            double bh_ret = (prev_bh > 0.0) ? (curr_bh - prev_bh) / prev_bh : 0.0;
+            double bh_ret = (bh_equity_now - prev_bh_equity_) / prev_bh_equity_;
             benchmark_returns_.push_back(bh_ret);
         }
 
@@ -85,6 +123,12 @@ void Analytics::on_market(const market_event& m)
             rolling_returns_.pop_front();
     }
     prev_equity_ = equity;
+    if (have_bh_now)
+    {
+        record_equity_point(benchmark_curve_, bench_stride_, bench_counter_,
+                            {m.get_timestamp(), bh_equity_now});
+        prev_bh_equity_ = bh_equity_now;
+    }
 
     if (equity > peak_equity_)
         peak_equity_ = equity;
@@ -194,8 +238,6 @@ void Analytics::on_fill(const fill_event& f)
 
         rec.pnl = pnl;
         trade_returns_.push_back(pnl);
-        return_stats_.update(pnl);
-        if (pnl < 0.0) downside_stats_.update(pnl);
 
         if (pnl > 0.0)
         {
@@ -258,8 +300,9 @@ double Analytics::rolling_sharpe() const
     for (double r : rolling_returns_) sum += r;
     double mean = sum / static_cast<double>(rolling_returns_.size());
 
-    double rf_per_bar = (rolling_window_ > 0) ? risk_free_rate_ / static_cast<double>(rolling_window_) : 0.0;
-    double excess_mean = mean - rf_per_bar;
+    const double ppy = static_cast<double>(periods_per_year_);
+    double rf_per_period = (ppy > 0.0) ? risk_free_rate_ / ppy : 0.0;
+    double excess_mean = mean - rf_per_period;
 
     double sq_sum = 0.0;
     for (double r : rolling_returns_)
@@ -268,7 +311,8 @@ double Analytics::rolling_sharpe() const
         sq_sum += d * d;
     }
     double stddev = std::sqrt(sq_sum / static_cast<double>(rolling_returns_.size() - 1));
-    return (stddev > 0.0) ? excess_mean / stddev : 0.0;
+    const double ann_factor = std::sqrt(ppy);
+    return (stddev > 0.0) ? (excess_mean / stddev) * ann_factor : 0.0;
 }
 
 double Analytics::rolling_max_drawdown() const
@@ -336,31 +380,41 @@ AnalyticsReport Analytics::snapshot() const
         r.largest_loser = largest_loser_;
     }
 
-    double rf_per_trade = 0.0;
-    if (risk_free_rate_ != 0.0 && market_events_total_ > 0)
-        rf_per_trade = risk_free_rate_ / static_cast<double>(market_events_total_);
+    const double ppy = static_cast<double>(periods_per_year_);
+    const double rf_per_period = (ppy > 0.0) ? risk_free_rate_ / ppy : 0.0;
+    const double ann_factor = std::sqrt(ppy);
 
     if (return_stats_.n > 1)
     {
-        double excess_mean = return_stats_.mean - rf_per_trade;
+        double excess_mean = return_stats_.mean - rf_per_period;
         r.sharpe_ratio = (return_stats_.stddev() > 0.0)
-            ? excess_mean / return_stats_.stddev() : 0.0;
+            ? (excess_mean / return_stats_.stddev()) * ann_factor : 0.0;
     }
     if (downside_stats_.n > 1)
     {
-        double excess_mean = return_stats_.mean - rf_per_trade;
+        double excess_mean = return_stats_.mean - rf_per_period;
         r.sortino_ratio = (downside_stats_.stddev() > 0.0)
-            ? excess_mean / downside_stats_.stddev() : 0.0;
+            ? (excess_mean / downside_stats_.stddev()) * ann_factor : 0.0;
     }
-    else if (return_stats_.n > 1 && return_stats_.mean > 0.0)
+    else if (return_stats_.n > 1 && return_stats_.mean > rf_per_period)
     {
         r.sortino_ratio = 1e9;
     }
 
     r.max_drawdown = max_drawdown_ * 100.0;
 
+    const double n_periods = static_cast<double>(strategy_returns_.size());
+    if (n_periods > 0.0 && ppy > 0.0 && r.cumulative_return > -1.0)
+    {
+        r.annualized_return = std::pow(1.0 + r.cumulative_return, ppy / n_periods) - 1.0;
+    }
+    else
+    {
+        r.annualized_return = r.cumulative_return;
+    }
+
     r.calmar_ratio = (r.max_drawdown > 0.0)
-        ? (r.cumulative_return * 100.0) / r.max_drawdown
+        ? (r.annualized_return * 100.0) / r.max_drawdown
         : 0.0;
 
     r.rolling_sharpe = rolling_sharpe();
@@ -479,7 +533,7 @@ void Analytics::export_json(const std::string& path) const
 
     char buf[2048];
     std::snprintf(buf, sizeof(buf),
-        R"({"initial_equity":%.2f,"final_equity":%.2f,"cumulative_return":%.6f,)"
+        R"({"initial_equity":%.2f,"final_equity":%.2f,"cumulative_return":%.6f,"annualized_return":%.6f,)"
         R"("sharpe_ratio":%.6f,"sortino_ratio":%.6f,"max_drawdown":%.6f,"calmar_ratio":%.6f,)"
         R"("rolling_sharpe":%.6f,"rolling_max_drawdown":%.6f,)"
         R"("win_rate":%.6f,"profit_factor":%.6f,"total_trades":%zu,)"
@@ -487,7 +541,7 @@ void Analytics::export_json(const std::string& path) const
         R"("time_in_market_pct":%.4f,"avg_slippage":%.6f,)"
         R"("buy_and_hold_return":%.6f,"strategy_vs_benchmark":%.6f,)"
         R"("alpha":%.6f,"beta":%.6f,"information_ratio":%.6f,"tracking_error":%.6f)",
-        r.initial_equity, r.final_equity, r.cumulative_return,
+        r.initial_equity, r.final_equity, r.cumulative_return, r.annualized_return,
         r.sharpe_ratio, r.sortino_ratio, r.max_drawdown, r.calmar_ratio,
         r.rolling_sharpe, r.rolling_max_drawdown,
         r.win_rate, r.profit_factor, r.total_trades,

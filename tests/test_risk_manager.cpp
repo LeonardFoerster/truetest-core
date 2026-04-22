@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "analytics/analytics.h"
 #include "risk/risk_manager.h"
 
 static auto epoch_ms(int64_t ms)

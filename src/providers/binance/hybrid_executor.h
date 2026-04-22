@@ -3,12 +3,16 @@
 
 #include "../../execution/execution_adapter.h"
 #include "../../execution/fee_model.h"
+#include "../../execution/latency_model.h"
 #include "../../orderbook/orderbook.h"
 #include "../../orderbook/fill_model.h"
 #include "../../types/order_id.h"
 #include "binance_executor.h"
 
+#include <algorithm>
 #include <memory>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 class HybridExecutor : public IExecutionAdapter
@@ -19,7 +23,8 @@ public:
                    std::shared_ptr<IFeeModel> fee_model = nullptr,
                    std::shared_ptr<IFillModel> fill_model = nullptr,
                    double qty_scale = 1e8,
-                   double spread_step_factor = 0.0001)
+                   double spread_step_factor = 0.0001,
+                   std::shared_ptr<ILatencyModel> latency_model = nullptr)
         : paper_(std::move(paper_exec))
         , book_(std::move(book))
         , book_adapter_(std::make_unique<LocalBookAdapter>(
@@ -29,10 +34,22 @@ public:
                          : std::make_shared<RealisticFillModel>(0.05, 0.8, 5.0)))
         , qty_scale_(qty_scale)
         , spread_step_factor_(spread_step_factor)
+        , latency_model_(std::move(latency_model))
     {}
 
     void submit_order(const order_event& o) override
     {
+        // Advance the sim-time proxy so previously buffered fills can
+        // release on this poll cycle. Orders flow through here in
+        // monotonically non-decreasing eligible_ts order (enforced by
+        // the engine's pending_orders_ priority queue), so max() is
+        // defensive.
+        if (o.get_earliest_eligible_ts() > now_proxy_)
+            now_proxy_ = o.get_earliest_eligible_ts();
+
+        if (latency_model_)
+            order_latencies_[o.get_order_id()] = latency_model_->get_order_latency();
+
         if (o.get_order_type() == order_type::market) {
             paper_->submit_order(o);
         } else {
@@ -42,9 +59,40 @@ public:
 
     bool poll_fills(std::vector<fill_event>& out) override
     {
-        bool had_paper = paper_->poll_fills(out);
-        bool had_book = book_adapter_->poll_fills(out);
-        return had_paper || had_book;
+        std::vector<fill_event> inner;
+        paper_->poll_fills(inner);
+        book_adapter_->poll_fills(inner);
+
+        // Fast path — no latency configured, pass fills through.
+        if (!latency_model_) {
+            if (inner.empty()) return false;
+            for (auto& f : inner) out.push_back(std::move(f));
+            return true;
+        }
+
+        // Buffer each fill with its release_ts = fill_ts + per-order
+        // latency sampled at submit time. The fill's own timestamp is
+        // left alone — it records when the book matched; release_ts
+        // records when the engine can see it.
+        for (auto& f : inner) {
+            auto it = order_latencies_.find(f.get_order_id());
+            auto latency = (it != order_latencies_.end())
+                ? it->second : latency_duration(0);
+            delayed_fills_.push_back({std::move(f), f.get_timestamp() + latency});
+        }
+
+        bool released = false;
+        auto new_end = std::remove_if(delayed_fills_.begin(), delayed_fills_.end(),
+            [&](delayed_fill& df) {
+                if (df.release_ts <= now_proxy_) {
+                    out.push_back(std::move(df.fill));
+                    released = true;
+                    return true;
+                }
+                return false;
+            });
+        delayed_fills_.erase(new_end, delayed_fills_.end());
+        return released;
     }
 
     bool cancel_order(uint64_t order_id) override
@@ -52,6 +100,16 @@ public:
         bool cancelled = book_adapter_->cancel_order(order_id);
         if (!cancelled)
             cancelled = paper_->cancel_order(order_id);
+
+        order_latencies_.erase(order_id);
+        auto new_end = std::remove_if(delayed_fills_.begin(), delayed_fills_.end(),
+            [order_id](const delayed_fill& df) {
+                return df.fill.get_order_id() == order_id;
+            });
+        if (new_end != delayed_fills_.end()) {
+            delayed_fills_.erase(new_end, delayed_fills_.end());
+            cancelled = true;
+        }
         return cancelled;
     }
 
@@ -83,11 +141,21 @@ public:
     }
 
 private:
+    struct delayed_fill {
+        fill_event fill;
+        std::chrono::system_clock::time_point release_ts;
+    };
+
     std::shared_ptr<BinanceExecutor> paper_;
     std::shared_ptr<orderbook> book_;
     std::unique_ptr<LocalBookAdapter> book_adapter_;
     double qty_scale_ = 1e8;
     double spread_step_factor_ = 0.0001;
+
+    std::shared_ptr<ILatencyModel> latency_model_;
+    std::unordered_map<uint64_t, latency_duration> order_latencies_;
+    std::vector<delayed_fill> delayed_fills_;
+    std::chrono::system_clock::time_point now_proxy_{};
 };
 
 #endif // HAS_BINANCE

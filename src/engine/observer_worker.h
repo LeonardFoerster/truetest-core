@@ -14,9 +14,12 @@ public:
                    std::atomic<bool>& halt_flag,
                    double initial_cash = 100000.0,
                    std::size_t rolling_window = 252,
-                   double risk_free_rate = 0.0)
+                   double risk_free_rate = 0.0,
+                   std::size_t periods_per_year = 252,
+                   std::size_t max_equity_points = 100000)
         : risk_manager_(std::move(rm))
-        , analytics_(initial_cash, rolling_window, risk_free_rate)
+        , analytics_(initial_cash, rolling_window, risk_free_rate,
+                     periods_per_year, max_equity_points)
         , halt_flag_(halt_flag) {}
 
     const char* worker_name() const override { return "observer"; }

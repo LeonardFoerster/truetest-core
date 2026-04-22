@@ -1,6 +1,7 @@
 #pragma once
 #include "../core/event.h"
 #include "../indicator/sma.h"
+#include "exits/exit_intent.h"
 #include "strategy_interface.h"
 
 #include <optional>
@@ -18,6 +19,8 @@ public:
     std::optional<order_event> on_market(const market_event& mkt) override;
     std::optional<order_event> on_tick(const tick_event& te) override;
     void set_position_open(const std::string& symbol, bool open) override;
+
+    std::optional<truetest::exits::exit_intent> take_pending_exit_intent() override;
 
     void update_equity(double equity) { equity_ = equity; }
 
@@ -62,6 +65,7 @@ private:
     double tp_pct_;
     std::unordered_map<std::string, simple_moving_average> smas_;
     std::unordered_map<std::string, bool> position_open_;
+    std::optional<truetest::exits::exit_intent> pending_intent_;
 
     simple_moving_average& get_sma(const std::string& symbol);
     double compute_quantity(double price) const;

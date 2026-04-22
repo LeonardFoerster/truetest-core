@@ -41,6 +41,11 @@ REGISTER_PROVIDER("binance", [](const provider_config& cfg) {
         ep.ws_host, ep.ws_port
     );
     provider->set_endpoints(ep);
+
+    auto depth = get("depth_stream");
+    if (!depth.empty())
+        provider->set_depth_stream(depth);
+
     return provider;
 });
 

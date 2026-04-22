@@ -5,10 +5,12 @@
 #include "fill_transport.h"
 #include "order_encoder.h"
 #include "fill_parser.h"
+#include "rate_limiter.h"
 #include "../core/event.h"
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -24,6 +26,17 @@ public:
         std::shared_ptr<IFillTransport>  fill_tx;
         std::shared_ptr<IOrderEncoder>   encoder;
         std::shared_ptr<IFillParser>     parser;
+
+        // Optional. If set, each submit consults it before sending and
+        // blocks until a token is available — gates the venue's order-rate
+        // cap (Binance spot: 50 orders / 10s). Left null, submit is ungated.
+        std::shared_ptr<TokenBucketRateLimiter> order_rate_limiter;
+
+        // Optional. Called per submit to produce the clientOrderId used for
+        // exchange-side idempotency and as the bridge's internal key. When
+        // null, the bridge falls back to "tt-<engine_order_id>", which is
+        // only unique within a single process lifetime.
+        std::function<std::string(uint64_t engine_order_id)> client_id_fn;
     };
 
     struct status_event
@@ -84,7 +97,12 @@ public:
             return;
         }
 
-        const std::string client_id = make_client_id(o.get_order_id());
+        if (d_.order_rate_limiter)
+            d_.order_rate_limiter->acquire_blocking(1.0);
+
+        const std::string client_id = d_.client_id_fn
+            ? d_.client_id_fn(o.get_order_id())
+            : make_client_id(o.get_order_id());
         auto enc = d_.encoder->encode_submit(o, client_id);
 
         tracked_order t;
@@ -143,6 +161,9 @@ public:
         }
 
         if (!d_.encoder || !d_.order_tx) return false;
+
+        if (d_.order_rate_limiter)
+            d_.order_rate_limiter->acquire_blocking(1.0);
 
         auto enc = d_.encoder->encode_cancel(symbol, exchange_id, client_id);
         auto res = d_.order_tx->cancel(enc.endpoint, enc.wire_payload);

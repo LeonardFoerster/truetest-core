@@ -1,5 +1,7 @@
 #pragma once
 #include "../core/event.h"
+#include "exits/exit_intent.h"
+
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -16,14 +18,6 @@ struct param_def
     std::string description;
 };
 
-struct position_stops
-{
-    double stop_loss = 0.0;
-    double take_profit = 0.0;
-    double quantity = 0.0;
-    bool active = false;
-};
-
 class IStrategy {
 public:
     virtual ~IStrategy() = default;
@@ -34,46 +28,15 @@ public:
     virtual void set_position_open(const std::string& symbol, bool open) = 0;
     virtual void set_position_open(bool open) { set_position_open("", open); }
 
-    void set_stops(const std::string& symbol, double sl, double tp, double qty)
+    // Strategy-declared exit plan (SL/TP/trailing/time). Returned at most
+    // once per entry order: the engine polls this right after each
+    // on_market/on_tick/on_l2_update call, registers the intent with its
+    // ExitManager, and the manager owns enforcement from that point on.
+    // Default: no exit plan (strategy handles its own exits via signals).
+    virtual std::optional<truetest::exits::exit_intent> take_pending_exit_intent()
     {
-        stops_[symbol] = {sl, tp, qty, true};
-    }
-
-    void clear_stops(const std::string& symbol)
-    {
-        stops_.erase(symbol);
-    }
-
-    std::optional<order_event> check_stops(
-        const std::string& symbol, double price,
-        std::chrono::system_clock::time_point ts)
-    {
-        auto it = stops_.find(symbol);
-        if (it == stops_.end() || !it->second.active)
-            return std::nullopt;
-
-        auto& s = it->second;
-
-        if (s.stop_loss > 0.0 && price <= s.stop_loss)
-        {
-            auto order = order_event(ts, symbol, order_type::market,
-                                     order_side::sell, s.quantity, price);
-            s.active = false;
-            return order;
-        }
-
-        if (s.take_profit > 0.0 && price >= s.take_profit)
-        {
-            auto order = order_event(ts, symbol, order_type::market,
-                                     order_side::sell, s.quantity, price);
-            s.active = false;
-            return order;
-        }
-
         return std::nullopt;
     }
-
-    const std::unordered_map<std::string, position_stops>& get_stops() const { return stops_; }
 
     virtual std::vector<param_def> get_param_schema() const { return {}; }
 
@@ -88,7 +51,4 @@ public:
     {
         return {};
     }
-
-protected:
-    std::unordered_map<std::string, position_stops> stops_;
 };

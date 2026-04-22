@@ -52,26 +52,17 @@ public:
 
     response post(const std::string& endpoint, const std::string& params)
     {
-        auto query = params + "&timestamp=" + std::to_string(binance::server_time_ms())
-                     + "&recvWindow=5000";
-        auto signed_query = binance::sign_query(query, api_secret_);
-        return execute(http::verb::post, endpoint, signed_query);
+        return do_signed_request(http::verb::post, endpoint, params, /*in_query=*/false);
     }
 
     response get(const std::string& endpoint, const std::string& params)
     {
-        auto query = params + "&timestamp=" + std::to_string(binance::server_time_ms())
-                     + "&recvWindow=5000";
-        auto signed_query = binance::sign_query(query, api_secret_);
-        return execute(http::verb::get, endpoint + "?" + signed_query, "");
+        return do_signed_request(http::verb::get, endpoint, params, /*in_query=*/true);
     }
 
     response del(const std::string& endpoint, const std::string& params)
     {
-        auto query = params + "&timestamp=" + std::to_string(binance::server_time_ms())
-                     + "&recvWindow=5000";
-        auto signed_query = binance::sign_query(query, api_secret_);
-        return execute(http::verb::delete_, endpoint + "?" + signed_query, "");
+        return do_signed_request(http::verb::delete_, endpoint, params, /*in_query=*/true);
     }
 
     response post_unsigned(const std::string& endpoint)
@@ -126,6 +117,58 @@ public:
     void set_weight_cap(int cap) { weight_cap_ = cap; }
     void set_soft_threshold_pct(int pct) { soft_threshold_pct_ = pct; }
 
+    // Clock-drift handling. Each signed request stamps
+    //   timestamp = local_now_ms + clock_offset_ms_
+    // where the offset is (server_ms - local_ms) learned from /api/v3/time.
+    // Without this, a local clock that drifts past recvWindow (5s) starts
+    // rejecting every signed call with -1021. The offset is refreshed
+    // lazily — every `sync_interval_ms_` before a signed send — and
+    // reactively when a -1021 response comes back (to catch NTP steps that
+    // happen between lazy refreshes).
+
+    void set_sync_interval_ms(long long ms) { sync_interval_ms_ = ms; }
+
+    long long clock_offset_ms() const
+    {
+        return clock_offset_ms_.load(std::memory_order_acquire);
+    }
+
+    // Force a clock resync against /api/v3/time. Returns true on success.
+    // Called at startup (BinanceProvider::open) to seed the offset, and
+    // invoked reactively on -1021 responses.
+    bool resync_clock_now()
+    {
+        auto offset = server_time_offset_ms(
+            [this](const std::string& ep, const std::string& p) {
+                return execute(http::verb::get,
+                               ep + (p.empty() ? "" : "?" + p), "");
+            });
+        if (offset == LLONG_MIN)
+        {
+            if (!sync_failed_logged_.exchange(true))
+                std::cerr << "BinanceRestClient: clock resync failed; "
+                             "keeping offset " << clock_offset_ms_.load()
+                          << " ms\n";
+            return false;
+        }
+        clock_offset_ms_.store(offset, std::memory_order_release);
+        last_sync_steady_ms_.store(steady_now_ms(), std::memory_order_release);
+        sync_failed_logged_.store(false);
+        return true;
+    }
+
+    // Pure decision so tests can exercise the lazy-resync rule without
+    // a network: should we resync given elapsed steady-clock time?
+    // last_sync_ms_ <= 0 means "never synced" → always due.
+    static bool resync_due(long long now_steady_ms,
+                           long long last_sync_steady_ms,
+                           long long interval_ms)
+    {
+        if (last_sync_steady_ms <= 0) return true;
+        if (interval_ms <= 0) return false;
+        return (now_steady_ms - last_sync_steady_ms) >= interval_ms;
+    }
+
     // Pure helper so tests can exercise the decision without a network.
     // Returns number of milliseconds to sleep before the next request;
     // 0 means no throttle needed.
@@ -157,6 +200,63 @@ private:
     std::atomic<long long> window_anchor_ms_{0};
     int weight_cap_ = 6000;
     int soft_threshold_pct_ = 80;
+
+    std::atomic<long long> clock_offset_ms_{0};
+    std::atomic<long long> last_sync_steady_ms_{0};
+    long long sync_interval_ms_ = 5 * 60 * 1000;
+    std::atomic<bool> sync_failed_logged_{false};
+
+    static long long steady_now_ms()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
+    void maybe_resync_clock()
+    {
+        if (resync_due(steady_now_ms(),
+                       last_sync_steady_ms_.load(std::memory_order_acquire),
+                       sync_interval_ms_))
+            resync_clock_now();
+    }
+
+    // Build + sign a query with the current offset, send it, and on a
+    // -1021 "timestamp outside recvWindow" response resync once and retry.
+    // Retrying requires rebuilding the signed query (new timestamp + new
+    // signature), so the retry lives here above execute_with_retry rather
+    // than inside it.
+    response do_signed_request(http::verb method,
+                               const std::string& endpoint,
+                               const std::string& params,
+                               bool in_query)
+    {
+        maybe_resync_clock();
+
+        auto build_signed = [&]() {
+            long long ts = static_cast<long long>(binance::server_time_ms())
+                         + clock_offset_ms_.load(std::memory_order_acquire);
+            auto q = params + "&timestamp=" + std::to_string(ts)
+                     + "&recvWindow=5000";
+            return binance::sign_query(q, api_secret_);
+        };
+
+        auto send = [&]() -> response {
+            auto sq = build_signed();
+            return in_query
+                ? execute(method, endpoint + "?" + sq, "")
+                : execute(method, endpoint, sq);
+        };
+
+        auto r = send();
+        if (r.status >= 400 && r.body.find("-1021") != std::string::npos)
+        {
+            std::cerr << "BinanceRestClient: -1021 timestamp drift, "
+                         "resyncing clock and retrying once\n";
+            if (resync_clock_now())
+                r = send();
+        }
+        return r;
+    }
 
     response execute(http::verb method, const std::string& target, const std::string& body)
     {

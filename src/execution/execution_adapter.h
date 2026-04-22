@@ -23,6 +23,14 @@ public:
     {
         (void)order_id; (void)new_price; (void)new_qty; return false;
     }
+
+    // Shadow-mode hook: engine forwards each real trade print on the
+    // symbol so a TradeTapeShadowAdapter can match open orders against
+    // the tape. Default no-op; backtest and live adapters ignore.
+    virtual void on_trade(const std::string& /*symbol*/,
+                          double /*trade_price*/,
+                          double /*trade_qty*/,
+                          std::chrono::system_clock::time_point /*trade_ts*/) {}
 };
 
 class LocalBookAdapter : public IExecutionAdapter
@@ -74,8 +82,11 @@ public:
 
         Price book_price;
         if (o.get_order_type() == order_type::market)
-            book_price = (book_side == side::buy) ? Price::from_double(o.get_price() * market_aggression_)
-                                                  : Price::from_double(o.get_price() * (2.0 - market_aggression_));
+        {
+            const double ref_price = (mid_price_ > 0.0) ? mid_price_ : o.get_price();
+            book_price = (book_side == side::buy) ? Price::from_double(ref_price * market_aggression_)
+                                                  : Price::from_double(ref_price * (2.0 - market_aggression_));
+        }
         else
             book_price = Price::from_double(o.get_price());
 

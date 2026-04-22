@@ -1,4 +1,5 @@
 #include "risk_manager.h"
+#include "../analytics/analytics.h"
 
 #include <cmath>
 
@@ -39,7 +40,7 @@ void RiskManager::update_daily_reset(std::chrono::system_clock::time_point now)
 
 risk_action RiskManager::check_order(const order_event& order,
                                      const portfolio& port,
-                                     const AnalyticsReport& snap)
+                                     const risk_snapshot& snap)
 {
     if (snap.max_drawdown / 100.0 >= limits_.max_drawdown)
         return risk_action::halt;
@@ -92,17 +93,14 @@ risk_action RiskManager::check_order(const order_event& order,
 
 risk_action RiskManager::check_post_fill(const fill_event& fill,
                                          const portfolio& /* port */,
-                                         const AnalyticsReport& snap)
+                                         const risk_snapshot& snap)
 {
     if (snap.max_drawdown / 100.0 >= limits_.max_drawdown)
         return risk_action::halt;
 
-    if (!snap.trades.empty())
-    {
-        const auto& last_trade = snap.trades.back();
-        if (last_trade.pnl < -limits_.max_loss_per_trade)
-            return risk_action::halt;
-    }
+    if (snap.has_last_trade &&
+        snap.last_trade_pnl < -limits_.max_loss_per_trade)
+        return risk_action::halt;
 
     if (limits_.max_trades_per_hour > 0 &&
         static_cast<int>(trade_timestamps_.size()) >= limits_.max_trades_per_hour)
@@ -116,6 +114,34 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
     }
 
     return risk_action::pass;
+}
+
+// Legacy overloads — collapse the heavy AnalyticsReport to the thin
+// risk_snapshot and dispatch into the real path so logic lives in one
+// place.
+risk_action RiskManager::check_order(const order_event& order,
+                                     const portfolio& port,
+                                     const AnalyticsReport& snap)
+{
+    risk_snapshot rs;
+    rs.max_drawdown = snap.max_drawdown;
+    rs.total_orders = snap.total_orders;
+    rs.total_fills  = snap.total_fills;
+    return check_order(order, port, rs);
+}
+
+risk_action RiskManager::check_post_fill(const fill_event& fill,
+                                         const portfolio& port,
+                                         const AnalyticsReport& snap)
+{
+    risk_snapshot rs;
+    rs.max_drawdown = snap.max_drawdown;
+    if (!snap.trades.empty())
+    {
+        rs.has_last_trade = true;
+        rs.last_trade_pnl = snap.trades.back().pnl;
+    }
+    return check_post_fill(fill, port, rs);
 }
 
 void RiskManager::on_fill(const fill_event& fill)

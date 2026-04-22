@@ -112,6 +112,7 @@ std::string render_returns_section(const AnalyticsReport& r, const report_option
 
     oss << metric("total return", ascii::fmt_signed_pct(r.cumulative_return),
                   ret_abs, bar_max, o.bar_width);
+    oss << metric("annualized",   ascii::fmt_signed_pct(r.annualized_return));
     oss << metric("buy & hold",   ascii::fmt_signed_pct(r.buy_and_hold_return),
                   bh_abs, bar_max, o.bar_width);
     oss << metric("vs benchmark", ascii::fmt_signed_pct(r.strategy_vs_benchmark));

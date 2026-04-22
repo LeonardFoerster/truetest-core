@@ -79,6 +79,8 @@ set(ENGINE_CORE_SOURCES
     src/market_maker/market_maker.cpp
     src/risk/risk_manager.cpp
     src/providers/local/local_register.cpp
+    src/ui/console_dashboard.cpp
+    src/exits/exit_manager.cpp
 )
 
 add_library(engine_core OBJECT ${ENGINE_CORE_SOURCES})
@@ -111,7 +113,11 @@ _tt_add_engine_binary(engine_backtest TT_TARGET_BACKTEST src/bin/engine_backtest
 _tt_add_engine_binary(engine_shadow   TT_TARGET_SHADOW   src/bin/engine_shadow/main.cpp)
 _tt_add_engine_binary(engine_live     TT_TARGET_LIVE     src/bin/engine_live/main.cpp)
 
-# Native microarchitecture tuning applies ONLY to engine_live.
+# Native microarchitecture tuning. Gated on ENABLE_NATIVE_OPT (default off);
+# when the user opts in they want it across the board, not just on live.
+# CI and portable builds keep ENABLE_NATIVE_OPT=OFF and are unaffected.
+tt_apply_live_flags(engine_backtest)
+tt_apply_live_flags(engine_shadow)
 tt_apply_live_flags(engine_live)
 
 # ── Shared library (C API for language bindings) ────────────────────────────
@@ -163,9 +169,22 @@ if(BUILD_TESTS)
         tests/test_report_generator.cpp
         tests/test_market_maker.cpp
         tests/test_data_handler.cpp
+        tests/test_date_parse.cpp
+        tests/test_trade_tape_shadow_adapter.cpp
+        tests/test_exit_manager.cpp
+        tests/test_hybrid_executor.cpp
+        tests/test_binance_combined_parser.cpp
+        tests/test_provider_event_stream_contract.cpp
+        tests/test_engine_l2_ingestion.cpp
         tests/test_execution_adapter.cpp
         tests/test_execution_bridge.cpp
         tests/test_engine.cpp
+        tests/test_engine_lookahead.cpp
+        tests/test_engine_instrument_spec.cpp
+        tests/test_instrument.cpp
+        tests/test_rate_limiter.cpp
+        tests/test_client_order_id.cpp
+        tests/test_live_safety.cpp
         tests/test_order_id.cpp
         tests/test_price.cpp
         tests/test_orderbook_registry.cpp

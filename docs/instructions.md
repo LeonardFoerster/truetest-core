@@ -163,7 +163,7 @@ you combine them. ASAN and UBSAN can be combined.
 
 | Flag | Default | Description |
 |---|---|---|
-| `ENABLE_NATIVE_OPT` | OFF | Applies `-march=native -mtune=native -funroll-loops -fomit-frame-pointer` to `engine_live` only, Release config only. Backtest and shadow binaries remain portable |
+| `ENABLE_NATIVE_OPT` | OFF | Applies `-march=native -mtune=native -funroll-loops -fomit-frame-pointer` to **all three binaries** (backtest, shadow, live), Release config only. Opt-in because CI and portable builds must stay CPU-agnostic; when set, the user has already accepted native-only builds across the board |
 
 ### Standard CMake variables
 
@@ -410,10 +410,19 @@ All three binaries accept the same CLI.
 
 ### Binance credentials
 
+**Prefer environment variables.** When these are set, they override the CLI
+flags. Passing secrets via argv leaks them to `ps` and shell history, and
+TrueTest emits a warning if you do:
+
+| Env var | Purpose |
+|---|---|
+| `TRUETEST_BINANCE_API_KEY` | Binance API key (wins over `--api-key`) |
+| `TRUETEST_BINANCE_API_SECRET` | Binance API secret (wins over `--api-secret`) |
+
 | Flag | Description |
 |---|---|
-| `--api-key` | Binance API key. Required for `--mode=live` |
-| `--api-secret` | Binance API secret. Required for `--mode=live` |
+| `--api-key` | Fallback when the env var is unset. Required for `--mode=live` if no env var |
+| `--api-secret` | Fallback when the env var is unset. Required for `--mode=live` if no env var |
 
 ### Strategy
 
@@ -435,7 +444,9 @@ All three binaries accept the same CLI.
 | `--daily-reset-hour` | `0` | UTC hour (0-23) to reset daily loss counter |
 | `--max-trades-per-hour` | `0` | Maximum fills per rolling hour (0 = no limit) |
 | `--max-orders-per-minute` | `0` | Maximum orders per rolling minute (0 = no limit) |
-| `--risk-unwind` | flag | On risk halt, unwind all open positions before stopping |
+| `--risk-unwind` | flag | On risk halt, unwind all open positions before stopping. Handles both longs and shorts — longs close with market SELL, shorts with market BUY |
+| `--reconcile-tolerance-bps` | `10.0` | Live only. Acceptable local/exchange balance drift (basis points) at startup. The Binance provider hits `/api/v3/account` before the engine starts; larger drift refuses startup |
+| `--kill-switch-deadline-ms` | `5000` | Live only. Deadline (ms) for the cancel-all + flatten sequence at shutdown. A missed deadline prints a warning so the operator knows to intervene manually |
 
 ### Fee model
 
@@ -512,6 +523,10 @@ Thread preset auto-selection:
 | `--spread-step` | `0.0001` | Spread step factor (`mid × factor`) |
 | `--debug-fills` | flag | Log the first N fills with full book state |
 | `--debug-fills-budget` | `20` | How many fills to log when `--debug-fills` is on |
+| `--exec-bar-delay` | `1` | Bars of simulated execution delay for backtest/shadow. `1` (default) parks orders until next bar's open — kills same-bar look-ahead. `0` restores legacy same-bar fill. Ignored in live mode and when a latency model is configured |
+| `--wire-latency-us` | `0` | Extra wire + exchange-ingest latency (microseconds) applied by the execution adapter on top of any engine-side latency model. Shadow: gates real trade prints matching open orders, surfacing "sim filled, exchange didn't" cases. Backtest against the Binance paper-hybrid executor: holds fills in a release buffer for this window before returning them. Ignored in live mode. See [§16.2.2](#1622-wire-latency-modeling) |
+| `--instrument` | none | Per-symbol trading rules (repeatable). Format: `SYMBOL:tick=X,lot=Y,minq=Q,minn=N,maker=M,taker=T` (any field optional). Price/qty get quantized before routing; orders below `min_qty` or `min_notional` are rejected |
+| `--depth-stream` | none | Optional L2 depth stream subscribed alongside `--stream` on a single combined WebSocket (provider-specific suffix; for Binance e.g. `depth20@100ms`). When set, the provider's orderbook is driven by real exchange levels and the paper market-maker is suppressed for that symbol. See [§16.2 Binance provider](#162-binance-provider) |
 
 ### WebSocket UI
 
@@ -527,8 +542,10 @@ Thread preset auto-selection:
 |---|---|---|
 | `--rolling-window` | `252` | Rolling metrics window size (number of bars) |
 | `--risk-free-rate` | `0.0` | Annual risk-free rate for Sharpe/Sortino ratios |
+| `--periods-per-year` | `252` | Annualization factor for Sharpe / Sortino / Calmar. Common values: `252` daily, `252×390` US-equities minute, `525600` crypto minute, `31536000` crypto second. Sharpe and Sortino are now multiplied by `sqrt(periods_per_year)`, so this must match your bar cadence |
+| `--max-equity-points` | `100000` | Hard cap on retained equity-curve points. Exceeded curves are decimated in place (every second point dropped, stride doubled) to keep memory bounded on long runs |
 | `--output` | none (stdout) | Write results to file |
-| `--output-format` | `json` | Output format: `json` or `csv` |
+| `--output-format` | `json` | Output format: `json` or `csv`. JSON now includes `annualized_return` alongside `cumulative_return` |
 
 ---
 
@@ -714,40 +731,145 @@ the hot path).
   --backfill 500
 ```
 
-**Supported streams:**
+**Supported streams (for `--stream`):**
 
 - `trade` — individual trade ticks
 - `kline_1m`, `kline_5m`, ... — 1-minute / 5-minute / etc. candlestick
   aggregation
-- `depth` — L2 orderbook depth (used by `HybridExecutor` for realistic
-  paper-mode limit fills against real exchange depth)
-- combined multi-stream (via `BinanceCombinedTransport`)
 
 **Execution modes:**
 
-- **Paper** (default) — orders logged, fills simulated from last price.
-- **Hybrid** — paper market orders + local-book limit fills (default for
-  backtest/shadow/paper modes). Owns synthetic book-seeding around the mid
-  price.
+- **Paper** (default, backtest only) — `HybridExecutor`: paper market
+  orders + local-book limit fills against a synthetic MM-seeded book.
+  When `--wire-latency-us` is set, each fill's release is deferred by
+  the sampled latency — the engine doesn't see the fill until
+  simulated time has advanced past `fill_ts + latency` (see
+  [§16.2.2](#1622-wire-latency-modeling)).
+- **Shadow** — primary fills come from `LocalBookAdapter` against the
+  engine's orderbook. The *exchange* side of `ShadowTracker` is
+  `TradeTapeShadowAdapter`: every real trade print is matched against
+  open orders, and a BUY-limit `P` fills when a trade prints at `price
+  ≤ P` after submit (SELL symmetric). Fill price = the printed trade
+  price. No order ever crosses the wire. Matching is gated by the
+  order's `earliest_eligible_ts` plus an optional `--wire-latency-us`
+  window — see [§16.2.1](#1621-l2-depth-feeding-the-orderbook-shadow-realism)
+  and [§16.2.2](#1622-wire-latency-modeling).
 - **Live** — signed REST order submission against `/api/v3/order` via
-  `BinanceRestClient`. `poll_live_fills()` polls order status for fills.
-  Cancel and modify are wired. Requires `--live` flag, `--api-key`,
-  `--api-secret`, and explicit `YES` confirmation at the prompt.
+  `BinanceRestClient`. Order acks + fills come from Binance's user-data
+  WebSocket. Cancel and modify are wired. Requires `--live` flag,
+  credentials (env vars or CLI), and explicit `YES` confirmation at the
+  prompt.
+
+**Live-safety surfaces** (live mode only, all provider-owned):
+
+- **Reconciler** — hits `/api/v3/account` at startup and compares local
+  cash + position to the exchange's free+locked balance for the quote
+  and base assets. Larger drift than `--reconcile-tolerance-bps`
+  refuses startup. Heuristic symbol→base/quote split handles standard
+  Binance suffixes (`USDT`, `USDC`, `BUSD`, `BTC`, `ETH`, …).
+- **Kill-switch** — on shutdown: `DELETE /api/v3/openOrders?symbol=X`,
+  then query the account and market-SELL any remaining free base-asset
+  balance. Honors `--kill-switch-deadline-ms`; warns when deadline is
+  missed so the operator knows to intervene.
+- **Client-order-id minter** — every submitted order gets a unique id
+  of form `tt-<epoch_hex>-<seed_hex>-<seq_hex>`, making reconnect
+  replays idempotent against exchange-side dedup.
+- **Order-rate limiter** — token bucket sized to Binance spot's
+  50-orders-per-10s cap, gating every `submit_order` / `cancel_order`
+  on the bridge.
+- **Clock sync** — `BinanceRestClient` caches the offset from
+  `/api/v3/time` and applies it to every signed timestamp. The offset
+  refreshes lazily every 5 minutes; a `-1021` response triggers an
+  immediate resync + one retry so a drifted NTP step doesn't kill the
+  whole session.
 
 **Historical backfill.** Historical bars are fetched via REST and injected
 into the live stream through `PrependTransport` — invisible to the engine.
 
-**L2 depth stream (paper fills against real book):**
+#### 16.2.1 L2 depth feeding the orderbook (shadow realism)
+
+Without `--depth-stream`, the engine's orderbook for the symbol is seeded
+by `MarketMaker::replenish` — paper liquidity around the mid price.
+`LocalBookAdapter` fills against that paper book, which is useful for
+rough shadow but doesn't reflect actual market depth.
+
+With `--depth-stream`, the Binance provider subscribes to a combined
+WebSocket carrying both feeds and the engine's orderbook is driven by
+real exchange levels:
 
 ```bash
 ./build/engine_shadow \
-  --provider binance --symbol btcusdt --stream depth \
-  --strategy mean-reversion --backfill 200 --web-ui
+  --provider binance --symbol btcusdt --stream trade \
+  --depth-stream depth20@100ms \
+  --strategy mean-reversion --web-ui
 ```
 
-The local orderbook receives live snapshots and incremental updates, so
-limit orders match against the real book instead of the synthetic
-MarketMaker-seeded one.
+What changes:
+- One WS subscribes to `/stream?streams=btcusdt@trade/btcusdt@depth20@100ms`.
+- Depth frames populate `orderbook_registry_` every 100 ms via
+  `apply_l2_snapshot`; `LocalBookAdapter` now matches strategy orders
+  against the **real** top-20 book.
+- `MarketMaker::replenish` is automatically suppressed for any symbol
+  that receives L2 frames.
+- The trade stream still drives strategy events and the
+  `TradeTapeShadowAdapter` as before.
+- `ShadowTracker`'s report now compares two meaningful things:
+  engine-sim fills against the real book vs. trade-tape fills.
+
+**Supported depth suffixes (Binance):** `depth5@100ms`, `depth10@100ms`,
+`depth20@100ms` (partial-book streams — each frame is a fresh top-N
+snapshot). Diff streams (`depth@100ms` with REST seed + sequence-id
+resequencing) are not yet supported.
+
+**Provider-generic.** `--depth-stream` is a venue-agnostic CLI flag; its
+value is passed opaquely through `provider_config` to the provider. Any
+provider that overrides `IProvider::supports_event_stream()` and
+`get_event_parser()` participates in the unified `provider::event`
+streaming path — no engine or CLI changes needed per venue.
+
+#### 16.2.2 Wire latency modeling
+
+`--wire-latency-us N` layers an `ILatencyModel` on top of the execution
+adapter, on top of any engine-side `latency_model` (which already delays
+order submission via `earliest_eligible_ts`). The two model different
+things and stack:
+
+| Layer | Represents | Applied by |
+|---|---|---|
+| `latency_model` | strategy → order-ready (engine-side processing) | Engine deferral of `submit_order` call |
+| `wire_latency_model` (`--wire-latency-us`) | order → venue (network + ingest) | Execution adapter internally |
+
+Ignored when `--mode live` (the real exchange supplies real latency).
+
+**Shadow mode** — `TradeTapeShadowAdapter` sets each open order's
+`submit_ts = earliest_eligible_ts + wire_latency`. Any real trade
+printing inside the wire window is correctly *missed* on the shadow
+side — `ShadowTracker` then reports it as a "sim filled, exchange
+didn't" divergence, which is precisely the cost of latency the operator
+cares about.
+
+**Backtest paper-hybrid** — `HybridExecutor` samples a per-order
+latency at `submit_order`, tags each emitted fill with a `release_ts =
+fill_ts + latency`, and holds it in a delayed-fills buffer. Fills only
+become visible to the engine once the simulated clock (tracked from the
+max `earliest_eligible_ts` seen across subsequent submits) has passed
+`release_ts`. Cancelling an order inside the wire window also discards
+any buffered fill for that id — prevents a "cancel won, but the fill
+reappears later" artifact.
+
+**Typical values.** Co-located HFT: `50–200 µs`. VPS in the same
+region: `500 µs – 2 ms`. Residential WAN: `20–50 ms`. Set what
+matches your deployment, not what looks best in the PnL.
+
+```bash
+# Shadow with 1 ms wire latency — trades printing within 1 ms of
+# submit are now correctly excluded from the "exchange" side of the
+# shadow comparison.
+./build/engine_shadow \
+  --provider binance --symbol btcusdt --stream trade \
+  --depth-stream depth20@100ms \
+  --strategy mean-reversion --wire-latency-us 1000
+```
 
 ### 16.3 Recording and replaying Binance data
 
@@ -1138,15 +1260,52 @@ loss resets at the configured UTC hour (default: midnight). `0` disables.
 ### 21.3 Automatic position unwinding
 
 By default, a risk halt stops the engine immediately. With `--risk-unwind`,
-the engine first closes all open positions via market sell orders, then
+the engine first closes all open positions via market orders, then
 halts. This prevents leaving orphaned positions on a live exchange.
+
+**Sign-aware.** Longs close with market SELL (`|qty|` shares); shorts
+close with market BUY (`|qty|` shares). Flat positions are skipped.
 
 ```bash
 ./build/engine_shadow --provider binance --symbol btcusdt --stream trade \
   --max-daily-loss 500 --max-trades-per-hour 100 --risk-unwind
 ```
 
-### 21.4 Risk in config files
+### 21.4 Live-mode startup and shutdown gates
+
+Separate from per-order / per-fill risk limits, live runs (Binance
+provider, `--mode live` via `engine_live`) pass through two provider-owned
+safety gates:
+
+- **Reconciler (startup)** — runs before the engine accepts any bar.
+  Refuses to start if local cash or position drift from the exchange's
+  `/api/v3/account` balance exceeds `--reconcile-tolerance-bps`.
+  Defaults to ±10 bps.
+- **Kill-switch (shutdown)** — runs as workers drain. Cancels all open
+  orders on the symbol, queries current holdings, market-sells free
+  base-asset balance within `--kill-switch-deadline-ms`. A missed
+  deadline prints `WARNING: kill-switch did NOT complete within N ms
+  — inspect exchange state manually.`
+
+Neither gate fires in backtest or shadow; the engine installs
+`NoopReconciler` / `NoopKillSwitch` there.
+
+### 21.5 Ring-buffer drop policy (shadow / live)
+
+Worker ring buffers drop events on overflow. The default policy
+(`allow`) counts drops and reports them at shutdown — fine for
+backtest. In **shadow and live**, main.inc overrides to `halt_on_drop`:
+a drop on any *safety-critical* ring (risk / observer / risk_stats —
+the ones feeding the halt flag and shadow portfolio) sets `halt_flag_`
+and emits one stderr line identifying the ring and drop count.
+Non-safety rings (logging / stats / mm / ws) still drop silently.
+
+Rationale: silently dropping a fill from the risk ring under burst
+load means the risk check never fires on that fill — exactly the
+moment you most need it. Halting loudly is safer than trading past
+a risk limit.
+
+### 21.6 Risk in config files
 
 ```json
 {
@@ -1226,6 +1385,11 @@ mutexes or syscalls on the hot path.
 
 High watermark statistics are printed at engine shutdown alongside drop
 counts.
+
+**Drop policy** (`engine_config::drop_policy`): `allow` by default
+(backtest), `halt_on_drop` in shadow and live. A drop from a
+safety-critical ring (risk, observer, risk_stats) under `halt_on_drop`
+halts the engine. See [§21.5](#215-ring-buffer-drop-policy-shadow--live).
 
 ---
 
