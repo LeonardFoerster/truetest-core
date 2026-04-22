@@ -5,7 +5,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -64,6 +66,60 @@ static void install_shutdown_handler()
         if (auto* tb = g_tick_bridge.load(std::memory_order_acquire)) tb->stop();
         if (auto* bb = g_bar_bridge.load(std::memory_order_acquire)) bb->stop();
     });
+}
+
+// Live-money safety gate. Prints a loud red warning and forces the operator
+// to solve a fresh random addition problem before real orders can be sent.
+// Returns true iff the answer was correct.
+static bool confirm_real_money_math()
+{
+    const char* RED  = ::isatty(fileno(stdout)) ? "\033[1;31m" : "";
+    const char* YEL  = ::isatty(fileno(stdout)) ? "\033[1;33m" : "";
+    const char* OFF  = ::isatty(fileno(stdout)) ? "\033[0m"    : "";
+
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    std::uniform_int_distribution<int> dist(100, 9999);
+    int a = dist(rng);
+    int b = dist(rng);
+    int answer = a + b;
+
+    std::cout << "\n";
+    std::cout << RED << "  ###############################################\n";
+    std::cout << "  #                                             #\n";
+    std::cout << "  #   !!!  LIVE TRADING — REAL MONEY  !!!       #\n";
+    std::cout << "  #                                             #\n";
+    std::cout << "  #   Orders submitted from here will execute   #\n";
+    std::cout << "  #   on a real exchange against real funds.    #\n";
+    std::cout << "  #   Losses are real and irreversible.         #\n";
+    std::cout << "  #                                             #\n";
+    std::cout << "  ###############################################" << OFF << "\n\n";
+
+    std::cout << YEL << "  Solve to confirm: " << a << " + " << b << " = " << OFF;
+    std::cout.flush();
+
+    std::string line;
+    if (!std::getline(std::cin, line))
+    {
+        std::cout << "  Aborted (no input).\n";
+        return false;
+    }
+
+    int given = 0;
+    try { given = std::stoi(line); }
+    catch (...) {
+        std::cout << "  ! Could not parse a number from \"" << line << "\". Aborted.\n";
+        return false;
+    }
+
+    if (given != answer)
+    {
+        std::cout << "  ! Wrong answer (expected " << answer << "). Aborted.\n";
+        return false;
+    }
+
+    std::cout << "  Confirmed. Proceeding with live execution.\n";
+    return true;
 }
 
 struct cli_options
@@ -771,14 +827,8 @@ static int run_provider_mode(const cli_options& o)
         }
         else
         {
-            std::cout << "  WARNING: You are about to submit REAL orders. Type YES to continue: ";
-            std::string confirm;
-            std::getline(std::cin, confirm);
-            if (confirm != "YES")
-            {
-                std::cout << "  Aborted.\n";
+            if (!confirm_real_money_math())
                 return 0;
-            }
         }
     }
     else if (o.testnet)
@@ -1144,7 +1194,18 @@ static int run_tui_mode(const cli_options& o)
     if (mode_choice == 2)
         config.mode = engine_mode::shadow;
     else if (mode_choice == 3)
+    {
+        if (!truetest::target_allows_live_orders())
+        {
+            std::cerr << "  ! Live mode is only permitted on the engine_live binary "
+                         "(this is " << truetest::target_name() << ").\n";
+            return 1;
+        }
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        if (!confirm_real_money_math())
+            return 0;
         config.mode = engine_mode::live;
+    }
 
     std::cout << "\n";
     std::cout << "  ============================================\n";

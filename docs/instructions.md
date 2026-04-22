@@ -390,7 +390,7 @@ All three binaries accept the same CLI.
 | Flag | Values | Default | Description |
 |---|---|---|---|
 | `--mode` | `backtest`, `shadow`, `live` | Per-binary default | Engine operating mode. `live` rejected on non-live binaries |
-| `--live` | flag | off | Safety flag required for live (real money) execution |
+| `--live` | flag | off | Safety flag required for live (real money) execution. On mainnet, also triggers an interactive math-challenge confirmation before any order is sent (skipped with `--testnet`) |
 | `--dry-run` | flag | off | Validate config, print summary, exit |
 | `--dump-config` | flag | off | Print resolved config as JSON and exit |
 | `--config` | path | none | Load configuration from a JSON file. CLI flags override file values |
@@ -784,12 +784,15 @@ live-target gate at startup.
 ```
 
 **This submits real orders against Binance.** Both `--mode live` (implied by
-the binary default) and the `--live` safety flag are required, and the CLI
-prints an explicit confirmation prompt that requires typing `YES` before
-proceeding. Orders are signed with HMAC-SHA256 and submitted to
-`/api/v3/order`. Always pair with tight `--max-daily-loss`,
-`--max-trades-per-hour`, and `--risk-unwind` so a bug cannot drain the
-account.
+the binary default) and the `--live` safety flag are required. Before any
+order is sent, the CLI prints a red `LIVE TRADING — REAL MONEY` banner and
+prompts the operator to solve a fresh random addition challenge — two
+integers in `[100, 9999]`. The run aborts cleanly on a wrong answer,
+non-numeric input, or EOF, so a stray `Enter` cannot launch live trading.
+The challenge is skipped only when `--testnet` is set. Orders are signed
+with HMAC-SHA256 and submitted to `/api/v3/order`. Always pair with tight
+`--max-daily-loss`, `--max-trades-per-hour`, and `--risk-unwind` so a bug
+cannot drain the account.
 
 For testnet:
 
@@ -2422,7 +2425,10 @@ cmake --build build
   --strategy mean-reversion --balance 50000 \
   --risk-fraction 0.01 --sl 0.003 --tp 0.008 \
   --max-daily-loss 1000 --max-trades-per-hour 50 --risk-unwind
-# Prompts "Type YES to continue" before placing real orders.
+# Before any real order, the engine prints a red "LIVE TRADING — REAL MONEY"
+# banner and asks the operator to solve a fresh random addition (two integers
+# in [100, 9999]). A wrong, non-numeric, or empty answer aborts cleanly.
+# Skipped on --testnet.
 ```
 
 ### 34.12 Record and replay Binance data
