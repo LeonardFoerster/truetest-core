@@ -63,6 +63,7 @@ configure_file(
 # its own copy, compiled with a distinct TT_TARGET define.
 set(ENGINE_CORE_SOURCES
     src/engine/engine.cpp
+    src/analytics/adverse_selection_tracker.cpp
     src/analytics/analytics.cpp
     src/analytics/ascii_widgets.cpp
     src/analytics/report_generator.cpp
@@ -152,6 +153,11 @@ if(BUILD_TESTS)
 
     set(TEST_SOURCES
         tests/test_main.cpp
+        tests/test_adverse_selection.cpp
+        tests/test_cancel_race.cpp
+        tests/test_queue_model.cpp
+        tests/test_queue_aware_adapter.cpp
+        tests/test_impact_model.cpp
         tests/test_events.cpp
         tests/test_orderbook.cpp
         tests/test_portfolio.cpp
