@@ -196,3 +196,124 @@ TEST(ExitManager, MultipleStrategiesOnSameSymbolKeyIndependently)
     ASSERT_TRUE(r2.has_value());
     EXPECT_EQ(m.armed_count(), 0u);
 }
+
+// ---- Partial exits (Phase C) ------------------------------------------
+
+TEST(ExitManager, PartialExit_SingleIntent_ClosesFraction)
+{
+    // Opener for 10 units; intent with qty_fraction = 0.5 ⇒ close_qty = 5.
+    ExitManager m;
+    auto intent = make_long_intent("s", "X", 1, /*sl=*/90.0, /*tp=*/110.0, /*qty=*/10.0);
+    intent.qty_fraction = 0.5;
+    m.register_pending(std::move(intent));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, /*qty=*/10.0, 100.0));
+
+    auto r = m.on_price("X", 89.0, t0);    // SL crossed
+    ASSERT_TRUE(r.has_value());
+    EXPECT_NEAR(r->get_quantity(), 5.0, 1e-9);
+}
+
+TEST(ExitManager, PartialExit_MultipleIntentsPerKey_ArmAll)
+{
+    // Strategy declares TP1 = 0.5 @ 110, TP2 = 0.3 @ 120, SL = 1.0 @ 90.
+    ExitManager m;
+    auto make = [](double frac, std::optional<double> sl, std::optional<double> tp) {
+        auto i = make_long_intent("s", "X", 42, sl, tp, /*qty=*/10.0);
+        i.qty_fraction = frac;
+        return i;
+    };
+    m.register_pending(make(0.5, std::nullopt, 110.0));
+    m.register_pending(make(0.3, std::nullopt, 120.0));
+    m.register_pending(make(1.0, 90.0, std::nullopt));
+
+    EXPECT_EQ(m.pending_count(), 3u);
+    m.on_fill(make_opener_fill(42, "X", order_side::buy, 10.0, 100.0));
+    EXPECT_EQ(m.pending_count(), 0u);
+    EXPECT_EQ(m.armed_count(), 3u);
+}
+
+TEST(ExitManager, PartialExit_TP1FiresWithoutAffectingTP2OrSL)
+{
+    ExitManager m;
+    auto make = [](double frac, std::optional<double> sl, std::optional<double> tp) {
+        auto i = make_long_intent("s", "X", 42, sl, tp, 10.0);
+        i.qty_fraction = frac;
+        return i;
+    };
+    m.register_pending(make(0.5, std::nullopt, 110.0));   // TP1
+    m.register_pending(make(0.3, std::nullopt, 120.0));   // TP2
+    m.register_pending(make(1.0, 90.0, std::nullopt));    // SL
+    m.on_fill(make_opener_fill(42, "X", order_side::buy, 10.0, 100.0));
+
+    // Touch 110 — TP1 fires, closing 5 units. TP2 and SL remain armed.
+    auto r1 = m.on_price("X", 110.0, t0);
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_NEAR(r1->get_quantity(), 5.0, 1e-9);
+    EXPECT_EQ(m.armed_count(), 2u);
+
+    // Touch 120 — TP2 fires, closing 3 units. SL remains.
+    auto r2 = m.on_price("X", 120.0, t0);
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_NEAR(r2->get_quantity(), 3.0, 1e-9);
+    EXPECT_EQ(m.armed_count(), 1u);
+
+    // Crash to 89 — SL fires for the full 10 units (its own fraction=1.0
+    // binds to opener_qty, independent of earlier fires).
+    auto r3 = m.on_price("X", 89.0, t0);
+    ASSERT_TRUE(r3.has_value());
+    EXPECT_NEAR(r3->get_quantity(), 10.0, 1e-9);
+    EXPECT_EQ(m.armed_count(), 0u);
+}
+
+TEST(ExitManager, PartialExit_DefaultFractionIsFullClose)
+{
+    // No qty_fraction set → default 1.0 → close_qty = opener_qty.
+    ExitManager m;
+    m.register_pending(make_long_intent("s", "X", 1, 90.0, 110.0, /*qty=*/10.0));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 10.0, 100.0));
+
+    auto r = m.on_price("X", 89.0, t0);
+    ASSERT_TRUE(r.has_value());
+    EXPECT_NEAR(r->get_quantity(), 10.0, 1e-9);
+}
+
+TEST(ExitManager, PartialExit_ClampsNegativeAndOutOfRangeFractions)
+{
+    ExitManager m;
+    auto bad = make_long_intent("s", "X", 1, 90.0, 110.0, 10.0);
+    bad.qty_fraction = -0.5;                   // nonsensical → treated as 1.0
+    m.register_pending(std::move(bad));
+
+    auto too_big = make_long_intent("s", "Y", 2, 90.0, 110.0, 10.0);
+    too_big.qty_fraction = 1.5;                // > 1.0 → clamped to 1.0
+    m.register_pending(std::move(too_big));
+
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 10.0, 100.0));
+    m.on_fill(make_opener_fill(2, "Y", order_side::buy, 10.0, 100.0));
+
+    auto r1 = m.on_price("X", 89.0, t0);
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_NEAR(r1->get_quantity(), 10.0, 1e-9);   // clamped to full
+
+    auto r2 = m.on_price("Y", 89.0, t0);
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_NEAR(r2->get_quantity(), 10.0, 1e-9);   // clamped to full
+}
+
+TEST(ExitManager, PartialExit_CancelRemovesAllIntentsForKey)
+{
+    ExitManager m;
+    auto make = [](double frac, std::optional<double> sl, std::optional<double> tp) {
+        auto i = make_long_intent("s", "X", 42, sl, tp, 10.0);
+        i.qty_fraction = frac;
+        return i;
+    };
+    m.register_pending(make(0.5, std::nullopt, 110.0));
+    m.register_pending(make(1.0, 90.0, std::nullopt));
+    m.on_fill(make_opener_fill(42, "X", order_side::buy, 10.0, 100.0));
+    EXPECT_EQ(m.armed_count(), 2u);
+
+    m.cancel("s", "X");
+    EXPECT_EQ(m.armed_count(), 0u);
+    EXPECT_EQ(m.pending_count(), 0u);
+}
