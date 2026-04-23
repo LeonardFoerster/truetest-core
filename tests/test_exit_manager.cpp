@@ -55,7 +55,7 @@ TEST(ExitManager, PendingOnlyFiresAfterOpenerFill)
     // Before the opener fills, no price event can trigger — the intent
     // is pending, not armed.
     auto r = m.on_price("X", 80.0, t0);
-    EXPECT_FALSE(r.has_value());
+    EXPECT_TRUE(r.empty());
     EXPECT_EQ(m.pending_count(), 1u);
     EXPECT_EQ(m.armed_count(), 0u);
 
@@ -71,18 +71,18 @@ TEST(ExitManager, StopLossFiresAtOrBelowThresholdAndDisarms)
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 2.0, 100.0));
 
     // Above SL — no fire.
-    EXPECT_FALSE(m.on_price("X", 96.0, t0).has_value());
+    EXPECT_TRUE(m.on_price("X", 96.0, t0).empty());
 
     // At SL — fire, market sell, correct qty.
     auto r = m.on_price("X", 95.0, t0);
-    ASSERT_TRUE(r.has_value());
-    EXPECT_EQ(r->get_symbol(), "X");
-    EXPECT_EQ(r->get_side(), order_side::sell);
-    EXPECT_EQ(r->get_order_type(), order_type::market);
-    EXPECT_DOUBLE_EQ(r->get_quantity(), 2.0);  // from opener fill qty, not intent qty
+    ASSERT_FALSE(r.empty());
+    EXPECT_EQ(r[0].get_symbol(), "X");
+    EXPECT_EQ(r[0].get_side(), order_side::sell);
+    EXPECT_EQ(r[0].get_order_type(), order_type::market);
+    EXPECT_DOUBLE_EQ(r[0].get_quantity(), 2.0);  // from opener fill qty, not intent qty
     // Second tick at the same price shouldn't re-fire — the intent is
     // gone after trigger.
-    EXPECT_FALSE(m.on_price("X", 95.0, t0).has_value());
+    EXPECT_TRUE(m.on_price("X", 95.0, t0).empty());
     EXPECT_EQ(m.armed_count(), 0u);
 }
 
@@ -92,10 +92,10 @@ TEST(ExitManager, TakeProfitFiresAtOrAboveThreshold)
     m.register_pending(make_long_intent("s", "X", 1, /*sl=*/90.0, /*tp=*/110.0));
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
 
-    EXPECT_FALSE(m.on_price("X", 109.99, t0).has_value());
+    EXPECT_TRUE(m.on_price("X", 109.99, t0).empty());
     auto r = m.on_price("X", 110.0, t0);
-    ASSERT_TRUE(r.has_value());
-    EXPECT_EQ(r->get_side(), order_side::sell);
+    ASSERT_FALSE(r.empty());
+    EXPECT_EQ(r[0].get_side(), order_side::sell);
 }
 
 TEST(ExitManager, GapPastSlFillsAtNextObservedPriceNotAtSl)
@@ -109,8 +109,8 @@ TEST(ExitManager, GapPastSlFillsAtNextObservedPriceNotAtSl)
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
 
     auto r = m.on_price("X", 91.0, t0);
-    ASSERT_TRUE(r.has_value());
-    EXPECT_DOUBLE_EQ(r->get_price(), 91.0);
+    ASSERT_FALSE(r.empty());
+    EXPECT_DOUBLE_EQ(r[0].get_price(), 91.0);
 }
 
 TEST(ExitManager, TrailingStopRaisesSlOnFavorableTicks)
@@ -123,11 +123,11 @@ TEST(ExitManager, TrailingStopRaisesSlOnFavorableTicks)
     m.register_pending(std::move(ei));
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
 
-    EXPECT_FALSE(m.on_price("X", 103.0, t0).has_value());  // trail raises SL to 101.97
-    EXPECT_FALSE(m.on_price("X", 105.0, t0).has_value());  // trail raises SL to 103.95
-    EXPECT_FALSE(m.on_price("X", 104.0, t0).has_value());  // above trailed SL
+    EXPECT_TRUE(m.on_price("X", 103.0, t0).empty());  // trail raises SL to 101.97
+    EXPECT_TRUE(m.on_price("X", 105.0, t0).empty());  // trail raises SL to 103.95
+    EXPECT_TRUE(m.on_price("X", 104.0, t0).empty());  // above trailed SL
     auto r = m.on_price("X", 103.90, t0);
-    ASSERT_TRUE(r.has_value());
+    ASSERT_FALSE(r.empty());
 }
 
 TEST(ExitManager, TimeStopFiresAfterDeadline)
@@ -138,9 +138,9 @@ TEST(ExitManager, TimeStopFiresAfterDeadline)
     m.register_pending(std::move(ei));
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
 
-    EXPECT_FALSE(m.on_price("X", 100.0, t0 + std::chrono::seconds(4)).has_value());
+    EXPECT_TRUE(m.on_price("X", 100.0, t0 + std::chrono::seconds(4)).empty());
     auto r = m.on_price("X", 100.0, t0 + std::chrono::seconds(5));
-    ASSERT_TRUE(r.has_value());
+    ASSERT_FALSE(r.empty());
 }
 
 TEST(ExitManager, CancelDropsPendingAndArmed)
@@ -154,7 +154,7 @@ TEST(ExitManager, CancelDropsPendingAndArmed)
     m.on_fill(make_opener_fill(2, "Y", order_side::buy, 1.0, 100.0));
     m.cancel("s", "Y");
     EXPECT_EQ(m.armed_count(), 0u);
-    EXPECT_FALSE(m.on_price("Y", 95.0, t0).has_value());
+    EXPECT_TRUE(m.on_price("Y", 95.0, t0).empty());
 }
 
 TEST(ExitManager, FillBindsToActualOpenerPriceAndQty)
@@ -171,8 +171,8 @@ TEST(ExitManager, FillBindsToActualOpenerPriceAndQty)
     m.on_fill(make_opener_fill(7, "X", order_side::buy, 0.6, 102.0));
 
     auto r = m.on_price("X", 96.0, t0);
-    ASSERT_TRUE(r.has_value());
-    EXPECT_DOUBLE_EQ(r->get_quantity(), 0.6);
+    ASSERT_FALSE(r.empty());
+    EXPECT_DOUBLE_EQ(r[0].get_quantity(), 0.6);
 }
 
 TEST(ExitManager, MultipleStrategiesOnSameSymbolKeyIndependently)
@@ -188,12 +188,12 @@ TEST(ExitManager, MultipleStrategiesOnSameSymbolKeyIndependently)
 
     // 93: between a.sl and b.sl — only a should fire.
     auto r = m.on_price("X", 93.0, t0);
-    ASSERT_TRUE(r.has_value());
+    ASSERT_FALSE(r.empty());
     EXPECT_EQ(m.armed_count(), 1u);
 
     // Tick at 89 triggers b.
     auto r2 = m.on_price("X", 89.0, t0);
-    ASSERT_TRUE(r2.has_value());
+    ASSERT_FALSE(r2.empty());
     EXPECT_EQ(m.armed_count(), 0u);
 }
 
@@ -209,8 +209,8 @@ TEST(ExitManager, PartialExit_SingleIntent_ClosesFraction)
     m.on_fill(make_opener_fill(1, "X", order_side::buy, /*qty=*/10.0, 100.0));
 
     auto r = m.on_price("X", 89.0, t0);    // SL crossed
-    ASSERT_TRUE(r.has_value());
-    EXPECT_NEAR(r->get_quantity(), 5.0, 1e-9);
+    ASSERT_FALSE(r.empty());
+    EXPECT_NEAR(r[0].get_quantity(), 5.0, 1e-9);
 }
 
 TEST(ExitManager, PartialExit_MultipleIntentsPerKey_ArmAll)
@@ -247,21 +247,21 @@ TEST(ExitManager, PartialExit_TP1FiresWithoutAffectingTP2OrSL)
 
     // Touch 110 — TP1 fires, closing 5 units. TP2 and SL remain armed.
     auto r1 = m.on_price("X", 110.0, t0);
-    ASSERT_TRUE(r1.has_value());
-    EXPECT_NEAR(r1->get_quantity(), 5.0, 1e-9);
+    ASSERT_FALSE(r1.empty());
+    EXPECT_NEAR(r1[0].get_quantity(), 5.0, 1e-9);
     EXPECT_EQ(m.armed_count(), 2u);
 
     // Touch 120 — TP2 fires, closing 3 units. SL remains.
     auto r2 = m.on_price("X", 120.0, t0);
-    ASSERT_TRUE(r2.has_value());
-    EXPECT_NEAR(r2->get_quantity(), 3.0, 1e-9);
+    ASSERT_FALSE(r2.empty());
+    EXPECT_NEAR(r2[0].get_quantity(), 3.0, 1e-9);
     EXPECT_EQ(m.armed_count(), 1u);
 
     // Crash to 89 — SL fires for the full 10 units (its own fraction=1.0
     // binds to opener_qty, independent of earlier fires).
     auto r3 = m.on_price("X", 89.0, t0);
-    ASSERT_TRUE(r3.has_value());
-    EXPECT_NEAR(r3->get_quantity(), 10.0, 1e-9);
+    ASSERT_FALSE(r3.empty());
+    EXPECT_NEAR(r3[0].get_quantity(), 10.0, 1e-9);
     EXPECT_EQ(m.armed_count(), 0u);
 }
 
@@ -273,8 +273,8 @@ TEST(ExitManager, PartialExit_DefaultFractionIsFullClose)
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 10.0, 100.0));
 
     auto r = m.on_price("X", 89.0, t0);
-    ASSERT_TRUE(r.has_value());
-    EXPECT_NEAR(r->get_quantity(), 10.0, 1e-9);
+    ASSERT_FALSE(r.empty());
+    EXPECT_NEAR(r[0].get_quantity(), 10.0, 1e-9);
 }
 
 TEST(ExitManager, PartialExit_ClampsNegativeAndOutOfRangeFractions)
@@ -292,12 +292,12 @@ TEST(ExitManager, PartialExit_ClampsNegativeAndOutOfRangeFractions)
     m.on_fill(make_opener_fill(2, "Y", order_side::buy, 10.0, 100.0));
 
     auto r1 = m.on_price("X", 89.0, t0);
-    ASSERT_TRUE(r1.has_value());
-    EXPECT_NEAR(r1->get_quantity(), 10.0, 1e-9);   // clamped to full
+    ASSERT_FALSE(r1.empty());
+    EXPECT_NEAR(r1[0].get_quantity(), 10.0, 1e-9);   // clamped to full
 
     auto r2 = m.on_price("Y", 89.0, t0);
-    ASSERT_TRUE(r2.has_value());
-    EXPECT_NEAR(r2->get_quantity(), 10.0, 1e-9);   // clamped to full
+    ASSERT_FALSE(r2.empty());
+    EXPECT_NEAR(r2[0].get_quantity(), 10.0, 1e-9);   // clamped to full
 }
 
 TEST(ExitManager, PartialExit_CancelRemovesAllIntentsForKey)

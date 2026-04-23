@@ -28,7 +28,7 @@ cmake --build build
 ./build/engine_backtest
 ```
 
-Optional features (PostgreSQL, Binance live streaming, WebSocket UI, sanitisers,
+Optional features (PostgreSQL, Binance live streaming, sanitisers,
 benchmarks, shared library) are opt-in via `ENABLE_*` CMake flags. The full
 matrix is documented in [`CLAUDE.md`](CLAUDE.md#build) and
 [`docs/user-manual.md`](docs/user-manual.md).

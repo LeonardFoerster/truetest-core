@@ -11,13 +11,6 @@
                 "openssl"
             ]
         },
-        "web-ui": {
-            "description": "WebSocket UI server (Boost.Beast)",
-            "dependencies": [
-                "boost-beast",
-                "boost-asio"
-            ]
-        },
         "live-data": {
             "description": "Generic WebSocket data source (Boost.Beast)",
             "dependencies": [

@@ -8,7 +8,6 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 option(ENABLE_POSTGRESQL "Build with PostgreSQL storage backend"                      OFF)
 option(ENABLE_LIVE_DATA  "Build with WebSocket live data feed (requires Boost.Beast)" OFF)
 option(ENABLE_DEBUG      "Build with performance instrumentation (requires Abseil)"   OFF)
-option(ENABLE_WEB_UI     "Build with WebSocket UI server (requires Boost.Beast)"      OFF)
 option(ENABLE_BINANCE    "Build with Binance exchange provider"                       OFF)
 option(ENABLE_SQLITE     "SQLite persistence for trades/portfolio"                    ON)
 option(ENABLE_TSAN       "Enable ThreadSanitizer"                                     OFF)
@@ -76,6 +75,7 @@ set(ENGINE_CORE_SOURCES
     src/strategy/mean_reversion_strategy.cpp
     src/strategy/sma_strategy.cpp
     src/strategy/ma_crossover_strategy.cpp
+    src/strategy/hedge_demo_strategy.cpp
     src/strategy/sma.cpp
     src/market_maker/market_maker.cpp
     src/risk/risk_manager.cpp
@@ -203,7 +203,6 @@ if(BUILD_TESTS)
         tests/test_engine_streaming.cpp
         tests/test_engine_integration.cpp
         tests/test_golden_regression.cpp
-        tests/test_event_json.cpp
         tests/test_binance_parser.cpp
         tests/test_binance_order_encoder.cpp
         tests/test_binance_rest_order_transport.cpp
@@ -253,7 +252,6 @@ endif()
 # ── Install rules ───────────────────────────────────────────────────────────
 install(TARGETS engine_backtest engine_shadow engine_live
     RUNTIME DESTINATION bin)
-install(FILES web/index.html DESTINATION share/truetest/web)
 
 # ── CPack packaging ─────────────────────────────────────────────────────────
 set(CPACK_PACKAGE_NAME              "truetest")

@@ -32,7 +32,7 @@ serialization surface. None of these three touch credentials or the hot path.
 
 | Component        | Flag                 | Version / source        | License               | Link mode | engine_live permissible? |
 |------------------|----------------------|-------------------------|-----------------------|-----------|--------------------------|
-| Boost (headers)  | `ENABLE_WEB_UI` / `ENABLE_BINANCE` | find_package      | BSL-1.0               | header-only | yes               |
+| Boost (headers)  | `ENABLE_BINANCE`     | find_package            | BSL-1.0               | header-only | yes                      |
 | Boost.System     | `ENABLE_LIVE_DATA`   | find_package            | BSL-1.0               | dynamic   | yes                      |
 | OpenSSL          | `ENABLE_BINANCE`     | find_package            | Apache-2.0 (3.x)      | dynamic   | yes — required for HMAC signing |
 | libpqxx          | `ENABLE_POSTGRESQL`  | 7.9.2 (FetchContent)    | BSD-3-Clause          | static    | yes                      |

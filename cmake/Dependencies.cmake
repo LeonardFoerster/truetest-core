@@ -176,13 +176,6 @@ function(tt_wire_optional_backends target)
         target_compile_definitions(${target} PUBLIC HAS_LIVE_DATA)
     endif()
 
-    # WebSocket UI
-    if(ENABLE_WEB_UI)
-        find_package(Boost REQUIRED)
-        target_link_libraries(${target} PUBLIC Boost::headers)
-        target_compile_definitions(${target} PUBLIC HAS_WEB_UI)
-    endif()
-
     # Binance exchange provider
     if(ENABLE_BINANCE)
         find_package(Boost REQUIRED)

@@ -10,7 +10,6 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$ROOT/build"
-WEB_DIR="$ROOT/web"
 VCPKG_DIR="$BUILD_DIR/_vcpkg"
 BINARY="$BUILD_DIR/truetest"
 
@@ -30,14 +29,12 @@ fi
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 # ── Script mode ────────────────────────────────────────────────────────────
-# "full"       → build + start engine + build frontend + serve
-# "dev"        → build + start engine + Vite dev server (hot reload)
-# "build-only" → build everything, don't start
+# "full"       → build + start engine
+# "build-only" → build, don't start
 # "no-build"   → skip build, start directly
-MODE="dev"
+MODE="full"
 
 # ── CMake build flags ─────────────────────────────────────────────────────
-ENABLE_WEB_UI=ON          # WebSocket dashboard (requires Boost)
 ENABLE_BINANCE=ON         # Binance live WebSocket streaming
 ENABLE_LIVE_DATA=OFF      # Generic WebSocket data source
 ENABLE_POSTGRESQL=OFF     # PostgreSQL backend (needs libpqxx/vcpkg)
@@ -96,12 +93,6 @@ SEED=0                     # RNG seed (0 = random)
 BACKFILL_BARS=500             # Number of historical candles to load on start (0 = disabled)
 BACKFILL_INTERVAL=""          # Kline interval for backfill (empty = match stream type)
 
-# ── WebSocket UI ──────────────────────────────────────────────────────────
-WS_PORT=8765               # Engine WebSocket broadcast port
-VITE_PORT=5173             # Frontend dev server port
-OPEN_BROWSER=true          # Auto-open browser on start
-
-# ── Event logging ─────────────────────────────────────────────────────────
 # ── SQLite persistence ────────────────────────────────────────────────────
 DB_PATH="truetest.db"      # SQLite database path (empty = no persistence)
 
@@ -147,7 +138,6 @@ bootstrap_vcpkg() {
     # Collect which vcpkg features are needed based on enabled CMake flags
     local features=()
     [[ "$ENABLE_BINANCE"    == "ON" ]] && features+=(binance)
-    [[ "$ENABLE_WEB_UI"     == "ON" ]] && features+=(web-ui)
     [[ "$ENABLE_LIVE_DATA"  == "ON" ]] && features+=(live-data)
     [[ "$ENABLE_POSTGRESQL" == "ON" ]] && features+=(postgresql)
     [[ "$ENABLE_SQLITE"     == "ON" ]] && features+=(sqlite)
@@ -219,7 +209,6 @@ build_engine() {
     bootstrap_vcpkg
 
     local cmake_flags=(
-        -DENABLE_WEB_UI="$ENABLE_WEB_UI"
         -DENABLE_BINANCE="$ENABLE_BINANCE"
         -DENABLE_LIVE_DATA="$ENABLE_LIVE_DATA"
         -DENABLE_POSTGRESQL="$ENABLE_POSTGRESQL"
@@ -249,20 +238,9 @@ build_engine() {
     ok "Engine built: $BINARY"
 }
 
-# ── Build frontend ────────────────────────────────────────────────────────
-build_frontend() {
-    if [[ ! -d "$WEB_DIR/node_modules" ]]; then
-        info "Installing frontend dependencies..."
-        (cd "$WEB_DIR" && npm install --silent)
-    fi
-    info "Building frontend..."
-    (cd "$WEB_DIR" && npx vite build --outDir "$BUILD_DIR/web-dist" --emptyOutDir > /dev/null 2>&1)
-    ok "Frontend built: $BUILD_DIR/web-dist/"
-}
-
 # ── Assemble engine CLI args ──────────────────────────────────────────────
 build_engine_args() {
-    ENGINE_ARGS=(--web-ui --ws-port "$WS_PORT")
+    ENGINE_ARGS=()
 
     # Provider
     ENGINE_ARGS+=(--provider "$PROVIDER")
@@ -331,113 +309,41 @@ build_engine_args() {
 start_engine() {
     build_engine_args
 
-    # Kill any leftover process on the WS port from a previous run
-    if [[ "$IS_WINDOWS" == true ]]; then
-        # netstat + taskkill on Windows/Git Bash
-        local pid
-        pid=$(netstat -ano 2>/dev/null | grep ":$WS_PORT " | grep LISTENING | awk '{print $5}' | head -1)
-        [[ -n "${pid:-}" ]] && taskkill //PID "$pid" //F 2>/dev/null || true
-    elif command -v fuser &>/dev/null; then
-        fuser -k "$WS_PORT/tcp" 2>/dev/null || true
-    fi
-    sleep 0.3
-
-    info "Starting engine on ws://localhost:$WS_PORT ..."
+    info "Starting engine..."
     info "Engine args: ${ENGINE_ARGS[*]}"
     "$BINARY" "${ENGINE_ARGS[@]}" &
     PIDS+=($!)
     ok "Engine PID: ${PIDS[-1]}"
 }
 
-# ── Start frontend dev server ─────────────────────────────────────────────
-start_dev_server() {
-    info "Starting Vite dev server on http://localhost:$VITE_PORT ..."
-    (cd "$WEB_DIR" && npx vite --port "$VITE_PORT" --host) &
-    PIDS+=($!)
-    ok "Vite PID: ${PIDS[-1]}"
-}
-
-# ── Serve built frontend ─────────────────────────────────────────────────
-start_static_server() {
-    local dist="$BUILD_DIR/web-dist"
-    [[ -f "$dist/index.html" ]] || fail "Frontend not built. Run without --no-build first."
-
-    if command -v python3 &>/dev/null; then
-        info "Serving frontend via python3 on http://localhost:$VITE_PORT ..."
-        (cd "$dist" && python3 -m http.server "$VITE_PORT" --bind 127.0.0.1) &>/dev/null &
-        PIDS+=($!)
-    elif command -v python &>/dev/null; then
-        (cd "$dist" && python -m http.server "$VITE_PORT" --bind 127.0.0.1) &>/dev/null &
-        PIDS+=($!)
-    else
-        warn "No static server available (python3 not found). Open $dist/index.html manually."
-        return
-    fi
-    ok "Frontend served at http://localhost:$VITE_PORT"
-}
-
-# ── Open browser ──────────────────────────────────────────────────────────
-open_browser() {
-    [[ "$OPEN_BROWSER" == true ]] || return 0
-    local url="http://localhost:$VITE_PORT"
-    sleep 1
-    if [[ "$IS_WINDOWS" == true ]]; then
-        start "$url" 2>/dev/null &
-    elif command -v xdg-open &>/dev/null; then
-        xdg-open "$url" 2>/dev/null &
-    elif command -v open &>/dev/null; then
-        open "$url" 2>/dev/null &
-    fi
-}
-
 # ── Main ──────────────────────────────────────────────────────────────────
 echo -e "${BOLD}${BLUE}"
 echo "  ╔══════════════════════════════════╗"
-echo "  ║   TrueTest Trading Dashboard     ║"
+echo "  ║           TrueTest               ║"
 echo "  ╚══════════════════════════════════╝"
 echo -e "${NC}"
 
 case "$MODE" in
     full)
         build_engine
-        build_frontend
         start_engine
-        start_static_server
-        open_browser
         echo ""
-        ok "All systems running. Press Ctrl+C to stop."
-        wait
-        ;;
-    dev)
-        build_engine
-        [[ -d "$WEB_DIR/node_modules" ]] || (cd "$WEB_DIR" && npm install --silent)
-        start_engine
-        start_dev_server
-        open_browser
-        echo ""
-        ok "Dev mode running. Frontend has hot reload. Press Ctrl+C to stop."
+        ok "Engine running. Press Ctrl+C to stop."
         wait
         ;;
     build-only)
         build_engine
-        build_frontend
         echo ""
         ok "Build complete. Set MODE=\"no-build\" and run again to start."
         ;;
     no-build)
-        [[ -x "$BINARY" ]] || fail "Engine not built. Set MODE=\"full\" or \"dev\" first."
+        [[ -x "$BINARY" ]] || fail "Engine not built. Set MODE=\"full\" first."
         start_engine
-        if [[ -f "$BUILD_DIR/web-dist/index.html" ]]; then
-            start_static_server
-        else
-            warn "Frontend not built. Set MODE=\"dev\" for hot reload or build first."
-        fi
-        open_browser
         echo ""
         ok "Running. Press Ctrl+C to stop."
         wait
         ;;
     *)
-        fail "Unknown MODE: $MODE (use full, dev, build-only, or no-build)"
+        fail "Unknown MODE: $MODE (use full, build-only, or no-build)"
         ;;
 esac
