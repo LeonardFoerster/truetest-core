@@ -148,22 +148,32 @@ public:
         }
         catch (const beast::system_error& se)
         {
-            if (se.code() == websocket::error::closed)
-            {
-                open_ = false;
-                return false;
-            }
-
-            if (!stopped_.load() && reconnect())
-                return read_frame_blocking(out);
+            const bool clean_close = (se.code() == websocket::error::closed);
+            std::cerr << "BinanceTransport: websocket "
+                      << (clean_close ? "closed by server" : "read error")
+                      << " (" << se.code().message() << ")\n";
 
             open_ = false;
+
+            if (stopped_.load())
+                return false;
+
+            if (reconnect())
+                return read_frame_blocking(out);
+
             return false;
         }
         catch (const std::exception& e)
         {
             std::cerr << "BinanceTransport: read error: " << e.what() << "\n";
             open_ = false;
+
+            if (stopped_.load())
+                return false;
+
+            if (reconnect())
+                return read_frame_blocking(out);
+
             return false;
         }
     }
@@ -207,20 +217,22 @@ private:
     std::atomic<bool> open_{false};
     std::atomic<bool> stopped_{false};
 
-    static constexpr unsigned MAX_RECONNECTS = 5;
+    static constexpr unsigned MAX_RECONNECTS = 30;
 
     bool reconnect()
     {
         retry_config cfg;
         cfg.max_attempts = MAX_RECONNECTS;
         cfg.initial_delay = std::chrono::milliseconds(1000);
-        cfg.max_delay = std::chrono::milliseconds(16000);
-        cfg.on_retry = [](unsigned attempt, std::exception_ptr) {
+        cfg.max_delay = std::chrono::milliseconds(30000);
+        cfg.on_retry = [this](unsigned attempt, std::exception_ptr) {
+            if (stopped_.load()) return;
             std::cerr << "BinanceTransport: reconnecting (attempt "
                       << attempt << "/" << MAX_RECONNECTS << ")\n";
         };
 
         return retry_with_backoff([this]() {
+            if (stopped_.load()) return true;  // bail out of retry loop
             ioc_.restart();
             ws_.reset();
             return open();

@@ -1841,6 +1841,15 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
             st.last_price_fp8.store(
                 static_cast<std::int64_t>(rec.close * 1e8),
                 std::memory_order_relaxed);
+            st.realized_pnl_fp4.store(
+                static_cast<std::int64_t>(std::llround(analytics_.realized_pnl() * 1e4)),
+                std::memory_order_relaxed);
+            st.drawdown_fp4.store(
+                static_cast<std::int64_t>(std::llround(analytics_.max_drawdown_pct() * 1e2)),
+                std::memory_order_relaxed);
+            st.win_rate_bps.store(
+                static_cast<std::uint32_t>(std::lround(analytics_.win_rate_pct() * 100.0)),
+                std::memory_order_relaxed);
         }
 
 #ifdef HAS_WEB_UI
@@ -1960,6 +1969,15 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
                                   std::memory_order_relaxed);
             st.last_price_fp8.store(
                 static_cast<std::int64_t>(rec.price * 1e8),
+                std::memory_order_relaxed);
+            st.realized_pnl_fp4.store(
+                static_cast<std::int64_t>(std::llround(analytics_.realized_pnl() * 1e4)),
+                std::memory_order_relaxed);
+            st.drawdown_fp4.store(
+                static_cast<std::int64_t>(std::llround(analytics_.max_drawdown_pct() * 1e2)),
+                std::memory_order_relaxed);
+            st.win_rate_bps.store(
+                static_cast<std::uint32_t>(std::lround(analytics_.win_rate_pct() * 100.0)),
                 std::memory_order_relaxed);
         }
 
@@ -2126,6 +2144,15 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
                 st.last_price_fp8.store(
                     static_cast<std::int64_t>(last_mid_price_ * 1e8),
                     std::memory_order_relaxed);
+            st.realized_pnl_fp4.store(
+                static_cast<std::int64_t>(std::llround(analytics_.realized_pnl() * 1e4)),
+                std::memory_order_relaxed);
+            st.drawdown_fp4.store(
+                static_cast<std::int64_t>(std::llround(analytics_.max_drawdown_pct() * 1e2)),
+                std::memory_order_relaxed);
+            st.win_rate_bps.store(
+                static_cast<std::uint32_t>(std::lround(analytics_.win_rate_pct() * 100.0)),
+                std::memory_order_relaxed);
         }
 
 #ifdef HAS_WEB_UI

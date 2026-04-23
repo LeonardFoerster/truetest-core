@@ -172,6 +172,16 @@ public:
     double rolling_sharpe() const;
     double rolling_max_drawdown() const;
 
+    double realized_pnl() const { return total_win_ - total_loss_; }
+    double max_drawdown_pct() const { return max_drawdown_ * 100.0; }
+    double win_rate_pct() const
+    {
+        return trade_returns_.empty()
+            ? 0.0
+            : static_cast<double>(win_count_)
+              / static_cast<double>(trade_returns_.size()) * 100.0;
+    }
+
 private:
     void on_market(const market_event& m);
     void on_tick(const tick_event& t);
