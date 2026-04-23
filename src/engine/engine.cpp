@@ -220,9 +220,8 @@ void engine::log_event(const event& ev)
 
 void engine::publish_event(const event_pointer& ev)
 {
-    // Fast path: inline-mode backtest with no WS ring has nothing to fan
-    // out, and this runs multiple times per bar. Short-circuit before we
-    // construct the push lambda or touch any ring state.
+    // Inline-mode with no WS ring has nothing to fan out. This runs many
+    // times per bar, so short-circuit before building the push lambda.
     if (config_.threading == thread_preset::inline_mode
 #ifdef HAS_WEB_UI
         && !ws_ring_
@@ -231,10 +230,8 @@ void engine::publish_event(const event_pointer& ev)
         return;
     }
 
-    // Push `ev` onto `ring`, or account a drop. `safety` flags rings that
-    // feed the halt flag / shadow portfolio — dropping from those in
-    // live/shadow leaves the engine trading past a risk limit, so the
-    // halt_on_drop policy escalates such a drop into an engine halt.
+    // `safety` flags rings whose drops would leave the engine trading past
+    // a risk limit; halt_on_drop escalates a safety drop into a full halt.
     auto push = [&](const std::shared_ptr<EventRing>& ring,
                     std::size_t& drops,
                     [[maybe_unused]] const char* name,
@@ -254,10 +251,6 @@ void engine::publish_event(const event_pointer& ev)
             if (auto* dash = config_.dashboard.get())
             {
                 auto& st = dash->stats();
-                // Route the drop counter to the matching atomic so the
-                // dashboard's "Rings" row reflects the live state. Uses
-                // the ring name as a cheap switch — these are string
-                // literals so the compare is fast and identity-stable.
                 if      (std::string_view(name) == "logging")    st.ring_drops_logging.store(drops, std::memory_order_relaxed);
                 else if (std::string_view(name) == "risk")       st.ring_drops_risk.store(drops, std::memory_order_relaxed);
                 else if (std::string_view(name) == "stats")      st.ring_drops_stats.store(drops, std::memory_order_relaxed);
@@ -725,19 +718,14 @@ void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
             auto ts = std::chrono::system_clock::now();
             auto tif = (otype == order_type::limit) ? time_in_force::gtc : time_in_force::ioc;
 
-            // Routed via route_order so WS-submitted orders pick up the same
-            // instrument-spec quantization, execution_bar_delay, and latency
-            // model as strategy-emitted orders. Bypassing this was a
-            // look-ahead leak: manual UI orders previously filled same-bar
-            // at last_mid_price_ with no venue filters.
+            // Route via route_order so UI-submitted orders pick up the same
+            // instrument-spec quant / exec delay / latency as strategy orders.
+            // Bypassing this was a look-ahead leak.
             order_event o(ts, symbol, otype, oside, cmd.quantity, price, tif);
             bool halted_here = false;
             route_order(o, ts, event_count, halted_here);
 
-            // route_order assigns the id and, on rejection, already
-            // broadcasts a rejection_event via publish_event + ws_worker_.
-            // The explicit "accepted" ack below just acknowledges receipt
-            // to the submitting client regardless of downstream outcome.
+            // Client "accepted" ack; rejection broadcast happens in route_order.
             ws_worker_->broadcast(event_json::order_response_to_json(
                 o.get_order_id(), "accepted", "",
                 symbol, cmd.side, cmd.quantity, price));
@@ -1044,6 +1032,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             auto fill_ptr = fill_pool_.acquire(f);
             log_event(f);
             portfolio_.on_fill(f);
+            adverse_selection_.on_fill(f);
             exit_manager_.on_fill(f);
             risk_manager_.on_fill(f);
 #ifdef HAS_SQLITE
@@ -1163,9 +1152,7 @@ bool engine::modify_order(const std::string& symbol, uint64_t order_id,
 
 void engine::unwind_positions(std::size_t& event_count)
 {
-    // Snapshot (symbol, qty) before iterating — each fill mutates
-    // portfolio_.positions_, which would invalidate iterators taken over
-    // the live map.
+    // Snapshot before iterating — each fill mutates positions_.
     std::vector<std::pair<std::string, double>> to_close;
     to_close.reserve(portfolio_.get_positions().size());
     for (const auto& [symbol, pos] : portfolio_.get_positions())
@@ -1176,9 +1163,7 @@ void engine::unwind_positions(std::size_t& event_count)
 
     for (const auto& [symbol, qty] : to_close)
     {
-        // Sign-aware flatten: long → market SELL qty, short → market BUY -qty.
-        // Hardcoding a sell here left shorts open on halt, which is the
-        // exact scenario where you most want positions closed.
+        // Sign-aware flatten — shorts need market BUY, not SELL.
         const order_side close_side = (qty > 0.0)
             ? order_side::sell : order_side::buy;
         const double close_qty = std::abs(qty);
@@ -1211,6 +1196,7 @@ void engine::unwind_positions(std::size_t& event_count)
                 auto fill_ptr = fill_pool_.acquire(f);
                 log_event(f);
                 portfolio_.on_fill(f);
+                adverse_selection_.on_fill(f);
                 exit_manager_.on_fill(f);
                 risk_manager_.on_fill(f);
 #ifdef HAS_SQLITE
@@ -1240,8 +1226,7 @@ void engine::apply_l2_snapshot(const std::string& symbol,
                                const std::vector<l2_level>& bids,
                                const std::vector<l2_level>& asks)
 {
-    // Tag this symbol as L2-driven so MarketMaker::replenish stops
-    // seeding paper liquidity on top of it.
+    // Tag L2-driven so MarketMaker::replenish stops seeding paper depth.
     l2_seeded_symbols_.insert(symbol);
     auto ob = orderbook_registry_.get_or_create(symbol);
 
@@ -1258,6 +1243,7 @@ void engine::apply_l2_snapshot(const std::string& symbol,
                              static_cast<quantity>(lvl.quantity));
 
     ob->apply_l2_snapshot(ob_bids, ob_asks);
+    refresh_top_of_book_atomics(*ob);
 
     auto ev = std::make_shared<l2_snapshot_event>(
         std::chrono::system_clock::now(), symbol, bids, asks);
@@ -1273,11 +1259,33 @@ void engine::apply_l2_update(const std::string& symbol,
     side ob_side = (ts_side == tick_side::bid) ? side::buy : side::sell;
     ob->apply_l2_update(ob_side, Price::from_double(price),
                         static_cast<quantity>(new_qty));
+    refresh_top_of_book_atomics(*ob);
 
     auto ev = std::make_shared<l2_update_event>(
         std::chrono::system_clock::now(), symbol, ts_side, price, new_qty);
     log_event(*ev);
     publish_event(ev);
+}
+
+void engine::refresh_top_of_book_atomics(const orderbook& ob)
+{
+    auto* dash = config_.dashboard.get();
+    if (!dash) return;
+    // bids descending, asks ascending — front() is top of book.
+    auto& st = dash->stats();
+    const auto infos = ob.get_order_infos();
+    const auto& bids = infos.get_bids();
+    const auto& asks = infos.get_asks();
+    st.best_bid_fp8.store(
+        bids.empty() ? std::int64_t{-1}
+                     : static_cast<std::int64_t>(
+                           std::llround(bids.front().price_.to_double() * 1e8)),
+        std::memory_order_relaxed);
+    st.best_ask_fp8.store(
+        asks.empty() ? std::int64_t{-1}
+                     : static_cast<std::int64_t>(
+                           std::llround(asks.front().price_.to_double() * 1e8)),
+        std::memory_order_relaxed);
 }
 
 const instrument_spec* engine::resolve_instrument_spec(const std::string& symbol)
@@ -1447,10 +1455,8 @@ void engine::notify_position_change_all(const std::string& symbol, bool open)
     for (auto& s : additional_strategies_)
         if (s) s->set_position_open(symbol, open);
 
-    // When the position closes via the strategy's own signal (or a
-    // manual flatten), drop any armed/pending exit intent for that
-    // (strategy, symbol). Otherwise the next entry would still carry
-    // the prior intent armed against a stale opener id.
+    // On close, drop exit intents so the next entry doesn't carry a
+    // prior intent armed against a stale opener id.
     if (!open)
     {
         if (!primary_strategy_name_.empty())
@@ -1467,7 +1473,7 @@ void engine::register_strategy_exit_intent(IStrategy& strategy,
     auto intent = strategy.take_pending_exit_intent();
     if (!intent) return;
     intent->opener_order_id = order_id;
-    intent->strategy_name   = strategy_name;  // engine-assigned key
+    intent->strategy_name   = strategy_name;
     exit_manager_.register_pending(std::move(*intent));
 }
 
@@ -1540,9 +1546,43 @@ void engine::dispatch_extras_on_tick(const tick_event& te,
     }
 }
 
+void engine::write_adapter_diagnostics(truetest::ui::streaming_stats& st)
+{
+    std::uint32_t live = 0;
+    std::uint64_t queue_sum = 0;
+    std::uint32_t queue_n   = 0;
+    auto collect = [&](IExecutionAdapter* a) {
+        if (!a) return;
+        const auto c = a->live_quote_count();
+        if (c == 0) return;
+        live      += static_cast<std::uint32_t>(c);
+        queue_sum += a->avg_queue_position_bps();
+        ++queue_n;
+    };
+    for (auto& [_, ad] : execution_adapters_)
+        collect(ad.get());
+    if (config_.provider)
+        collect(config_.provider->get_execution_adapter().get());
+
+    st.live_quotes.store(live, std::memory_order_relaxed);
+    st.avg_queue_pos_bps.store(
+        queue_n > 0 ? static_cast<std::uint32_t>(queue_sum / queue_n) : 0u,
+        std::memory_order_relaxed);
+}
+
 void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                                 const std::chrono::system_clock::time_point& timestamp)
 {
+    // Advance adapter clocks first so cancels whose in-flight window has
+    // elapsed are drained before this event's matching runs.
+    for (auto& [_, ad] : execution_adapters_)
+        if (ad) ad->advance_time(timestamp);
+    if (config_.provider)
+    {
+        if (auto pa = config_.provider->get_execution_adapter())
+            pa->advance_time(timestamp);
+    }
+
     market_event mkt(
         timestamp,
         rec.symbol,
@@ -1556,6 +1596,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         std::chrono::steady_clock::now().time_since_epoch()).count());
 
     last_mid_price_ = mkt.get_open();
+    last_mark_symbol_ = mkt.get_symbol();
 
     while (!pending_orders_.empty() &&
            pending_orders_.top().order->get_earliest_eligible_ts() <= timestamp)
@@ -1569,6 +1610,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     }
 
     last_mid_price_ = mkt.get_close();
+    last_mark_symbol_ = mkt.get_symbol();
 
     auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
     if (!preset_has_mm_worker(config_.threading) &&
@@ -1580,10 +1622,8 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         config_.provider->on_mid_price(mkt.get_symbol(), last_mid_price_);
         auto provider_adapter = config_.provider->get_execution_adapter();
 
-        // Shadow bar-path: feed a synthetic trade at the bar close with the
-        // bar's volume. This is a lossy proxy (we don't know the intra-bar
-        // path) but it's strictly more informative than no trade feed, and
-        // bar-only shadow is already low-fidelity for fills by construction.
+        // Shadow bar-path: feed a synthetic close+volume trade. Lossy
+        // (no intra-bar path), but bar-only shadow is low-fidelity anyway.
         if (config_.mode == engine_mode::shadow && provider_adapter)
         {
             provider_adapter->on_trade(mkt.get_symbol(), mkt.get_close(),
@@ -1604,6 +1644,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                 }
                 auto fill_ptr = fill_pool_.acquire(f);
                 portfolio_.on_fill(f);
+                adverse_selection_.on_fill(f);
                 exit_manager_.on_fill(f);
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
@@ -1664,6 +1705,14 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
 void engine::process_single_tick(const tick_record& rec, std::size_t& event_count)
 {
+    for (auto& [_, ad] : execution_adapters_)
+        if (ad) ad->advance_time(rec.timestamp);
+    if (config_.provider)
+    {
+        if (auto pa = config_.provider->get_execution_adapter())
+            pa->advance_time(rec.timestamp);
+    }
+
     tick_side ts = tick_side::unknown;
     if (rec.side == data_tick_side::bid) ts = tick_side::bid;
     else if (rec.side == data_tick_side::ask) ts = tick_side::ask;
@@ -1673,6 +1722,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         std::chrono::steady_clock::now().time_since_epoch()).count());
 
     last_mid_price_ = rec.price;
+    last_mark_symbol_ = rec.symbol;
 
     auto ob = orderbook_registry_.get_or_create(rec.symbol);
     if (!l2_seeded_symbols_.count(rec.symbol))
@@ -1683,10 +1733,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         config_.provider->on_mid_price(rec.symbol, last_mid_price_);
         auto provider_adapter = config_.provider->get_execution_adapter();
 
-        // Shadow: feed the real trade tape into the provider adapter so it
-        // can match open orders against what actually printed. Must fire
-        // BEFORE poll_fills so fills generated by this tick are drained in
-        // the same iteration.
+        // Must fire BEFORE poll_fills so fills this tick are drained here.
         if (config_.mode == engine_mode::shadow && provider_adapter)
         {
             provider_adapter->on_trade(rec.symbol, rec.price,
@@ -1707,6 +1754,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                 }
                 auto fill_ptr = fill_pool_.acquire(f);
                 portfolio_.on_fill(f);
+                adverse_selection_.on_fill(f);
                 exit_manager_.on_fill(f);
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
@@ -1844,12 +1892,39 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
             st.realized_pnl_fp4.store(
                 static_cast<std::int64_t>(std::llround(analytics_.realized_pnl() * 1e4)),
                 std::memory_order_relaxed);
+            {
+                const auto& positions = portfolio_.get_positions();
+                double qty = 0.0, cost = 0.0;
+                if (auto it = positions.find(rec.symbol); it != positions.end())
+                {
+                    qty  = it->second.qty;
+                    cost = it->second.cost_basis;
+                }
+                const double unreal = qty * rec.close - cost;
+                st.unrealized_pnl_fp4.store(
+                    static_cast<std::int64_t>(std::llround(unreal * 1e4)),
+                    std::memory_order_relaxed);
+                st.position_qty_fp8.store(
+                    static_cast<std::int64_t>(std::llround(qty * 1e8)),
+                    std::memory_order_relaxed);
+            }
+            // Sign-flip so "%+.2f%%" renders "-15.50%" not "+15.50%".
             st.drawdown_fp4.store(
-                static_cast<std::int64_t>(std::llround(analytics_.max_drawdown_pct() * 1e2)),
+                -static_cast<std::int64_t>(std::llround(analytics_.max_drawdown_pct() * 1e2)),
                 std::memory_order_relaxed);
             st.win_rate_bps.store(
                 static_cast<std::uint32_t>(std::lround(analytics_.win_rate_pct() * 100.0)),
                 std::memory_order_relaxed);
+            // Simulated time so horizon compares correctly in replay.
+            adverse_selection_.on_mark(rec.symbol, rec.close, timestamp);
+            st.toxicity_bps_fp2.store(
+                static_cast<std::int32_t>(std::lround(
+                    adverse_selection_.mean_bps() * 100.0)),
+                std::memory_order_relaxed);
+            st.toxicity_samples.store(
+                static_cast<std::uint32_t>(adverse_selection_.sample_count()),
+                std::memory_order_relaxed);
+            write_adapter_diagnostics(st);
         }
 
 #ifdef HAS_WEB_UI
@@ -1973,12 +2048,37 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
             st.realized_pnl_fp4.store(
                 static_cast<std::int64_t>(std::llround(analytics_.realized_pnl() * 1e4)),
                 std::memory_order_relaxed);
+            {
+                const auto& positions = portfolio_.get_positions();
+                double qty = 0.0, cost = 0.0;
+                if (auto it = positions.find(rec.symbol); it != positions.end())
+                {
+                    qty  = it->second.qty;
+                    cost = it->second.cost_basis;
+                }
+                const double unreal = qty * rec.price - cost;
+                st.unrealized_pnl_fp4.store(
+                    static_cast<std::int64_t>(std::llround(unreal * 1e4)),
+                    std::memory_order_relaxed);
+                st.position_qty_fp8.store(
+                    static_cast<std::int64_t>(std::llround(qty * 1e8)),
+                    std::memory_order_relaxed);
+            }
             st.drawdown_fp4.store(
-                static_cast<std::int64_t>(std::llround(analytics_.max_drawdown_pct() * 1e2)),
+                -static_cast<std::int64_t>(std::llround(analytics_.max_drawdown_pct() * 1e2)),
                 std::memory_order_relaxed);
             st.win_rate_bps.store(
                 static_cast<std::uint32_t>(std::lround(analytics_.win_rate_pct() * 100.0)),
                 std::memory_order_relaxed);
+            adverse_selection_.on_mark(rec.symbol, rec.price, rec.timestamp);
+            st.toxicity_bps_fp2.store(
+                static_cast<std::int32_t>(std::lround(
+                    adverse_selection_.mean_bps() * 100.0)),
+                std::memory_order_relaxed);
+            st.toxicity_samples.store(
+                static_cast<std::uint32_t>(adverse_selection_.sample_count()),
+                std::memory_order_relaxed);
+            write_adapter_diagnostics(st);
         }
 
 #ifdef HAS_WEB_UI
@@ -2078,11 +2178,12 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
 
     auto last_report_time = std::chrono::steady_clock::now();
 
-    // Unified dispatch: the engine stops caring which venue produced the
-    // frame. Each provider::event arm routes into a path that already
-    // exists — bar/tick feed the strategy, L2 populates orderbook_registry_
-    // directly. This is how the LocalBookAdapter sees real exchange depth
-    // in shadow mode without leaking Binance specifics into the engine.
+    // current_event_ts tracks sim time of the last price-bearing event —
+    // the clock used for AdverseSelectionTracker::on_mark so horizons stay
+    // consistent in historical replay. L2 + status don't advance it.
+    std::chrono::system_clock::time_point current_event_ts =
+        std::chrono::system_clock::now();
+
     bridge->run_streaming(data_handler_, [&](const provider::event& ev) {
         std::visit([&](const auto& e) {
             using E = std::decay_t<decltype(e)>;
@@ -2101,12 +2202,14 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
                     }
                     return std::chrono::system_clock::now();
                 }();
+                current_event_ts = timestamp;
                 process_single_bar(rec, event_count, timestamp);
                 record_count++;
             }
             else if constexpr (std::is_same_v<E, provider::tick>)
             {
                 auto rec = provider::to_tick_record(e);
+                current_event_ts = rec.timestamp;
                 process_single_tick(rec, event_count);
                 record_count++;
             }
@@ -2121,13 +2224,33 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
                 for (const auto& lvl : e.asks)
                     asks.push_back({lvl.price, lvl.quantity});
                 apply_l2_snapshot(e.symbol, bids, asks);
+
+                // Forward so queue-aware adapters can seed level aggregates.
+                std::vector<std::pair<double,double>> abids, aasks;
+                abids.reserve(e.bids.size());
+                aasks.reserve(e.asks.size());
+                for (const auto& lvl : e.bids)
+                    abids.emplace_back(lvl.price, lvl.quantity);
+                for (const auto& lvl : e.asks)
+                    aasks.emplace_back(lvl.price, lvl.quantity);
+                for (auto& [_, ad] : execution_adapters_)
+                    if (ad) ad->on_l2_snapshot(e.symbol, abids, aasks);
+                if (config_.provider)
+                    if (auto pa = config_.provider->get_execution_adapter())
+                        pa->on_l2_snapshot(e.symbol, abids, aasks);
             }
             else if constexpr (std::is_same_v<E, provider::l2_update>)
             {
                 tick_side ts = (e.side == 0) ? tick_side::bid : tick_side::ask;
                 apply_l2_update(e.symbol, ts, e.price, e.new_quantity);
+
+                const order_side os = (e.side == 0) ? order_side::buy : order_side::sell;
+                for (auto& [_, ad] : execution_adapters_)
+                    if (ad) ad->on_l2_update(e.symbol, os, e.price, e.new_quantity);
+                if (config_.provider)
+                    if (auto pa = config_.provider->get_execution_adapter())
+                        pa->on_l2_update(e.symbol, os, e.price, e.new_quantity);
             }
-            // provider::status falls through — informational only.
         }, ev);
 
         if (dash)
@@ -2147,12 +2270,44 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
             st.realized_pnl_fp4.store(
                 static_cast<std::int64_t>(std::llround(analytics_.realized_pnl() * 1e4)),
                 std::memory_order_relaxed);
+            // Only mark once we've seen a price — L2/status may arrive first.
+            if (last_mid_price_ > 0.0 && !last_mark_symbol_.empty())
+            {
+                const auto& positions = portfolio_.get_positions();
+                double qty = 0.0, cost = 0.0;
+                if (auto it = positions.find(last_mark_symbol_); it != positions.end())
+                {
+                    qty  = it->second.qty;
+                    cost = it->second.cost_basis;
+                }
+                const double unreal = qty * last_mid_price_ - cost;
+                st.unrealized_pnl_fp4.store(
+                    static_cast<std::int64_t>(std::llround(unreal * 1e4)),
+                    std::memory_order_relaxed);
+                st.position_qty_fp8.store(
+                    static_cast<std::int64_t>(std::llround(qty * 1e8)),
+                    std::memory_order_relaxed);
+            }
             st.drawdown_fp4.store(
-                static_cast<std::int64_t>(std::llround(analytics_.max_drawdown_pct() * 1e2)),
+                -static_cast<std::int64_t>(std::llround(analytics_.max_drawdown_pct() * 1e2)),
                 std::memory_order_relaxed);
             st.win_rate_bps.store(
                 static_cast<std::uint32_t>(std::lround(analytics_.win_rate_pct() * 100.0)),
                 std::memory_order_relaxed);
+            if (last_mid_price_ > 0.0 && !last_mark_symbol_.empty())
+            {
+                adverse_selection_.on_mark(last_mark_symbol_,
+                                           last_mid_price_,
+                                           current_event_ts);
+            }
+            st.toxicity_bps_fp2.store(
+                static_cast<std::int32_t>(std::lround(
+                    adverse_selection_.mean_bps() * 100.0)),
+                std::memory_order_relaxed);
+            st.toxicity_samples.store(
+                static_cast<std::uint32_t>(adverse_selection_.sample_count()),
+                std::memory_order_relaxed);
+            write_adapter_diagnostics(st);
         }
 
 #ifdef HAS_WEB_UI
@@ -2253,15 +2408,9 @@ void engine::run()
 
     bool halt_requested = false;
 
-    // Bar-timestamp resolution. Consumed by analytics (equity curve x-axis),
-    // the risk manager's daily reset boundary, SQLite equity points, and any
-    // timestamp-sensitive strategy.
-    //
-    // Deterministic mode (seed != 0) keeps the legacy synthetic stepping
-    // (base_ts + i ms) so reproducibility tests and golden regressions stay
-    // stable. Normal runs consult the CSV date column, falling back to
-    // +1 ms stepping only when the parse fails or regresses — that covers
-    // missing/malformed dates without silently reordering rows.
+    // seed != 0 keeps legacy synthetic stepping (base + i ms) for golden
+    // reproducibility. Normal runs read the CSV date and fall back to +1ms
+    // on parse failure / regression — never silent reordering.
     const bool use_csv_dates = (config_.seed == 0);
     auto resolve_bar_ts = [&](std::size_t i,
                               const std::chrono::system_clock::time_point& prev)
@@ -2459,8 +2608,6 @@ void engine::run()
         bool first = true;
         for (const auto& [sym, pos] : portfolio_.get_positions())
         {
-            // Skip only flat positions; keep shorts (qty < 0) so the
-            // snapshot truthfully reflects end-of-run exposure.
             if (std::abs(pos.qty) < 1e-12) continue;
             if (!first) pos_json += ",";
             first = false;
@@ -2681,13 +2828,9 @@ void engine::run_replay(const std::string& log_path,
     start_workers();
     pin_event_loop_thread();
 
-    // Replay re-runs the strategy against the logged market data, which
-    // means the same routing pipeline must be used as the original run —
-    // otherwise instrument_spec / execution_bar_delay / latency_model /
-    // stop-order / day-order behavior diverges between the logged run and
-    // its replay, defeating the point. Previously the switch below
-    // reimplemented a thinner order path inline; it now delegates to
-    // route_order + process_order exactly like run() and run_streaming().
+    // Replay must go through route_order+process_order so instrument spec,
+    // exec delay, latency, stops, and day-order behavior stay identical to
+    // the original run (not a thinner inline path).
     pending_stops_.clear();
     while (!pending_orders_.empty()) pending_orders_.pop();
     order_seq_ = 0;
@@ -2801,10 +2944,8 @@ void engine::run_replay(const std::string& log_path,
             break;
         }
         default:
-            // Non-market/non-tick events (orders, fills, cancels, rejections)
-            // from the original log are re-published for observers but NOT
-            // re-executed — replay regenerates orders by re-running the
-            // strategy on the market data.
+            // Non-price events are re-published for observers but not
+            // re-executed — replay regenerates orders from the strategy.
             publish_event(ev);
             if (!config_.is_threaded())
                 analytics_.on_event(ev);
@@ -2814,8 +2955,7 @@ void engine::run_replay(const std::string& log_path,
         event_count++;
     }
 
-    // Drain any pending orders still eligible at end-of-log so we don't
-    // leak queued state across replays.
+    // Drain so queued state doesn't leak across replays.
     while (!pending_orders_.empty())
     {
         auto entry = pending_orders_.top();

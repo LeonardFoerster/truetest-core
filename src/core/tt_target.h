@@ -1,13 +1,8 @@
 #pragma once
-//
-// Compile-time target identification.
-//
-// Each first-party executable (engine_backtest / engine_shadow / engine_live)
-// is compiled with -DTT_TARGET=<one of the TT_TARGET_* ids below>. Code that
-// needs to know which binary it's in — for argument-default selection,
-// credential gating, or compile-time removal of dead paths — uses these
-// macros. Runtime mode switching is kept ONLY at the argument-parsing edge.
-//
+// Compile-time target id. Each engine_{backtest,shadow,live} binary is
+// built with -DTT_TARGET=<one of these>. Used for arg defaults, credential
+// gating, and dead-path removal. Runtime mode switching is kept only at
+// the argument-parsing edge.
 
 #define TT_TARGET_BACKTEST 1
 #define TT_TARGET_SHADOW   2

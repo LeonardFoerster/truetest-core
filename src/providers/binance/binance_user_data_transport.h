@@ -38,20 +38,19 @@ struct ka_response
 };
 
 using put_fn  = std::function<ka_response(const std::string& listen_key)>;
-// On success, POST must write the new listenKey into out_key and return 2xx.
+// POST must write the new listenKey into out_key on success.
 using post_fn = std::function<ka_response(std::string& out_key)>;
 
 struct tick_result
 {
     enum class kind { ok, rotated, error, stopped };
     kind k = kind::ok;
-    std::string new_key;     // populated when k == rotated
+    std::string new_key;  // set when k == rotated
     std::string note;
 };
 
-// Single keepalive tick. Tries PUT up to max_retries; if all fail, rotates
-// via POST. Cancellable via `stop`. `wait_fn(delay, stop)` sleeps for at
-// most `delay`, returning true if stop was observed during the wait.
+// PUT up to max_retries; on total failure, rotate via POST. wait_fn sleeps
+// up to `delay`, returning true if stop was observed during the wait.
 template <typename WaitFn>
 inline tick_result keepalive_tick(const binance_keepalive_policy& pol,
                                   const std::string& current_key,
@@ -346,9 +345,8 @@ private:
                     break;
                 delay = std::min(delay * 2, max_delay);
 
-                // If the session length before the last disconnect was
-                // healthy, rotate the listenKey to be safe — it may have
-                // been expired during the reconnect sleep.
+                // Rotate the listenKey if the reconnect sleep may have
+                // outlived its expiration window.
                 auto now_ms = static_cast<long long>(binance::server_time_ms());
                 if (last_open_ms > 0 &&
                     (now_ms - last_open_ms) >
@@ -370,7 +368,7 @@ private:
             if (r == run_result::network_error &&
                 (open_end_ms - open_start_ms) > k_reset_threshold_ms)
             {
-                // long-running stream hiccuped — reset backoff.
+                // Long-running stream hiccuped — reset backoff.
                 attempt = 0;
                 delay = initial;
                 last_open_ms = open_end_ms;
@@ -487,7 +485,6 @@ private:
                 cv_.notify_all();
                 break;
             }
-            // stopped → loop will exit on next iteration.
         }
     }
 

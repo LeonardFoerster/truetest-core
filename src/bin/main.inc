@@ -125,6 +125,74 @@ static bool confirm_real_money_math()
     return true;
 }
 
+// Renders a multi-line breakdown of threading: preset, OS-thread count,
+// physical/logical core counts, per-role core pins, and spin policy. Used
+// by the dry-run and run banners so the operator sees the same layout
+// everywhere and can tell at a glance that "3 workers" ≠ "3 threads".
+static void print_threading_details(std::ostream& os,
+                                    const std::string& indent,
+                                    thread_preset preset,
+                                    spin_policy spin)
+{
+    const bool tty = ::isatty(fileno(stdout)) != 0;
+    const char* CYN = tty ? "\033[36m" : "";
+    const char* DIM = tty ? "\033[2m"  : "";
+    const char* BLD = tty ? "\033[1m"  : "";
+    const char* OFF = tty ? "\033[0m"  : "";
+
+    const std::size_t phys = detect_physical_cores();
+    const unsigned    hw   = std::thread::hardware_concurrency();
+    const int         workers = preset_worker_count(preset);
+    const int         threads = workers + 1;  // +1 = event_loop (main thread)
+
+    os << indent << "Threading:  " << BLD << preset_to_string(preset) << OFF
+       << " preset — " << BLD << threads << OFF << " thread"
+       << (threads == 1 ? "" : "s")
+       << " on " << phys << " physical core" << (phys == 1 ? "" : "s");
+    if (hw > phys)
+        os << " " << DIM << "(" << hw << " logical w/ SMT — siblings left idle)" << OFF;
+    os << "\n";
+
+    auto cmap = build_core_map();
+    auto core_of = [&](core_role r) -> int {
+        for (const auto& a : cmap) if (a.role == r) return a.core_id;
+        return -1;
+    };
+    auto print_role = [&](const char* label, core_role r) {
+        int c = core_of(r);
+        os << indent << "  " << CYN << label << OFF << " ";
+        if (c < 0) os << DIM << "→ (unpinned)" << OFF;
+        else       os << "→ core " << c;
+        os << "\n";
+    };
+
+    print_role("event_loop ", core_role::event_loop);
+    switch (preset) {
+    case thread_preset::inline_mode:
+        break;
+    case thread_preset::light:
+        print_role("observer   ", core_role::logging);
+        break;
+    case thread_preset::standard:
+        print_role("logging    ", core_role::logging);
+        print_role("risk+stats ", core_role::risk);
+        break;
+    case thread_preset::full:
+        print_role("logging    ", core_role::logging);
+        print_role("risk       ", core_role::risk);
+        print_role("stats      ", core_role::stats);
+        break;
+    case thread_preset::extended:
+        print_role("logging    ", core_role::logging);
+        print_role("risk       ", core_role::risk);
+        print_role("stats      ", core_role::stats);
+        print_role("market_make", core_role::market_maker);
+        break;
+    }
+    os << indent << "  " << DIM << "spin: " << spin_policy_to_string(spin)
+       << OFF << "\n";
+}
+
 struct cli_options
 {
     std::string replay_path;
@@ -703,7 +771,9 @@ static int run_dry_run(const cli_options& o)
     std::cout << "    Risk:       " << (o.risk_fraction * 100) << "% per trade\n";
     std::cout << "    SL/TP:      " << (o.sl_pct * 100) << "% / " << (o.tp_pct * 100) << "%\n";
     std::string resolved_spin = o.spin_policy_str.empty() ? "adaptive" : o.spin_policy_str;
-    std::cout << "    Threading:  " << resolved_preset << " (" << resolved_spin << " spin)\n";
+    print_threading_details(std::cout, "    ",
+                            string_to_preset(resolved_preset),
+                            string_to_spin_policy(resolved_spin));
     std::cout << "    Provider:   " << (o.provider_name.empty() ? "(TUI)" : o.provider_name) << "\n";
     std::cout << "    Data path:  " << (o.provider_path.empty() ? "(none)" : o.provider_path) << "\n";
     std::cout << "    DB:         " << (o.db_path.empty() ? "(disabled)" : o.db_path) << "\n";
@@ -1038,8 +1108,8 @@ static int run_provider_mode(const cli_options& o)
     std::cout << "    SL/TP:     " << (o.sl_pct * 100) << "% / " << (o.tp_pct * 100) << "%\n";
     std::cout << "    Fees:      " << (prov_cfg.fee_model ? "yes" : "none") << "\n";
     std::cout << "    Streaming: " << (is_streaming ? "yes" : "no") << "\n";
-    std::cout << "    Threading: " << preset_to_string(prov_cfg.threading)
-              << " (" << preset_worker_count(prov_cfg.threading) << " workers)\n";
+    print_threading_details(std::cout, "    ",
+                            prov_cfg.threading, prov_cfg.worker_spin_policy);
     if (!o.record_path.empty())
         std::cout << "    Recording: " << o.record_path << "\n";
     if (!o.replay_data_path.empty())
@@ -1081,7 +1151,46 @@ static int run_provider_mode(const cli_options& o)
         }
         dcfg.risk_max_open_orders = o.risk_max_open_orders;
         dcfg.risk_max_daily_loss = o.risk_max_daily_loss;
+        dcfg.risk_max_position_value = o.risk_max_position_value;
         dcfg.initial_balance = o.balance;
+
+        // One-line threading summary for the dashboard. Mirrors the fuller
+        // banner printed above but flattened to fit the ~66 col inner box.
+        {
+            const std::size_t phys = detect_physical_cores();
+            const int threads = preset_worker_count(prov_cfg.threading) + 1;
+            auto cmap = build_core_map();
+            auto core_of = [&](core_role r) -> int {
+                for (const auto& a : cmap) if (a.role == r) return a.core_id;
+                return -1;
+            };
+            std::string pins;
+            auto add_pin = [&](core_role r) {
+                int c = core_of(r);
+                if (c < 0) return;
+                if (!pins.empty()) pins += ",";
+                pins += std::to_string(c);
+            };
+            add_pin(core_role::event_loop);
+            switch (prov_cfg.threading) {
+            case thread_preset::inline_mode: break;
+            case thread_preset::light:    add_pin(core_role::logging); break;
+            case thread_preset::standard: add_pin(core_role::logging);
+                                          add_pin(core_role::risk); break;
+            case thread_preset::full:     add_pin(core_role::logging);
+                                          add_pin(core_role::risk);
+                                          add_pin(core_role::stats); break;
+            case thread_preset::extended: add_pin(core_role::logging);
+                                          add_pin(core_role::risk);
+                                          add_pin(core_role::stats);
+                                          add_pin(core_role::market_maker); break;
+            }
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "%s  %d thr / %zu cores  [%s]",
+                          preset_to_string(prov_cfg.threading).c_str(),
+                          threads, phys, pins.c_str());
+            dcfg.threading_summary = buf;
+        }
         dashboard = std::make_shared<truetest::ui::ConsoleDashboard>(std::move(dcfg));
         prov_cfg.dashboard = dashboard;
         // Re-push the config so the provider can wire the dashboard into
@@ -1402,9 +1511,8 @@ static int run_tui_mode(const cli_options& o)
     if (!o.spin_policy_str.empty())
         config.worker_spin_policy = string_to_spin_policy(o.spin_policy_str);
 
-    std::cout << "  Threading: " << preset_to_string(config.threading)
-              << " (" << preset_worker_count(config.threading) << " workers, "
-              << spin_policy_to_string(config.worker_spin_policy) << " spin)\n";
+    print_threading_details(std::cout, "  ",
+                            config.threading, config.worker_spin_policy);
 
     if (fee_choice == 2)
     {

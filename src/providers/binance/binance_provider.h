@@ -54,9 +54,8 @@ public:
         if (!port.empty()) endpoints_.ws_port = port;
     }
 
-    // Opt into a combined WebSocket carrying the primary stream plus an
-    // L2 depth stream (e.g. "depth20@100ms"). Empty means single-stream
-    // — today's default behavior, paper-seeded orderbook in shadow mode.
+    // Combined WS: primary stream + depth (e.g. "depth20@100ms"). Empty =
+    // single-stream, paper-seeded book in shadow.
     void set_depth_stream(const std::string& depth_stream_suffix)
     {
         depth_stream_ = depth_stream_suffix;
@@ -93,10 +92,8 @@ public:
         backfill_host_override_ = cfg.backfill_host;
         seed_ = cfg.seed;
         dashboard_ = cfg.dashboard;
-        // Propagate to an already-opened executor. main.inc has to set the
-        // dashboard pointer after open() because is_streaming isn't known
-        // until the transport is materialized; without this forward, every
-        // paper order would fall through to stdout and scroll the TUI.
+        // main.inc configures after open(); forward so paper orders don't
+        // fall through to stdout and scroll the TUI.
         if (binance_exec_)
             binance_exec_->set_dashboard(dashboard_);
         configured_ = true;
@@ -106,11 +103,6 @@ public:
     {
         state_ = lifecycle::opening;
 
-        // Pick single vs combined WS based on whether a depth stream was
-        // requested. Combined subscription means trade/kline AND depth
-        // frames are interleaved on one socket, with Binance's native
-        // `/stream?streams=A/B` envelope. BinanceCombinedParser handles
-        // both envelope formats.
         std::shared_ptr<IDataTransport> live_transport;
         if (depth_stream_.empty())
         {
@@ -170,11 +162,8 @@ public:
             rest_ = std::make_shared<BinanceRestClient>(
                 api_key_, api_secret_, rest_host, endpoints_.rest_port);
 
-            // Prime the offset cache so the very first signed request
-            // doesn't incur an extra round-trip via maybe_resync_clock.
-            // Return value is intentionally discarded here — verify_clock_skew
-            // below is the authoritative go/no-go gate and also fails if
-            // the time endpoint is unreachable.
+            // Prime offset cache so the first signed req doesn't resync.
+            // verify_clock_skew below is the authoritative gate.
             (void)rest_->resync_clock_now();
 
             auto check = binance::verify_clock_skew(*rest_);
@@ -186,11 +175,8 @@ public:
                 return false;
             }
 
-            // Live-safety wiring. The minter gives every submitted order an
-            // id that is unique across runs (prefix includes wall-clock +
-            // seed), letting the exchange de-duplicate replays. The limiter
-            // tracks Binance spot's 50-orders-per-10s rule; order rate
-            // limits are NOT covered by the REST client's weight throttle.
+            // Limiter tracks Binance spot's 50/10s order-rate rule —
+            // NOT covered by the REST client's weight throttle.
             minter_ = std::make_shared<ClientOrderIdMinter>("tt", seed_);
             order_rate_limiter_ = std::make_shared<TokenBucketRateLimiter>(
                 /*capacity=*/50.0, /*refill_per_sec=*/5.0);
@@ -222,12 +208,6 @@ public:
         }
         else if (mode_ == engine_mode::shadow)
         {
-            // Shadow-mode "exchange" side: match open orders against the
-            // real trade tape. Replaces the prior paper-seeded
-            // HybridExecutor, which was a second simulation rather than
-            // anything the exchange actually did. `wire_latency_model_`
-            // (optional) represents wire + exchange-ingest delay on top
-            // of the engine's own latency_model.
             shadow_exec_ = std::make_shared<TradeTapeShadowAdapter>(
                 wire_latency_model_, fee_model_);
             executor_ = shadow_exec_;
@@ -278,10 +258,7 @@ public:
     std::shared_ptr<IReconciler> get_reconciler() override { return reconciler_; }
     std::shared_ptr<IKillSwitch> get_kill_switch() override { return kill_switch_; }
 
-    // Unified event-stream surface — enabled only when a depth stream
-    // was requested, because without depth the combined parser would
-    // just re-wrap tick/bar events the single-stream parser already
-    // handles more cheaply.
+    // Only with depth — otherwise the single-stream parser is cheaper.
     bool supports_event_stream() const override
     {
         return !depth_stream_.empty();
@@ -326,10 +303,8 @@ private:
     std::shared_ptr<ExecutionBridge> bridge_;
     std::shared_ptr<IExecutionAdapter> executor_;
 
-    // Live-mode-only state. Non-null after a successful open() against the
-    // real venue; nullptr in shadow/backtest, so get_reconciler()/
-    // get_kill_switch() correctly return nullptr and the engine installs
-    // its Noop defaults.
+    // Live-only; null in shadow/backtest so accessors return nullptr
+    // and the engine installs its Noop defaults.
     std::shared_ptr<BinanceRestClient> rest_;
     std::shared_ptr<ClientOrderIdMinter> minter_;
     std::shared_ptr<TokenBucketRateLimiter> order_rate_limiter_;
@@ -342,12 +317,8 @@ private:
 
     struct asset_pair { std::string base; std::string quote; };
 
-    // Best-effort split of a Binance symbol (e.g. "BTCUSDT" → base "BTC",
-    // quote "USDT"). Binance symbols are unseparated, so we match against
-    // the documented quote-asset suffixes. Unknown suffix → assume 3-char
-    // quote, which covers "BTCETH" and similar and yields a defensible
-    // default that the operator can override by supplying their own
-    // reconciler via engine_config.reconciler.
+    // "BTCUSDT" → {BTC, USDT} via the documented quote suffixes. Unknown
+    // → 3-char quote fallback; operator can override via cfg.reconciler.
     static asset_pair split_symbol(const std::string& sym)
     {
         std::string u = upper(sym);

@@ -13,16 +13,9 @@
 #include <string_view>
 #include <utility>
 
-// Live-mode startup gate. Calls GET /api/v3/account, extracts the quote-asset
-// free+locked total, and compares it to the local portfolio's cash. Also
-// compares any open long position against its corresponding base-asset
-// balance on the exchange. Returns "" on pass, a human-readable diff string
-// on failure — the engine turns that into a startup exception.
-//
-// The reconciler does NOT attempt to match per-order state. Its purpose is
-// to catch the "we think we hold 2 BTC + 10k USDT, the exchange thinks we
-// hold 0" category of startup drift, which is the one that would wipe out
-// an account when a strategy ran hot against stale local state.
+// Startup gate: compares local cash/position against GET /api/v3/account.
+// Catches the "we think we hold X, exchange thinks 0" drift that would
+// wipe an account under stale local state. Not per-order.
 class BinanceReconciler : public IReconciler
 {
 public:
@@ -98,18 +91,13 @@ public:
         return {};
     }
 
-    // Scan the account-endpoint response for a specific asset entry and pull
-    // out its free/locked amounts. Visible for tests.
+    // Binance fixed key order: find "asset":"X", then read the nearest
+    // "free"/"locked" after it. Avoids a full JSON parse.
     static bool extract_balance(std::string_view json,
                                 std::string_view asset,
                                 double& free_out,
                                 double& locked_out)
     {
-        // Balance entries look like: {"asset":"BTC","free":"0.1","locked":"0.0"}
-        // We locate the "asset":"X" pair then read the nearest "free"/"locked"
-        // after it. The extraction is scoped to the rest of the string; since
-        // keys appear in a fixed order in Binance responses, this gives the
-        // right entry without a full JSON parse.
         std::string needle;
         needle.reserve(asset.size() + 12);
         needle += "\"asset\":\"";
@@ -131,11 +119,10 @@ public:
 private:
     static bool within_tolerance(double a, double b, double tolerance_bps)
     {
-        // Compare relative drift. Zero vs zero is always OK. Zero vs small
-        // (< 1e-8) is also OK — below any meaningful exchange precision.
+        // 0 vs 0 OK. 0 vs <1e-8 OK (below exchange precision).
         const double bound = std::max(std::abs(a), std::abs(b));
         if (bound < 1e-8) return true;
-        const double rel = std::abs(a - b) / bound * 10000.0; // bps
+        const double rel = std::abs(a - b) / bound * 10000.0;
         return rel <= tolerance_bps;
     }
 

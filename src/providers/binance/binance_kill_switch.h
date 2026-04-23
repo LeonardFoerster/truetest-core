@@ -15,15 +15,8 @@
 #include <string>
 #include <utility>
 
-// Live-mode shutdown path. Asks the exchange to cancel every open order on
-// the configured symbol, then queries current holdings and submits a market
-// SELL for any remaining base-asset balance. Returns true iff both steps
-// completed before the supplied deadline.
-//
-// Flatten logic queries the exchange for the current base-asset balance
-// rather than trusting the local portfolio — the whole point of this path
-// is to be correct when something has gone wrong with local state. If the
-// exchange says we hold 0 of base, flatten is a no-op.
+// Cancel all open orders, then market-sell base-asset balance queried
+// from the exchange (not local state — local may be exactly what's wrong).
 class BinanceKillSwitch : public IKillSwitch
 {
 public:
@@ -48,15 +41,12 @@ public:
         const auto start = std::chrono::steady_clock::now();
         const auto expires_at = start + deadline;
 
-        // Phase 1: cancel all open orders for the symbol.
         {
             const std::string params = "symbol=" + symbol_;
             auto resp = rest_->del("/api/v3/openOrders", params);
             if (resp.status < 200 || resp.status >= 300)
             {
-                // -2011 ("Unknown order sent") fires when there are no open
-                // orders; treat that as success. Other HTTP / exchange errors
-                // are failures because residual orders can still fill.
+                // -2011 = "no open orders", treat as success.
                 if (resp.body.find("-2011") == std::string::npos)
                 {
                     std::cerr << "BinanceKillSwitch: cancel_all HTTP "
@@ -72,7 +62,6 @@ public:
             return false;
         }
 
-        // Phase 2: query current base-asset balance, market-sell what's there.
         double ex_base_free = 0.0, ex_base_locked = 0.0;
         {
             auto acct = rest_->get("/api/v3/account", "");
@@ -84,17 +73,13 @@ public:
             }
             if (!BinanceReconciler::extract_balance(
                     acct.body, base_asset_, ex_base_free, ex_base_locked))
-            {
-                // Asset absent from account — nothing to flatten.
                 return true;
-            }
         }
 
         if (ex_base_free < 1e-12)
         {
-            // Locked inventory exists (e.g. still on a stuck order) but no
-            // free qty. cancel_all should have freed it; if not, the operator
-            // needs to intervene. Report partial success so the warning fires.
+            // Locked inventory after cancel_all means a stuck order —
+            // operator must intervene. Report failure so the warning fires.
             if (ex_base_locked > 1e-12)
             {
                 std::cerr << "BinanceKillSwitch: "
@@ -112,8 +97,7 @@ public:
             return false;
         }
 
-        // Submit market SELL. clientOrderId makes the request idempotent
-        // against transport retries.
+        // clientOrderId → idempotent against transport retries.
         std::string params = "symbol=" + symbol_
             + "&side=SELL&type=MARKET&quantity="
             + format_qty(ex_base_free);

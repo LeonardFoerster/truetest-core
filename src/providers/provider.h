@@ -46,33 +46,16 @@ public:
 
 	virtual std::shared_ptr<IExecutionAdapter> get_execution_adapter() = 0;
 
-	// Per-symbol trading rules (tick/lot/min-notional/fees).
-	// Return std::nullopt if the provider has no opinion — the engine will
-	// fall back to user-supplied overrides or skip the checks entirely.
+	// nullopt → engine falls back to user overrides or skips checks.
 	virtual std::optional<instrument_spec>
 	get_instrument(const std::string& /*symbol*/) const { return std::nullopt; }
 
-	// Live-mode safety surfaces. Default to nullptr — engine installs
-	// Noop* implementations when no provider-specific one exists, so live
-	// runs against a half-wired provider fail-safe rather than no-op
-	// silently. Venue providers override these.
+	// nullptr → engine installs Noop* safety shims; venue providers override.
 	virtual std::shared_ptr<IReconciler> get_reconciler() { return nullptr; }
 	virtual std::shared_ptr<IKillSwitch> get_kill_switch() { return nullptr; }
 
-	// Unified event-stream hook. When a provider can emit a mixed stream
-	// of bar / tick / l2_snapshot / l2_update events (typically required
-	// for realistic shadow: real market data AND real exchange depth
-	// driving the engine's orderbook_registry_), it sets this to true
-	// and returns a parser that produces provider::event variants.
-	//
-	// The engine then uses a single DataBridge<provider::event> →
-	// run_streaming path regardless of venue. Default false/null means
-	// main.inc falls back to the existing specialized
-	// DataBridge<bar_record>/DataBridge<tick_record> bridges.
-	//
-	// Each provider owns its own wire format, subscription topology
-	// (single vs combined WebSocket), and reconnect logic — the engine
-	// only sees the variant stream.
+	// True → provider emits a unified bar/tick/l2 variant stream. False
+	// falls back to the specialized bar_record/tick_record bridges.
 	virtual bool supports_event_stream() const { return false; }
 
 	virtual std::shared_ptr<IDataParser<provider::event>>

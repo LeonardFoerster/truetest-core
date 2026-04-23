@@ -18,36 +18,32 @@ enum class exit_reason : std::uint8_t
     manual
 };
 
-// Declarative exit plan produced by a strategy when it enters. The engine
-// owns enforcement: it binds the intent to the actual opener fill (so the
-// entry price is the real fill_price, not the intended price), evaluates
-// triggers on every market/tick/l2 update, and submits the close order
-// through the normal engine pipeline so both sim- and exchange-side
-// adapters see it. A strategy never executes its own stops anymore.
+// Declarative exit plan emitted by a strategy at entry. The engine owns
+// enforcement and binds triggers to the actual opener fill price, so a
+// strategy never executes its own stops.
 struct exit_intent
 {
     std::string symbol;
     order_side  close_side = order_side::sell;
     double      qty = 0.0;
 
+    // Fraction of opener fill to close. 1.0 = full exit. Multiple intents
+    // per (strategy,symbol) compose for TP1/TP2/SL scale-outs; risk layer
+    // catches fractions summing above 1.0.
+    double qty_fraction = 1.0;
+
     std::optional<double> stop_loss;
     std::optional<double> take_profit;
 
-    // Fraction of the running best price; e.g. 0.005 ⇒ 0.5% trailing.
-    // When set, the manager raises stop_loss each tick by
-    //   stop_loss = max(stop_loss, best_price * (1 - trailing_pct))
-    // for longs (and the mirror for shorts).
+    // Fraction of best price (0.005 = 0.5% trail). Raises stop_loss each
+    // tick to max(stop_loss, best * (1 - trailing_pct)) for longs.
     std::optional<double> trailing_pct;
 
-    // Absolute deadline. If the current event timestamp exceeds this, the
-    // manager fires a time_stop exit at the event's price.
     std::optional<std::chrono::system_clock::time_point> deadline;
 
-    // Bound by the engine when the opener fill arrives.
     std::uint64_t opener_order_id = 0;
 
-    // Human-readable tag for the exit's source (strategy name), carried
-    // through to Analytics for per-strategy attribution.
+    // Carried through to Analytics for per-strategy attribution.
     std::string strategy_name;
 };
 

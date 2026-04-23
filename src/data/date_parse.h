@@ -8,16 +8,9 @@
 #include <string>
 #include <string_view>
 
-// Permissive bar-date parser. Used by the engine to promote CSV date columns
-// from strings into real time_points. Handles:
-//   - 13-digit numeric  → epoch milliseconds
-//   - 10-digit numeric  → epoch seconds
-//   - "YYYY-MM-DD"      → midnight UTC on that date
-//   - "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS[.fff][Z]" → UTC instant
-//
-// Returns std::nullopt when the string is empty or none of the patterns match.
-// Callers then fall back to synthetic stepping (bar_interval offsets from a
-// base timestamp) so an unparseable date does not poison the whole run.
+// Permissive bar-date parser. Accepts 13-digit epoch-ms, 10-digit epoch-s,
+// "YYYY-MM-DD", "YYYY-MM-DD HH:MM:SS" / ISO-8601. nullopt on mismatch;
+// callers fall back to synthetic stepping so a bad row doesn't poison the run.
 namespace tt::date_parse
 {
 
@@ -32,12 +25,9 @@ inline bool all_digits(std::string_view s)
     return true;
 }
 
-// timegm(): convert a UTC std::tm to epoch seconds. Portable fallback,
-// avoids pulling in nonstandard extensions on MSVC.
+// Portable UTC timegm. Howard Hinnant days-from-civil algorithm.
 inline std::int64_t utc_tm_to_epoch_s(const std::tm& t)
 {
-    // Days from civil 1970-01-01 to the given year/month/day, per the
-    // Howard Hinnant algorithm.
     int y = t.tm_year + 1900;
     int m = t.tm_mon + 1;
     int d = t.tm_mday;
@@ -71,15 +61,13 @@ parse(std::string_view s)
         for (char c : s) v = v * 10 + (c - '0');
         if (s.size() >= 13) return tp{ms{v}};
         if (s.size() >= 10) return tp{sec{v}};
-        return std::nullopt; // 8 digits like 20240101 would be ambiguous
+        return std::nullopt;  // 8-digit YYYYMMDD would be ambiguous vs epoch
     }
 
     int y = 0, mo = 0, d = 0, h = 0, mi = 0, se = 0, frac_ms = 0;
     char sep = 0;
-    // Buffer a null-terminated copy since sscanf doesn't take string_view.
     std::string buf(s);
 
-    // YYYY-MM-DDTHH:MM:SS.fff[Z] or with space separator
     if (std::sscanf(buf.c_str(), "%4d-%2d-%2d%c%2d:%2d:%2d.%3d",
                     &y, &mo, &d, &sep, &h, &mi, &se, &frac_ms) >= 7 &&
         (sep == 'T' || sep == ' '))

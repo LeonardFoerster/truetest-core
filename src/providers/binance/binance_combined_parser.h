@@ -18,10 +18,8 @@ public:
 
     std::optional<provider::event> parse_record(const std::string& line) override
     {
-        // Combined-stream frames are wrapped in {"stream":"...","data":{...}}.
-        // Single-stream frames arrive as the raw data object — accept both so
-        // the same parser works whether BinanceProvider subscribed to one
-        // stream or several.
+        // Accept both combined-stream envelopes ({"stream":...,"data":{...}})
+        // and raw single-stream data objects.
         const std::string stream_name = extract_stream_name(line);
         std::string data_json = extract_data(line);
         if (data_json.empty())
@@ -67,9 +65,8 @@ public:
             return provider::event{*snap};
         }
 
-        // Partial-book streams (@depth5@100ms / @depth10 / @depth20) send
-        // frames with no "e" / "s" fields — just {"lastUpdateId", "bids",
-        // "asks"}. Detect them by the stream-name suffix in the envelope.
+        // Partial-book streams (@depth{5|10|20}@...) have no "e"/"s",
+        // just {lastUpdateId, bids, asks} — detect by stream-name suffix.
         if (is_partial_book_stream(stream_name))
         {
             auto snap = binance::parse_depth_snapshot(data_json);
@@ -107,16 +104,13 @@ private:
         return "";
     }
 
-    // Pull the "stream":"..." value out of a combined-stream envelope.
-    // Returns empty when the frame is a raw (single-stream) data object.
     static std::string extract_stream_name(const std::string& json)
     {
         return binance::extract_string(json, "stream");
     }
 
-    // Partial-book streams have the form <symbol>@depth{5|10|20}@<ms>ms.
-    // We match the "@depth" marker followed by a digit to avoid confusing
-    // them with the diff stream "@depth@100ms" (which has no level count).
+    // Match "@depth" + digit so partial-book ("@depth5@…") isn't confused
+    // with the diff stream ("@depth@100ms", no level count).
     static bool is_partial_book_stream(const std::string& stream_name)
     {
         auto pos = stream_name.find("@depth");

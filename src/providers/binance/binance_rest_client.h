@@ -77,8 +77,7 @@ public:
 
     int last_used_weight() const { return last_used_weight_.load(); }
 
-    // returns server_time_ms - local_time_ms; negative means we are ahead.
-    // On any failure returns LLONG_MIN so callers can detect it.
+    // server_time_ms - local_time_ms; negative = we're ahead. LLONG_MIN on failure.
     using get_fn_t = std::function<response(const std::string&, const std::string&)>;
 
     static long long server_time_offset_ms(const get_fn_t& get_fn)
@@ -106,26 +105,18 @@ public:
     {
         return server_time_offset_ms(
             [this](const std::string& ep, const std::string& p) {
-                // unsigned GET: do not sign, do not add timestamp.
                 return execute(http::verb::get,
                                ep + (p.empty() ? "" : "?" + p),
                                "");
             });
     }
 
-    // Throttle policy knobs (exposed for tests; not wired through config yet).
     void set_weight_cap(int cap) { weight_cap_ = cap; }
     void set_soft_threshold_pct(int pct) { soft_threshold_pct_ = pct; }
 
-    // Clock-drift handling. Each signed request stamps
-    //   timestamp = local_now_ms + clock_offset_ms_
-    // where the offset is (server_ms - local_ms) learned from /api/v3/time.
-    // Without this, a local clock that drifts past recvWindow (5s) starts
-    // rejecting every signed call with -1021. The offset is refreshed
-    // lazily — every `sync_interval_ms_` before a signed send — and
-    // reactively when a -1021 response comes back (to catch NTP steps that
-    // happen between lazy refreshes).
-
+    // Signed requests stamp timestamp = local + clock_offset, learned from
+    // /api/v3/time. Without this, drift past recvWindow (5s) → -1021 on
+    // every call. Refreshed lazily and reactively on -1021.
     void set_sync_interval_ms(long long ms) { sync_interval_ms_ = ms; }
 
     long long clock_offset_ms() const
@@ -133,9 +124,6 @@ public:
         return clock_offset_ms_.load(std::memory_order_acquire);
     }
 
-    // Force a clock resync against /api/v3/time. Returns true on success.
-    // Called at startup (BinanceProvider::open) to seed the offset, and
-    // invoked reactively on -1021 responses.
     bool resync_clock_now()
     {
         auto offset = server_time_offset_ms(
@@ -157,9 +145,7 @@ public:
         return true;
     }
 
-    // Pure decision so tests can exercise the lazy-resync rule without
-    // a network: should we resync given elapsed steady-clock time?
-    // last_sync_ms_ <= 0 means "never synced" → always due.
+    // last_sync_ms_ <= 0 = never synced → always due. Pure for tests.
     static bool resync_due(long long now_steady_ms,
                            long long last_sync_steady_ms,
                            long long interval_ms)
@@ -169,9 +155,7 @@ public:
         return (now_steady_ms - last_sync_steady_ms) >= interval_ms;
     }
 
-    // Pure helper so tests can exercise the decision without a network.
-    // Returns number of milliseconds to sleep before the next request;
-    // 0 means no throttle needed.
+    // ms to sleep before next request; 0 = no throttle. Pure for tests.
     static long long throttle_delay_ms(int used_weight,
                                        long long anchor_ms,
                                        long long now_ms,
@@ -220,11 +204,8 @@ private:
             resync_clock_now();
     }
 
-    // Build + sign a query with the current offset, send it, and on a
-    // -1021 "timestamp outside recvWindow" response resync once and retry.
-    // Retrying requires rebuilding the signed query (new timestamp + new
-    // signature), so the retry lives here above execute_with_retry rather
-    // than inside it.
+    // Retries once on -1021 by rebuilding the signed query (new ts+sig)
+    // after a resync — must live above execute_with_retry for that reason.
     response do_signed_request(http::verb method,
                                const std::string& endpoint,
                                const std::string& params,
@@ -268,8 +249,7 @@ private:
                                 const std::string& body,
                                 bool retry_on_429)
     {
-        // Proactive throttle: if we are near the weight cap, wait for the
-        // 1-minute window to roll before firing the request.
+        // Near the weight cap: wait for the 1-minute window to roll.
         {
             long long now_ms = static_cast<long long>(binance::server_time_ms());
             long long delay = throttle_delay_ms(
@@ -283,7 +263,6 @@ private:
                 std::cerr << "BinanceRestClient: near weight cap, pausing "
                           << delay << " ms\n";
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-                // Clear the anchor so a stale window does not throttle us again.
                 window_anchor_ms_.store(0);
             }
         }

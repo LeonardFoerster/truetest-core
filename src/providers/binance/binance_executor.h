@@ -24,9 +24,6 @@ public:
 
     void set_symbol(const std::string& sym) { symbol_ = sym; }
 
-    // When set, paper-order log lines are delivered to the dashboard's
-    // recent-events pane instead of stdout, so they don't interleave
-    // with the TUI repaint and push the box down.
     void set_dashboard(std::weak_ptr<truetest::ui::ConsoleDashboard> dash)
     {
         dashboard_ = std::move(dash);
@@ -41,12 +38,8 @@ public:
         const double px = last_price_ > 0 ? last_price_ : o.get_price();
         const char* side = (o.get_side() == order_side::buy) ? "BUY" : "SELL";
 
-        // When the dashboard owns stdout, suppress per-order output entirely
-        // — neither stdout nor the recent-events pane. The summary counters
-        // (Events / Fills / Round-trips) already reflect the order flow, and
-        // a busy strategy would otherwise scroll a [PAPER] line per trade
-        // and drown out everything else in the TUI. In headless / log-file
-        // runs we still want one line per order for replay grep-ability.
+        // Suppress paper-order lines when the TUI owns stdout; in headless
+        // runs keep them for replay grep-ability.
         if (dashboard_.expired())
         {
             std::cout << "  [PAPER] " << side
@@ -56,9 +49,7 @@ public:
 
         if (o.get_order_type() == order_type::market && last_price_ > 0)
         {
-            // Market orders are always taker. Without this commission,
-            // paper-mode P&L ignored Binance's 0.1% spot fees entirely
-            // and diverged from shadow/live after the very first fill.
+            // Market = taker; without this, paper P&L ignores taker fees.
             double commission = 0.0;
             if (fee_model_)
                 commission = fee_model_->compute_commission(

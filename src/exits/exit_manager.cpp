@@ -10,7 +10,7 @@ void ExitManager::register_pending(exit_intent intent)
     key_t k{intent.strategy_name, intent.symbol};
     if (intent.opener_order_id != 0)
         opener_id_to_key_[intent.opener_order_id] = k;
-    pending_[k] = std::move(intent);
+    pending_.emplace(k, std::move(intent));
 }
 
 void ExitManager::on_fill(const fill_event& f)
@@ -22,23 +22,25 @@ void ExitManager::on_fill(const fill_event& f)
     key_t k = it->second;
     opener_id_to_key_.erase(it);
 
-    auto pit = pending_.find(k);
-    if (pit == pending_.end())
-        return;
+    // Promote every pending intent at this key to armed using the fill
+    // price and fraction-of-fill qty (TP1/TP2/SL plans flip in one go).
+    auto range = pending_.equal_range(k);
+    if (range.first == range.second) return;
 
-    // If an armed intent for the same key already exists (strategy
-    // re-entered without the previous exit completing — shouldn't
-    // happen with the position-netting portfolio, but be defensive),
-    // the new opener fill overrides it.
-    armed_intent ai;
-    ai.intent      = std::move(pit->second);
-    ai.entry_price = f.get_fill_price();
-    ai.best_price  = f.get_fill_price();
-    // Honor the actual filled quantity — the intent's qty was only a
-    // hint based on the intended_price.
-    ai.intent.qty = f.get_filled_quantity();
-    armed_[k] = std::move(ai);
-    pending_.erase(pit);
+    for (auto pit = range.first; pit != range.second; ++pit)
+    {
+        armed_intent ai;
+        ai.intent      = std::move(pit->second);
+        ai.entry_price = f.get_fill_price();
+        ai.best_price  = f.get_fill_price();
+        // Clamp to [0,1] so a mis-authored fraction can't overflow position.
+        double frac = ai.intent.qty_fraction;
+        if (frac <= 0.0) frac = 1.0;
+        if (frac > 1.0)  frac = 1.0;
+        ai.intent.qty = f.get_filled_quantity() * frac;
+        armed_.emplace(k, std::move(ai));
+    }
+    pending_.erase(range.first, range.second);
 }
 
 std::optional<order_event> ExitManager::on_price(
@@ -56,9 +58,8 @@ std::optional<order_event> ExitManager::on_price(
         const bool is_long  = (ai.intent.close_side == order_side::sell);
         const bool is_short = (ai.intent.close_side == order_side::buy);
 
-        // Update MFE and trailing stop before evaluating triggers so a
-        // single tick that runs past the trail raises the SL to the new
-        // level *and* can fire on the same pass if it also crosses.
+        // Update MFE + trail before evaluating so a single tick can raise
+        // the SL and fire on the same pass if it also crosses it.
         if (is_long && px > ai.best_price)  ai.best_price = px;
         if (is_short && px < ai.best_price) ai.best_price = px;
 
@@ -71,7 +72,7 @@ std::optional<order_event> ExitManager::on_price(
                 double cur = ai.intent.stop_loss.value_or(0.0);
                 if (trailed > cur) ai.intent.stop_loss = trailed;
             }
-            else  // short
+            else
             {
                 double trailed = ai.best_price * (1.0 + pct);
                 double cur = ai.intent.stop_loss.value_or(std::numeric_limits<double>::infinity());

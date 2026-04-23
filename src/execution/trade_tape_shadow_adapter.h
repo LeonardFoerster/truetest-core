@@ -11,44 +11,23 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
-// Shadow-mode "exchange" adapter. Matches open orders against the live
-// trade tape instead of a paper-seeded orderbook — when a real trade
-// prints at a price that would have crossed one of our open limits, we
-// synthesize a fill at that price. ShadowTracker then compares these
-// trade-tape fills against the engine's primary (simulated) fills to
-// surface real slippage and fill-rate divergence.
+// Shadow-mode adapter. Matches open orders against the live trade tape —
+// when a real trade prints at a price crossing our limit, synthesize a
+// fill at the trade price. ShadowTracker compares these against the sim
+// fills to surface real slippage and fill-rate divergence.
 //
-// Matching rules:
-//   - BUY limit @ P: fills when a real trade prints at price ≤ P after
-//     submit_ts.
-//   - SELL limit @ P: fills when a real trade prints at price ≥ P after
-//     submit_ts.
-//   - MARKET: fills at the next trade price after submit_ts, regardless
-//     of side.
-//   - Trade qty caps the fill qty; partial fills leave the order live.
-//   - Pre-submit trades (ts < submit_ts) are ignored so we never claim a
-//     fill we couldn't actually have reached.
+// BUY @P: trade_price ≤ P. SELL @P: trade_price ≥ P. MARKET: first trade.
+// Pre-submit trades (ts < submit_ts) ignored. No queue modeling
+// (optimistic). Not thread-safe.
 //
-// Intentional simplifications:
-//   - No queue-position modeling — a trade crossing our limit always fills
-//     us. This is optimistic vs. real-venue queue depth but matches what
-//     most shadow systems assume (and is still strictly more realistic
-//     than the paper-seeded HybridExecutor it replaces).
-//   - Not thread-safe. The engine drives submit / cancel / on_trade /
-//     poll_fills from a single loop thread in shadow mode.
-//
-// Latency:
-//   An optional ILatencyModel represents the wire + exchange-ingest delay
-//   on top of whatever engine-side latency has already been applied (the
-//   engine's own latency_model gates `earliest_eligible_ts` before the
-//   order ever reaches this adapter). The shadow `submit_ts` is therefore
-//   `earliest_eligible_ts + wire_latency`, so any real trade printing
-//   during the wire-latency window is correctly *missed* on the shadow
-//   side — exactly the kind of fill the engine would have booked on the
-//   sim side but never actually got at the exchange.
+// Optional ILatencyModel represents wire + exchange-ingest delay ON TOP of
+// the engine-side latency already applied — so submit_ts is
+// earliest_eligible_ts + wire_latency, and trades printing during that
+// window are correctly missed on the shadow side.
 class TradeTapeShadowAdapter : public IExecutionAdapter
 {
 public:
@@ -88,6 +67,19 @@ public:
 
     bool cancel_order(uint64_t engine_order_id) override
     {
+        // Same "too slow to pull" semantics as LocalBookAdapter.
+        if (latency_model_)
+        {
+            auto it = std::find_if(open_orders_.begin(), open_orders_.end(),
+                [engine_order_id](const open_order& oo) {
+                    return oo.engine_id == engine_order_id;
+                });
+            if (it == open_orders_.end()) return false;
+            const auto lat = latency_model_->get_cancel_latency();
+            pending_cancels_[engine_order_id] = current_time_ + lat;
+            return true;
+        }
+
         auto it = std::remove_if(open_orders_.begin(), open_orders_.end(),
             [engine_order_id](const open_order& oo) {
                 return oo.engine_id == engine_order_id;
@@ -95,6 +87,27 @@ public:
         bool found = (it != open_orders_.end());
         open_orders_.erase(it, open_orders_.end());
         return found;
+    }
+
+    void advance_time(std::chrono::system_clock::time_point ts) override
+    {
+        current_time_ = ts;
+        if (pending_cancels_.empty()) return;
+        for (auto it = pending_cancels_.begin(); it != pending_cancels_.end(); )
+        {
+            if (it->second <= ts)
+            {
+                const auto eid = it->first;
+                auto oo_it = std::remove_if(open_orders_.begin(), open_orders_.end(),
+                    [eid](const open_order& oo) { return oo.engine_id == eid; });
+                open_orders_.erase(oo_it, open_orders_.end());
+                it = pending_cancels_.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
     }
 
     bool modify_order(uint64_t engine_order_id,
@@ -112,9 +125,6 @@ public:
         return false;
     }
 
-    // Called by the engine for every real trade print on the shadowed
-    // symbol. For each open order, evaluate the matching rule and emit a
-    // fill if crossed.
     void on_trade(const std::string& symbol,
                   double trade_price,
                   double trade_qty,
@@ -146,10 +156,8 @@ public:
             }
 
             const double fill_qty = std::min(oo.qty_remaining, remaining_tape_qty);
-            // Fill at the trade price — that's the execution level the rest
-            // of the market actually got. Using the limit price would give
-            // a BUY @100 crossed by a trade @99 a worse fill than everyone
-            // else on the tape, which is the wrong direction of optimism.
+            // Fill at the trade price — the level the rest of the market
+            // got. Using the limit would put BUY @100 worse than a @99 tape.
             const double fill_price = trade_price;
 
             oo.qty_remaining   -= fill_qty;
@@ -157,11 +165,8 @@ public:
 
             const double rem = std::max(0.0, oo.qty_remaining);
 
-            // A tape-crossing fill is always by definition a taker trade —
-            // we only match when a real trade prints through our resting
-            // limit (or on any print, for markets). Pass is_taker=true so
-            // TieredFeeModel uses the taker bps. Without this, shadow-side
-            // P&L ignored Binance's 0.1% spot fees entirely.
+            // Tape-crossing fills are always takers — TieredFeeModel needs
+            // is_taker=true or shadow P&L ignores taker fees entirely.
             double commission = 0.0;
             if (fee_model_)
                 commission = fee_model_->compute_commission(
@@ -180,7 +185,6 @@ public:
         }
     }
 
-    // For tests / diagnostics.
     std::size_t open_order_count() const { return open_orders_.size(); }
     std::size_t pending_fill_count() const { return pending_fills_.size(); }
 
@@ -201,4 +205,6 @@ private:
     uint64_t next_fill_id_ = 0;
     std::shared_ptr<ILatencyModel> latency_model_;
     std::shared_ptr<IFeeModel>     fee_model_;
+    std::unordered_map<uint64_t, std::chrono::system_clock::time_point> pending_cancels_;
+    std::chrono::system_clock::time_point current_time_{};
 };

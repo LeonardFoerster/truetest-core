@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "data/data_handler.h"
 #include "strategy/strategy_interface.h"
+#include "analytics/adverse_selection_tracker.h"
 #include "execution/portfolio.h"
 #include "execution/execution_adapter.h"
 #include "execution/instrument.h"
@@ -22,6 +23,8 @@
 #include "risk_stats_worker.h"
 #include "market_maker_worker.h"
 #include "engine_config.h"
+
+namespace truetest::ui { struct streaming_stats; }
 #include "core/event.h"
 #include "core/event_log.h"
 #include "types/order_id.h"
@@ -78,16 +81,19 @@ private:
     portfolio portfolio_;
     OrderTracker order_tracker_;
     Analytics analytics_;
+    AdverseSelectionTracker adverse_selection_;
+
+    void write_adapter_diagnostics(truetest::ui::streaming_stats& st);
+    void refresh_top_of_book_atomics(const orderbook& ob);
     RiskManager risk_manager_;
     MarketMaker market_maker_;
     double last_mid_price_ = 0.0;
+    std::string last_mark_symbol_;
 
     std::unordered_map<std::string, std::optional<instrument_spec>> instrument_cache_;
 
-    // Symbols whose orderbook_registry_ entry is being populated from a
-    // live L2 depth stream. Used to gate MarketMaker::replenish —
-    // seeding paper liquidity on top of real exchange depth would
-    // corrupt the fill simulation that LocalBookAdapter performs.
+    // Symbols already carrying real L2 depth — MarketMaker::replenish is
+    // suppressed here so paper liquidity can't corrupt the fill sim.
     std::unordered_set<std::string> l2_seeded_symbols_;
     const instrument_spec* resolve_instrument_spec(const std::string& symbol);
     bool apply_instrument_spec(order_event& o, const instrument_spec& spec) const;
@@ -124,25 +130,13 @@ private:
 
     std::unique_ptr<ShadowTracker> shadow_tracker_;
 
-    // Engine-side enforcement of strategy-declared SL/TP/trailing/time
-    // exits. Populated from each strategy's take_pending_exit_intent()
-    // right after it emits an entry order; the manager is then consulted
-    // on every market/tick/l2 dispatch and any triggered close order is
-    // routed through the normal process_order path so both sim- and
-    // exchange-side adapters (and analytics) see it.
     truetest::exits::ExitManager exit_manager_;
 
-    // Helper: poll an exit intent from a strategy that just emitted an
-    // entry order, tag it, and register it. `order_id` is the id of that
-    // entry order. Called once per strategy invocation that produced an
-    // entry.
     void register_strategy_exit_intent(IStrategy& strategy,
                                        const std::string& strategy_name,
                                        std::uint64_t order_id);
 
-    // Helper: evaluate exit manager at `px`/`ts` for `symbol`; if an
-    // exit fires, route the resulting market order. Returns true if the
-    // engine halted as a result.
+    // Returns true if an exit fire caused the engine to halt.
     bool evaluate_exits(const std::string& symbol, double px,
                         std::chrono::system_clock::time_point ts,
                         std::size_t& event_count,
@@ -270,11 +264,9 @@ public:
     void run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge);
     void run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge);
 
-    // Unified-event streaming. Consumes provider::event variants —
-    // bar / tick / l2_snapshot / l2_update — from any provider that
-    // opts into the unified surface via IProvider::supports_event_stream.
-    // L2 events populate orderbook_registry_ directly, which is how the
-    // LocalBookAdapter sees real exchange depth in shadow mode.
+    // Unified-event streaming (bar/tick/l2_snapshot/l2_update). L2 events
+    // populate orderbook_registry_ directly — this is how LocalBookAdapter
+    // sees real exchange depth in shadow mode.
     void run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge);
     void set_strategy(std::shared_ptr<IStrategy> strategy);
 

@@ -18,11 +18,9 @@ namespace truetest::ui {
 
 namespace {
 
-// Visible width of the dashboard box (columns, excluding border).
-// Content is rendered into a 70-column inner field, then wrapped with
-// "│ " + content + " │" by the row helper. Total box width = 74.
+// Content rendered into 70-col inner field, wrapped to a 74-col box.
 constexpr int inner_width = 70;
-constexpr int content_width = inner_width - 2;  // leave 1 space each side
+constexpr int content_width = inner_width - 2;
 
 std::string make_hline(int n, const char* middle = "─")
 {
@@ -33,7 +31,7 @@ std::string make_hline(int n, const char* middle = "─")
     return s;
 }
 
-// Hand-rolled thousands separator — locale-free, allocation-minimal.
+// Locale-free thousands separator.
 std::string fmt_u64(std::uint64_t v)
 {
     char raw[24];
@@ -54,7 +52,6 @@ std::string fmt_price_fp8(std::int64_t fp, int decimals = 2)
     if (fp < 0) return "—";
     std::uint64_t whole = static_cast<std::uint64_t>(fp) / 100000000ULL;
     std::uint64_t frac  = static_cast<std::uint64_t>(fp) % 100000000ULL;
-    // Scale frac to the requested number of decimals.
     std::uint64_t div = 100000000ULL;
     for (int i = 0; i < decimals; ++i) div /= 10;
     std::uint64_t frac_rounded = frac / (div == 0 ? 1 : div);
@@ -72,10 +69,36 @@ std::string fmt_pnl_fp4(std::int64_t fp4)
     std::uint64_t mag = neg ? static_cast<std::uint64_t>(-fp4)
                              : static_cast<std::uint64_t>(fp4);
     std::uint64_t whole = mag / 10000ULL;
-    std::uint64_t frac  = mag % 10000ULL / 100ULL;  // 2 decimals
+    std::uint64_t frac  = mag % 10000ULL / 100ULL;
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%s$%s.%02llu",
                   neg ? "-" : "+",
+                  fmt_u64(whole).c_str(),
+                  static_cast<unsigned long long>(frac));
+    return buf;
+}
+
+// samples==0 renders as em-dash so "0.00 bps" isn't confused with "no data yet".
+std::string fmt_toxicity_bps_fp2(std::int32_t fp2, std::uint32_t samples)
+{
+    if (samples == 0) return "—";
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%+.2f bps",
+                  static_cast<double>(fp2) / 100.0);
+    return buf;
+}
+
+std::string fmt_position_fp8(std::int64_t fp8)
+{
+    if (fp8 == 0) return "flat";
+    const bool neg = fp8 < 0;
+    const std::uint64_t mag = neg ? static_cast<std::uint64_t>(-fp8)
+                                  : static_cast<std::uint64_t>(fp8);
+    const std::uint64_t whole = mag / 100000000ULL;
+    const std::uint64_t frac  = (mag % 100000000ULL) / 10000ULL;
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%s %s.%04llu",
+                  neg ? "short" : "long",
                   fmt_u64(whole).c_str(),
                   static_cast<unsigned long long>(frac));
     return buf;
@@ -92,22 +115,18 @@ std::string fmt_duration(std::chrono::seconds s)
     return buf;
 }
 
-// Best-effort visible width. Counts bytes only — we control the inputs and
-// avoid embedding CJK / combining characters, so byte length equals column
-// width for everything except UTF-8 multi-byte sequences (box chars, "●").
-// Those are all 3-byte / 3-byte sequences rendering to 1 column, so the
-// adjustment is: subtract 2 bytes per leading UTF-8 continuation byte.
+// Counts bytes and treats UTF-8 continuations + ANSI CSI sequences as zero
+// columns. Inputs are controlled — no CJK/combining chars — so this is exact.
 int visible_width_utf8(std::string_view s)
 {
     int w = 0;
     for (std::size_t i = 0; i < s.size(); ++i)
     {
         unsigned char c = static_cast<unsigned char>(s[i]);
-        if ((c & 0xC0) == 0x80) continue;  // continuation byte — no column
-        // ANSI CSI sequence — consume until the final byte (0x40-0x7E).
+        if ((c & 0xC0) == 0x80) continue;
         if (c == 0x1B && i + 1 < s.size() && s[i + 1] == '[')
         {
-            i += 1;  // skip '['
+            i += 1;
             while (i + 1 < s.size())
             {
                 unsigned char next = static_cast<unsigned char>(s[++i]);
@@ -127,11 +146,8 @@ std::string pad_right(const std::string& s, int target_cols)
     return s + std::string(static_cast<std::size_t>(target_cols - vis), ' ');
 }
 
-// Build one box row, including the trailing clear-to-eol so any leftover
-// bytes from a previously-longer value get wiped when this row is emitted.
-// No trailing newline — the diff loop appends '\n' (or skips the row and
-// emits a cursor-down instead) so the cursor advances exactly one line per
-// row regardless of whether the row was rewritten.
+// Trailing clear-to-eol wipes leftovers from a previously-longer value. No
+// newline — the diff loop decides whether to emit '\n' or a cursor-down.
 std::string row(const std::string& content_with_ansi, bool color_on)
 {
     std::string padded = pad_right(content_with_ansi, content_width);
@@ -257,6 +273,25 @@ ConsoleDashboard::ConsoleDashboard(dashboard_config cfg)
     : cfg_(std::move(cfg))
     , resolved_mode_(resolve_mode(cfg_.mode))
 {
+    rows_scratch_.reserve(16);
+
+    row_separator_.reserve(inner_width * 3 + 8);
+    row_separator_ += "├";
+    row_separator_ += make_hline(inner_width);
+    row_separator_ += "┤";
+    row_separator_ += ansi::clear_to_eol;
+
+    row_bottom_.reserve(inner_width * 3 + 8);
+    row_bottom_ += "└";
+    row_bottom_ += make_hline(inner_width);
+    row_bottom_ += "┘";
+    row_bottom_ += ansi::clear_to_eol;
+
+    row_recent_header_.reserve(inner_width * 3 + 16);
+    row_recent_header_ += "├─ recent ";
+    row_recent_header_ += make_hline(inner_width - 9);
+    row_recent_header_ += "┤";
+    row_recent_header_ += ansi::clear_to_eol;
 }
 
 ConsoleDashboard::~ConsoleDashboard()
@@ -267,7 +302,7 @@ ConsoleDashboard::~ConsoleDashboard()
 void ConsoleDashboard::start()
 {
     if (resolved_mode_ == output_mode::off) return;
-    if (running_.exchange(true)) return;  // already running
+    if (running_.exchange(true)) return;
 
     start_time_ = std::chrono::steady_clock::now();
     last_sample_time_ = start_time_;
@@ -275,8 +310,7 @@ void ConsoleDashboard::start()
 
     if (resolved_mode_ == output_mode::tui)
     {
-        // Hide cursor while the dashboard owns the bottom of the terminal.
-        // No alt-screen — we want the banner and prior scrollback to stay.
+        // No alt-screen so the banner and prior scrollback stay visible.
         write_all(STDOUT_FILENO, ansi::cursor_hide);
     }
 
@@ -290,8 +324,7 @@ void ConsoleDashboard::stop()
 
     if (resolved_mode_ == output_mode::tui)
     {
-        // Final frame, then show cursor and emit a newline so the shell
-        // prompt lands on a fresh line rather than on top of the box.
+        // Final frame + newline so the shell prompt lands below the box.
         std::string buf;
         render_tui(buf);
         write_all(STDOUT_FILENO, buf);
@@ -312,12 +345,22 @@ void ConsoleDashboard::set_feed_label(std::string label)
 
 void ConsoleDashboard::push_event(event_severity sev, std::string_view msg)
 {
-    std::lock_guard<std::mutex> lk(recent_mu_);
-    std::uint64_t idx = recent_head_.fetch_add(1, std::memory_order_acq_rel);
+    // MPSC seqlock: idx*2+1 marks the slot mid-write, idx*2+2 publishes it.
+    // Release on the "writing" tag pairs with the reader's acquire so a
+    // reader that sees it also sees the prior publication and can skip.
+    const std::uint64_t idx = recent_head_.fetch_add(1, std::memory_order_acq_rel);
     auto& slot = recent_[idx % recent_cap];
-    slot.ts = std::chrono::system_clock::now();
-    slot.sev = sev;
-    slot.msg.assign(msg);
+
+    slot.seq.store(idx * 2 + 1, std::memory_order_release);
+
+    slot.entry.ts = std::chrono::system_clock::now();
+    slot.entry.sev = sev;
+    const std::size_t n = (std::min)(msg.size(), recent_msg_cap);
+    if (n > 0)
+        std::memcpy(slot.entry.msg, msg.data(), n);
+    slot.entry.msg_len = static_cast<std::uint8_t>(n);
+
+    slot.seq.store(idx * 2 + 2, std::memory_order_release);
 }
 
 void ConsoleDashboard::render_banner()
@@ -338,7 +381,6 @@ void ConsoleDashboard::render_banner()
         buf += "\n";
         write_all(STDOUT_FILENO, buf);
     }
-    // In TUI mode the live dashboard is the banner — nothing to print here.
 }
 
 void ConsoleDashboard::update_rate_ema(std::uint64_t now_events,
@@ -364,6 +406,58 @@ void ConsoleDashboard::render_loop()
         auto now = std::chrono::steady_clock::now();
         update_rate_ema(stats_.events_total.load(std::memory_order_relaxed), now);
 
+        // TUI frame-skip: if the digest of displayed atomics + uptime-sec
+        // is unchanged, skip the render and the stdout write entirely.
+        if (resolved_mode_ == output_mode::tui)
+        {
+            const std::uint64_t digest =
+                stats_.events_total.load(std::memory_order_relaxed)
+              + stats_.fills_total.load(std::memory_order_relaxed)
+              + stats_.trades_total.load(std::memory_order_relaxed)
+              + recent_head_.load(std::memory_order_relaxed)
+              + stats_.state.load(std::memory_order_relaxed)
+              + (stats_.halt_flag.load(std::memory_order_relaxed) ? 1ull : 0ull)
+              + stats_.open_orders.load(std::memory_order_relaxed)
+              + static_cast<std::uint64_t>(
+                    stats_.realized_pnl_fp4.load(std::memory_order_relaxed))
+              + static_cast<std::uint64_t>(
+                    stats_.unrealized_pnl_fp4.load(std::memory_order_relaxed))
+              + static_cast<std::uint64_t>(
+                    stats_.position_qty_fp8.load(std::memory_order_relaxed))
+              + static_cast<std::uint64_t>(
+                    stats_.drawdown_fp4.load(std::memory_order_relaxed))
+              + stats_.win_rate_bps.load(std::memory_order_relaxed)
+              + static_cast<std::uint64_t>(
+                    stats_.toxicity_bps_fp2.load(std::memory_order_relaxed))
+              + stats_.toxicity_samples.load(std::memory_order_relaxed)
+              + stats_.live_quotes.load(std::memory_order_relaxed)
+              + stats_.avg_queue_pos_bps.load(std::memory_order_relaxed)
+              + static_cast<std::uint64_t>(
+                    stats_.best_bid_fp8.load(std::memory_order_relaxed))
+              + static_cast<std::uint64_t>(
+                    stats_.best_ask_fp8.load(std::memory_order_relaxed))
+              + stats_.ring_drops_logging.load(std::memory_order_relaxed)
+              + stats_.ring_drops_risk.load(std::memory_order_relaxed)
+              + stats_.ring_drops_stats.load(std::memory_order_relaxed)
+              + stats_.ring_drops_observer.load(std::memory_order_relaxed)
+              + stats_.ring_drops_risk_stats.load(std::memory_order_relaxed)
+              + stats_.ring_drops_mm.load(std::memory_order_relaxed);
+            const int uptime_sec = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::seconds>(
+                    now - start_time_).count());
+
+            if (have_digest_
+                && digest == last_digest_
+                && uptime_sec == last_uptime_sec_)
+            {
+                std::this_thread::sleep_for(cfg_.render_interval);
+                continue;
+            }
+            last_digest_ = digest;
+            last_uptime_sec_ = uptime_sec;
+            have_digest_ = true;
+        }
+
         buf.clear();
         switch (resolved_mode_)
         {
@@ -384,7 +478,6 @@ void ConsoleDashboard::render_tui(std::string& buf)
     const auto state = static_cast<connection_state>(
         stats_.state.load(std::memory_order_acquire));
 
-    // Counters (all relaxed — display-only).
     const std::uint64_t events = stats_.events_total.load(std::memory_order_relaxed);
     const std::uint64_t fills  = stats_.fills_total.load(std::memory_order_relaxed);
     const std::uint64_t trades = stats_.trades_total.load(std::memory_order_relaxed);
@@ -400,23 +493,25 @@ void ConsoleDashboard::render_tui(std::string& buf)
                               + stats_.ring_drops_observer.load(std::memory_order_relaxed)
                               + stats_.ring_drops_risk_stats.load(std::memory_order_relaxed)
                               + stats_.ring_drops_mm.load(std::memory_order_relaxed);
-    const std::int64_t pnl_fp4 = stats_.realized_pnl_fp4.load(std::memory_order_relaxed);
-    const std::int64_t dd_fp4  = stats_.drawdown_fp4.load(std::memory_order_relaxed);
-    const std::uint32_t wr_bps = stats_.win_rate_bps.load(std::memory_order_relaxed);
+    const std::int64_t pnl_fp4     = stats_.realized_pnl_fp4.load(std::memory_order_relaxed);
+    const std::int64_t unreal_fp4  = stats_.unrealized_pnl_fp4.load(std::memory_order_relaxed);
+    const std::int64_t pos_qty_fp8 = stats_.position_qty_fp8.load(std::memory_order_relaxed);
+    const std::int64_t dd_fp4      = stats_.drawdown_fp4.load(std::memory_order_relaxed);
+    const std::uint32_t wr_bps     = stats_.win_rate_bps.load(std::memory_order_relaxed);
+    const std::int32_t tox_fp2     = stats_.toxicity_bps_fp2.load(std::memory_order_relaxed);
+    const std::uint32_t tox_n      = stats_.toxicity_samples.load(std::memory_order_relaxed);
+    const std::uint32_t live_qs    = stats_.live_quotes.load(std::memory_order_relaxed);
+    const std::uint32_t qpos_bps   = stats_.avg_queue_pos_bps.load(std::memory_order_relaxed);
     const bool halted = stats_.halt_flag.load(std::memory_order_acquire);
 
     auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::steady_clock::now() - start_time_);
 
-    // Build every row's bytes into rows[]. Each entry is a self-contained
-    // line (no trailing '\n'); the diff loop below appends '\n' or skips
-    // the row and emits a cursor-down instead. Doing this means cells
-    // whose values haven't changed don't get rewritten on every tick, so
-    // the box stops flickering when only a handful of values are moving.
-    std::vector<std::string> rows;
-    rows.reserve(14);
+    // Each row is self-contained (no '\n'); the diff loop below decides
+    // whether to emit the row or advance the cursor past an unchanged one.
+    auto& rows = rows_scratch_;
+    rows.clear();
 
-    // Top border with title + uptime.
     {
         std::string title;
         title += cfg_.title;
@@ -433,42 +528,56 @@ void ConsoleDashboard::render_tui(std::string& buf)
         if (dashes < 2) dashes = 2;
         std::string r;
         r += "┌─ ";
+        if (color) r += ansi::bold;
+        if (color) r += ansi::fg_cyan;
         r += title;
+        if (color) r += ansi::reset;
         r += ' ';
         r += make_hline(dashes);
         r += ' ';
+        if (color) r += ansi::dim;
         r += time_str;
+        if (color) r += ansi::reset;
         r += " ─┐";
         r += ansi::clear_to_eol;
         rows.push_back(std::move(r));
     }
 
-    // State / Rate / Ring drops.
     {
         std::string c;
+        if (color) c += ansi::fg_cyan;
         c += "State  ";
+        if (color) c += ansi::reset;
         if (color) c += state_color(state, true);
         c += "● ";
         c += state_label(state);
         if (color) c += ansi::reset;
         c = pad_right(c, 22);
+        if (color) c += ansi::fg_cyan;
         c += "Feed  ";
+        if (color) c += ansi::reset;
         char rb[32];
         std::snprintf(rb, sizeof(rb), "%6.0f ev/s", rate_ema_);
         c += rb;
         c = pad_right(c, 48);
+        if (color) c += ansi::fg_cyan;
         c += "Ring drops ";
+        if (color) c += (drops > 0 ? ansi::fg_br_red : ansi::reset);
         c += fmt_u64(drops);
+        if (color) c += ansi::reset;
         rows.push_back(row(c, color));
     }
 
-    // Last / Spread / Backfill.
     {
         std::string c;
+        if (color) c += ansi::fg_cyan;
         c += "Last   ";
+        if (color) c += ansi::reset;
         c += last_px < 0 ? "—" : fmt_price_fp8(last_px);
         c = pad_right(c, 22);
+        if (color) c += ansi::fg_cyan;
         c += "Spread ";
+        if (color) c += ansi::reset;
         if (bid > 0 && ask > 0)
         {
             double b = static_cast<double>(bid) / 1e8;
@@ -484,7 +593,9 @@ void ConsoleDashboard::render_tui(std::string& buf)
             c += "—";
         }
         c = pad_right(c, 48);
+        if (color) c += ansi::fg_cyan;
         c += "Backfill ";
+        if (color) c += ansi::reset;
         if (bf_total > 0)
         {
             char b[32];
@@ -499,53 +610,174 @@ void ConsoleDashboard::render_tui(std::string& buf)
         rows.push_back(row(c, color));
     }
 
-    // Separator.
-    {
-        std::string r;
-        r += "├";
-        r += make_hline(inner_width);
-        r += "┤";
-        r += ansi::clear_to_eol;
-        rows.push_back(std::move(r));
-    }
-
-    // Events / Fills / Round-trips.
+    if (!cfg_.threading_summary.empty())
     {
         std::string c;
+        if (color) c += ansi::fg_cyan;
+        c += "Threads ";
+        if (color) c += ansi::reset;
+        c += " ";
+        if (color) c += ansi::dim;
+        c += cfg_.threading_summary;
+        if (color) c += ansi::reset;
+        rows.push_back(row(c, color));
+    }
+
+    rows.push_back(row_separator_);
+
+    {
+        std::string c;
+        if (color) c += ansi::fg_cyan;
         c += "Events  ";
+        if (color) c += ansi::reset;
         c += fmt_u64(events);
         c = pad_right(c, 26);
+        if (color) c += ansi::fg_cyan;
         c += "Fills ";
+        if (color) c += ansi::reset;
         c += fmt_u64(fills);
         c = pad_right(c, 40);
+        if (color) c += ansi::fg_cyan;
         c += "Round-trips ";
+        if (color) c += ansi::reset;
         c += fmt_u64(trades);
         rows.push_back(row(c, color));
     }
 
-    // PnL / Drawdown / Win rate.
     {
         std::string c;
+        if (color) c += ansi::fg_cyan;
         c += "Realized PnL  ";
+        if (color) c += ansi::reset;
+        if (color)
+            c += pnl_fp4 > 0 ? ansi::fg_br_green
+               : pnl_fp4 < 0 ? ansi::fg_br_red
+               : ansi::fg_gray;
         c += fmt_pnl_fp4(pnl_fp4);
+        if (color) c += ansi::reset;
         c = pad_right(c, 30);
+        if (color) c += ansi::fg_cyan;
         c += "Drawdown ";
+        if (color) c += ansi::reset;
         char db[32];
         std::snprintf(db, sizeof(db), "%+.2f%%",
                       static_cast<double>(dd_fp4) / 1e2);
+        if (color) c += dd_fp4 <= -500 ? ansi::fg_br_red
+                     :  dd_fp4 <= -100 ? ansi::fg_br_yel
+                     :  ansi::fg_gray;
         c += db;
-        c = pad_right(c, 50);
-        c += "Win rate ";
-        char wr[16];
-        std::snprintf(wr, sizeof(wr), "%u%%", wr_bps / 100);
-        c += wr;
+        if (color) c += ansi::reset;
         rows.push_back(row(c, color));
     }
 
-    // Risk.
     {
         std::string c;
-        c += "Risk    halt:";
+        if (color) c += ansi::fg_cyan;
+        c += "Unrealized    ";
+        if (color) c += ansi::reset;
+        if (color)
+            c += unreal_fp4 > 0 ? ansi::fg_br_green
+               : unreal_fp4 < 0 ? ansi::fg_br_red
+               : ansi::fg_gray;
+        c += fmt_pnl_fp4(unreal_fp4);
+        if (color) c += ansi::reset;
+        c = pad_right(c, 30);
+        if (color) c += ansi::fg_cyan;
+        c += "Position ";
+        if (color) c += ansi::reset;
+        if (color)
+            c += pos_qty_fp8 > 0 ? ansi::fg_br_green
+               : pos_qty_fp8 < 0 ? ansi::fg_br_red
+               : ansi::fg_gray;
+        c += fmt_position_fp8(pos_qty_fp8);
+        if (color) c += ansi::reset;
+        rows.push_back(row(c, color));
+    }
+
+    // Toxicity + Win rate. Toxicity: positive markout = bleeding to adverse
+    // selection; red >2 bps, yellow >0.5 bps, gray otherwise.
+    {
+        std::string c;
+        if (color) c += ansi::fg_cyan;
+        c += "Toxicity      ";
+        if (color) c += ansi::reset;
+        if (color && tox_n > 0)
+            c += tox_fp2 >  200 ? ansi::fg_br_red
+               : tox_fp2 >   50 ? ansi::fg_br_yel
+               : tox_fp2 <    0 ? ansi::fg_br_green
+               : ansi::fg_gray;
+        c += fmt_toxicity_bps_fp2(tox_fp2, tox_n);
+        if (color) c += ansi::reset;
+        if (tox_n > 0)
+        {
+            char tn[24];
+            std::snprintf(tn, sizeof(tn), " (n=%u)", tox_n);
+            if (color) c += ansi::dim;
+            c += tn;
+            if (color) c += ansi::reset;
+        }
+        c = pad_right(c, 34);
+        if (color) c += ansi::fg_cyan;
+        c += "Win rate ";
+        if (color) c += ansi::reset;
+        if (trades > 0)
+        {
+            char wr[16];
+            std::snprintf(wr, sizeof(wr), "%u%%", wr_bps / 100);
+            if (color)
+                c += wr_bps >= 5500 ? ansi::fg_br_green
+                   : wr_bps >= 4500 ? ansi::fg_gray
+                   : ansi::fg_br_yel;
+            c += wr;
+            if (color) c += ansi::reset;
+        }
+        else
+        {
+            c += "—";
+        }
+        rows.push_back(row(c, color));
+    }
+
+    // Queue pos: 0 = all at front, 10000 = all at back. Populated by
+    // QueueAwareBookAdapter; other adapters return 0 → dashes.
+    {
+        std::string c;
+        if (color) c += ansi::fg_cyan;
+        c += "Quotes        ";
+        if (color) c += ansi::reset;
+        if (live_qs > 0)
+        {
+            char qb[24];
+            std::snprintf(qb, sizeof(qb), "%u live", live_qs);
+            c += qb;
+        }
+        else
+        {
+            c += "—";
+        }
+        c = pad_right(c, 34);
+        if (color) c += ansi::fg_cyan;
+        c += "Queue pos ";
+        if (color) c += ansi::reset;
+        if (live_qs > 0)
+        {
+            char qp[16];
+            std::snprintf(qp, sizeof(qp), "%u%%", qpos_bps / 100);
+            c += qp;
+        }
+        else
+        {
+            c += "—";
+        }
+        rows.push_back(row(c, color));
+    }
+
+    {
+        std::string c;
+        if (color) c += ansi::fg_cyan;
+        c += "Risk    ";
+        if (color) c += ansi::reset;
+        c += "halt:";
         if (color) c += halted ? ansi::fg_br_red : ansi::fg_gray;
         c += halted ? "yes" : "no";
         if (color) c += ansi::reset;
@@ -563,51 +795,74 @@ void ConsoleDashboard::render_tui(std::string& buf)
                           cfg_.risk_max_daily_loss);
             c += buf2;
         }
+        if (cfg_.risk_max_position_value > 0.0 && last_px > 0 && pos_qty_fp8 != 0)
+        {
+            const double qty       = static_cast<double>(pos_qty_fp8) / 1.0e8;
+            const double last      = static_cast<double>(last_px)     / 1.0e8;
+            const double inv_value = std::abs(qty) * last;
+            const double pct       = inv_value / cfg_.risk_max_position_value * 100.0;
+            char buf3[48];
+            std::snprintf(buf3, sizeof(buf3), "  inv %.0f%%", pct);
+            c += buf3;
+        }
         rows.push_back(row(c, color));
     }
 
-    // Rings.
     {
+        const auto log_d   = stats_.ring_drops_logging.load(std::memory_order_relaxed);
+        const auto risk_d  = stats_.ring_drops_risk.load(std::memory_order_relaxed);
+        const auto stats_d = stats_.ring_drops_stats.load(std::memory_order_relaxed);
+        const auto mm_d    = stats_.ring_drops_mm.load(std::memory_order_relaxed);
+        auto emit = [&](std::string& c, const char* lbl, std::uint64_t v) {
+            c += lbl;
+            if (color) c += (v > 0 ? ansi::fg_br_red : ansi::fg_gray);
+            c += fmt_u64(v);
+            if (color) c += ansi::reset;
+        };
         std::string c;
-        c += "Rings   log:";
-        c += fmt_u64(stats_.ring_drops_logging.load(std::memory_order_relaxed));
-        c += "  risk:";
-        c += fmt_u64(stats_.ring_drops_risk.load(std::memory_order_relaxed));
-        c += "  stats:";
-        c += fmt_u64(stats_.ring_drops_stats.load(std::memory_order_relaxed));
-        c += "  mm:";
-        c += fmt_u64(stats_.ring_drops_mm.load(std::memory_order_relaxed));
+        if (color) c += ansi::fg_cyan;
+        c += "Rings   ";
+        if (color) c += ansi::reset;
+        emit(c, "log:",    log_d);
+        emit(c, "  risk:", risk_d);
+        emit(c, "  stats:",stats_d);
+        emit(c, "  mm:",   mm_d);
         rows.push_back(row(c, color));
     }
 
-    // Recent events pane header.
-    {
-        std::string r;
-        r += "├─ recent ";
-        r += make_hline(inner_width - 9);
-        r += "┤";
-        r += ansi::clear_to_eol;
-        rows.push_back(std::move(r));
-    }
+    rows.push_back(row_recent_header_);
 
-    // Last 4 events, oldest → newest.
+    // Seqlock reads: verify slot.seq == idx*2+2 before and after the copy;
+    // a racing next-cycle writer flips seq and we render the row blank.
     constexpr int recent_rows = 4;
     event_entry snapshot[recent_rows];
-    int have = 0;
+    bool        have[recent_rows] = {false, false, false, false};
     {
-        std::lock_guard<std::mutex> lk(recent_mu_);
-        std::uint64_t head = recent_head_.load(std::memory_order_relaxed);
-        int start = static_cast<int>((std::min)(static_cast<std::uint64_t>(recent_rows), head));
+        const std::uint64_t head = recent_head_.load(std::memory_order_acquire);
+        const int start = static_cast<int>(
+            (std::min)(static_cast<std::uint64_t>(recent_rows), head));
         for (int i = start; i > 0; --i)
         {
-            std::uint64_t idx = head - static_cast<std::uint64_t>(i);
-            snapshot[have++] = recent_[idx % recent_cap];
+            const std::uint64_t idx = head - static_cast<std::uint64_t>(i);
+            const std::uint64_t expected = idx * 2 + 2;
+            auto& slot = recent_[idx % recent_cap];
+
+            const std::uint64_t s1 = slot.seq.load(std::memory_order_acquire);
+            if (s1 != expected) continue;
+            event_entry tmp = slot.entry;
+            std::atomic_thread_fence(std::memory_order_acquire);
+            const std::uint64_t s2 = slot.seq.load(std::memory_order_relaxed);
+            if (s2 != expected) continue;
+
+            const int out = recent_rows - i;
+            snapshot[out] = tmp;
+            have[out] = true;
         }
     }
     for (int i = 0; i < recent_rows; ++i)
     {
         std::string c;
-        if (i < have)
+        if (have[i])
         {
             c += clock_hhmmss(snapshot[i].ts);
             c += "  ";
@@ -615,25 +870,16 @@ void ConsoleDashboard::render_tui(std::string& buf)
             c += severity_label(snapshot[i].sev);
             if (color) c += ansi::reset;
             c += "  ";
-            c += snapshot[i].msg;
+            c.append(snapshot[i].msg, snapshot[i].msg_len);
         }
         rows.push_back(row(c, color));
     }
 
-    // Bottom border.
-    {
-        std::string r;
-        r += "└";
-        r += make_hline(inner_width);
-        r += "┘";
-        r += ansi::clear_to_eol;
-        rows.push_back(std::move(r));
-    }
+    rows.push_back(row_bottom_);
 
     const int row_count = static_cast<int>(rows.size());
 
-    // First frame, or a row-count change (shouldn't happen — height is
-    // constant 14 — but guard anyway): full repaint, then seed the cache.
+    // First frame or row-count drift: full repaint and seed the cache.
     if (last_row_count_ == 0 || last_row_count_ != row_count
         || static_cast<int>(last_rows_.size()) != row_count)
     {
@@ -655,10 +901,8 @@ void ConsoleDashboard::render_tui(std::string& buf)
         return;
     }
 
-    // Steady-state path: hop to the top of the box, then per-row diff.
-    // Unchanged rows just advance the cursor (ESC[B + CR) so the border
-    // and unchanging cells emit zero bytes — which is what stops the box
-    // from flickering when the only thing moving is a couple of counters.
+    // Steady state: hop to the top of the box and per-row diff. Unchanged
+    // rows only emit ESC[B+CR — zero bytes of content, no flicker.
     char up[16];
     std::snprintf(up, sizeof(up), "\x1b[%dA", last_row_count_);
     buf += up;
