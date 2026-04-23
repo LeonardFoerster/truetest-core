@@ -372,7 +372,7 @@ FodyWeavers.xsd
 to_do.md
 CLAUDE.MD
 features.md
-
+*.md
 .claude/
 
 # CMake build directory — single canonical build dir only
