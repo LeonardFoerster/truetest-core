@@ -100,10 +100,6 @@ struct engine_config
     double reconcile_tolerance_bps = 10.0;
     std::chrono::milliseconds kill_switch_deadline{5000};
 
-    bool enable_web_ui = false;
-    uint16_t ws_port = 8765;
-    bool ws_compress = true;
-
     double market_aggression = 1.1;
     double qty_scale = 1e8;
     unsigned fill_rng_seed = 42;

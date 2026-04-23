@@ -221,10 +221,6 @@ struct cli_options
     double maker_rate = 0.0;
     double taker_rate = 0.0;
 
-    bool enable_web_ui = false;
-    uint16_t ws_port = 8765;
-    bool ws_compress = true;
-
     std::string symbol;
     std::string stream;
     std::string api_key;
@@ -431,9 +427,6 @@ static void load_config_file(const std::string& path, cli_options& o)
     auto get_bool = [&](const char* k, bool& out) {
         if (j.contains(k) && j[k].is_boolean()) out = j[k].get<bool>();
     };
-    auto get_u16 = [&](const char* k, uint16_t& out) {
-        if (j.contains(k) && j[k].is_number_unsigned()) out = j[k].get<uint16_t>();
-    };
 
     get_str("replay", o.replay_path);
     get_str("log_events", o.event_log_path);
@@ -449,9 +442,6 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_double("fee_value", o.fee_value);
     get_double("maker_rate", o.maker_rate);
     get_double("taker_rate", o.taker_rate);
-    get_bool("web_ui", o.enable_web_ui);
-    get_u16("ws_port", o.ws_port);
-    get_bool("ws_compress", o.ws_compress);
     get_str("symbol", o.symbol);
     get_str("stream", o.stream);
     get_str("api_key", o.api_key);
@@ -518,9 +508,6 @@ static void dump_config(const cli_options& o)
     j["fee_value"] = o.fee_value;
     j["maker_rate"] = o.maker_rate;
     j["taker_rate"] = o.taker_rate;
-    j["web_ui"] = o.enable_web_ui;
-    j["ws_port"] = o.ws_port;
-    j["ws_compress"] = o.ws_compress;
     j["symbol"] = o.symbol;
     j["stream"] = o.stream;
     j["host"] = o.host;
@@ -578,11 +565,6 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--fee-value", o.fee_value, "Fixed fee per trade");
     app.add_option("--maker-rate", o.maker_rate, "Maker fee rate (tiered)");
     app.add_option("--taker-rate", o.taker_rate, "Taker fee rate (tiered)");
-
-    app.add_flag("--web-ui", o.enable_web_ui, "Enable WebSocket UI server");
-    app.add_option("--ws-port", o.ws_port, "WebSocket server port")->default_val(8765);
-    app.add_flag("--ws-compress,!--no-ws-compress", o.ws_compress,
-                 "Enable per-message deflate compression (default: on)");
 
     app.add_option("--symbol", o.symbol, "Trading symbol (e.g., BTCUSDT)");
     app.add_option("--stream", o.stream, "Stream type: trade, kline, or interval");
@@ -711,9 +693,6 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--fee-value")) opts.fee_value = file_opts.fee_value;
     if (!was_set("--maker-rate")) opts.maker_rate = file_opts.maker_rate;
     if (!was_set("--taker-rate")) opts.taker_rate = file_opts.taker_rate;
-    if (!was_set("--web-ui")) opts.enable_web_ui = file_opts.enable_web_ui;
-    if (!was_set("--ws-port")) opts.ws_port = file_opts.ws_port;
-    if (!was_set("--ws-compress")) opts.ws_compress = file_opts.ws_compress;
     if (!was_set("--symbol")) opts.symbol = file_opts.symbol;
     if (!was_set("--stream")) opts.stream = file_opts.stream;
     if (!was_set("--api-key")) opts.api_key = file_opts.api_key;
@@ -778,9 +757,6 @@ static int run_dry_run(const cli_options& o)
     std::cout << "    Data path:  " << (o.provider_path.empty() ? "(none)" : o.provider_path) << "\n";
     std::cout << "    DB:         " << (o.db_path.empty() ? "(disabled)" : o.db_path) << "\n";
     std::cout << "    Fee model:  " << (o.fee_model.empty() ? "zero" : o.fee_model) << "\n";
-    std::cout << "    Web UI:     " << (o.enable_web_ui ? "yes" : "no") << "\n";
-    if (o.enable_web_ui)
-        std::cout << "    WS port:    " << o.ws_port << "\n";
     std::cout << "    Seed:       " << (o.seed == 0 ? "random" : std::to_string(o.seed)) << "\n";
     std::cout << "  ── Risk Limits ──\n";
     std::cout << "    Max drawdown:        " << (o.risk_max_drawdown * 100) << "%\n";
@@ -954,9 +930,6 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.log_max_files = o.log_keep;
     prov_cfg.disable_pinning = o.no_pin;
     prov_cfg.provider = provider;
-    prov_cfg.enable_web_ui = o.enable_web_ui;
-    prov_cfg.ws_port = o.ws_port;
-    prov_cfg.ws_compress = o.ws_compress;
     prov_cfg.initial_balance = o.balance;
     prov_cfg.db_path = o.db_path;
     prov_cfg.checkpoint_path = o.checkpoint_path;

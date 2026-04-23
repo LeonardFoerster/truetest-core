@@ -37,10 +37,6 @@ namespace truetest::ui { struct streaming_stats; }
 #include "data/sqlite_store.h"
 #endif
 
-#ifdef HAS_WEB_UI
-#include "ws_worker.h"
-#endif
-
 #ifdef HAS_DEBUG
 #include "debug/debug_log.h"
 #include "debug/memory_info.h"
@@ -192,6 +188,24 @@ private:
 
     std::vector<std::pair<std::string, uint64_t>> day_order_ids_;
 
+    // Per-order metadata recorded at route time. Used when fills come back
+    // to route them to the right lot (opener_order_id) and to tag the lot
+    // with its owning strategy.
+    struct order_meta
+    {
+        uint64_t opener_order_id = 0;
+        std::string strategy_name;
+    };
+    std::unordered_map<uint64_t, order_meta> order_meta_;
+
+    void register_order_meta(const order_event& o);
+    uint64_t lookup_opener(uint64_t order_id) const;
+    const std::string& lookup_strategy_name(uint64_t order_id) const;
+
+    // Routes a fill back to the strategy that emitted the originating
+    // order, by matching strategy_name against primary/additional sets.
+    void dispatch_fill_to_strategy(const fill_event& f);
+
     std::atomic<bool> halt_flag_{false};
     std::atomic<bool> worker_failed_{false};
 
@@ -219,22 +233,6 @@ private:
     std::unique_ptr<ObserverWorker> observer_worker_;
     std::unique_ptr<RiskStatsWorker> risk_stats_worker_;
     std::unique_ptr<MarketMakerWorker> mm_worker_;
-
-#ifdef HAS_WEB_UI
-    std::shared_ptr<EventRing> ws_ring_;
-    std::unique_ptr<WebSocketWorker> ws_worker_;
-    std::size_t ws_drops_ = 0;
-
-    void process_ws_commands(bool& halt_requested, std::size_t& event_count);
-    void broadcast_orderbook_snapshot(const std::string& symbol);
-    void send_state_snapshot();
-    void broadcast_market_with_indicators(const market_event& mkt);
-
-    std::chrono::steady_clock::time_point last_ob_snapshot_time_;
-
-    static constexpr std::size_t MAX_BAR_HISTORY = 1000;
-    std::vector<std::string> bar_history_;
-#endif
 
     std::mutex switch_mu_;
     std::string pending_symbol_;

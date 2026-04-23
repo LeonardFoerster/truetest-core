@@ -1,59 +1,67 @@
 #include "exits/exit_manager.h"
 
-#include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace truetest::exits {
 
 void ExitManager::register_pending(exit_intent intent)
 {
-    key_t k{intent.strategy_name, intent.symbol};
-    if (intent.opener_order_id != 0)
-        opener_id_to_key_[intent.opener_order_id] = k;
-    pending_.emplace(k, std::move(intent));
+    if (intent.opener_order_id == 0) return;  // cannot key — drop silently
+    strategy_symbol_key ssk{intent.strategy_name, intent.symbol};
+    strategy_symbol_to_openers_.emplace(ssk, intent.opener_order_id);
+    pending_.emplace(intent.opener_order_id, std::move(intent));
 }
 
 void ExitManager::on_fill(const fill_event& f)
 {
-    auto it = opener_id_to_key_.find(f.get_order_id());
-    if (it == opener_id_to_key_.end())
+    on_fill(f, f.get_order_id());
+}
+
+void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
+{
+    // Closer fill: bracket for the original opener should no longer fire.
+    if (opener_order_id != 0 && opener_order_id != f.get_order_id())
+    {
+        cancel(opener_order_id);
         return;
+    }
 
-    key_t k = it->second;
-    opener_id_to_key_.erase(it);
-
-    // Promote every pending intent at this key to armed using the fill
-    // price and fraction-of-fill qty (TP1/TP2/SL plans flip in one go).
-    auto range = pending_.equal_range(k);
+    // Opener fill: promote pending → armed.
+    auto range = pending_.equal_range(f.get_order_id());
     if (range.first == range.second) return;
 
-    for (auto pit = range.first; pit != range.second; ++pit)
+    for (auto it = range.first; it != range.second; ++it)
     {
         armed_intent ai;
-        ai.intent      = std::move(pit->second);
+        ai.intent      = std::move(it->second);
         ai.entry_price = f.get_fill_price();
         ai.best_price  = f.get_fill_price();
-        // Clamp to [0,1] so a mis-authored fraction can't overflow position.
+
         double frac = ai.intent.qty_fraction;
         if (frac <= 0.0) frac = 1.0;
         if (frac > 1.0)  frac = 1.0;
         ai.intent.qty = f.get_filled_quantity() * frac;
-        armed_.emplace(k, std::move(ai));
+
+        armed_.emplace(f.get_order_id(), std::move(ai));
     }
     pending_.erase(range.first, range.second);
 }
 
-std::optional<order_event> ExitManager::on_price(
+std::vector<order_event> ExitManager::on_price(
     const std::string& symbol, double px,
     std::chrono::system_clock::time_point ts)
 {
+    std::vector<order_event> closes;
     if (armed_.empty() || !(px > 0.0))
-        return std::nullopt;
+        return closes;
 
-    for (auto it = armed_.begin(); it != armed_.end(); ++it)
+    std::vector<std::uint64_t> erased_openers;
+
+    for (auto it = armed_.begin(); it != armed_.end(); )
     {
-        if (it->first.second != symbol) continue;
         auto& ai = it->second;
+        if (ai.intent.symbol != symbol) { ++it; continue; }
 
         const bool is_long  = (ai.intent.close_side == order_side::sell);
         const bool is_short = (ai.intent.close_side == order_side::buy);
@@ -93,27 +101,73 @@ std::optional<order_event> ExitManager::on_price(
         const bool time_hit =
             ai.intent.deadline && ts >= *ai.intent.deadline;
 
-        if (!sl_hit && !tp_hit && !time_hit)
-            continue;
+        if (!sl_hit && !tp_hit && !time_hit) { ++it; continue; }
 
         order_event close(ts, ai.intent.symbol,
                           order_type::market, ai.intent.close_side,
                           ai.intent.qty, px);
-        armed_.erase(it);
-        return close;
+        close.set_opener_order_id(it->first);
+        close.set_strategy_name(ai.intent.strategy_name);
+        closes.push_back(std::move(close));
+
+        erased_openers.push_back(it->first);
+        // Capture key fields before erase invalidates `ai`/`it`.
+        const std::string sname = ai.intent.strategy_name;
+        const std::string sym   = ai.intent.symbol;
+        const std::uint64_t opener = it->first;
+        it = armed_.erase(it);
+        untrack_opener(opener, sname, sym);
     }
-    return std::nullopt;
+
+    return closes;
+}
+
+void ExitManager::cancel(std::uint64_t opener_order_id)
+{
+    // Capture side-index entries before the primary containers drop the key.
+    std::string sname, sym;
+    auto ap = pending_.find(opener_order_id);
+    if (ap != pending_.end()) { sname = ap->second.strategy_name; sym = ap->second.symbol; }
+    else
+    {
+        auto aa = armed_.find(opener_order_id);
+        if (aa != armed_.end()) { sname = aa->second.intent.strategy_name; sym = aa->second.intent.symbol; }
+    }
+
+    pending_.erase(opener_order_id);
+    armed_.erase(opener_order_id);
+    if (!sname.empty() || !sym.empty())
+        untrack_opener(opener_order_id, sname, sym);
 }
 
 void ExitManager::cancel(const std::string& strategy_name, const std::string& symbol)
 {
-    key_t k{strategy_name, symbol};
-    pending_.erase(k);
-    armed_.erase(k);
-    for (auto it = opener_id_to_key_.begin(); it != opener_id_to_key_.end(); )
+    strategy_symbol_key ssk{strategy_name, symbol};
+    auto range = strategy_symbol_to_openers_.equal_range(ssk);
+    std::vector<std::uint64_t> openers;
+    for (auto it = range.first; it != range.second; ++it)
+        openers.push_back(it->second);
+    strategy_symbol_to_openers_.erase(ssk);
+
+    for (auto id : openers)
     {
-        if (it->second == k) it = opener_id_to_key_.erase(it);
-        else ++it;
+        pending_.erase(id);
+        armed_.erase(id);
+    }
+}
+
+void ExitManager::untrack_opener(std::uint64_t opener_order_id,
+                                 const std::string& strategy_name,
+                                 const std::string& symbol)
+{
+    strategy_symbol_key ssk{strategy_name, symbol};
+    auto range = strategy_symbol_to_openers_.equal_range(ssk);
+    for (auto it = range.first; it != range.second; )
+    {
+        if (it->second == opener_order_id)
+            it = strategy_symbol_to_openers_.erase(it);
+        else
+            ++it;
     }
 }
 

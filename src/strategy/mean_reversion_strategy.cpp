@@ -31,24 +31,6 @@ double mean_reversion_strategy::compute_quantity(double price) const
     return equity_ * risk_fraction_ / price;
 }
 
-namespace {
-
-truetest::exits::exit_intent make_long_exit_intent(
-    const std::string& symbol, double entry, double qty,
-    double sl_pct, double tp_pct)
-{
-    truetest::exits::exit_intent ei;
-    ei.symbol       = symbol;
-    ei.close_side   = order_side::sell;
-    ei.qty          = qty;
-    if (sl_pct > 0.0) ei.stop_loss   = entry * (1.0 - sl_pct);
-    if (tp_pct > 0.0) ei.take_profit = entry * (1.0 + tp_pct);
-    ei.strategy_name = "mean-reversion";
-    return ei;
-}
-
-} // namespace
-
 std::optional<order_event> mean_reversion_strategy::on_market(const market_event& mkt)
 {
     auto& sma = get_sma(mkt.get_symbol());
@@ -61,8 +43,8 @@ std::optional<order_event> mean_reversion_strategy::on_market(const market_event
 
     if (!is_open && mkt.get_close() < *sma_value) {
         double entry = mkt.get_close();
-        pending_intent_ = make_long_exit_intent(mkt.get_symbol(), entry, qty,
-                                                sl_pct_, tp_pct_);
+        pending_intent_ = truetest::exits::make_long_exit_intent(
+            mkt.get_symbol(), entry, qty, sl_pct_, tp_pct_, "mean-reversion");
         return order_event(mkt.get_timestamp(), mkt.get_symbol(),
                            order_type::market, order_side::buy, qty, entry);
     }
@@ -85,8 +67,8 @@ std::optional<order_event> mean_reversion_strategy::on_tick(const tick_event& te
 
     if (!is_open && te.get_price() < *sma_value) {
         double entry = te.get_price();
-        pending_intent_ = make_long_exit_intent(te.get_symbol(), entry, qty,
-                                                sl_pct_, tp_pct_);
+        pending_intent_ = truetest::exits::make_long_exit_intent(
+            te.get_symbol(), entry, qty, sl_pct_, tp_pct_, "mean-reversion");
         return order_event(te.get_timestamp(), te.get_symbol(),
                            order_type::market, order_side::buy, qty, entry);
     }

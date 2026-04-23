@@ -5,65 +5,89 @@
 
 #include <chrono>
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace truetest::exits {
 
 // Engine-side enforcement of strategy-declared exit intents. Keyed by
-// (strategy, symbol) so multi-strategy runs on the same symbol carry
-// independent stops. Lifecycle: register_pending at entry submit → on_fill
-// promotes to armed (using actual fill px/qty) → on_price evaluates every
-// tick and returns a synthetic close order when any trigger crosses.
+// opener_order_id so two concurrent entries on the same (strategy,symbol)
+// carry independent stops. Lifecycle: register_pending at entry submit →
+// on_fill promotes to armed (using actual fill px/qty) → on_price returns
+// every armed intent that triggers on this tick.
 class ExitManager
 {
 public:
     ExitManager() = default;
 
-    // New call replaces any earlier pending intent for the same key.
+    // Adds a pending intent for intent.opener_order_id. Calling again with
+    // the same opener_id appends a second intent (TP1/TP2/SL scale-out).
     void register_pending(exit_intent intent);
 
-    // Binds pending → armed using the fill price (trailing reference) and
-    // fill qty (the intent's qty was just a hint). No-op if no match.
+    // Promotes all pending intents keyed by f.get_order_id() into armed,
+    // using the fill price as entry reference and fill qty as the size.
     void on_fill(const fill_event& f);
 
-    // First armed intent to trigger wins and is erased atomically so a
-    // second crossing on the same tick can't double-fire.
-    std::optional<order_event> on_price(const std::string& symbol,
-                                        double px,
-                                        std::chrono::system_clock::time_point ts);
+    // Opener- or closer-aware variant. Passing the opener_order_id lets
+    // the manager distinguish the two roles: when opener==fill.order_id
+    // (the fill is the opener itself), pending intents are promoted to
+    // armed; when opener != fill.order_id (this fill closes an earlier
+    // entry), the armed bracket for that opener is dropped so it can't
+    // fire again on a lot that's already been closed by signal.
+    void on_fill(const fill_event& f, std::uint64_t opener_order_id);
 
-    // Drops pending+armed when the strategy exits via its own signal path.
+    // Returns every armed intent at this symbol whose SL/TP/trailing/time
+    // trigger crossed. Returned order_events carry opener_order_id so the
+    // portfolio can close the correct lot.
+    std::vector<order_event> on_price(const std::string& symbol,
+                                      double px,
+                                      std::chrono::system_clock::time_point ts);
+
+    // Drop everything for one opener (used when strategy exits via its own
+    // signal path and the armed bracket should no longer fire).
+    void cancel(std::uint64_t opener_order_id);
+
+    // Legacy bulk-cancel: remove every pending/armed intent for a given
+    // (strategy,symbol). Preserved for the net-flat notifier path; becomes
+    // unused once strategies own their entry gating.
     void cancel(const std::string& strategy_name, const std::string& symbol);
 
     std::size_t armed_count() const { return armed_.size(); }
     std::size_t pending_count() const { return pending_.size(); }
 
 private:
-    struct key_hash
+    struct armed_intent
     {
-        std::size_t operator()(const std::pair<std::string, std::string>& k) const noexcept
+        exit_intent intent;
+        double      entry_price = 0.0;
+        double      best_price  = 0.0;  // running MFE for trailing
+    };
+
+    using strategy_symbol_key = std::pair<std::string, std::string>;
+    struct ss_hash
+    {
+        std::size_t operator()(const strategy_symbol_key& k) const noexcept
         {
             std::hash<std::string> h;
             return h(k.first) ^ (h(k.second) << 1);
         }
     };
-    using key_t = std::pair<std::string, std::string>;
 
-    struct armed_intent
-    {
-        exit_intent   intent;
-        double        entry_price = 0.0;
-        double        best_price  = 0.0;  // running MFE for trailing
-    };
+    // Keyed by opener_order_id. Multimap so a single entry can carry
+    // TP1/TP2/SL scale-outs.
+    std::unordered_multimap<std::uint64_t, exit_intent>  pending_;
+    std::unordered_multimap<std::uint64_t, armed_intent> armed_;
 
-    // Multimap lets a strategy declare a TP1/TP2/SL scale-out plan per key.
-    std::unordered_multimap<key_t, exit_intent,   key_hash> pending_;
-    std::unordered_multimap<key_t, armed_intent,  key_hash> armed_;
+    // Reverse index supporting legacy cancel(strategy,symbol).
+    std::unordered_multimap<strategy_symbol_key, std::uint64_t, ss_hash>
+        strategy_symbol_to_openers_;
 
-    std::unordered_map<std::uint64_t, key_t> opener_id_to_key_;
+    void untrack_opener(std::uint64_t opener_order_id,
+                        const std::string& strategy_name,
+                        const std::string& symbol);
 };
 
 } // namespace truetest::exits

@@ -28,8 +28,8 @@ struct exit_intent
     double      qty = 0.0;
 
     // Fraction of opener fill to close. 1.0 = full exit. Multiple intents
-    // per (strategy,symbol) compose for TP1/TP2/SL scale-outs; risk layer
-    // catches fractions summing above 1.0.
+    // per opener compose for TP1/TP2/SL scale-outs; risk layer catches
+    // fractions summing above 1.0.
     double qty_fraction = 1.0;
 
     std::optional<double> stop_loss;
@@ -46,5 +46,37 @@ struct exit_intent
     // Carried through to Analytics for per-strategy attribution.
     std::string strategy_name;
 };
+
+// Shared helpers so strategies don't each re-derive the SL/TP math with the
+// wrong sign for shorts.
+inline exit_intent make_long_exit_intent(const std::string& symbol,
+                                         double entry, double qty,
+                                         double sl_pct, double tp_pct,
+                                         const std::string& strategy_name = {})
+{
+    exit_intent ei;
+    ei.symbol        = symbol;
+    ei.close_side    = order_side::sell;
+    ei.qty           = qty;
+    if (sl_pct > 0.0) ei.stop_loss   = entry * (1.0 - sl_pct);
+    if (tp_pct > 0.0) ei.take_profit = entry * (1.0 + tp_pct);
+    ei.strategy_name = strategy_name;
+    return ei;
+}
+
+inline exit_intent make_short_exit_intent(const std::string& symbol,
+                                          double entry, double qty,
+                                          double sl_pct, double tp_pct,
+                                          const std::string& strategy_name = {})
+{
+    exit_intent ei;
+    ei.symbol        = symbol;
+    ei.close_side    = order_side::buy;
+    ei.qty           = qty;
+    if (sl_pct > 0.0) ei.stop_loss   = entry * (1.0 + sl_pct);
+    if (tp_pct > 0.0) ei.take_profit = entry * (1.0 - tp_pct);
+    ei.strategy_name = strategy_name;
+    return ei;
+}
 
 } // namespace truetest::exits
