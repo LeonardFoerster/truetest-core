@@ -74,6 +74,15 @@ struct engine_config
 
     std::string db_path;
 
+#ifdef HAS_QUESTDB
+    bool persist_enabled = false;
+    std::string questdb_host = "127.0.0.1";
+    std::uint16_t questdb_ilp_port = 9009;
+    std::uint16_t questdb_http_port = 9000;
+    std::string run_tag;     // empty → auto-generate
+    std::string run_notes;   // optional free-form, goes to runs_meta
+#endif
+
     std::string checkpoint_path;
     std::string resume_checkpoint_path;
     std::size_t checkpoint_interval_events = 10000;

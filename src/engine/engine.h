@@ -37,6 +37,11 @@ namespace truetest::ui { struct streaming_stats; }
 #include "data/sqlite_store.h"
 #endif
 
+#ifdef HAS_QUESTDB
+#include "data/questdb/store.h"
+#include "questdb_worker.h"
+#endif
+
 #ifdef HAS_DEBUG
 #include "debug/debug_log.h"
 #include "debug/memory_info.h"
@@ -117,6 +122,18 @@ private:
     std::string current_run_id_;
     void record_run_begin();
     void record_run_end();
+#endif
+
+#ifdef HAS_QUESTDB
+    std::shared_ptr<truetest::questdb::QuestdbStore> questdb_store_;
+    std::shared_ptr<EventRing> questdb_ring_;
+    std::unique_ptr<QuestDbWorker> questdb_worker_;
+    std::size_t questdb_drops_ = 0;
+    bool questdb_active_ = false;  // true only after successful begin()
+    std::size_t questdb_total_rejections_ = 0;
+
+    void questdb_begin();
+    void questdb_end();
 #endif
 
     void write_checkpoint_if_due(std::size_t event_count);

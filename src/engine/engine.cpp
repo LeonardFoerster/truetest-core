@@ -1,5 +1,8 @@
 #include "engine.h"
 #include "checkpoint.h"
+#ifdef HAS_QUESTDB
+#include "data/questdb/run_tag.h"
+#endif
 #include "data/data_handler.h"
 #include "data/date_parse.h"
 #include "execution/portfolio.h"
@@ -294,6 +297,19 @@ void engine::publish_event(const event_pointer& ev)
     }
 
 #undef TT_PUSH
+
+#ifdef HAS_QUESTDB
+    // QuestDB observer ring is non-safety: drops never escalate to halt.
+    // It's a tail-side capture for analysis, in addition to the synchronous
+    // capture-point writes from process_order / route_order / cancel_order.
+    if (questdb_ring_ && !questdb_ring_->try_push(ev))
+    {
+        ++questdb_drops_;
+        if (questdb_drops_ == 1 || questdb_drops_ % 1000 == 0)
+            std::cerr << "  QuestDB ring: " << questdb_drops_
+                      << " events dropped\n";
+    }
+#endif
 }
 
 std::unique_ptr<LoggingWorker> engine::make_logging_worker()
@@ -478,6 +494,22 @@ void engine::start_workers()
         break;
     }
     }
+
+#ifdef HAS_QUESTDB
+    // QuestDB worker: drains questdb_ring_ in addition to the synchronous
+    // record_* calls from the engine's hot-path capture points. Spawned
+    // only when persistence has been activated by questdb_begin() (DDLs
+    // and ILP socket succeeded).
+    if (questdb_active_ && questdb_store_)
+    {
+        questdb_ring_ = std::make_shared<EventRing>();
+        questdb_worker_ = std::make_unique<QuestDbWorker>(questdb_store_);
+        wire_failure(*questdb_worker_);
+        worker_threads_.emplace_back([this]() {
+            questdb_worker_->run(*questdb_ring_);
+        });
+    }
+#endif
 }
 
 void engine::stop_workers()
@@ -488,6 +520,9 @@ void engine::stop_workers()
     if (stats_worker_) stats_worker_->stop();
     if (risk_stats_worker_) risk_stats_worker_->stop();
     if (mm_worker_) mm_worker_->stop();
+#ifdef HAS_QUESTDB
+    if (questdb_worker_) questdb_worker_->stop();
+#endif
 
     for (auto& t : worker_threads_)
     {
@@ -522,6 +557,9 @@ void engine::stop_workers()
     Worker* all_workers[] = {
         logging_worker_.get(), risk_worker_.get(), stats_worker_.get(),
         observer_worker_.get(), risk_stats_worker_.get(), mm_worker_.get(),
+#ifdef HAS_QUESTDB
+        questdb_worker_.get(),
+#endif
     };
     for (auto* w : all_workers)
     {
@@ -539,6 +577,9 @@ void engine::stop_workers()
 
     std::size_t total_drops = logging_drops_ + risk_drops_ + stats_drops_
                             + observer_drops_ + risk_stats_drops_ + mm_drops_;
+#ifdef HAS_QUESTDB
+    total_drops += questdb_drops_;
+#endif
     if (total_drops > 0)
     {
         std::cerr << "  WARNING: " << total_drops << " events dropped from ring buffers.\n";
@@ -547,7 +588,11 @@ void engine::stop_workers()
                   << " stats=" << stats_drops_
                   << " observer=" << observer_drops_
                   << " risk_stats=" << risk_stats_drops_
-                  << " mm=" << mm_drops_ << "\n";
+                  << " mm=" << mm_drops_
+#ifdef HAS_QUESTDB
+                  << " questdb=" << questdb_drops_
+#endif
+                  << "\n";
     }
 
     auto report_hwm = [](const char* name, const std::shared_ptr<EventRing>& ring) {
@@ -566,7 +611,78 @@ void engine::stop_workers()
     report_hwm("observer", observer_ring_);
     report_hwm("risk_stats", risk_stats_ring_);
     report_hwm("mm", mm_ring_);
+#ifdef HAS_QUESTDB
+    report_hwm("questdb", questdb_ring_);
+#endif
 }
+
+#ifdef HAS_QUESTDB
+void engine::questdb_begin()
+{
+    if (!config_.persist_enabled) return;
+
+    truetest::questdb::StoreConfig scfg;
+    scfg.host = config_.questdb_host;
+    scfg.ilp_port = config_.questdb_ilp_port;
+    scfg.http_port = config_.questdb_http_port;
+    try
+    {
+        scfg.run_tag = truetest::questdb::make_run_tag(config_.run_tag);
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "  WARNING: invalid --run-tag (" << e.what()
+                  << ") — persistence disabled.\n";
+        return;
+    }
+
+    scfg.mode = (config_.mode == engine_mode::backtest ? "backtest"
+              :  config_.mode == engine_mode::shadow   ? "shadow"
+              :                                          "live");
+    // Engine_core has no TT_TARGET define, so derive a binary label from
+    // the runtime mode. main.inc could supply a more accurate value, but
+    // mode-based naming is informative enough for runs_meta.
+    scfg.binary = (config_.mode == engine_mode::backtest ? "engine_backtest"
+                :  config_.mode == engine_mode::shadow   ? "engine_shadow"
+                :                                          "engine_live");
+    scfg.strategy = primary_strategy_name_;
+    if (data_handler_ && !data_handler_->db_data_symbol.empty())
+        scfg.symbol = data_handler_->db_data_symbol.front();
+    scfg.initial_equity = config_.initial_balance;
+    scfg.notes = config_.run_notes;
+
+    questdb_store_ = std::make_shared<truetest::questdb::QuestdbStore>(
+        std::move(scfg));
+
+    if (questdb_store_->begin())
+    {
+        questdb_active_ = true;
+        std::cerr << "  QuestDB persistence ENABLED (run_tag="
+                  << questdb_store_->run_tag() << ")\n";
+    }
+    else
+    {
+        std::cerr << "  WARNING: QuestDB unreachable at "
+                  << config_.questdb_host << ":" << config_.questdb_http_port
+                  << " — continuing with persistence DISABLED for this session.\n"
+                  << "  Start the daemon with: questdb start\n"
+                  << "  Or re-run without --persist to suppress this warning.\n";
+        questdb_store_.reset();
+    }
+}
+
+void engine::questdb_end()
+{
+    if (!questdb_active_ || !questdb_store_) return;
+    const auto report = analytics_.snapshot();
+    const double final_equity = portfolio_.get_equity(last_mid_price_);
+    questdb_store_->end(final_equity,
+                        report.total_orders,
+                        report.total_fills,
+                        questdb_total_rejections_);
+    questdb_active_ = false;
+}
+#endif
 
 void engine::print_summary()
 {
@@ -632,6 +748,17 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             log_event(*rej);
             publish_event(rej);
 
+#ifdef HAS_QUESTDB
+            if (questdb_active_ && questdb_store_)
+            {
+                questdb_store_->record_order_submitted(*o, "rejected");
+                questdb_store_->record_rejection(*o,
+                    (action == risk_action::halt) ? "risk_halt" : "risk_reject",
+                    reason);
+                questdb_total_rejections_++;
+            }
+#endif
+
             order_tracker_.set_status(o->get_order_id(), order_status::rejected);
             if (action == risk_action::halt)
             {
@@ -648,6 +775,15 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     log_event(*o);
     publish_event(o);
     analytics_.on_event(o);
+
+#ifdef HAS_QUESTDB
+    if (questdb_active_ && questdb_store_)
+    {
+        questdb_store_->record_order_submitted(*o, "pending");
+        questdb_store_->record_status_transition(o->get_order_id(),
+            order_status::pending, order_status::open);
+    }
+#endif
 
     auto adapter = get_adapter(o->get_symbol());
 
@@ -668,8 +804,9 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     {
         for (auto& f : fills)
         {
-            order_tracker_.set_status(f.get_order_id(),
-                f.is_partial() ? order_status::partially_filled : order_status::filled);
+            const auto new_status = f.is_partial()
+                ? order_status::partially_filled : order_status::filled;
+            order_tracker_.set_status(f.get_order_id(), new_status);
             auto fill_ptr = fill_pool_.acquire(f);
             log_event(f);
             portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
@@ -680,6 +817,20 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             risk_manager_.on_fill(f);
 #ifdef HAS_SQLITE
             if (store_) store_->insert_fill(f);
+#endif
+#ifdef HAS_QUESTDB
+            if (questdb_active_ && questdb_store_)
+            {
+                const char* src =
+                    (f.get_source() == fill_source::exchange)  ? "exchange"
+                  : (f.get_source() == fill_source::simulated) ? "simulated"
+                  :                                              "local";
+                questdb_store_->record_fill(f, lookup_opener(f.get_order_id()),
+                                            lookup_strategy_name(f.get_order_id()),
+                                            src);
+                questdb_store_->record_status_transition(f.get_order_id(),
+                    order_status::open, new_status);
+            }
 #endif
             notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
             publish_event(fill_ptr);
@@ -753,6 +904,16 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
         publish_event(cancel_ev);
         if (!config_.is_threaded())
             analytics_.on_event(cancel_ev);
+#ifdef HAS_QUESTDB
+        if (questdb_active_ && questdb_store_)
+        {
+            questdb_store_->record_cancellation(order_id, symbol,
+                lookup_strategy_name(order_id),
+                reason.empty() ? "manual" : reason);
+            questdb_store_->record_status_transition(order_id,
+                order_status::open, order_status::cancelled, reason);
+        }
+#endif
     }
 
     return cancelled;
@@ -766,12 +927,23 @@ bool engine::modify_order(const std::string& symbol, uint64_t order_id,
 
     if (modified)
     {
+        const auto now = std::chrono::system_clock::now();
         auto amend_ev = std::make_shared<amend_event>(
-            std::chrono::system_clock::now(), symbol, order_id, new_price, new_qty);
+            now, symbol, order_id, new_price, new_qty);
         log_event(*amend_ev);
         publish_event(amend_ev);
         if (!config_.is_threaded())
             analytics_.on_event(amend_ev);
+#ifdef HAS_QUESTDB
+        if (questdb_active_ && questdb_store_)
+        {
+            // Engine doesn't preserve old price/qty cleanly here; log zeros
+            // and rely on the orders/order_status tables for history.
+            questdb_store_->record_amendment(order_id, symbol,
+                /*old_price=*/0.0, new_price,
+                /*old_qty=*/0.0, new_qty, now);
+        }
+#endif
     }
 
     return modified;
@@ -807,6 +979,15 @@ void engine::unwind_positions(std::size_t& event_count)
         publish_event(close_order);
         analytics_.on_event(close_order);
 
+#ifdef HAS_QUESTDB
+        if (questdb_active_ && questdb_store_)
+        {
+            questdb_store_->record_order_submitted(*close_order, "pending");
+            questdb_store_->record_status_transition(close_order->get_order_id(),
+                order_status::pending, order_status::open, "risk_unwind");
+        }
+#endif
+
         auto adapter = get_adapter(symbol);
         if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
             local->set_mid_price(last_mid_price_);
@@ -818,8 +999,9 @@ void engine::unwind_positions(std::size_t& event_count)
         {
             for (auto& f : fills)
             {
-                order_tracker_.set_status(f.get_order_id(),
-                    f.is_partial() ? order_status::partially_filled : order_status::filled);
+                const auto new_status = f.is_partial()
+                    ? order_status::partially_filled : order_status::filled;
+                order_tracker_.set_status(f.get_order_id(), new_status);
                 auto fill_ptr = fill_pool_.acquire(f);
                 log_event(f);
                 portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
@@ -830,6 +1012,20 @@ void engine::unwind_positions(std::size_t& event_count)
                 risk_manager_.on_fill(f);
 #ifdef HAS_SQLITE
                 if (store_) store_->insert_fill(f);
+#endif
+#ifdef HAS_QUESTDB
+                if (questdb_active_ && questdb_store_)
+                {
+                    const char* src =
+                        (f.get_source() == fill_source::exchange)  ? "exchange"
+                      : (f.get_source() == fill_source::simulated) ? "simulated"
+                      :                                              "local";
+                    questdb_store_->record_fill(f, lookup_opener(f.get_order_id()),
+                                                lookup_strategy_name(f.get_order_id()),
+                                                src);
+                    questdb_store_->record_status_transition(f.get_order_id(),
+                        order_status::open, new_status, "risk_unwind");
+                }
 #endif
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
@@ -973,6 +1169,14 @@ bool engine::route_order(order_event& order,
                 order.get_order_id(), reason);
             log_event(*rej);
             publish_event(rej);
+#ifdef HAS_QUESTDB
+            if (questdb_active_ && questdb_store_)
+            {
+                questdb_store_->record_order_submitted(order, "rejected");
+                questdb_store_->record_rejection(order, "venue_filter", reason);
+                questdb_total_rejections_++;
+            }
+#endif
             order_tracker_.set_status(order.get_order_id(), order_status::rejected);
             (void)event_count;
             (void)halt_requested;
@@ -1468,6 +1672,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
     record_run_begin();
 #endif
 
+#ifdef HAS_QUESTDB
+    questdb_begin();
+#endif
     start_workers();
     pin_event_loop_thread();
 
@@ -1606,6 +1813,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
 #endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 }
 
 void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
@@ -1619,6 +1829,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     record_run_begin();
 #endif
 
+#ifdef HAS_QUESTDB
+    questdb_begin();
+#endif
     start_workers();
     pin_event_loop_thread();
 
@@ -1744,6 +1957,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 #endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 }
 
 void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
@@ -1757,6 +1973,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
     record_run_begin();
 #endif
 
+#ifdef HAS_QUESTDB
+    questdb_begin();
+#endif
     start_workers();
     pin_event_loop_thread();
 
@@ -1945,6 +2164,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
 #endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 }
 
 void engine::run()
@@ -1972,6 +2194,9 @@ void engine::run()
     memory_sampler_.set_start(debug::memory_snapshot::capture());
 #endif
 
+#ifdef HAS_QUESTDB
+    questdb_begin();
+#endif
     start_workers();
     pin_event_loop_thread();
 
@@ -2203,6 +2428,9 @@ void engine::run()
 
     if (event_logger_) event_logger_->flush();
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 
 #ifdef HAS_DEBUG
     memory_sampler_.set_end(debug::memory_snapshot::capture());
@@ -2240,6 +2468,9 @@ void engine::run_tick_data()
     order_seq_ = 0;
     day_order_ids_.clear();
 
+#ifdef HAS_QUESTDB
+    questdb_begin();
+#endif
     start_workers();
     pin_event_loop_thread();
 
@@ -2378,6 +2609,9 @@ void engine::run_tick_data()
 #endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 }
 
 void engine::run_replay(const std::string& log_path,
@@ -2386,6 +2620,9 @@ void engine::run_replay(const std::string& log_path,
 {
     EventReplayer replayer(log_path, replay_from_us, replay_to_us);
 
+#ifdef HAS_QUESTDB
+    questdb_begin();
+#endif
     start_workers();
     pin_event_loop_thread();
 
@@ -2537,4 +2774,7 @@ void engine::run_replay(const std::string& log_path,
               << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
 
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 }

@@ -286,6 +286,15 @@ struct cli_options
     int risk_max_trades_per_hour = 0;
     int risk_max_orders_per_minute = 0;
     bool risk_unwind = false;
+
+#ifdef HAS_QUESTDB
+    bool persist = false;
+    std::string run_tag;
+    std::string run_notes;
+    std::string questdb_host = "127.0.0.1";
+    std::uint16_t questdb_ilp_port = 9009;
+    std::uint16_t questdb_http_port = 9000;
+#endif
 };
 
 static std::vector<std::string> split_csv(const std::string& s)
@@ -427,6 +436,12 @@ static void load_config_file(const std::string& path, cli_options& o)
     auto get_bool = [&](const char* k, bool& out) {
         if (j.contains(k) && j[k].is_boolean()) out = j[k].get<bool>();
     };
+#ifdef HAS_QUESTDB
+    auto get_u16 = [&](const char* k, std::uint16_t& out) {
+        if (j.contains(k) && j[k].is_number_unsigned())
+            out = static_cast<std::uint16_t>(j[k].get<unsigned>());
+    };
+#endif
 
     get_str("replay", o.replay_path);
     get_str("log_events", o.event_log_path);
@@ -489,6 +504,14 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_int("wire_latency_us", o.wire_latency_us);
     get_str("output", o.output);
     get_str("output_format", o.output_format);
+#ifdef HAS_QUESTDB
+    get_bool("persist", o.persist);
+    get_str("run_tag", o.run_tag);
+    get_str("run_notes", o.run_notes);
+    get_str("questdb_host", o.questdb_host);
+    get_u16("questdb_ilp_port", o.questdb_ilp_port);
+    get_u16("questdb_http_port", o.questdb_http_port);
+#endif
 }
 
 static void dump_config(const cli_options& o)
@@ -536,6 +559,14 @@ static void dump_config(const cli_options& o)
         {"max_trades_per_hour", o.risk_max_trades_per_hour},
         {"max_orders_per_minute", o.risk_max_orders_per_minute}
     };
+#ifdef HAS_QUESTDB
+    j["persist"] = o.persist;
+    j["run_tag"] = o.run_tag;
+    j["run_notes"] = o.run_notes;
+    j["questdb_host"] = o.questdb_host;
+    j["questdb_ilp_port"] = o.questdb_ilp_port;
+    j["questdb_http_port"] = o.questdb_http_port;
+#endif
     std::cout << j.dump(2) << "\n";
 }
 
@@ -665,6 +696,24 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Live status display: auto, tui, plain, ndjson, off (default: auto)")
         ->default_val("auto");
     app.add_flag("--no-tui", o.no_tui, "Shortcut for --status-format=plain");
+
+#ifdef HAS_QUESTDB
+    app.add_flag("--persist", o.persist,
+                 "Write every order lifecycle event to QuestDB for this session");
+    app.add_option("--run-tag", o.run_tag,
+                   "Table prefix for this run (auto-generated if omitted)");
+    app.add_option("--run-notes", o.run_notes,
+                   "Free-form note stored with the run metadata");
+    app.add_option("--questdb-host", o.questdb_host,
+                   "QuestDB host (default 127.0.0.1)")
+        ->default_val("127.0.0.1");
+    app.add_option("--questdb-ilp-port", o.questdb_ilp_port,
+                   "QuestDB ILP ingest port (default 9009)")
+        ->default_val(9009);
+    app.add_option("--questdb-http-port", o.questdb_http_port,
+                   "QuestDB HTTP/DDL port (default 9000)")
+        ->default_val(9000);
+#endif
 }
 
 static void apply_config_overlay(CLI::App& app, cli_options& opts)
@@ -729,6 +778,14 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--daily-reset-hour")) opts.risk_daily_reset_hour = file_opts.risk_daily_reset_hour;
     if (!was_set("--max-trades-per-hour")) opts.risk_max_trades_per_hour = file_opts.risk_max_trades_per_hour;
     if (!was_set("--max-orders-per-minute")) opts.risk_max_orders_per_minute = file_opts.risk_max_orders_per_minute;
+#ifdef HAS_QUESTDB
+    if (!was_set("--persist")) opts.persist = file_opts.persist;
+    if (!was_set("--run-tag")) opts.run_tag = file_opts.run_tag;
+    if (!was_set("--run-notes")) opts.run_notes = file_opts.run_notes;
+    if (!was_set("--questdb-host")) opts.questdb_host = file_opts.questdb_host;
+    if (!was_set("--questdb-ilp-port")) opts.questdb_ilp_port = file_opts.questdb_ilp_port;
+    if (!was_set("--questdb-http-port")) opts.questdb_http_port = file_opts.questdb_http_port;
+#endif
 }
 
 static int run_dry_run(const cli_options& o)
@@ -770,6 +827,19 @@ static int run_dry_run(const cli_options& o)
         std::cout << "    Max trades/hour:     " << o.risk_max_trades_per_hour << "\n";
     if (o.risk_max_orders_per_minute > 0)
         std::cout << "    Max orders/minute:   " << o.risk_max_orders_per_minute << "\n";
+#ifdef HAS_QUESTDB
+    std::cout << "    Persistence:    " << (o.persist ? "QuestDB" : "no") << "\n";
+    if (o.persist)
+    {
+        std::cout << "    QuestDB host:   " << o.questdb_host << "\n";
+        std::cout << "    ILP port:       " << o.questdb_ilp_port << "\n";
+        std::cout << "    HTTP port:      " << o.questdb_http_port << "\n";
+        std::cout << "    Run tag:        "
+                  << (o.run_tag.empty() ? "(auto)" : o.run_tag) << "\n";
+        if (!o.run_notes.empty())
+            std::cout << "    Run notes:      " << o.run_notes << "\n";
+    }
+#endif
     std::cout << "  ============================================\n";
 
     bool valid = true;
@@ -964,6 +1034,15 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.risk.max_trades_per_hour = o.risk_max_trades_per_hour;
     prov_cfg.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
     prov_cfg.risk_unwind = o.risk_unwind;
+
+#ifdef HAS_QUESTDB
+    prov_cfg.persist_enabled = o.persist;
+    prov_cfg.questdb_host = o.questdb_host;
+    prov_cfg.questdb_ilp_port = o.questdb_ilp_port;
+    prov_cfg.questdb_http_port = o.questdb_http_port;
+    prov_cfg.run_tag = o.run_tag;
+    prov_cfg.run_notes = o.run_notes;
+#endif
 
     if (o.testnet)
         prov_cfg.backfill_host = "testnet.binance.vision";
