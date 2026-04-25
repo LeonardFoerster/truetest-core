@@ -1465,6 +1465,133 @@ halts the engine. See [§21.5](#215-ring-buffer-drop-policy-shadow--live).
 
 ---
 
+## 23. QuestDB Persistence
+
+Built only when `-DENABLE_QUESTDB=ON` and activated only when the
+runtime `--persist` flag is supplied. Captures every order-lifecycle
+event (submission, status transition, fill, rejection, cancellation,
+amendment) to a local QuestDB instance for replay, analysis, and
+cross-run comparison.
+
+### When to use it
+
+- Capture a complete audit trail of orders / fills for a backtest,
+  shadow session, or live run — independent of the engine's own log
+  files.
+- Compare two strategy runs by SQL JOIN on `run_tag`.
+- Drive ad-hoc dashboards from the QuestDB web console
+  (`http://localhost:9000/`).
+
+### CLI flags
+
+| Flag                     | Default       | Purpose                                                |
+|--------------------------|---------------|--------------------------------------------------------|
+| `--persist`              | off           | Activate QuestDB writes for this session               |
+| `--run-tag <tag>`        | auto-generated| Table prefix for the per-run tables                    |
+| `--run-notes <text>`     | empty         | Free-form note stored in `runs_meta`                   |
+| `--questdb-host <host>`  | `127.0.0.1`   | Where to find the daemon                               |
+| `--questdb-ilp-port <n>` | `9009`        | InfluxDB Line Protocol ingest port (TCP)               |
+| `--questdb-http-port <n>`| `9000`        | HTTP `/exec` port for DDL                              |
+
+Auto-generated run tags follow the pattern
+`run_<YYYYMMDD>_<HHMMSS>_<6 hex chars>`. User-supplied tags must match
+`[A-Za-z0-9_]{1,64}`. The flags are unknown to a binary built with
+`ENABLE_QUESTDB=OFF` and CLI11 will reject them with "argument was not
+expected" so an accidentally-disabled build can never silently ignore
+`--persist`.
+
+### How writes happen
+
+Two paths land rows in the per-run tables:
+
+1. **Synchronous capture points** in the engine — `process_order` (risk
+   acceptance + risk rejection), `route_order` (instrument-filter
+   rejection), the fill loop, `cancel_order`, `modify_order`,
+   `unwind_positions`. These calls carry full context (`opener_order_id`,
+   `strategy_name`, fill `source`, rejection category) that the ring
+   path doesn't have access to.
+2. **`QuestDbWorker`** drains `questdb_ring_` (fed by `publish_event`)
+   on its own thread and forwards each event to the same store.
+
+`QuestdbStore` serialises both writers behind a `std::mutex`. The two
+paths therefore both write rows for the same logical event, with the
+sync path producing the fully-tagged record and the worker producing a
+slimmer one. Consumers that want a single canonical row should
+deduplicate on `order_id` and prefer the sync row (it always carries a
+non-empty `strategy_name`). Dedup on the writer side is a follow-up.
+
+### Tables
+
+Each run creates six per-run tables prefixed with `{run_tag}_`:
+`orders`, `order_status`, `fills`, `rejections`, `cancellations`,
+`amendments`. One permanent `runs_meta` table indexes all runs with the
+session's mode, binary name, strategy, symbol, initial/final equity,
+and counters. `runs_meta` receives **two** rows per run — one at
+`begin()` and one at `end()` — so consumers should
+`GROUP BY run_tag` and `LAST(ended_at)` to reconstruct the closing
+state. Full DDL is in `docs/db.md` Appendix A.
+
+### Health-check behaviour (soft warning)
+
+If the daemon is unreachable at startup the engine prints
+per-step breadcrumbs from the store + a high-level WARNING from the
+engine:
+
+```
+[questdb] connect(127.0.0.1:9000) failed: Connection refused
+[questdb] DDL HTTP request failed (no response)
+[questdb] begin() aborted: DDL step failed
+  WARNING: QuestDB unreachable at 127.0.0.1:9000 — continuing with persistence DISABLED for this session.
+  Start the daemon with: questdb start
+  Or re-run without --persist to suppress this warning.
+```
+
+The session continues without persistence and exits 0. Hard-fail (i.e.
+"refuse to start when `--persist` is set but QuestDB is down") is a
+documented future TODO.
+
+### Example queries
+
+```sql
+-- Count fills for a specific run
+SELECT COUNT(*) FROM run_20260424_120000_abc123_fills;
+
+-- Final equity across all runs of a strategy
+SELECT run_tag, LAST(final_equity) AS final
+  FROM runs_meta
+  WHERE strategy = 'mean-reversion' AND final_equity IS NOT NULL
+  GROUP BY run_tag;
+
+-- All rejections for the latest run
+SELECT * FROM mytag_rejections ORDER BY ts DESC;
+```
+
+### Local QuestDB via Docker
+
+```bash
+docker run --rm -d --name truetest-questdb \
+    -p 9000:9000 -p 9009:9009 questdb/questdb:latest
+
+# Wait until ready
+until curl -fs "http://127.0.0.1:9000/exec?query=SELECT%201" >/dev/null; do
+    sleep 1
+done
+
+# Run engine with persistence
+./build/engine_backtest --provider local --path market_data.csv \
+    --strategy mean-reversion --persist --run-tag my_run
+
+# Browse data: http://127.0.0.1:9000/
+
+# Stop
+docker stop truetest-questdb
+```
+
+See `docs/db.md` for the full implementation plan, schema reference, and
+ILP cheatsheet.
+
+---
+
 ## 24. Event Pipeline
 
 Sequential event-driven pipeline:

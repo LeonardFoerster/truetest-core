@@ -197,6 +197,18 @@ function(tt_wire_optional_backends target)
         target_compile_definitions(${target} PUBLIC HAS_SQLITE)
     endif()
 
+    # QuestDB persistence (raw POSIX sockets, zero external deps).
+    if(ENABLE_QUESTDB)
+        target_sources(${target} PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/tcp_client.cpp
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/http_client.cpp
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/ilp_writer.cpp
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/schema.cpp
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/run_tag.cpp
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/store.cpp)
+        target_compile_definitions(${target} PUBLIC HAS_QUESTDB)
+    endif()
+
     # Debug instrumentation (Abseil)
     if(ENABLE_DEBUG)
         if(NOT TARGET absl::log)

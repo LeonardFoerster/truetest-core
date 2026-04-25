@@ -10,6 +10,7 @@ option(ENABLE_LIVE_DATA  "Build with WebSocket live data feed (requires Boost.Be
 option(ENABLE_DEBUG      "Build with performance instrumentation (requires Abseil)"   OFF)
 option(ENABLE_BINANCE    "Build with Binance exchange provider"                       OFF)
 option(ENABLE_SQLITE     "SQLite persistence for trades/portfolio"                    ON)
+option(ENABLE_QUESTDB    "Build with QuestDB persistence backend"                     OFF)
 option(ENABLE_TSAN       "Enable ThreadSanitizer"                                     OFF)
 option(ENABLE_ASAN       "Enable AddressSanitizer (mutually exclusive with TSAN)"     OFF)
 option(ENABLE_UBSAN      "Enable UndefinedBehaviorSanitizer (mutex with TSAN)"        OFF)
@@ -220,6 +221,17 @@ if(BUILD_TESTS)
         tests/test_provider_engine_wiring.cpp
     )
 
+    if(ENABLE_QUESTDB)
+        list(APPEND TEST_SOURCES
+            tests/test_questdb_http_client.cpp
+            tests/test_questdb_ilp_writer.cpp
+            tests/test_questdb_schema.cpp
+            tests/test_questdb_run_tag.cpp
+            tests/test_questdb_store.cpp
+            tests/test_questdb_worker.cpp
+            tests/test_questdb_integration.cpp)
+    endif()
+
     add_executable(truetest_tests ${TEST_SOURCES})
     target_include_directories(truetest_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/tests")
@@ -235,6 +247,9 @@ if(BUILD_TESTS)
     add_executable(truetest_cli_tests tests/test_cli.cpp)
     target_link_libraries(truetest_cli_tests PRIVATE GTest::gtest GTest::gtest_main)
     add_dependencies(truetest_cli_tests engine_backtest)
+    if(ENABLE_QUESTDB)
+        target_compile_definitions(truetest_cli_tests PRIVATE HAS_QUESTDB)
+    endif()
     gtest_discover_tests(truetest_cli_tests
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()

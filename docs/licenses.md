@@ -39,6 +39,13 @@ serialization surface. None of these three touch credentials or the hot path.
 | libpq / PostgreSQL client | `ENABLE_POSTGRESQL` | find_package / vcpkg | PostgreSQL license | dynamic | yes |
 | Abseil           | `ENABLE_DEBUG`       | 20240722.0 (FetchContent) | Apache-2.0          | static    | no — debug-only; must not ship in live |
 
+`ENABLE_QUESTDB` introduces **no** new third-party dependency. The QuestDB
+client is hand-rolled on top of POSIX `socket(2)` / `send(2)` / `recv(2)`
+(see `src/data/questdb/`). Persistence speaks raw HTTP/1.1 on port 9000 for
+DDL and InfluxDB Line Protocol on port 9009 for ingest. Anything brought in
+by a future swap (e.g. simdjson for hot-path JSON) must be added to the
+table above in the same PR.
+
 ## Test / benchmark binaries only (not shipped)
 
 | Component         | Version   | License       | Scope                         |
