@@ -190,3 +190,42 @@ TEST(DryRun, InvalidFeeModelExitsOne)
     EXPECT_EQ(rc, 1);
     EXPECT_NE(out.find("Unknown fee model"), std::string::npos);
 }
+
+// ─── B4: QuestDB persistence flags ─────────────────────────────────────────
+
+#ifdef HAS_QUESTDB
+
+TEST(CLI, PersistFlagAccepted)
+{
+    std::string out;
+    int rc = run_truetest("--persist --dump-config", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("\"persist\": true"), std::string::npos);
+}
+
+TEST(CLI, RunTagFlagAccepted)
+{
+    std::string out;
+    int rc = run_truetest("--persist --run-tag my_run --dump-config", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("\"run_tag\": \"my_run\""), std::string::npos);
+}
+
+TEST(CLI, QuestdbPortsAccepted)
+{
+    std::string out;
+    int rc = run_truetest("--persist --questdb-ilp-port 19009 "
+                          "--questdb-http-port 19000 --dump-config", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("\"questdb_ilp_port\": 19009"), std::string::npos);
+    EXPECT_NE(out.find("\"questdb_http_port\": 19000"), std::string::npos);
+}
+
+#else
+
+TEST(CLI, PersistFlagRejectedWhenQuestDbDisabled)
+{
+    GTEST_SKIP() << "Build has HAS_QUESTDB defined; skipping rejection test.";
+}
+
+#endif // HAS_QUESTDB
