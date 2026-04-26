@@ -188,44 +188,23 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     int y = body_y0;
     if (y >= body_y0 + height) return;
 
-    // Row 1: state + uptime
-    label(y, x_label, "State");
-    attron(COLOR_PAIR(state_pair(state)) | A_BOLD);
-    mvprintw(y, x_value, "%-12s", state_text(state));
-    attroff(COLOR_PAIR(state_pair(state)) | A_BOLD);
-    {
-        // uptime since the dashboard process started; we don't have direct
-        // access to start_time_, so use the most recent seen-event timestamp
-        // delta as a proxy when present; otherwise leave blank.
-        // Simpler: pull rate from public accessor for the right-side cell.
-        char rb[32];
-        std::snprintf(rb, sizeof(rb), "%6.1f ev/s", data.rate_ema());
-        label(y, x_label2, "Rate");
-        mvaddstr(y, x_value2, rb);
-    }
-    ++y;
-
-    // Row 2: last + spread
-    label(y, x_label, "Last");
-    if (last_fp8 >= 0) mvaddstr(y, x_value, fmt_price(last).c_str());
-    else               mvaddstr(y, x_value, "—");
-    label(y, x_label2, "Spread");
+    // Row: bid · ask · spread (last is in status bar) + rate
+    label(y, x_label, "Bid/Ask");
     if (bid_fp8 > 0 && ask_fp8 > 0)
     {
-        double mid = (bid + ask) * 0.5;
-        double bps = mid > 0 ? (ask - bid) / mid * 1e4 : 0.0;
-        char b[32];
-        std::snprintf(b, sizeof(b), "%5.2f bps", bps);
-        mvaddstr(y, x_value2, b);
+        char b[64];
+        const double mid = (bid + ask) * 0.5;
+        const double bps = mid > 0 ? (ask - bid) / mid * 1e4 : 0.0;
+        std::snprintf(b, sizeof(b), "%.2f / %.2f  (%.1fbp)", bid, ask, bps);
+        mvaddstr(y, x_value, b);
     }
-    else mvaddstr(y, x_value2, "—");
-    ++y;
-
-    // Row 3: bid / ask
-    label(y, x_label, "Bid");
-    mvaddstr(y, x_value, bid_fp8 > 0 ? fmt_price(bid).c_str() : "—");
-    label(y, x_label2, "Ask");
-    mvaddstr(y, x_value2, ask_fp8 > 0 ? fmt_price(ask).c_str() : "—");
+    else mvaddstr(y, x_value, "—");
+    label(y, x_label2, "Rate");
+    {
+        char rb[32];
+        std::snprintf(rb, sizeof(rb), "%6.1f ev/s", data.rate_ema());
+        mvaddstr(y, x_value2, rb);
+    }
     ++y;
 
     if (bf_total > 0)
@@ -312,27 +291,48 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     else mvaddstr(y, x_value2, "—");
     ++y;
 
-    // Row: risk
-    label(y, x_label, "Halt");
+    // Row: inventory bar (current exposure vs limit) + cash
+    if (snap)
     {
-        int p = halted ? kPairRed : kPairGreen;
-        attron(COLOR_PAIR(p) | A_BOLD);
-        mvaddstr(y, x_value, halted ? "YES" : "no");
-        attroff(COLOR_PAIR(p) | A_BOLD);
+        label(y, x_label, "Inventory");
+        const double exp_lim = snap->risk.exposure_limit;
+        if (exp_lim > 0.0)
+        {
+            const double frac = std::min(1.0, snap->risk.exposure / exp_lim);
+            const int bar_w = 24;
+            const int filled = static_cast<int>(std::lround(frac * bar_w));
+            int p = (frac >= 0.85) ? kPairRed
+                  : (frac >= 0.6)  ? kPairYellow
+                  : kPairGreen;
+            mvaddch(y, x_value, '[');
+            attron(COLOR_PAIR(p));
+            for (int i = 0; i < filled; ++i)
+                mvaddch(y, x_value + 1 + i, ACS_CKBOARD);
+            attroff(COLOR_PAIR(p));
+            for (int i = filled; i < bar_w; ++i)
+                mvaddch(y, x_value + 1 + i, '.');
+            mvaddch(y, x_value + 1 + bar_w, ']');
+            char b[16];
+            std::snprintf(b, sizeof(b), " %3.0f%%", frac * 100.0);
+            mvaddstr(y, x_value + 2 + bar_w, b);
+        }
+        else
+        {
+            attron(A_DIM);
+            mvaddstr(y, x_value, "(no exposure limit set)");
+            attroff(A_DIM);
+        }
+        label(y, x_label2 + 28, "Cash");
+        char cb[24];
+        std::snprintf(cb, sizeof(cb), "%10.2f", snap->cash);
+        mvaddstr(y, x_label2 + 36, cb);
+        ++y;
     }
-    label(y, x_label2, "Drops");
-    {
-        int p = drops_total > 0 ? kPairRed : kPairWhite;
-        attron(COLOR_PAIR(p));
-        mvaddstr(y, x_value2, fmt_int(drops_total).c_str());
-        attroff(COLOR_PAIR(p));
-    }
-    ++y;
 
-    // Row: per-ring drops detail (only show if any)
+    // Row: per-ring drops detail (only show if any) — status bar shows total.
     if (drops_total > 0)
     {
-        label(y, x_label, "Rings");
+        label(y, x_label, "Drops");
         char b[96];
         std::snprintf(b, sizeof(b),
                       "log:%llu  risk:%llu  stats:%llu  obs:%llu  rs:%llu  mm:%llu",

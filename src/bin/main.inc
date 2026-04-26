@@ -1262,10 +1262,30 @@ static int run_provider_mode(const cli_options& o)
             && dashboard->is_tui())
         {
             auto snap_fn = [&eng](truetest::ui::dashboard_snapshot& out) {
-                return eng.snapshot_dashboard(out);
+                bool ok = eng.snapshot_dashboard(out);
+                if (ok) out.debug.target = truetest::target_name();
+                return ok;
             };
             rich_tui = std::make_unique<truetest::ui::TabbedDashboard>(
                 dashboard, snap_fn);
+
+            // Wire operator hotkey actions. Pause/flatten always available;
+            // kill switch comes from the provider when one supplies it
+            // (Binance does — backtest does not).
+            truetest::ui::operator_actions ops;
+            ops.pause_toggle = [&eng]() {
+                eng.set_pause_all(!eng.is_pause_all());
+            };
+            ops.pause_state  = [&eng]() { return eng.is_pause_all(); };
+            ops.flatten      = [&eng]() { eng.request_flatten(); };
+            if (provider) {
+                if (auto ks = provider->get_kill_switch()) {
+                    ops.kill = [ks](std::chrono::milliseconds dl) {
+                        return ks->cancel_all_and_flatten(dl);
+                    };
+                }
+            }
+            rich_tui->set_actions(std::move(ops));
         }
 #endif
 

@@ -135,6 +135,13 @@ private:
     truetest::ui::dashboard_snapshot      dashboard_view_;
     bool                                  dashboard_view_initialised_ = false;
     std::chrono::steady_clock::time_point dashboard_view_last_{};
+
+    // Memory-view cache. /proc/self/* parsing was the dominant cost of
+    // the snapshot path; refresh at ~1 Hz instead of every snapshot.
+    // mutable so build_dashboard_view (const) can update it.
+    mutable truetest::ui::dashboard_snapshot::memory_view memory_cache_{};
+    mutable std::chrono::steady_clock::time_point         memory_cache_last_{};
+    mutable bool                                          memory_cache_initialised_ = false;
     std::chrono::milliseconds             dashboard_view_interval_{100};
     void refresh_dashboard_view_if_due();
     void build_dashboard_view(truetest::ui::dashboard_snapshot& out) const;
@@ -259,6 +266,8 @@ private:
 
     std::atomic<bool> halt_flag_{false};
     std::atomic<bool> worker_failed_{false};
+    std::atomic<bool> pause_all_{false};
+    std::atomic<bool> flatten_request_{false};
 
     std::size_t logging_drops_ = 0;
     std::size_t risk_drops_ = 0;
@@ -320,6 +329,30 @@ public:
     void set_strategy(std::shared_ptr<IStrategy> strategy);
 
     void set_primary_strategy_name(const std::string& name) { primary_strategy_name_ = name; }
+
+    // Operator controls callable from the live TUI. Each is a single
+    // atomic action; the engine checks the flags from the hot path on
+    // the next event. Safe to invoke from any thread.
+    //
+    // Pause/resume: when paused, the engine still drains events and
+    // updates portfolio/analytics from inbound fills, but skips the
+    // strategy.on_market/on_tick calls so no new orders are emitted.
+    void set_pause_all(bool paused)
+    {
+        pause_all_.store(paused, std::memory_order_release);
+    }
+    bool is_pause_all() const
+    {
+        return pause_all_.load(std::memory_order_acquire);
+    }
+
+    // Flatten on demand: drains all open positions through the unwind
+    // path. Halts the engine afterwards (operator can resume by clearing
+    // the halt flag separately if desired).
+    void request_flatten()
+    {
+        flatten_request_.store(true, std::memory_order_release);
+    }
 
     void add_strategy(std::shared_ptr<IStrategy> strategy, const std::string& name)
     {

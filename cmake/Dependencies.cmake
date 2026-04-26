@@ -171,7 +171,12 @@ function(tt_wire_rich_tui target)
         ${CMAKE_SOURCE_DIR}/src/ui/panels/overview_panel.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/panels/positions_panel.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/panels/orders_panel.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/panels/risk_panel.cpp)
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/risk_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/brackets_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/strategy_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/health_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/debug_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/l2_panel.cpp)
     target_include_directories(${target} PRIVATE ${CURSES_INCLUDE_DIRS})
     target_link_libraries(${target} PRIVATE ${CURSES_LIBRARIES})
     target_compile_definitions(${target} PRIVATE HAS_RICH_TUI)

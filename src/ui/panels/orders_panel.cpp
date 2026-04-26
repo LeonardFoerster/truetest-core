@@ -86,6 +86,11 @@ void OrdersPanel::draw(int body_y0, int width, int height,
     int y = body_y0;
     int y_end = body_y0 + height;
 
+    // Wide-mode (≥160 cols): open orders left, recent fills right at
+    // full vertical height each. Narrow stays vertically split.
+    const bool wide = (width >= 160);
+    const int  fill_x_offset = wide ? 90 : 0;
+
     // ── Open orders ──
     label(y, 2, "Open orders");
     {
@@ -111,8 +116,9 @@ void OrdersPanel::draw(int body_y0, int width, int height,
     ++y;
 
     // Reserve the bottom half of the panel for fills, regardless of how
-    // many open-order rows we have to render.
-    const int orders_section_end = body_y0 + height / 2;
+    // many open-order rows we have to render. In wide mode, both
+    // sections use the full vertical height (side-by-side).
+    const int orders_section_end = wide ? y_end : (body_y0 + height / 2);
 
     if (snap->open_orders.empty())
     {
@@ -155,50 +161,80 @@ void OrdersPanel::draw(int body_y0, int width, int height,
             attron(COLOR_PAIR(statpair));
             mvprintw(y, 66, "%-9s", o.status);
             attroff(COLOR_PAIR(statpair));
+
+            // Age color-grade: fresh=white, getting stale=yellow, very stale=red.
+            // Stale resting limits often mean dead-quote or wrong-side prices.
+            int agepair = (o.age_seconds >= 120) ? kPairRed
+                        : (o.age_seconds >= 30)  ? kPairYellow
+                        : kPairWhite;
+            attron(COLOR_PAIR(agepair));
             mvprintw(y, 76, "%6s",  fmt_age(o.age_seconds).c_str());
+            attroff(COLOR_PAIR(agepair));
             ++y; ++shown;
         }
     }
 
-    // Anchor the fills section at the half-way line so the panel always
-    // looks visually balanced even when one side has few rows.
-    y = orders_section_end;
-    if (y >= y_end) return;
-    mvhline(y++, 1, ACS_HLINE, width - 2);
-
-    // ── Recent fills (with markout summary) ──
-    label(y, 2, "Recent fills");
+    // Fills section. Narrow: stacked below; wide: right half, full height.
+    const int fxo = fill_x_offset;
+    if (wide)
     {
-        char b[64];
+        y = body_y0;
+        attron(A_DIM);
+        mvvline(body_y0, 88, ACS_VLINE, height);
+        attroff(A_DIM);
+    }
+    else
+    {
+        y = orders_section_end;
+        if (y >= y_end) return;
+        mvhline(y++, 1, ACS_HLINE, width - 2);
+    }
+
+    // ── Recent fills (with markout + side counts) ──
+    label(y, 2 + fxo, "Recent fills");
+    {
+        // Compose: avg markout + buy/sell tally over the visible window.
+        std::size_t buys = 0, sells = 0;
+        double fee_sum = 0.0, qty_sum = 0.0;
+        for (const auto& f : snap->recent_fills)
+        {
+            if (f.side == 'B') ++buys;
+            else if (f.side == 'S') ++sells;
+            fee_sum += f.fee;
+            qty_sum += f.qty;
+        }
+        char b[160];
         if (snap->perf.markout_samples > 0)
             std::snprintf(b, sizeof(b),
-                          "  avg markout: %+5.2f bps over %zu fills",
-                          snap->perf.avg_markout_bps,
-                          snap->perf.markout_samples);
+                "  markout %+5.2fbp/n=%zu  buy %zu / sell %zu  Σfees %.4f  Σqty %.4f",
+                snap->perf.avg_markout_bps, snap->perf.markout_samples,
+                buys, sells, fee_sum, qty_sum);
         else
-            std::snprintf(b, sizeof(b), "  avg markout: —");
+            std::snprintf(b, sizeof(b),
+                "  buy %zu / sell %zu  Σfees %.4f  Σqty %.4f",
+                buys, sells, fee_sum, qty_sum);
         attron(A_DIM);
-        mvaddstr(y, 16, b);
+        mvaddstr(y, 16 + fxo, b);
         attroff(A_DIM);
     }
     ++y;
     if (y >= y_end) return;
 
     attron(A_DIM);
-    mvprintw(y, 2,  "%-10s", "Time");
-    mvprintw(y, 12, "%-5s",  "Side");
-    mvprintw(y, 18, "%-10s", "Symbol");
-    mvprintw(y, 29, "%14s",  "Qty");
-    mvprintw(y, 45, "%14s",  "Price");
-    mvprintw(y, 61, "%10s",  "Fee");
-    mvprintw(y, 72, "%-10s", "Source");
+    mvprintw(y, 2  + fxo, "%-10s", "Time");
+    mvprintw(y, 12 + fxo, "%-5s",  "Side");
+    mvprintw(y, 18 + fxo, "%-10s", "Symbol");
+    mvprintw(y, 29 + fxo, "%14s",  "Qty");
+    mvprintw(y, 45 + fxo, "%14s",  "Price");
+    mvprintw(y, 61 + fxo, "%10s",  "Fee");
+    mvprintw(y, 72 + fxo, "%-10s", "Source");
     attroff(A_DIM);
     ++y;
 
     if (snap->recent_fills.empty())
     {
         attron(A_DIM);
-        mvaddstr(y++, 4, "(no fills yet)");
+        mvaddstr(y++, 4 + fxo, "(no fills yet)");
         attroff(A_DIM);
     }
     else
@@ -211,25 +247,34 @@ void OrdersPanel::draw(int body_y0, int width, int height,
                 if (snap->recent_fills.size() - shown > 0)
                 {
                     attron(A_DIM);
-                    mvprintw(y, 4, "+ %zu more …",
+                    mvprintw(y, 4 + fxo, "+ %zu more …",
                              snap->recent_fills.size() - shown);
                     attroff(A_DIM);
                 }
                 break;
             }
             if (y >= y_end) break;
-            mvprintw(y, 2, "%-10s", fmt_hhmmss(f.ts).c_str());
+            mvprintw(y, 2 + fxo, "%-10s", fmt_hhmmss(f.ts).c_str());
             int spair = (f.side == 'B') ? kPairGreen
                        : (f.side == 'S') ? kPairRed : kPairWhite;
             attron(COLOR_PAIR(spair) | A_BOLD);
-            mvaddstr(y, 12, f.side == 'B' ? "BUY"  :
-                            f.side == 'S' ? "SELL" : "?");
+            mvaddstr(y, 12 + fxo, f.side == 'B' ? "BUY"  :
+                                  f.side == 'S' ? "SELL" : "?");
             attroff(COLOR_PAIR(spair) | A_BOLD);
-            mvprintw(y, 18, "%-10.10s", f.symbol.c_str());
-            mvprintw(y, 29, "%14.6f",   f.qty);
-            mvprintw(y, 45, "%14.4f",   f.price);
-            mvprintw(y, 61, "%10.4f",   f.fee);
-            mvprintw(y, 72, "%-10s",    f.source);
+            mvprintw(y, 18 + fxo, "%-10.10s", f.symbol.c_str());
+            mvprintw(y, 29 + fxo, "%14.6f",   f.qty);
+            mvprintw(y, 45 + fxo, "%14.4f",   f.price);
+            // Fee dim if zero (no fee model loaded), red if non-trivial.
+            int fee_pair = (f.fee > 0.0) ? kPairRed : kPairWhite;
+            attron(COLOR_PAIR(fee_pair));
+            mvprintw(y, 61 + fxo, "%10.4f",   f.fee);
+            attroff(COLOR_PAIR(fee_pair));
+            // Source: cyan for "exchange" (real fill), white otherwise.
+            int src_pair = (std::string(f.source) == "exchange") ? kPairCyan
+                         : kPairWhite;
+            attron(COLOR_PAIR(src_pair));
+            mvprintw(y, 72 + fxo, "%-10s",    f.source);
+            attroff(COLOR_PAIR(src_pair));
             ++y; ++shown;
         }
     }

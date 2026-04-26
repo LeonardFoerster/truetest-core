@@ -44,8 +44,12 @@ TEST(DataHandler, LoadIntoQueue)
 
 TEST(DataHandler, HasBarData)
 {
+    // Use valid bar values (low > 0): the loader's input-validation guard
+    // rejects rows with non-positive prices since they break downstream
+    // mid/spread math. Earlier this test passed `low=0` which silently
+    // dropped the row and left the handler empty.
     data_handler dh;
-    dh.load_into_queue("2024-01-01", "X", 1, 2, 0, 1, 100);
+    dh.load_into_queue("2024-01-01", "X", 1.0, 2.0, 0.5, 1.5, 100);
     EXPECT_TRUE(dh.has_bar_data());
     EXPECT_FALSE(dh.has_tick_data());
 }

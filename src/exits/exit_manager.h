@@ -110,12 +110,34 @@ public:
     // are what cancel() forwards to. Both come back online together.
     void rehydrate(const IBracketAdapter::recovered_bracket& rb);
 
+    // Read-only snapshot of armed brackets for the live TUI. Designed
+    // to be called from the engine's snapshot path (main thread). Each
+    // row carries the in-process intent + whether the venue has the
+    // bracket as a resting order (handles_ entry exists) so the panel
+    // can show "engine-only" vs "venue-resting" state.
+    struct armed_view
+    {
+        std::uint64_t opener_order_id = 0;
+        std::string   strategy_name;
+        std::string   symbol;
+        order_side    close_side = order_side::sell;
+        double        qty = 0.0;
+        double        entry_price = 0.0;
+        std::optional<double> stop_loss;
+        std::optional<double> take_profit;
+        bool          venue_managed = false;   // handles_ entry exists
+        std::string   venue_list_id;           // empty if not OCO/grouped
+        std::chrono::system_clock::time_point ts_armed{};
+    };
+    std::vector<armed_view> snapshot_armed() const;
+
 private:
     struct armed_intent
     {
         exit_intent intent;
         double      entry_price = 0.0;
         double      best_price  = 0.0;  // running MFE for trailing
+        std::chrono::system_clock::time_point ts_armed{};
     };
 
     using strategy_symbol_key = std::pair<std::string, std::string>;

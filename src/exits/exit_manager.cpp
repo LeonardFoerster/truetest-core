@@ -42,6 +42,7 @@ void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
         ai.intent      = it->second;
         ai.entry_price = f.get_fill_price();
         ai.best_price  = f.get_fill_price();
+        ai.ts_armed    = f.get_timestamp();
 
         double frac = ai.intent.qty_fraction;
         if (frac <= 0.0) frac = 1.0;
@@ -290,6 +291,41 @@ std::string ExitManager::strategy_name_for_exchange_order(const std::string& exc
     return it == exchange_to_leg_.end() ? std::string{} : it->second.strategy_name;
 }
 
+std::vector<ExitManager::armed_view> ExitManager::snapshot_armed() const
+{
+    std::vector<armed_view> out;
+    out.reserve(armed_.size());
+
+    // Snapshot venue handles separately so we can mark each row's
+    // venue_managed flag without touching armed_ across the lock.
+    std::unordered_map<std::uint64_t, std::string> oco_ids;
+    {
+        std::lock_guard<std::mutex> lk(venue_mu_);
+        for (const auto& [opener, h] : handles_)
+            oco_ids.emplace(opener,
+                h.oco_list_id ? *h.oco_list_id : std::string{});
+    }
+
+    for (const auto& [opener, ai] : armed_)
+    {
+        armed_view v;
+        v.opener_order_id = opener;
+        v.strategy_name   = ai.intent.strategy_name;
+        v.symbol          = ai.intent.symbol;
+        v.close_side      = ai.intent.close_side;
+        v.qty             = ai.intent.qty;
+        v.entry_price     = ai.entry_price;
+        v.stop_loss       = ai.intent.stop_loss;
+        v.take_profit     = ai.intent.take_profit;
+        v.ts_armed        = ai.ts_armed;
+        auto hit = oco_ids.find(opener);
+        v.venue_managed = (hit != oco_ids.end());
+        if (v.venue_managed) v.venue_list_id = hit->second;
+        out.push_back(std::move(v));
+    }
+    return out;
+}
+
 void ExitManager::rehydrate(const IBracketAdapter::recovered_bracket& rb)
 {
     if (rb.opener_order_id == 0) return;
@@ -308,6 +344,7 @@ void ExitManager::rehydrate(const IBracketAdapter::recovered_bracket& rb)
     ai.intent      = ei;
     ai.entry_price = rb.entry_price;
     ai.best_price  = rb.entry_price;
+    ai.ts_armed    = std::chrono::system_clock::now();  // best-effort post-restart
 
     armed_.emplace(rb.opener_order_id, std::move(ai));
 

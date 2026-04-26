@@ -8,8 +8,9 @@
 
 class TrueTestListener : public ::testing::EmptyTestEventListener
 {
-    int passed_ = 0;
-    int failed_ = 0;
+    int passed_  = 0;
+    int failed_  = 0;
+    int skipped_ = 0;
     int total_ = 0;
     std::chrono::steady_clock::time_point suite_start_;
     std::chrono::steady_clock::time_point test_start_;
@@ -75,10 +76,18 @@ public:
         auto elapsed = std::chrono::steady_clock::now() - test_start_;
         auto ms = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
 
-        bool ok = test_info.result()->Passed();
-        if (ok) passed_++; else failed_++;
+        // gtest's Passed() returns false for both real failures AND
+        // GTEST_SKIP, so distinguish them: skipped tests count as
+        // neither passed nor failed (they're conditional opt-outs,
+        // typically guarded on env vars like QUESTDB_TEST_HOST).
+        const auto* result = test_info.result();
+        const bool skipped = result->Skipped();
+        const bool ok      = result->Passed() || skipped;
+        if (skipped)      ++skipped_;
+        else if (ok)      ++passed_;
+        else              ++failed_;
 
-        std::string status = ok ? " ok " : "FAIL";
+        const char* status = skipped ? "SKIP" : (ok ? " ok " : "FAIL");
         std::string name = pad(test_info.name(), 42);
 
         std::cout << "    " << status << "  " << name;
@@ -89,7 +98,6 @@ public:
         if (!ok)
         {
             // Print failure details indented
-            const auto* result = test_info.result();
             for (int i = 0; i < result->total_part_count(); ++i)
             {
                 const auto& part = result->GetTestPartResult(i);
@@ -122,7 +130,10 @@ public:
         {
             std::cout << "       ______________________\n";
             std::cout << "      /                      \\\n";
-            std::cout << "     |   ALL " << std::setw(4) << passed_ << " TESTS PASSED   |\n";
+            std::cout << "     |   ALL " << std::setw(4) << passed_ << " TESTS PASSED";
+            if (skipped_ > 0)
+                std::cout << " (" << skipped_ << " skipped)";
+            std::cout << "   |\n";
             std::cout << "      \\______________________/\n";
             std::cout << "             \\   ^__^\n";
             std::cout << "              \\  (oo)\\_______\n";

@@ -90,23 +90,29 @@ void PositionsPanel::draw(int body_y0, int width, int height,
 
     if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
 
-    // Split remaining body in half: positions on top, lots on bottom.
-    // Each section gets one label row + one column-header row + data rows,
-    // with a "+ N more" hint if truncated.
+    // Layout: on wide terminals (≥ 160 cols) render the two tables
+    // side-by-side. Otherwise stack them vertically as before. Wide
+    // mode lets each table use the full vertical space and removes
+    // the awkward 50/50 split when one table dominates.
+    const bool wide = (width >= 160);
+    const int  lot_x_offset = wide ? 80 : 0;   // shift lots to right half
     const int remaining = y_end - y;
-    const int positions_end = y + remaining / 2;
-    const int lots_end = y_end;
+    const int positions_end = wide ? y_end : (y + remaining / 2);
+    const int lots_end      = y_end;
+    const int lots_y_start  = wide ? y : positions_end;
 
     // ── Positions table (netted, per-symbol) ──
     label(y++, 2, "Positions (netted)");
     if (y < positions_end)
     {
         attron(A_DIM);
-        mvprintw(y, 2,  "%-10s", "Symbol");
-        mvprintw(y, 14, "%14s", "Qty");
-        mvprintw(y, 30, "%14s", "Avg Entry");
-        mvprintw(y, 46, "%14s", "Mark");
-        mvprintw(y, 62, "%14s", "uPnL");
+        mvprintw(y, 2,  "%-9s",  "Symbol");
+        mvprintw(y, 12, "%12s",  "Qty");
+        mvprintw(y, 25, "%10s",  "Entry");
+        mvprintw(y, 36, "%10s",  "Mark");
+        mvprintw(y, 47, "%8s",   "Δ%");
+        mvprintw(y, 56, "%12s",  "uPnL");
+        mvprintw(y, 69, "%8s",   "uPnL%");
         attroff(A_DIM);
         ++y;
     }
@@ -134,38 +140,63 @@ void PositionsPanel::draw(int body_y0, int width, int height,
                 break;
             }
             if (y >= positions_end) break;
-            mvprintw(y, 2, "%-10.10s", p.symbol.c_str());
+            mvprintw(y, 2, "%-9.9s", p.symbol.c_str());
             int qpair = signed_pair(p.qty);
             attron(COLOR_PAIR(qpair));
-            mvprintw(y, 14, "%+14.6f", p.qty);
+            mvprintw(y, 12, "%+12.6f", p.qty);
             attroff(COLOR_PAIR(qpair));
-            mvprintw(y, 30, "%14.4f", p.avg_entry);
-            if (p.mark > 0.0) mvprintw(y, 46, "%14.4f", p.mark);
-            else              mvprintw(y, 46, "%14s", "—");
+            mvprintw(y, 25, "%10.4f", p.avg_entry);
+            if (p.mark > 0.0) mvprintw(y, 36, "%10.4f", p.mark);
+            else              mvprintw(y, 36, "%10s", "—");
+
+            // Δ% — price drift from entry.
+            if (p.mark > 0.0 && p.avg_entry > 0.0)
+            {
+                const double drift = (p.mark - p.avg_entry) / p.avg_entry * 100.0;
+                int dp = signed_pair(drift);
+                attron(COLOR_PAIR(dp));
+                mvprintw(y, 47, "%+7.2f%%", drift);
+                attroff(COLOR_PAIR(dp));
+            }
+            else mvprintw(y, 47, "%8s", "—");
+
             int upair = signed_pair(p.unrealized);
             attron(COLOR_PAIR(upair));
-            mvprintw(y, 62, "%+14.4f", p.unrealized);
+            mvprintw(y, 56, "%+12.4f", p.unrealized);
             attroff(COLOR_PAIR(upair));
+
+            // uPnL% — unrealized as fraction of cost basis.
+            if (std::abs(p.qty) > 0.0 && p.avg_entry > 0.0)
+            {
+                const double basis = std::abs(p.qty) * p.avg_entry;
+                const double upct  = (basis > 0.0) ? p.unrealized / basis * 100.0 : 0.0;
+                int up = signed_pair(upct);
+                attron(COLOR_PAIR(up));
+                mvprintw(y, 69, "%+7.2f%%", upct);
+                attroff(COLOR_PAIR(up));
+            }
+            else mvprintw(y, 69, "%8s", "—");
+
             ++y; ++shown;
         }
     }
 
-    // Anchor the lots section to the bottom half regardless of how many
-    // position rows were drawn — prevents bottom-of-panel emptiness.
-    y = positions_end;
-    if (y < lots_end) mvhline(y++, 1, ACS_HLINE, width - 2);
+    // Lots section. In wide mode it lives in the right half (x_offset);
+    // in narrow mode it lives below positions, separated by a divider.
+    y = lots_y_start;
+    if (!wide && y < lots_end) mvhline(y++, 1, ACS_HLINE, width - 2);
 
-    // ── Lots table (per-strategy attribution) ──
-    if (y < lots_end) label(y++, 2, "Open lots (per strategy)");
+    const int xo = lot_x_offset;
+    if (y < lots_end) label(y++, 2 + xo, "Open lots (per strategy)");
     if (y < lots_end)
     {
         attron(A_DIM);
-        mvprintw(y, 2,  "%-8s", "Side");
-        mvprintw(y, 10, "%-12s", "Symbol");
-        mvprintw(y, 22, "%-16s", "Strategy");
-        mvprintw(y, 38, "%14s", "Qty open");
-        mvprintw(y, 54, "%14s", "Entry");
-        mvprintw(y, 68, "%10s", "Age");
+        mvprintw(y, 2 + xo,  "%-8s", "Side");
+        mvprintw(y, 10 + xo, "%-12s", "Symbol");
+        mvprintw(y, 22 + xo, "%-16s", "Strategy");
+        mvprintw(y, 38 + xo, "%14s", "Qty open");
+        mvprintw(y, 54 + xo, "%14s", "Entry");
+        mvprintw(y, 68 + xo, "%10s", "Age");
         attroff(A_DIM);
         ++y;
     }
@@ -173,7 +204,7 @@ void PositionsPanel::draw(int body_y0, int width, int height,
     if (snap->lots.empty() && y < lots_end)
     {
         attron(A_DIM);
-        mvaddstr(y++, 4, "(no open lots)");
+        mvaddstr(y++, 4 + xo, "(no open lots)");
         attroff(A_DIM);
     }
     else
@@ -186,7 +217,7 @@ void PositionsPanel::draw(int body_y0, int width, int height,
                 if (snap->lots.size() - shown > 0)
                 {
                     attron(A_DIM);
-                    mvprintw(y, 4, "+ %zu more …",
+                    mvprintw(y, 4 + xo, "+ %zu more …",
                              snap->lots.size() - shown);
                     attroff(A_DIM);
                 }
@@ -196,17 +227,43 @@ void PositionsPanel::draw(int body_y0, int width, int height,
             int spair = (l.side == 'L') ? kPairGreen
                        : (l.side == 'S') ? kPairRed : kPairWhite;
             attron(COLOR_PAIR(spair) | A_BOLD);
-            mvaddstr(y, 2, l.side == 'L' ? "LONG"
-                          : l.side == 'S' ? "SHORT" : "?");
+            mvaddstr(y, 2 + xo, l.side == 'L' ? "LONG"
+                              : l.side == 'S' ? "SHORT" : "?");
             attroff(COLOR_PAIR(spair) | A_BOLD);
-            mvprintw(y, 10, "%-12.12s", l.symbol.c_str());
-            mvprintw(y, 22, "%-16.16s",
+            mvprintw(y, 10 + xo, "%-12.12s", l.symbol.c_str());
+            mvprintw(y, 22 + xo, "%-16.16s",
                      l.strategy_name.empty() ? "—" : l.strategy_name.c_str());
-            mvprintw(y, 38, "%14.6f", l.qty_open);
-            mvprintw(y, 54, "%14.4f", l.entry_price);
-            mvprintw(y, 68, "%10s", fmt_age(l.age_seconds).c_str());
+            mvprintw(y, 38 + xo, "%14.6f", l.qty_open);
+            mvprintw(y, 54 + xo, "%14.4f", l.entry_price);
+            mvprintw(y, 68 + xo, "%10s", fmt_age(l.age_seconds).c_str());
             ++y; ++shown;
         }
+    }
+
+    // Vertical divider in wide mode.
+    if (wide)
+    {
+        attron(A_DIM);
+        mvvline(body_y0, 78, ACS_VLINE, height);
+        attroff(A_DIM);
+    }
+
+    // ── Session summary footer ─────────────────────────────────────────
+    // One-line digest pinned to the last available row: round-trips,
+    // win rate, and aggregate fills/orders. Hidden if there's no room.
+    if (y < lots_end)
+    {
+        attron(A_DIM);
+        char b[160];
+        const std::size_t trades = snap->perf.total_trades;
+        const std::size_t fills  = snap->perf.total_fills;
+        const std::size_t orders = snap->perf.total_orders;
+        const double      wr     = snap->perf.win_rate;
+        std::snprintf(b, sizeof(b),
+            "session: %zu trades  %zu fills  %zu orders  wr %.0f%%  sharpe %+.2f",
+            trades, fills, orders, wr, snap->perf.sharpe);
+        mvaddstr(lots_end - 1, 2, b);
+        attroff(A_DIM);
     }
 }
 
