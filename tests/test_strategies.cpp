@@ -75,17 +75,31 @@ TEST(MeanRevStrategy, BuySignal)
     EXPECT_EQ(order->get_side(), order_side::buy);
 }
 
-TEST(MeanRevStrategy, SellSignal)
+TEST(MeanRevStrategy, NoSignalSellWhenAboveSma)
 {
+    // Exits are owned by the engine's bracket (SL/TP), not by a SMA-cross
+    // signal. While position is open, the strategy must stay silent so SL
+    // and TP are the only ways out.
     mean_reversion_strategy s(3);
     s.on_market(make_mkt(0, 100.0));
     s.on_market(make_mkt(1, 100.0));
     s.on_market(make_mkt(2, 100.0));
     s.set_position_open("TEST", true);
-    // close > SMA → sell (opposite of SMA)
     auto order = s.on_market(make_mkt(3, 110.0));
-    ASSERT_TRUE(order.has_value());
-    EXPECT_EQ(order->get_side(), order_side::sell);
+    EXPECT_FALSE(order.has_value());
+}
+
+TEST(MeanRevStrategy, NoReentryWhilePositionOpen)
+{
+    // Even if close < SMA, no second entry while a position is open —
+    // the active bracket owns the lifecycle of the existing lot.
+    mean_reversion_strategy s(3);
+    s.on_market(make_mkt(0, 100.0));
+    s.on_market(make_mkt(1, 100.0));
+    s.on_market(make_mkt(2, 100.0));
+    s.set_position_open("TEST", true);
+    auto order = s.on_market(make_mkt(3, 90.0));
+    EXPECT_FALSE(order.has_value());
 }
 
 // --- MA Crossover Strategy ---

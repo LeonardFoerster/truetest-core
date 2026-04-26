@@ -1362,11 +1362,31 @@ void engine::notify_position_change_all(const std::string& symbol, bool open)
 {
     // Legacy net-truth push for strategies that still override
     // set_position_open. Multi-lot strategies ignore this and track
-    // openers via on_fill. Bracket cancellation on close is handled
-    // per-opener in the fill path (below), not blanket-per-symbol here.
+    // openers via on_fill.
     if (strategy_) strategy_->set_position_open(symbol, open);
     for (auto& s : additional_strategies_)
         if (s) s->set_position_open(symbol, open);
+
+    // On a net-flat transition, sweep any leftover bracket for a
+    // single-lot strategy. This catches strategies that close via a
+    // signal in on_market/on_tick without setting opener_order_id on the
+    // closer — the per-opener cancel path in ExitManager::on_fill can't
+    // reach those, so the intent would otherwise stay armed and could
+    // fire later as a phantom close on a flat position. Skipped when
+    // multiple openers are live for a (strategy,symbol) — that's the
+    // multi-lot pattern, where the strategy owns opener_order_id
+    // discipline and we must not bulk-cancel.
+    if (!open)
+    {
+        auto sweep = [&](const std::string& name) {
+            if (name.empty()) return;
+            if (exit_manager_.openers_for(name, symbol) <= 1)
+                exit_manager_.cancel(name, symbol);
+        };
+        sweep(primary_strategy_name_);
+        for (const auto& name : additional_strategy_names_)
+            sweep(name);
+    }
 }
 
 void engine::register_order_meta(const order_event& o)
@@ -1444,6 +1464,24 @@ bool engine::evaluate_exits(const std::string& symbol, double px,
     return false;
 }
 
+bool engine::evaluate_exits(const std::string& symbol,
+                            double low, double high, double close,
+                            std::chrono::system_clock::time_point ts,
+                            std::size_t& event_count,
+                            std::int64_t recv_ns)
+{
+    auto fires = exit_manager_.on_bar(symbol, low, high, close, ts);
+    if (fires.empty()) return false;
+    for (auto& c : fires)
+    {
+        c.set_recv_ns(recv_ns);
+        bool halt = false;
+        route_order(c, ts, event_count, halt);
+        if (halt) return true;
+    }
+    return false;
+}
+
 void engine::dispatch_extras_on_market(const market_event& mkt,
                                        const std::chrono::system_clock::time_point& ts,
                                        std::size_t& event_count)
@@ -1454,8 +1492,9 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
         auto& s = additional_strategies_[i];
         if (!s) continue;
 
-        if (evaluate_exits(mkt.get_symbol(), mkt.get_close(), ts,
-                           event_count, mkt.get_recv_ns()))
+        if (evaluate_exits(mkt.get_symbol(),
+                           mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                           ts, event_count, mkt.get_recv_ns()))
             return;
 
         if (auto o = s->on_market(mkt))
@@ -1620,8 +1659,9 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         analytics_.on_event(mkt_ptr);
     event_count++;
 
-    if (evaluate_exits(mkt.get_symbol(), mkt.get_close(), timestamp,
-                       event_count, mkt.get_recv_ns()))
+    if (evaluate_exits(mkt.get_symbol(),
+                       mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                       timestamp, event_count, mkt.get_recv_ns()))
         return;
 
     if (order_opt)
@@ -2382,8 +2422,9 @@ void engine::run()
             analytics_.on_event(mkt_ptr);
         event_count++;
 
-        if (evaluate_exits(symbol, mkt.get_close(), sim_time,
-                           event_count, mkt.get_recv_ns()))
+        if (evaluate_exits(symbol,
+                           mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                           sim_time, event_count, mkt.get_recv_ns()))
             break;
 
         if (order_opt)
@@ -2515,8 +2556,9 @@ void engine::run_tick_data()
         if (!config_.is_threaded())
             analytics_.on_event(bar_ptr);
 
-        if (evaluate_exits(bar.get_symbol(), bar.get_close(), bar.get_timestamp(),
-                           event_count, bar_recv_ns))
+        if (evaluate_exits(bar.get_symbol(),
+                           bar.get_low(), bar.get_high(), bar.get_close(),
+                           bar.get_timestamp(), event_count, bar_recv_ns))
             return;
 
         if (order_opt)
@@ -2697,8 +2739,9 @@ void engine::run_replay(const std::string& log_path,
             if (!config_.is_threaded())
                 analytics_.on_event(ev);
 
-            if (evaluate_exits(mkt.get_symbol(), mkt.get_close(), sim_time,
-                               event_count, mkt.get_recv_ns()))
+            if (evaluate_exits(mkt.get_symbol(),
+                               mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                               sim_time, event_count, mkt.get_recv_ns()))
                 break;
 
             if (order_opt)

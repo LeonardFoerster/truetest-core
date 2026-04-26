@@ -317,3 +317,95 @@ TEST(ExitManager, PartialExit_CancelRemovesAllIntentsForKey)
     EXPECT_EQ(m.armed_count(), 0u);
     EXPECT_EQ(m.pending_count(), 0u);
 }
+
+// ---- Bar variant (low/high probing) -----------------------------------
+
+TEST(ExitManager, OnBar_LongSlFiresOnLowEvenWhenCloseRecovers)
+{
+    // Bar wicks below SL but closes above — on_price(close) would miss it,
+    // on_bar must catch it.
+    ExitManager m;
+    m.register_pending(make_long_intent("s", "X", 1, /*sl=*/95.0, /*tp=*/110.0));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
+
+    auto r = m.on_bar("X", /*low=*/94.0, /*high=*/101.0, /*close=*/100.0, t0);
+    ASSERT_FALSE(r.empty());
+    EXPECT_EQ(r[0].get_side(), order_side::sell);
+    EXPECT_DOUBLE_EQ(r[0].get_price(), 94.0);  // fired at observed extreme
+    EXPECT_EQ(m.armed_count(), 0u);
+}
+
+TEST(ExitManager, OnBar_LongTpFiresOnHighEvenWhenCloseDoesntReach)
+{
+    ExitManager m;
+    m.register_pending(make_long_intent("s", "X", 1, 95.0, 110.0));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
+
+    auto r = m.on_bar("X", 99.0, 112.0, 105.0, t0);
+    ASSERT_FALSE(r.empty());
+    EXPECT_DOUBLE_EQ(r[0].get_price(), 112.0);
+}
+
+TEST(ExitManager, OnBar_BothTouchedSlWinsForLong)
+{
+    // Conservative: when both extremes cross in one bar, SL fires (worst).
+    ExitManager m;
+    m.register_pending(make_long_intent("s", "X", 1, 95.0, 110.0));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
+
+    auto r = m.on_bar("X", 94.0, 111.0, 100.0, t0);
+    ASSERT_FALSE(r.empty());
+    EXPECT_DOUBLE_EQ(r[0].get_price(), 94.0);  // SL not TP
+}
+
+TEST(ExitManager, OnBar_ShortSlFiresOnHigh)
+{
+    // For shorts the worst case is the high.
+    ExitManager m;
+    exit_intent ei;
+    ei.symbol           = "X";
+    ei.close_side       = order_side::buy;
+    ei.qty              = 1.0;
+    ei.stop_loss        = 105.0;
+    ei.take_profit      = 95.0;
+    ei.opener_order_id  = 1;
+    ei.strategy_name    = "s";
+    m.register_pending(std::move(ei));
+    m.on_fill(make_opener_fill(1, "X", order_side::sell, 1.0, 100.0));
+
+    auto r = m.on_bar("X", /*low=*/96.0, /*high=*/106.0, /*close=*/100.0, t0);
+    ASSERT_FALSE(r.empty());
+    EXPECT_EQ(r[0].get_side(), order_side::buy);
+    EXPECT_DOUBLE_EQ(r[0].get_price(), 106.0);
+}
+
+TEST(ExitManager, OnBar_NoTriggerLeavesIntentArmed)
+{
+    ExitManager m;
+    m.register_pending(make_long_intent("s", "X", 1, 95.0, 110.0));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
+
+    EXPECT_TRUE(m.on_bar("X", 96.0, 109.0, 100.0, t0).empty());
+    EXPECT_EQ(m.armed_count(), 1u);
+}
+
+TEST(ExitManager, OpenersFor_TracksPendingAndArmed)
+{
+    ExitManager m;
+    EXPECT_EQ(m.openers_for("s", "X"), 0u);
+
+    m.register_pending(make_long_intent("s", "X", 1, 95.0, 110.0));
+    EXPECT_EQ(m.openers_for("s", "X"), 1u);
+
+    // Second concurrent opener (multi-lot pattern).
+    m.register_pending(make_long_intent("s", "X", 2, 95.0, 110.0));
+    EXPECT_EQ(m.openers_for("s", "X"), 2u);
+
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
+    EXPECT_EQ(m.openers_for("s", "X"), 2u);  // promoted, still live
+
+    // Trigger — opener 1's intent fires and is untracked.
+    auto r = m.on_price("X", 95.0, t0);
+    ASSERT_FALSE(r.empty());
+    EXPECT_EQ(m.openers_for("s", "X"), 1u);
+}

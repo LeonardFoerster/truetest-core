@@ -46,6 +46,15 @@ public:
                                       double px,
                                       std::chrono::system_clock::time_point ts);
 
+    // Bar-aware variant: probes each armed intent against the bar's worst-
+    // and best-case extremes (longs: low for SL, high for TP/trail; shorts:
+    // inverted) so an intra-bar wick through the bracket fires it instead
+    // of being missed when only the close is checked. Conservative ordering:
+    // SL is evaluated before TP if both extremes crossed in the same bar.
+    std::vector<order_event> on_bar(const std::string& symbol,
+                                    double low, double high, double close,
+                                    std::chrono::system_clock::time_point ts);
+
     // Drop everything for one opener (used when strategy exits via its own
     // signal path and the armed bracket should no longer fire).
     void cancel(std::uint64_t opener_order_id);
@@ -57,6 +66,13 @@ public:
 
     std::size_t armed_count() const { return armed_.size(); }
     std::size_t pending_count() const { return pending_.size(); }
+
+    // Live opener count for a (strategy,symbol) pair across pending+armed.
+    // Used by the engine to distinguish single-lot strategies (where a
+    // net-flat transition can safely bulk-cancel any leftover bracket)
+    // from multi-lot strategies (which own opener_order_id discipline).
+    std::size_t openers_for(const std::string& strategy_name,
+                            const std::string& symbol) const;
 
 private:
     struct armed_intent

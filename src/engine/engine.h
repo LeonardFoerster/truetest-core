@@ -175,6 +175,14 @@ private:
                         std::size_t& event_count,
                         std::int64_t recv_ns);
 
+    // Bar variant: probes the bar's low/high so an intra-bar wick through
+    // SL/TP fires the bracket. Tick paths keep the price-only overload.
+    bool evaluate_exits(const std::string& symbol,
+                        double low, double high, double close,
+                        std::chrono::system_clock::time_point ts,
+                        std::size_t& event_count,
+                        std::int64_t recv_ns);
+
     void log_event(const event& ev);
 
     std::shared_ptr<IExecutionAdapter> get_adapter(const std::string& symbol);

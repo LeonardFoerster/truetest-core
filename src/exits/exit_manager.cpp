@@ -122,6 +122,94 @@ std::vector<order_event> ExitManager::on_price(
     return closes;
 }
 
+std::vector<order_event> ExitManager::on_bar(
+    const std::string& symbol, double low, double high, double close,
+    std::chrono::system_clock::time_point ts)
+{
+    std::vector<order_event> closes;
+    if (armed_.empty()) return closes;
+    if (!(low > 0.0) || !(high > 0.0) || !(close > 0.0)) return closes;
+    if (low > high) std::swap(low, high);
+
+    for (auto it = armed_.begin(); it != armed_.end(); )
+    {
+        auto& ai = it->second;
+        if (ai.intent.symbol != symbol) { ++it; continue; }
+
+        const bool is_long  = (ai.intent.close_side == order_side::sell);
+        const double favorable = is_long ? high : low;
+        const double adverse   = is_long ? low  : high;
+
+        if (is_long  && favorable > ai.best_price) ai.best_price = favorable;
+        if (!is_long && favorable < ai.best_price) ai.best_price = favorable;
+
+        if (ai.intent.trailing_pct)
+        {
+            double pct = *ai.intent.trailing_pct;
+            if (is_long)
+            {
+                double trailed = ai.best_price * (1.0 - pct);
+                double cur = ai.intent.stop_loss.value_or(0.0);
+                if (trailed > cur) ai.intent.stop_loss = trailed;
+            }
+            else
+            {
+                double trailed = ai.best_price * (1.0 + pct);
+                double cur = ai.intent.stop_loss.value_or(std::numeric_limits<double>::infinity());
+                if (trailed < cur) ai.intent.stop_loss = trailed;
+            }
+        }
+
+        double fire_px = 0.0;
+        bool fired = false;
+
+        // SL takes precedence when both extremes cross in one bar — we can't
+        // know intra-bar order so the worst case wins.
+        if (ai.intent.stop_loss &&
+            ((is_long  && adverse <= *ai.intent.stop_loss) ||
+             (!is_long && adverse >= *ai.intent.stop_loss)))
+        {
+            fire_px = adverse;
+            fired = true;
+        }
+        else if (ai.intent.take_profit &&
+                 ((is_long  && favorable >= *ai.intent.take_profit) ||
+                  (!is_long && favorable <= *ai.intent.take_profit)))
+        {
+            fire_px = favorable;
+            fired = true;
+        }
+        else if (ai.intent.deadline && ts >= *ai.intent.deadline)
+        {
+            fire_px = close;
+            fired = true;
+        }
+
+        if (!fired) { ++it; continue; }
+
+        order_event c(ts, ai.intent.symbol, order_type::market,
+                      ai.intent.close_side, ai.intent.qty, fire_px);
+        c.set_opener_order_id(it->first);
+        c.set_strategy_name(ai.intent.strategy_name);
+        closes.push_back(std::move(c));
+
+        const std::string sname = ai.intent.strategy_name;
+        const std::string sym   = ai.intent.symbol;
+        const std::uint64_t opener = it->first;
+        it = armed_.erase(it);
+        untrack_opener(opener, sname, sym);
+    }
+
+    return closes;
+}
+
+std::size_t ExitManager::openers_for(const std::string& strategy_name,
+                                     const std::string& symbol) const
+{
+    strategy_symbol_key ssk{strategy_name, symbol};
+    return strategy_symbol_to_openers_.count(ssk);
+}
+
 void ExitManager::cancel(std::uint64_t opener_order_id)
 {
     // Capture side-index entries before the primary containers drop the key.
