@@ -13,6 +13,8 @@
 #   tt_fetch_tests_dependencies()    # GoogleTest
 #   tt_fetch_bench_dependencies()    # Google Benchmark
 #   tt_wire_optional_backends(target)   # optional ENABLE_* deps per target
+#   tt_wire_rich_tui(target)            # ncurses-backed tabbed dashboard
+#                                       # (call on engine_shadow / engine_live)
 #
 # Why PUBLIC scope in tt_wire_optional_backends:
 #   It is called exactly once — on `engine_core` (an OBJECT library). Every
@@ -209,6 +211,11 @@ function(tt_wire_optional_backends target)
         target_compile_definitions(${target} PUBLIC HAS_QUESTDB)
     endif()
 
+    # Rich (ncurses) TUI dashboard for shadow/live binaries. Wired here for
+    # consistency with the optional-backend pattern, but the tt_wire_rich_tui
+    # function below is the actual entry point — engine_core is target-agnostic
+    # and must not link Curses (engine_backtest binary doesn't ship the rich TUI).
+
     # Debug instrumentation (Abseil)
     if(ENABLE_DEBUG)
         if(NOT TARGET absl::log)
@@ -233,4 +240,24 @@ function(tt_wire_optional_backends target)
             absl::flags absl::flags_parse absl::strings absl::str_format)
         target_compile_definitions(${target} PUBLIC HAS_DEBUG)
     endif()
+endfunction()
+
+# ── tt_wire_rich_tui(target) ────────────────────────────────────────────────
+# Adds the ncurses-backed tabbed dashboard sources and links Curses.
+# Call ONLY on engine_shadow and engine_live; engine_backtest must not link
+# Curses, so the rich-TUI sources are added per-binary, not into engine_core.
+function(tt_wire_rich_tui target)
+    set(CURSES_NEED_NCURSES TRUE)
+    set(CURSES_NEED_WIDE    TRUE)
+    find_package(Curses REQUIRED)
+
+    target_sources(${target} PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/ui/tabbed_dashboard.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/overview_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/positions_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/orders_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/risk_panel.cpp)
+    target_include_directories(${target} PRIVATE ${CURSES_INCLUDE_DIRS})
+    target_link_libraries(${target} PRIVATE ${CURSES_LIBRARIES})
+    target_compile_definitions(${target} PRIVATE HAS_RICH_TUI)
 endfunction()

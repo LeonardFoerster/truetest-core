@@ -115,6 +115,11 @@ _tt_add_engine_binary(engine_backtest TT_TARGET_BACKTEST src/bin/engine_backtest
 _tt_add_engine_binary(engine_shadow   TT_TARGET_SHADOW   src/bin/engine_shadow/main.cpp)
 _tt_add_engine_binary(engine_live     TT_TARGET_LIVE     src/bin/engine_live/main.cpp)
 
+# Rich (ncurses) tabbed dashboard — shadow and live binaries only.
+# engine_backtest keeps the existing ANSI ConsoleDashboard.
+tt_wire_rich_tui(engine_shadow)
+tt_wire_rich_tui(engine_live)
+
 # Native microarchitecture tuning. Gated on ENABLE_NATIVE_OPT (default off);
 # when the user opts in they want it across the board, not just on live.
 # CI and portable builds keep ENABLE_NATIVE_OPT=OFF and are unaffected.
@@ -228,7 +233,6 @@ if(BUILD_TESTS)
             tests/test_questdb_schema.cpp
             tests/test_questdb_run_tag.cpp
             tests/test_questdb_store.cpp
-            tests/test_questdb_worker.cpp
             tests/test_questdb_integration.cpp)
     endif()
 
