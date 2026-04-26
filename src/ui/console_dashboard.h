@@ -124,6 +124,23 @@ public:
 
     bool is_tui() const { return resolved_mode_ == output_mode::tui; }
 
+    // Public view of one recent event — used by the rich (ncurses)
+    // dashboard, which can't read the private seqlocked storage directly.
+    struct recent_event_view
+    {
+        std::chrono::system_clock::time_point ts{};
+        event_severity sev{event_severity::info};
+        std::string    msg;
+    };
+
+    // Snapshot the most recent up-to `max_count` events, oldest first.
+    // Thread-safe seqlock read; entries failing the seq check are skipped.
+    std::vector<recent_event_view> recent_events_snapshot(std::size_t max_count) const;
+
+    // Pre-formatted "ev/s" rate the renderer maintains internally; the rich
+    // TUI shows the same value alongside event totals.
+    double rate_ema() const { return rate_ema_; }
+
 private:
     void render_loop();
     void render_tui(std::string& buf);

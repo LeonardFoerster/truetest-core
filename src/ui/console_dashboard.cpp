@@ -363,6 +363,38 @@ void ConsoleDashboard::push_event(event_severity sev, std::string_view msg)
     slot.seq.store(idx * 2 + 2, std::memory_order_release);
 }
 
+std::vector<ConsoleDashboard::recent_event_view>
+ConsoleDashboard::recent_events_snapshot(std::size_t max_count) const
+{
+    std::vector<recent_event_view> out;
+    if (max_count == 0) return out;
+
+    const std::uint64_t head = recent_head_.load(std::memory_order_acquire);
+    const std::uint64_t take = (std::min)(static_cast<std::uint64_t>(max_count),
+                                          head);
+    out.reserve(take);
+    for (std::uint64_t i = take; i > 0; --i)
+    {
+        const std::uint64_t idx      = head - i;
+        const std::uint64_t expected = idx * 2 + 2;
+        const auto& slot = recent_[idx % recent_cap];
+
+        const std::uint64_t s1 = slot.seq.load(std::memory_order_acquire);
+        if (s1 != expected) continue;
+        event_entry tmp = slot.entry;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const std::uint64_t s2 = slot.seq.load(std::memory_order_relaxed);
+        if (s2 != expected) continue;
+
+        recent_event_view v;
+        v.ts  = tmp.ts;
+        v.sev = tmp.sev;
+        v.msg.assign(tmp.msg, tmp.msg_len);
+        out.push_back(std::move(v));
+    }
+    return out;
+}
+
 void ConsoleDashboard::render_banner()
 {
     if (resolved_mode_ == output_mode::off) return;
