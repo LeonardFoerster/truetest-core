@@ -183,6 +183,9 @@ if(BUILD_TESTS)
         tests/test_trade_tape_shadow_adapter.cpp
         tests/test_exit_manager.cpp
         tests/test_engine_brackets.cpp
+        tests/test_bracket_adapter.cpp
+        tests/test_binance_oco_bracket_adapter.cpp
+        tests/test_bridge_unknown_fill.cpp
         tests/test_hybrid_executor.cpp
         tests/test_binance_combined_parser.cpp
         tests/test_provider_event_stream_contract.cpp

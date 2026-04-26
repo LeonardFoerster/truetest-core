@@ -7,6 +7,8 @@
 #include "data/date_parse.h"
 #include "execution/portfolio.h"
 #include "execution/latency_model.h"
+#include "execution/execution_bridge.h"
+#include "execution/fill_parser.h"
 #include "providers/provider.h"
 #include "providers/provider_convert.h"
 #include "ui/console_dashboard.h"
@@ -40,6 +42,52 @@ engine::engine(std::shared_ptr<data_handler> dh,
     if (config_.mode == engine_mode::shadow)
         shadow_tracker_ = std::make_unique<ShadowTracker>();
 
+    // Wire venue-bracket adapter if the provider offers one. Live mode
+    // is the only setting where this currently kicks in (Binance OCO),
+    // but the wiring is provider-driven, not mode-driven, so any future
+    // adapter (e.g. shadow-mode replay of venue brackets) plugs in here.
+    if (config_.provider)
+    {
+        if (auto ba = config_.provider->get_bracket_adapter())
+            exit_manager_.set_bracket_adapter(std::move(ba));
+
+        // Install the bridge-side hook that turns inbound fills for
+        // venue-bracket legs (which never went through route_order, so
+        // by_client_id_ misses them) into engine-recognized fill_events.
+        if (auto adapter = config_.provider->get_execution_adapter())
+        {
+            if (auto* bridge = dynamic_cast<ExecutionBridge*>(adapter.get()))
+            {
+                bridge->set_unknown_fill_handler(
+                    [this](const parsed_exec& msg, std::uint64_t fill_id)
+                        -> std::optional<ExecutionBridge::synth_result>
+                    {
+                        const auto opener = exit_manager_
+                            .opener_for_exchange_order(msg.exchange_order_id);
+                        if (opener == 0) return std::nullopt;
+
+                        auto strategy_name = exit_manager_
+                            .strategy_name_for_exchange_order(msg.exchange_order_id);
+
+                        const auto engine_id = OrderIdGenerator::next();
+                        const auto ts = (msg.ts.time_since_epoch().count() != 0)
+                            ? msg.ts : std::chrono::system_clock::now();
+                        const double remaining =
+                            (msg.k == parsed_exec::kind::partial_fill)
+                              ? std::max(0.0, msg.cumulative_qty - msg.last_fill_qty)
+                              : 0.0;
+
+                        fill_event fe(ts, msg.symbol, engine_id, msg.side,
+                                      msg.last_fill_qty, msg.last_fill_price,
+                                      msg.commission, remaining, fill_id);
+                        fe.set_source(fill_source::exchange);
+                        return ExecutionBridge::synth_result{
+                            std::move(fe), opener, std::move(strategy_name)};
+                    });
+            }
+        }
+    }
+
     restore_from_checkpoint();
 
     if (config_.mode == engine_mode::live)
@@ -53,6 +101,26 @@ engine::engine(std::shared_ptr<data_handler> dh,
         auto err = reconciler->reconcile(portfolio_, config_.reconcile_tolerance_bps);
         if (!err.empty())
             throw std::runtime_error("reconciliation refused startup: " + err);
+
+        // Restart safety: rehydrate any venue-resting brackets from a
+        // previous run so the watchdog evaluates them and our cancel
+        // paths know about them. Without this, an engine restart would
+        // leave orphan OCO orders on the venue and the in-process
+        // ExitManager would have no record of them.
+        if (auto adapter = exit_manager_.has_bracket_adapter()
+                                ? config_.provider->get_bracket_adapter()
+                                : nullptr)
+        {
+            for (auto& rb : adapter->list_open())
+            {
+                std::cerr << "engine: rehydrating bracket opener="
+                          << rb.opener_order_id << " symbol=" << rb.symbol
+                          << " sl=" << (rb.stop_loss   ? *rb.stop_loss   : 0.0)
+                          << " tp=" << (rb.take_profit ? *rb.take_profit : 0.0)
+                          << "\n";
+                exit_manager_.rehydrate(rb);
+            }
+        }
     }
 }
 
@@ -427,6 +495,23 @@ void engine::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
     }
     out.risk.exposure       = exposure;
     out.risk.exposure_limit = config_.risk.max_portfolio_exposure;
+
+    // Trend strip — equity + drawdown tails the Overview panel renders
+    // as sparklines. 60 cells matches the panel width budget; longer
+    // tails are sub-sampled by ascii::sparkline anyway. The rate tail
+    // is sourced by the panel directly from ConsoleDashboard (it owns
+    // the rolling rate_ema_ samples), so the engine doesn't reach into
+    // the dashboard from here.
+    constexpr std::size_t kTailWidth = 60;
+    out.trend.equity_tail   = analytics_.equity_tail(kTailWidth);
+    out.trend.drawdown_tail = analytics_.drawdown_tail(kTailWidth);
+
+    out.trend.equity_now = out.equity;
+    out.trend.equity_change_pct = (out.initial_balance > 0.0)
+        ? (out.equity / out.initial_balance - 1.0) * 100.0
+        : 0.0;
+    out.trend.drawdown_now_pct = out.trend.drawdown_tail.empty()
+        ? 0.0 : out.trend.drawdown_tail.back();
 }
 
 std::unique_ptr<LoggingWorker> engine::make_logging_worker()
@@ -1433,6 +1518,23 @@ void engine::dispatch_fill_to_strategy(const fill_event& f)
     }
 }
 
+void engine::drain_venue_bracket_meta()
+{
+    if (!config_.provider) return;
+    auto adapter = config_.provider->get_execution_adapter();
+    auto* bridge = dynamic_cast<ExecutionBridge*>(adapter.get());
+    if (!bridge) return;
+
+    std::vector<ExecutionBridge::synth_meta> meta;
+    if (!bridge->poll_synth_meta(meta)) return;
+
+    for (const auto& m : meta)
+    {
+        order_meta_[m.engine_order_id] = order_meta{
+            m.opener_order_id, m.strategy_name};
+    }
+}
+
 void engine::register_strategy_exit_intent(IStrategy& strategy,
                                            const std::string& strategy_name,
                                            std::uint64_t order_id)
@@ -1622,6 +1724,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                                        mkt.get_timestamp());
         }
 
+        drain_venue_bracket_meta();
         std::vector<fill_event> provider_fills;
         if (provider_adapter && provider_adapter->poll_fills(provider_fills))
         {
@@ -1714,6 +1817,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                                        rec.timestamp);
         }
 
+        drain_venue_bracket_meta();
         std::vector<fill_event> provider_fills;
         if (provider_adapter && provider_adapter->poll_fills(provider_fills))
         {

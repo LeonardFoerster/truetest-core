@@ -169,6 +169,12 @@ private:
                                        const std::string& strategy_name,
                                        std::uint64_t order_id);
 
+    // Invoked by the engine on each fill-poll cycle to register any
+    // venue-bracket-leg metadata produced by the unknown_fill_handler
+    // installed on the provider's ExecutionBridge. Safe to call when
+    // there is no bridge — it just no-ops.
+    void drain_venue_bracket_meta();
+
     // Returns true if an exit fire caused the engine to halt.
     bool evaluate_exits(const std::string& symbol, double px,
                         std::chrono::system_clock::time_point ts,

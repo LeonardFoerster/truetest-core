@@ -31,10 +31,15 @@ void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
     auto range = pending_.equal_range(f.get_order_id());
     if (range.first == range.second) return;
 
+    // Snapshot intents before we move them so we can hand the adapter
+    // a stable copy (the in-process armed copy stays as watchdog).
+    std::vector<exit_intent> to_place;
+    to_place.reserve(static_cast<std::size_t>(std::distance(range.first, range.second)));
+
     for (auto it = range.first; it != range.second; ++it)
     {
         armed_intent ai;
-        ai.intent      = std::move(it->second);
+        ai.intent      = it->second;
         ai.entry_price = f.get_fill_price();
         ai.best_price  = f.get_fill_price();
 
@@ -43,9 +48,32 @@ void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
         if (frac > 1.0)  frac = 1.0;
         ai.intent.qty = f.get_filled_quantity() * frac;
 
+        to_place.push_back(ai.intent);
         armed_.emplace(f.get_order_id(), std::move(ai));
     }
     pending_.erase(range.first, range.second);
+
+    // Defense-in-depth: hand the venue adapter a copy so it can place
+    // resting orders. Empty handles → engine-side eval is the only path
+    // (already armed above; nothing else to do). For multi-intent openers
+    // (TP1/TP2/SL scale-outs) we currently delegate the first one only —
+    // adapters that don't model partial brackets natively must short-circuit.
+    if (bracket_adapter_ && !to_place.empty())
+    {
+        const auto& first = to_place.front();
+        auto handles = bracket_adapter_->place(
+            f.get_order_id(), first, f.get_fill_price());
+        if (!handles.empty())
+        {
+            std::lock_guard<std::mutex> lk(venue_mu_);
+            const exchange_leg leg{f.get_order_id(), first.strategy_name};
+            if (handles.sl_exchange_id)
+                exchange_to_leg_.emplace(*handles.sl_exchange_id, leg);
+            if (handles.tp_exchange_id)
+                exchange_to_leg_.emplace(*handles.tp_exchange_id, leg);
+            handles_.emplace(f.get_order_id(), std::move(handles));
+        }
+    }
 }
 
 std::vector<order_event> ExitManager::on_price(
@@ -117,6 +145,7 @@ std::vector<order_event> ExitManager::on_price(
         const std::uint64_t opener = it->first;
         it = armed_.erase(it);
         untrack_opener(opener, sname, sym);
+        release_venue_bracket(opener);
     }
 
     return closes;
@@ -198,6 +227,7 @@ std::vector<order_event> ExitManager::on_bar(
         const std::uint64_t opener = it->first;
         it = armed_.erase(it);
         untrack_opener(opener, sname, sym);
+        release_venue_bracket(opener);
     }
 
     return closes;
@@ -226,6 +256,7 @@ void ExitManager::cancel(std::uint64_t opener_order_id)
     armed_.erase(opener_order_id);
     if (!sname.empty() || !sym.empty())
         untrack_opener(opener_order_id, sname, sym);
+    release_venue_bracket(opener_order_id);
 }
 
 void ExitManager::cancel(const std::string& strategy_name, const std::string& symbol)
@@ -241,7 +272,83 @@ void ExitManager::cancel(const std::string& strategy_name, const std::string& sy
     {
         pending_.erase(id);
         armed_.erase(id);
+        release_venue_bracket(id);
     }
+}
+
+std::uint64_t ExitManager::opener_for_exchange_order(const std::string& exchange_order_id) const
+{
+    std::lock_guard<std::mutex> lk(venue_mu_);
+    auto it = exchange_to_leg_.find(exchange_order_id);
+    return it == exchange_to_leg_.end() ? 0u : it->second.opener_order_id;
+}
+
+std::string ExitManager::strategy_name_for_exchange_order(const std::string& exchange_order_id) const
+{
+    std::lock_guard<std::mutex> lk(venue_mu_);
+    auto it = exchange_to_leg_.find(exchange_order_id);
+    return it == exchange_to_leg_.end() ? std::string{} : it->second.strategy_name;
+}
+
+void ExitManager::rehydrate(const IBracketAdapter::recovered_bracket& rb)
+{
+    if (rb.opener_order_id == 0) return;
+    if (rb.handles.empty())      return;
+
+    exit_intent ei;
+    ei.symbol           = rb.symbol;
+    ei.close_side       = rb.close_side;
+    ei.qty              = rb.qty;
+    ei.stop_loss        = rb.stop_loss;
+    ei.take_profit      = rb.take_profit;
+    ei.opener_order_id  = rb.opener_order_id;
+    ei.strategy_name    = rb.strategy_name;
+
+    armed_intent ai;
+    ai.intent      = ei;
+    ai.entry_price = rb.entry_price;
+    ai.best_price  = rb.entry_price;
+
+    armed_.emplace(rb.opener_order_id, std::move(ai));
+
+    // Strategy-symbol side index: keep openers_for() consistent so the
+    // engine's net-flat sweep doesn't accidentally bulk-cancel a
+    // multi-lot strategy after restart (count >= 1 already protects it).
+    if (!rb.strategy_name.empty() || !rb.symbol.empty())
+        strategy_symbol_to_openers_.emplace(
+            strategy_symbol_key{rb.strategy_name, rb.symbol},
+            rb.opener_order_id);
+
+    // Venue-side state: install handles + reverse map under venue_mu_
+    // so the inbound user-data fill stream can stamp opener_order_id
+    // immediately without waiting for the next on_fill to populate it.
+    {
+        std::lock_guard<std::mutex> lk(venue_mu_);
+        const exchange_leg leg{rb.opener_order_id, rb.strategy_name};
+        if (rb.handles.sl_exchange_id)
+            exchange_to_leg_.emplace(*rb.handles.sl_exchange_id, leg);
+        if (rb.handles.tp_exchange_id)
+            exchange_to_leg_.emplace(*rb.handles.tp_exchange_id, leg);
+        handles_.emplace(rb.opener_order_id, rb.handles);
+    }
+}
+
+void ExitManager::release_venue_bracket(std::uint64_t opener_order_id)
+{
+    bracket_handles handles;
+    {
+        std::lock_guard<std::mutex> lk(venue_mu_);
+        auto it = handles_.find(opener_order_id);
+        if (it == handles_.end()) return;
+        handles = std::move(it->second);
+        handles_.erase(it);
+        if (handles.sl_exchange_id) exchange_to_leg_.erase(*handles.sl_exchange_id);
+        if (handles.tp_exchange_id) exchange_to_leg_.erase(*handles.tp_exchange_id);
+    }
+    // Adapter call OUTSIDE the mutex — adapters do REST I/O and we don't
+    // want WS-thread lookups blocked behind a network round-trip.
+    if (bracket_adapter_)
+        bracket_adapter_->cancel(opener_order_id, handles);
 }
 
 void ExitManager::untrack_opener(std::uint64_t opener_order_id,

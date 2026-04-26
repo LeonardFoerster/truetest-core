@@ -389,6 +389,192 @@ TEST(ExitManager, OnBar_NoTriggerLeavesIntentArmed)
     EXPECT_EQ(m.armed_count(), 1u);
 }
 
+// ---- Bracket adapter integration ---------------------------------------
+
+namespace {
+
+struct FakeAdapter : public IBracketAdapter
+{
+    bracket_caps caps_state{};
+    int place_calls  = 0;
+    int cancel_calls = 0;
+    std::vector<std::uint64_t> placed_openers;
+    std::vector<std::uint64_t> cancelled_openers;
+    bracket_handles next_handles;
+
+    bracket_caps capabilities() const override { return caps_state; }
+
+    bracket_handles place(std::uint64_t opener,
+                          const exit_intent&,
+                          double) override
+    {
+        ++place_calls;
+        placed_openers.push_back(opener);
+        return next_handles;
+    }
+
+    void cancel(std::uint64_t opener,
+                const bracket_handles&) override
+    {
+        ++cancel_calls;
+        cancelled_openers.push_back(opener);
+    }
+};
+
+} // namespace
+
+TEST(ExitManagerAdapter, OpenerFillTriggersPlaceWithStableHandles)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->caps_state.oco = true;
+    fake->next_handles.sl_exchange_id = "sl-1";
+    fake->next_handles.tp_exchange_id = "tp-1";
+    fake->next_handles.oco_list_id    = "list-A";
+    m.set_bracket_adapter(fake);
+
+    m.register_pending(make_long_intent("s", "X", 7, 95.0, 110.0));
+    EXPECT_EQ(fake->place_calls, 0);
+
+    m.on_fill(make_opener_fill(7, "X", order_side::buy, 1.0, 100.0));
+    ASSERT_EQ(fake->place_calls, 1);
+    EXPECT_EQ(fake->placed_openers[0], 7u);
+
+    // Reverse map populated for both legs.
+    EXPECT_EQ(m.opener_for_exchange_order("sl-1"), 7u);
+    EXPECT_EQ(m.opener_for_exchange_order("tp-1"), 7u);
+    EXPECT_EQ(m.opener_for_exchange_order("nope"), 0u);
+}
+
+TEST(ExitManagerAdapter, EmptyHandlesSkipsExchangeMap)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    // place returns empty handles → adapter declined (e.g. only stop_market
+    // available but intent had both SL+TP). Engine-side eval still runs.
+    m.set_bracket_adapter(fake);
+
+    m.register_pending(make_long_intent("s", "X", 1, 95.0, 110.0));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
+
+    EXPECT_EQ(fake->place_calls, 1);
+    EXPECT_EQ(m.opener_for_exchange_order("anything"), 0u);
+}
+
+TEST(ExitManagerAdapter, PriceTriggerCancelsVenueBracket)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-9";
+    fake->next_handles.tp_exchange_id = "tp-9";
+    m.set_bracket_adapter(fake);
+
+    m.register_pending(make_long_intent("s", "X", 9, 95.0, 110.0));
+    m.on_fill(make_opener_fill(9, "X", order_side::buy, 1.0, 100.0));
+    EXPECT_EQ(fake->place_calls, 1);
+
+    auto r = m.on_price("X", 94.0, t0);
+    ASSERT_FALSE(r.empty());
+    EXPECT_EQ(fake->cancel_calls, 1);
+    EXPECT_EQ(fake->cancelled_openers[0], 9u);
+
+    // Reverse map cleared so a stale fill on the same exchange id is inert.
+    EXPECT_EQ(m.opener_for_exchange_order("sl-9"), 0u);
+}
+
+TEST(ExitManagerAdapter, ManualCancelCancelsVenueBracket)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.oco_list_id = "list-77";
+    m.set_bracket_adapter(fake);
+
+    m.register_pending(make_long_intent("s", "X", 77, 95.0, 110.0));
+    m.on_fill(make_opener_fill(77, "X", order_side::buy, 1.0, 100.0));
+    m.cancel(77u);
+    EXPECT_EQ(fake->cancel_calls, 1);
+}
+
+TEST(ExitManagerAdapter, BulkCancelByStrategySymbolCancelsAllVenueBrackets)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.oco_list_id = "list";
+    m.set_bracket_adapter(fake);
+
+    m.register_pending(make_long_intent("s", "X", 1, 95.0, 110.0));
+    m.register_pending(make_long_intent("s", "X", 2, 95.0, 110.0));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
+    m.on_fill(make_opener_fill(2, "X", order_side::buy, 1.0, 100.0));
+
+    m.cancel("s", "X");
+    EXPECT_EQ(fake->cancel_calls, 2);
+}
+
+TEST(ExitManagerAdapter, RehydrateInstallsArmedAndVenueState)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    m.set_bracket_adapter(fake);
+
+    IBracketAdapter::recovered_bracket rb;
+    rb.opener_order_id = 555;
+    rb.strategy_name   = "mr";
+    rb.symbol          = "X";
+    rb.close_side      = order_side::sell;
+    rb.qty             = 1.0;
+    rb.entry_price     = 100.0;
+    rb.stop_loss       = 95.0;
+    rb.take_profit     = 110.0;
+    rb.handles.sl_exchange_id = "sl-r";
+    rb.handles.tp_exchange_id = "tp-r";
+    rb.handles.oco_list_id    = "list-r";
+
+    m.rehydrate(rb);
+
+    EXPECT_EQ(m.armed_count(), 1u);
+    EXPECT_EQ(m.openers_for("mr", "X"), 1u);
+    EXPECT_EQ(m.opener_for_exchange_order("sl-r"), 555u);
+    EXPECT_EQ(m.opener_for_exchange_order("tp-r"), 555u);
+
+    // Now a price tick crosses SL → ExitManager fires AND cancels
+    // venue-side via the adapter (defense in depth: even if Binance
+    // already filled the OCO, our DELETE is idempotent).
+    auto r = m.on_price("X", 94.0, t0);
+    ASSERT_FALSE(r.empty());
+    EXPECT_EQ(fake->cancel_calls, 1);
+    EXPECT_EQ(fake->cancelled_openers[0], 555u);
+}
+
+TEST(ExitManagerAdapter, RehydrateRejectsEmptyHandlesOrZeroOpener)
+{
+    ExitManager m;
+    IBracketAdapter::recovered_bracket bad;
+    bad.opener_order_id = 0;          // missing opener
+    bad.symbol          = "X";
+    bad.handles.oco_list_id = "g";
+    m.rehydrate(bad);
+    EXPECT_EQ(m.armed_count(), 0u);
+
+    bad.opener_order_id = 1;
+    bad.handles = {};                  // empty handles → adapter declined
+    m.rehydrate(bad);
+    EXPECT_EQ(m.armed_count(), 0u);
+}
+
+TEST(ExitManagerAdapter, NoAdapterMeansNoCallsAndExchangeMapAlwaysZero)
+{
+    ExitManager m;
+    m.register_pending(make_long_intent("s", "X", 1, 95.0, 110.0));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
+
+    EXPECT_FALSE(m.has_bracket_adapter());
+    EXPECT_EQ(m.opener_for_exchange_order("anything"), 0u);
+
+    auto r = m.on_price("X", 94.0, t0);
+    ASSERT_FALSE(r.empty());  // engine-side eval still works
+}
+
 TEST(ExitManager, OpenersFor_TracksPendingAndArmed)
 {
     ExitManager m;

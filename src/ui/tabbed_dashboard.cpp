@@ -11,6 +11,7 @@
 
 #include <ncurses.h>
 
+#include <clocale>
 #include <utility>
 
 namespace truetest::ui {
@@ -38,6 +39,11 @@ void TabbedDashboard::start()
 {
     bool expected = false;
     if (!running_.compare_exchange_strong(expected, true)) return;
+
+    // Required for ncursesw to render the UTF-8 block chars used by
+    // ascii::sparkline (▁▂▃▄▅▆▇█) and the warning glyph in RiskPanel.
+    // Safe to call repeatedly; no-op if already set by the user's env.
+    std::setlocale(LC_ALL, "");
 
     initscr();
     cbreak();

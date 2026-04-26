@@ -141,6 +141,12 @@ public:
     // TUI shows the same value alongside event totals.
     double rate_ema() const { return rate_ema_; }
 
+    // Returns up to n most recent rate samples (one per render tick).
+    // Used by the Overview panel's sparkline strip — the only consumer
+    // for now. Lockless: render_loop is the sole writer and the panel
+    // reads from the same thread (TabbedDashboard::render_loop_).
+    std::vector<double> rate_tail(std::size_t n) const;
+
 private:
     void render_loop();
     void render_tui(std::string& buf);
@@ -163,6 +169,13 @@ private:
     std::chrono::steady_clock::time_point last_sample_time_{};
     std::uint64_t                         last_sample_events_{0};
     double                                rate_ema_{0.0};
+
+    // Small ring of recent rate samples (1 sample per render tick).
+    // Bounded so it never reallocates and hot-path stays allocation-free.
+    static constexpr std::size_t rate_history_cap = 120;
+    std::array<double, rate_history_cap> rate_history_{};
+    std::size_t                          rate_history_count_ = 0;
+    std::size_t                          rate_history_head_  = 0;
 
     std::chrono::steady_clock::time_point start_time_{};
 

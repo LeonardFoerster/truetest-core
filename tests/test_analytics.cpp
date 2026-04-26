@@ -17,6 +17,59 @@ TEST(Analytics, InitialReport)
     EXPECT_EQ(r.total_fills, 0u);
 }
 
+TEST(Analytics, EquityTail_EmptyBeforeAnyEvents)
+{
+    Analytics a;
+    EXPECT_TRUE(a.equity_tail(10).empty());
+    EXPECT_TRUE(a.drawdown_tail(10).empty());
+}
+
+TEST(Analytics, EquityTail_ReturnsLastNValuesInOrder)
+{
+    Analytics a;
+    for (int i = 0; i < 5; ++i)
+    {
+        auto m = std::make_shared<market_event>(epoch_ms(i), "X",
+                                                100.0 + i, 100.0 + i,
+                                                100.0 + i, 100.0 + i);
+        a.on_event(m);
+    }
+    auto tail = a.equity_tail(3);
+    ASSERT_EQ(tail.size(), 3u);
+    // Equity is constant (no positions) → 100000 across the tail.
+    for (double v : tail) EXPECT_DOUBLE_EQ(v, 100000.0);
+
+    // Asking for more than available returns all of it.
+    EXPECT_EQ(a.equity_tail(99).size(), 5u);
+    EXPECT_EQ(a.equity_tail(0).size(), 0u);
+}
+
+TEST(Analytics, DrawdownTail_ZeroAtPeakPositiveBelowPeak)
+{
+    Analytics a;
+    auto m1 = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
+    a.on_event(m1);
+    auto buy = std::make_shared<order_event>(epoch_ms(1), "X",
+                  order_type::limit, order_side::buy, 100.0, 100.0);
+    buy->set_order_id(1);
+    a.on_event(buy);
+    auto fill = std::make_shared<fill_event>(epoch_ms(1), "X", 1,
+                  order_side::buy, 100.0, 100.0, 0.0);
+    a.on_event(fill);
+
+    // Price rises to 110 → equity peak at ~101000.
+    auto m2 = std::make_shared<market_event>(epoch_ms(2), "X", 110, 110, 110, 110.0);
+    a.on_event(m2);
+    // Then drops to 105 → drawdown vs peak.
+    auto m3 = std::make_shared<market_event>(epoch_ms(3), "X", 105, 105, 105, 105.0);
+    a.on_event(m3);
+
+    auto dd = a.drawdown_tail(4);
+    ASSERT_GE(dd.size(), 2u);
+    for (double v : dd) EXPECT_GE(v, 0.0);  // never negative
+    EXPECT_GT(dd.back(), 0.0);              // last point is below peak
+}
+
 TEST(Analytics, MarketEvent_TracksPrice)
 {
     Analytics a;

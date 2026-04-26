@@ -95,6 +95,22 @@ struct dashboard_snapshot
 
     risk_view risk;
     perf_view perf;
+
+    // Compact time-series tails the Overview panel renders as sparklines
+    // to fill the lower half. Sized to fit the panel width (~60 cells)
+    // and refreshed under the same engine snapshot lock as everything
+    // else, so values stay coherent with positions/risk/perf above.
+    struct trend_view
+    {
+        std::vector<double> equity_tail;     // last N equity points
+        std::vector<double> drawdown_tail;   // last N drawdown % (≥ 0)
+        std::vector<double> rate_tail;       // last N event-rate samples
+        double equity_now        = 0.0;      // most recent equity
+        double equity_change_pct = 0.0;      // vs initial_balance
+        double drawdown_now_pct  = 0.0;      // most recent dd
+        double rate_now          = 0.0;      // most recent rate
+    };
+    trend_view trend;
 };
 
 } // namespace truetest::ui

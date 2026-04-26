@@ -4,6 +4,7 @@
 
 #include "../console_dashboard.h"
 #include "../dashboard_snapshot.h"
+#include "analytics/ascii_widgets.h"
 
 #include <ncurses.h>
 
@@ -13,6 +14,7 @@
 #include <cstdio>
 #include <ctime>
 #include <string>
+#include <vector>
 
 namespace truetest::ui {
 
@@ -137,7 +139,7 @@ int sev_pair(event_severity s)
 
 void OverviewPanel::draw(int body_y0, int width, int height,
                          const ConsoleDashboard& data,
-                         const dashboard_snapshot* /*snap*/)
+                         const dashboard_snapshot* snap)
 {
     const auto& s = data.stats();
     const int x_label = 2;
@@ -345,6 +347,71 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     }
 
     // Spacer
+    if (y < body_y0 + height) mvhline(y++, 1, ACS_HLINE, width - 2);
+
+    // ── Trend strip ─────────────────────────────────────────────────
+    // Three sparkline rows that turn the previously-empty bottom half
+    // into an at-a-glance health view. Sourced from the snapshot's
+    // trend_view (equity + drawdown) and ConsoleDashboard's rate ring.
+    if (y < body_y0 + height)
+    {
+        const int spark_x   = x_label + 12;            // leave label gutter
+        const int spark_w   = std::max(8, width - spark_x - 22);
+        const int value_x   = spark_x + spark_w + 2;
+
+        auto draw_spark_row = [&](const char* lbl,
+                                  const std::vector<double>& series,
+                                  const char* value_str,
+                                  int value_pair)
+        {
+            if (y >= body_y0 + height) return;
+            label(y, x_label, lbl);
+            if (series.size() >= 2)
+            {
+                auto s = tt::ascii::sparkline(series,
+                            static_cast<std::size_t>(spark_w));
+                mvaddstr(y, spark_x, s.c_str());
+            }
+            else
+            {
+                attron(A_DIM);
+                for (int i = 0; i < spark_w; ++i) mvaddch(y, spark_x + i, '.');
+                attroff(A_DIM);
+            }
+            attron(COLOR_PAIR(value_pair));
+            mvaddstr(y, value_x, value_str);
+            attroff(COLOR_PAIR(value_pair));
+            ++y;
+        };
+
+        char eq_lbl[32];
+        std::snprintf(eq_lbl, sizeof(eq_lbl), "%+6.2f%%",
+                      snap ? snap->trend.equity_change_pct : 0.0);
+        const int eq_pair =
+            !snap ? kPairWhite
+            : snap->trend.equity_change_pct > 0 ? kPairGreen
+            : snap->trend.equity_change_pct < 0 ? kPairRed
+            : kPairWhite;
+        draw_spark_row("Equity",
+                       snap ? snap->trend.equity_tail : std::vector<double>{},
+                       eq_lbl, eq_pair);
+
+        char dd_lbl[32];
+        const double dd_now = snap ? snap->trend.drawdown_now_pct : 0.0;
+        std::snprintf(dd_lbl, sizeof(dd_lbl), "-%5.2f%%", dd_now);
+        const int dd_pair = (dd_now >= 5.0) ? kPairRed
+                          : (dd_now >= 1.0) ? kPairYellow
+                          : kPairWhite;
+        draw_spark_row("Drawdown",
+                       snap ? snap->trend.drawdown_tail : std::vector<double>{},
+                       dd_lbl, dd_pair);
+
+        auto rate_series = data.rate_tail(60);
+        char rt_lbl[32];
+        std::snprintf(rt_lbl, sizeof(rt_lbl), "%6.0f ev/s", data.rate_ema());
+        draw_spark_row("Event rate", rate_series, rt_lbl, kPairCyan);
+    }
+
     if (y < body_y0 + height) mvhline(y++, 1, ACS_HLINE, width - 2);
 
     // Recent events. Use the public seqlock snapshot accessor.

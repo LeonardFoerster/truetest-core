@@ -172,6 +172,18 @@ public:
     double rolling_sharpe() const;
     double rolling_max_drawdown() const;
 
+    // Cheap O(n) copy of the last n equity values for the live TUI's
+    // sparkline strip — avoids snapshot()'s full report rebuild on every
+    // render tick. Returns the most recent n samples (or fewer if the
+    // curve is shorter); empty if nothing recorded yet.
+    std::vector<double> equity_tail(std::size_t n) const;
+
+    // Last n drawdown values as positive percentages (0 = at peak,
+    // 5.0 = 5% below peak). Walks equity_curve_ once to recover the
+    // running peak so the values match how the live drawdown atomic
+    // is reported elsewhere.
+    std::vector<double> drawdown_tail(std::size_t n) const;
+
     double realized_pnl() const { return total_win_ - total_loss_; }
     double max_drawdown_pct() const { return max_drawdown_ * 100.0; }
     double win_rate_pct() const

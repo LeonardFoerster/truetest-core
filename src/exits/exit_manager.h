@@ -2,9 +2,12 @@
 
 #include "core/event.h"
 #include "exits/exit_intent.h"
+#include "exits/bracket_adapter.h"
 
 #include <chrono>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -74,6 +77,39 @@ public:
     std::size_t openers_for(const std::string& strategy_name,
                             const std::string& symbol) const;
 
+    // Optional venue-bracket integration. nullptr → engine-side eval is
+    // the only enforcement (current backtest/shadow behavior). Setting
+    // an adapter activates defense-in-depth: the in-process armed intent
+    // stays armed AND the venue gets resting orders. Set once at startup.
+    void set_bracket_adapter(std::shared_ptr<IBracketAdapter> adapter)
+    {
+        bracket_adapter_ = std::move(adapter);
+    }
+    bool has_bracket_adapter() const
+    {
+        return static_cast<bool>(bracket_adapter_);
+    }
+
+    // Reverse-lookup for fills coming back from the venue. The engine
+    // calls this on every inbound exec report — non-zero means the fill
+    // is a venue-bracket leg and the engine should stamp opener_order_id
+    // before routing through the closer-fill path. Thread-safe — may be
+    // called from a provider's WS thread (e.g. user-data stream).
+    std::uint64_t opener_for_exchange_order(const std::string& exchange_order_id) const;
+
+    // Companion lookup so the engine can populate order_meta_ with the
+    // right strategy_name when it synthesizes an order_id for a venue
+    // bracket leg. Empty string = no match. Thread-safe.
+    std::string strategy_name_for_exchange_order(const std::string& exchange_order_id) const;
+
+    // Restart recovery: install an armed intent + venue handles for a
+    // bracket the venue still has resting from a previous engine run.
+    // Engine calls this at startup after the adapter enumerates open
+    // brackets via IBracketAdapter::list_open(). The in-process armed
+    // intent is what evaluate_exits checks against — the venue handles
+    // are what cancel() forwards to. Both come back online together.
+    void rehydrate(const IBracketAdapter::recovered_bracket& rb);
+
 private:
     struct armed_intent
     {
@@ -101,9 +137,30 @@ private:
     std::unordered_multimap<strategy_symbol_key, std::uint64_t, ss_hash>
         strategy_symbol_to_openers_;
 
+    // Venue-bracket state. handles_ keyed by opener so cancel paths can
+    // forward to the adapter; exchange_to_leg_ is the reverse for
+    // inbound venue fills that need to be stamped as closers. Mutated on
+    // the engine thread; read on the provider's WS thread — guarded by
+    // venue_mu_ which only wraps these three fields. None of the other
+    // ExitManager containers are touched off-thread.
+    struct exchange_leg
+    {
+        std::uint64_t opener_order_id = 0;
+        std::string   strategy_name;
+    };
+    std::shared_ptr<IBracketAdapter> bracket_adapter_;
+    std::unordered_map<std::uint64_t, bracket_handles> handles_;
+    std::unordered_map<std::string, exchange_leg>      exchange_to_leg_;
+    mutable std::mutex venue_mu_;
+
     void untrack_opener(std::uint64_t opener_order_id,
                         const std::string& strategy_name,
                         const std::string& symbol);
+
+    // Single point that drops handles_ + exchange_to_opener_ entries and
+    // tells the adapter to clean up venue-side. Called from every cancel
+    // path so adapter.cancel() is invoked exactly once per opener.
+    void release_venue_bracket(std::uint64_t opener_order_id);
 };
 
 } // namespace truetest::exits

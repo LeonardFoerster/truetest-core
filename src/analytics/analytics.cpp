@@ -292,6 +292,46 @@ void Analytics::on_fill(const fill_event& f)
     trades_.push_back(rec);
 }
 
+std::vector<double> Analytics::equity_tail(std::size_t n) const
+{
+    std::vector<double> out;
+    if (n == 0 || equity_curve_.empty()) return out;
+    const std::size_t take = std::min(n, equity_curve_.size());
+    out.reserve(take);
+    const std::size_t start = equity_curve_.size() - take;
+    for (std::size_t i = start; i < equity_curve_.size(); ++i)
+        out.push_back(equity_curve_[i].equity);
+    return out;
+}
+
+std::vector<double> Analytics::drawdown_tail(std::size_t n) const
+{
+    std::vector<double> out;
+    if (n == 0 || equity_curve_.empty()) return out;
+
+    // Walk from the start so the running peak we report reflects the
+    // full history, matching how max_drawdown_pct() is computed
+    // elsewhere. Cheap — we only emit n values into out.
+    const std::size_t take = std::min(n, equity_curve_.size());
+    out.reserve(take);
+    const std::size_t emit_start = equity_curve_.size() - take;
+
+    double peak = 0.0;
+    for (std::size_t i = 0; i < equity_curve_.size(); ++i)
+    {
+        const double eq = equity_curve_[i].equity;
+        if (eq > peak) peak = eq;
+        if (i >= emit_start)
+        {
+            const double dd_pct = (peak > 0.0)
+                ? std::max(0.0, (peak - eq) / peak * 100.0)
+                : 0.0;
+            out.push_back(dd_pct);
+        }
+    }
+    return out;
+}
+
 double Analytics::rolling_sharpe() const
 {
     if (rolling_returns_.size() < 2) return 0.0;

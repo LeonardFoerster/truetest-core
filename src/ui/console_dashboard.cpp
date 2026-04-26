@@ -426,6 +426,32 @@ void ConsoleDashboard::update_rate_ema(std::uint64_t now_events,
     rate_ema_ = (rate_ema_ == 0.0) ? inst : alpha * inst + (1.0 - alpha) * rate_ema_;
     last_sample_time_ = now;
     last_sample_events_ = now_events;
+
+    // Push the smoothed rate into the rolling history ring. One sample
+    // per render tick is enough resolution for a 60-cell sparkline.
+    rate_history_[rate_history_head_] = rate_ema_;
+    rate_history_head_ = (rate_history_head_ + 1) % rate_history_cap;
+    if (rate_history_count_ < rate_history_cap) ++rate_history_count_;
+}
+
+std::vector<double> ConsoleDashboard::rate_tail(std::size_t n) const
+{
+    std::vector<double> out;
+    if (n == 0 || rate_history_count_ == 0) return out;
+
+    const std::size_t take = std::min(n, rate_history_count_);
+    out.reserve(take);
+
+    // Walk back from head_ by `take` positions; head_ points at the
+    // next slot to write, so the most recent value is at (head-1) mod cap.
+    const std::size_t start = (rate_history_head_ + rate_history_cap - take)
+                              % rate_history_cap;
+    for (std::size_t i = 0; i < take; ++i)
+    {
+        const std::size_t idx = (start + i) % rate_history_cap;
+        out.push_back(rate_history_[idx]);
+    }
+    return out;
 }
 
 void ConsoleDashboard::render_loop()
