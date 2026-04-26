@@ -36,16 +36,16 @@
 #include "utils/log/logger.h"
 #include <tt/truetest_version.h>
 
-#ifdef HAS_POSTGRESQL
-#include "data/pg_data_source.h"
-#endif
-
 #include "providers/provider_registry.h"
 #include "providers/data_bridge.h"
 #include "providers/provider_sink.h"
 #include "providers/local/csv_parser.h"
 #include "providers/local/file_transport.h"
 #include "ui/console_dashboard.h"
+#ifdef HAS_RICH_TUI
+#include "ui/dashboard_snapshot.h"
+#include "ui/tabbed_dashboard.h"
+#endif
 
 #ifdef HAS_BINANCE
 #include "providers/binance/binance_parser.h"
@@ -237,9 +237,6 @@ struct cli_options
     double risk_fraction = 0.02;
     double sl_pct = 0.005;
     double tp_pct = 0.01;
-
-    std::string db_path = "truetest.db";
-    bool no_db = false;
 
     std::string checkpoint_path;
     std::string resume_path;
@@ -468,7 +465,6 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_bool("live", o.live);
     get_bool("testnet", o.testnet);
     get_str("mode", o.mode);
-    get_str("db", o.db_path);
     get_double("balance", o.balance);
     get_double("risk_fraction", o.risk_fraction);
     get_double("sl", o.sl_pct);
@@ -540,7 +536,6 @@ static void dump_config(const cli_options& o)
     j["live"] = o.live;
     j["testnet"] = o.testnet;
     j["mode"] = o.mode.empty() ? TT_DEFAULT_MODE : o.mode;
-    j["db"] = o.db_path;
     j["balance"] = o.balance;
     j["risk_fraction"] = o.risk_fraction;
     j["sl"] = o.sl_pct;
@@ -619,9 +614,6 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--risk-fraction", o.risk_fraction, "Position size as equity fraction")->default_val(0.02);
     app.add_option("--sl", o.sl_pct, "Stop loss fraction of entry price")->default_val(0.005);
     app.add_option("--tp", o.tp_pct, "Take profit fraction of entry price")->default_val(0.01);
-
-    app.add_option("--db", o.db_path, "SQLite database path")->default_val("truetest.db");
-    app.add_flag("--no-db", o.no_db, "Disable SQLite persistence");
 
     app.add_option("--checkpoint", o.checkpoint_path,
                    "Write periodic portfolio checkpoint to this binary file");
@@ -753,7 +745,6 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--live")) opts.live = file_opts.live;
     if (!was_set("--testnet")) opts.testnet = file_opts.testnet;
     if (!was_set("--mode")) opts.mode = file_opts.mode;
-    if (!was_set("--db")) opts.db_path = file_opts.db_path;
     if (!was_set("--balance")) opts.balance = file_opts.balance;
     if (!was_set("--risk-fraction")) opts.risk_fraction = file_opts.risk_fraction;
     if (!was_set("--sl")) opts.sl_pct = file_opts.sl_pct;
@@ -812,7 +803,6 @@ static int run_dry_run(const cli_options& o)
                             string_to_spin_policy(resolved_spin));
     std::cout << "    Provider:   " << (o.provider_name.empty() ? "(TUI)" : o.provider_name) << "\n";
     std::cout << "    Data path:  " << (o.provider_path.empty() ? "(none)" : o.provider_path) << "\n";
-    std::cout << "    DB:         " << (o.db_path.empty() ? "(disabled)" : o.db_path) << "\n";
     std::cout << "    Fee model:  " << (o.fee_model.empty() ? "zero" : o.fee_model) << "\n";
     std::cout << "    Seed:       " << (o.seed == 0 ? "random" : std::to_string(o.seed)) << "\n";
     std::cout << "  ── Risk Limits ──\n";
@@ -1001,7 +991,6 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.disable_pinning = o.no_pin;
     prov_cfg.provider = provider;
     prov_cfg.initial_balance = o.balance;
-    prov_cfg.db_path = o.db_path;
     prov_cfg.checkpoint_path = o.checkpoint_path;
     prov_cfg.resume_checkpoint_path = o.resume_path;
     prov_cfg.checkpoint_interval_events = o.checkpoint_interval;
@@ -1261,13 +1250,44 @@ static int run_provider_mode(const cli_options& o)
 
         install_shutdown_handler();
 
+#ifdef HAS_RICH_TUI
+        // Rich (ncurses) tabbed dashboard for shadow/live binaries when the
+        // resolved status mode is TUI. ncurses takes over the terminal, so
+        // we skip render_banner() (it would be cleared on initscr) and skip
+        // the inner ConsoleDashboard render loop — the rich TUI reads from
+        // the same ConsoleDashboard atomics + recent-event ring, and pulls
+        // structured tables (positions, lots, ...) via engine::snapshot_dashboard.
+        std::unique_ptr<truetest::ui::TabbedDashboard> rich_tui;
+        if (dashboard && truetest::target_uses_rich_tui()
+            && dashboard->is_tui())
+        {
+            auto snap_fn = [&eng](truetest::ui::dashboard_snapshot& out) {
+                return eng.snapshot_dashboard(out);
+            };
+            rich_tui = std::make_unique<truetest::ui::TabbedDashboard>(
+                dashboard, snap_fn);
+        }
+#endif
+
         if (dashboard)
         {
-            dashboard->render_banner();
-            dashboard->push_event(
-                truetest::ui::event_severity::notice,
-                "engine starting");
-            dashboard->start();
+#ifdef HAS_RICH_TUI
+            if (rich_tui)
+            {
+                dashboard->push_event(
+                    truetest::ui::event_severity::notice,
+                    "engine starting");
+                rich_tui->start();
+            }
+            else
+#endif
+            {
+                dashboard->render_banner();
+                dashboard->push_event(
+                    truetest::ui::event_severity::notice,
+                    "engine starting");
+                dashboard->start();
+            }
         }
 
         // Unified event-stream path — provider-agnostic. When the provider
@@ -1318,7 +1338,11 @@ static int run_provider_mode(const cli_options& o)
 
         if (dashboard)
         {
-            dashboard->stop();
+#ifdef HAS_RICH_TUI
+            if (rich_tui) rich_tui->stop();
+            else
+#endif
+                dashboard->stop();
         }
 
         // Skip the multi-line analytics report when the TUI owns stdout —
@@ -1458,14 +1482,8 @@ static int run_tui_mode(const cli_options& o)
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  |  Data Source                               |\n";
     std::cout << "  +-------------------------------------------+\n";
-#ifdef HAS_POSTGRESQL
-    std::cout << "  |  [1]  PostgreSQL Database                  |\n";
-#else
-    std::cout << "  |  [1]  PostgreSQL (unavailable)             |\n";
-    std::cout << "  |       build with -DENABLE_POSTGRESQL=ON    |\n";
-#endif
-    std::cout << "  |  [2]  CSV File (OHLCV)                     |\n";
-    std::cout << "  |  [3]  Tick CSV File                        |\n";
+    std::cout << "  |  [1]  CSV File (OHLCV)                     |\n";
+    std::cout << "  |  [2]  Tick CSV File                        |\n";
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  > ";
     int data_choice;
@@ -1473,29 +1491,20 @@ static int run_tui_mode(const cli_options& o)
 
     std::unique_ptr<IDataSource> source;
 
-    if (data_choice == 2)
+    if (data_choice == 1)
     {
         std::cout << "\n  CSV path: ";
         std::string csv_path;
         std::cin >> csv_path;
         source = std::make_unique<CsvDataSource>(csv_path);
     }
-    else if (data_choice == 3)
+    else if (data_choice == 2)
     {
         std::cout << "\n  Tick CSV path: ";
         std::string tick_path;
         std::cin >> tick_path;
         source = std::make_unique<TickCsvDataSource>(tick_path);
     }
-#ifdef HAS_POSTGRESQL
-    else if (data_choice == 1)
-    {
-        auto pg = std::make_unique<PgDataSource>();
-        pg->establish_connection();
-        pg->test_connection();
-        source = std::make_unique<BinaryCacheSource>(std::move(pg), "data_cache.bin");
-    }
-#endif
     else
     {
         std::cout << "  ! Invalid choice.\n";
@@ -1521,7 +1530,6 @@ static int run_tui_mode(const cli_options& o)
     config.log_max_bytes = o.log_max_size_mb * 1024ull * 1024ull;
     config.log_max_files = o.log_keep;
     config.disable_pinning = o.no_pin;
-    config.db_path = o.db_path;
     config.checkpoint_path = o.checkpoint_path;
     config.resume_checkpoint_path = o.resume_path;
     config.checkpoint_interval_events = o.checkpoint_interval;
@@ -1670,15 +1678,11 @@ int main(int argc, char* argv[])
              TRUETEST_BUILD_TIMESTAMP, TRUETEST_BUILD_TYPE,
              TRUETEST_CXX_COMPILER);
     LOG_INFO("audit",
-             "deps cli11=%s zstd=%s nlohmann=%s gtest=%s bench=%s "
-             "libpqxx=%s abseil=%s",
+             "deps cli11=%s zstd=%s nlohmann=%s gtest=%s bench=%s abseil=%s",
              TRUETEST_DEP_CLI11, TRUETEST_DEP_ZSTD, TRUETEST_DEP_NLOHMANN,
-             TRUETEST_DEP_GTEST, TRUETEST_DEP_BENCHMARK,
-             TRUETEST_DEP_LIBPQXX, TRUETEST_DEP_ABSEIL);
+             TRUETEST_DEP_GTEST, TRUETEST_DEP_BENCHMARK, TRUETEST_DEP_ABSEIL);
 
     apply_config_overlay(app, opts);
-
-    if (opts.no_db) opts.db_path.clear();
 
     if (opts.dump_config_flag) { dump_config(opts); return 0; }
     if (opts.dry_run) return run_dry_run(opts);

@@ -32,6 +32,17 @@ constexpr bool target_allows_live_orders() noexcept {
 #endif
 }
 
+// True for binaries that ship the rich (ncurses) tabbed dashboard.
+// Backtest finishes faster than human reading speed; the existing ANSI
+// dashboard is enough there. Shadow and live get the extended panes.
+constexpr bool target_uses_rich_tui() noexcept {
+#if TT_TARGET == TT_TARGET_BACKTEST
+    return false;
+#else
+    return true;
+#endif
+}
+
 constexpr const char* target_name() noexcept {
 #if TT_TARGET == TT_TARGET_BACKTEST
     return "engine_backtest";

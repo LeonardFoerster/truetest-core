@@ -5,11 +5,9 @@ project(truetest LANGUAGES CXX VERSION 0.1.0)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 # ── Build options ───────────────────────────────────────────────────────────
-option(ENABLE_POSTGRESQL "Build with PostgreSQL storage backend"                      OFF)
 option(ENABLE_LIVE_DATA  "Build with WebSocket live data feed (requires Boost.Beast)" OFF)
 option(ENABLE_DEBUG      "Build with performance instrumentation (requires Abseil)"   OFF)
 option(ENABLE_BINANCE    "Build with Binance exchange provider"                       OFF)
-option(ENABLE_SQLITE     "SQLite persistence for trades/portfolio"                    ON)
 option(ENABLE_QUESTDB    "Build with QuestDB persistence backend"                     OFF)
 option(ENABLE_TSAN       "Enable ThreadSanitizer"                                     OFF)
 option(ENABLE_ASAN       "Enable AddressSanitizer (mutually exclusive with TSAN)"     OFF)

@@ -25,6 +25,12 @@
 #include "engine_config.h"
 
 namespace truetest::ui { struct streaming_stats; }
+#include "ui/dashboard_snapshot.h"
+
+#include <chrono>
+#include <deque>
+#include <mutex>
+#include <unordered_map>
 #include "core/event.h"
 #include "core/event_log.h"
 #include "types/order_id.h"
@@ -33,13 +39,8 @@ namespace truetest::ui { struct streaming_stats; }
 
 #include "debug/stage_timer.h"
 
-#ifdef HAS_SQLITE
-#include "data/sqlite_store.h"
-#endif
-
 #ifdef HAS_QUESTDB
 #include "data/questdb/store.h"
-#include "questdb_worker.h"
 #endif
 
 #ifdef HAS_DEBUG
@@ -117,24 +118,43 @@ private:
 
     void publish_event(const event_pointer& ev);
 
-#ifdef HAS_SQLITE
-    std::unique_ptr<SqliteStore> store_;
-    std::string current_run_id_;
-    void record_run_begin();
-    void record_run_end();
-#endif
-
 #ifdef HAS_QUESTDB
     std::shared_ptr<truetest::questdb::QuestdbStore> questdb_store_;
-    std::shared_ptr<EventRing> questdb_ring_;
-    std::unique_ptr<QuestDbWorker> questdb_worker_;
-    std::size_t questdb_drops_ = 0;
     bool questdb_active_ = false;  // true only after successful begin()
     std::size_t questdb_total_rejections_ = 0;
 
     void questdb_begin();
     void questdb_end();
 #endif
+
+    // Dashboard view: read from the rich (ncurses) TUI render thread.
+    // Filled on the event loop (no contention with the hot path) and
+    // swapped into the slot under a mutex; readers take a quick lock to
+    // copy. Refresh is debounced to ~100 ms aligned with the render tick.
+    mutable std::mutex                    dashboard_view_mu_;
+    truetest::ui::dashboard_snapshot      dashboard_view_;
+    bool                                  dashboard_view_initialised_ = false;
+    std::chrono::steady_clock::time_point dashboard_view_last_{};
+    std::chrono::milliseconds             dashboard_view_interval_{100};
+    void refresh_dashboard_view_if_due();
+    void build_dashboard_view(truetest::ui::dashboard_snapshot& out) const;
+
+    // Side caches for the rich TUI's Orders & Fills pane. Mutated on the
+    // event-loop thread alongside order_tracker_/portfolio_; copied into
+    // the snapshot during build_dashboard_view().
+    struct open_order_cache_entry
+    {
+        truetest::ui::dashboard_snapshot::open_order_row row{};
+        std::chrono::system_clock::time_point            ts{};
+    };
+    std::unordered_map<std::uint64_t, open_order_cache_entry> open_orders_cache_;
+    std::deque<truetest::ui::dashboard_snapshot::fill_row>    recent_fills_cache_;
+    static constexpr std::size_t kRecentFillsCap = 64;
+
+    void cache_open_order(const order_event& o);
+    void update_open_order_status(std::uint64_t id, const char* status);
+    void erase_open_order(std::uint64_t id);
+    void cache_fill(const fill_event& f);
 
     void write_checkpoint_if_due(std::size_t event_count);
     void restore_from_checkpoint();
@@ -306,6 +326,11 @@ public:
                          tick_side side, double price, int64_t new_qty);
     void print_summary();
     const Analytics& get_analytics() const;
+
+    // Fill `out` with a coherent dashboard snapshot. Returns false when no
+    // snapshot exists yet (engine just constructed; first refresh hasn't
+    // run). Mutex-protected; safe to call from any thread.
+    bool snapshot_dashboard(truetest::ui::dashboard_snapshot& out) const;
 
     std::shared_ptr<EventRing> get_logging_ring() const { return logging_ring_; }
     std::shared_ptr<EventRing> get_risk_ring() const { return risk_ring_; }

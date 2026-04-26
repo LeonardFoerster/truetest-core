@@ -93,8 +93,7 @@ private:
     HttpExecFn http_exec_;
     std::chrono::system_clock::time_point started_at_{};
 
-    // Serialises access to ilp_ — both the QuestDbWorker (draining the
-    // ring) and the engine hot-path capture points call record_* directly.
+    // Serialises access to ilp_ across engine capture-point callers.
     mutable std::mutex mu_;
 
     std::string table_name(const char* suffix) const;

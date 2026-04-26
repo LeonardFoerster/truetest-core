@@ -24,7 +24,6 @@
 #define TRUETEST_DEP_NLOHMANN     "v3.11.3"
 #define TRUETEST_DEP_GTEST        "v1.15.2"
 #define TRUETEST_DEP_BENCHMARK    "v1.8.5"
-#define TRUETEST_DEP_LIBPQXX      "7.9.2"
 #define TRUETEST_DEP_ABSEIL       "20240722.0"
 
 // clang-format on

@@ -72,8 +72,6 @@ struct engine_config
 
     std::shared_ptr<IProvider> provider;
 
-    std::string db_path;
-
 #ifdef HAS_QUESTDB
     bool persist_enabled = false;
     std::string questdb_host = "127.0.0.1";

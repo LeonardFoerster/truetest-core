@@ -40,11 +40,6 @@ engine::engine(std::shared_ptr<data_handler> dh,
     if (config_.mode == engine_mode::shadow)
         shadow_tracker_ = std::make_unique<ShadowTracker>();
 
-#ifdef HAS_SQLITE
-    if (!config_.db_path.empty())
-        store_ = std::make_unique<SqliteStore>(config_.db_path);
-#endif
-
     restore_from_checkpoint();
 
     if (config_.mode == engine_mode::live)
@@ -100,51 +95,6 @@ void engine::restore_from_checkpoint()
         std::cerr << "[checkpoint] restore failed: " << e.what() << std::endl;
     }
 }
-
-#ifdef HAS_SQLITE
-void engine::record_run_begin()
-{
-    if (!store_) return;
-
-    char buf[1024];
-    const char* mode_str =
-        (config_.mode == engine_mode::backtest) ? "backtest" :
-        (config_.mode == engine_mode::shadow)   ? "shadow"   : "live";
-    std::snprintf(buf, sizeof(buf),
-        R"({"mode":"%s","seed":%llu,"initial_balance":%.4f,"threading":"%s","rolling_window":%zu})",
-        mode_str,
-        static_cast<unsigned long long>(config_.seed),
-        config_.initial_balance,
-        preset_to_string(config_.threading).c_str(),
-        config_.rolling_window);
-
-    try {
-        current_run_id_ = store_->begin_run(buf);
-    } catch (const std::exception& e) {
-        std::cerr << "[runs] begin_run failed: " << e.what() << std::endl;
-        current_run_id_.clear();
-    }
-}
-
-void engine::record_run_end()
-{
-    if (!store_ || current_run_id_.empty()) return;
-
-    try {
-        const auto& a = get_analytics();
-        auto report = a.snapshot();
-        report.final_equity = portfolio_.get_equity(last_mid_price_);
-        store_->end_run(current_run_id_,
-                        report.final_equity,
-                        report.sharpe_ratio,
-                        report.max_drawdown,
-                        static_cast<int>(portfolio_.get_total_trades()));
-    } catch (const std::exception& e) {
-        std::cerr << "[runs] end_run failed: " << e.what() << std::endl;
-    }
-    current_run_id_.clear();
-}
-#endif
 
 void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
 {
@@ -202,6 +152,8 @@ void engine::log_event(const event& ev)
 
 void engine::publish_event(const event_pointer& ev)
 {
+    refresh_dashboard_view_if_due();
+
     if (config_.threading == thread_preset::inline_mode) {
         return;
     }
@@ -297,19 +249,184 @@ void engine::publish_event(const event_pointer& ev)
     }
 
 #undef TT_PUSH
+}
 
-#ifdef HAS_QUESTDB
-    // QuestDB observer ring is non-safety: drops never escalate to halt.
-    // It's a tail-side capture for analysis, in addition to the synchronous
-    // capture-point writes from process_order / route_order / cancel_order.
-    if (questdb_ring_ && !questdb_ring_->try_push(ev))
+bool engine::snapshot_dashboard(truetest::ui::dashboard_snapshot& out) const
+{
+    std::lock_guard<std::mutex> lk(dashboard_view_mu_);
+    if (!dashboard_view_initialised_) return false;
+    out = dashboard_view_;
+    return true;
+}
+
+void engine::refresh_dashboard_view_if_due()
+{
+    auto now = std::chrono::steady_clock::now();
+    if (dashboard_view_initialised_
+        && now - dashboard_view_last_ < dashboard_view_interval_)
     {
-        ++questdb_drops_;
-        if (questdb_drops_ == 1 || questdb_drops_ % 1000 == 0)
-            std::cerr << "  QuestDB ring: " << questdb_drops_
-                      << " events dropped\n";
+        return;
     }
-#endif
+
+    truetest::ui::dashboard_snapshot snap;
+    build_dashboard_view(snap);
+
+    {
+        std::lock_guard<std::mutex> lk(dashboard_view_mu_);
+        dashboard_view_              = std::move(snap);
+        dashboard_view_initialised_  = true;
+    }
+    dashboard_view_last_ = now;
+}
+
+void engine::cache_open_order(const order_event& o)
+{
+    open_order_cache_entry e;
+    e.row.order_id      = o.get_order_id();
+    e.row.symbol        = o.get_symbol();
+    e.row.strategy_name = o.get_strategy_name();
+    e.row.side          = (o.get_side() == order_side::buy) ? 'B' : 'S';
+    switch (o.get_order_type())
+    {
+        case order_type::market:     e.row.type = 'M'; break;
+        case order_type::limit:      e.row.type = 'L'; break;
+        case order_type::stop:       e.row.type = 'S'; break;
+        case order_type::stop_limit: e.row.type = 's'; break;
+    }
+    e.row.qty    = o.get_quantity();
+    e.row.price  = o.get_price();
+    e.row.status = "open";
+    e.ts         = o.get_timestamp();
+    open_orders_cache_[o.get_order_id()] = std::move(e);
+}
+
+void engine::update_open_order_status(std::uint64_t id, const char* status)
+{
+    auto it = open_orders_cache_.find(id);
+    if (it != open_orders_cache_.end())
+        it->second.row.status = status;
+}
+
+void engine::erase_open_order(std::uint64_t id)
+{
+    open_orders_cache_.erase(id);
+}
+
+void engine::cache_fill(const fill_event& f)
+{
+    truetest::ui::dashboard_snapshot::fill_row r;
+    r.ts     = f.get_timestamp();
+    r.symbol = f.get_symbol();
+    r.side   = (f.get_side() == order_side::buy) ? 'B' : 'S';
+    r.qty    = f.get_filled_quantity();
+    r.price  = f.get_fill_price();
+    r.fee    = f.get_commission();
+    r.source = (f.get_source() == fill_source::exchange)  ? "exchange"
+             : (f.get_source() == fill_source::simulated) ? "simulated"
+             :                                              "local";
+    recent_fills_cache_.push_front(std::move(r));
+    while (recent_fills_cache_.size() > kRecentFillsCap)
+        recent_fills_cache_.pop_back();
+}
+
+void engine::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
+{
+    using snap_t = truetest::ui::dashboard_snapshot;
+
+    // Account
+    out.cash             = portfolio_.get_cash();
+    out.initial_balance  = portfolio_.get_initial_balance();
+    out.equity           = portfolio_.get_equity(last_mid_price_);
+    out.realized_pnl     = out.equity - out.initial_balance;   // approximation
+    out.unrealized_pnl   = 0.0;
+
+    // Positions
+    out.positions.clear();
+    out.positions.reserve(portfolio_.get_positions().size());
+    for (const auto& [sym, pos] : portfolio_.get_positions())
+    {
+        if (std::abs(pos.qty) < 1e-12) continue;
+        snap_t::position_row row;
+        row.symbol     = sym;
+        row.qty        = pos.qty;
+        row.avg_entry  = (std::abs(pos.qty) > 0.0)
+                           ? pos.cost_basis / pos.qty : 0.0;
+        row.mark       = (sym == last_mark_symbol_) ? last_mid_price_ : 0.0;
+        row.unrealized = (row.mark > 0.0)
+                           ? (row.mark - row.avg_entry) * pos.qty
+                           : 0.0;
+        out.unrealized_pnl += row.unrealized;
+        out.positions.push_back(std::move(row));
+    }
+
+    // Lots — per-strategy attribution alongside the netted positions.
+    out.lots.clear();
+    out.lots.reserve(portfolio_.get_lots().size());
+    auto now_sys = std::chrono::system_clock::now();
+    for (const auto& [opener_id, l] : portfolio_.get_lots())
+    {
+        snap_t::lot_row row;
+        row.opener_order_id = opener_id;
+        row.symbol          = l.symbol;
+        row.strategy_name   = l.strategy_name;
+        row.side            = (l.side == order_side::buy) ? 'L' : 'S';
+        row.qty_open        = l.qty_open;
+        row.entry_price     = l.entry_price;
+        row.age_seconds     = std::chrono::duration_cast<std::chrono::seconds>(
+                                  now_sys - l.ts_open).count();
+        out.lots.push_back(std::move(row));
+    }
+
+    // Open orders — copy from cache, computing age vs now.
+    out.open_orders.clear();
+    out.open_orders.reserve(open_orders_cache_.size());
+    auto now_steady_sys = std::chrono::system_clock::now();
+    for (const auto& [id, e] : open_orders_cache_)
+    {
+        auto row = e.row;
+        row.age_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                              now_steady_sys - e.ts).count();
+        out.open_orders.push_back(std::move(row));
+    }
+
+    // Recent fills — newest first.
+    out.recent_fills.assign(recent_fills_cache_.begin(),
+                            recent_fills_cache_.end());
+
+    // Markout from adverse-selection tracker (post-fill mid drift).
+    out.perf.avg_markout_bps = adverse_selection_.mean_bps();
+    out.perf.markout_samples = adverse_selection_.sample_count();
+    out.perf.total_fills     = portfolio_.get_total_fills();
+    out.perf.total_trades    = portfolio_.get_total_trades();
+    out.perf.total_orders    = open_orders_cache_.size()   // active right now
+                              + portfolio_.get_total_fills(); // historical lower bound
+    out.perf.win_rate        = analytics_.win_rate_pct();
+    out.perf.sharpe          = analytics_.rolling_sharpe();
+    out.perf.sortino         = 0.0;             // requires full report — skip
+    out.perf.profit_factor   = 0.0;             // requires full report — skip
+
+    // Risk view.
+    out.risk.halted             = halt_flag_.load(std::memory_order_acquire);
+    out.risk.daily_loss         = 0.0;          // RiskManager doesn't expose
+    out.risk.daily_loss_limit   = config_.risk.max_daily_loss;
+    out.risk.max_drawdown_pct   = analytics_.max_drawdown_pct();
+    out.risk.max_drawdown_limit = config_.risk.max_drawdown * 100.0;
+    out.risk.open_orders        = open_orders_cache_.size();
+    out.risk.open_orders_limit  =
+        (config_.risk.max_open_orders > 0)
+            ? static_cast<std::size_t>(config_.risk.max_open_orders)
+            : 0;
+
+    // Exposure: |qty| * mark per symbol, summed.
+    double exposure = 0.0;
+    for (const auto& [sym, pos] : portfolio_.get_positions())
+    {
+        if (std::abs(pos.qty) < 1e-12) continue;
+        double mark = (sym == last_mark_symbol_) ? last_mid_price_ : 0.0;
+        if (mark > 0.0) exposure += std::abs(pos.qty) * mark;
+    }
+    out.risk.exposure       = exposure;
+    out.risk.exposure_limit = config_.risk.max_portfolio_exposure;
 }
 
 std::unique_ptr<LoggingWorker> engine::make_logging_worker()
@@ -495,21 +612,6 @@ void engine::start_workers()
     }
     }
 
-#ifdef HAS_QUESTDB
-    // QuestDB worker: drains questdb_ring_ in addition to the synchronous
-    // record_* calls from the engine's hot-path capture points. Spawned
-    // only when persistence has been activated by questdb_begin() (DDLs
-    // and ILP socket succeeded).
-    if (questdb_active_ && questdb_store_)
-    {
-        questdb_ring_ = std::make_shared<EventRing>();
-        questdb_worker_ = std::make_unique<QuestDbWorker>(questdb_store_);
-        wire_failure(*questdb_worker_);
-        worker_threads_.emplace_back([this]() {
-            questdb_worker_->run(*questdb_ring_);
-        });
-    }
-#endif
 }
 
 void engine::stop_workers()
@@ -520,9 +622,6 @@ void engine::stop_workers()
     if (stats_worker_) stats_worker_->stop();
     if (risk_stats_worker_) risk_stats_worker_->stop();
     if (mm_worker_) mm_worker_->stop();
-#ifdef HAS_QUESTDB
-    if (questdb_worker_) questdb_worker_->stop();
-#endif
 
     for (auto& t : worker_threads_)
     {
@@ -557,9 +656,6 @@ void engine::stop_workers()
     Worker* all_workers[] = {
         logging_worker_.get(), risk_worker_.get(), stats_worker_.get(),
         observer_worker_.get(), risk_stats_worker_.get(), mm_worker_.get(),
-#ifdef HAS_QUESTDB
-        questdb_worker_.get(),
-#endif
     };
     for (auto* w : all_workers)
     {
@@ -577,9 +673,6 @@ void engine::stop_workers()
 
     std::size_t total_drops = logging_drops_ + risk_drops_ + stats_drops_
                             + observer_drops_ + risk_stats_drops_ + mm_drops_;
-#ifdef HAS_QUESTDB
-    total_drops += questdb_drops_;
-#endif
     if (total_drops > 0)
     {
         std::cerr << "  WARNING: " << total_drops << " events dropped from ring buffers.\n";
@@ -589,9 +682,6 @@ void engine::stop_workers()
                   << " observer=" << observer_drops_
                   << " risk_stats=" << risk_stats_drops_
                   << " mm=" << mm_drops_
-#ifdef HAS_QUESTDB
-                  << " questdb=" << questdb_drops_
-#endif
                   << "\n";
     }
 
@@ -611,9 +701,6 @@ void engine::stop_workers()
     report_hwm("observer", observer_ring_);
     report_hwm("risk_stats", risk_stats_ring_);
     report_hwm("mm", mm_ring_);
-#ifdef HAS_QUESTDB
-    report_hwm("questdb", questdb_ring_);
-#endif
 }
 
 #ifdef HAS_QUESTDB
@@ -760,6 +847,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 #endif
 
             order_tracker_.set_status(o->get_order_id(), order_status::rejected);
+            erase_open_order(o->get_order_id());
             if (action == risk_action::halt)
             {
                 if (config_.risk_unwind)
@@ -772,6 +860,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     }
 
     order_tracker_.set_status(o->get_order_id(), order_status::open);
+    cache_open_order(*o);
     log_event(*o);
     publish_event(o);
     analytics_.on_event(o);
@@ -807,6 +896,11 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             const auto new_status = f.is_partial()
                 ? order_status::partially_filled : order_status::filled;
             order_tracker_.set_status(f.get_order_id(), new_status);
+            cache_fill(f);
+            if (f.is_partial())
+                update_open_order_status(f.get_order_id(), "partial");
+            else
+                erase_open_order(f.get_order_id());
             auto fill_ptr = fill_pool_.acquire(f);
             log_event(f);
             portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
@@ -815,9 +909,6 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             adverse_selection_.on_fill(f);
             exit_manager_.on_fill(f, lookup_opener(f.get_order_id()));
             risk_manager_.on_fill(f);
-#ifdef HAS_SQLITE
-            if (store_) store_->insert_fill(f);
-#endif
 #ifdef HAS_QUESTDB
             if (questdb_active_ && questdb_store_)
             {
@@ -898,6 +989,7 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
     if (cancelled)
     {
         order_tracker_.set_status(order_id, order_status::cancelled);
+        erase_open_order(order_id);
         auto cancel_ev = std::make_shared<cancel_event>(
             std::chrono::system_clock::now(), symbol, order_id, reason);
         log_event(*cancel_ev);
@@ -975,6 +1067,7 @@ void engine::unwind_positions(std::size_t& event_count)
         close_order->set_strategy_name("risk_unwind");
 
         order_tracker_.set_status(close_order->get_order_id(), order_status::open);
+        cache_open_order(*close_order);
         log_event(*close_order);
         publish_event(close_order);
         analytics_.on_event(close_order);
@@ -1002,6 +1095,11 @@ void engine::unwind_positions(std::size_t& event_count)
                 const auto new_status = f.is_partial()
                     ? order_status::partially_filled : order_status::filled;
                 order_tracker_.set_status(f.get_order_id(), new_status);
+                cache_fill(f);
+                if (f.is_partial())
+                    update_open_order_status(f.get_order_id(), "partial");
+                else
+                    erase_open_order(f.get_order_id());
                 auto fill_ptr = fill_pool_.acquire(f);
                 log_event(f);
                 portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
@@ -1010,9 +1108,6 @@ void engine::unwind_positions(std::size_t& event_count)
                 adverse_selection_.on_fill(f);
                 exit_manager_.on_fill(f, lookup_opener(f.get_order_id()));
                 risk_manager_.on_fill(f);
-#ifdef HAS_SQLITE
-                if (store_) store_->insert_fill(f);
-#endif
 #ifdef HAS_QUESTDB
                 if (questdb_active_ && questdb_store_)
                 {
@@ -1499,6 +1594,8 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                         shadow_tracker_->on_exchange_fill(f);
                     continue;
                 }
+                cache_fill(f);
+                erase_open_order(f.get_order_id());
                 auto fill_ptr = fill_pool_.acquire(f);
                 portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
                                lookup_strategy_name(f.get_order_id()));
@@ -1522,15 +1619,6 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     if (!config_.is_threaded())
         analytics_.on_event(mkt_ptr);
     event_count++;
-
-#ifdef HAS_SQLITE
-    if (store_)
-    {
-        auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            timestamp.time_since_epoch()).count();
-        store_->insert_equity_point(ts_ms, portfolio_.get_equity(last_mid_price_));
-    }
-#endif
 
     if (evaluate_exits(mkt.get_symbol(), mkt.get_close(), timestamp,
                        event_count, mkt.get_recv_ns()))
@@ -1597,6 +1685,8 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                         shadow_tracker_->on_exchange_fill(f);
                     continue;
                 }
+                cache_fill(f);
+                erase_open_order(f.get_order_id());
                 auto fill_ptr = fill_pool_.acquire(f);
                 portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
                                lookup_strategy_name(f.get_order_id()));
@@ -1635,15 +1725,6 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         analytics_.on_event(tick_ptr);
     event_count++;
 
-#ifdef HAS_SQLITE
-    if (store_)
-    {
-        auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            rec.timestamp.time_since_epoch()).count();
-        store_->insert_equity_point(ts_ms, portfolio_.get_equity(last_mid_price_));
-    }
-#endif
-
     if (evaluate_exits(rec.symbol, rec.price, rec.timestamp,
                        event_count, te.get_recv_ns()))
         return;
@@ -1667,10 +1748,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
 
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
-
-#ifdef HAS_SQLITE
-    record_run_begin();
-#endif
 
 #ifdef HAS_QUESTDB
     questdb_begin();
@@ -1807,10 +1884,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
                   << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
     }
 
-#ifdef HAS_SQLITE
-    if (store_) store_->flush_all();
-    record_run_end();
-#endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
 #ifdef HAS_QUESTDB
@@ -1824,10 +1897,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
-
-#ifdef HAS_SQLITE
-    record_run_begin();
-#endif
 
 #ifdef HAS_QUESTDB
     questdb_begin();
@@ -1951,10 +2020,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
                   << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
     }
 
-#ifdef HAS_SQLITE
-    if (store_) store_->flush_all();
-    record_run_end();
-#endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
 #ifdef HAS_QUESTDB
@@ -1968,10 +2033,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
 
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
-
-#ifdef HAS_SQLITE
-    record_run_begin();
-#endif
 
 #ifdef HAS_QUESTDB
     questdb_begin();
@@ -2158,10 +2219,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
                   << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
     }
 
-#ifdef HAS_SQLITE
-    if (store_) store_->flush_all();
-    record_run_end();
-#endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
 #ifdef HAS_QUESTDB
@@ -2182,10 +2239,6 @@ void engine::run()
     if (!data_handler_->has_bar_data()) {
         throw std::runtime_error("no data loaded — call IDataSource::load_data() before run()");
     }
-
-#ifdef HAS_SQLITE
-    record_run_begin();
-#endif
 
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
@@ -2385,35 +2438,6 @@ void engine::run()
     double throughput = static_cast<double>(event_count) / (elapsed_ms / 1000.0);
     std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
 
-#ifdef HAS_SQLITE
-    if (store_)
-    {
-        store_->flush_all();
-        auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-
-        std::string pos_json = "[";
-        bool first = true;
-        for (const auto& [sym, pos] : portfolio_.get_positions())
-        {
-            if (std::abs(pos.qty) < 1e-12) continue;
-            if (!first) pos_json += ",";
-            first = false;
-            char buf[256];
-            std::snprintf(buf, sizeof(buf),
-                R"({"symbol":"%s","qty":%.8g,"cost_basis":%.6f})",
-                sym.c_str(), pos.qty, pos.cost_basis);
-            pos_json += buf;
-        }
-        pos_json += "]";
-
-        store_->insert_portfolio_snapshot(
-            portfolio_.get_cash(), portfolio_.get_equity(last_mid_price_),
-            pos_json, portfolio_.get_total_trades(), ts_ms);
-    }
-    record_run_end();
-#endif
-
     if (!config_.checkpoint_path.empty())
     {
         try {
@@ -2458,10 +2482,6 @@ void engine::run_tick_data()
 {
     if (!config_.event_log_path.empty() && !event_logger_)
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
-
-#ifdef HAS_SQLITE
-    if (current_run_id_.empty()) record_run_begin();
-#endif
 
     pending_stops_.clear();
     while (!pending_orders_.empty()) pending_orders_.pop();
@@ -2603,10 +2623,6 @@ void engine::run_tick_data()
     double throughput = static_cast<double>(event_count) / (elapsed_ms / 1000.0);
     std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
 
-#ifdef HAS_SQLITE
-    if (store_) store_->flush_all();
-    record_run_end();
-#endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
 #ifdef HAS_QUESTDB
