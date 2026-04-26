@@ -110,6 +110,10 @@ void OrdersPanel::draw(int body_y0, int width, int height,
     attroff(A_DIM);
     ++y;
 
+    // Reserve the bottom half of the panel for fills, regardless of how
+    // many open-order rows we have to render.
+    const int orders_section_end = body_y0 + height / 2;
+
     if (snap->open_orders.empty())
     {
         attron(A_DIM);
@@ -118,13 +122,21 @@ void OrdersPanel::draw(int body_y0, int width, int height,
     }
     else
     {
-        // Print up to N rows; older rows get clipped if the window is small.
-        int max_rows = (y_end - y) / 2;          // leave space for fills below
-        if (max_rows < 1) max_rows = 1;
-        int shown = 0;
+        std::size_t shown = 0;
         for (const auto& o : snap->open_orders)
         {
-            if (shown >= max_rows || y >= y_end) break;
+            if (y >= orders_section_end - 1 && shown < snap->open_orders.size())
+            {
+                if (snap->open_orders.size() - shown > 0)
+                {
+                    attron(A_DIM);
+                    mvprintw(y, 4, "+ %zu more …",
+                             snap->open_orders.size() - shown);
+                    attroff(A_DIM);
+                }
+                break;
+            }
+            if (y >= orders_section_end) break;
             mvprintw(y, 2,  "%-10llu",
                      static_cast<unsigned long long>(o.order_id));
             int spair = (o.side == 'B') ? kPairGreen
@@ -148,7 +160,10 @@ void OrdersPanel::draw(int body_y0, int width, int height,
         }
     }
 
-    if (y >= y_end - 2) return;
+    // Anchor the fills section at the half-way line so the panel always
+    // looks visually balanced even when one side has few rows.
+    y = orders_section_end;
+    if (y >= y_end) return;
     mvhline(y++, 1, ACS_HLINE, width - 2);
 
     // ── Recent fills (with markout summary) ──
@@ -188,8 +203,20 @@ void OrdersPanel::draw(int body_y0, int width, int height,
     }
     else
     {
+        std::size_t shown = 0;
         for (const auto& f : snap->recent_fills)
         {
+            if (y >= y_end - 1 && shown < snap->recent_fills.size())
+            {
+                if (snap->recent_fills.size() - shown > 0)
+                {
+                    attron(A_DIM);
+                    mvprintw(y, 4, "+ %zu more …",
+                             snap->recent_fills.size() - shown);
+                    attroff(A_DIM);
+                }
+                break;
+            }
             if (y >= y_end) break;
             mvprintw(y, 2, "%-10s", fmt_hhmmss(f.ts).c_str());
             int spair = (f.side == 'B') ? kPairGreen
@@ -203,7 +230,7 @@ void OrdersPanel::draw(int body_y0, int width, int height,
             mvprintw(y, 45, "%14.4f",   f.price);
             mvprintw(y, 61, "%10.4f",   f.fee);
             mvprintw(y, 72, "%-10s",    f.source);
-            ++y;
+            ++y; ++shown;
         }
     }
 }

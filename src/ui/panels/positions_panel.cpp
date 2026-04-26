@@ -90,21 +90,28 @@ void PositionsPanel::draw(int body_y0, int width, int height,
 
     if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
 
+    // Split remaining body in half: positions on top, lots on bottom.
+    // Each section gets one label row + one column-header row + data rows,
+    // with a "+ N more" hint if truncated.
+    const int remaining = y_end - y;
+    const int positions_end = y + remaining / 2;
+    const int lots_end = y_end;
+
     // ── Positions table (netted, per-symbol) ──
     label(y++, 2, "Positions (netted)");
-    if (y >= y_end) return;
+    if (y < positions_end)
+    {
+        attron(A_DIM);
+        mvprintw(y, 2,  "%-10s", "Symbol");
+        mvprintw(y, 14, "%14s", "Qty");
+        mvprintw(y, 30, "%14s", "Avg Entry");
+        mvprintw(y, 46, "%14s", "Mark");
+        mvprintw(y, 62, "%14s", "uPnL");
+        attroff(A_DIM);
+        ++y;
+    }
 
-    // Column header
-    attron(A_DIM);
-    mvprintw(y, 2,  "%-10s", "Symbol");
-    mvprintw(y, 14, "%14s", "Qty");
-    mvprintw(y, 30, "%14s", "Avg Entry");
-    mvprintw(y, 46, "%14s", "Mark");
-    mvprintw(y, 62, "%14s", "uPnL");
-    attroff(A_DIM);
-    ++y;
-
-    if (snap->positions.empty())
+    if (snap->positions.empty() && y < positions_end)
     {
         attron(A_DIM);
         mvaddstr(y++, 4, "(no open positions)");
@@ -112,9 +119,21 @@ void PositionsPanel::draw(int body_y0, int width, int height,
     }
     else
     {
+        std::size_t shown = 0;
         for (const auto& p : snap->positions)
         {
-            if (y >= y_end) break;
+            if (y >= positions_end - 1 && shown < snap->positions.size())
+            {
+                if (snap->positions.size() - shown > 0)
+                {
+                    attron(A_DIM);
+                    mvprintw(y, 4, "+ %zu more …",
+                             snap->positions.size() - shown);
+                    attroff(A_DIM);
+                }
+                break;
+            }
+            if (y >= positions_end) break;
             mvprintw(y, 2, "%-10.10s", p.symbol.c_str());
             int qpair = signed_pair(p.qty);
             attron(COLOR_PAIR(qpair));
@@ -127,28 +146,31 @@ void PositionsPanel::draw(int body_y0, int width, int height,
             attron(COLOR_PAIR(upair));
             mvprintw(y, 62, "%+14.4f", p.unrealized);
             attroff(COLOR_PAIR(upair));
-            ++y;
+            ++y; ++shown;
         }
     }
 
-    if (y >= y_end) return;
-    mvhline(y++, 1, ACS_HLINE, width - 2);
+    // Anchor the lots section to the bottom half regardless of how many
+    // position rows were drawn — prevents bottom-of-panel emptiness.
+    y = positions_end;
+    if (y < lots_end) mvhline(y++, 1, ACS_HLINE, width - 2);
 
     // ── Lots table (per-strategy attribution) ──
-    label(y++, 2, "Open lots (per strategy)");
-    if (y >= y_end) return;
+    if (y < lots_end) label(y++, 2, "Open lots (per strategy)");
+    if (y < lots_end)
+    {
+        attron(A_DIM);
+        mvprintw(y, 2,  "%-8s", "Side");
+        mvprintw(y, 10, "%-12s", "Symbol");
+        mvprintw(y, 22, "%-16s", "Strategy");
+        mvprintw(y, 38, "%14s", "Qty open");
+        mvprintw(y, 54, "%14s", "Entry");
+        mvprintw(y, 68, "%10s", "Age");
+        attroff(A_DIM);
+        ++y;
+    }
 
-    attron(A_DIM);
-    mvprintw(y, 2,  "%-8s", "Side");
-    mvprintw(y, 10, "%-12s", "Symbol");
-    mvprintw(y, 22, "%-16s", "Strategy");
-    mvprintw(y, 38, "%14s", "Qty open");
-    mvprintw(y, 54, "%14s", "Entry");
-    mvprintw(y, 68, "%10s", "Age");
-    attroff(A_DIM);
-    ++y;
-
-    if (snap->lots.empty())
+    if (snap->lots.empty() && y < lots_end)
     {
         attron(A_DIM);
         mvaddstr(y++, 4, "(no open lots)");
@@ -156,9 +178,21 @@ void PositionsPanel::draw(int body_y0, int width, int height,
     }
     else
     {
+        std::size_t shown = 0;
         for (const auto& l : snap->lots)
         {
-            if (y >= y_end) break;
+            if (y >= lots_end - 1 && shown < snap->lots.size())
+            {
+                if (snap->lots.size() - shown > 0)
+                {
+                    attron(A_DIM);
+                    mvprintw(y, 4, "+ %zu more …",
+                             snap->lots.size() - shown);
+                    attroff(A_DIM);
+                }
+                break;
+            }
+            if (y >= lots_end) break;
             int spair = (l.side == 'L') ? kPairGreen
                        : (l.side == 'S') ? kPairRed : kPairWhite;
             attron(COLOR_PAIR(spair) | A_BOLD);
@@ -171,7 +205,7 @@ void PositionsPanel::draw(int body_y0, int width, int height,
             mvprintw(y, 38, "%14.6f", l.qty_open);
             mvprintw(y, 54, "%14.4f", l.entry_price);
             mvprintw(y, 68, "%10s", fmt_age(l.age_seconds).c_str());
-            ++y;
+            ++y; ++shown;
         }
     }
 }

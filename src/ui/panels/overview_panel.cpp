@@ -351,10 +351,9 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     label(y, x_label, "Recent events");
     ++y;
 
-    int max_lines = (body_y0 + height) - y - 1;
+    int max_lines = (body_y0 + height) - y;
     if (max_lines < 0) max_lines = 0;
-    int want = (std::min)(max_lines, 8);
-    auto evs = data.recent_events_snapshot(static_cast<std::size_t>(want));
+    auto evs = data.recent_events_snapshot(static_cast<std::size_t>(max_lines));
     for (const auto& e : evs)
     {
         if (y >= body_y0 + height) break;

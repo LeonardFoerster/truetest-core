@@ -8,8 +8,10 @@
 #include <ncurses.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
 #include <string>
 
 namespace truetest::ui {
@@ -22,6 +24,44 @@ constexpr int kPairYellow = 3;
 constexpr int kPairCyan   = 4;
 constexpr int kPairWhite  = 5;
 constexpr int kBarWidth   = 28;
+
+const char* sev_text(event_severity s)
+{
+    switch (s)
+    {
+        case event_severity::info:   return "info ";
+        case event_severity::notice: return "note ";
+        case event_severity::warn:   return "warn ";
+        case event_severity::error:  return "error";
+    }
+    return "?    ";
+}
+
+int sev_pair(event_severity s)
+{
+    switch (s)
+    {
+        case event_severity::error:  return kPairRed;
+        case event_severity::warn:   return kPairYellow;
+        case event_severity::notice: return kPairCyan;
+        default:                     return kPairWhite;
+    }
+}
+
+std::string fmt_hhmmss(std::chrono::system_clock::time_point tp)
+{
+    auto t = std::chrono::system_clock::to_time_t(tp);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
+                  tm.tm_hour, tm.tm_min, tm.tm_sec);
+    return buf;
+}
 
 void label(int y, int x, const char* text)
 {
@@ -59,17 +99,10 @@ void draw_gauge(int y, int x, double frac)
     mvaddstr(y, x + kBarWidth + 3, b);
 }
 
-void draw_value_only(int y, int x, double v)
-{
-    char b[32];
-    std::snprintf(b, sizeof(b), "%14.2f", v);
-    mvaddstr(y, x, b);
-}
-
 } // namespace
 
 void RiskPanel::draw(int body_y0, int width, int height,
-                     const ConsoleDashboard& /*data*/,
+                     const ConsoleDashboard& data,
                      const dashboard_snapshot* snap)
 {
     if (!snap)
@@ -171,6 +204,32 @@ void RiskPanel::draw(int body_y0, int width, int height,
         attron(A_DIM);
         mvaddstr(y, 2, b);
         attroff(A_DIM);
+        ++y;
+    }
+
+    if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
+
+    // ── Recent events (fills the remaining vertical space) ──
+    if (y >= y_end) return;
+    label(y++, 2, "Recent events");
+
+    int max_lines = y_end - y;
+    if (max_lines <= 0) return;
+
+    auto evs = data.recent_events_snapshot(static_cast<std::size_t>(max_lines));
+    for (const auto& e : evs)
+    {
+        if (y >= y_end) break;
+        std::string ts = fmt_hhmmss(e.ts);
+        mvaddstr(y, 2, ts.c_str());
+        attron(COLOR_PAIR(sev_pair(e.sev)));
+        mvaddstr(y, 12, sev_text(e.sev));
+        attroff(COLOR_PAIR(sev_pair(e.sev)));
+        int maxw = width - 19;
+        if (maxw < 1) maxw = 1;
+        std::string msg = e.msg;
+        if (static_cast<int>(msg.size()) > maxw) msg.resize(maxw);
+        mvaddstr(y, 19, msg.c_str());
         ++y;
     }
 }
