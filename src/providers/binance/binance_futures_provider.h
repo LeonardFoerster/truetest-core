@@ -2,6 +2,10 @@
 #ifdef HAS_BINANCE
 
 #include "engine/engine_config.h"
+#include "execution/client_order_id.h"
+#include "execution/execution_bridge.h"
+#include "execution/rate_limiter.h"
+#include "execution/trade_tape_shadow_adapter.h"
 #include "providers/provider.h"
 #include "providers/prepend_transport.h"
 #include "providers/binance/binance_combined_parser.h"
@@ -10,8 +14,15 @@
 #include "providers/binance/binance_executor.h"
 #include "providers/binance/binance_backfill.h"
 #include "providers/binance/binance_endpoints.h"
+#include "providers/binance/binance_futures_kill_switch.h"
+#include "providers/binance/binance_futures_order_encoder.h"
+#include "providers/binance/binance_futures_reconciler.h"
+#include "providers/binance/binance_futures_user_data_parser.h"
+#include "providers/binance/binance_rest_client.h"
+#include "providers/binance/binance_rest_order_transport.h"
+#include "providers/binance/binance_time_sync.h"
+#include "providers/binance/binance_user_data_transport.h"
 #include "providers/binance/hybrid_executor.h"
-#include "execution/trade_tape_shadow_adapter.h"
 #include "orderbook/orderbook.h"
 
 #include <cctype>
@@ -93,19 +104,6 @@ public:
     {
         state_ = lifecycle::opening;
 
-        // Step 3 wires the futures REST client, reconciler and kill switch.
-        // Until then a live attempt against this provider would silently
-        // fall through to the paper path, which is exactly the kind of
-        // confusion the live binary's compile-time gate exists to prevent.
-        if (mode_ == engine_mode::live)
-        {
-            std::cerr << "BinanceFuturesProvider: live execution not "
-                         "implemented yet (futures step 3); refusing to "
-                         "open. Use --mode shadow or backtest meanwhile.\n";
-            state_ = lifecycle::error;
-            return false;
-        }
-
         std::cerr << "  BinanceFuturesProvider: "
                   << (endpoints_.is_testnet ? "[TESTNET] " : "")
                   << "ws=" << endpoints_.ws_host << ":" << endpoints_.ws_port
@@ -167,7 +165,106 @@ public:
         if (fee_model_)
             binance_exec_->set_fee_model(fee_model_);
 
-        if (mode_ == engine_mode::shadow)
+        if (mode_ == engine_mode::live && !api_key_.empty())
+        {
+            // Time path is the only routing-critical wiring difference
+            // from spot — every other endpoint is hardcoded inside the
+            // futures-specific bracket components.
+            rest_ = std::make_shared<BinanceRestClient>(
+                api_key_, api_secret_, rest_host, endpoints_.rest_port,
+                "/fapi/v1/time");
+
+            (void)rest_->resync_clock_now();
+
+            auto check = binance::verify_clock_skew(*rest_);
+            if (!check.ok)
+            {
+                std::cerr << "BinanceFuturesProvider: refusing to go live — "
+                          << check.note << "\n";
+                state_ = lifecycle::error;
+                return false;
+            }
+
+            // Symbol existence probe; futures testnet's symbol set drifts
+            // from prod and a typo otherwise surfaces as -1121 mid-stream.
+            {
+                auto info = rest_->get_unsigned(
+                    "/fapi/v1/exchangeInfo", "symbol=" + upper(symbol_));
+                if (info.status < 200 || info.status >= 300)
+                {
+                    std::cerr << "BinanceFuturesProvider: refusing to go "
+                                 "live — symbol '" << upper(symbol_)
+                              << "' not found on "
+                              << (endpoints_.is_testnet ? "testnet " : "")
+                              << "exchangeInfo (HTTP " << info.status
+                              << "): " << info.body.substr(0, 160) << "\n";
+                    state_ = lifecycle::error;
+                    return false;
+                }
+            }
+
+            // Hedge mode is the cleanest place to refuse: every order
+            // would otherwise need a `positionSide` argument the encoder
+            // does not emit, and the engine's lot bookkeeping is built
+            // around netted (one-way) positions. Operators must flip the
+            // account back to one-way mode in the Binance UI.
+            {
+                auto resp = rest_->get("/fapi/v1/positionSide/dual", "");
+                if (resp.status < 200 || resp.status >= 300)
+                {
+                    std::cerr << "BinanceFuturesProvider: refusing to go "
+                                 "live — /fapi/v1/positionSide/dual HTTP "
+                              << resp.status << ": "
+                              << resp.body.substr(0, 160) << "\n";
+                    state_ = lifecycle::error;
+                    return false;
+                }
+                if (binance::extract_sv_bool(resp.body, "dualSidePosition"))
+                {
+                    std::cerr << "BinanceFuturesProvider: refusing to go "
+                                 "live — account is in hedge mode "
+                                 "(dualSidePosition=true). Switch to "
+                                 "one-way mode in the Binance UI.\n";
+                    state_ = lifecycle::error;
+                    return false;
+                }
+            }
+
+            minter_ = std::make_shared<ClientOrderIdMinter>("tt", seed_);
+
+            // Spot's order rate is 50/10s; futures is more permissive
+            // (~300/10s) but the conservative bucket avoids surprises and
+            // matches what live spot has been validated against.
+            order_rate_limiter_ = std::make_shared<TokenBucketRateLimiter>(
+                /*capacity=*/50.0, /*refill_per_sec=*/5.0);
+
+            reconciler_ = std::make_shared<BinanceFuturesReconciler>(
+                rest_, upper(symbol_), endpoints_.is_testnet);
+            kill_switch_ = std::make_shared<BinanceFuturesKillSwitch>(
+                rest_, upper(symbol_), minter_);
+
+            ExecutionBridge::deps d;
+            d.order_tx = make_binance_rest_order_transport(rest_);
+            d.fill_tx  = std::make_shared<BinanceUserDataTransport>(
+                             rest_, endpoints_.ws_host, endpoints_.ws_port,
+                             binance_keepalive_policy{},
+                             "/fapi/v1/listenKey");
+            d.encoder  = std::make_shared<BinanceFuturesOrderEncoder>(symbol_);
+            d.parser   = std::make_shared<BinanceFuturesUserDataParser>();
+            d.order_rate_limiter = order_rate_limiter_;
+            d.client_id_fn = [m = minter_](uint64_t) { return m->next(); };
+
+            bridge_ = std::make_shared<ExecutionBridge>(std::move(d));
+            if (!bridge_->open())
+            {
+                std::cerr << "BinanceFuturesProvider: ExecutionBridge open "
+                             "failed: " << bridge_->last_error() << "\n";
+                state_ = lifecycle::error;
+                return false;
+            }
+            executor_ = bridge_;
+        }
+        else if (mode_ == engine_mode::shadow)
         {
             shadow_exec_ = std::make_shared<TradeTapeShadowAdapter>(
                 wire_latency_model_, fee_model_);
@@ -194,6 +291,7 @@ public:
     void close() override
     {
         if (transport_) transport_->close();
+        if (bridge_)    bridge_->close();
         state_ = lifecycle::closed;
     }
 
@@ -214,6 +312,9 @@ public:
         else if (binance_exec_)
             binance_exec_->set_last_price(mid_price);
     }
+
+    std::shared_ptr<IReconciler> get_reconciler() override { return reconciler_; }
+    std::shared_ptr<IKillSwitch> get_kill_switch() override { return kill_switch_; }
 
     bool supports_event_stream() const override
     {
@@ -256,7 +357,16 @@ private:
     std::shared_ptr<BinanceExecutor> binance_exec_;
     std::shared_ptr<HybridExecutor> hybrid_exec_;
     std::shared_ptr<TradeTapeShadowAdapter> shadow_exec_;
+    std::shared_ptr<ExecutionBridge> bridge_;
     std::shared_ptr<IExecutionAdapter> executor_;
+
+    // Live-only; null in shadow/backtest so accessors return nullptr
+    // and the engine installs its Noop defaults.
+    std::shared_ptr<BinanceRestClient> rest_;
+    std::shared_ptr<ClientOrderIdMinter> minter_;
+    std::shared_ptr<TokenBucketRateLimiter> order_rate_limiter_;
+    std::shared_ptr<BinanceFuturesReconciler> reconciler_;
+    std::shared_ptr<BinanceFuturesKillSwitch> kill_switch_;
 
     std::uint64_t seed_ = 0;
     std::string depth_stream_;
