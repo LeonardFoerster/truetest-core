@@ -26,6 +26,7 @@
 
 #include "providers/binance/binance_endpoints.h"
 #include "providers/binance/binance_futures_bracket_adapter.h"
+#include "providers/binance/binance_futures_dead_mans_switch.h"
 #include "providers/binance/binance_futures_reconciler.h"
 #include "providers/binance/binance_parser.h"
 #include "providers/binance/binance_rest_client.h"
@@ -231,6 +232,48 @@ TEST(BinanceFuturesTestnetLive, BracketAdapterRoundTrip)
         if (r.opener_order_id == opener) { still_present = true; break; }
     }
     EXPECT_FALSE(still_present) << "bracket survived cancel";
+}
+
+TEST(BinanceFuturesTestnetLive, DeadMansSwitchRoundTrip)
+{
+    auto cli = setup_or_skip("BinanceFuturesTestnetLive.DeadMansSwitchRoundTrip");
+    if (!cli) return;
+
+    // Tight intervals so the test finishes in ~1s. Production defaults
+    // would be (30000, 10000) — far too slow for CI but the wire
+    // contract is the same shape.
+    constexpr int64_t countdown_ms = 5000;
+    constexpr int64_t heartbeat_ms = 200;
+
+    auto dms = make_binance_futures_dead_mans_switch(
+        cli, "BTCUSDT", countdown_ms, heartbeat_ms);
+
+    // start() arms the server-side timer. Real failure here means the
+    // testnet rejected our signed POST or returned a 4xx — which is
+    // the exact regression this test exists to catch.
+    ASSERT_TRUE(dms->start())
+        << "DMS arm failed against the live testnet — auth, signing, or "
+           "wire format regressed";
+
+    const int64_t initial_beat =
+        dms->liveness_ts().load(std::memory_order_acquire);
+    EXPECT_GT(initial_beat, 0);
+
+    // Wait long enough for at least 2-3 heartbeat cycles. The liveness
+    // atomic must advance — that's the channel the watchdog reads.
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+
+    const int64_t later_beat =
+        dms->liveness_ts().load(std::memory_order_acquire);
+    EXPECT_GT(later_beat, initial_beat)
+        << "heartbeat thread did not refresh the timer against the "
+           "live testnet — investigate before defaulting DMS on";
+
+    // Disarm explicitly. Verifies the countdownTime=0 path is accepted.
+    dms->stop();
+    EXPECT_TRUE(dms->disarm())
+        << "DMS disarm POST failed — operator-driven shutdown would leak "
+           "an active server-side timer into the next session";
 }
 
 TEST(BinanceFuturesTestnetLive, ReconcilerRoundTrip)
