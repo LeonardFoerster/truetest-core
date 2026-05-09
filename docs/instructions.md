@@ -39,8 +39,9 @@ data through a strategy and orderbook pipeline.
 20. [Fee Models](#20-fee-models)
 21. [Risk Management](#21-risk-management)
 22. [Threading Model](#22-threading-model)
+23. [QuestDB Persistence](#23-questdb-persistence)
 24. [Event Pipeline](#24-event-pipeline)
-25. [SQLite Persistence](#25-sqlite-persistence)
+25. [Checkpointing & Determinism](#25-checkpointing--determinism)
 26. [Analytics & Reporting](#26-analytics--reporting)
 27. [Observability & Debugging](#27-observability--debugging)
 28. [Error Handling & Resilience](#28-error-handling--resilience)
@@ -62,7 +63,6 @@ data through a strategy and orderbook pipeline.
 | CMake | 3.22 | |
 | C++ compiler | C++23 support | GCC 13+, Clang 17+, MSVC 2022+. `CMAKE_CXX_STANDARD` is locked to 23; values below 23 are a fatal error. Extensions are OFF. |
 | Git | any | FetchContent clones dependencies at configure time |
-| libsqlite3-dev | any | Default ON; skip with `-DENABLE_SQLITE=OFF` |
 
 **Optional system packages** (only needed when the corresponding `ENABLE_*`
 flag is ON):
@@ -71,10 +71,14 @@ flag is ON):
 |---|---|---|
 | `libboost-dev`, `libboost-system-dev` | `sudo apt install libboost-all-dev` | `ENABLE_BINANCE`, `ENABLE_LIVE_DATA` |
 | `libssl-dev` (OpenSSL) | `sudo apt install libssl-dev` | `ENABLE_BINANCE` |
-| `libpq-dev` / `postgresql-server-dev-all` | `sudo apt install libpq-dev` | `ENABLE_POSTGRESQL` |
+| ncurses (`libncurses-dev`) | `sudo apt install libncurses-dev` | Rich tabbed dashboard on `engine_shadow` / `engine_live` |
 | Abseil | auto-fetched via CMake | `ENABLE_DEBUG` |
 | GoogleTest | auto-fetched via CMake | `BUILD_TESTS` |
 | Google Benchmark | auto-fetched via CMake | `ENABLE_BENCHMARKS` |
+
+QuestDB itself is a separate runtime daemon (Docker recipe in
+[§23](#23-questdb-persistence)); the engine's QuestDB client uses raw POSIX
+sockets, no system package needed at build time.
 
 ---
 
@@ -88,8 +92,8 @@ cmake --build build
 ```
 
 Produces the three engine binaries (`engine_backtest`, `engine_shadow`,
-`engine_live`) with CSV data sources, the core event pipeline, and SQLite
-persistence. SQLite is enabled by default and requires `libsqlite3-dev`.
+`engine_live`) with CSV data sources and the core event pipeline. No
+external libraries required.
 
 ### Full-featured build
 
@@ -98,7 +102,7 @@ cmake -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DENABLE_BINANCE=ON \
   -DENABLE_LIVE_DATA=ON \
-  -DENABLE_SQLITE=ON \
+  -DENABLE_QUESTDB=ON \
   -DENABLE_DEBUG=ON \
   -DBUILD_TESTS=ON
 cmake --build build -j$(nproc)
@@ -131,9 +135,8 @@ source files are compiled in. Optional dependencies are wired into the
 
 | Flag | Default | `HAS_*` define | System deps | Description |
 |---|---|---|---|---|
-| `ENABLE_SQLITE` | **ON** | `HAS_SQLITE` | libsqlite3 | SQLite persistence for trades, portfolio snapshots, and equity curves |
-| `ENABLE_POSTGRESQL` | OFF | `HAS_POSTGRESQL` | libpq + libpqxx (auto-fetched) | PostgreSQL/TimescaleDB storage backend. Auto-fetches vcpkg if `pg_config` is not on PATH. FetchContent pins libpqxx 7.9.2 |
-| `ENABLE_BINANCE` | OFF | `HAS_BINANCE` | Boost headers, OpenSSL | Binance spot exchange provider: live WebSocket streaming, REST execution, HMAC-SHA256 signing, historical kline backfill |
+| `ENABLE_QUESTDB` | OFF | `HAS_QUESTDB` | none (raw POSIX sockets) | QuestDB persistence backend: per-run capture of every order-lifecycle event via ILP/TCP + HTTP DDL. Activated at runtime by `--persist`. See [§23](#23-questdb-persistence) |
+| `ENABLE_BINANCE` | OFF | `HAS_BINANCE` | Boost headers, OpenSSL | Binance spot exchange provider: live WebSocket streaming, REST execution, HMAC-SHA256 signing, historical kline backfill, spot testnet support |
 | `ENABLE_LIVE_DATA` | OFF | `HAS_LIVE_DATA` | Boost.System | Generic WebSocket data feed via `websocket_data_source` |
 | `ENABLE_DEBUG` | OFF | `HAS_DEBUG` | Abseil 20240722.0 (auto-fetched) | Performance instrumentation: stage timers, memory info, hardware info, copy tracker, debug report |
 
@@ -265,7 +268,6 @@ the build audit header.
 | nlohmann/json | v3.11.3 | Config-file parsing and C API serialization (not hot-path) |
 | GoogleTest | v1.15.2 | Unit tests (`BUILD_TESTS=ON` only) |
 | Google Benchmark | v1.8.5 | Performance benchmarks (`ENABLE_BENCHMARKS=ON` only) |
-| libpqxx | 7.9.2 | PostgreSQL client (`ENABLE_POSTGRESQL=ON` only) |
 | Abseil | 20240722.0 | Debug instrumentation logging (`ENABLE_DEBUG=ON` only) |
 
 ---
@@ -395,14 +397,20 @@ All three binaries accept the same CLI.
 
 | Flag | Values | Default | Description |
 |---|---|---|---|
-| `--provider` | `local`, `binance` | none (TUI mode) | Data provider. Omit for interactive TUI |
+| `--provider` | `local`, `binance`, `binance-futures` | none (TUI mode) | Data provider. Omit for interactive TUI |
 | `--path` | file path | none | CSV file path for `local` provider. Accepts comma-separated paths for multi-symbol |
 | `--format` | `bar`, `tick` | auto-detected | Data format. Auto-detected for Binance based on `--stream` |
 | `--symbol` | string | none | Trading symbol (e.g. `btcusdt`) |
 | `--stream` | `trade`, `kline_1m`, `kline_5m`, `depth`, etc. | none | Stream type for Binance provider |
 | `--host` | hostname | exchange default | WebSocket host override |
 | `--port` | number | exchange default | Port override |
-| `--testnet` | flag | off | Route Binance to spot testnet (`stream.testnet.binance.vision`) |
+| `--testnet` | flag | off | Route to the testnet stack — spot (`stream.testnet.binance.vision`) for `binance`, USDT-M futures (`stream.binancefuture.com`) for `binance-futures` |
+| `--margin-type` | `ISOLATED`, `CROSSED` | empty (no check) | (`binance-futures` only) Expected margin type for advisory comparison. Empty disables the check |
+| `--margin-type-strict` | flag | off | (`binance-futures` only) Escalate margin-mode mismatch from advisory (warning) to refusal. Has no effect unless `--margin-type` is also set |
+| `--liquidation-warn-pct` | float | 0.05 | (`binance-futures` only) Warn at startup if any open position is within this fraction of liquidation. Set to 0 to disable |
+| `--max-notional` | float (USDT) | 0 (disabled) | (`binance-futures` only) Per-order notional cap: refuses if `\|post_qty\| × mark` exceeds this |
+| `--max-leverage` | float | 0 (disabled) | (`binance-futures` only) Per-order leverage cap: refuses if `post_notional / cash` exceeds this |
+| `--min-liq-distance-pct` | float | 0 (disabled) | (`binance-futures` only) Per-order minimum projected buffer to liquidation. 0.05 = 5%. See `docs/futures-testnet.md` for the approximation caveats |
 
 ### Binance credentials
 
@@ -476,8 +484,14 @@ Thread preset auto-selection:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--db` | `truetest.db` | SQLite database path |
-| `--no-db` | flag | Disable SQLite persistence entirely |
+| `--persist` | off | Activate QuestDB writes for this session. Requires `-DENABLE_QUESTDB=ON` at build time |
+| `--run-tag` | auto | Table prefix for the per-run tables. Auto: `run_<YYYYMMDD>_<HHMMSS>_<6 hex>`. User-supplied tags must match `[A-Za-z0-9_]{1,64}` |
+| `--run-notes` | empty | Free-form note recorded in `runs_meta` |
+| `--questdb-host` | `127.0.0.1` | Where to find the daemon |
+| `--questdb-ilp-port` | `9009` | InfluxDB Line Protocol ingest port (TCP) |
+| `--questdb-http-port` | `9000` | HTTP `/exec` port for DDL + queries |
+
+See [§23](#23-questdb-persistence) for schema, write pipeline, and example queries.
 
 ### Checkpointing
 
@@ -649,22 +663,29 @@ starting the engine or requiring data files.
 
 ## 15. Interactive TUI Mode
 
-Without `--provider` or `--replay`, TrueTest presents an interactive text
-menu. The menus walk you through:
+Two TUIs ship in the tree:
 
-1. **Strategy selection** — Mean Reversion, SMA, or MA Crossover
-2. **SMA period** — numeric input (default: 20)
-3. **Data source** — PostgreSQL (if compiled), CSV file, or Tick CSV file,
-   or Live WebSocket (if compiled)
-4. **Fee model** — Zero fees, Fixed fee, or Tiered (maker/taker)
-5. **Engine mode** — Backtest, Shadow, or Live (availability gated by binary)
+- **Setup menu** (`engine_backtest` only) — without `--provider` or
+  `--replay`, the backtest binary presents a numbered text menu that walks
+  through strategy selection, SMA period, data source (CSV or tick CSV;
+  Live WebSocket if `-DENABLE_LIVE_DATA=ON`), fee model, and engine mode.
+  Invalid input falls back to the default (typically option 1).
+- **Rich tabbed dashboard** (`engine_shadow`, `engine_live`) — when the
+  resolved status mode is TUI (default unless `--no-tui` /
+  `--status-format=plain` / `--status-format=ndjson`), shadow and live
+  binaries take over the terminal with an ncurses tabbed dashboard:
+  positions, lots, brackets, fills, debug counters. Operator hotkeys:
+  pause/resume, flatten, kill-switch (live only). Implementation in
+  `src/ui/tabbed_dashboard.{h,cpp}` + `src/ui/panels/`.
 
-Each menu shows numbered options. Enter the number and press Enter. Invalid
-input falls back to the default (typically option 1).
-
-PostgreSQL appears in the data source menu only when built with
-`-DENABLE_POSTGRESQL=ON`; it shows as unavailable otherwise. Live WebSocket
-likewise requires `-DENABLE_LIVE_DATA=ON`.
+| Flag | Effect |
+|---|---|
+| `--status-format auto` (default) | TUI when stdout is a tty, plain text otherwise |
+| `--status-format tui` | Force ncurses TUI |
+| `--status-format plain` | Line-buffered ANSI updates |
+| `--status-format ndjson` | One JSON event per line — pipe-friendly |
+| `--status-format off` | No status output |
+| `--no-tui` | Shortcut for `--status-format=plain` |
 
 ---
 
@@ -901,13 +922,81 @@ with HMAC-SHA256 and submitted to `/api/v3/order`. Always pair with tight
 `--max-daily-loss`, `--max-trades-per-hour`, and `--risk-unwind` so a bug
 cannot drain the account.
 
-For testnet:
+For testnet, see [§16.5](#165-binance-spot-testnet) below or
+[`docs/testnet.md`](testnet.md) for the full walkthrough.
+
+### 16.5 Binance spot testnet
+
+The spot testnet (`testnet.binance.vision`) is a Binance-operated sandbox:
+real-time market data, real signed REST/WebSocket protocols, demo balances.
+**Same code path as mainnet live** — the only differences are the
+endpoints, three testnet-specific refusal gates at provider open, the
+reconciler's monthly-reset tolerance, and the captcha (skipped on
+`--testnet`).
 
 ```bash
-./build/engine_live --provider binance --symbol btcusdt --stream trade \
-  --testnet --live --api-key "$KEY" --api-secret "$SECRET" \
-  --strategy sma --balance 10000
+export TRUETEST_BINANCE_API_KEY=<testnet-key>
+export TRUETEST_BINANCE_API_SECRET=<testnet-secret>
+
+./build/engine_live --provider binance --symbol btcusdt --stream kline_1m \
+  --testnet --live \
+  --strategy sma --sma-period 14 --balance 10000 \
+  --max-daily-loss 200 --max-trades-per-hour 20 --risk-unwind \
+  --persist --run-tag testnet_sma_smoke   # optional QuestDB capture
 ```
+
+#### Testnet-only refusals at `BinanceProvider::open()`
+
+- **Symbol existence** — unsigned `GET /api/v3/exchangeInfo?symbol=…`.
+  Refuses unknown / dropped symbols (testnet's symbol set is a smaller,
+  rotating subset of mainnet). Catches typos at startup, not mid-stream
+  as `-1121`.
+- **WAF SQL-keyword scan** — refuses if the minted `clientOrderId` prefix
+  contains `OR/AND/SELECT/DROP/UNION/--` (case-insensitive). Testnet's
+  WAF rejects any param containing those tokens.
+- **(existing) Clock skew** — refuses if drift > 2000 ms vs `/api/v3/time`.
+
+#### Reconciler's monthly-reset tolerance
+
+Binance wipes testnet balances roughly monthly. The reconciler detects
+the reset signature (venue ≈ 0, local > 0) and downgrades from
+"refuse to start" to a `[TESTNET-RESET]` warning so subsequent fills
+re-anchor local state. Mainnet reconciler unchanged.
+
+#### Pre-flight smoke test
+
+`tests/test_binance_testnet_live.cpp` runs an end-to-end REST round-trip
+when both env vars are set:
+
+```bash
+TRUETEST_TESTNET_KEY="$TRUETEST_BINANCE_API_KEY" \
+TRUETEST_TESTNET_SECRET="$TRUETEST_BINANCE_API_SECRET" \
+  ./build/test_engine --gtest_filter=BinanceTestnetLive.*
+```
+
+Resyncs the clock, probes `exchangeInfo`, fetches mark price, places and
+cancels a non-fillable `LIMIT BUY` at half mid. Without env vars the test
+prints a one-line skip notice and passes.
+
+#### Inspecting your run with QuestDB
+
+If you passed `--persist`, point a browser at `http://localhost:9000/`
+or query `/exec` directly. See [§23](#23-questdb-persistence) for schema.
+
+```bash
+RUN=testnet_sma_smoke
+curl -G "http://127.0.0.1:9000/exec" --data-urlencode \
+  "query=SELECT * FROM ${RUN}_fills ORDER BY ts DESC LIMIT 20"
+curl -G "http://127.0.0.1:9000/exec" --data-urlencode \
+  "query=SELECT * FROM ${RUN}_rejections"
+curl -G "http://127.0.0.1:9000/exec" --data-urlencode \
+  "query=SELECT LAST(final_equity), LAST(total_fills), LAST(total_rejections)
+   FROM runs_meta WHERE run_tag = '${RUN}'"
+```
+
+Full operational notes (gotchas, account-reset semantics, `MIN_NOTIONAL`
+threshold, futures-testnet scope, etc.) in
+[`docs/testnet.md`](testnet.md).
 
 ---
 
@@ -1183,18 +1272,7 @@ deleted and regenerated.
 Transparent — no CLI flag needed. A `<path>.cache` file is written alongside
 the data file on first run and picked up automatically afterwards.
 
-### 19.5 PostgreSQL
-
-Available with `-DENABLE_POSTGRESQL=ON`. Connects to a PostgreSQL database
-and loads OHLCV via SQL queries. Connection parameters are prompted in TUI
-mode (no dedicated CLI flag set yet):
-
-```bash
-./build/engine_backtest
-# Select: Data source → PostgreSQL, then enter host/db/user/password/query
-```
-
-### 19.6 WebSocket data source
+### 19.5 WebSocket data source
 
 Available with `-DENABLE_LIVE_DATA=ON`. Connects to a generic WebSocket
 endpoint for live streaming. The parser supports two JSON message formats:
@@ -1225,7 +1303,7 @@ dedicated CLI flag set:
 # Select: Data source → Live WebSocket, then enter host/port/symbol
 ```
 
-### 19.7 Multi-symbol backtesting
+### 19.6 Multi-symbol backtesting
 
 A single strategy (or a multi-strategy ensemble) can run across multiple
 symbols in the same run. Every symbol gets its own orderbook via
@@ -1735,64 +1813,14 @@ partial fills incrementally.
 
 ---
 
-## 25. SQLite Persistence
+## 25. Checkpointing & Determinism
 
-SQLite is enabled by default (`-DENABLE_SQLITE=ON`). It persists equity
-curve data and trade history to a local database file. Both equity points
-and fill records are batched into transactions (100 rows per txn) for
-improved write throughput.
+Two orthogonal features that pair well with QuestDB persistence
+([§23](#23-questdb-persistence)) for reproducible runs: in-process
+portfolio checkpoints (resume-after-crash) and seeded RNGs (byte-identical
+re-runs).
 
-```bash
-# Default path
-./build/engine_backtest --provider local --path data.csv
-# Creates truetest.db
-
-# Custom path
-./build/engine_backtest --provider local --path data.csv --db results.db
-
-# Disable
-./build/engine_backtest --provider local --path data.csv --no-db
-```
-
-Query with any SQLite client:
-
-```bash
-sqlite3 truetest.db ".tables"
-sqlite3 truetest.db "SELECT * FROM equity_curve ORDER BY timestamp DESC LIMIT 10;"
-```
-
-### 25.1 Run metadata (`runs` table)
-
-Every invocation that writes to SQLite also records a row in `runs`. A row
-is inserted when the engine starts and updated when it finishes with the
-final metrics — enabling run history and comparison across backtests without
-parsing JSON exports.
-
-Schema:
-
-```
-runs (
-  run_id       TEXT PRIMARY KEY,    -- "run_<wall_ms>_<counter>"
-  started_at   INTEGER NOT NULL,    -- wall-clock ms since epoch
-  ended_at     INTEGER,             -- wall-clock ms since epoch (null if still running)
-  config_json  TEXT NOT NULL,       -- compact {"mode","seed","initial_balance","threading","rolling_window"}
-  status       TEXT NOT NULL,       -- "running" | "completed" | "failed"
-  final_equity REAL,                -- end-of-run equity
-  sharpe       REAL,
-  max_drawdown REAL,
-  trade_count  INTEGER
-)
-```
-
-Query past runs:
-
-```bash
-sqlite3 truetest.db \
-  "SELECT run_id, status, final_equity, sharpe, max_drawdown, trade_count
-     FROM runs ORDER BY started_at DESC LIMIT 20;"
-```
-
-### 25.2 Portfolio checkpoints (resume-after-crash)
+### 25.1 Portfolio checkpoints (resume-after-crash)
 
 Long-running sessions can write periodic portfolio snapshots to a binary
 checkpoint file. On the next invocation, `--resume <path>` restores cash,
@@ -1827,7 +1855,7 @@ orderbook state, and in-flight pending orders are not restored — they
 rehydrate from the market data stream. For fully deterministic replay, pair
 `--resume` with `--seed <n>` and a recorded event log.
 
-### 25.3 Deterministic replay and RNG seeding
+### 25.2 Deterministic replay and RNG seeding
 
 When `--seed <n>` is non-zero, every stochastic component is initialized
 from that seed:
@@ -2090,29 +2118,7 @@ A successful `on_event()` resets the counter. Total errors via
 `Worker::error_count()`. Each worker exposes `worker_name()` used in log
 messages (e.g. `[WARN] [logging] on_event exception ...`).
 
-### 28.2 WebSocket input sanitization (N2)
-
-All incoming WebSocket commands are sanitized at the system boundary:
-
-- **Message length**: messages exceeding 4 KB are rejected with an error
-  response and logged.
-- **Null bytes**: messages containing `\0` are rejected.
-- **Control characters**: string fields (command, side, type, timeframe,
-  value) are checked for ASCII control characters (< 0x20, except tab).
-  Rejected.
-- **Numeric validation**: numeric fields (quantity, price) must contain
-  actual numeric data. Non-numeric values rejected with descriptive errors
-  rather than silently defaulting to 0.
-
-All rejections produce a structured error response:
-
-```json
-{"type": "error", "data": {"message": "message too large (max 4096 bytes)", "source": "ws_validator"}}
-```
-
-Rejections also logged under the `ws` component.
-
-### 28.3 Unified connection retry (N3)
+### 28.2 Unified connection retry (N2)
 
 Shared retry-with-exponential-backoff utility in
 `BacktestEngine/src/utils/retry.h`. All external connection points use this
@@ -2147,13 +2153,12 @@ Components using the shared utility:
 | Binance WebSocket | `binance_transport.h` | 5 attempts, 1s → 16s backoff |
 | Binance combined stream | `binance_combined_transport.h` | 5 attempts, 1s → 16s backoff |
 | Generic WebSocket source | `websocket_data_source.cpp` | 10 attempts, configurable delays |
-| PostgreSQL | `pg_data_source.cpp` | 5 attempts, 1s → 16s backoff |
 
 The callable returns `true` on success, `false` on failure. If it throws,
 the exception counts as a failure and is forwarded to `on_retry`. After all
 attempts are exhausted, the last exception is rethrown.
 
-### 28.4 Binance reliability hardening (Tier 1)
+### 28.3 Binance reliability hardening (Tier 1)
 
 Five independent hardening passes landed on `providers/binance/` to let a
 live session survive long-running operation without silent stalls. Every
@@ -2429,7 +2434,6 @@ message is available through `tt_last_error()` (thread-local).
 | `qty_scale` | number | `1e8` | Fractional-quantity scale factor |
 | `fill_rng_seed` | uint | `42` | Fill model RNG seed |
 | `spread_step_factor` | number | `0.0001` | Spread step (fraction of mid) |
-| `db_path` | string | `""` | Optional SQLite persistence path |
 | `event_log_path` | string | `""` | Optional binary event log path |
 | `params` | object | `{}` | `{key: number}` pairs forwarded to `strategy.set_param()` |
 
@@ -2529,10 +2533,10 @@ FetchContent caching.
 
 | Job | Compiler | Type | Extra flags | Purpose |
 |---|---|---|---|---|
-| `build` (matrix) | gcc-13, clang-17 | Debug, Release | `BUILD_TESTS=ON ENABLE_SQLITE=ON` | Core build + test across compilers and configs |
+| `build` (matrix) | gcc-13, clang-17 | Debug, Release | `BUILD_TESTS=ON` | Core build + test across compilers and configs |
 | `asan` | gcc-13 | Debug | `ENABLE_ASAN=ON ENABLE_UBSAN=ON` | Memory safety + undefined behavior |
 | `binance` | gcc-13 | Release | `ENABLE_BINANCE=ON` | Binance provider compilation + tests |
-| `postgresql` | gcc-13 | Release | `ENABLE_POSTGRESQL=ON` | PostgreSQL backend compilation + tests |
+| `questdb` | gcc-13 | Release | `ENABLE_QUESTDB=ON` | QuestDB persistence backend compilation + tests |
 | `format` | clang-format-17 | — | — | `clang-format --dry-run --Werror` on all sources |
 | `tidy` | clang-tidy-17 | Debug | `CMAKE_EXPORT_COMPILE_COMMANDS=ON` | Static analysis, warnings-as-errors |
 | `benchmarks` | gcc-13 | Release | `ENABLE_BENCHMARKS=ON` | Build + smoke-run benchmarks |
@@ -2588,24 +2592,23 @@ cmake --build build
 
 Running twice with the same `--seed` produces identical results.
 
-### 34.6 Backtest with PostgreSQL data source
+### 34.6 Backtest with QuestDB persistence
 
 ```bash
-cmake -B build -DENABLE_POSTGRESQL=ON
+cmake -B build -DENABLE_QUESTDB=ON
 cmake --build build
-./build/engine_backtest   # TUI mode — select PostgreSQL interactively
-```
 
-### 34.7 Backtest with SQLite persistence disabled
+# Start a local QuestDB (one-time, see §23 for Docker recipe)
+docker run --rm -d --name truetest-questdb \
+  -p 9000:9000 -p 9009:9009 questdb/questdb:latest
 
-```bash
-cmake -B build -DENABLE_SQLITE=OFF
-cmake --build build
 ./build/engine_backtest --provider local --path market_data.csv \
-  --strategy sma --no-db
+  --strategy sma --persist --run-tag sma_smoke --run-notes "first try"
+
+# Browse: http://127.0.0.1:9000/
 ```
 
-### 34.8 Binance paper trading
+### 34.7 Binance paper trading
 
 ```bash
 cmake -B build -DENABLE_BINANCE=ON
@@ -2614,22 +2617,38 @@ cmake --build build
   --strategy mean-reversion --backfill 1000
 ```
 
-### 34.9 Binance kline streaming with tiered fees
+### 34.8 Binance kline streaming with tiered fees
 
 ```bash
 ./build/engine_shadow --provider binance --symbol ethusdt --stream kline_1m \
   --fee tiered --maker-rate 0.001 --taker-rate 0.001 --balance 100000
 ```
 
-### 34.10 Binance testnet live execution
+### 34.9 Binance testnet live execution
+
+Same code path as mainnet live; the captcha is skipped because `--testnet`
+is set. See [`docs/testnet.md`](testnet.md) for the full walkthrough,
+account setup, refusal gates, and gotchas.
 
 ```bash
-./build/engine_live --provider binance --symbol btcusdt --stream trade \
-  --testnet --live --api-key "$KEY" --api-secret "$SECRET" \
-  --strategy sma --sma-period 14 --balance 10000
+cmake -B build -DENABLE_BINANCE=ON -DENABLE_QUESTDB=ON
+cmake --build build
+
+# (one-time) start local QuestDB; see §23
+docker run --rm -d --name truetest-questdb \
+  -p 9000:9000 -p 9009:9009 questdb/questdb:latest
+
+export TRUETEST_BINANCE_API_KEY=<testnet-key>
+export TRUETEST_BINANCE_API_SECRET=<testnet-secret>
+
+./build/engine_live --provider binance --symbol btcusdt --stream kline_1m \
+  --testnet --live \
+  --strategy sma --sma-period 14 --balance 10000 \
+  --max-daily-loss 200 --max-trades-per-hour 20 --risk-unwind \
+  --persist --run-tag testnet_sma_smoke
 ```
 
-### 34.11 Binance mainnet live execution
+### 34.10 Binance mainnet live execution
 
 ```bash
 ./build/engine_live --provider binance --symbol btcusdt --stream kline_1m \
@@ -2643,7 +2662,7 @@ cmake --build build
 # Skipped on --testnet.
 ```
 
-### 34.12 Record and replay Binance data
+### 34.11 Record and replay Binance data
 
 ```bash
 # Record
@@ -2655,7 +2674,7 @@ cmake --build build
   --replay-data btc_session.bin --strategy sma
 ```
 
-### 34.13 Binary event log: write, then replay
+### 34.12 Binary event log: write, then replay
 
 ```bash
 ./build/engine_backtest --provider local --path market_data.csv \
@@ -2664,14 +2683,14 @@ cmake --build build
 ./build/engine_backtest --replay events.bin
 ```
 
-### 34.14 Replay a time slice from an event log
+### 34.13 Replay a time slice from an event log
 
 ```bash
 ./build/engine_backtest --replay events.bin \
   --replay-from 1700000000000000 --replay-to 1700003600000000
 ```
 
-### 34.15 Portfolio checkpointing and resume
+### 34.14 Portfolio checkpointing and resume
 
 ```bash
 # Run with checkpointing
@@ -2683,7 +2702,7 @@ cmake --build build
   --resume portfolio.ckpt
 ```
 
-### 34.16 JSON config file with CLI override
+### 34.15 JSON config file with CLI override
 
 ```bash
 cat > backtest.json << 'EOF'
@@ -2710,23 +2729,23 @@ EOF
 ./build/engine_backtest --config backtest.json --balance 100000 --strategy mean-reversion
 ```
 
-### 34.17 Dry run and dump config
+### 34.16 Dry run and dump config
 
 ```bash
 ./build/engine_backtest --config backtest.json --dry-run
 ./build/engine_backtest --config backtest.json --balance 100000 --dump-config
 ```
 
-### 34.18 Full-featured Release build
+### 34.17 Full-featured Release build
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  -DENABLE_BINANCE=ON -DENABLE_SQLITE=ON \
+  -DENABLE_BINANCE=ON -DENABLE_QUESTDB=ON \
   -DENABLE_NATIVE_OPT=ON -DBUILD_TESTS=ON -DENABLE_BENCHMARKS=ON
 cmake --build build -j$(nproc)
 ```
 
-### 34.19 Debug build with ASAN + UBSAN
+### 34.18 Debug build with ASAN + UBSAN
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Debug \
@@ -2737,7 +2756,7 @@ UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1" \
   ctest --test-dir build --output-on-failure
 ```
 
-### 34.20 Debug build with TSAN
+### 34.19 Debug build with TSAN
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Debug \
@@ -2746,7 +2765,7 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
-### 34.21 Build with debug instrumentation (Abseil)
+### 34.20 Build with debug instrumentation (Abseil)
 
 ```bash
 cmake -B build -DENABLE_DEBUG=ON
@@ -2755,7 +2774,7 @@ cmake --build build
 # Writes truetest_debug.log with stage timers, memory, and hardware info.
 ```
 
-### 34.22 Build shared library for embedding
+### 34.21 Build shared library for embedding
 
 ```bash
 cmake -B build -DBUILD_SHARED_LIB=ON
@@ -2764,7 +2783,7 @@ ls build/libtruetest.so
 # Use from Python: ctypes.CDLL("build/libtruetest.so")
 ```
 
-### 34.23 Run benchmarks
+### 34.22 Run benchmarks
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_BENCHMARKS=ON
@@ -2772,21 +2791,21 @@ cmake --build build --target truetest_benchmarks
 ./build/truetest_benchmarks --benchmark_min_time=1s
 ```
 
-### 34.24 Threading preset override
+### 34.23 Threading preset override
 
 ```bash
 ./build/engine_backtest --provider local --path market_data.csv --strategy sma \
   --thread-preset extended --spin-policy spin --seed 42
 ```
 
-### 34.25 Disable CPU pinning (containers)
+### 34.24 Disable CPU pinning (containers)
 
 ```bash
 ./build/engine_backtest --provider local --path market_data.csv --strategy sma \
   --no-pin
 ```
 
-### 34.26 Export results to CSV
+### 34.25 Export results to CSV
 
 ```bash
 ./build/engine_backtest --provider local --path market_data.csv --strategy sma \
@@ -2794,7 +2813,7 @@ cmake --build build --target truetest_benchmarks
 # Produces results.csv (equity) + results_trades.csv (trade log)
 ```
 
-### 34.27 Custom risk limits
+### 34.26 Custom risk limits
 
 ```bash
 ./build/engine_backtest --provider local --path market_data.csv --strategy sma \
@@ -2803,7 +2822,7 @@ cmake --build build --target truetest_benchmarks
   --max-trades-per-hour 120 --max-orders-per-minute 30 --risk-unwind
 ```
 
-### 34.28 Log rotation
+### 34.27 Log rotation
 
 ```bash
 ./build/engine_shadow --provider binance --symbol btcusdt --stream trade \
@@ -2812,28 +2831,28 @@ cmake --build build --target truetest_benchmarks
 # Rotates event and text logs at 100 MB, keeps last 10 files.
 ```
 
-### 34.30 CMake preset — Linux
+### 34.28 CMake preset — Linux
 
 ```bash
 cmake --preset linux-default
 cmake --build out/build/linux-default
 ```
 
-### 34.31 CMake preset — Windows Ninja
+### 34.29 CMake preset — Windows Ninja
 
 ```cmd
 cmake --preset windows-ninja
 cmake --build out/build/windows-ninja
 ```
 
-### 34.32 CMake preset — Windows Visual Studio
+### 34.30 CMake preset — Windows Visual Studio
 
 ```cmd
 cmake --preset windows-vs-2022
 cmake --build out/build/windows-vs-2022 --config Release
 ```
 
-### 34.33 start.sh dev mode
+### 34.31 start.sh dev mode
 
 ```bash
 chmod +x start.sh
@@ -2843,7 +2862,7 @@ chmod +x start.sh
 # provider, strategy, etc.
 ```
 
-### 34.34 Install via CPack
+### 34.32 Install via CPack
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -2852,7 +2871,7 @@ cd build && cpack -G TGZ
 # Produces truetest-0.1.0-Linux.tar.gz with bin/ containing all three engine binaries.
 ```
 
-### 34.35 Install to prefix
+### 34.33 Install to prefix
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/truetest
@@ -2862,7 +2881,7 @@ cmake --install build
 # If BUILD_SHARED_LIB=ON: libtruetest.so to lib/, truetest_api.h to include/truetest/
 ```
 
-### 34.36 Production-style live run
+### 34.34 Production-style live run
 
 ```bash
 ./build/engine_live \
