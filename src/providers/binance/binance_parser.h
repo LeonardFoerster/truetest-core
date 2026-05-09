@@ -88,7 +88,28 @@ inline bool extract_sv_bool(std::string_view json, std::string_view key)
     if (colon == std::string_view::npos) return false;
     std::size_t pos = colon + 1;
     detail::skip_ws(json, pos);
-    return pos < json.size() && json[pos] == 't';
+    // Require an exact `true` literal (lowercase, JSON spec). The previous
+    // version returned true on any value starting with `t`, which would
+    // mis-classify e.g. `"truncated"` as boolean true.
+    if (pos + 4 > json.size()) return false;
+    return json.compare(pos, 4, "true") == 0;
+}
+
+// Distinguishes "exactly true", "exactly false", and "missing or
+// malformed". Callers that proceed on an unknown response (e.g.
+// position-mode safety gate) should use this and refuse on nullopt.
+inline std::optional<bool> extract_sv_optional_bool(std::string_view json,
+                                                    std::string_view key)
+{
+    auto colon = detail::find_key(json, key);
+    if (colon == std::string_view::npos) return std::nullopt;
+    std::size_t pos = colon + 1;
+    detail::skip_ws(json, pos);
+    if (pos + 4 <= json.size() && json.compare(pos, 4, "true") == 0)
+        return true;
+    if (pos + 5 <= json.size() && json.compare(pos, 5, "false") == 0)
+        return false;
+    return std::nullopt;
 }
 
 inline bool parse_double_sv(std::string_view sv, double& out)

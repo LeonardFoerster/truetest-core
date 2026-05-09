@@ -198,23 +198,40 @@ TEST(BinanceFuturesBracketAdapter, CancelHitsBothLegEndpointsWithSymbol)
     auto del  = std::make_shared<fake_caller>();
     del->default_resp = {200, "{}"};
 
-    BinanceFuturesBracketAdapter a(wrap(post), wrap(del),
-                                    /*get=*/nullptr, "btcusdt");
+    BinanceFuturesBracketAdapter a(wrap(post), wrap(del));
 
+    // Symbol now travels with the handles, populated by place()
+    // / list_open() at runtime. Tests construct it directly here.
     truetest::exits::bracket_handles h;
     h.sl_exchange_id = "111";
     h.tp_exchange_id = "222";
+    h.symbol         = "BTCUSDT";
     a.cancel(7, h);
 
     ASSERT_EQ(del->log.size(), 2u);
     EXPECT_EQ(del->log[0].first, "/fapi/v1/order");
     EXPECT_EQ(del->log[1].first, "/fapi/v1/order");
-    // /fapi/v1/order DELETE requires symbol; adapter must include it
-    // (and uppercase it, matching the rest of the wire format).
     EXPECT_NE(del->log[0].second.find("symbol=BTCUSDT"), std::string::npos);
     EXPECT_NE(del->log[1].second.find("symbol=BTCUSDT"), std::string::npos);
     EXPECT_NE(del->log[0].second.find("orderId=111"),    std::string::npos);
     EXPECT_NE(del->log[1].second.find("orderId=222"),    std::string::npos);
+}
+
+TEST(BinanceFuturesBracketAdapter, PlacePopulatesHandlesSymbol)
+{
+    auto post = std::make_shared<fake_caller>();
+    post->responses = {
+        {200, R"({"orderId":111,"clientOrderId":"tt-fb-sl-7"})"},
+        {200, R"({"orderId":222,"clientOrderId":"tt-fb-tp-7"})"},
+    };
+    auto del = std::make_shared<fake_caller>();
+
+    BinanceFuturesBracketAdapter a(wrap(post), wrap(del));
+    auto h = a.place(7, make_long_intent(7, 100.0, 110.0), 105.0);
+
+    // Symbol is uppercased (matches the wire format) and travels with
+    // the handles for downstream cancel().
+    EXPECT_EQ(h.symbol, "BTCUSDT");
 }
 
 TEST(BinanceFuturesBracketAdapter, CancelEmptyHandlesIsNoop)

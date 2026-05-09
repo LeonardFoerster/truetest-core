@@ -35,6 +35,36 @@ TEST(BinanceParser, ExtractBool)
     EXPECT_FALSE(binance::extract_bool(json, "missing"));
 }
 
+// Tightened parser: only an exact lowercase `true` is true; anything
+// else (including substrings starting with 't' like "truncated", and
+// uppercase "True") is treated as not-true. The previous behavior
+// returned true on any value starting with 't', which mis-classified
+// truncated WAF responses as boolean true on the safety gates.
+TEST(BinanceParser, ExtractBoolRequiresExactTrue)
+{
+    EXPECT_TRUE(binance::extract_sv_bool(R"({"x":true})", "x"));
+    EXPECT_FALSE(binance::extract_sv_bool(R"({"x":false})", "x"));
+    EXPECT_FALSE(binance::extract_sv_bool(R"({"x":True})", "x"));
+    EXPECT_FALSE(binance::extract_sv_bool(R"({"x":truncated})", "x"));
+    EXPECT_FALSE(binance::extract_sv_bool(R"({"x":tru})", "x"));
+    EXPECT_FALSE(binance::extract_sv_bool(R"({"y":true})", "x"));
+}
+
+TEST(BinanceParser, ExtractOptionalBoolDistinguishesMissing)
+{
+    auto t = binance::extract_sv_optional_bool(R"({"x":true})", "x");
+    ASSERT_TRUE(t.has_value());
+    EXPECT_TRUE(*t);
+
+    auto f = binance::extract_sv_optional_bool(R"({"x":false})", "x");
+    ASSERT_TRUE(f.has_value());
+    EXPECT_FALSE(*f);
+
+    EXPECT_FALSE(binance::extract_sv_optional_bool(R"({"x":True})", "x").has_value());
+    EXPECT_FALSE(binance::extract_sv_optional_bool(R"({"x":tru})", "x").has_value());
+    EXPECT_FALSE(binance::extract_sv_optional_bool(R"({"y":true})", "x").has_value());
+}
+
 // --- Trade parsing tests ---
 
 TEST(BinanceParser, ParseTradeMessage)

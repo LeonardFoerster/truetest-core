@@ -47,22 +47,13 @@ public:
     using request_fn = std::function<response(std::string_view endpoint,
                                               std::string_view params)>;
 
-    // `symbol` is the futures contract this adapter manages (e.g. BTCUSDT).
-    // Required because /fapi/v1/order DELETE needs a symbol param, and
-    // bracket_handles do not carry it (the type is shared with spot OCO,
-    // whose cancel-orderList path doesn't need it). One adapter per
-    // provider per symbol — matches how providers are constructed today.
     BinanceFuturesBracketAdapter(request_fn post,
                                  request_fn del,
-                                 request_fn get = nullptr,
-                                 std::string symbol = "")
+                                 request_fn get = nullptr)
         : post_(std::move(post))
         , del_(std::move(del))
         , get_(std::move(get))
-        , symbol_(upper(std::move(symbol)))
     {}
-
-    void set_symbol(std::string sym) { symbol_ = upper(std::move(sym)); }
 
     truetest::exits::bracket_caps capabilities() const override
     {
@@ -118,6 +109,8 @@ public:
                                *intent.stop_loss, sl_cli, opener_order_id);
         if (sl_id.empty()) return handles;
         handles.sl_exchange_id = sl_id;
+        handles.symbol = symbol;  // populated even on partial-leg success
+                                  // so cancel() can scrub a hanging SL
 
         auto tp_id = place_leg("TAKE_PROFIT_MARKET", symbol, side,
                                *intent.take_profit, tp_cli, opener_order_id);
@@ -154,18 +147,17 @@ public:
         for (const auto& l : legs)
         {
             if (!*l.id) continue;
-            // /fapi/v1/order DELETE requires symbol. Adapter holds it
-            // from construction (per-provider per-symbol invariant). If
-            // a future multi-symbol setup needs to span symbols here,
-            // bracket_handles or the IBracketAdapter contract has to
-            // carry symbol — at that point this branch becomes the
-            // forcing function for that change.
+            // /fapi/v1/order DELETE requires symbol. handles.symbol is
+            // populated by place() and list_open(); empty here means
+            // the caller constructed the handles themselves without
+            // the field set, in which case we fall through to a
+            // symbol-less request and let the venue surface 4xx.
             std::string params;
-            if (!symbol_.empty())
+            if (!handles.symbol.empty())
             {
-                params.reserve(symbol_.size() + 32);
+                params.reserve(handles.symbol.size() + 32);
                 params.append("symbol=", 7);
-                params.append(symbol_);
+                params.append(handles.symbol);
                 params.append("&orderId=", 9);
             }
             else
@@ -263,6 +255,7 @@ public:
 
             rb.opener_order_id = opener;
             rb.symbol = symbol;
+            rb.handles.symbol = symbol;
             rb.close_side = (side == "SELL") ? order_side::sell : order_side::buy;
             // closePosition=true emits qty=0 in openOrders; only believe
             // it if non-zero to avoid clobbering a legitimate value from
@@ -302,7 +295,6 @@ private:
     request_fn post_;
     request_fn del_;
     request_fn get_;
-    std::string symbol_;
 
     // Returns the orderId on success, "" on failure (caller treats as decline).
     std::string place_leg(const char* type,
@@ -368,8 +360,7 @@ private:
 };
 
 inline std::shared_ptr<BinanceFuturesBracketAdapter>
-make_binance_futures_bracket_adapter(std::shared_ptr<BinanceRestClient> client,
-                                     std::string symbol = "")
+make_binance_futures_bracket_adapter(std::shared_ptr<BinanceRestClient> client)
 {
     auto post = [client](std::string_view ep, std::string_view p)
         -> BinanceFuturesBracketAdapter::response
@@ -390,8 +381,7 @@ make_binance_futures_bracket_adapter(std::shared_ptr<BinanceRestClient> client,
         return {r.status, r.body};
     };
     return std::make_shared<BinanceFuturesBracketAdapter>(
-        std::move(post), std::move(del), std::move(get),
-        std::move(symbol));
+        std::move(post), std::move(del), std::move(get));
 }
 
 #endif // HAS_BINANCE

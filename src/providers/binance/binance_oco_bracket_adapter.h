@@ -128,6 +128,7 @@ public:
         if (list_id.empty())
             list_id = binance::extract_string(resp.body, "listClientOrderId");
         if (!list_id.empty()) handles.oco_list_id = list_id;
+        handles.symbol = symbol;
 
         // Pull the two leg orderIds out of orderReports so we can map
         // inbound fills back to opener_order_id without depending on
@@ -207,6 +208,7 @@ public:
             truetest::exits::IBracketAdapter::recovered_bracket rb;
             rb.opener_order_id = opener;
             rb.symbol          = symbol;
+            rb.handles.symbol  = symbol;
             rb.handles.oco_list_id = order_list_id.empty() ? list_cli : order_list_id;
 
             for (const auto& leg_id : leg_ids)
@@ -270,7 +272,19 @@ public:
         for (const auto* id : { &handles.sl_exchange_id, &handles.tp_exchange_id })
         {
             if (!*id) continue;
-            std::string params = "orderId=" + **id;
+            std::string params;
+            if (!handles.symbol.empty())
+            {
+                params.reserve(handles.symbol.size() + 32);
+                params.append("symbol=", 7);
+                params.append(handles.symbol);
+                params.append("&orderId=", 9);
+            }
+            else
+            {
+                params.append("orderId=", 8);
+            }
+            params.append(**id);
             auto resp = del_("/api/v3/order", params);
             if (resp.status >= 400)
                 std::cerr << "BinanceOcoBracketAdapter: per-leg cancel(orderId="

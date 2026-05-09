@@ -234,7 +234,23 @@ public:
                     state_ = lifecycle::error;
                     return false;
                 }
-                if (binance::extract_sv_bool(resp.body, "dualSidePosition"))
+                auto dual = binance::extract_sv_optional_bool(
+                    resp.body, "dualSidePosition");
+                if (!dual.has_value())
+                {
+                    // Malformed / missing field: refuse rather than
+                    // proceed assuming one-way mode. A truncated WAF
+                    // response or schema change would otherwise sneak
+                    // a hedge-mode account past the gate silently.
+                    std::cerr << "BinanceFuturesProvider: refusing to go "
+                                 "live — /fapi/v1/positionSide/dual "
+                                 "response missing or malformed "
+                                 "dualSidePosition field: "
+                              << resp.body.substr(0, 160) << "\n";
+                    state_ = lifecycle::error;
+                    return false;
+                }
+                if (*dual)
                 {
                     std::cerr << "BinanceFuturesProvider: refusing to go "
                                  "live — account is in hedge mode "
@@ -282,8 +298,7 @@ public:
                 rest_, upper(symbol_), endpoints_.is_testnet);
             kill_switch_ = std::make_shared<BinanceFuturesKillSwitch>(
                 rest_, upper(symbol_), minter_);
-            bracket_adapter_ = make_binance_futures_bracket_adapter(
-                rest_, upper(symbol_));
+            bracket_adapter_ = make_binance_futures_bracket_adapter(rest_);
 
             ExecutionBridge::deps d;
             d.order_tx = make_binance_rest_order_transport(rest_);

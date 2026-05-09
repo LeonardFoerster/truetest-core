@@ -24,6 +24,14 @@ struct bracket_handles
     // (Binance OCO listClientOrderId / orderListId).
     std::optional<std::string> oco_list_id;
 
+    // Symbol the brackets were placed against (uppercase). Required by
+    // venues that scope cancel by symbol+orderId (Binance futures
+    // /fapi/v1/order DELETE) — without this, the adapter would have to
+    // stash a single symbol on construction, which doesn't generalize
+    // to multi-symbol providers. Empty when handles haven't been
+    // populated by place() / list_open() yet.
+    std::string symbol;
+
     bool empty() const
     {
         return !sl_exchange_id && !tp_exchange_id && !oco_list_id;
