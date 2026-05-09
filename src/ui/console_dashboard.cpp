@@ -363,6 +363,38 @@ void ConsoleDashboard::push_event(event_severity sev, std::string_view msg)
     slot.seq.store(idx * 2 + 2, std::memory_order_release);
 }
 
+std::vector<ConsoleDashboard::recent_event_view>
+ConsoleDashboard::recent_events_snapshot(std::size_t max_count) const
+{
+    std::vector<recent_event_view> out;
+    if (max_count == 0) return out;
+
+    const std::uint64_t head = recent_head_.load(std::memory_order_acquire);
+    const std::uint64_t take = (std::min)(static_cast<std::uint64_t>(max_count),
+                                          head);
+    out.reserve(take);
+    for (std::uint64_t i = take; i > 0; --i)
+    {
+        const std::uint64_t idx      = head - i;
+        const std::uint64_t expected = idx * 2 + 2;
+        const auto& slot = recent_[idx % recent_cap];
+
+        const std::uint64_t s1 = slot.seq.load(std::memory_order_acquire);
+        if (s1 != expected) continue;
+        event_entry tmp = slot.entry;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const std::uint64_t s2 = slot.seq.load(std::memory_order_relaxed);
+        if (s2 != expected) continue;
+
+        recent_event_view v;
+        v.ts  = tmp.ts;
+        v.sev = tmp.sev;
+        v.msg.assign(tmp.msg, tmp.msg_len);
+        out.push_back(std::move(v));
+    }
+    return out;
+}
+
 void ConsoleDashboard::render_banner()
 {
     if (resolved_mode_ == output_mode::off) return;
@@ -394,6 +426,32 @@ void ConsoleDashboard::update_rate_ema(std::uint64_t now_events,
     rate_ema_ = (rate_ema_ == 0.0) ? inst : alpha * inst + (1.0 - alpha) * rate_ema_;
     last_sample_time_ = now;
     last_sample_events_ = now_events;
+
+    // Push the smoothed rate into the rolling history ring. One sample
+    // per render tick is enough resolution for a 60-cell sparkline.
+    rate_history_[rate_history_head_] = rate_ema_;
+    rate_history_head_ = (rate_history_head_ + 1) % rate_history_cap;
+    if (rate_history_count_ < rate_history_cap) ++rate_history_count_;
+}
+
+std::vector<double> ConsoleDashboard::rate_tail(std::size_t n) const
+{
+    std::vector<double> out;
+    if (n == 0 || rate_history_count_ == 0) return out;
+
+    const std::size_t take = std::min(n, rate_history_count_);
+    out.reserve(take);
+
+    // Walk back from head_ by `take` positions; head_ points at the
+    // next slot to write, so the most recent value is at (head-1) mod cap.
+    const std::size_t start = (rate_history_head_ + rate_history_cap - take)
+                              % rate_history_cap;
+    for (std::size_t i = 0; i < take; ++i)
+    {
+        const std::size_t idx = (start + i) % rate_history_cap;
+        out.push_back(rate_history_[idx]);
+    }
+    return out;
 }
 
 void ConsoleDashboard::render_loop()

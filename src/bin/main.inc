@@ -36,16 +36,16 @@
 #include "utils/log/logger.h"
 #include <tt/truetest_version.h>
 
-#ifdef HAS_POSTGRESQL
-#include "data/pg_data_source.h"
-#endif
-
 #include "providers/provider_registry.h"
 #include "providers/data_bridge.h"
 #include "providers/provider_sink.h"
 #include "providers/local/csv_parser.h"
 #include "providers/local/file_transport.h"
 #include "ui/console_dashboard.h"
+#ifdef HAS_RICH_TUI
+#include "ui/dashboard_snapshot.h"
+#include "ui/tabbed_dashboard.h"
+#endif
 
 #ifdef HAS_BINANCE
 #include "providers/binance/binance_parser.h"
@@ -221,10 +221,6 @@ struct cli_options
     double maker_rate = 0.0;
     double taker_rate = 0.0;
 
-    bool enable_web_ui = false;
-    uint16_t ws_port = 8765;
-    bool ws_compress = true;
-
     std::string symbol;
     std::string stream;
     std::string api_key;
@@ -241,9 +237,6 @@ struct cli_options
     double risk_fraction = 0.02;
     double sl_pct = 0.005;
     double tp_pct = 0.01;
-
-    std::string db_path = "truetest.db";
-    bool no_db = false;
 
     std::string checkpoint_path;
     std::string resume_path;
@@ -290,6 +283,15 @@ struct cli_options
     int risk_max_trades_per_hour = 0;
     int risk_max_orders_per_minute = 0;
     bool risk_unwind = false;
+
+#ifdef HAS_QUESTDB
+    bool persist = false;
+    std::string run_tag;
+    std::string run_notes;
+    std::string questdb_host = "127.0.0.1";
+    std::uint16_t questdb_ilp_port = 9009;
+    std::uint16_t questdb_http_port = 9000;
+#endif
 };
 
 static std::vector<std::string> split_csv(const std::string& s)
@@ -431,9 +433,12 @@ static void load_config_file(const std::string& path, cli_options& o)
     auto get_bool = [&](const char* k, bool& out) {
         if (j.contains(k) && j[k].is_boolean()) out = j[k].get<bool>();
     };
-    auto get_u16 = [&](const char* k, uint16_t& out) {
-        if (j.contains(k) && j[k].is_number_unsigned()) out = j[k].get<uint16_t>();
+#ifdef HAS_QUESTDB
+    auto get_u16 = [&](const char* k, std::uint16_t& out) {
+        if (j.contains(k) && j[k].is_number_unsigned())
+            out = static_cast<std::uint16_t>(j[k].get<unsigned>());
     };
+#endif
 
     get_str("replay", o.replay_path);
     get_str("log_events", o.event_log_path);
@@ -449,9 +454,6 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_double("fee_value", o.fee_value);
     get_double("maker_rate", o.maker_rate);
     get_double("taker_rate", o.taker_rate);
-    get_bool("web_ui", o.enable_web_ui);
-    get_u16("ws_port", o.ws_port);
-    get_bool("ws_compress", o.ws_compress);
     get_str("symbol", o.symbol);
     get_str("stream", o.stream);
     get_str("api_key", o.api_key);
@@ -463,7 +465,6 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_bool("live", o.live);
     get_bool("testnet", o.testnet);
     get_str("mode", o.mode);
-    get_str("db", o.db_path);
     get_double("balance", o.balance);
     get_double("risk_fraction", o.risk_fraction);
     get_double("sl", o.sl_pct);
@@ -499,6 +500,14 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_int("wire_latency_us", o.wire_latency_us);
     get_str("output", o.output);
     get_str("output_format", o.output_format);
+#ifdef HAS_QUESTDB
+    get_bool("persist", o.persist);
+    get_str("run_tag", o.run_tag);
+    get_str("run_notes", o.run_notes);
+    get_str("questdb_host", o.questdb_host);
+    get_u16("questdb_ilp_port", o.questdb_ilp_port);
+    get_u16("questdb_http_port", o.questdb_http_port);
+#endif
 }
 
 static void dump_config(const cli_options& o)
@@ -518,9 +527,6 @@ static void dump_config(const cli_options& o)
     j["fee_value"] = o.fee_value;
     j["maker_rate"] = o.maker_rate;
     j["taker_rate"] = o.taker_rate;
-    j["web_ui"] = o.enable_web_ui;
-    j["ws_port"] = o.ws_port;
-    j["ws_compress"] = o.ws_compress;
     j["symbol"] = o.symbol;
     j["stream"] = o.stream;
     j["host"] = o.host;
@@ -530,7 +536,6 @@ static void dump_config(const cli_options& o)
     j["live"] = o.live;
     j["testnet"] = o.testnet;
     j["mode"] = o.mode.empty() ? TT_DEFAULT_MODE : o.mode;
-    j["db"] = o.db_path;
     j["balance"] = o.balance;
     j["risk_fraction"] = o.risk_fraction;
     j["sl"] = o.sl_pct;
@@ -549,6 +554,14 @@ static void dump_config(const cli_options& o)
         {"max_trades_per_hour", o.risk_max_trades_per_hour},
         {"max_orders_per_minute", o.risk_max_orders_per_minute}
     };
+#ifdef HAS_QUESTDB
+    j["persist"] = o.persist;
+    j["run_tag"] = o.run_tag;
+    j["run_notes"] = o.run_notes;
+    j["questdb_host"] = o.questdb_host;
+    j["questdb_ilp_port"] = o.questdb_ilp_port;
+    j["questdb_http_port"] = o.questdb_http_port;
+#endif
     std::cout << j.dump(2) << "\n";
 }
 
@@ -579,11 +592,6 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--maker-rate", o.maker_rate, "Maker fee rate (tiered)");
     app.add_option("--taker-rate", o.taker_rate, "Taker fee rate (tiered)");
 
-    app.add_flag("--web-ui", o.enable_web_ui, "Enable WebSocket UI server");
-    app.add_option("--ws-port", o.ws_port, "WebSocket server port")->default_val(8765);
-    app.add_flag("--ws-compress,!--no-ws-compress", o.ws_compress,
-                 "Enable per-message deflate compression (default: on)");
-
     app.add_option("--symbol", o.symbol, "Trading symbol (e.g., BTCUSDT)");
     app.add_option("--stream", o.stream, "Stream type: trade, kline, or interval");
     app.add_option("--depth-stream", o.depth_stream,
@@ -606,9 +614,6 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--risk-fraction", o.risk_fraction, "Position size as equity fraction")->default_val(0.02);
     app.add_option("--sl", o.sl_pct, "Stop loss fraction of entry price")->default_val(0.005);
     app.add_option("--tp", o.tp_pct, "Take profit fraction of entry price")->default_val(0.01);
-
-    app.add_option("--db", o.db_path, "SQLite database path")->default_val("truetest.db");
-    app.add_flag("--no-db", o.no_db, "Disable SQLite persistence");
 
     app.add_option("--checkpoint", o.checkpoint_path,
                    "Write periodic portfolio checkpoint to this binary file");
@@ -683,6 +688,24 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Live status display: auto, tui, plain, ndjson, off (default: auto)")
         ->default_val("auto");
     app.add_flag("--no-tui", o.no_tui, "Shortcut for --status-format=plain");
+
+#ifdef HAS_QUESTDB
+    app.add_flag("--persist", o.persist,
+                 "Write every order lifecycle event to QuestDB for this session");
+    app.add_option("--run-tag", o.run_tag,
+                   "Table prefix for this run (auto-generated if omitted)");
+    app.add_option("--run-notes", o.run_notes,
+                   "Free-form note stored with the run metadata");
+    app.add_option("--questdb-host", o.questdb_host,
+                   "QuestDB host (default 127.0.0.1)")
+        ->default_val("127.0.0.1");
+    app.add_option("--questdb-ilp-port", o.questdb_ilp_port,
+                   "QuestDB ILP ingest port (default 9009)")
+        ->default_val(9009);
+    app.add_option("--questdb-http-port", o.questdb_http_port,
+                   "QuestDB HTTP/DDL port (default 9000)")
+        ->default_val(9000);
+#endif
 }
 
 static void apply_config_overlay(CLI::App& app, cli_options& opts)
@@ -711,9 +734,6 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--fee-value")) opts.fee_value = file_opts.fee_value;
     if (!was_set("--maker-rate")) opts.maker_rate = file_opts.maker_rate;
     if (!was_set("--taker-rate")) opts.taker_rate = file_opts.taker_rate;
-    if (!was_set("--web-ui")) opts.enable_web_ui = file_opts.enable_web_ui;
-    if (!was_set("--ws-port")) opts.ws_port = file_opts.ws_port;
-    if (!was_set("--ws-compress")) opts.ws_compress = file_opts.ws_compress;
     if (!was_set("--symbol")) opts.symbol = file_opts.symbol;
     if (!was_set("--stream")) opts.stream = file_opts.stream;
     if (!was_set("--api-key")) opts.api_key = file_opts.api_key;
@@ -725,7 +745,6 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--live")) opts.live = file_opts.live;
     if (!was_set("--testnet")) opts.testnet = file_opts.testnet;
     if (!was_set("--mode")) opts.mode = file_opts.mode;
-    if (!was_set("--db")) opts.db_path = file_opts.db_path;
     if (!was_set("--balance")) opts.balance = file_opts.balance;
     if (!was_set("--risk-fraction")) opts.risk_fraction = file_opts.risk_fraction;
     if (!was_set("--sl")) opts.sl_pct = file_opts.sl_pct;
@@ -750,6 +769,14 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--daily-reset-hour")) opts.risk_daily_reset_hour = file_opts.risk_daily_reset_hour;
     if (!was_set("--max-trades-per-hour")) opts.risk_max_trades_per_hour = file_opts.risk_max_trades_per_hour;
     if (!was_set("--max-orders-per-minute")) opts.risk_max_orders_per_minute = file_opts.risk_max_orders_per_minute;
+#ifdef HAS_QUESTDB
+    if (!was_set("--persist")) opts.persist = file_opts.persist;
+    if (!was_set("--run-tag")) opts.run_tag = file_opts.run_tag;
+    if (!was_set("--run-notes")) opts.run_notes = file_opts.run_notes;
+    if (!was_set("--questdb-host")) opts.questdb_host = file_opts.questdb_host;
+    if (!was_set("--questdb-ilp-port")) opts.questdb_ilp_port = file_opts.questdb_ilp_port;
+    if (!was_set("--questdb-http-port")) opts.questdb_http_port = file_opts.questdb_http_port;
+#endif
 }
 
 static int run_dry_run(const cli_options& o)
@@ -776,11 +803,7 @@ static int run_dry_run(const cli_options& o)
                             string_to_spin_policy(resolved_spin));
     std::cout << "    Provider:   " << (o.provider_name.empty() ? "(TUI)" : o.provider_name) << "\n";
     std::cout << "    Data path:  " << (o.provider_path.empty() ? "(none)" : o.provider_path) << "\n";
-    std::cout << "    DB:         " << (o.db_path.empty() ? "(disabled)" : o.db_path) << "\n";
     std::cout << "    Fee model:  " << (o.fee_model.empty() ? "zero" : o.fee_model) << "\n";
-    std::cout << "    Web UI:     " << (o.enable_web_ui ? "yes" : "no") << "\n";
-    if (o.enable_web_ui)
-        std::cout << "    WS port:    " << o.ws_port << "\n";
     std::cout << "    Seed:       " << (o.seed == 0 ? "random" : std::to_string(o.seed)) << "\n";
     std::cout << "  ── Risk Limits ──\n";
     std::cout << "    Max drawdown:        " << (o.risk_max_drawdown * 100) << "%\n";
@@ -794,6 +817,19 @@ static int run_dry_run(const cli_options& o)
         std::cout << "    Max trades/hour:     " << o.risk_max_trades_per_hour << "\n";
     if (o.risk_max_orders_per_minute > 0)
         std::cout << "    Max orders/minute:   " << o.risk_max_orders_per_minute << "\n";
+#ifdef HAS_QUESTDB
+    std::cout << "    Persistence:    " << (o.persist ? "QuestDB" : "no") << "\n";
+    if (o.persist)
+    {
+        std::cout << "    QuestDB host:   " << o.questdb_host << "\n";
+        std::cout << "    ILP port:       " << o.questdb_ilp_port << "\n";
+        std::cout << "    HTTP port:      " << o.questdb_http_port << "\n";
+        std::cout << "    Run tag:        "
+                  << (o.run_tag.empty() ? "(auto)" : o.run_tag) << "\n";
+        if (!o.run_notes.empty())
+            std::cout << "    Run notes:      " << o.run_notes << "\n";
+    }
+#endif
     std::cout << "  ============================================\n";
 
     bool valid = true;
@@ -954,11 +990,7 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.log_max_files = o.log_keep;
     prov_cfg.disable_pinning = o.no_pin;
     prov_cfg.provider = provider;
-    prov_cfg.enable_web_ui = o.enable_web_ui;
-    prov_cfg.ws_port = o.ws_port;
-    prov_cfg.ws_compress = o.ws_compress;
     prov_cfg.initial_balance = o.balance;
-    prov_cfg.db_path = o.db_path;
     prov_cfg.checkpoint_path = o.checkpoint_path;
     prov_cfg.resume_checkpoint_path = o.resume_path;
     prov_cfg.checkpoint_interval_events = o.checkpoint_interval;
@@ -991,6 +1023,15 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.risk.max_trades_per_hour = o.risk_max_trades_per_hour;
     prov_cfg.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
     prov_cfg.risk_unwind = o.risk_unwind;
+
+#ifdef HAS_QUESTDB
+    prov_cfg.persist_enabled = o.persist;
+    prov_cfg.questdb_host = o.questdb_host;
+    prov_cfg.questdb_ilp_port = o.questdb_ilp_port;
+    prov_cfg.questdb_http_port = o.questdb_http_port;
+    prov_cfg.run_tag = o.run_tag;
+    prov_cfg.run_notes = o.run_notes;
+#endif
 
     if (o.testnet)
         prov_cfg.backfill_host = "testnet.binance.vision";
@@ -1213,13 +1254,64 @@ static int run_provider_mode(const cli_options& o)
 
         install_shutdown_handler();
 
+#ifdef HAS_RICH_TUI
+        // Rich (ncurses) tabbed dashboard for shadow/live binaries when the
+        // resolved status mode is TUI. ncurses takes over the terminal, so
+        // we skip render_banner() (it would be cleared on initscr) and skip
+        // the inner ConsoleDashboard render loop — the rich TUI reads from
+        // the same ConsoleDashboard atomics + recent-event ring, and pulls
+        // structured tables (positions, lots, ...) via engine::snapshot_dashboard.
+        std::unique_ptr<truetest::ui::TabbedDashboard> rich_tui;
+        if (dashboard && truetest::target_uses_rich_tui()
+            && dashboard->is_tui())
+        {
+            auto snap_fn = [&eng](truetest::ui::dashboard_snapshot& out) {
+                bool ok = eng.snapshot_dashboard(out);
+                if (ok) out.debug.target = truetest::target_name();
+                return ok;
+            };
+            rich_tui = std::make_unique<truetest::ui::TabbedDashboard>(
+                dashboard, snap_fn);
+
+            // Wire operator hotkey actions. Pause/flatten always available;
+            // kill switch comes from the provider when one supplies it
+            // (Binance does — backtest does not).
+            truetest::ui::operator_actions ops;
+            ops.pause_toggle = [&eng]() {
+                eng.set_pause_all(!eng.is_pause_all());
+            };
+            ops.pause_state  = [&eng]() { return eng.is_pause_all(); };
+            ops.flatten      = [&eng]() { eng.request_flatten(); };
+            if (provider) {
+                if (auto ks = provider->get_kill_switch()) {
+                    ops.kill = [ks](std::chrono::milliseconds dl) {
+                        return ks->cancel_all_and_flatten(dl);
+                    };
+                }
+            }
+            rich_tui->set_actions(std::move(ops));
+        }
+#endif
+
         if (dashboard)
         {
-            dashboard->render_banner();
-            dashboard->push_event(
-                truetest::ui::event_severity::notice,
-                "engine starting");
-            dashboard->start();
+#ifdef HAS_RICH_TUI
+            if (rich_tui)
+            {
+                dashboard->push_event(
+                    truetest::ui::event_severity::notice,
+                    "engine starting");
+                rich_tui->start();
+            }
+            else
+#endif
+            {
+                dashboard->render_banner();
+                dashboard->push_event(
+                    truetest::ui::event_severity::notice,
+                    "engine starting");
+                dashboard->start();
+            }
         }
 
         // Unified event-stream path — provider-agnostic. When the provider
@@ -1270,7 +1362,11 @@ static int run_provider_mode(const cli_options& o)
 
         if (dashboard)
         {
-            dashboard->stop();
+#ifdef HAS_RICH_TUI
+            if (rich_tui) rich_tui->stop();
+            else
+#endif
+                dashboard->stop();
         }
 
         // Skip the multi-line analytics report when the TUI owns stdout —
@@ -1410,14 +1506,8 @@ static int run_tui_mode(const cli_options& o)
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  |  Data Source                               |\n";
     std::cout << "  +-------------------------------------------+\n";
-#ifdef HAS_POSTGRESQL
-    std::cout << "  |  [1]  PostgreSQL Database                  |\n";
-#else
-    std::cout << "  |  [1]  PostgreSQL (unavailable)             |\n";
-    std::cout << "  |       build with -DENABLE_POSTGRESQL=ON    |\n";
-#endif
-    std::cout << "  |  [2]  CSV File (OHLCV)                     |\n";
-    std::cout << "  |  [3]  Tick CSV File                        |\n";
+    std::cout << "  |  [1]  CSV File (OHLCV)                     |\n";
+    std::cout << "  |  [2]  Tick CSV File                        |\n";
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  > ";
     int data_choice;
@@ -1425,29 +1515,20 @@ static int run_tui_mode(const cli_options& o)
 
     std::unique_ptr<IDataSource> source;
 
-    if (data_choice == 2)
+    if (data_choice == 1)
     {
         std::cout << "\n  CSV path: ";
         std::string csv_path;
         std::cin >> csv_path;
         source = std::make_unique<CsvDataSource>(csv_path);
     }
-    else if (data_choice == 3)
+    else if (data_choice == 2)
     {
         std::cout << "\n  Tick CSV path: ";
         std::string tick_path;
         std::cin >> tick_path;
         source = std::make_unique<TickCsvDataSource>(tick_path);
     }
-#ifdef HAS_POSTGRESQL
-    else if (data_choice == 1)
-    {
-        auto pg = std::make_unique<PgDataSource>();
-        pg->establish_connection();
-        pg->test_connection();
-        source = std::make_unique<BinaryCacheSource>(std::move(pg), "data_cache.bin");
-    }
-#endif
     else
     {
         std::cout << "  ! Invalid choice.\n";
@@ -1473,7 +1554,6 @@ static int run_tui_mode(const cli_options& o)
     config.log_max_bytes = o.log_max_size_mb * 1024ull * 1024ull;
     config.log_max_files = o.log_keep;
     config.disable_pinning = o.no_pin;
-    config.db_path = o.db_path;
     config.checkpoint_path = o.checkpoint_path;
     config.resume_checkpoint_path = o.resume_path;
     config.checkpoint_interval_events = o.checkpoint_interval;
@@ -1622,15 +1702,11 @@ int main(int argc, char* argv[])
              TRUETEST_BUILD_TIMESTAMP, TRUETEST_BUILD_TYPE,
              TRUETEST_CXX_COMPILER);
     LOG_INFO("audit",
-             "deps cli11=%s zstd=%s nlohmann=%s gtest=%s bench=%s "
-             "libpqxx=%s abseil=%s",
+             "deps cli11=%s zstd=%s nlohmann=%s gtest=%s bench=%s abseil=%s",
              TRUETEST_DEP_CLI11, TRUETEST_DEP_ZSTD, TRUETEST_DEP_NLOHMANN,
-             TRUETEST_DEP_GTEST, TRUETEST_DEP_BENCHMARK,
-             TRUETEST_DEP_LIBPQXX, TRUETEST_DEP_ABSEIL);
+             TRUETEST_DEP_GTEST, TRUETEST_DEP_BENCHMARK, TRUETEST_DEP_ABSEIL);
 
     apply_config_overlay(app, opts);
-
-    if (opts.no_db) opts.db_path.clear();
 
     if (opts.dump_config_flag) { dump_config(opts); return 0; }
     if (opts.dry_run) return run_dry_run(opts);

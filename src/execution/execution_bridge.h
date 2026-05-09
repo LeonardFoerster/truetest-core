@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -44,6 +45,53 @@ public:
         IFillTransport::lifecycle state = IFillTransport::lifecycle::closed;
         std::string note;
     };
+
+    // Hook for venue-managed orders that we never submitted ourselves
+    // (e.g. Binance OCO legs placed by BinanceOcoBracketAdapter). The
+    // bridge's by_client_id_ lookup misses for these. If a handler is
+    // installed, the bridge invokes it and, if it returns a synth_result,
+    // enqueues the fill alongside normal fills AND records the
+    // (engine_order_id → opener_order_id + strategy) metadata for the
+    // engine to register in its order_meta_ on the main thread.
+    //
+    // Handler runs on the fill transport's worker thread → must be
+    // thread-safe. ExitManager's venue lookups are mutex-guarded; the
+    // engine-side OrderIdGenerator::next() is atomic.
+    struct synth_result
+    {
+        fill_event    fill;
+        std::uint64_t opener_order_id = 0;
+        std::string   strategy_name;
+    };
+    using unknown_fill_handler =
+        std::function<std::optional<synth_result>(const parsed_exec&,
+                                                  std::uint64_t fill_id)>;
+
+    struct synth_meta
+    {
+        std::uint64_t engine_order_id  = 0;
+        std::uint64_t opener_order_id  = 0;
+        std::string   strategy_name;
+    };
+
+    void set_unknown_fill_handler(unknown_fill_handler h)
+    {
+        std::lock_guard<std::mutex> lk(handler_mu_);
+        unknown_fill_handler_ = std::move(h);
+    }
+
+    // Engine drains this BEFORE poll_fills so order_meta_ has the
+    // mapping ready when lookup_opener fires inside the fill loop.
+    bool poll_synth_meta(std::vector<synth_meta>& out)
+    {
+        std::lock_guard<std::mutex> lk(synth_mu_);
+        if (pending_synth_meta_.empty()) return false;
+        out.insert(out.end(),
+                   std::make_move_iterator(pending_synth_meta_.begin()),
+                   std::make_move_iterator(pending_synth_meta_.end()));
+        pending_synth_meta_.clear();
+        return true;
+    }
 
     explicit ExecutionBridge(deps d)
         : d_(std::move(d))
@@ -214,6 +262,23 @@ private:
         double total_qty = 0.0;
         double tracked_cumulative = 0.0;
         {
+            bool unknown = false;
+            {
+                std::lock_guard<std::mutex> lk(map_mu_);
+                auto cit = by_client_id_.find(msg.client_order_id);
+                if (cit == by_client_id_.end())
+                    unknown = true;
+                else
+                    engine_id = cit->second;
+            }
+            if (unknown)
+            {
+                // Unknown client_id but we may still recognize the
+                // exchange_order_id as a venue-managed bracket leg.
+                // Defer to the engine-supplied handler.
+                dispatch_unknown_fill(msg);
+                return;
+            }
             std::lock_guard<std::mutex> lk(map_mu_);
             auto cit = by_client_id_.find(msg.client_order_id);
             if (cit == by_client_id_.end()) return;
@@ -282,6 +347,39 @@ private:
         pending_status_.push_back({st, std::string(note)});
     }
 
+    void dispatch_unknown_fill(const parsed_exec& msg)
+    {
+        unknown_fill_handler handler;
+        {
+            std::lock_guard<std::mutex> lk(handler_mu_);
+            handler = unknown_fill_handler_;
+        }
+        if (!handler) return;
+        if (msg.exchange_order_id.empty()) return;
+
+        std::uint64_t fill_id;
+        {
+            std::lock_guard<std::mutex> lk(fills_mu_);
+            fill_id = next_fill_id_++;
+        }
+
+        auto sr = handler(msg, fill_id);
+        if (!sr) return;
+
+        // Record meta first so the engine can register in order_meta_
+        // before processing the fill. Both queues use their own mutex
+        // — the meta is shorter-lived (drained before fills each tick).
+        {
+            std::lock_guard<std::mutex> lk(synth_mu_);
+            pending_synth_meta_.push_back(synth_meta{
+                sr->fill.get_order_id(),
+                sr->opener_order_id,
+                sr->strategy_name});
+        }
+        std::lock_guard<std::mutex> lk(fills_mu_);
+        pending_fills_.push_back(std::move(sr->fill));
+    }
+
     static std::string make_client_id(uint64_t engine_order_id)
     {
         return "tt-" + std::to_string(engine_order_id);
@@ -314,4 +412,10 @@ private:
 
     mutable std::mutex error_mu_;
     std::string last_error_;
+
+    mutable std::mutex handler_mu_;
+    unknown_fill_handler unknown_fill_handler_;
+
+    std::mutex synth_mu_;
+    std::vector<synth_meta> pending_synth_meta_;
 };

@@ -31,46 +31,28 @@ double mean_reversion_strategy::compute_quantity(double price) const
     return equity_ * risk_fraction_ / price;
 }
 
-namespace {
-
-truetest::exits::exit_intent make_long_exit_intent(
-    const std::string& symbol, double entry, double qty,
-    double sl_pct, double tp_pct)
-{
-    truetest::exits::exit_intent ei;
-    ei.symbol       = symbol;
-    ei.close_side   = order_side::sell;
-    ei.qty          = qty;
-    if (sl_pct > 0.0) ei.stop_loss   = entry * (1.0 - sl_pct);
-    if (tp_pct > 0.0) ei.take_profit = entry * (1.0 + tp_pct);
-    ei.strategy_name = "mean-reversion";
-    return ei;
-}
-
-} // namespace
-
+// Exits are owned by the engine's ExitManager via the bracket registered
+// at entry — there is intentionally no signal-based SELL here. A previous
+// version closed when price crossed back above the SMA, but that always
+// fired before TP and competed with SL, leaving the bracket effectively
+// dead. SL and TP now behave as independent triggers per entry.
 std::optional<order_event> mean_reversion_strategy::on_market(const market_event& mkt)
 {
     auto& sma = get_sma(mkt.get_symbol());
     auto sma_value = sma.update(mkt.get_close());
     if (!sma_value) return std::nullopt;
 
-    bool is_open = position_open_[mkt.get_symbol()];
+    if (position_open_[mkt.get_symbol()])  return std::nullopt;
+    if (mkt.get_close() >= *sma_value)     return std::nullopt;
+
     double qty = compute_quantity(mkt.get_close());
     if (qty <= 0.0) return std::nullopt;
 
-    if (!is_open && mkt.get_close() < *sma_value) {
-        double entry = mkt.get_close();
-        pending_intent_ = make_long_exit_intent(mkt.get_symbol(), entry, qty,
-                                                sl_pct_, tp_pct_);
-        return order_event(mkt.get_timestamp(), mkt.get_symbol(),
-                           order_type::market, order_side::buy, qty, entry);
-    }
-    if (is_open && mkt.get_close() > *sma_value) {
-        return order_event(mkt.get_timestamp(), mkt.get_symbol(),
-                           order_type::market, order_side::sell, qty, mkt.get_close());
-    }
-    return std::nullopt;
+    double entry = mkt.get_close();
+    pending_intent_ = truetest::exits::make_long_exit_intent(
+        mkt.get_symbol(), entry, qty, sl_pct_, tp_pct_, "mean-reversion");
+    return order_event(mkt.get_timestamp(), mkt.get_symbol(),
+                       order_type::market, order_side::buy, qty, entry);
 }
 
 std::optional<order_event> mean_reversion_strategy::on_tick(const tick_event& te)
@@ -79,22 +61,17 @@ std::optional<order_event> mean_reversion_strategy::on_tick(const tick_event& te
     auto sma_value = sma.update(te.get_price());
     if (!sma_value) return std::nullopt;
 
-    bool is_open = position_open_[te.get_symbol()];
+    if (position_open_[te.get_symbol()]) return std::nullopt;
+    if (te.get_price() >= *sma_value)    return std::nullopt;
+
     double qty = compute_quantity(te.get_price());
     if (qty <= 0.0) return std::nullopt;
 
-    if (!is_open && te.get_price() < *sma_value) {
-        double entry = te.get_price();
-        pending_intent_ = make_long_exit_intent(te.get_symbol(), entry, qty,
-                                                sl_pct_, tp_pct_);
-        return order_event(te.get_timestamp(), te.get_symbol(),
-                           order_type::market, order_side::buy, qty, entry);
-    }
-    if (is_open && te.get_price() > *sma_value) {
-        return order_event(te.get_timestamp(), te.get_symbol(),
-                           order_type::market, order_side::sell, qty, te.get_price());
-    }
-    return std::nullopt;
+    double entry = te.get_price();
+    pending_intent_ = truetest::exits::make_long_exit_intent(
+        te.get_symbol(), entry, qty, sl_pct_, tp_pct_, "mean-reversion");
+    return order_event(te.get_timestamp(), te.get_symbol(),
+                       order_type::market, order_side::buy, qty, entry);
 }
 
 std::optional<truetest::exits::exit_intent>

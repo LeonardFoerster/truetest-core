@@ -48,6 +48,32 @@ public:
     void log() const;
     void reset();
 
+    // Cheap snapshot for the live Debug tab. No mutex — stats_ is
+    // updated from the engine main thread; callers reading from the
+    // dashboard thread accept "eventually-consistent" values (no torn
+    // reads in practice on x86 for aligned uint64).
+    stage_stats snapshot(stage s) const
+    {
+        return stats_[static_cast<size_t>(s)];
+    }
+
+    static const char* stage_name(stage s)
+    {
+        switch (s) {
+            case stage::market_create:   return "market_create";
+            case stage::strategy:        return "strategy";
+            case stage::orderbook:       return "orderbook";
+            case stage::fill_processing: return "fill_processing";
+            case stage::ring_publish:    return "ring_publish";
+            case stage::risk_check:      return "risk_check";
+            case stage::mm_replenish:    return "mm_replenish";
+            case stage::stop_check:      return "stop_check";
+            case stage::pending_drain:   return "pending_drain";
+            case stage::COUNT:           return "?";
+        }
+        return "?";
+    }
+
 private:
     stage_stats stats_[static_cast<size_t>(stage::COUNT)] = {};
 };

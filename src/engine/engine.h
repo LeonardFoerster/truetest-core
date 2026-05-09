@@ -25,6 +25,12 @@
 #include "engine_config.h"
 
 namespace truetest::ui { struct streaming_stats; }
+#include "ui/dashboard_snapshot.h"
+
+#include <chrono>
+#include <deque>
+#include <mutex>
+#include <unordered_map>
 #include "core/event.h"
 #include "core/event_log.h"
 #include "types/order_id.h"
@@ -33,12 +39,8 @@ namespace truetest::ui { struct streaming_stats; }
 
 #include "debug/stage_timer.h"
 
-#ifdef HAS_SQLITE
-#include "data/sqlite_store.h"
-#endif
-
-#ifdef HAS_WEB_UI
-#include "ws_worker.h"
+#ifdef HAS_QUESTDB
+#include "data/questdb/store.h"
 #endif
 
 #ifdef HAS_DEBUG
@@ -116,12 +118,50 @@ private:
 
     void publish_event(const event_pointer& ev);
 
-#ifdef HAS_SQLITE
-    std::unique_ptr<SqliteStore> store_;
-    std::string current_run_id_;
-    void record_run_begin();
-    void record_run_end();
+#ifdef HAS_QUESTDB
+    std::shared_ptr<truetest::questdb::QuestdbStore> questdb_store_;
+    bool questdb_active_ = false;  // true only after successful begin()
+    std::size_t questdb_total_rejections_ = 0;
+
+    void questdb_begin();
+    void questdb_end();
 #endif
+
+    // Dashboard view: read from the rich (ncurses) TUI render thread.
+    // Filled on the event loop (no contention with the hot path) and
+    // swapped into the slot under a mutex; readers take a quick lock to
+    // copy. Refresh is debounced to ~100 ms aligned with the render tick.
+    mutable std::mutex                    dashboard_view_mu_;
+    truetest::ui::dashboard_snapshot      dashboard_view_;
+    bool                                  dashboard_view_initialised_ = false;
+    std::chrono::steady_clock::time_point dashboard_view_last_{};
+
+    // Memory-view cache. /proc/self/* parsing was the dominant cost of
+    // the snapshot path; refresh at ~1 Hz instead of every snapshot.
+    // mutable so build_dashboard_view (const) can update it.
+    mutable truetest::ui::dashboard_snapshot::memory_view memory_cache_{};
+    mutable std::chrono::steady_clock::time_point         memory_cache_last_{};
+    mutable bool                                          memory_cache_initialised_ = false;
+    std::chrono::milliseconds             dashboard_view_interval_{100};
+    void refresh_dashboard_view_if_due();
+    void build_dashboard_view(truetest::ui::dashboard_snapshot& out) const;
+
+    // Side caches for the rich TUI's Orders & Fills pane. Mutated on the
+    // event-loop thread alongside order_tracker_/portfolio_; copied into
+    // the snapshot during build_dashboard_view().
+    struct open_order_cache_entry
+    {
+        truetest::ui::dashboard_snapshot::open_order_row row{};
+        std::chrono::system_clock::time_point            ts{};
+    };
+    std::unordered_map<std::uint64_t, open_order_cache_entry> open_orders_cache_;
+    std::deque<truetest::ui::dashboard_snapshot::fill_row>    recent_fills_cache_;
+    static constexpr std::size_t kRecentFillsCap = 64;
+
+    void cache_open_order(const order_event& o);
+    void update_open_order_status(std::uint64_t id, const char* status);
+    void erase_open_order(std::uint64_t id);
+    void cache_fill(const fill_event& f);
 
     void write_checkpoint_if_due(std::size_t event_count);
     void restore_from_checkpoint();
@@ -136,8 +176,22 @@ private:
                                        const std::string& strategy_name,
                                        std::uint64_t order_id);
 
+    // Invoked by the engine on each fill-poll cycle to register any
+    // venue-bracket-leg metadata produced by the unknown_fill_handler
+    // installed on the provider's ExecutionBridge. Safe to call when
+    // there is no bridge — it just no-ops.
+    void drain_venue_bracket_meta();
+
     // Returns true if an exit fire caused the engine to halt.
     bool evaluate_exits(const std::string& symbol, double px,
+                        std::chrono::system_clock::time_point ts,
+                        std::size_t& event_count,
+                        std::int64_t recv_ns);
+
+    // Bar variant: probes the bar's low/high so an intra-bar wick through
+    // SL/TP fires the bracket. Tick paths keep the price-only overload.
+    bool evaluate_exits(const std::string& symbol,
+                        double low, double high, double close,
                         std::chrono::system_clock::time_point ts,
                         std::size_t& event_count,
                         std::int64_t recv_ns);
@@ -192,8 +246,28 @@ private:
 
     std::vector<std::pair<std::string, uint64_t>> day_order_ids_;
 
+    // Per-order metadata recorded at route time. Used when fills come back
+    // to route them to the right lot (opener_order_id) and to tag the lot
+    // with its owning strategy.
+    struct order_meta
+    {
+        uint64_t opener_order_id = 0;
+        std::string strategy_name;
+    };
+    std::unordered_map<uint64_t, order_meta> order_meta_;
+
+    void register_order_meta(const order_event& o);
+    uint64_t lookup_opener(uint64_t order_id) const;
+    const std::string& lookup_strategy_name(uint64_t order_id) const;
+
+    // Routes a fill back to the strategy that emitted the originating
+    // order, by matching strategy_name against primary/additional sets.
+    void dispatch_fill_to_strategy(const fill_event& f);
+
     std::atomic<bool> halt_flag_{false};
     std::atomic<bool> worker_failed_{false};
+    std::atomic<bool> pause_all_{false};
+    std::atomic<bool> flatten_request_{false};
 
     std::size_t logging_drops_ = 0;
     std::size_t risk_drops_ = 0;
@@ -219,22 +293,6 @@ private:
     std::unique_ptr<ObserverWorker> observer_worker_;
     std::unique_ptr<RiskStatsWorker> risk_stats_worker_;
     std::unique_ptr<MarketMakerWorker> mm_worker_;
-
-#ifdef HAS_WEB_UI
-    std::shared_ptr<EventRing> ws_ring_;
-    std::unique_ptr<WebSocketWorker> ws_worker_;
-    std::size_t ws_drops_ = 0;
-
-    void process_ws_commands(bool& halt_requested, std::size_t& event_count);
-    void broadcast_orderbook_snapshot(const std::string& symbol);
-    void send_state_snapshot();
-    void broadcast_market_with_indicators(const market_event& mkt);
-
-    std::chrono::steady_clock::time_point last_ob_snapshot_time_;
-
-    static constexpr std::size_t MAX_BAR_HISTORY = 1000;
-    std::vector<std::string> bar_history_;
-#endif
 
     std::mutex switch_mu_;
     std::string pending_symbol_;
@@ -272,6 +330,30 @@ public:
 
     void set_primary_strategy_name(const std::string& name) { primary_strategy_name_ = name; }
 
+    // Operator controls callable from the live TUI. Each is a single
+    // atomic action; the engine checks the flags from the hot path on
+    // the next event. Safe to invoke from any thread.
+    //
+    // Pause/resume: when paused, the engine still drains events and
+    // updates portfolio/analytics from inbound fills, but skips the
+    // strategy.on_market/on_tick calls so no new orders are emitted.
+    void set_pause_all(bool paused)
+    {
+        pause_all_.store(paused, std::memory_order_release);
+    }
+    bool is_pause_all() const
+    {
+        return pause_all_.load(std::memory_order_acquire);
+    }
+
+    // Flatten on demand: drains all open positions through the unwind
+    // path. Halts the engine afterwards (operator can resume by clearing
+    // the halt flag separately if desired).
+    void request_flatten()
+    {
+        flatten_request_.store(true, std::memory_order_release);
+    }
+
     void add_strategy(std::shared_ptr<IStrategy> strategy, const std::string& name)
     {
         if (!strategy) return;
@@ -291,6 +373,11 @@ public:
                          tick_side side, double price, int64_t new_qty);
     void print_summary();
     const Analytics& get_analytics() const;
+
+    // Fill `out` with a coherent dashboard snapshot. Returns false when no
+    // snapshot exists yet (engine just constructed; first refresh hasn't
+    // run). Mutex-protected; safe to call from any thread.
+    bool snapshot_dashboard(truetest::ui::dashboard_snapshot& out) const;
 
     std::shared_ptr<EventRing> get_logging_ring() const { return logging_ring_; }
     std::shared_ptr<EventRing> get_risk_ring() const { return risk_ring_; }

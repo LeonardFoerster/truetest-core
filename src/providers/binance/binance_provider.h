@@ -9,6 +9,7 @@
 #include "providers/provider.h"
 #include "providers/prepend_transport.h"
 #include "providers/binance/binance_kill_switch.h"
+#include "providers/binance/binance_oco_bracket_adapter.h"
 #include "providers/binance/binance_reconciler.h"
 #include "providers/binance/binance_combined_parser.h"
 #include "providers/binance/binance_combined_transport.h"
@@ -225,6 +226,7 @@ public:
                 endpoints_.is_testnet);
             kill_switch_ = std::make_shared<BinanceKillSwitch>(
                 rest_, upper(symbol_), assets.base, minter_);
+            bracket_adapter_ = make_binance_oco_bracket_adapter(rest_);
 
             ExecutionBridge::deps d;
             d.order_tx = make_binance_rest_order_transport(rest_);
@@ -296,6 +298,10 @@ public:
 
     std::shared_ptr<IReconciler> get_reconciler() override { return reconciler_; }
     std::shared_ptr<IKillSwitch> get_kill_switch() override { return kill_switch_; }
+    std::shared_ptr<truetest::exits::IBracketAdapter> get_bracket_adapter() override
+    {
+        return bracket_adapter_;
+    }
 
     // Only with depth — otherwise the single-stream parser is cheaper.
     bool supports_event_stream() const override
@@ -349,6 +355,7 @@ private:
     std::shared_ptr<TokenBucketRateLimiter> order_rate_limiter_;
     std::shared_ptr<BinanceReconciler> reconciler_;
     std::shared_ptr<BinanceKillSwitch> kill_switch_;
+    std::shared_ptr<BinanceOcoBracketAdapter> bracket_adapter_;
 
     std::uint64_t seed_ = 0;
     std::string depth_stream_;

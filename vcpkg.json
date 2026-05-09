@@ -11,30 +11,11 @@
                 "openssl"
             ]
         },
-        "web-ui": {
-            "description": "WebSocket UI server (Boost.Beast)",
-            "dependencies": [
-                "boost-beast",
-                "boost-asio"
-            ]
-        },
         "live-data": {
             "description": "Generic WebSocket data source (Boost.Beast)",
             "dependencies": [
                 "boost-beast",
                 "boost-asio"
-            ]
-        },
-        "postgresql": {
-            "description": "PostgreSQL storage backend",
-            "dependencies": [
-                "libpq"
-            ]
-        },
-        "sqlite": {
-            "description": "SQLite persistence",
-            "dependencies": [
-                "sqlite3"
             ]
         }
     }

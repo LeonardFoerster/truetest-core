@@ -6,13 +6,15 @@
 #
 # The rule, per prerequisites.md §11:
 #   * Small header/source-only libs  → FetchContent with pinned tag
-#   * Large system libs (Boost, OpenSSL, PostgreSQL, SQLite) → find_package
+#   * Large system libs (Boost, OpenSSL) → find_package
 #
 # Public surface:
 #   tt_fetch_dependencies()          # core deps (always fetched)
 #   tt_fetch_tests_dependencies()    # GoogleTest
 #   tt_fetch_bench_dependencies()    # Google Benchmark
 #   tt_wire_optional_backends(target)   # optional ENABLE_* deps per target
+#   tt_wire_rich_tui(target)            # ncurses-backed tabbed dashboard
+#                                       # (call on engine_shadow / engine_live)
 #
 # Why PUBLIC scope in tt_wire_optional_backends:
 #   It is called exactly once — on `engine_core` (an OBJECT library). Every
@@ -87,86 +89,10 @@ function(tt_fetch_bench_dependencies)
     FetchContent_MakeAvailable(benchmark)
 endfunction()
 
-# ── PostgreSQL helper (fetches vcpkg on platforms missing pg_config) ────────
-function(_tt_ensure_vcpkg_for_postgres)
-    find_program(_pg_config NAMES pg_config)
-    if(_pg_config OR DEFINED CMAKE_TOOLCHAIN_FILE)
-        return()
-    endif()
-
-    message(STATUS "pg_config not found — fetching vcpkg for PostgreSQL...")
-    set(_vcpkg_dir "${CMAKE_CURRENT_BINARY_DIR}/_vcpkg")
-
-    if(NOT EXISTS "${_vcpkg_dir}/.git")
-        execute_process(
-            COMMAND git clone --depth 1 --branch 2025.04.09
-                    https://github.com/microsoft/vcpkg.git "${_vcpkg_dir}"
-            RESULT_VARIABLE _git_result)
-        if(NOT _git_result EQUAL 0)
-            message(FATAL_ERROR
-                "vcpkg clone failed (${_git_result}). Install libpq manually.")
-        endif()
-    endif()
-
-    set(_vcpkg_exe "${_vcpkg_dir}/vcpkg")
-    if(WIN32)
-        string(APPEND _vcpkg_exe ".exe")
-    endif()
-
-    if(NOT EXISTS "${_vcpkg_exe}")
-        if(WIN32)
-            execute_process(
-                COMMAND           "${_vcpkg_dir}/bootstrap-vcpkg.bat" -disableMetrics
-                WORKING_DIRECTORY "${_vcpkg_dir}"
-                RESULT_VARIABLE   _vcpkg_result)
-        else()
-            execute_process(
-                COMMAND           sh "${_vcpkg_dir}/bootstrap-vcpkg.sh" -disableMetrics
-                WORKING_DIRECTORY "${_vcpkg_dir}"
-                RESULT_VARIABLE   _vcpkg_result)
-        endif()
-        if(NOT _vcpkg_result EQUAL 0)
-            message(FATAL_ERROR
-                "vcpkg bootstrap failed (${_vcpkg_result}). "
-                "Install libpq-dev / postgresql-libs manually.")
-        endif()
-    endif()
-
-    set(CMAKE_TOOLCHAIN_FILE
-        "${_vcpkg_dir}/scripts/buildsystems/vcpkg.cmake"
-        CACHE STRING "vcpkg toolchain" FORCE)
-    message(STATUS "vcpkg toolchain: ${CMAKE_TOOLCHAIN_FILE}")
-endfunction()
-
 # ── tt_wire_optional_backends(target) ───────────────────────────────────────
 # Call this ONCE on engine_core (the OBJECT library). PUBLIC usage-requirements
 # propagate to every executable / test / benchmark that links engine_core.
 function(tt_wire_optional_backends target)
-    # PostgreSQL backend
-    if(ENABLE_POSTGRESQL)
-        _tt_ensure_vcpkg_for_postgres()
-        find_package(PostgreSQL REQUIRED)
-
-        if(NOT TARGET pqxx)
-            FetchContent_Declare(
-                libpqxx
-                GIT_REPOSITORY https://github.com/jtv/libpqxx.git
-                GIT_TAG        7.9.2
-            )
-            set(SKIP_BUILD_AUDIT ON CACHE BOOL "" FORCE)
-            FetchContent_MakeAvailable(libpqxx)
-        endif()
-
-        target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/src/data/pg_data_source.cpp)
-        target_include_directories(${target} PUBLIC ${PostgreSQL_INCLUDE_DIRS})
-        target_link_libraries(${target} PUBLIC pqxx ${PostgreSQL_LIBRARIES})
-        target_compile_definitions(${target} PUBLIC HAS_POSTGRESQL)
-        if(WIN32)
-            target_link_libraries(${target} PUBLIC ws2_32 secur32)
-        endif()
-    endif()
-
     # Generic WebSocket data feed
     if(ENABLE_LIVE_DATA)
         find_package(Boost REQUIRED COMPONENTS system)
@@ -174,13 +100,6 @@ function(tt_wire_optional_backends target)
             ${CMAKE_SOURCE_DIR}/src/data/websocket_data_source.cpp)
         target_link_libraries(${target} PUBLIC Boost::system)
         target_compile_definitions(${target} PUBLIC HAS_LIVE_DATA)
-    endif()
-
-    # WebSocket UI
-    if(ENABLE_WEB_UI)
-        find_package(Boost REQUIRED)
-        target_link_libraries(${target} PUBLIC Boost::headers)
-        target_compile_definitions(${target} PUBLIC HAS_WEB_UI)
     endif()
 
     # Binance exchange provider
@@ -195,14 +114,22 @@ function(tt_wire_optional_backends target)
         target_compile_definitions(${target} PUBLIC HAS_BINANCE)
     endif()
 
-    # SQLite persistence
-    if(ENABLE_SQLITE)
-        find_package(SQLite3 REQUIRED)
+    # QuestDB persistence (raw POSIX sockets, zero external deps).
+    if(ENABLE_QUESTDB)
         target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/src/data/sqlite_store.cpp)
-        target_link_libraries(${target} PUBLIC SQLite3::SQLite3)
-        target_compile_definitions(${target} PUBLIC HAS_SQLITE)
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/tcp_client.cpp
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/http_client.cpp
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/ilp_writer.cpp
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/schema.cpp
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/run_tag.cpp
+            ${CMAKE_SOURCE_DIR}/src/data/questdb/store.cpp)
+        target_compile_definitions(${target} PUBLIC HAS_QUESTDB)
     endif()
+
+    # Rich (ncurses) TUI dashboard for shadow/live binaries. Wired here for
+    # consistency with the optional-backend pattern, but the tt_wire_rich_tui
+    # function below is the actual entry point — engine_core is target-agnostic
+    # and must not link Curses (engine_backtest binary doesn't ship the rich TUI).
 
     # Debug instrumentation (Abseil)
     if(ENABLE_DEBUG)
@@ -228,4 +155,29 @@ function(tt_wire_optional_backends target)
             absl::flags absl::flags_parse absl::strings absl::str_format)
         target_compile_definitions(${target} PUBLIC HAS_DEBUG)
     endif()
+endfunction()
+
+# ── tt_wire_rich_tui(target) ────────────────────────────────────────────────
+# Adds the ncurses-backed tabbed dashboard sources and links Curses.
+# Call ONLY on engine_shadow and engine_live; engine_backtest must not link
+# Curses, so the rich-TUI sources are added per-binary, not into engine_core.
+function(tt_wire_rich_tui target)
+    set(CURSES_NEED_NCURSES TRUE)
+    set(CURSES_NEED_WIDE    TRUE)
+    find_package(Curses REQUIRED)
+
+    target_sources(${target} PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/ui/tabbed_dashboard.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/overview_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/positions_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/orders_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/risk_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/brackets_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/strategy_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/health_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/debug_panel.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/panels/l2_panel.cpp)
+    target_include_directories(${target} PRIVATE ${CURSES_INCLUDE_DIRS})
+    target_link_libraries(${target} PRIVATE ${CURSES_LIBRARIES})
+    target_compile_definitions(${target} PRIVATE HAS_RICH_TUI)
 endfunction()

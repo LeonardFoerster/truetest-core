@@ -7,6 +7,7 @@
 #include "execution/execution_adapter.h"
 #include "execution/instrument.h"
 #include "execution/live_safety.h"
+#include "exits/bracket_adapter.h"
 
 #include <memory>
 #include <optional>
@@ -53,6 +54,12 @@ public:
 	// nullptr → engine installs Noop* safety shims; venue providers override.
 	virtual std::shared_ptr<IReconciler> get_reconciler() { return nullptr; }
 	virtual std::shared_ptr<IKillSwitch> get_kill_switch() { return nullptr; }
+
+	// nullptr → ExitManager runs engine-side eval only (current behavior,
+	// always used by backtest/shadow). Live providers override to push
+	// brackets to the venue as resting orders. See exits/bracket_adapter.h.
+	virtual std::shared_ptr<truetest::exits::IBracketAdapter>
+	get_bracket_adapter() { return nullptr; }
 
 	// True → provider emits a unified bar/tick/l2 variant stream. False
 	// falls back to the specialized bar_record/tick_record bridges.

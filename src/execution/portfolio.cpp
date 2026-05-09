@@ -11,7 +11,21 @@ portfolio::portfolio(double initial_balance)
 
 void portfolio::on_fill(const fill_event& fill)
 {
+    on_fill(fill, fill.get_order_id(), {});
+}
+
+void portfolio::on_fill(const fill_event& fill,
+                        std::uint64_t opener_order_id,
+                        const std::string& strategy_name)
+{
     total_fills_++;
+    apply_netted_fill(fill);
+    if (opener_order_id != 0)
+        apply_lot_fill(fill, opener_order_id, strategy_name);
+}
+
+void portfolio::apply_netted_fill(const fill_event& fill)
+{
     auto& pos = positions_[fill.get_symbol()];
     double fill_qty = fill.get_filled_quantity();
 
@@ -73,6 +87,68 @@ void portfolio::on_fill(const fill_event& fill)
     }
 }
 
+void portfolio::apply_lot_fill(const fill_event& fill, std::uint64_t opener_order_id,
+                               const std::string& strategy_name)
+{
+    const bool is_opener = (opener_order_id == fill.get_order_id());
+    auto it = lots_.find(opener_order_id);
+
+    if (is_opener)
+    {
+        if (it == lots_.end())
+        {
+            lot l;
+            l.symbol           = fill.get_symbol();
+            l.side             = fill.get_side();
+            l.qty_open         = fill.get_filled_quantity();
+            l.entry_price      = fill.get_fill_price();
+            l.entry_filled_qty = fill.get_filled_quantity();
+            l.strategy_name    = strategy_name;
+            l.ts_open          = fill.get_timestamp();
+            lots_.emplace(opener_order_id, std::move(l));
+        }
+        else
+        {
+            // Partial fills on the same opener — roll into weighted avg.
+            auto& l = it->second;
+            double new_filled = l.entry_filled_qty + fill.get_filled_quantity();
+            if (new_filled > 0.0)
+                l.entry_price =
+                    (l.entry_price * l.entry_filled_qty +
+                     fill.get_fill_price() * fill.get_filled_quantity()) / new_filled;
+            l.entry_filled_qty = new_filled;
+            l.qty_open        += fill.get_filled_quantity();
+        }
+        return;
+    }
+
+    // Closer: reduce the referenced lot. A closer with no matching lot is a
+    // stale reference — portfolio state is authoritative, so drop silently.
+    if (it == lots_.end()) return;
+    auto& l = it->second;
+    l.qty_open -= fill.get_filled_quantity();
+    if (l.qty_open < 1e-12)
+        lots_.erase(it);
+}
+
+std::vector<std::uint64_t>
+portfolio::open_lots_by_symbol(const std::string& symbol) const
+{
+    std::vector<std::uint64_t> out;
+    for (const auto& [id, l] : lots_)
+        if (l.symbol == symbol) out.push_back(id);
+    return out;
+}
+
+std::vector<std::uint64_t>
+portfolio::open_lots_by_strategy(const std::string& strategy_name) const
+{
+    std::vector<std::uint64_t> out;
+    for (const auto& [id, l] : lots_)
+        if (l.strategy_name == strategy_name) out.push_back(id);
+    return out;
+}
+
 bool portfolio::position_open() const
 {
     for (const auto& [_, pos] : positions_)
@@ -132,4 +208,5 @@ void portfolio::print_summary() const
             std::cout << "Position " << sym << ": " << pos.qty << " units" << std::endl;
     }
     std::cout << "Total Trades Executed: " << total_trades_ << std::endl;
+    std::cout << "Open Lots: " << lots_.size() << std::endl;
 }

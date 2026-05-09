@@ -39,7 +39,6 @@ data through a strategy and orderbook pipeline.
 20. [Fee Models](#20-fee-models)
 21. [Risk Management](#21-risk-management)
 22. [Threading Model](#22-threading-model)
-23. [WebSocket UI](#23-websocket-ui)
 24. [Event Pipeline](#24-event-pipeline)
 25. [SQLite Persistence](#25-sqlite-persistence)
 26. [Analytics & Reporting](#26-analytics--reporting)
@@ -70,7 +69,7 @@ flag is ON):
 
 | Package | Install (Debian/Ubuntu) | Required by |
 |---|---|---|
-| `libboost-dev`, `libboost-system-dev` | `sudo apt install libboost-all-dev` | `ENABLE_WEB_UI`, `ENABLE_BINANCE`, `ENABLE_LIVE_DATA` |
+| `libboost-dev`, `libboost-system-dev` | `sudo apt install libboost-all-dev` | `ENABLE_BINANCE`, `ENABLE_LIVE_DATA` |
 | `libssl-dev` (OpenSSL) | `sudo apt install libssl-dev` | `ENABLE_BINANCE` |
 | `libpq-dev` / `postgresql-server-dev-all` | `sudo apt install libpq-dev` | `ENABLE_POSTGRESQL` |
 | Abseil | auto-fetched via CMake | `ENABLE_DEBUG` |
@@ -97,7 +96,6 @@ persistence. SQLite is enabled by default and requires `libsqlite3-dev`.
 ```bash
 cmake -B build \
   -DCMAKE_BUILD_TYPE=Release \
-  -DENABLE_WEB_UI=ON \
   -DENABLE_BINANCE=ON \
   -DENABLE_LIVE_DATA=ON \
   -DENABLE_SQLITE=ON \
@@ -135,7 +133,6 @@ source files are compiled in. Optional dependencies are wired into the
 |---|---|---|---|---|
 | `ENABLE_SQLITE` | **ON** | `HAS_SQLITE` | libsqlite3 | SQLite persistence for trades, portfolio snapshots, and equity curves |
 | `ENABLE_POSTGRESQL` | OFF | `HAS_POSTGRESQL` | libpq + libpqxx (auto-fetched) | PostgreSQL/TimescaleDB storage backend. Auto-fetches vcpkg if `pg_config` is not on PATH. FetchContent pins libpqxx 7.9.2 |
-| `ENABLE_WEB_UI` | OFF | `HAS_WEB_UI` | Boost headers | Boost.Beast WebSocket + HTTP server that broadcasts engine events as JSON to the React frontend |
 | `ENABLE_BINANCE` | OFF | `HAS_BINANCE` | Boost headers, OpenSSL | Binance spot exchange provider: live WebSocket streaming, REST execution, HMAC-SHA256 signing, historical kline backfill |
 | `ENABLE_LIVE_DATA` | OFF | `HAS_LIVE_DATA` | Boost.System | Generic WebSocket data feed via `websocket_data_source` |
 | `ENABLE_DEBUG` | OFF | `HAS_DEBUG` | Abseil 20240722.0 (auto-fetched) | Performance instrumentation: stage timers, memory info, hardware info, copy tracker, debug report |
@@ -320,7 +317,6 @@ cmake --install build --prefix /opt/truetest
 
 This installs:
 - `<prefix>/bin/engine_backtest`, `engine_shadow`, `engine_live`
-- `<prefix>/share/truetest/web/index.html` — the WebSocket dashboard entry page
 - When `BUILD_SHARED_LIB=ON`: `<prefix>/lib/libtruetest.so` +
   `<prefix>/include/truetest/truetest_api.h`
 
@@ -366,7 +362,7 @@ rejected. The runtime dispatches on flags rather than the binary name:
 ./build/engine_backtest --provider local --path market_data.csv --strategy sma
 
 # Shadow streaming with Binance
-./build/engine_shadow --provider binance --symbol btcusdt --stream trade --web-ui
+./build/engine_shadow --provider binance --symbol btcusdt --stream trade
 
 # Live execution (real money) — only engine_live accepts --mode live
 ./build/engine_live --provider binance --symbol btcusdt --stream kline_1m \
@@ -528,14 +524,6 @@ Thread preset auto-selection:
 | `--instrument` | none | Per-symbol trading rules (repeatable). Format: `SYMBOL:tick=X,lot=Y,minq=Q,minn=N,maker=M,taker=T` (any field optional). Price/qty get quantized before routing; orders below `min_qty` or `min_notional` are rejected |
 | `--depth-stream` | none | Optional L2 depth stream subscribed alongside `--stream` on a single combined WebSocket (provider-specific suffix; for Binance e.g. `depth20@100ms`). When set, the provider's orderbook is driven by real exchange levels and the paper market-maker is suppressed for that symbol. See [§16.2 Binance provider](#162-binance-provider) |
 
-### WebSocket UI
-
-| Flag | Default | Description |
-|---|---|---|
-| `--web-ui` | flag | Enable WebSocket + HTTP server for the React frontend |
-| `--ws-port` | `8765` | WebSocket server listen port |
-| `--ws-compress` / `--no-ws-compress` | on | Per-message deflate compression |
-
 ### Analytics & output
 
 | Flag | Default | Description |
@@ -574,9 +562,6 @@ default values. Key names use underscores (e.g. `sma_period`, not
   "taker_rate": 0.001,
   "mode": "backtest",
   "db": "my_run.db",
-  "web_ui": true,
-  "ws_port": 8765,
-  "ws_compress": true,
   "thread_preset": "full",
   "seed": 12345,
   "backfill": 1000,
@@ -722,7 +707,7 @@ the hot path).
 # Paper trading (shadow binary, shadow mode default)
 ./build/engine_shadow \
   --provider binance --symbol btcusdt --stream trade \
-  --strategy mean-reversion --web-ui
+  --strategy mean-reversion
 
 # Kline stream with backfill and tiered fees
 ./build/engine_shadow \
@@ -801,7 +786,7 @@ real exchange levels:
 ./build/engine_shadow \
   --provider binance --symbol btcusdt --stream trade \
   --depth-stream depth20@100ms \
-  --strategy mean-reversion --web-ui
+  --strategy mean-reversion
 ```
 
 What changes:
@@ -1012,7 +997,34 @@ Parameters:
   --param fast_period=5 --param slow_period=20
 ```
 
-### 18.4 Indicators
+### 18.4 Hedge Demo (`hedge-demo`)
+
+Demonstrates the multi-position / per-lot architecture: opens a long leg with
+its own SL/TP bracket, then `hedge_gap` bars later opens a short leg on the
+same symbol with its own independent SL/TP bracket. On a spot venue the two
+legs net at the portfolio level (zero exposure), but the lot table
+(`portfolio::lots_`) keeps each leg's entry price, owning strategy, and exit
+bracket distinct. The two brackets in the `ExitManager` fire independently
+per opener.
+
+Parameters:
+
+- `hedge_gap` (default `5`) — bars between the long entry and the short entry
+- `notional` (default `100`) — notional size of each leg
+- `sl_pct` (default `0.005`) — stop loss as fraction of entry price
+- `tp_pct` (default `0.01`) — take profit as fraction of entry price
+
+```bash
+./build/engine_backtest --provider local --path market_data.csv \
+  --strategy hedge-demo --param hedge_gap=10 --param notional=250
+```
+
+This strategy does **not** use the legacy `set_position_open()` boolean; it
+overrides `on_fill(fill, opener_order_id)` to maintain its own per-side open
+counters, and returns its SL/TP brackets from `take_pending_exit_intents()`
+(the new vector form of the exit-intent hook). See §18.6 and §18.8.
+
+### 18.5 Indicators
 
 The following indicators are available for use in strategies:
 
@@ -1027,7 +1039,7 @@ All follow the same pattern: call `update(price)` on each bar/tick; returns
 `std::nullopt` during warmup, then the computed value once enough data has
 accumulated. Use `ready()` to check and `value()` to read the last result.
 
-### 18.5 Strategy registry
+### 18.6 Strategy registry
 
 Strategies self-register via `REGISTER_STRATEGY("name", factory)` (mirroring
 the provider registry). To add a new strategy:
@@ -1037,9 +1049,26 @@ the provider registry). To add a new strategy:
 3. The strategy becomes available by name via `--strategy <name>`
 
 All strategies expose their indicator values via `get_indicator_values()` for
-use in analytics and the WebSocket UI.
+use in analytics.
 
-### 18.6 Multi-strategy runs
+Key `IStrategy` hooks for new strategies:
+
+- `on_market` / `on_tick` / `on_l2_update` — emit an opening `order_event`.
+- `take_pending_exit_intents()` — return a `vector<exit_intent>` immediately
+  after each emission; the engine stamps them with the just-submitted
+  opener's `order_id` and registers them with the `ExitManager`. Multiple
+  intents per opener compose for TP1/TP2/SL scale-outs. The legacy
+  single-optional `take_pending_exit_intent()` still works as a fallback.
+- `on_fill(fill, opener_order_id)` — called after the portfolio applies a
+  fill this strategy emitted. `opener_order_id == fill.order_id` means the
+  fill is an opener; otherwise it's a closer referencing the original entry.
+  Strategies that manage multiple concurrent entries track their lots here.
+- `set_position_open(symbol, open)` — **legacy**, default no-op. The engine
+  still calls it when a symbol flips between flat and non-flat on the netted
+  book, but new strategies should ignore it and track per-lot state via
+  `on_fill` instead.
+
+### 18.7 Multi-strategy runs
 
 `--strategy` accepts a comma-separated list. The first entry becomes the
 **primary** strategy; subsequent entries run alongside it and share the same
@@ -1057,14 +1086,57 @@ Behaviour:
   each additional strategy in order.
 - Orders are tagged with `order_event::strategy_name`. Fills inherit the tag,
   enabling per-strategy attribution in analytics and the event log.
-- SL/TP stops (`check_stops()`) are evaluated independently per strategy —
-  each manages its own position state via `set_position_open()`.
+- Closing orders (including strategy-emitted exits) also carry
+  `order_event::opener_order_id` so the portfolio reduces the correct lot
+  and fills are routed back to the originating strategy's `on_fill`.
+- SL/TP brackets are enforced per opener by the `ExitManager` (see §18.8),
+  not from `set_position_open()`. Each entry's bracket is independent, so
+  two concurrent entries on the same (strategy, symbol) — for example the
+  long and short legs of `hedge-demo` — carry distinct stops.
 - `--param key=value` applies to **all** strategies; unknown params are
   silently ignored.
 - Risk checks, fees, and the orderbook are global; the risk manager sees
   combined exposure.
 
 Multi-strategy works in batch, streaming, tick, and replay loops.
+
+### 18.8 Per-lot exit brackets (ExitManager)
+
+Engine-side enforcement of strategy-declared SL/TP/trailing/time exits lives
+in `src/exits/exit_manager.h`. Lifecycle per intent:
+
+1. Strategy emits an opener `order_event` and returns an `exit_intent` from
+   `take_pending_exit_intents()`.
+2. The engine stamps the intent with the opener's `order_id` and calls
+   `ExitManager::register_pending(intent)`.
+3. When the opener fills, `ExitManager::on_fill(fill, opener_order_id)`
+   promotes the pending intent(s) into armed brackets using the actual
+   fill price (trailing reference) and qty.
+4. On every subsequent tick, `ExitManager::on_price(symbol, px, ts)` returns
+   a synthetic `order_event` for each armed intent whose SL / TP / trailing
+   stop / time-stop crosses. Each returned order carries the original
+   `opener_order_id` so the correct lot is closed.
+5. When the opener is closed by the strategy's own signal path, its bracket
+   is cancelled so it can't fire on a lot that's already flat.
+
+Intents are keyed by `opener_order_id`, not by `(strategy, symbol)`. Two
+concurrent entries on the same symbol therefore carry independent brackets.
+Multiple intents under one opener compose for TP1/TP2/SL scale-outs
+(`exit_intent::qty_fraction` must sum to ≤ 1.0; the risk layer catches
+violations).
+
+The helpers `make_long_exit_intent(symbol, entry, qty, sl_pct, tp_pct, …)`
+and `make_short_exit_intent(...)` in `src/exits/exit_intent.h` compute the
+SL/TP levels with the correct sign for each side — strategies should use
+these rather than re-deriving the math.
+
+The portfolio maintains a parallel `lots_` map keyed by `opener_order_id`
+alongside the netted `positions_` map. A single symbol can have multiple
+concurrent open lots (e.g. a long and a short with independent brackets);
+the venue still sees the netted balance, but lot bookkeeping keeps each
+entry's price, opening strategy, and attribution distinct. Inspect via
+`portfolio::get_lots()`, `open_lots_by_symbol()`, and
+`open_lots_by_strategy()`.
 
 ---
 
@@ -1232,8 +1304,8 @@ returns one of four actions:
 
 Risk checks run **synchronously on the hot path** (pre-order and post-fill)
 for real-time rejection. A `rejection` event is emitted through the full
-event pipeline (ring buffers, event log, WebSocket UI). The async shadow
-check in the risk worker thread remains as a secondary validation layer.
+event pipeline (ring buffers, event log). The async shadow check in the
+risk worker thread remains as a secondary validation layer.
 
 ### 21.1 Static risk limits (config file only)
 
@@ -1393,103 +1465,130 @@ halts the engine. See [§21.5](#215-ring-buffer-drop-policy-shadow--live).
 
 ---
 
-## 23. WebSocket UI
+## 23. QuestDB Persistence
 
-`--web-ui` starts a Boost.Beast server that handles both WebSocket
-connections and HTTP REST requests on the same port. Open the React SPA at
-`web/index.html` (or serve via any HTTP server); the dashboard connects to
-`ws://localhost:8765` and renders:
+Built only when `-DENABLE_QUESTDB=ON` and activated only when the
+runtime `--persist` flag is supplied. Captures every order-lifecycle
+event (submission, status transition, fill, rejection, cancellation,
+amendment) to a local QuestDB instance for replay, analysis, and
+cross-run comparison.
 
-- Live equity curve
-- Fill history
-- Open positions
-- Analytics (Sharpe, Sortino, drawdown, win rate)
-- Orderbook visualization
+### When to use it
 
-### 23.1 Per-message deflate compression
+- Capture a complete audit trail of orders / fills for a backtest,
+  shadow session, or live run — independent of the engine's own log
+  files.
+- Compare two strategy runs by SQL JOIN on `run_tag`.
+- Drive ad-hoc dashboards from the QuestDB web console
+  (`http://localhost:9000/`).
 
-Default on. Typically reduces JSON payload size by 60-80%. Negotiated during
-handshake; clients without support fall back transparently. Disable with
-`--no-ws-compress` for very low-latency requirements.
+### CLI flags
 
-### 23.2 Command validation
+| Flag                     | Default       | Purpose                                                |
+|--------------------------|---------------|--------------------------------------------------------|
+| `--persist`              | off           | Activate QuestDB writes for this session               |
+| `--run-tag <tag>`        | auto-generated| Table prefix for the per-run tables                    |
+| `--run-notes <text>`     | empty         | Free-form note stored in `runs_meta`                   |
+| `--questdb-host <host>`  | `127.0.0.1`   | Where to find the daemon                               |
+| `--questdb-ilp-port <n>` | `9009`        | InfluxDB Line Protocol ingest port (TCP)               |
+| `--questdb-http-port <n>`| `9000`        | HTTP `/exec` port for DDL                              |
 
-All incoming WebSocket commands are validated against a per-command schema
-before processing. Malformed commands receive:
+Auto-generated run tags follow the pattern
+`run_<YYYYMMDD>_<HHMMSS>_<6 hex chars>`. User-supplied tags must match
+`[A-Za-z0-9_]{1,64}`. The flags are unknown to a binary built with
+`ENABLE_QUESTDB=OFF` and CLI11 will reject them with "argument was not
+expected" so an accidentally-disabled build can never silently ignore
+`--persist`.
 
-```json
-{"type": "error", "data": {"message": "order: missing required field 'side'", "source": "ws_validator"}}
+### How writes happen
+
+Two paths land rows in the per-run tables:
+
+1. **Synchronous capture points** in the engine — `process_order` (risk
+   acceptance + risk rejection), `route_order` (instrument-filter
+   rejection), the fill loop, `cancel_order`, `modify_order`,
+   `unwind_positions`. These calls carry full context (`opener_order_id`,
+   `strategy_name`, fill `source`, rejection category) that the ring
+   path doesn't have access to.
+2. **`QuestDbWorker`** drains `questdb_ring_` (fed by `publish_event`)
+   on its own thread and forwards each event to the same store.
+
+`QuestdbStore` serialises both writers behind a `std::mutex`. The two
+paths therefore both write rows for the same logical event, with the
+sync path producing the fully-tagged record and the worker producing a
+slimmer one. Consumers that want a single canonical row should
+deduplicate on `order_id` and prefer the sync row (it always carries a
+non-empty `strategy_name`). Dedup on the writer side is a follow-up.
+
+### Tables
+
+Each run creates six per-run tables prefixed with `{run_tag}_`:
+`orders`, `order_status`, `fills`, `rejections`, `cancellations`,
+`amendments`. One permanent `runs_meta` table indexes all runs with the
+session's mode, binary name, strategy, symbol, initial/final equity,
+and counters. `runs_meta` receives **two** rows per run — one at
+`begin()` and one at `end()` — so consumers should
+`GROUP BY run_tag` and `LAST(ended_at)` to reconstruct the closing
+state. Full DDL is in `docs/db.md` Appendix A.
+
+### Health-check behaviour (soft warning)
+
+If the daemon is unreachable at startup the engine prints
+per-step breadcrumbs from the store + a high-level WARNING from the
+engine:
+
+```
+[questdb] connect(127.0.0.1:9000) failed: Connection refused
+[questdb] DDL HTTP request failed (no response)
+[questdb] begin() aborted: DDL step failed
+  WARNING: QuestDB unreachable at 127.0.0.1:9000 — continuing with persistence DISABLED for this session.
+  Start the daemon with: questdb start
+  Or re-run without --persist to suppress this warning.
 ```
 
-Both `"command"` and `"cmd"` field names are accepted. Unrecognized
-commands are rejected. Per-command requirements:
+The session continues without persistence and exits 0. Hard-fail (i.e.
+"refuse to start when `--persist` is set but QuestDB is down") is a
+documented future TODO.
 
-- **order**: `side` (buy/sell), `quantity` (> 0); `type` defaults to
-  `"market"`; limit orders require `price > 0`.
-- **set_timeframe**: `timeframe`
-- **set_symbol**: `value`
-- **set_strategy**: `value`
-- **start**, **pause**, **stop**: no fields required
+### Example queries
 
-### 23.3 Client commands
+```sql
+-- Count fills for a specific run
+SELECT COUNT(*) FROM run_20260424_120000_abc123_fills;
 
-```json
-{"cmd": "start"}
-{"cmd": "pause"}
-{"cmd": "stop"}
-{"cmd": "order", "side": "buy", "quantity": 0.1, "price": 50000, "type": "limit"}
-{"cmd": "set_timeframe", "timeframe": "1h"}
-{"cmd": "set_symbol", "value": "ETHUSDT"}
-{"cmd": "set_strategy", "value": "sma"}
-{"cmd": "subscribe", "events": ["fill", "tick"], "symbols": ["BTCUSDT"]}
+-- Final equity across all runs of a strategy
+SELECT run_tag, LAST(final_equity) AS final
+  FROM runs_meta
+  WHERE strategy = 'mean-reversion' AND final_equity IS NOT NULL
+  GROUP BY run_tag;
+
+-- All rejections for the latest run
+SELECT * FROM mytag_rejections ORDER BY ts DESC;
 ```
 
-### 23.4 Event filtering (subscribe)
-
-Clients can subscribe to specific event types and/or symbols to reduce
-bandwidth. Send `subscribe` after connecting:
-
-```json
-{"cmd": "subscribe", "events": ["fill", "market"], "symbols": ["BTCUSDT", "ETHUSDT"]}
-```
-
-- **events**: array of event type strings (`fill`, `tick`, `market`,
-  `order`, `status`, `orderbook`, `error`). Empty = all.
-- **symbols**: array of symbols. Empty = all. Case-insensitive. Messages
-  without a symbol field (status, error) always pass.
-
-Default (no subscribe command): all events are sent (backward compatible).
-Server ack:
-
-```json
-{"type": "subscribed", "data": {"events": 2, "symbols": 1}}
-```
-
-### 23.5 REST API
-
-The same port serves HTTP REST endpoints. All responses are JSON with CORS
-headers.
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/api/health` | Health check (`{"status":"ok"}`) |
-| POST | `/api/backtest` | Submit a backtest (config JSON body) |
-| GET | `/api/backtest` | List all backtest runs |
-| GET | `/api/backtest/<id>/status` | Status of a specific run |
-| GET | `/api/backtest/<id>/results` | Results of a completed run |
-| GET | `/api/runs` | List recent runs from the SQLite `runs` table (limit param supported) |
-| GET | `/metrics` | Prometheus metrics exposition (see §27.2) |
+### Local QuestDB via Docker
 
 ```bash
-curl -X POST http://localhost:8765/api/backtest \
-  -H "Content-Type: application/json" \
-  -d '{"strategy":"sma","path":"market_data.csv"}'
+docker run --rm -d --name truetest-questdb \
+    -p 9000:9000 -p 9009:9009 questdb/questdb:latest
 
-curl http://localhost:8765/api/backtest/1/status
-curl http://localhost:8765/api/backtest/1/results
+# Wait until ready
+until curl -fs "http://127.0.0.1:9000/exec?query=SELECT%201" >/dev/null; do
+    sleep 1
+done
+
+# Run engine with persistence
+./build/engine_backtest --provider local --path market_data.csv \
+    --strategy mean-reversion --persist --run-tag my_run
+
+# Browse data: http://127.0.0.1:9000/
+
+# Stop
+docker stop truetest-questdb
 ```
 
-Custom port: `--ws-port 9000`.
+See `docs/db.md` for the full implementation plan, schema reference, and
+ILP cheatsheet.
 
 ---
 
@@ -1582,7 +1681,6 @@ order ID. The order loses time priority (standard exchange amend behavior).
 
 On success, an `amend_event` is emitted through the ring buffers and event
 log, containing the order ID, symbol, new price, and new quantity.
-Serialized in both JSON (WebSocket UI) and binary (event log).
 
 Exposed through `IExecutionAdapter::modify_order()`:
 
@@ -1693,15 +1791,6 @@ sqlite3 truetest.db \
   "SELECT run_id, status, final_equity, sharpe, max_drawdown, trade_count
      FROM runs ORDER BY started_at DESC LIMIT 20;"
 ```
-
-When the WebSocket UI is enabled:
-
-```bash
-curl http://localhost:8765/api/runs
-curl http://localhost:8765/api/runs?limit=20
-```
-
-If SQLite is disabled (`--no-db`), `GET /api/runs` returns HTTP 503.
 
 ### 25.2 Portfolio checkpoints (resume-after-crash)
 
@@ -1940,47 +2029,6 @@ component name + printf-style format. This is distinct from the trading-
 event log handled by `LoggingWorker`: the operational log is for engine
 lifecycle, config, startup errors, and diagnostics; the trading event log
 captures market/order/fill events for replay.
-
-### 27.2 Prometheus metrics endpoint (L2)
-
-When `-DENABLE_WEB_UI=ON` and `--web-ui` is passed, `GET /metrics` exposes
-engine state in Prometheus text exposition format:
-
-```bash
-curl http://127.0.0.1:8765/metrics
-```
-
-Example output:
-
-```
-# HELP truetest_events_processed_total Events processed by analytics
-# TYPE truetest_events_processed_total counter
-truetest_events_processed_total 12853.000000
-# HELP truetest_orders_submitted_total Total orders submitted
-# TYPE truetest_orders_submitted_total counter
-truetest_orders_submitted_total 42.000000
-# HELP truetest_fills_total Total fills executed
-# TYPE truetest_fills_total counter
-truetest_fills_total 40.000000
-# HELP truetest_equity_current Current portfolio equity (valued at last_mid_price)
-# TYPE truetest_equity_current gauge
-truetest_equity_current 10325.120000
-# HELP truetest_cash_current Current cash balance
-# TYPE truetest_cash_current gauge
-truetest_cash_current 9820.440000
-# HELP truetest_drawdown_current Current drawdown fraction
-# TYPE truetest_drawdown_current gauge
-truetest_drawdown_current 0.018000
-# HELP truetest_sharpe_ratio Sharpe ratio (point-in-time)
-# TYPE truetest_sharpe_ratio gauge
-truetest_sharpe_ratio 1.230000
-# HELP truetest_halt_flag 1 if halt flag set, 0 otherwise
-# TYPE truetest_halt_flag gauge
-truetest_halt_flag 0.000000
-```
-
-Registered via `WebSocketWorker::set_on_metrics()`; returns HTTP 503 until
-the engine is running. When the web UI is disabled, the route is not served.
 
 ### 27.3 Event log rotation (L3)
 
@@ -2466,11 +2514,11 @@ A runnable example lives at `python/example.py`.
 ### 32.5 Limitations
 
 The C API intentionally covers the batch-backtest use case only. Live
-streaming, WebSocket UI, provider-based execution, replay, and multi-
-symbol runs are driven through the CLI binaries — callers that need those
-features today should shell out to `engine_backtest` / `engine_shadow` /
-`engine_live` rather than the shared library. The API surface is
-deliberately small so it can stay stable while the internal engine evolves.
+streaming, provider-based execution, replay, and multi-symbol runs are
+driven through the CLI binaries — callers that need those features today
+should shell out to `engine_backtest` / `engine_shadow` / `engine_live`
+rather than the shared library. The API surface is deliberately small so
+it can stay stable while the internal engine evolves.
 
 ---
 
@@ -2557,13 +2605,13 @@ cmake --build build
   --strategy sma --no-db
 ```
 
-### 34.8 Binance paper trading with WebSocket UI
+### 34.8 Binance paper trading
 
 ```bash
-cmake -B build -DENABLE_BINANCE=ON -DENABLE_WEB_UI=ON
+cmake -B build -DENABLE_BINANCE=ON
 cmake --build build
 ./build/engine_shadow --provider binance --symbol btcusdt --stream trade \
-  --web-ui --ws-port 8765 --strategy mean-reversion --backfill 1000
+  --strategy mean-reversion --backfill 1000
 ```
 
 ### 34.9 Binance kline streaming with tiered fees
@@ -2673,7 +2721,7 @@ EOF
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  -DENABLE_BINANCE=ON -DENABLE_WEB_UI=ON -DENABLE_SQLITE=ON \
+  -DENABLE_BINANCE=ON -DENABLE_SQLITE=ON \
   -DENABLE_NATIVE_OPT=ON -DBUILD_TESTS=ON -DENABLE_BENCHMARKS=ON
 cmake --build build -j$(nproc)
 ```
@@ -2764,13 +2812,6 @@ cmake --build build --target truetest_benchmarks
 # Rotates event and text logs at 100 MB, keeps last 10 files.
 ```
 
-### 34.29 WebSocket UI with custom port and compression disabled
-
-```bash
-./build/engine_shadow --provider binance --symbol btcusdt --stream trade \
-  --web-ui --ws-port 9000 --no-ws-compress
-```
-
 ### 34.30 CMake preset — Linux
 
 ```bash
@@ -2818,7 +2859,6 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/truetest
 cmake --build build
 cmake --install build
 # Installs engine_backtest, engine_shadow, engine_live to /opt/truetest/bin/
-# Installs web/index.html to /opt/truetest/share/truetest/web/
 # If BUILD_SHARED_LIB=ON: libtruetest.so to lib/, truetest_api.h to include/truetest/
 ```
 
@@ -2833,8 +2873,7 @@ cmake --install build
   --checkpoint /var/lib/truetest/live.ckpt \
   --log-events /var/log/truetest/events.bin \
   --log-max-size 100 --log-keep 10 \
-  --output /var/log/truetest/results.json \
-  --web-ui --ws-port 8765
+  --output /var/log/truetest/results.json
 ```
 
 Combines tight risk caps with automatic unwind, periodic checkpointing,

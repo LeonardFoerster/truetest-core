@@ -172,6 +172,46 @@ public:
     double rolling_sharpe() const;
     double rolling_max_drawdown() const;
 
+    // Cheap O(n) copy of the last n equity values for the live TUI's
+    // sparkline strip — avoids snapshot()'s full report rebuild on every
+    // render tick. Returns the most recent n samples (or fewer if the
+    // curve is shorter); empty if nothing recorded yet.
+    std::vector<double> equity_tail(std::size_t n) const;
+
+    // Last n drawdown values as positive percentages (0 = at peak,
+    // 5.0 = 5% below peak). Walks equity_curve_ once to recover the
+    // running peak so the values match how the live drawdown atomic
+    // is reported elsewhere.
+    std::vector<double> drawdown_tail(std::size_t n) const;
+
+    // Cheap O(K) read of the per-strategy analytics map for the live
+    // TUI. Avoids snapshot()'s full report rebuild on every render
+    // tick (~tens of ms in a 100k-trade run). Returns a copy because
+    // the underlying map is mutated on the analytics worker thread.
+    std::unordered_map<std::string, sub_analytics> per_strategy_view() const
+    {
+        return per_strategy_;
+    }
+
+    // Cheap latency snapshot for the Health panel — same idea as
+    // per_strategy_view: avoid the full report rebuild.
+    struct latency_view
+    {
+        double      avg_ns = 0.0;
+        std::int64_t min_ns = 0;
+        std::int64_t max_ns = 0;
+        std::size_t  samples = 0;
+    };
+    latency_view latency_view_now() const
+    {
+        latency_view v;
+        v.samples = static_cast<std::size_t>(tick_to_trade_ns_.n);
+        v.avg_ns  = tick_to_trade_ns_.mean;
+        v.min_ns  = tick_to_trade_min_ns_;
+        v.max_ns  = tick_to_trade_max_ns_;
+        return v;
+    }
+
     double realized_pnl() const { return total_win_ - total_loss_; }
     double max_drawdown_pct() const { return max_drawdown_ * 100.0; }
     double win_rate_pct() const

@@ -5,12 +5,10 @@ project(truetest LANGUAGES CXX VERSION 0.1.0)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 # ── Build options ───────────────────────────────────────────────────────────
-option(ENABLE_POSTGRESQL "Build with PostgreSQL storage backend"                      OFF)
 option(ENABLE_LIVE_DATA  "Build with WebSocket live data feed (requires Boost.Beast)" OFF)
 option(ENABLE_DEBUG      "Build with performance instrumentation (requires Abseil)"   OFF)
-option(ENABLE_WEB_UI     "Build with WebSocket UI server (requires Boost.Beast)"      OFF)
 option(ENABLE_BINANCE    "Build with Binance exchange provider"                       OFF)
-option(ENABLE_SQLITE     "SQLite persistence for trades/portfolio"                    ON)
+option(ENABLE_QUESTDB    "Build with QuestDB persistence backend"                     OFF)
 option(ENABLE_TSAN       "Enable ThreadSanitizer"                                     OFF)
 option(ENABLE_ASAN       "Enable AddressSanitizer (mutually exclusive with TSAN)"     OFF)
 option(ENABLE_UBSAN      "Enable UndefinedBehaviorSanitizer (mutex with TSAN)"        OFF)
@@ -76,6 +74,7 @@ set(ENGINE_CORE_SOURCES
     src/strategy/mean_reversion_strategy.cpp
     src/strategy/sma_strategy.cpp
     src/strategy/ma_crossover_strategy.cpp
+    src/strategy/hedge_demo_strategy.cpp
     src/strategy/sma.cpp
     src/market_maker/market_maker.cpp
     src/risk/risk_manager.cpp
@@ -113,6 +112,11 @@ endfunction()
 _tt_add_engine_binary(engine_backtest TT_TARGET_BACKTEST src/bin/engine_backtest/main.cpp)
 _tt_add_engine_binary(engine_shadow   TT_TARGET_SHADOW   src/bin/engine_shadow/main.cpp)
 _tt_add_engine_binary(engine_live     TT_TARGET_LIVE     src/bin/engine_live/main.cpp)
+
+# Rich (ncurses) tabbed dashboard — shadow and live binaries only.
+# engine_backtest keeps the existing ANSI ConsoleDashboard.
+tt_wire_rich_tui(engine_shadow)
+tt_wire_rich_tui(engine_live)
 
 # Native microarchitecture tuning. Gated on ENABLE_NATIVE_OPT (default off);
 # when the user opts in they want it across the board, not just on live.
@@ -178,6 +182,10 @@ if(BUILD_TESTS)
         tests/test_date_parse.cpp
         tests/test_trade_tape_shadow_adapter.cpp
         tests/test_exit_manager.cpp
+        tests/test_engine_brackets.cpp
+        tests/test_bracket_adapter.cpp
+        tests/test_binance_oco_bracket_adapter.cpp
+        tests/test_bridge_unknown_fill.cpp
         tests/test_hybrid_executor.cpp
         tests/test_binance_combined_parser.cpp
         tests/test_provider_event_stream_contract.cpp
@@ -203,7 +211,6 @@ if(BUILD_TESTS)
         tests/test_engine_streaming.cpp
         tests/test_engine_integration.cpp
         tests/test_golden_regression.cpp
-        tests/test_event_json.cpp
         tests/test_binance_parser.cpp
         tests/test_binance_order_encoder.cpp
         tests/test_binance_rest_order_transport.cpp
@@ -222,6 +229,16 @@ if(BUILD_TESTS)
         tests/test_provider_engine_wiring.cpp
     )
 
+    if(ENABLE_QUESTDB)
+        list(APPEND TEST_SOURCES
+            tests/test_questdb_http_client.cpp
+            tests/test_questdb_ilp_writer.cpp
+            tests/test_questdb_schema.cpp
+            tests/test_questdb_run_tag.cpp
+            tests/test_questdb_store.cpp
+            tests/test_questdb_integration.cpp)
+    endif()
+
     add_executable(truetest_tests ${TEST_SOURCES})
     target_include_directories(truetest_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/tests")
@@ -237,6 +254,9 @@ if(BUILD_TESTS)
     add_executable(truetest_cli_tests tests/test_cli.cpp)
     target_link_libraries(truetest_cli_tests PRIVATE GTest::gtest GTest::gtest_main)
     add_dependencies(truetest_cli_tests engine_backtest)
+    if(ENABLE_QUESTDB)
+        target_compile_definitions(truetest_cli_tests PRIVATE HAS_QUESTDB)
+    endif()
     gtest_discover_tests(truetest_cli_tests
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
@@ -254,7 +274,6 @@ endif()
 # ── Install rules ───────────────────────────────────────────────────────────
 install(TARGETS engine_backtest engine_shadow engine_live
     RUNTIME DESTINATION bin)
-install(FILES web/index.html DESTINATION share/truetest/web)
 
 # ── CPack packaging ─────────────────────────────────────────────────────────
 set(CPACK_PACKAGE_NAME              "truetest")

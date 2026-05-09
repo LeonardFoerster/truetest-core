@@ -223,6 +223,11 @@ public:
         const std::string& get_strategy_name() const { return strategy_name_; }
         void set_strategy_name(const std::string& name) { strategy_name_ = name; }
 
+        // Non-zero when this order closes (or scales out of) an earlier
+        // entry; it references that entry's order_id. Openers leave this 0.
+        uint64_t get_opener_order_id() const { return opener_order_id_; }
+        void set_opener_order_id(uint64_t id) { opener_order_id_ = id; }
+
         std::chrono::system_clock::time_point get_earliest_eligible_ts() const { return earliest_eligible_ts_; }
         void set_earliest_eligible_ts(std::chrono::system_clock::time_point ts) { earliest_eligible_ts_ = ts; }
 
@@ -252,6 +257,7 @@ private:
         double stop_price_;
         std::chrono::system_clock::time_point earliest_eligible_ts_;
         std::string strategy_name_;
+        uint64_t opener_order_id_ = 0;
 };
 
 enum class fill_source

@@ -1,9 +1,14 @@
 #include "engine.h"
 #include "checkpoint.h"
+#ifdef HAS_QUESTDB
+#include "data/questdb/run_tag.h"
+#endif
 #include "data/data_handler.h"
 #include "data/date_parse.h"
 #include "execution/portfolio.h"
 #include "execution/latency_model.h"
+#include "execution/execution_bridge.h"
+#include "execution/fill_parser.h"
 #include "providers/provider.h"
 #include "providers/provider_convert.h"
 #include "ui/console_dashboard.h"
@@ -11,7 +16,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string_view>
 #include <vector>
 #include <queue>
@@ -37,10 +45,51 @@ engine::engine(std::shared_ptr<data_handler> dh,
     if (config_.mode == engine_mode::shadow)
         shadow_tracker_ = std::make_unique<ShadowTracker>();
 
-#ifdef HAS_SQLITE
-    if (!config_.db_path.empty())
-        store_ = std::make_unique<SqliteStore>(config_.db_path);
-#endif
+    // Wire venue-bracket adapter if the provider offers one. Live mode
+    // is the only setting where this currently kicks in (Binance OCO),
+    // but the wiring is provider-driven, not mode-driven, so any future
+    // adapter (e.g. shadow-mode replay of venue brackets) plugs in here.
+    if (config_.provider)
+    {
+        if (auto ba = config_.provider->get_bracket_adapter())
+            exit_manager_.set_bracket_adapter(std::move(ba));
+
+        // Install the bridge-side hook that turns inbound fills for
+        // venue-bracket legs (which never went through route_order, so
+        // by_client_id_ misses them) into engine-recognized fill_events.
+        if (auto adapter = config_.provider->get_execution_adapter())
+        {
+            if (auto* bridge = dynamic_cast<ExecutionBridge*>(adapter.get()))
+            {
+                bridge->set_unknown_fill_handler(
+                    [this](const parsed_exec& msg, std::uint64_t fill_id)
+                        -> std::optional<ExecutionBridge::synth_result>
+                    {
+                        const auto opener = exit_manager_
+                            .opener_for_exchange_order(msg.exchange_order_id);
+                        if (opener == 0) return std::nullopt;
+
+                        auto strategy_name = exit_manager_
+                            .strategy_name_for_exchange_order(msg.exchange_order_id);
+
+                        const auto engine_id = OrderIdGenerator::next();
+                        const auto ts = (msg.ts.time_since_epoch().count() != 0)
+                            ? msg.ts : std::chrono::system_clock::now();
+                        const double remaining =
+                            (msg.k == parsed_exec::kind::partial_fill)
+                              ? std::max(0.0, msg.cumulative_qty - msg.last_fill_qty)
+                              : 0.0;
+
+                        fill_event fe(ts, msg.symbol, engine_id, msg.side,
+                                      msg.last_fill_qty, msg.last_fill_price,
+                                      msg.commission, remaining, fill_id);
+                        fe.set_source(fill_source::exchange);
+                        return ExecutionBridge::synth_result{
+                            std::move(fe), opener, std::move(strategy_name)};
+                    });
+            }
+        }
+    }
 
     restore_from_checkpoint();
 
@@ -55,6 +104,26 @@ engine::engine(std::shared_ptr<data_handler> dh,
         auto err = reconciler->reconcile(portfolio_, config_.reconcile_tolerance_bps);
         if (!err.empty())
             throw std::runtime_error("reconciliation refused startup: " + err);
+
+        // Restart safety: rehydrate any venue-resting brackets from a
+        // previous run so the watchdog evaluates them and our cancel
+        // paths know about them. Without this, an engine restart would
+        // leave orphan OCO orders on the venue and the in-process
+        // ExitManager would have no record of them.
+        if (auto adapter = exit_manager_.has_bracket_adapter()
+                                ? config_.provider->get_bracket_adapter()
+                                : nullptr)
+        {
+            for (auto& rb : adapter->list_open())
+            {
+                std::cerr << "engine: rehydrating bracket opener="
+                          << rb.opener_order_id << " symbol=" << rb.symbol
+                          << " sl=" << (rb.stop_loss   ? *rb.stop_loss   : 0.0)
+                          << " tp=" << (rb.take_profit ? *rb.take_profit : 0.0)
+                          << "\n";
+                exit_manager_.rehydrate(rb);
+            }
+        }
     }
 }
 
@@ -98,51 +167,6 @@ void engine::restore_from_checkpoint()
     }
 }
 
-#ifdef HAS_SQLITE
-void engine::record_run_begin()
-{
-    if (!store_) return;
-
-    char buf[1024];
-    const char* mode_str =
-        (config_.mode == engine_mode::backtest) ? "backtest" :
-        (config_.mode == engine_mode::shadow)   ? "shadow"   : "live";
-    std::snprintf(buf, sizeof(buf),
-        R"({"mode":"%s","seed":%llu,"initial_balance":%.4f,"threading":"%s","rolling_window":%zu})",
-        mode_str,
-        static_cast<unsigned long long>(config_.seed),
-        config_.initial_balance,
-        preset_to_string(config_.threading).c_str(),
-        config_.rolling_window);
-
-    try {
-        current_run_id_ = store_->begin_run(buf);
-    } catch (const std::exception& e) {
-        std::cerr << "[runs] begin_run failed: " << e.what() << std::endl;
-        current_run_id_.clear();
-    }
-}
-
-void engine::record_run_end()
-{
-    if (!store_ || current_run_id_.empty()) return;
-
-    try {
-        const auto& a = get_analytics();
-        auto report = a.snapshot();
-        report.final_equity = portfolio_.get_equity(last_mid_price_);
-        store_->end_run(current_run_id_,
-                        report.final_equity,
-                        report.sharpe_ratio,
-                        report.max_drawdown,
-                        static_cast<int>(portfolio_.get_total_trades()));
-    } catch (const std::exception& e) {
-        std::cerr << "[runs] end_run failed: " << e.what() << std::endl;
-    }
-    current_run_id_.clear();
-}
-#endif
-
 void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
 {
     if (!strategy) return;
@@ -155,31 +179,10 @@ void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
 
 void engine::switch_symbol(const std::string& new_symbol)
 {
-#ifdef HAS_WEB_UI
-    if (tick_aggregator_) {
-        tick_aggregator_->flush();
-        tick_aggregator_ = std::make_unique<BarAggregator>(
-            tick_bar_interval_,
-            [this](const market_event& bar) {
-                broadcast_market_with_indicators(bar);
-            });
-    }
-    bar_history_.clear();
-#endif
-
     data_handler_->db_data_symbol.clear();
     data_handler_->db_data_symbol.push_back(new_symbol);
 
     strategy_->set_position_open(new_symbol, false);
-
-#ifdef HAS_WEB_UI
-    if (ws_worker_) {
-        ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
-        ws_worker_->broadcast_status("running",
-            config_.provider ? config_.provider->name() : "",
-            new_symbol);
-    }
-#endif
 }
 
 std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol)
@@ -220,13 +223,9 @@ void engine::log_event(const event& ev)
 
 void engine::publish_event(const event_pointer& ev)
 {
-    // Inline-mode with no WS ring has nothing to fan out. This runs many
-    // times per bar, so short-circuit before building the push lambda.
-    if (config_.threading == thread_preset::inline_mode
-#ifdef HAS_WEB_UI
-        && !ws_ring_
-#endif
-       ) {
+    refresh_dashboard_view_if_due();
+
+    if (config_.threading == thread_preset::inline_mode) {
         return;
     }
 
@@ -321,15 +320,694 @@ void engine::publish_event(const event_pointer& ev)
     }
 
 #undef TT_PUSH
+}
 
-#ifdef HAS_WEB_UI
-    if (ws_ring_ && !ws_ring_->try_push(ev))
+bool engine::snapshot_dashboard(truetest::ui::dashboard_snapshot& out) const
+{
+    std::lock_guard<std::mutex> lk(dashboard_view_mu_);
+    if (!dashboard_view_initialised_) return false;
+    out = dashboard_view_;
+    return true;
+}
+
+void engine::refresh_dashboard_view_if_due()
+{
+    auto now = std::chrono::steady_clock::now();
+    if (dashboard_view_initialised_
+        && now - dashboard_view_last_ < dashboard_view_interval_)
     {
-        ws_drops_++;
-        if (ws_drops_ == 1 || ws_drops_ % 1000 == 0)
-            std::cerr << "  WS ring: " << ws_drops_ << " events dropped\n";
+        return;
     }
+
+    truetest::ui::dashboard_snapshot snap;
+    build_dashboard_view(snap);
+
+    {
+        std::lock_guard<std::mutex> lk(dashboard_view_mu_);
+        dashboard_view_              = std::move(snap);
+        dashboard_view_initialised_  = true;
+    }
+    dashboard_view_last_ = now;
+}
+
+void engine::cache_open_order(const order_event& o)
+{
+    open_order_cache_entry e;
+    e.row.order_id      = o.get_order_id();
+    e.row.symbol        = o.get_symbol();
+    e.row.strategy_name = o.get_strategy_name();
+    e.row.side          = (o.get_side() == order_side::buy) ? 'B' : 'S';
+    switch (o.get_order_type())
+    {
+        case order_type::market:     e.row.type = 'M'; break;
+        case order_type::limit:      e.row.type = 'L'; break;
+        case order_type::stop:       e.row.type = 'S'; break;
+        case order_type::stop_limit: e.row.type = 's'; break;
+    }
+    e.row.qty    = o.get_quantity();
+    e.row.price  = o.get_price();
+    e.row.status = "open";
+    e.ts         = o.get_timestamp();
+    open_orders_cache_[o.get_order_id()] = std::move(e);
+}
+
+void engine::update_open_order_status(std::uint64_t id, const char* status)
+{
+    auto it = open_orders_cache_.find(id);
+    if (it != open_orders_cache_.end())
+        it->second.row.status = status;
+}
+
+void engine::erase_open_order(std::uint64_t id)
+{
+    open_orders_cache_.erase(id);
+}
+
+void engine::cache_fill(const fill_event& f)
+{
+    truetest::ui::dashboard_snapshot::fill_row r;
+    r.ts     = f.get_timestamp();
+    r.symbol = f.get_symbol();
+    r.side   = (f.get_side() == order_side::buy) ? 'B' : 'S';
+    r.qty    = f.get_filled_quantity();
+    r.price  = f.get_fill_price();
+    r.fee    = f.get_commission();
+    r.source = (f.get_source() == fill_source::exchange)  ? "exchange"
+             : (f.get_source() == fill_source::simulated) ? "simulated"
+             :                                              "local";
+    recent_fills_cache_.push_front(std::move(r));
+    while (recent_fills_cache_.size() > kRecentFillsCap)
+        recent_fills_cache_.pop_back();
+}
+
+void engine::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
+{
+    using snap_t = truetest::ui::dashboard_snapshot;
+
+    // Account
+    out.cash             = portfolio_.get_cash();
+    out.initial_balance  = portfolio_.get_initial_balance();
+    out.equity           = portfolio_.get_equity(last_mid_price_);
+    out.realized_pnl     = out.equity - out.initial_balance;   // approximation
+    out.unrealized_pnl   = 0.0;
+
+    // Positions
+    out.positions.clear();
+    out.positions.reserve(portfolio_.get_positions().size());
+    for (const auto& [sym, pos] : portfolio_.get_positions())
+    {
+        if (std::abs(pos.qty) < 1e-12) continue;
+        snap_t::position_row row;
+        row.symbol     = sym;
+        row.qty        = pos.qty;
+        row.avg_entry  = (std::abs(pos.qty) > 0.0)
+                           ? pos.cost_basis / pos.qty : 0.0;
+        row.mark       = (sym == last_mark_symbol_) ? last_mid_price_ : 0.0;
+        row.unrealized = (row.mark > 0.0)
+                           ? (row.mark - row.avg_entry) * pos.qty
+                           : 0.0;
+        out.unrealized_pnl += row.unrealized;
+        out.positions.push_back(std::move(row));
+    }
+
+    // Lots — per-strategy attribution alongside the netted positions.
+    out.lots.clear();
+    out.lots.reserve(portfolio_.get_lots().size());
+    auto now_sys = std::chrono::system_clock::now();
+    for (const auto& [opener_id, l] : portfolio_.get_lots())
+    {
+        snap_t::lot_row row;
+        row.opener_order_id = opener_id;
+        row.symbol          = l.symbol;
+        row.strategy_name   = l.strategy_name;
+        row.side            = (l.side == order_side::buy) ? 'L' : 'S';
+        row.qty_open        = l.qty_open;
+        row.entry_price     = l.entry_price;
+        row.age_seconds     = std::chrono::duration_cast<std::chrono::seconds>(
+                                  now_sys - l.ts_open).count();
+        out.lots.push_back(std::move(row));
+    }
+
+    // Open orders — copy from cache, computing age vs now.
+    out.open_orders.clear();
+    out.open_orders.reserve(open_orders_cache_.size());
+    auto now_steady_sys = std::chrono::system_clock::now();
+    for (const auto& [id, e] : open_orders_cache_)
+    {
+        auto row = e.row;
+        row.age_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+                              now_steady_sys - e.ts).count();
+        out.open_orders.push_back(std::move(row));
+    }
+
+    // Recent fills — newest first.
+    out.recent_fills.assign(recent_fills_cache_.begin(),
+                            recent_fills_cache_.end());
+
+    // Markout from adverse-selection tracker (post-fill mid drift).
+    out.perf.avg_markout_bps = adverse_selection_.mean_bps();
+    out.perf.markout_samples = adverse_selection_.sample_count();
+    out.perf.total_fills     = portfolio_.get_total_fills();
+    out.perf.total_trades    = portfolio_.get_total_trades();
+    out.perf.total_orders    = open_orders_cache_.size()   // active right now
+                              + portfolio_.get_total_fills(); // historical lower bound
+    out.perf.win_rate        = analytics_.win_rate_pct();
+    out.perf.sharpe          = analytics_.rolling_sharpe();
+    out.perf.sortino         = 0.0;             // requires full report — skip
+    out.perf.profit_factor   = 0.0;             // requires full report — skip
+
+    // Risk view.
+    out.risk.halted             = halt_flag_.load(std::memory_order_acquire);
+    out.risk.daily_loss         = 0.0;          // RiskManager doesn't expose
+    out.risk.daily_loss_limit   = config_.risk.max_daily_loss;
+    out.risk.max_drawdown_pct   = analytics_.max_drawdown_pct();
+    out.risk.max_drawdown_limit = config_.risk.max_drawdown * 100.0;
+    out.risk.open_orders        = open_orders_cache_.size();
+    out.risk.open_orders_limit  =
+        (config_.risk.max_open_orders > 0)
+            ? static_cast<std::size_t>(config_.risk.max_open_orders)
+            : 0;
+
+    // Exposure: |qty| * mark per symbol, summed.
+    double exposure = 0.0;
+    for (const auto& [sym, pos] : portfolio_.get_positions())
+    {
+        if (std::abs(pos.qty) < 1e-12) continue;
+        double mark = (sym == last_mark_symbol_) ? last_mid_price_ : 0.0;
+        if (mark > 0.0) exposure += std::abs(pos.qty) * mark;
+    }
+    out.risk.exposure       = exposure;
+    out.risk.exposure_limit = config_.risk.max_portfolio_exposure;
+
+    // Brackets — armed bracket intents from ExitManager. Each row is
+    // matched to its symbol's mark from the positions table so the
+    // panel can render distance-to-trigger directly.
+    out.brackets.clear();
+    auto armed = exit_manager_.snapshot_armed();
+    out.brackets.reserve(armed.size());
+    for (const auto& a : armed)
+    {
+        snap_t::bracket_row row;
+        row.opener_order_id = a.opener_order_id;
+        row.strategy_name   = a.strategy_name;
+        row.symbol          = a.symbol;
+        row.side            = (a.close_side == order_side::sell) ? 'L' : 'S';
+        row.qty             = a.qty;
+        row.entry_price     = a.entry_price;
+        row.stop_loss       = a.stop_loss;
+        row.take_profit     = a.take_profit;
+        row.venue_managed   = a.venue_managed;
+        row.venue_list_id   = a.venue_list_id;
+        row.age_seconds     = std::chrono::duration_cast<std::chrono::seconds>(
+                                  now_sys - a.ts_armed).count();
+        // Mark from the per-symbol position row (already computed above).
+        for (const auto& p : out.positions)
+        {
+            if (p.symbol == a.symbol) { row.mark = p.mark; break; }
+        }
+        if (row.mark == 0.0 && a.symbol == last_mark_symbol_)
+            row.mark = last_mid_price_;
+        out.brackets.push_back(std::move(row));
+    }
+
+    // L2 ladder for the active symbol. Reads the orderbook directly;
+    // the only allocation is the small bid/ask vectors. Source flag
+    // disambiguates real venue depth (provider's L2 stream tagged the
+    // symbol in l2_seeded_symbols_) from MM-seeded synthetic depth.
+    {
+        using snap_t = truetest::ui::dashboard_snapshot;
+        auto& v = out.l2;
+        v = snap_t::l2_view{};
+
+        constexpr std::size_t kDepthRows = 10;
+        const std::string& sym = last_mark_symbol_;
+        v.symbol = sym;
+
+        if (!sym.empty())
+        {
+            auto ob = orderbook_registry_.get(sym);
+            if (ob)
+            {
+                auto infos = ob->get_order_infos();
+                const auto& bids = infos.get_bids();   // best-first (high → low)
+                const auto& asks = infos.get_asks();   // best-first (low  → high)
+                v.total_bid_levels = bids.size();
+                v.total_ask_levels = asks.size();
+
+                // Truncate to top-N + walk cumulative. Both vectors are
+                // already sorted best-first by the orderbook itself.
+                double cb = 0.0;
+                v.bids.reserve(std::min(kDepthRows, bids.size()));
+                for (std::size_t i = 0; i < std::min(kDepthRows, bids.size()); ++i)
+                {
+                    snap_t::l2_level l;
+                    l.price = bids[i].price_.to_double();
+                    l.size  = static_cast<double>(bids[i].quantity_) / config_.qty_scale;
+                    cb += l.size;
+                    l.cum   = cb;
+                    v.bids.push_back(l);
+                }
+                v.cum_bid_size = cb;
+
+                double ca = 0.0;
+                v.asks.reserve(std::min(kDepthRows, asks.size()));
+                for (std::size_t i = 0; i < std::min(kDepthRows, asks.size()); ++i)
+                {
+                    snap_t::l2_level l;
+                    l.price = asks[i].price_.to_double();
+                    l.size  = static_cast<double>(asks[i].quantity_) / config_.qty_scale;
+                    ca += l.size;
+                    l.cum   = ca;
+                    v.asks.push_back(l);
+                }
+                v.cum_ask_size = ca;
+
+                if (!v.bids.empty()) v.best_bid = v.bids.front().price;
+                if (!v.asks.empty()) v.best_ask = v.asks.front().price;
+                if (v.best_bid > 0.0 && v.best_ask > 0.0)
+                {
+                    v.mid = (v.best_bid + v.best_ask) * 0.5;
+                    v.spread_bps = (v.best_ask - v.best_bid) / v.mid * 1e4;
+                    // Microprice — size-weighted mid that leans toward
+                    // the side with more depth at the BBO.
+                    const double bsz = v.bids.front().size;
+                    const double asz = v.asks.front().size;
+                    const double tot = bsz + asz;
+                    v.microprice = (tot > 0.0)
+                        ? (bsz * v.best_ask + asz * v.best_bid) / tot
+                        : v.mid;
+                }
+                if (v.cum_bid_size + v.cum_ask_size > 0.0)
+                    v.imbalance = (v.cum_bid_size - v.cum_ask_size)
+                                / (v.cum_bid_size + v.cum_ask_size);
+
+                // Source: venue if L2 stream tagged the symbol; else
+                // synthetic (MM seeded) if any depth exists; else none.
+                if (l2_seeded_symbols_.count(sym))
+                    v.source = snap_t::l2_source::venue;
+                else if (!v.bids.empty() || !v.asks.empty())
+                    v.source = snap_t::l2_source::synthetic;
+                else
+                    v.source = snap_t::l2_source::none;
+            }
+        }
+    }
+
+    // Memory view — RSS/heap from /proc (Linux only) + computed pool /
+    // ring footprints. Cached at ~1 Hz: memory doesn't move in 100 ms
+    // and /proc parsing was the dominant cost of the whole snapshot
+    // path. The cache is mutable so this const method can update it.
+    {
+        const auto now_steady = std::chrono::steady_clock::now();
+        const bool stale = !memory_cache_initialised_
+            || (now_steady - memory_cache_last_) >= std::chrono::seconds(1);
+
+        if (stale)
+        {
+            auto& m = memory_cache_;
+            m = truetest::ui::dashboard_snapshot::memory_view{};
+
+            // Single-pass /proc/self/status parse. Earlier code opened
+            // the file three times (once per key); now one read scans
+            // for all three. Saves ~10 KB of redundant I/O per refresh.
+            std::ifstream sf("/proc/self/status");
+            if (sf.is_open())
+            {
+                std::string line;
+                int hits = 0;
+                while (hits < 3 && std::getline(sf, line))
+                {
+                    auto extract_kib = [&](const char* key) -> std::uint64_t {
+                        const std::size_t klen = std::strlen(key);
+                        if (line.compare(0, klen, key) != 0) return 0;
+                        std::istringstream ss(line);
+                        std::string k;
+                        std::uint64_t v = 0;
+                        ss >> k >> v;
+                        return v * 1024;
+                    };
+                    if (auto v = extract_kib("VmRSS:"))  { m.rss_bytes      = v; ++hits; continue; }
+                    if (auto v = extract_kib("VmSize:")) { m.vm_bytes       = v; ++hits; continue; }
+                    if (auto v = extract_kib("VmHWM:"))  { m.peak_rss_bytes = v; ++hits; continue; }
+                }
+            }
+
+            // /proc/self/statm — column 6 is "data" (heap+BSS+stack) in pages.
+            {
+                std::ifstream f("/proc/self/statm");
+                if (f.is_open())
+                {
+                    std::uint64_t size, resident, shared, text, lib, data, dt;
+                    if (f >> size >> resident >> shared >> text >> lib >> data >> dt)
+                        m.heap_bytes = data * 4096;
+                }
+            }
+            m.available = (m.rss_bytes > 0);
+
+            // /proc/self/maps — categorise mapped regions so the panel
+            // can break down the "other" segment into heap / stacks /
+            // shared-lib code / anonymous mmap. Each line:
+            //   <start>-<end> <perms> <off> <dev> <ino> <path>
+            // sizes are summed in BYTES, not pages, since the address
+            // range itself is the size.
+            {
+                std::ifstream f("/proc/self/maps");
+                std::uint64_t b_heap = 0, b_stacks = 0, b_so = 0,
+                              b_anon = 0, b_file = 0;
+                if (f.is_open())
+                {
+                    std::string line;
+                    while (std::getline(f, line))
+                    {
+                        // Parse the address range up to the dash.
+                        const auto dash = line.find('-');
+                        if (dash == std::string::npos) continue;
+                        const auto sp1  = line.find(' ', dash + 1);
+                        if (sp1 == std::string::npos) continue;
+                        std::uint64_t a = 0, b = 0;
+                        try {
+                            a = std::stoull(line.substr(0, dash), nullptr, 16);
+                            b = std::stoull(line.substr(dash + 1, sp1 - dash - 1),
+                                            nullptr, 16);
+                        } catch (...) { continue; }
+                        if (b <= a) continue;
+                        const std::uint64_t bytes = b - a;
+
+                        // Path is everything after the last whitespace
+                        // run (or empty for anonymous mappings).
+                        const auto path_pos = line.find_last_of(' ');
+                        std::string path = (path_pos != std::string::npos)
+                            ? line.substr(path_pos + 1) : std::string{};
+
+                        if (path == "[heap]")              b_heap   += bytes;
+                        else if (path.rfind("[stack", 0) == 0)
+                                                            b_stacks += bytes;
+                        else if (path.size() >= 3 &&
+                                 path.find(".so") != std::string::npos)
+                                                            b_so     += bytes;
+                        else if (path.empty() || path[0] == '[')
+                                                            b_anon   += bytes;
+                        else                                b_file   += bytes;
+                    }
+                }
+                using snap_t = truetest::ui::dashboard_snapshot;
+                if (b_heap   > 0) m.other_breakdown.push_back({"heap",      b_heap});
+                if (b_stacks > 0) m.other_breakdown.push_back({"stacks",    b_stacks});
+                if (b_so     > 0) m.other_breakdown.push_back({".so libs",  b_so});
+                if (b_file   > 0) m.other_breakdown.push_back({"file-mmap", b_file});
+                if (b_anon   > 0) m.other_breakdown.push_back({"anon-mmap", b_anon});
+            }
+
+            // Pools: ObjectPool::block_count() is now lock-free atomic
+            // (see #3 in this commit), so this is just an atomic load
+            // per pool. Cached anyway since stale-check already gates us.
+            constexpr std::size_t kPoolBlock = 4096;
+            auto add_pool = [&](const char* name, std::size_t blocks,
+                                std::size_t slot, std::size_t in_use) {
+                using snap_t = truetest::ui::dashboard_snapshot;
+                snap_t::mem_pool_row r;
+                r.name           = name;
+                r.blocks         = blocks;
+                r.slot_size      = slot;
+                r.bytes          = static_cast<std::uint64_t>(blocks) * kPoolBlock * slot;
+                r.in_use         = in_use;
+                r.capacity_slots = blocks * kPoolBlock;
+                m.pool_bytes_total += r.bytes;
+                m.pools.push_back(r);
+            };
+            add_pool("market_pool", market_pool_.block_count(), sizeof(market_event), market_pool_.in_use());
+            add_pool("order_pool",  order_pool_.block_count(),  sizeof(order_event),  order_pool_.in_use());
+            add_pool("fill_pool",   fill_pool_.block_count(),   sizeof(fill_event),   fill_pool_.in_use());
+            add_pool("tick_pool",   tick_pool_.block_count(),   sizeof(tick_event),   tick_pool_.in_use());
+
+            // Rings: capacity is constexpr; this is essentially free.
+            auto add_ring = [&](const char* name, const auto& ring) {
+                using snap_t = truetest::ui::dashboard_snapshot;
+                snap_t::mem_ring_row r;
+                r.name = name;
+                if (ring) {
+                    r.capacity      = ring->capacity();
+                    r.element_bytes = sizeof(event_pointer);
+                    r.bytes = static_cast<std::uint64_t>(r.capacity) * r.element_bytes;
+                    m.ring_bytes_total += r.bytes;
+                }
+                m.rings.push_back(r);
+            };
+            add_ring("logging",    logging_ring_);
+            add_ring("risk",       risk_ring_);
+            add_ring("stats",      stats_ring_);
+            add_ring("observer",   observer_ring_);
+            add_ring("risk_stats", risk_stats_ring_);
+            add_ring("mm_event",   mm_ring_);
+            add_ring("mm_order",   mm_order_ring_);
+
+            memory_cache_last_ = now_steady;
+            memory_cache_initialised_ = true;
+        }
+        out.memory = memory_cache_;
+
+        // In-use counts refresh every snapshot — atomic loads are free,
+        // and the panel's pool fill-bars look frozen if they lag the
+        // cached interval. Order matches the add_pool() calls above.
+        if (out.memory.pools.size() == 4)
+        {
+            out.memory.pools[0].in_use = market_pool_.in_use();
+            out.memory.pools[1].in_use = order_pool_.in_use();
+            out.memory.pools[2].in_use = fill_pool_.in_use();
+            out.memory.pools[3].in_use = tick_pool_.in_use();
+        }
+    }
+
+    // Debug view — engine introspection for the Debug tab. All sourced
+    // from existing accessors / atomics; no new hot-path tracking. Built
+    // once per snapshot under the same lock as everything else.
+    {
+        auto& d = out.debug;
+        // engine_core is built without TT_TARGET (per-binary define), so
+        // we surface the runtime mode here instead of the binary name.
+        // The status bar already shows which binary you're in via the
+        // window chrome / process name.
+        d.target = "(engine_core)";
+        switch (config_.mode) {
+            case engine_mode::backtest: d.mode = "backtest"; break;
+            case engine_mode::shadow:   d.mode = "shadow";   break;
+            case engine_mode::live:     d.mode = "live";     break;
+        }
+#ifdef HAS_BINANCE
+        d.has_binance = true;
 #endif
+#ifdef HAS_QUESTDB
+        d.has_questdb = true;
+#endif
+#ifdef HAS_DEBUG
+        d.has_debug = true;
+#endif
+#ifdef HAS_LIVE_DATA
+        d.has_live_data = true;
+#endif
+
+        d.preset = preset_to_string(config_.threading);
+        d.spin_policy = spin_policy_to_string(config_.worker_spin_policy);
+        d.cpu_pin    = !config_.disable_pinning;
+
+        // Worker count: derived from which ring members are non-null.
+        std::size_t workers = 0;
+        if (logging_ring_)    ++workers;
+        if (risk_ring_)       ++workers;
+        if (stats_ring_)      ++workers;
+        if (observer_ring_)   ++workers;
+        if (risk_stats_ring_) ++workers;
+        if (mm_ring_ || mm_order_ring_) ++workers;
+        d.worker_count = workers;
+
+        // Ring stats — capacity 0 indicates the ring isn't running at
+        // this preset (engine returns nullptr from the get_*_ring()).
+        auto add_ring = [&](const char* name, const auto& ring) {
+            using snap_t = truetest::ui::dashboard_snapshot;
+            snap_t::ring_stat r;
+            r.name = name;
+            if (ring) {
+                r.size = ring->size();
+                r.hwm  = ring->high_watermark();
+                r.capacity = ring->capacity();
+                r.drops = ring->drop_count();
+            }
+            d.rings.push_back(r);
+        };
+        add_ring("logging",    logging_ring_);
+        add_ring("risk",       risk_ring_);
+        add_ring("stats",      stats_ring_);
+        add_ring("observer",   observer_ring_);
+        add_ring("risk_stats", risk_stats_ring_);
+        add_ring("mm_event",   mm_ring_);
+        // mm_order_ring_ uses MMRing (different element type) — track separately.
+        {
+            using snap_t = truetest::ui::dashboard_snapshot;
+            snap_t::ring_stat r;
+            r.name = "mm_order";
+            if (mm_order_ring_) {
+                r.size = mm_order_ring_->size();
+                r.hwm  = mm_order_ring_->high_watermark();
+                r.capacity = mm_order_ring_->capacity();
+                r.drops = mm_order_ring_->drop_count();
+            }
+            d.rings.push_back(r);
+        }
+
+        // Pools — only block_count() is exposed (no in-use tracking yet).
+        // We report blocks * BlockSize as capacity; in-use shown as "—".
+        constexpr std::size_t kPoolBlock = 4096;
+        auto add_pool = [&](const char* name, std::size_t blocks) {
+            using snap_t = truetest::ui::dashboard_snapshot;
+            snap_t::pool_stat p;
+            p.name = name;
+            p.blocks = blocks;
+            p.block_size = kPoolBlock;
+            p.capacity = blocks * kPoolBlock;
+            d.pools.push_back(p);
+        };
+        add_pool("market_pool", market_pool_.block_count());
+        add_pool("order_pool",  order_pool_.block_count());
+        add_pool("fill_pool",   fill_pool_.block_count());
+        add_pool("tick_pool",   tick_pool_.block_count());
+
+        // Engine state.
+        d.next_order_id = OrderIdGenerator::next();
+        // Decrement back so we don't perturb the live id sequence — the
+        // call above only reads + increments atomically, so the value
+        // we surface is "what the next allocation WOULD have been".
+        // (We can't decrement an atomic safely if other threads bump it
+        //  in between; subtract logically: the value we want is `next-1`
+        //  treating it as the most-recently-allocated id, which is fine
+        //  for an introspection display.)
+        if (d.next_order_id > 0) --d.next_order_id;
+        d.pending_orders    = pending_orders_.size();
+        d.pending_stops     = pending_stops_.size();
+        d.open_orders_cache = open_orders_cache_.size();
+        d.order_meta_size   = order_meta_.size();
+        d.armed_brackets    = exit_manager_.armed_count();
+        d.handles_size      = exit_manager_.armed_count();   // proxy
+
+        d.exit_pending = exit_manager_.pending_count();
+        d.exit_armed   = exit_manager_.armed_count();
+        d.exit_exchange_to_leg = 0;  // not exposed; left as 0
+
+#ifdef HAS_DEBUG
+        // Stage timings — only present on HAS_DEBUG builds. The stats
+        // are accumulated counters, not percentile sketches; we surface
+        // (calls / avg / min / max) which is what stage_stats actually
+        // holds. Real percentiles would need an approximate-quantile
+        // estimator wired into StageTimer::record().
+        for (std::size_t i = 0; i < static_cast<std::size_t>(debug::stage::COUNT); ++i)
+        {
+            const auto st = static_cast<debug::stage>(i);
+            const auto s  = stage_timer_.snapshot(st);
+            if (s.call_count == 0) continue;
+            using snap_t = truetest::ui::dashboard_snapshot;
+            snap_t::debug_view::stage_row r;
+            r.name   = debug::StageTimer::stage_name(st);
+            r.calls  = s.call_count;
+            r.avg_ns = s.total_ns / s.call_count;
+            r.min_ns = s.min_ns;
+            r.max_ns = s.max_ns;
+            d.stages.push_back(r);
+        }
+#endif
+
+        // Last errors — pull what's exposed; subsystems without a public
+        // accessor get an empty string. Bridge has last_error() when the
+        // provider supplies an ExecutionBridge adapter.
+        using snap_t = truetest::ui::dashboard_snapshot;
+        d.errors.push_back(snap_t::subsys_error{"engine",  ""});
+        if (config_.provider)
+        {
+            auto adapter = config_.provider->get_execution_adapter();
+            if (auto* bridge = dynamic_cast<ExecutionBridge*>(adapter.get()))
+                d.errors.push_back(snap_t::subsys_error{"bridge", bridge->last_error()});
+            else
+                d.errors.push_back(snap_t::subsys_error{"bridge", ""});
+        }
+        else d.errors.push_back(snap_t::subsys_error{"bridge", ""});
+        d.errors.push_back(snap_t::subsys_error{"provider", ""});
+        d.errors.push_back(snap_t::subsys_error{"adapter",  ""});
+        d.errors.push_back(snap_t::subsys_error{"questdb",  ""});
+    }
+
+    // Health view — latency from analytics + provider state. Ring drops,
+    // event totals, and ages are read by the Health panel directly from
+    // ConsoleDashboard's atomics (the engine does not own that ring).
+    {
+        auto lv = analytics_.latency_view_now();
+        out.health.tick_to_trade_samples = lv.samples;
+        out.health.avg_tick_to_trade_us  = lv.avg_ns / 1000.0;
+        out.health.min_tick_to_trade_us  = static_cast<double>(lv.min_ns) / 1000.0;
+        out.health.max_tick_to_trade_us  = static_cast<double>(lv.max_ns) / 1000.0;
+
+        out.health.orders_total = open_orders_cache_.size()
+                                + portfolio_.get_total_fills();
+        out.health.fills_total  = portfolio_.get_total_fills();
+        out.health.trades_total = portfolio_.get_total_trades();
+
+        if (config_.provider)
+        {
+            out.health.provider_present = true;
+            out.health.provider_name    = config_.provider->name();
+            out.health.provider_state   = static_cast<int>(
+                config_.provider->lifecycle_state());
+        }
+    }
+
+    // Per-strategy attribution. analytics_.per_strategy_view() copies
+    // the per-strategy map cheaply (O(K) for K strategies). Counts of
+    // open lots and armed brackets are derived from the same passes
+    // we already did over portfolio_/exit_manager_ above.
+    out.strategies.clear();
+    {
+        // Tally lots and armed brackets per strategy in single passes.
+        std::unordered_map<std::string, std::size_t> lots_by_strat;
+        for (const auto& [_, l] : portfolio_.get_lots())
+            ++lots_by_strat[l.strategy_name];
+        std::unordered_map<std::string, std::size_t> brackets_by_strat;
+        for (const auto& a : armed)
+            ++brackets_by_strat[a.strategy_name];
+
+        auto per_strat = analytics_.per_strategy_view();
+        out.strategies.reserve(per_strat.size());
+        for (const auto& [name, sa] : per_strat)
+        {
+            snap_t::strategy_row row;
+            row.name           = name;
+            row.pnl            = sa.total_pnl;
+            row.trade_count    = sa.trade_count;
+            row.win_count      = sa.win_count;
+            row.win_rate       = sa.win_rate();
+            row.profit_factor  = sa.profit_factor();
+            row.total_win      = sa.total_win;
+            row.total_loss     = sa.total_loss;
+            auto lit = lots_by_strat.find(name);
+            row.open_lots      = (lit != lots_by_strat.end()) ? lit->second : 0;
+            auto bit = brackets_by_strat.find(name);
+            row.armed_brackets = (bit != brackets_by_strat.end()) ? bit->second : 0;
+            out.strategies.push_back(std::move(row));
+        }
+    }
+
+    // Trend strip — equity + drawdown tails the Overview panel renders
+    // as sparklines. 60 cells matches the panel width budget; longer
+    // tails are sub-sampled by ascii::sparkline anyway. The rate tail
+    // is sourced by the panel directly from ConsoleDashboard (it owns
+    // the rolling rate_ema_ samples), so the engine doesn't reach into
+    // the dashboard from here.
+    constexpr std::size_t kTailWidth = 60;
+    out.trend.equity_tail   = analytics_.equity_tail(kTailWidth);
+    out.trend.drawdown_tail = analytics_.drawdown_tail(kTailWidth);
+
+    out.trend.equity_now = out.equity;
+    out.trend.equity_change_pct = (out.initial_balance > 0.0)
+        ? (out.equity / out.initial_balance - 1.0) * 100.0
+        : 0.0;
+    out.trend.drawdown_now_pct = out.trend.drawdown_tail.empty()
+        ? 0.0 : out.trend.drawdown_tail.back();
 }
 
 std::unique_ptr<LoggingWorker> engine::make_logging_worker()
@@ -371,70 +1049,6 @@ void engine::start_workers()
         w.set_spin_policy(config_.worker_spin_policy);
         w.set_max_consecutive_errors(config_.max_consecutive_worker_errors);
     };
-
-#ifdef HAS_WEB_UI
-    if (config_.enable_web_ui)
-    {
-        ws_ring_ = std::make_shared<EventRing>();
-        ws_worker_ = std::make_unique<WebSocketWorker>(config_.ws_port, config_.ws_compress);
-        wire_failure(*ws_worker_);
-
-#ifdef HAS_SQLITE
-        if (store_)
-        {
-            ws_worker_->set_on_list_runs([this](int limit) -> std::string {
-                if (!store_) return {};
-                try { return store_->query_runs_json(limit); }
-                catch (const std::exception& e) {
-                    std::cerr << "[runs] query_runs failed: " << e.what() << std::endl;
-                    return {};
-                }
-            });
-        }
-#endif
-
-        ws_worker_->set_on_metrics([this]() -> std::string {
-            auto snap = analytics_.snapshot();
-            char buf[2048];
-            std::size_t n = 0;
-            auto w = [&](const char* name, const char* help, const char* type,
-                         double value) {
-                n += std::snprintf(buf + n, sizeof(buf) - n,
-                    "# HELP %s %s\n# TYPE %s %s\n%s %.6f\n",
-                    name, help, name, type, name, value);
-            };
-            w("truetest_events_processed_total",
-              "Events processed by analytics", "counter",
-              static_cast<double>(snap.total_orders + snap.total_fills));
-            w("truetest_orders_submitted_total",
-              "Total orders submitted", "counter",
-              static_cast<double>(snap.total_orders));
-            w("truetest_fills_total",
-              "Total fills executed", "counter",
-              static_cast<double>(snap.total_fills));
-            w("truetest_equity_current",
-              "Current portfolio equity (valued at last_mid_price)", "gauge",
-              portfolio_.get_equity(last_mid_price_));
-            w("truetest_cash_current",
-              "Current cash balance", "gauge",
-              portfolio_.get_cash());
-            w("truetest_drawdown_current",
-              "Current drawdown fraction", "gauge",
-              snap.max_drawdown);
-            w("truetest_sharpe_ratio",
-              "Sharpe ratio (point-in-time)", "gauge",
-              snap.sharpe_ratio);
-            w("truetest_halt_flag",
-              "1 if halt flag set, 0 otherwise", "gauge",
-              halt_flag_.load(std::memory_order_relaxed) ? 1.0 : 0.0);
-            return std::string(buf, n);
-        });
-
-        worker_threads_.emplace_back([this]() {
-            ws_worker_->run(*ws_ring_);
-        });
-    }
-#endif
 
     if (!config_.is_threaded())
         return;
@@ -578,6 +1192,7 @@ void engine::start_workers()
         break;
     }
     }
+
 }
 
 void engine::stop_workers()
@@ -588,9 +1203,6 @@ void engine::stop_workers()
     if (stats_worker_) stats_worker_->stop();
     if (risk_stats_worker_) risk_stats_worker_->stop();
     if (mm_worker_) mm_worker_->stop();
-#ifdef HAS_WEB_UI
-    if (ws_worker_) ws_worker_->stop();
-#endif
 
     for (auto& t : worker_threads_)
     {
@@ -625,11 +1237,6 @@ void engine::stop_workers()
     Worker* all_workers[] = {
         logging_worker_.get(), risk_worker_.get(), stats_worker_.get(),
         observer_worker_.get(), risk_stats_worker_.get(), mm_worker_.get(),
-#ifdef HAS_WEB_UI
-        ws_worker_.get(),
-#else
-        nullptr,
-#endif
     };
     for (auto* w : all_workers)
     {
@@ -645,12 +1252,8 @@ void engine::stop_workers()
         }
     }
 
-    std::size_t ws_d = 0;
-#ifdef HAS_WEB_UI
-    ws_d = ws_drops_;
-#endif
     std::size_t total_drops = logging_drops_ + risk_drops_ + stats_drops_
-                            + observer_drops_ + risk_stats_drops_ + mm_drops_ + ws_d;
+                            + observer_drops_ + risk_stats_drops_ + mm_drops_;
     if (total_drops > 0)
     {
         std::cerr << "  WARNING: " << total_drops << " events dropped from ring buffers.\n";
@@ -659,7 +1262,8 @@ void engine::stop_workers()
                   << " stats=" << stats_drops_
                   << " observer=" << observer_drops_
                   << " risk_stats=" << risk_stats_drops_
-                  << " mm=" << mm_drops_ << "\n";
+                  << " mm=" << mm_drops_
+                  << "\n";
     }
 
     auto report_hwm = [](const char* name, const std::shared_ptr<EventRing>& ring) {
@@ -678,242 +1282,73 @@ void engine::stop_workers()
     report_hwm("observer", observer_ring_);
     report_hwm("risk_stats", risk_stats_ring_);
     report_hwm("mm", mm_ring_);
-#ifdef HAS_WEB_UI
-    report_hwm("ws", ws_ring_);
-#endif
 }
 
-#ifdef HAS_WEB_UI
-void engine::process_ws_commands(bool& halt_requested, std::size_t& event_count)
+#ifdef HAS_QUESTDB
+void engine::questdb_begin()
 {
-    if (!ws_worker_) return;
+    if (!config_.persist_enabled) return;
 
-    ws_command cmd;
-    while (ws_worker_->poll_command(cmd))
+    truetest::questdb::StoreConfig scfg;
+    scfg.host = config_.questdb_host;
+    scfg.ilp_port = config_.questdb_ilp_port;
+    scfg.http_port = config_.questdb_http_port;
+    try
     {
-        if (cmd.command == "stop")
-        {
-            halt_requested = true;
-            ws_worker_->broadcast_status("halted",
-                config_.provider ? config_.provider->name() : "",
-                "");
-        }
-        else if (cmd.command == "order")
-        {
-            if (cmd.side.empty() || cmd.quantity <= 0.0)
-            {
-                ws_worker_->broadcast(event_json::order_response_to_json(
-                    0, "rejected", "invalid order parameters"));
-                continue;
-            }
-
-            auto otype = (cmd.order_type == "limit") ? order_type::limit : order_type::market;
-            auto oside = (cmd.side == "sell") ? order_side::sell : order_side::buy;
-            double price = (otype == order_type::limit && cmd.price > 0.0) ? cmd.price : last_mid_price_;
-
-            std::string symbol;
-            if (!data_handler_->db_data_symbol.empty())
-                symbol = data_handler_->db_data_symbol.back();
-
-            auto ts = std::chrono::system_clock::now();
-            auto tif = (otype == order_type::limit) ? time_in_force::gtc : time_in_force::ioc;
-
-            // Route via route_order so UI-submitted orders pick up the same
-            // instrument-spec quant / exec delay / latency as strategy orders.
-            // Bypassing this was a look-ahead leak.
-            order_event o(ts, symbol, otype, oside, cmd.quantity, price, tif);
-            bool halted_here = false;
-            route_order(o, ts, event_count, halted_here);
-
-            // Client "accepted" ack; rejection broadcast happens in route_order.
-            ws_worker_->broadcast(event_json::order_response_to_json(
-                o.get_order_id(), "accepted", "",
-                symbol, cmd.side, cmd.quantity, price));
-
-            if (halted_here) halt_requested = true;
-        }
-        else if (cmd.command == "set_timeframe" && !cmd.timeframe.empty())
-        {
-            int value = 0;
-            char unit = 0;
-            if (std::sscanf(cmd.timeframe.c_str(), "%d%c", &value, &unit) == 2 && value > 0)
-            {
-                std::chrono::milliseconds new_interval{0};
-                switch (unit)
-                {
-                case 's': new_interval = std::chrono::seconds(value); break;
-                case 'm': new_interval = std::chrono::minutes(value); break;
-                case 'h': new_interval = std::chrono::hours(value); break;
-                default: break;
-                }
-
-                if (new_interval.count() > 0)
-                {
-                    tick_bar_interval_ = new_interval;
-
-                    if (tick_aggregator_)
-                    {
-                        tick_aggregator_->flush();
-                        tick_aggregator_ = std::make_unique<BarAggregator>(
-                            tick_bar_interval_,
-                            [this](const market_event& bar) {
-                                broadcast_market_with_indicators(bar);
-                            });
-                    }
-
-                    ws_worker_->broadcast(R"({"type":"chart_reset","data":{"timeframe":")"
-                        + cmd.timeframe + R"("}})");
-                }
-            }
-        }
-#ifdef HAS_SQLITE
-        else if (cmd.command == "query_fills")
-        {
-            int limit = cmd.price > 0 ? static_cast<int>(cmd.price) : 200;
-            if (store_)
-            {
-                ws_worker_->broadcast(event_json::fills_history_to_json(
-                    store_->query_fills_json(cmd.timeframe, limit)));
-            }
-        }
-#endif
-        else if (cmd.command == "set_symbol" && !cmd.value.empty())
-        {
-            std::string new_symbol = cmd.value;
-            std::transform(new_symbol.begin(), new_symbol.end(),
-                           new_symbol.begin(), ::tolower);
-
-            std::lock_guard<std::mutex> lk(switch_mu_);
-            pending_symbol_ = new_symbol;
-
-            ws_worker_->broadcast_status("switching",
-                config_.provider ? config_.provider->name() : "", new_symbol);
-        }
-        else if (cmd.command == "set_strategy" && !cmd.value.empty())
-        {
-            std::string new_strategy = cmd.value;
-
-            auto available = StrategyFactory::available();
-            bool valid = std::find(available.begin(), available.end(), new_strategy)
-                         != available.end();
-            if (!valid) {
-                ws_worker_->broadcast(event_json::error_to_json(
-                    "Unknown strategy: " + new_strategy));
-                continue;
-            }
-
-            std::lock_guard<std::mutex> lk(switch_mu_);
-            pending_strategy_ = new_strategy;
-
-            ws_worker_->broadcast_status("running",
-                new_strategy,
-                (!data_handler_->db_data_symbol.empty())
-                    ? data_handler_->db_data_symbol.back() : "");
-        }
-        else if (cmd.command == "backfill")
-        {
-            (void)cmd;
-        }
+        scfg.run_tag = truetest::questdb::make_run_tag(config_.run_tag);
     }
-}
-
-void engine::broadcast_orderbook_snapshot(const std::string& symbol)
-{
-    if (!ws_worker_) return;
-
-    auto now = std::chrono::steady_clock::now();
-    if (now - last_ob_snapshot_time_ < std::chrono::milliseconds(250))
+    catch (const std::exception& e)
+    {
+        std::cerr << "  WARNING: invalid --run-tag (" << e.what()
+                  << ") — persistence disabled.\n";
         return;
-    last_ob_snapshot_time_ = now;
-
-    auto ob = orderbook_registry_.get(symbol);
-    if (!ob) return;
-
-    auto infos = ob->get_order_infos();
-    const auto& bid_lvls = infos.get_bids();
-    const auto& ask_lvls = infos.get_asks();
-
-    const int max_levels = 20;
-    std::vector<std::pair<double, double>> bids;
-    std::vector<std::pair<double, double>> asks;
-
-    for (int i = 0; i < std::min(max_levels, static_cast<int>(bid_lvls.size())); ++i)
-    {
-        bids.emplace_back(bid_lvls[i].price_.to_double(),
-                          static_cast<double>(bid_lvls[i].quantity_) / 1e8);
-    }
-    for (int i = 0; i < std::min(max_levels, static_cast<int>(ask_lvls.size())); ++i)
-    {
-        asks.emplace_back(ask_lvls[i].price_.to_double(),
-                          static_cast<double>(ask_lvls[i].quantity_) / 1e8);
     }
 
-    double spread = 0.0;
-    if (!bids.empty() && !asks.empty())
-        spread = asks.front().first - bids.front().first;
+    scfg.mode = (config_.mode == engine_mode::backtest ? "backtest"
+              :  config_.mode == engine_mode::shadow   ? "shadow"
+              :                                          "live");
+    // Engine_core has no TT_TARGET define, so derive a binary label from
+    // the runtime mode. main.inc could supply a more accurate value, but
+    // mode-based naming is informative enough for runs_meta.
+    scfg.binary = (config_.mode == engine_mode::backtest ? "engine_backtest"
+                :  config_.mode == engine_mode::shadow   ? "engine_shadow"
+                :                                          "engine_live");
+    scfg.strategy = primary_strategy_name_;
+    if (data_handler_ && !data_handler_->db_data_symbol.empty())
+        scfg.symbol = data_handler_->db_data_symbol.front();
+    scfg.initial_equity = config_.initial_balance;
+    scfg.notes = config_.run_notes;
 
-    ws_worker_->broadcast_orderbook(bids, asks, spread);
-}
+    questdb_store_ = std::make_shared<truetest::questdb::QuestdbStore>(
+        std::move(scfg));
 
-void engine::send_state_snapshot()
-{
-    if (!ws_worker_) return;
-
-    ws_worker_->broadcast_status("running",
-        config_.provider ? config_.provider->name() : "",
-        (!data_handler_->db_data_symbol.empty()) ? data_handler_->db_data_symbol.back() : "");
-
+    if (questdb_store_->begin())
     {
-        auto json = event_json::portfolio_to_json(portfolio_);
-        ws_worker_->broadcast(json);
+        questdb_active_ = true;
+        std::cerr << "  QuestDB persistence ENABLED (run_tag="
+                  << questdb_store_->run_tag() << ")\n";
     }
-
+    else
     {
-        auto report = analytics_.snapshot();
-        report.final_equity = portfolio_.get_equity(last_mid_price_);
-        auto json = event_json::analytics_to_json(report);
-        ws_worker_->broadcast(json);
-    }
-
-    ws_worker_->broadcast(R"({"type":"chart_reset","data":{}})");
-    for (const auto& bar_json : bar_history_)
-        ws_worker_->broadcast(bar_json);
-
-#ifdef HAS_SQLITE
-    if (store_)
-    {
-        ws_worker_->broadcast(
-            event_json::fills_history_to_json(store_->query_fills_json("", 200)));
-        ws_worker_->broadcast(
-            event_json::equity_history_to_json(store_->query_equity_json(500)));
-    }
-#endif
-
-    {
-        auto names = StrategyFactory::available();
-        std::string json = R"({"type":"strategies","data":[)";
-        for (std::size_t i = 0; i < names.size(); ++i) {
-            if (i > 0) json += ",";
-            json += "\"" + names[i] + "\"";
-        }
-        json += "]}";
-        ws_worker_->broadcast(json);
+        std::cerr << "  WARNING: QuestDB unreachable at "
+                  << config_.questdb_host << ":" << config_.questdb_http_port
+                  << " — continuing with persistence DISABLED for this session.\n"
+                  << "  Start the daemon with: questdb start\n"
+                  << "  Or re-run without --persist to suppress this warning.\n";
+        questdb_store_.reset();
     }
 }
 
-void engine::broadcast_market_with_indicators(const market_event& mkt)
+void engine::questdb_end()
 {
-    if (!ws_worker_) return;
-
-    auto indicators = strategy_ ? strategy_->get_indicator_values(mkt.get_symbol())
-                                : std::vector<std::pair<std::string, double>>{};
-
-    auto json = event_json::to_json_with_indicators(mkt, indicators);
-    ws_worker_->broadcast(json);
-
-    if (bar_history_.size() >= MAX_BAR_HISTORY)
-        bar_history_.erase(bar_history_.begin());
-    bar_history_.push_back(json);
+    if (!questdb_active_ || !questdb_store_) return;
+    const auto report = analytics_.snapshot();
+    const double final_equity = portfolio_.get_equity(last_mid_price_);
+    questdb_store_->end(final_equity,
+                        report.total_orders,
+                        report.total_fills,
+                        questdb_total_rejections_);
+    questdb_active_ = false;
 }
 #endif
 
@@ -981,17 +1416,19 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             log_event(*rej);
             publish_event(rej);
 
-#ifdef HAS_WEB_UI
-            if (ws_worker_)
+#ifdef HAS_QUESTDB
+            if (questdb_active_ && questdb_store_)
             {
-                ws_worker_->broadcast(event_json::order_response_to_json(
-                    o->get_order_id(), "rejected", reason,
-                    o->get_symbol(),
-                    o->get_side() == order_side::buy ? "buy" : "sell",
-                    o->get_quantity(), o->get_price()));
+                questdb_store_->record_order_submitted(*o, "rejected");
+                questdb_store_->record_rejection(*o,
+                    (action == risk_action::halt) ? "risk_halt" : "risk_reject",
+                    reason);
+                questdb_total_rejections_++;
             }
 #endif
+
             order_tracker_.set_status(o->get_order_id(), order_status::rejected);
+            erase_open_order(o->get_order_id());
             if (action == risk_action::halt)
             {
                 if (config_.risk_unwind)
@@ -1004,9 +1441,19 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     }
 
     order_tracker_.set_status(o->get_order_id(), order_status::open);
+    cache_open_order(*o);
     log_event(*o);
     publish_event(o);
     analytics_.on_event(o);
+
+#ifdef HAS_QUESTDB
+    if (questdb_active_ && questdb_store_)
+    {
+        questdb_store_->record_order_submitted(*o, "pending");
+        questdb_store_->record_status_transition(o->get_order_id(),
+            order_status::pending, order_status::open);
+    }
+#endif
 
     auto adapter = get_adapter(o->get_symbol());
 
@@ -1027,16 +1474,35 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     {
         for (auto& f : fills)
         {
-            order_tracker_.set_status(f.get_order_id(),
-                f.is_partial() ? order_status::partially_filled : order_status::filled);
+            const auto new_status = f.is_partial()
+                ? order_status::partially_filled : order_status::filled;
+            order_tracker_.set_status(f.get_order_id(), new_status);
+            cache_fill(f);
+            if (f.is_partial())
+                update_open_order_status(f.get_order_id(), "partial");
+            else
+                erase_open_order(f.get_order_id());
             auto fill_ptr = fill_pool_.acquire(f);
             log_event(f);
-            portfolio_.on_fill(f);
+            portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
+                               lookup_strategy_name(f.get_order_id()));
+            dispatch_fill_to_strategy(f);
             adverse_selection_.on_fill(f);
-            exit_manager_.on_fill(f);
+            exit_manager_.on_fill(f, lookup_opener(f.get_order_id()));
             risk_manager_.on_fill(f);
-#ifdef HAS_SQLITE
-            if (store_) store_->insert_fill(f);
+#ifdef HAS_QUESTDB
+            if (questdb_active_ && questdb_store_)
+            {
+                const char* src =
+                    (f.get_source() == fill_source::exchange)  ? "exchange"
+                  : (f.get_source() == fill_source::simulated) ? "simulated"
+                  :                                              "local";
+                questdb_store_->record_fill(f, lookup_opener(f.get_order_id()),
+                                            lookup_strategy_name(f.get_order_id()),
+                                            src);
+                questdb_store_->record_status_transition(f.get_order_id(),
+                    order_status::open, new_status);
+            }
 #endif
             notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
             publish_event(fill_ptr);
@@ -1045,17 +1511,6 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             if (config_.mode == engine_mode::shadow && shadow_tracker_)
                 shadow_tracker_->on_simulated_fill(f);
 
-#ifdef HAS_WEB_UI
-            if (ws_worker_)
-            {
-                ws_worker_->broadcast(event_json::order_response_to_json(
-                    f.get_order_id(), "filled", "",
-                    f.get_symbol(),
-                    f.get_side() == order_side::buy ? "buy" : "sell",
-                    f.get_filled_quantity(), f.get_fill_price()));
-            }
-#endif
-
             event_count++;
 
             {
@@ -1063,11 +1518,6 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                 auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
                 if (post_action == risk_action::halt)
                 {
-#ifdef HAS_WEB_UI
-                    if (ws_worker_)
-                        ws_worker_->broadcast(event_json::error_to_json(
-                            "Risk manager halted engine", "risk"));
-#endif
                     if (config_.risk_unwind)
                         unwind_positions(event_count);
                     halt_requested = true;
@@ -1120,12 +1570,23 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
     if (cancelled)
     {
         order_tracker_.set_status(order_id, order_status::cancelled);
+        erase_open_order(order_id);
         auto cancel_ev = std::make_shared<cancel_event>(
             std::chrono::system_clock::now(), symbol, order_id, reason);
         log_event(*cancel_ev);
         publish_event(cancel_ev);
         if (!config_.is_threaded())
             analytics_.on_event(cancel_ev);
+#ifdef HAS_QUESTDB
+        if (questdb_active_ && questdb_store_)
+        {
+            questdb_store_->record_cancellation(order_id, symbol,
+                lookup_strategy_name(order_id),
+                reason.empty() ? "manual" : reason);
+            questdb_store_->record_status_transition(order_id,
+                order_status::open, order_status::cancelled, reason);
+        }
+#endif
     }
 
     return cancelled;
@@ -1139,12 +1600,23 @@ bool engine::modify_order(const std::string& symbol, uint64_t order_id,
 
     if (modified)
     {
+        const auto now = std::chrono::system_clock::now();
         auto amend_ev = std::make_shared<amend_event>(
-            std::chrono::system_clock::now(), symbol, order_id, new_price, new_qty);
+            now, symbol, order_id, new_price, new_qty);
         log_event(*amend_ev);
         publish_event(amend_ev);
         if (!config_.is_threaded())
             analytics_.on_event(amend_ev);
+#ifdef HAS_QUESTDB
+        if (questdb_active_ && questdb_store_)
+        {
+            // Engine doesn't preserve old price/qty cleanly here; log zeros
+            // and rely on the orders/order_status tables for history.
+            questdb_store_->record_amendment(order_id, symbol,
+                /*old_price=*/0.0, new_price,
+                /*old_qty=*/0.0, new_qty, now);
+        }
+#endif
     }
 
     return modified;
@@ -1176,9 +1648,19 @@ void engine::unwind_positions(std::size_t& event_count)
         close_order->set_strategy_name("risk_unwind");
 
         order_tracker_.set_status(close_order->get_order_id(), order_status::open);
+        cache_open_order(*close_order);
         log_event(*close_order);
         publish_event(close_order);
         analytics_.on_event(close_order);
+
+#ifdef HAS_QUESTDB
+        if (questdb_active_ && questdb_store_)
+        {
+            questdb_store_->record_order_submitted(*close_order, "pending");
+            questdb_store_->record_status_transition(close_order->get_order_id(),
+                order_status::pending, order_status::open, "risk_unwind");
+        }
+#endif
 
         auto adapter = get_adapter(symbol);
         if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
@@ -1191,31 +1673,40 @@ void engine::unwind_positions(std::size_t& event_count)
         {
             for (auto& f : fills)
             {
-                order_tracker_.set_status(f.get_order_id(),
-                    f.is_partial() ? order_status::partially_filled : order_status::filled);
+                const auto new_status = f.is_partial()
+                    ? order_status::partially_filled : order_status::filled;
+                order_tracker_.set_status(f.get_order_id(), new_status);
+                cache_fill(f);
+                if (f.is_partial())
+                    update_open_order_status(f.get_order_id(), "partial");
+                else
+                    erase_open_order(f.get_order_id());
                 auto fill_ptr = fill_pool_.acquire(f);
                 log_event(f);
-                portfolio_.on_fill(f);
+                portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
+                               lookup_strategy_name(f.get_order_id()));
+            dispatch_fill_to_strategy(f);
                 adverse_selection_.on_fill(f);
-                exit_manager_.on_fill(f);
+                exit_manager_.on_fill(f, lookup_opener(f.get_order_id()));
                 risk_manager_.on_fill(f);
-#ifdef HAS_SQLITE
-                if (store_) store_->insert_fill(f);
+#ifdef HAS_QUESTDB
+                if (questdb_active_ && questdb_store_)
+                {
+                    const char* src =
+                        (f.get_source() == fill_source::exchange)  ? "exchange"
+                      : (f.get_source() == fill_source::simulated) ? "simulated"
+                      :                                              "local";
+                    questdb_store_->record_fill(f, lookup_opener(f.get_order_id()),
+                                                lookup_strategy_name(f.get_order_id()),
+                                                src);
+                    questdb_store_->record_status_transition(f.get_order_id(),
+                        order_status::open, new_status, "risk_unwind");
+                }
 #endif
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
                 analytics_.on_event(fill_ptr);
 
-#ifdef HAS_WEB_UI
-                if (ws_worker_)
-                {
-                    ws_worker_->broadcast(event_json::order_response_to_json(
-                        f.get_order_id(), "filled", "risk unwind",
-                        f.get_symbol(),
-                        f.get_side() == order_side::buy ? "buy" : "sell",
-                        f.get_filled_quantity(), f.get_fill_price()));
-                }
-#endif
                 event_count++;
             }
         }
@@ -1340,8 +1831,20 @@ bool engine::route_order(order_event& order,
                          const std::chrono::system_clock::time_point& sim_time,
                          std::size_t& event_count, bool& halt_requested)
 {
+    // Operator-pause gate: intercept here so every strategy call site is
+    // covered by one branch. Strategies still run (so analytics + lots
+    // stay live for fills already in flight), but no new orders reach
+    // the venue. The intent's order_id stays 0, which makes
+    // register_strategy_exit_intent a no-op for paused emissions.
+    if (pause_all_.load(std::memory_order_acquire))
+    {
+        (void)sim_time; (void)event_count; (void)halt_requested;
+        return true;
+    }
+
     order.set_order_id(OrderIdGenerator::next());
     order_tracker_.set_status(order.get_order_id(), order_status::pending);
+    register_order_meta(order);
 
     if (auto* spec = resolve_instrument_spec(order.get_symbol()))
     {
@@ -1353,14 +1856,12 @@ bool engine::route_order(order_event& order,
                 order.get_order_id(), reason);
             log_event(*rej);
             publish_event(rej);
-#ifdef HAS_WEB_UI
-            if (ws_worker_)
+#ifdef HAS_QUESTDB
+            if (questdb_active_ && questdb_store_)
             {
-                ws_worker_->broadcast(event_json::order_response_to_json(
-                    order.get_order_id(), "rejected", reason,
-                    order.get_symbol(),
-                    order.get_side() == order_side::buy ? "buy" : "sell",
-                    order.get_quantity(), order.get_price()));
+                questdb_store_->record_order_submitted(order, "rejected");
+                questdb_store_->record_rejection(order, "venue_filter", reason);
+                questdb_total_rejections_++;
             }
 #endif
             order_tracker_.set_status(order.get_order_id(), order_status::rejected);
@@ -1451,18 +1952,93 @@ void engine::check_pending_stops(double high, double low,
 
 void engine::notify_position_change_all(const std::string& symbol, bool open)
 {
+    // Legacy net-truth push for strategies that still override
+    // set_position_open. Multi-lot strategies ignore this and track
+    // openers via on_fill.
     if (strategy_) strategy_->set_position_open(symbol, open);
     for (auto& s : additional_strategies_)
         if (s) s->set_position_open(symbol, open);
 
-    // On close, drop exit intents so the next entry doesn't carry a
-    // prior intent armed against a stale opener id.
+    // On a net-flat transition, sweep any leftover bracket for a
+    // single-lot strategy. This catches strategies that close via a
+    // signal in on_market/on_tick without setting opener_order_id on the
+    // closer — the per-opener cancel path in ExitManager::on_fill can't
+    // reach those, so the intent would otherwise stay armed and could
+    // fire later as a phantom close on a flat position. Skipped when
+    // multiple openers are live for a (strategy,symbol) — that's the
+    // multi-lot pattern, where the strategy owns opener_order_id
+    // discipline and we must not bulk-cancel.
     if (!open)
     {
-        if (!primary_strategy_name_.empty())
-            exit_manager_.cancel(primary_strategy_name_, symbol);
+        auto sweep = [&](const std::string& name) {
+            if (name.empty()) return;
+            if (exit_manager_.openers_for(name, symbol) <= 1)
+                exit_manager_.cancel(name, symbol);
+        };
+        sweep(primary_strategy_name_);
         for (const auto& name : additional_strategy_names_)
-            exit_manager_.cancel(name, symbol);
+            sweep(name);
+    }
+}
+
+void engine::register_order_meta(const order_event& o)
+{
+    const std::uint64_t opener = (o.get_opener_order_id() != 0)
+        ? o.get_opener_order_id()
+        : o.get_order_id();
+    order_meta_[o.get_order_id()] = order_meta{opener, o.get_strategy_name()};
+}
+
+std::uint64_t engine::lookup_opener(std::uint64_t order_id) const
+{
+    auto it = order_meta_.find(order_id);
+    return it != order_meta_.end() ? it->second.opener_order_id : 0;
+}
+
+const std::string& engine::lookup_strategy_name(std::uint64_t order_id) const
+{
+    static const std::string empty;
+    auto it = order_meta_.find(order_id);
+    return it != order_meta_.end() ? it->second.strategy_name : empty;
+}
+
+void engine::dispatch_fill_to_strategy(const fill_event& f)
+{
+    const std::string& name = lookup_strategy_name(f.get_order_id());
+    if (name.empty()) return;
+    const std::uint64_t opener = lookup_opener(f.get_order_id());
+
+    if (strategy_ && name == primary_strategy_name_)
+    {
+        strategy_->on_fill(f, opener);
+        return;
+    }
+    for (std::size_t i = 0; i < additional_strategies_.size(); ++i)
+    {
+        if (i < additional_strategy_names_.size() &&
+            additional_strategy_names_[i] == name &&
+            additional_strategies_[i])
+        {
+            additional_strategies_[i]->on_fill(f, opener);
+            return;
+        }
+    }
+}
+
+void engine::drain_venue_bracket_meta()
+{
+    if (!config_.provider) return;
+    auto adapter = config_.provider->get_execution_adapter();
+    auto* bridge = dynamic_cast<ExecutionBridge*>(adapter.get());
+    if (!bridge) return;
+
+    std::vector<ExecutionBridge::synth_meta> meta;
+    if (!bridge->poll_synth_meta(meta)) return;
+
+    for (const auto& m : meta)
+    {
+        order_meta_[m.engine_order_id] = order_meta{
+            m.opener_order_id, m.strategy_name};
     }
 }
 
@@ -1470,11 +2046,14 @@ void engine::register_strategy_exit_intent(IStrategy& strategy,
                                            const std::string& strategy_name,
                                            std::uint64_t order_id)
 {
-    auto intent = strategy.take_pending_exit_intent();
-    if (!intent) return;
-    intent->opener_order_id = order_id;
-    intent->strategy_name   = strategy_name;
-    exit_manager_.register_pending(std::move(*intent));
+    if (order_id == 0) return;  // opener not yet assigned — cannot key
+    auto intents = strategy.take_pending_exit_intents();
+    for (auto& intent : intents)
+    {
+        intent.opener_order_id = order_id;
+        intent.strategy_name   = strategy_name;
+        exit_manager_.register_pending(std::move(intent));
+    }
 }
 
 bool engine::evaluate_exits(const std::string& symbol, double px,
@@ -1482,12 +2061,34 @@ bool engine::evaluate_exits(const std::string& symbol, double px,
                             std::size_t& event_count,
                             std::int64_t recv_ns)
 {
-    auto close_opt = exit_manager_.on_price(symbol, px, ts);
-    if (!close_opt) return false;
-    close_opt->set_recv_ns(recv_ns);
-    bool halt = false;
-    route_order(*close_opt, ts, event_count, halt);
-    return halt;
+    auto closes = exit_manager_.on_price(symbol, px, ts);
+    if (closes.empty()) return false;
+    for (auto& close : closes)
+    {
+        close.set_recv_ns(recv_ns);
+        bool halt = false;
+        route_order(close, ts, event_count, halt);
+        if (halt) return true;
+    }
+    return false;
+}
+
+bool engine::evaluate_exits(const std::string& symbol,
+                            double low, double high, double close,
+                            std::chrono::system_clock::time_point ts,
+                            std::size_t& event_count,
+                            std::int64_t recv_ns)
+{
+    auto fires = exit_manager_.on_bar(symbol, low, high, close, ts);
+    if (fires.empty()) return false;
+    for (auto& c : fires)
+    {
+        c.set_recv_ns(recv_ns);
+        bool halt = false;
+        route_order(c, ts, event_count, halt);
+        if (halt) return true;
+    }
+    return false;
 }
 
 void engine::dispatch_extras_on_market(const market_event& mkt,
@@ -1500,19 +2101,19 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
         auto& s = additional_strategies_[i];
         if (!s) continue;
 
-        if (evaluate_exits(mkt.get_symbol(), mkt.get_close(), ts,
-                           event_count, mkt.get_recv_ns()))
+        if (evaluate_exits(mkt.get_symbol(),
+                           mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                           ts, event_count, mkt.get_recv_ns()))
             return;
 
         if (auto o = s->on_market(mkt))
         {
             o->set_recv_ns(mkt.get_recv_ns());
             o->set_strategy_name(additional_strategy_names_[i]);
-            std::uint64_t oid = o->get_order_id();
             bool halt = false;
             route_order(*o, ts, event_count, halt);
             if (!halt)
-                register_strategy_exit_intent(*s, additional_strategy_names_[i], oid);
+                register_strategy_exit_intent(*s, additional_strategy_names_[i], o->get_order_id());
             if (halt) return;
         }
     }
@@ -1536,11 +2137,10 @@ void engine::dispatch_extras_on_tick(const tick_event& te,
         {
             o->set_recv_ns(te.get_recv_ns());
             o->set_strategy_name(additional_strategy_names_[i]);
-            std::uint64_t oid = o->get_order_id();
             bool halt = false;
             route_order(*o, ts, event_count, halt);
             if (!halt)
-                register_strategy_exit_intent(*s, additional_strategy_names_[i], oid);
+                register_strategy_exit_intent(*s, additional_strategy_names_[i], o->get_order_id());
             if (halt) return;
         }
     }
@@ -1573,6 +2173,11 @@ void engine::write_adapter_diagnostics(truetest::ui::streaming_stats& st)
 void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                                 const std::chrono::system_clock::time_point& timestamp)
 {
+    // Operator-requested flatten: drain on the next event so the timestamp
+    // we close at is from the live stream rather than wall-clock-now.
+    if (flatten_request_.exchange(false, std::memory_order_acq_rel))
+        unwind_positions(event_count);
+
     // Advance adapter clocks first so cancels whose in-flight window has
     // elapsed are drained before this event's matching runs.
     for (auto& [_, ad] : execution_adapters_)
@@ -1631,6 +2236,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                                        mkt.get_timestamp());
         }
 
+        drain_venue_bracket_meta();
         std::vector<fill_event> provider_fills;
         if (provider_adapter && provider_adapter->poll_fills(provider_fills))
         {
@@ -1642,23 +2248,18 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                         shadow_tracker_->on_exchange_fill(f);
                     continue;
                 }
+                cache_fill(f);
+                erase_open_order(f.get_order_id());
                 auto fill_ptr = fill_pool_.acquire(f);
-                portfolio_.on_fill(f);
+                portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
+                               lookup_strategy_name(f.get_order_id()));
+            dispatch_fill_to_strategy(f);
                 adverse_selection_.on_fill(f);
-                exit_manager_.on_fill(f);
+                exit_manager_.on_fill(f, lookup_opener(f.get_order_id()));
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
                 if (!config_.is_threaded())
                     analytics_.on_event(fill_ptr);
-#ifdef HAS_WEB_UI
-                if (ws_worker_) {
-                    ws_worker_->broadcast(event_json::order_response_to_json(
-                        f.get_order_id(), "filled", "",
-                        f.get_symbol(),
-                        f.get_side() == order_side::buy ? "buy" : "sell",
-                        f.get_filled_quantity(), f.get_fill_price()));
-                }
-#endif
                 event_count++;
             }
         }
@@ -1673,38 +2274,28 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         analytics_.on_event(mkt_ptr);
     event_count++;
 
-#ifdef HAS_SQLITE
-    if (store_)
-    {
-        auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            timestamp.time_since_epoch()).count();
-        store_->insert_equity_point(ts_ms, portfolio_.get_equity(last_mid_price_));
-    }
-#endif
-
-#ifdef HAS_WEB_UI
-    broadcast_market_with_indicators(mkt);
-#endif
-
-    if (evaluate_exits(mkt.get_symbol(), mkt.get_close(), timestamp,
-                       event_count, mkt.get_recv_ns()))
+    if (evaluate_exits(mkt.get_symbol(),
+                       mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                       timestamp, event_count, mkt.get_recv_ns()))
         return;
 
     if (order_opt)
     {
         if (!primary_strategy_name_.empty())
             order_opt->set_strategy_name(primary_strategy_name_);
-        std::uint64_t oid = order_opt->get_order_id();
         bool halt = false;
         route_order(*order_opt, timestamp, event_count, halt);
         if (!halt && strategy_)
-            register_strategy_exit_intent(*strategy_, primary_strategy_name_, oid);
+            register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
     }
     dispatch_extras_on_market(mkt, timestamp, event_count);
 }
 
 void engine::process_single_tick(const tick_record& rec, std::size_t& event_count)
 {
+    if (flatten_request_.exchange(false, std::memory_order_acq_rel))
+        unwind_positions(event_count);
+
     for (auto& [_, ad] : execution_adapters_)
         if (ad) ad->advance_time(rec.timestamp);
     if (config_.provider)
@@ -1741,6 +2332,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                                        rec.timestamp);
         }
 
+        drain_venue_bracket_meta();
         std::vector<fill_event> provider_fills;
         if (provider_adapter && provider_adapter->poll_fills(provider_fills))
         {
@@ -1752,23 +2344,18 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                         shadow_tracker_->on_exchange_fill(f);
                     continue;
                 }
+                cache_fill(f);
+                erase_open_order(f.get_order_id());
                 auto fill_ptr = fill_pool_.acquire(f);
-                portfolio_.on_fill(f);
+                portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
+                               lookup_strategy_name(f.get_order_id()));
+            dispatch_fill_to_strategy(f);
                 adverse_selection_.on_fill(f);
-                exit_manager_.on_fill(f);
+                exit_manager_.on_fill(f, lookup_opener(f.get_order_id()));
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
                 if (!config_.is_threaded())
                     analytics_.on_event(fill_ptr);
-#ifdef HAS_WEB_UI
-                if (ws_worker_) {
-                    ws_worker_->broadcast(event_json::order_response_to_json(
-                        f.get_order_id(), "filled", "",
-                        f.get_symbol(),
-                        f.get_side() == order_side::buy ? "buy" : "sell",
-                        f.get_filled_quantity(), f.get_fill_price()));
-                }
-#endif
                 event_count++;
             }
         }
@@ -1797,20 +2384,6 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         analytics_.on_event(tick_ptr);
     event_count++;
 
-#ifdef HAS_SQLITE
-    if (store_)
-    {
-        auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            rec.timestamp.time_since_epoch()).count();
-        store_->insert_equity_point(ts_ms, portfolio_.get_equity(last_mid_price_));
-    }
-#endif
-
-#ifdef HAS_WEB_UI
-    if (tick_aggregator_)
-        tick_aggregator_->on_tick(rec.symbol, rec.price, rec.quantity, rec.timestamp);
-#endif
-
     if (evaluate_exits(rec.symbol, rec.price, rec.timestamp,
                        event_count, te.get_recv_ns()))
         return;
@@ -1821,10 +2394,9 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         order_opt->set_recv_ns(te.get_recv_ns());
         if (!primary_strategy_name_.empty())
             order_opt->set_strategy_name(primary_strategy_name_);
-        std::uint64_t oid = order_opt->get_order_id();
         route_order(*order_opt, rec.timestamp, event_count, halt);
         if (!halt && strategy_)
-            register_strategy_exit_intent(*strategy_, primary_strategy_name_, oid);
+            register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
     }
     dispatch_extras_on_tick(te, rec.timestamp, event_count);
 }
@@ -1836,10 +2408,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
 
-#ifdef HAS_SQLITE
-    record_run_begin();
+#ifdef HAS_QUESTDB
+    questdb_begin();
 #endif
-
     start_workers();
     pin_event_loop_thread();
 
@@ -1927,14 +2498,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
             write_adapter_diagnostics(st);
         }
 
-#ifdef HAS_WEB_UI
-        broadcast_orderbook_snapshot(rec.symbol);
-        bool halt = false;
-        process_ws_commands(halt, event_count);
-        if (ws_worker_ && ws_worker_->has_pending_connect())
-            send_state_snapshot();
-#endif
-
         {
             std::lock_guard<std::mutex> lk(switch_mu_);
             if (!pending_symbol_.empty()) {
@@ -1980,12 +2543,11 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
                   << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
     }
 
-#ifdef HAS_SQLITE
-    if (store_) store_->flush_all();
-    record_run_end();
-#endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 }
 
 void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
@@ -1995,18 +2557,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
 
-#ifdef HAS_SQLITE
-    record_run_begin();
+#ifdef HAS_QUESTDB
+    questdb_begin();
 #endif
-
-#ifdef HAS_WEB_UI
-    tick_aggregator_ = std::make_unique<BarAggregator>(
-        tick_bar_interval_,
-        [this](const market_event& bar) {
-            broadcast_market_with_indicators(bar);
-        });
-#endif
-
     start_workers();
     pin_event_loop_thread();
 
@@ -2081,14 +2634,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
             write_adapter_diagnostics(st);
         }
 
-#ifdef HAS_WEB_UI
-        broadcast_orderbook_snapshot(rec.symbol);
-        bool halt = false;
-        process_ws_commands(halt, event_count);
-        if (ws_worker_ && ws_worker_->has_pending_connect())
-            send_state_snapshot();
-#endif
-
         {
             std::lock_guard<std::mutex> lk(switch_mu_);
             if (!pending_symbol_.empty()) {
@@ -2134,16 +2679,11 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
                   << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
     }
 
-#ifdef HAS_WEB_UI
-    if (tick_aggregator_) tick_aggregator_->flush();
-#endif
-
-#ifdef HAS_SQLITE
-    if (store_) store_->flush_all();
-    record_run_end();
-#endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 }
 
 void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
@@ -2153,10 +2693,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
 
-#ifdef HAS_SQLITE
-    record_run_begin();
+#ifdef HAS_QUESTDB
+    questdb_begin();
 #endif
-
     start_workers();
     pin_event_loop_thread();
 
@@ -2310,13 +2849,6 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
             write_adapter_diagnostics(st);
         }
 
-#ifdef HAS_WEB_UI
-        bool halt = false;
-        process_ws_commands(halt, event_count);
-        if (ws_worker_ && ws_worker_->has_pending_connect())
-            send_state_snapshot();
-#endif
-
         if (!dash)
         {
             auto now_report = std::chrono::steady_clock::now();
@@ -2346,12 +2878,11 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
                   << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
     }
 
-#ifdef HAS_SQLITE
-    if (store_) store_->flush_all();
-    record_run_end();
-#endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 }
 
 void engine::run()
@@ -2368,10 +2899,6 @@ void engine::run()
         throw std::runtime_error("no data loaded — call IDataSource::load_data() before run()");
     }
 
-#ifdef HAS_SQLITE
-    record_run_begin();
-#endif
-
     if (!config_.event_log_path.empty())
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
 
@@ -2379,16 +2906,11 @@ void engine::run()
     memory_sampler_.set_start(debug::memory_snapshot::capture());
 #endif
 
+#ifdef HAS_QUESTDB
+    questdb_begin();
+#endif
     start_workers();
     pin_event_loop_thread();
-
-#ifdef HAS_WEB_UI
-    if (ws_worker_)
-    {
-        std::string sym = (!data_handler_->db_data_symbol.empty()) ? data_handler_->db_data_symbol[0] : "";
-        ws_worker_->broadcast_status("running", "", sym);
-    }
-#endif
 
     const auto base_ts = (config_.seed != 0)
         ? std::chrono::system_clock::time_point(std::chrono::milliseconds(0))
@@ -2519,19 +3041,9 @@ void engine::run()
             analytics_.on_event(mkt_ptr);
         event_count++;
 
-#ifdef HAS_WEB_UI
-        broadcast_market_with_indicators(mkt);
-
-        broadcast_orderbook_snapshot(symbol);
-
-        process_ws_commands(halt_requested, event_count);
-
-        if (ws_worker_ && ws_worker_->has_pending_connect())
-            send_state_snapshot();
-#endif
-
-        if (evaluate_exits(symbol, mkt.get_close(), sim_time,
-                           event_count, mkt.get_recv_ns()))
+        if (evaluate_exits(symbol,
+                           mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                           sim_time, event_count, mkt.get_recv_ns()))
             break;
 
         if (order_opt)
@@ -2539,10 +3051,9 @@ void engine::run()
             order_opt->set_recv_ns(mkt.get_recv_ns());
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
-            std::uint64_t oid = order_opt->get_order_id();
             route_order(*order_opt, sim_time, event_count, halt_requested);
             if (!halt_requested && strategy_)
-                register_strategy_exit_intent(*strategy_, primary_strategy_name_, oid);
+                register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
         }
         dispatch_extras_on_market(mkt, sim_time, event_count);
 
@@ -2560,16 +3071,6 @@ void engine::run()
 
         write_checkpoint_if_due(event_count);
     }
-
-#ifdef HAS_WEB_UI
-    if (ws_worker_)
-    {
-        if (worker_failed_.load(std::memory_order_acquire))
-            ws_worker_->broadcast(event_json::error_to_json("Worker thread crashed", "engine"));
-        else if (halt_flag_.load(std::memory_order_acquire))
-            ws_worker_->broadcast(event_json::error_to_json("Risk manager halted engine", "risk"));
-    }
-#endif
 
     while (!pending_orders_.empty())
     {
@@ -2597,35 +3098,6 @@ void engine::run()
     double throughput = static_cast<double>(event_count) / (elapsed_ms / 1000.0);
     std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
 
-#ifdef HAS_SQLITE
-    if (store_)
-    {
-        store_->flush_all();
-        auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-
-        std::string pos_json = "[";
-        bool first = true;
-        for (const auto& [sym, pos] : portfolio_.get_positions())
-        {
-            if (std::abs(pos.qty) < 1e-12) continue;
-            if (!first) pos_json += ",";
-            first = false;
-            char buf[256];
-            std::snprintf(buf, sizeof(buf),
-                R"({"symbol":"%s","qty":%.8g,"cost_basis":%.6f})",
-                sym.c_str(), pos.qty, pos.cost_basis);
-            pos_json += buf;
-        }
-        pos_json += "]";
-
-        store_->insert_portfolio_snapshot(
-            portfolio_.get_cash(), portfolio_.get_equity(last_mid_price_),
-            pos_json, portfolio_.get_total_trades(), ts_ms);
-    }
-    record_run_end();
-#endif
-
     if (!config_.checkpoint_path.empty())
     {
         try {
@@ -2640,6 +3112,9 @@ void engine::run()
 
     if (event_logger_) event_logger_->flush();
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 
 #ifdef HAS_DEBUG
     memory_sampler_.set_end(debug::memory_snapshot::capture());
@@ -2668,15 +3143,14 @@ void engine::run_tick_data()
     if (!config_.event_log_path.empty() && !event_logger_)
         event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
 
-#ifdef HAS_SQLITE
-    if (current_run_id_.empty()) record_run_begin();
-#endif
-
     pending_stops_.clear();
     while (!pending_orders_.empty()) pending_orders_.pop();
     order_seq_ = 0;
     day_order_ids_.clear();
 
+#ifdef HAS_QUESTDB
+    questdb_begin();
+#endif
     start_workers();
     pin_event_loop_thread();
 
@@ -2701,8 +3175,9 @@ void engine::run_tick_data()
         if (!config_.is_threaded())
             analytics_.on_event(bar_ptr);
 
-        if (evaluate_exits(bar.get_symbol(), bar.get_close(), bar.get_timestamp(),
-                           event_count, bar_recv_ns))
+        if (evaluate_exits(bar.get_symbol(),
+                           bar.get_low(), bar.get_high(), bar.get_close(),
+                           bar.get_timestamp(), event_count, bar_recv_ns))
             return;
 
         if (order_opt)
@@ -2710,10 +3185,9 @@ void engine::run_tick_data()
             order_opt->set_recv_ns(bar_recv_ns);
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
-            std::uint64_t oid = order_opt->get_order_id();
             route_order(*order_opt, bar.get_timestamp(), event_count, halt_requested);
             if (!halt_requested && strategy_)
-                register_strategy_exit_intent(*strategy_, primary_strategy_name_, oid);
+                register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
         }
         dispatch_extras_on_market(bar, bar.get_timestamp(), event_count);
     });
@@ -2769,10 +3243,9 @@ void engine::run_tick_data()
             order_opt->set_recv_ns(te.get_recv_ns());
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
-            std::uint64_t oid = order_opt->get_order_id();
             route_order(*order_opt, tick.timestamp, event_count, halt_requested);
             if (!halt_requested && strategy_)
-                register_strategy_exit_intent(*strategy_, primary_strategy_name_, oid);
+                register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
         }
         dispatch_extras_on_tick(te, tick.timestamp, event_count);
         if (halt_requested) break;
@@ -2811,12 +3284,11 @@ void engine::run_tick_data()
     double throughput = static_cast<double>(event_count) / (elapsed_ms / 1000.0);
     std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
 
-#ifdef HAS_SQLITE
-    if (store_) store_->flush_all();
-    record_run_end();
-#endif
     if (event_logger_) event_logger_->flush();
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 }
 
 void engine::run_replay(const std::string& log_path,
@@ -2825,6 +3297,9 @@ void engine::run_replay(const std::string& log_path,
 {
     EventReplayer replayer(log_path, replay_from_us, replay_to_us);
 
+#ifdef HAS_QUESTDB
+    questdb_begin();
+#endif
     start_workers();
     pin_event_loop_thread();
 
@@ -2883,8 +3358,9 @@ void engine::run_replay(const std::string& log_path,
             if (!config_.is_threaded())
                 analytics_.on_event(ev);
 
-            if (evaluate_exits(mkt.get_symbol(), mkt.get_close(), sim_time,
-                               event_count, mkt.get_recv_ns()))
+            if (evaluate_exits(mkt.get_symbol(),
+                               mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                               sim_time, event_count, mkt.get_recv_ns()))
                 break;
 
             if (order_opt)
@@ -2892,10 +3368,9 @@ void engine::run_replay(const std::string& log_path,
                 if (!primary_strategy_name_.empty())
                     order_opt->set_strategy_name(primary_strategy_name_);
                 order_opt->set_recv_ns(mkt.get_recv_ns());
-                std::uint64_t oid = order_opt->get_order_id();
                 route_order(*order_opt, sim_time, event_count, halt_requested);
                 if (!halt_requested && strategy_)
-                    register_strategy_exit_intent(*strategy_, primary_strategy_name_, oid);
+                    register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
             }
             dispatch_extras_on_market(mkt, sim_time, event_count);
             break;
@@ -2935,10 +3410,9 @@ void engine::run_replay(const std::string& log_path,
                 if (!primary_strategy_name_.empty())
                     order_opt->set_strategy_name(primary_strategy_name_);
                 order_opt->set_recv_ns(te.get_recv_ns());
-                std::uint64_t oid = order_opt->get_order_id();
                 route_order(*order_opt, sim_time, event_count, halt_requested);
                 if (!halt_requested && strategy_)
-                    register_strategy_exit_intent(*strategy_, primary_strategy_name_, oid);
+                    register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
             }
             dispatch_extras_on_tick(te, sim_time, event_count);
             break;
@@ -2978,4 +3452,7 @@ void engine::run_replay(const std::string& log_path,
               << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
 
     stop_workers();
+#ifdef HAS_QUESTDB
+    questdb_end();
+#endif
 }
