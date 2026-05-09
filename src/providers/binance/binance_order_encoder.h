@@ -3,6 +3,7 @@
 
 #include "../../execution/order_encoder.h"
 
+#include <array>
 #include <cctype>
 #include <cstdio>
 #include <string>
@@ -13,43 +14,63 @@ class BinanceOrderEncoder : public IOrderEncoder
 {
 public:
     explicit BinanceOrderEncoder(std::string default_symbol = "")
-        : default_symbol_(std::move(default_symbol))
+        : default_symbol_(upper(std::move(default_symbol)))
     {}
 
-    void set_default_symbol(std::string sym) { default_symbol_ = std::move(sym); }
+    void set_default_symbol(std::string sym)
+    {
+        default_symbol_ = upper(std::move(sym));
+        for (auto& s : prefix_cache_) s.clear();
+    }
 
     encoded_order encode_submit(const order_event& o,
                                 std::string_view client_order_id) override
     {
-        const std::string sym = resolve_symbol(o.get_symbol());
-        const char* type_str = order_type_to_binance(o.get_order_type());
-        const char* side_str = (o.get_side() == order_side::buy) ? "BUY" : "SELL";
+        const std::string sym = upper(
+            o.get_symbol().empty() ? default_symbol_ : o.get_symbol());
+        const order_side  side = o.get_side();
+        const order_type  type = o.get_order_type();
+        const time_in_force tif = o.get_tif();
 
-        std::string params = "symbol=" + sym
-            + "&side=" + side_str
-            + "&type=" + type_str
-            + "&quantity=" + format_decimal(o.get_quantity());
+        // Cached prefix covers symbol+side+type[+timeInForce]. Variable
+        // suffix (quantity, price, stopPrice, newClientOrderId) is appended
+        // in place, no allocations beyond the single payload string.
+        const std::string& prefix = (sym == default_symbol_)
+            ? cached_prefix(side, type, tif)
+            : prefix_for(sym, side, type, tif);
 
-        if (o.get_order_type() != order_type::market)
+        std::string payload;
+        payload.reserve(prefix.size() + 96 + client_order_id.size());
+        payload.assign(prefix);
+
+        char numbuf[64];
+        int n = std::snprintf(numbuf, sizeof(numbuf), "%.8f", o.get_quantity());
+        payload.append("&quantity=", 10);
+        payload.append(numbuf, static_cast<std::size_t>(n));
+
+        if (type != order_type::market)
         {
-            params += "&price=" + format_decimal(o.get_price());
-            params += "&timeInForce=" + std::string(tif_to_binance(o.get_tif()));
+            n = std::snprintf(numbuf, sizeof(numbuf), "%.8f", o.get_price());
+            payload.append("&price=", 7);
+            payload.append(numbuf, static_cast<std::size_t>(n));
         }
 
-        if (o.get_order_type() == order_type::stop ||
-            o.get_order_type() == order_type::stop_limit)
+        if (type == order_type::stop || type == order_type::stop_limit)
         {
-            params += "&stopPrice=" + format_decimal(o.get_stop_price());
+            n = std::snprintf(numbuf, sizeof(numbuf), "%.8f", o.get_stop_price());
+            payload.append("&stopPrice=", 11);
+            payload.append(numbuf, static_cast<std::size_t>(n));
         }
 
         if (!client_order_id.empty())
         {
-            params += "&newClientOrderId=" + std::string(client_order_id);
+            payload.append("&newClientOrderId=", 18);
+            payload.append(client_order_id);
         }
 
         encoded_order e;
         e.endpoint        = "/api/v3/order";
-        e.wire_payload    = std::move(params);
+        e.wire_payload    = std::move(payload);
         e.client_order_id = std::string(client_order_id);
         return e;
     }
@@ -61,14 +82,20 @@ public:
         std::string sym = symbol.empty() ? default_symbol_ : std::string(symbol);
         std::string sym_upper = upper(std::move(sym));
 
-        std::string params = "symbol=" + sym_upper;
+        std::string params;
+        params.reserve(sym_upper.size() + 64 + client_order_id.size()
+                       + exchange_order_id.size());
+        params.append("symbol=", 7);
+        params.append(sym_upper);
         if (!exchange_order_id.empty())
         {
-            params += "&orderId=" + std::string(exchange_order_id);
+            params.append("&orderId=", 9);
+            params.append(exchange_order_id);
         }
         else if (!client_order_id.empty())
         {
-            params += "&origClientOrderId=" + std::string(client_order_id);
+            params.append("&origClientOrderId=", 19);
+            params.append(client_order_id);
         }
 
         encoded_order e;
@@ -79,11 +106,45 @@ public:
     }
 
 private:
+    // 2 sides × 4 types × 4 tifs = 32. Index packs (side, type, tif).
+    static constexpr std::size_t kPrefixCacheSize = 2 * 4 * 4;
+    std::array<std::string, kPrefixCacheSize> prefix_cache_{};
     std::string default_symbol_;
 
-    std::string resolve_symbol(const std::string& event_sym) const
+    static std::size_t cache_index(order_side s, order_type t, time_in_force tif)
     {
-        return upper(event_sym.empty() ? default_symbol_ : event_sym);
+        return static_cast<std::size_t>(s) * 16
+             + static_cast<std::size_t>(t) * 4
+             + static_cast<std::size_t>(tif);
+    }
+
+    const std::string& cached_prefix(order_side s, order_type t,
+                                     time_in_force tif)
+    {
+        const std::size_t idx = cache_index(s, t, tif);
+        if (prefix_cache_[idx].empty())
+            prefix_cache_[idx] = prefix_for(default_symbol_, s, t, tif);
+        return prefix_cache_[idx];
+    }
+
+    static std::string prefix_for(const std::string& sym,
+                                  order_side s, order_type t,
+                                  time_in_force tif)
+    {
+        std::string out;
+        out.reserve(sym.size() + 48);
+        out.append("symbol=", 7);
+        out.append(sym);
+        out.append("&side=", 6);
+        out.append(side_to_binance(s));
+        out.append("&type=", 6);
+        out.append(order_type_to_binance(t));
+        if (t != order_type::market)
+        {
+            out.append("&timeInForce=", 13);
+            out.append(tif_to_binance(tif));
+        }
+        return out;
     }
 
     static std::string upper(std::string s)
@@ -91,6 +152,11 @@ private:
         for (auto& c : s)
             c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return s;
+    }
+
+    static const char* side_to_binance(order_side s)
+    {
+        return s == order_side::buy ? "BUY" : "SELL";
     }
 
     static const char* order_type_to_binance(order_type t)
@@ -115,13 +181,6 @@ private:
         case time_in_force::day: return "GTC";
         }
         return "GTC";
-    }
-
-    static std::string format_decimal(double v)
-    {
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "%.8f", v);
-        return std::string(buf);
     }
 };
 

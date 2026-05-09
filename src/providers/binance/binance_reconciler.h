@@ -22,11 +22,13 @@ public:
     BinanceReconciler(std::shared_ptr<BinanceRestClient> rest,
                       std::string symbol,
                       std::string base_asset,
-                      std::string quote_asset)
+                      std::string quote_asset,
+                      bool is_testnet = false)
         : rest_(std::move(rest))
         , symbol_(std::move(symbol))
         , base_asset_(std::move(base_asset))
         , quote_asset_(std::move(quote_asset))
+        , is_testnet_(is_testnet)
     {}
 
     std::string reconcile(const portfolio& local, double tolerance_bps) override
@@ -55,6 +57,18 @@ public:
 
         if (!within_tolerance(local_cash, ex_quote_total, tolerance_bps))
         {
+            // Testnet wipes balances ~monthly. Treat "venue ~zero, local non-zero"
+            // as the reset signature and downgrade to a warning so startup can
+            // proceed; subsequent fills will re-anchor local state.
+            if (is_testnet_ && looks_like_reset(ex_quote_total, local_cash))
+            {
+                std::fprintf(stderr,
+                    "  [TESTNET-RESET] venue cash=%.8f %s, local=%.8f %s — "
+                    "treating as account reset, drift check skipped.\n",
+                    ex_quote_total, quote_asset_.c_str(),
+                    local_cash, quote_asset_.c_str());
+                return {};
+            }
             char buf[256];
             std::snprintf(buf, sizeof(buf),
                 "cash drift: local=%.8f %s exchange=%.8f %s (> %.2f bps)",
@@ -78,6 +92,14 @@ public:
             const double ex_base_total = ex_base_free + ex_base_locked;
             if (!within_tolerance(it->second.qty, ex_base_total, tolerance_bps))
             {
+                if (is_testnet_ && looks_like_reset(ex_base_total, it->second.qty))
+                {
+                    std::fprintf(stderr,
+                        "  [TESTNET-RESET] venue %s=%.8f, local=%.8f — "
+                        "treating as account reset, position drift skipped.\n",
+                        base_asset_.c_str(), ex_base_total, it->second.qty);
+                    return {};
+                }
                 char buf[256];
                 std::snprintf(buf, sizeof(buf),
                     "position drift: local=%.8f %s exchange=%.8f %s (> %.2f bps)",
@@ -126,10 +148,18 @@ private:
         return rel <= tolerance_bps;
     }
 
+    // Testnet reset signature: venue near-zero while local has real magnitude.
+    // The 1e-6 floor catches dust that survives some resets.
+    static bool looks_like_reset(double venue, double local)
+    {
+        return std::abs(venue) < 1e-6 && std::abs(local) > 1e-6;
+    }
+
     std::shared_ptr<BinanceRestClient> rest_;
     std::string symbol_;
     std::string base_asset_;
     std::string quote_asset_;
+    bool is_testnet_ = false;
 };
 
 #endif // HAS_BINANCE

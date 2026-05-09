@@ -12,6 +12,8 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 
+#include <openssl/ssl.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -110,9 +112,34 @@ public:
         , ws_host_(std::move(ws_host))
         , ws_port_(std::move(ws_port))
         , keepalive_policy_(policy)
-    {}
+        , ws_ctx_(boost::asio::ssl::context::tlsv12_client)
+    {
+        ws_ctx_.set_default_verify_paths();
+        ws_ctx_.set_verify_mode(boost::asio::ssl::verify_peer);
 
-    ~BinanceUserDataTransport() override { close(); }
+        // TLS session resumption across reconnects: 24h disconnect cap +
+        // monthly testnet wipes mean this socket genuinely flaps. Cache one
+        // most-recent ticket; OpenSSL falls back to a full handshake if the
+        // server rejects it.
+        SSL_CTX* raw = ws_ctx_.native_handle();
+        SSL_CTX_set_session_cache_mode(
+            raw, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
+        SSL_CTX_set_ex_data(raw, ex_data_index(), this);
+        SSL_CTX_sess_set_new_cb(raw, &BinanceUserDataTransport::on_new_session);
+    }
+
+    ~BinanceUserDataTransport() override
+    {
+        close();
+        SSL_SESSION* sess = cached_session_.exchange(
+            nullptr, std::memory_order_acq_rel);
+        if (sess) SSL_SESSION_free(sess);
+    }
+
+    BinanceUserDataTransport(const BinanceUserDataTransport&) = delete;
+    BinanceUserDataTransport& operator=(const BinanceUserDataTransport&) = delete;
+    BinanceUserDataTransport(BinanceUserDataTransport&&) = delete;
+    BinanceUserDataTransport& operator=(BinanceUserDataTransport&&) = delete;
 
     bool open() override
     {
@@ -232,6 +259,26 @@ public:
     }
 
 private:
+    static int ex_data_index()
+    {
+        static const int idx = SSL_CTX_get_ex_new_index(
+            0, const_cast<char*>("BinanceUserDataTransport::this"),
+            nullptr, nullptr, nullptr);
+        return idx;
+    }
+
+    static int on_new_session(SSL* ssl, SSL_SESSION* session)
+    {
+        SSL_CTX* ctx = SSL_get_SSL_CTX(ssl);
+        auto* self = static_cast<BinanceUserDataTransport*>(
+            SSL_CTX_get_ex_data(ctx, ex_data_index()));
+        if (!self) return 0;
+        SSL_SESSION* old = self->cached_session_.exchange(
+            session, std::memory_order_acq_rel);
+        if (old) SSL_SESSION_free(old);
+        return 1;
+    }
+
     std::string current_listen_key() const
     {
         std::lock_guard<std::mutex> lk(listen_key_mu_);
@@ -259,15 +306,12 @@ private:
         try
         {
             net::io_context ioc;
-            ssl::context ctx(ssl::context::tlsv12_client);
-            ctx.set_default_verify_paths();
-            ctx.set_verify_mode(ssl::verify_peer);
 
             tcp::resolver resolver(ioc);
             auto results = resolver.resolve(ws_host_, ws_port_);
 
             ws_ = std::make_unique<
-                websocket::stream<beast::ssl_stream<tcp::socket>>>(ioc, ctx);
+                websocket::stream<beast::ssl_stream<tcp::socket>>>(ioc, ws_ctx_);
 
             auto& lowest = beast::get_lowest_layer(*ws_);
             net::connect(lowest, results);
@@ -277,6 +321,10 @@ private:
             {
                 return run_result::handshake_error;
             }
+
+            // Apply the cached session, if any. SSL_set_session up_refs.
+            if (SSL_SESSION* sess = cached_session_.load(std::memory_order_acquire))
+                SSL_set_session(ws_->next_layer().native_handle(), sess);
 
             ws_->next_layer().handshake(ssl::stream_base::client);
             ws_->set_option(websocket::stream_base::decorator(
@@ -494,6 +542,8 @@ private:
     mutable std::mutex listen_key_mu_;
     std::string listen_key_;
     binance_keepalive_policy keepalive_policy_;
+    boost::asio::ssl::context ws_ctx_;
+    std::atomic<SSL_SESSION*> cached_session_{nullptr};
 
     std::unique_ptr<boost::beast::websocket::stream<
         boost::beast::ssl_stream<boost::asio::ip::tcp::socket>>> ws_;

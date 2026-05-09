@@ -103,6 +103,12 @@ public:
     {
         state_ = lifecycle::opening;
 
+        std::cerr << "  BinanceProvider: "
+                  << (endpoints_.is_testnet ? "[TESTNET] " : "")
+                  << "ws=" << endpoints_.ws_host << ":" << endpoints_.ws_port
+                  << " rest=" << endpoints_.rest_host << ":" << endpoints_.rest_port
+                  << "\n";
+
         std::shared_ptr<IDataTransport> live_transport;
         if (depth_stream_.empty())
         {
@@ -175,15 +181,48 @@ public:
                 return false;
             }
 
+            // Symbol existence check. Testnet's symbol set is a smaller
+            // rotating subset of prod, and a typo otherwise surfaces as
+            // -1121 mid-stream. Cheap one-shot REST call (weight 10).
+            {
+                auto info = rest_->get_unsigned(
+                    "/api/v3/exchangeInfo", "symbol=" + upper(symbol_));
+                if (info.status < 200 || info.status >= 300)
+                {
+                    std::cerr << "BinanceProvider: refusing to go live — "
+                                 "symbol '" << upper(symbol_)
+                              << "' not found on "
+                              << (endpoints_.is_testnet ? "testnet " : "")
+                              << "exchangeInfo (HTTP " << info.status
+                              << "): " << info.body.substr(0, 160) << "\n";
+                    state_ = lifecycle::error;
+                    return false;
+                }
+            }
+
             // Limiter tracks Binance spot's 50/10s order-rate rule —
             // NOT covered by the REST client's weight throttle.
             minter_ = std::make_shared<ClientOrderIdMinter>("tt", seed_);
+            if (endpoints_.is_testnet)
+            {
+                auto kw = ClientOrderIdMinter::sql_keyword_in(minter_->prefix());
+                if (!kw.empty())
+                {
+                    std::cerr << "BinanceProvider: refusing to go live on testnet — "
+                                 "client_order_id prefix '" << minter_->prefix()
+                              << "' contains '" << kw << "', which the spot-testnet "
+                                 "WAF rejects.\n";
+                    state_ = lifecycle::error;
+                    return false;
+                }
+            }
             order_rate_limiter_ = std::make_shared<TokenBucketRateLimiter>(
                 /*capacity=*/50.0, /*refill_per_sec=*/5.0);
 
             auto assets = split_symbol(symbol_);
             reconciler_ = std::make_shared<BinanceReconciler>(
-                rest_, upper(symbol_), assets.base, assets.quote);
+                rest_, upper(symbol_), assets.base, assets.quote,
+                endpoints_.is_testnet);
             kill_switch_ = std::make_shared<BinanceKillSwitch>(
                 rest_, upper(symbol_), assets.base, minter_);
 

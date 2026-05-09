@@ -9,12 +9,17 @@
 #include <boost/beast.hpp>
 #include <boost/beast/ssl.hpp>
 
+#include <openssl/ssl.h>
+
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <stdexcept>
 #include <thread>
@@ -38,10 +43,35 @@ public:
         , host_(host)
         , port_(port)
         , ctx_(ssl::context::tlsv12_client)
+        , signer_(api_secret)
     {
         ctx_.set_default_verify_paths();
         ctx_.set_verify_mode(ssl::verify_peer);
+
+        // TLS session resumption: every signed request opens a new
+        // connection (no keep-alive in execute_with_retry), so a cached
+        // session skips the asymmetric-crypto round of every subsequent
+        // handshake. NO_INTERNAL_STORE because we own the cache (one slot).
+        // Boost.Asio reserves SSL_CTX ex_data slot 0 (used by app_data); we
+        // allocate a private index so our `this` pointer doesn't clobber it.
+        SSL_CTX* raw = ctx_.native_handle();
+        SSL_CTX_set_session_cache_mode(
+            raw, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
+        SSL_CTX_set_ex_data(raw, ex_data_index(), this);
+        SSL_CTX_sess_set_new_cb(raw, &BinanceRestClient::on_new_session);
     }
+
+    ~BinanceRestClient()
+    {
+        SSL_SESSION* sess = cached_session_.exchange(
+            nullptr, std::memory_order_acq_rel);
+        if (sess) SSL_SESSION_free(sess);
+    }
+
+    BinanceRestClient(const BinanceRestClient&) = delete;
+    BinanceRestClient& operator=(const BinanceRestClient&) = delete;
+    BinanceRestClient(BinanceRestClient&&) = delete;
+    BinanceRestClient& operator=(BinanceRestClient&&) = delete;
 
     struct response
     {
@@ -68,6 +98,13 @@ public:
     response post_unsigned(const std::string& endpoint)
     {
         return execute(http::verb::post, endpoint, "");
+    }
+
+    response get_unsigned(const std::string& endpoint, const std::string& params = "")
+    {
+        return execute(http::verb::get,
+                       endpoint + (params.empty() ? "" : "?" + params),
+                       "");
     }
 
     response put_unsigned(const std::string& endpoint, const std::string& params = "")
@@ -175,11 +212,40 @@ public:
     }
 
 private:
+    // Allocated once across all BinanceRestClient instances; OpenSSL
+    // hands out monotonically-increasing indexes via get_ex_new_index.
+    static int ex_data_index()
+    {
+        static const int idx = SSL_CTX_get_ex_new_index(
+            0, const_cast<char*>("BinanceRestClient::this"),
+            nullptr, nullptr, nullptr);
+        return idx;
+    }
+
+    // OpenSSL hands us a session with refcount already bumped for us; we
+    // either store it (return 1, keeping the ref) or decline (return 0 and
+    // OpenSSL frees). Multiple tickets can arrive on TLS 1.3 — keep only
+    // the most recent and free any predecessor.
+    static int on_new_session(SSL* ssl, SSL_SESSION* session)
+    {
+        SSL_CTX* ctx = SSL_get_SSL_CTX(ssl);
+        auto* self = static_cast<BinanceRestClient*>(
+            SSL_CTX_get_ex_data(ctx, ex_data_index()));
+        if (!self) return 0;
+        SSL_SESSION* old = self->cached_session_.exchange(
+            session, std::memory_order_acq_rel);
+        if (old) SSL_SESSION_free(old);
+        return 1;
+    }
+
     std::string api_key_;
     std::string api_secret_;
     std::string host_;
     std::string port_;
     ssl::context ctx_;
+    std::atomic<SSL_SESSION*> cached_session_{nullptr};
+    binance::HmacSha256Signer signer_;
+    std::mutex signer_mu_;
     std::atomic<int> last_used_weight_{0};
     std::atomic<long long> window_anchor_ms_{0};
     int weight_cap_ = 6000;
@@ -206,6 +272,11 @@ private:
 
     // Retries once on -1021 by rebuilding the signed query (new ts+sig)
     // after a resync — must live above execute_with_retry for that reason.
+    //
+    // Builds the signed query into a thread-local scratch buffer to avoid
+    // 4–6 string allocations per order. Reuses a keyed HMAC_CTX (signer_)
+    // so we don't pay the per-call key-schedule setup. Hex encoding is
+    // hand-rolled (vs ostringstream in binance::sign_query).
     response do_signed_request(http::verb method,
                                const std::string& endpoint,
                                const std::string& params,
@@ -213,19 +284,37 @@ private:
     {
         maybe_resync_clock();
 
-        auto build_signed = [&]() {
+        auto build_signed = [&](std::string& out) {
             long long ts = static_cast<long long>(binance::server_time_ms())
                          + clock_offset_ms_.load(std::memory_order_acquire);
-            auto q = params + "&timestamp=" + std::to_string(ts)
-                     + "&recvWindow=5000";
-            return binance::sign_query(q, api_secret_);
+
+            out.clear();
+            out.reserve(params.size() + 96);
+            out.append(params);
+
+            char buf[64];
+            int n = std::snprintf(buf, sizeof(buf),
+                "&timestamp=%lld&recvWindow=5000", ts);
+            out.append(buf, static_cast<std::size_t>(n));
+
+            unsigned char digest[32];
+            {
+                std::lock_guard<std::mutex> lk(signer_mu_);
+                signer_.sign(out, digest);
+            }
+
+            char hex[64];
+            binance::bytes_to_hex_lower(digest, 32, hex);
+            out.append("&signature=", 11);
+            out.append(hex, 64);
         };
 
         auto send = [&]() -> response {
-            auto sq = build_signed();
+            thread_local std::string scratch;
+            build_signed(scratch);
             return in_query
-                ? execute(method, endpoint + "?" + sq, "")
-                : execute(method, endpoint, sq);
+                ? execute(method, endpoint + "?" + scratch, "")
+                : execute(method, endpoint, scratch);
         };
 
         auto r = send();
@@ -277,6 +366,13 @@ private:
 
             if (!SSL_set_tlsext_host_name(stream.native_handle(), host_.c_str()))
                 throw std::runtime_error("SNI setup failed");
+
+            // Apply the most recent resumable session, if any. OpenSSL
+            // transparently falls back to a full handshake if rejected.
+            // Refcount: SSL_set_session up_refs internally, so our cached
+            // ref stays valid for the next call.
+            if (SSL_SESSION* sess = cached_session_.load(std::memory_order_acquire))
+                SSL_set_session(stream.native_handle(), sess);
 
             auto& lowest = beast::get_lowest_layer(stream);
             net::connect(lowest, results);

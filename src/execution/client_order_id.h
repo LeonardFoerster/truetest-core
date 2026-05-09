@@ -6,6 +6,7 @@
 // ~30 chars for Binance's 36-char limit.
 
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -41,6 +42,26 @@ public:
     }
 
     const std::string& prefix() const { return prefix_; }
+
+    // Binance spot testnet's WAF rejects requests whose params contain
+    // SQL keywords (OR, AND, SELECT, DROP, UNION, "--"). Caller checks
+    // the live prefix before going hot so a misconfigured run fails at
+    // startup instead of every order being silently 400'd by the venue.
+    // Returns the offending token, or empty if safe. Case-insensitive.
+    static std::string sql_keyword_in(const std::string& s)
+    {
+        static constexpr const char* forbidden[] = {
+            "OR", "AND", "SELECT", "DROP", "UNION", "--"
+        };
+        std::string upper;
+        upper.reserve(s.size());
+        for (char c : s) upper.push_back(
+            static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+        for (const char* kw : forbidden)
+            if (upper.find(kw) != std::string::npos)
+                return kw;
+        return {};
+    }
 
 private:
     static std::int64_t now_epoch_ms()

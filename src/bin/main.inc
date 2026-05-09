@@ -1034,6 +1034,10 @@ static int run_provider_mode(const cli_options& o)
         {
             std::cerr << "  ! Live mode is only permitted on the engine_live binary "
                          "(this is " << truetest::target_name() << ").\n";
+            if (o.testnet)
+                std::cerr << "    Testnet still uses the live order code path; "
+                             "build and run engine_live with --testnet to trade "
+                             "on the spot sandbox.\n";
             return 1;
         }
         if (!o.live)
