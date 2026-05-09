@@ -80,6 +80,15 @@ public:
     {
         liquidation_warn_pct_ = pct;
     }
+    // When true, a margin-mode mismatch is escalated from advisory
+    // (warning) to refusal (open() returns false). For shops that have
+    // made a deliberate margin-type choice, the unannounced flip from
+    // ISOLATED → CROSSED in the Binance UI is a real config error
+    // worth halting on.
+    void set_margin_type_strict(bool strict)
+    {
+        margin_type_strict_ = strict;
+    }
 
     void set_endpoints(binance::endpoints ep)
     {
@@ -276,6 +285,16 @@ public:
                         liquidation_warn_pct_);
                     for (const auto& a : advisories)
                         std::cerr << "  [ADVISORY] " << a.note << "\n";
+
+                    if (auto refuse = binance::futures::first_strict_refusal(
+                            advisories, margin_type_strict_))
+                    {
+                        std::cerr << "BinanceFuturesProvider: refusing to "
+                                     "go live — --margin-type-strict and "
+                                  << *refuse << "\n";
+                        state_ = lifecycle::error;
+                        return false;
+                    }
                 }
                 else
                 {
@@ -446,6 +465,7 @@ private:
 
     std::string expected_margin_type_;        // "" disables check
     double      liquidation_warn_pct_ = 0.05; // 5%; <=0 disables check
+    bool        margin_type_strict_   = false;
 
     static std::string upper(const std::string& s)
     {

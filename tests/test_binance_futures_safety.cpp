@@ -157,6 +157,67 @@ TEST(BinanceFuturesSafety, LiquidationPctZeroDisablesCheck)
     EXPECT_TRUE(a.empty());
 }
 
+TEST(BinanceFuturesSafety, FirstStrictRefusalOffByDefault)
+{
+    std::vector<binance::futures::advisory> advisories;
+    binance::futures::advisory a;
+    a.k = binance::futures::advisory::kind::margin_mode_mismatch;
+    a.note = "BTCUSDT margin mode is CROSSED, operator configured ISOLATED";
+    advisories.push_back(a);
+
+    auto note = binance::futures::first_strict_refusal(advisories,
+                                                       /*strict=*/false);
+    EXPECT_FALSE(note.has_value());
+}
+
+TEST(BinanceFuturesSafety, FirstStrictRefusalOnMarginMismatch)
+{
+    std::vector<binance::futures::advisory> advisories;
+    binance::futures::advisory a;
+    a.k = binance::futures::advisory::kind::margin_mode_mismatch;
+    a.note = "BTCUSDT margin mode is CROSSED, operator configured ISOLATED";
+    advisories.push_back(a);
+
+    auto note = binance::futures::first_strict_refusal(advisories,
+                                                       /*strict=*/true);
+    ASSERT_TRUE(note.has_value());
+    EXPECT_NE(note->find("CROSSED"), std::string::npos);
+}
+
+TEST(BinanceFuturesSafety, FirstStrictRefusalIgnoresLiquidationAdvisories)
+{
+    // Strict mode escalates margin-mode only. Liquidation advisories
+    // remain warnings — the operator can't unilaterally reduce
+    // distance-to-liquidation by typing a flag, so refusing on it
+    // would trap them in a useless gate.
+    std::vector<binance::futures::advisory> advisories;
+    binance::futures::advisory a;
+    a.k = binance::futures::advisory::kind::liquidation_close;
+    a.note = "BTCUSDT position is 2.00% from liquidation";
+    advisories.push_back(a);
+
+    auto note = binance::futures::first_strict_refusal(advisories,
+                                                       /*strict=*/true);
+    EXPECT_FALSE(note.has_value());
+}
+
+TEST(BinanceFuturesSafety, FirstStrictRefusalReturnsFirstMarginMismatch)
+{
+    std::vector<binance::futures::advisory> advisories;
+    binance::futures::advisory a1, a2;
+    a1.k = binance::futures::advisory::kind::liquidation_close;
+    a1.note = "ETHUSDT liq advisory";
+    a2.k = binance::futures::advisory::kind::margin_mode_mismatch;
+    a2.note = "BTCUSDT margin mismatch";
+    advisories.push_back(a1);
+    advisories.push_back(a2);
+
+    auto note = binance::futures::first_strict_refusal(advisories,
+                                                       /*strict=*/true);
+    ASSERT_TRUE(note.has_value());
+    EXPECT_NE(note->find("BTCUSDT"), std::string::npos);
+}
+
 TEST(BinanceFuturesSafety, BothChecksCombineAcrossRows)
 {
     auto body = array_of({

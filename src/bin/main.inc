@@ -237,6 +237,7 @@ struct cli_options
     // use provider default (5%). Empty margin_type = check disabled.
     std::string margin_type;
     double      liquidation_warn_pct = -1.0;
+    bool        margin_type_strict   = false;
 
     double balance = 10000.0;
     double risk_fraction = 0.02;
@@ -612,6 +613,10 @@ static void register_cli_options(CLI::App& app, cli_options& o)
         "(binance-futures only) Warn at startup if any open position "
         "is within this fraction of liquidation. 0.05 = 5%. Set to 0 "
         "to disable. Default: 0.05.");
+    app.add_flag("--margin-type-strict", o.margin_type_strict,
+        "(binance-futures only) Escalate margin-mode mismatch from "
+        "advisory (warning) to refusal. Requires --margin-type to be "
+        "set; otherwise has no effect.");
 
     app.add_option("--api-key", o.api_key, "API key for exchange");
     app.add_option("--api-secret", o.api_secret, "API secret for exchange");
@@ -950,6 +955,7 @@ static int run_provider_mode(const cli_options& o)
     if (!o.margin_type.empty()) pcfg["margin_type"] = o.margin_type;
     if (o.liquidation_warn_pct >= 0.0)
         pcfg["liquidation_warn_pct"] = std::to_string(o.liquidation_warn_pct);
+    if (o.margin_type_strict)   pcfg["margin_type_strict"] = "1";
 
     std::shared_ptr<IProvider> provider;
     try {

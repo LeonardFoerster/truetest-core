@@ -100,7 +100,8 @@ the engine cannot fix on its own.
 | Flag | Default | What it does |
 |---|---|---|
 | `--margin-type ISOLATED\|CROSSED` | empty (no check) | Reads `marginType` from `/fapi/v2/positionRisk` per open position. If venue says one thing and you said another, prints `[ADVISORY] BTCUSDT margin mode is CROSSED, operator configured ISOLATED`. Both spellings match (`isolated`/`ISOLATED`, `cross`/`CROSSED`). |
-| `--liquidation-warn-pct 0.05` | 0.05 (5%) | For each open position with a non-zero `liquidationPrice`, computes distance from `markPrice`. If smaller than the threshold, prints `[ADVISORY] BTCUSDT position is N.NN% from liquidation (mark=… liq=… threshold=5.00%)`. Set to 0 to disable. |
+| `--margin-type-strict` | off | Escalates margin-mode mismatch from advisory (warning) to refusal — `open()` returns false instead of logging and proceeding. Has no effect unless `--margin-type` is also set. Use this when the margin-type choice is a deliberate config invariant, not a preference. |
+| `--liquidation-warn-pct 0.05` | 0.05 (5%) | For each open position with a non-zero `liquidationPrice`, computes distance from `markPrice`. If smaller than the threshold, prints `[ADVISORY] BTCUSDT position is N.NN% from liquidation (mark=… liq=… threshold=5.00%)`. Set to 0 to disable. **Always advisory** — there's no `--strict` companion because liquidation distance shrinks under price action the operator can't fix by restarting. |
 
 Both advisories are filtered to the provider's symbol — multi-symbol
 cross-margin awareness is out of scope for v1. Both tolerate

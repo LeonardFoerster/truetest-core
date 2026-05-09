@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -164,6 +165,26 @@ inline std::vector<advisory> compute_advisories(
         }
     }
     return out;
+}
+
+// Operator-driven escalation. compute_advisories() always returns
+// warnings; this helper decides whether one of them is severe enough
+// (under the operator's strict flags) to refuse startup. Returns the
+// note from the first advisory that should refuse, or nullopt to
+// proceed. Pure for testability.
+inline std::optional<std::string> first_strict_refusal(
+    const std::vector<advisory>& advisories,
+    bool margin_type_strict)
+{
+    if (margin_type_strict)
+    {
+        for (const auto& a : advisories)
+        {
+            if (a.k == advisory::kind::margin_mode_mismatch)
+                return a.note;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace binance::futures

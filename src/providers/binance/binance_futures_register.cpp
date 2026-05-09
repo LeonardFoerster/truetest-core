@@ -66,6 +66,10 @@ REGISTER_PROVIDER("binance-futures", [](const provider_config& cfg) {
         }
     }
 
+    auto strict = get("margin_type_strict");
+    if (strict == "1" || strict == "true")
+        provider->set_margin_type_strict(true);
+
     return provider;
 });
 
