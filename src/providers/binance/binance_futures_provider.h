@@ -18,6 +18,7 @@
 #include "providers/binance/binance_futures_kill_switch.h"
 #include "providers/binance/binance_futures_order_encoder.h"
 #include "providers/binance/binance_futures_reconciler.h"
+#include "providers/binance/binance_futures_safety.h"
 #include "providers/binance/binance_futures_user_data_parser.h"
 #include "providers/binance/binance_rest_client.h"
 #include "providers/binance/binance_rest_order_transport.h"
@@ -66,6 +67,19 @@ public:
     }
 
     const std::string& depth_stream() const { return depth_stream_; }
+
+    // Operator-set advisory inputs. Empty / non-positive disables the
+    // matching check; defaults run the liquidation-distance check at
+    // 5% so it's opt-out, not opt-in (drowning is a harder condition
+    // to opt back into noticing).
+    void set_expected_margin_type(std::string mt)
+    {
+        expected_margin_type_ = std::move(mt);
+    }
+    void set_liquidation_warn_pct(double pct)
+    {
+        liquidation_warn_pct_ = pct;
+    }
 
     void set_endpoints(binance::endpoints ep)
     {
@@ -231,6 +245,31 @@ public:
                 }
             }
 
+            // Advisories (warnings, not refusals): margin-mode mismatch
+            // and liquidation-distance. Filtered to this provider's
+            // symbol — multi-symbol cross-margin awareness is out of
+            // scope. The reconciler will read positionRisk again later;
+            // this call is the startup-time advisory pass.
+            {
+                auto pr = rest_->get("/fapi/v2/positionRisk",
+                                     "symbol=" + upper(symbol_));
+                if (pr.status >= 200 && pr.status < 300)
+                {
+                    auto advisories = binance::futures::compute_advisories(
+                        pr.body, expected_margin_type_,
+                        liquidation_warn_pct_);
+                    for (const auto& a : advisories)
+                        std::cerr << "  [ADVISORY] " << a.note << "\n";
+                }
+                else
+                {
+                    std::cerr << "BinanceFuturesProvider: positionRisk "
+                                 "advisory probe HTTP " << pr.status
+                              << " — skipping margin/liquidation checks "
+                                 "(reconciler will retry)\n";
+                }
+            }
+
             minter_ = std::make_shared<ClientOrderIdMinter>("tt", seed_);
 
             // Spot's order rate is 50/10s; futures is more permissive
@@ -379,6 +418,9 @@ private:
     std::uint64_t seed_ = 0;
     std::string depth_stream_;
     std::weak_ptr<truetest::ui::ConsoleDashboard> dashboard_;
+
+    std::string expected_margin_type_;        // "" disables check
+    double      liquidation_warn_pct_ = 0.05; // 5%; <=0 disables check
 
     static std::string upper(const std::string& s)
     {

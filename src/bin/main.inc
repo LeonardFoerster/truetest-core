@@ -233,6 +233,11 @@ struct cli_options
     bool live = false;
     bool testnet = false;
 
+    // Futures-only advisory inputs. Sentinel -1 = operator didn't set,
+    // use provider default (5%). Empty margin_type = check disabled.
+    std::string margin_type;
+    double      liquidation_warn_pct = -1.0;
+
     double balance = 10000.0;
     double risk_fraction = 0.02;
     double sl_pct = 0.005;
@@ -600,6 +605,14 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "When set, the provider's orderbook_registry_ is driven "
                    "by real exchange levels (LocalBookAdapter in shadow "
                    "stops matching against paper-seeded MM liquidity).");
+    app.add_option("--margin-type", o.margin_type,
+        "(binance-futures only) Expected margin type for advisory "
+        "comparison: ISOLATED or CROSSED. Empty = no check.");
+    app.add_option("--liquidation-warn-pct", o.liquidation_warn_pct,
+        "(binance-futures only) Warn at startup if any open position "
+        "is within this fraction of liquidation. 0.05 = 5%. Set to 0 "
+        "to disable. Default: 0.05.");
+
     app.add_option("--api-key", o.api_key, "API key for exchange");
     app.add_option("--api-secret", o.api_secret, "API secret for exchange");
     app.add_option("--host", o.host, "WebSocket host");
@@ -934,6 +947,9 @@ static int run_provider_mode(const cli_options& o)
     if (!o.host.empty())        pcfg["host"] = o.host;
     if (!o.port.empty())        pcfg["port"] = o.port;
     if (o.testnet)              pcfg["testnet"] = "1";
+    if (!o.margin_type.empty()) pcfg["margin_type"] = o.margin_type;
+    if (o.liquidation_warn_pct >= 0.0)
+        pcfg["liquidation_warn_pct"] = std::to_string(o.liquidation_warn_pct);
 
     std::shared_ptr<IProvider> provider;
     try {

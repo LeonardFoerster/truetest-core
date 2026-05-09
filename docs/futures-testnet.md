@@ -83,6 +83,30 @@ The engine logs the resolved endpoints at startup:
 The math-captcha confirmation prompt is auto-skipped when `--testnet`
 is set, same as spot.
 
+### Optional advisory inputs
+
+Two startup-time *advisories* (warnings, not refusals — startup proceeds
+either way) sit alongside the refusal pipeline. They surface conditions
+the engine cannot fix on its own.
+
+```bash
+./engine_live --provider binance-futures \
+    --symbol btcusdt --stream kline_1m \
+    --mode live --live --testnet \
+    --margin-type ISOLATED \
+    --liquidation-warn-pct 0.05
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--margin-type ISOLATED\|CROSSED` | empty (no check) | Reads `marginType` from `/fapi/v2/positionRisk` per open position. If venue says one thing and you said another, prints `[ADVISORY] BTCUSDT margin mode is CROSSED, operator configured ISOLATED`. Both spellings match (`isolated`/`ISOLATED`, `cross`/`CROSSED`). |
+| `--liquidation-warn-pct 0.05` | 0.05 (5%) | For each open position with a non-zero `liquidationPrice`, computes distance from `markPrice`. If smaller than the threshold, prints `[ADVISORY] BTCUSDT position is N.NN% from liquidation (mark=… liq=… threshold=5.00%)`. Set to 0 to disable. |
+
+Both advisories are filtered to the provider's symbol — multi-symbol
+cross-margin awareness is out of scope for v1. Both tolerate
+`liquidationPrice == 0` and `markPrice == 0` silently (unfunded testnet
+accounts and just-opened positions both legitimately surface zeros).
+
 ## Refusal modes (what the messages mean)
 
 The live `open()` runs a strict refusal pipeline. Each gate exists

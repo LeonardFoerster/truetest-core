@@ -47,6 +47,25 @@ REGISTER_PROVIDER("binance-futures", [](const provider_config& cfg) {
     if (!depth.empty())
         provider->set_depth_stream(depth);
 
+    // Optional advisory inputs. Silent absence = use provider defaults
+    // (margin-mode check off, liquidation-distance check at 5%).
+    auto margin_type = get("margin_type");
+    if (!margin_type.empty())
+        provider->set_expected_margin_type(margin_type);
+
+    auto liq_pct_str = get("liquidation_warn_pct");
+    if (!liq_pct_str.empty())
+    {
+        try
+        {
+            provider->set_liquidation_warn_pct(std::stod(liq_pct_str));
+        }
+        catch (...)
+        {
+            // Ignore malformed input; provider default applies.
+        }
+    }
+
     return provider;
 });
 
