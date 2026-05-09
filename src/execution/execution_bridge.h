@@ -38,6 +38,13 @@ public:
         // null, the bridge falls back to "tt-<engine_order_id>", which is
         // only unique within a single process lifetime.
         std::function<std::string(uint64_t engine_order_id)> client_id_fn;
+
+        // Optional. Fires when the parser declines the message via parse()
+        // but accepts it via parse_position_snapshot() — i.e. server-pushed
+        // position/balance state changes (futures ACCOUNT_UPDATE). Runs on
+        // the fill transport's worker thread; must be thread-safe.
+        std::function<void(const parsed_position_snapshot&)>
+            position_snapshot_handler;
     };
 
     struct status_event
@@ -256,7 +263,20 @@ private:
     {
         if (!d_.parser) return;
         parsed_exec msg;
-        if (!d_.parser->parse(raw, msg)) return;
+        if (!d_.parser->parse(raw, msg))
+        {
+            // Not an order-lifecycle event; might be a server-pushed
+            // position/balance snapshot. Spot's parser short-circuits
+            // here (default returns false); futures recognizes
+            // ACCOUNT_UPDATE.
+            if (d_.position_snapshot_handler)
+            {
+                parsed_position_snapshot snap;
+                if (d_.parser->parse_position_snapshot(raw, snap))
+                    d_.position_snapshot_handler(snap);
+            }
+            return;
+        }
 
         uint64_t engine_id = 0;
         double total_qty = 0.0;

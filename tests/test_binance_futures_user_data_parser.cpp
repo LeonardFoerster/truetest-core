@@ -49,16 +49,127 @@ TEST(BinanceFuturesUserDataParser, RejectsNonOrderTradeUpdates)
     BinanceFuturesUserDataParser p;
     parsed_exec out;
 
+    // ACCOUNT_UPDATE must NOT be picked up by parse() — it goes through
+    // parse_position_snapshot() instead. This is the contract that lets
+    // ExecutionBridge route the two event kinds to different consumers.
     std::string acct = R"({"e":"ACCOUNT_UPDATE","E":1})";
     EXPECT_FALSE(p.parse(acct, out));
 
     std::string listen = R"({"e":"listenKeyExpired","E":1})";
     EXPECT_FALSE(p.parse(listen, out));
 
-    // Spot's executionReport must NOT be accepted by the futures parser.
     std::string spot = R"({"e":"executionReport","E":1,"s":"X","c":"c","S":"BUY",)"
                        R"("x":"NEW","X":"NEW","i":1,"l":"0","L":"0","z":"0","n":"0","N":"USDT"})";
     EXPECT_FALSE(p.parse(spot, out));
+}
+
+TEST(BinanceFuturesUserDataParser, AccountUpdateOrderReasonWithPositionAndBalance)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_position_snapshot s;
+
+    std::string j = R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"T":1700000000000,)"
+                    R"("a":{"m":"ORDER",)"
+                    R"("B":[{"a":"USDT","wb":"122624.12","cw":"100.12","bc":"50.12"}],)"
+                    R"("P":[{"s":"BTCUSDT","pa":"0.5","ep":"30000","mt":"isolated","ps":"BOTH"}]}})";
+
+    ASSERT_TRUE(p.parse_position_snapshot(j, s));
+    EXPECT_EQ(s.r, parsed_position_snapshot::reason::order);
+    ASSERT_EQ(s.balances.size(), 1u);
+    EXPECT_EQ(s.balances[0].asset, "USDT");
+    EXPECT_DOUBLE_EQ(s.balances[0].wallet_balance, 122624.12);
+    EXPECT_DOUBLE_EQ(s.balances[0].balance_change, 50.12);
+
+    ASSERT_EQ(s.positions.size(), 1u);
+    EXPECT_EQ(s.positions[0].symbol, "BTCUSDT");
+    EXPECT_DOUBLE_EQ(s.positions[0].qty, 0.5);
+    EXPECT_EQ(s.positions[0].margin_type, "ISOLATED");
+    EXPECT_EQ(s.positions[0].position_side, "BOTH");
+
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  s.ts.time_since_epoch()).count();
+    EXPECT_EQ(ms, 1700000000000LL);
+}
+
+TEST(BinanceFuturesUserDataParser, AccountUpdateNegativePositionAmtIsShort)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_position_snapshot s;
+
+    std::string j = R"({"e":"ACCOUNT_UPDATE","E":1,)"
+                    R"("a":{"m":"ORDER","B":[],)"
+                    R"("P":[{"s":"BTCUSDT","pa":"-1.25","mt":"cross","ps":"BOTH"}]}})";
+
+    ASSERT_TRUE(p.parse_position_snapshot(j, s));
+    ASSERT_EQ(s.positions.size(), 1u);
+    EXPECT_DOUBLE_EQ(s.positions[0].qty, -1.25);
+    EXPECT_EQ(s.positions[0].margin_type, "CROSSED");
+}
+
+TEST(BinanceFuturesUserDataParser, AccountUpdateFundingFeeReason)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_position_snapshot s;
+
+    std::string j = R"({"e":"ACCOUNT_UPDATE","E":1,)"
+                    R"("a":{"m":"FUNDING_FEE",)"
+                    R"("B":[{"a":"USDT","wb":"99.5","bc":"-0.5"}],)"
+                    R"("P":[]}})";
+
+    ASSERT_TRUE(p.parse_position_snapshot(j, s));
+    EXPECT_EQ(s.r, parsed_position_snapshot::reason::funding_fee);
+    ASSERT_EQ(s.balances.size(), 1u);
+    EXPECT_DOUBLE_EQ(s.balances[0].balance_change, -0.5);
+    EXPECT_TRUE(s.positions.empty());
+}
+
+TEST(BinanceFuturesUserDataParser, AccountUpdateLiquidationReason)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_position_snapshot s;
+
+    std::string j = R"({"e":"ACCOUNT_UPDATE","E":1,)"
+                    R"("a":{"m":"INSURANCE_CLEAR","B":[],"P":[]}})";
+
+    ASSERT_TRUE(p.parse_position_snapshot(j, s));
+    EXPECT_EQ(s.r, parsed_position_snapshot::reason::liquidation);
+}
+
+TEST(BinanceFuturesUserDataParser, AccountUpdateUnknownReasonFallsBack)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_position_snapshot s;
+
+    std::string j = R"({"e":"ACCOUNT_UPDATE","E":1,)"
+                    R"("a":{"m":"WEIRD_NEW_REASON","B":[],"P":[]}})";
+
+    ASSERT_TRUE(p.parse_position_snapshot(j, s));
+    EXPECT_EQ(s.r, parsed_position_snapshot::reason::other);
+}
+
+TEST(BinanceFuturesUserDataParser, AccountUpdateMissingFieldEmptyArrays)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_position_snapshot s;
+
+    std::string j = R"({"e":"ACCOUNT_UPDATE","E":1,"a":{"m":"ORDER"}})";
+
+    // No B[] or P[] keys: parse should still succeed and leave the
+    // vectors empty rather than rejecting outright. Real responses
+    // sometimes omit one of the arrays when only the other changed.
+    ASSERT_TRUE(p.parse_position_snapshot(j, s));
+    EXPECT_TRUE(s.balances.empty());
+    EXPECT_TRUE(s.positions.empty());
+}
+
+TEST(BinanceFuturesUserDataParser, ParsePositionSnapshotRejectsOrderTradeUpdate)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_position_snapshot s;
+
+    std::string j = R"({"e":"ORDER_TRADE_UPDATE","E":1,"o":{"s":"BTCUSDT"}})";
+
+    EXPECT_FALSE(p.parse_position_snapshot(j, s));
 }
 
 TEST(BinanceFuturesUserDataParser, NewAck)

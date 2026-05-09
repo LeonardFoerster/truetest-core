@@ -20,6 +20,60 @@
 class BinanceFuturesUserDataParser : public IFillParser
 {
 public:
+    bool parse_position_snapshot(std::string_view raw,
+                                 parsed_position_snapshot& out) override
+    {
+        std::string json(raw);
+
+        auto event_type = binance::extract_string(json, "e");
+        if (event_type != "ACCOUNT_UPDATE")
+            return false;
+
+        auto a_pos = json.find("\"a\":{");
+        if (a_pos == std::string::npos) return false;
+        std::string_view inner(json.data() + a_pos, json.size() - a_pos);
+
+        out = parsed_position_snapshot{};
+
+        auto m_str = std::string(binance::extract_sv_string(inner, "m"));
+        out.r = classify_reason(m_str);
+
+        auto ts_ms = binance::extract_number(json, "E");
+        if (!ts_ms.empty())
+        {
+            auto ms = std::strtoll(ts_ms.c_str(), nullptr, 10);
+            out.ts = std::chrono::system_clock::time_point(
+                std::chrono::milliseconds(ms));
+        }
+
+        // Walk B[] (balances) — array starts at "B":[ inside the inner.
+        for_each_object_in_array(inner, "B", [&](std::string_view obj) {
+            parsed_position_snapshot::balance_row row;
+            row.asset = std::string(binance::extract_sv_string(obj, "a"));
+            row.wallet_balance =
+                to_double(binance::extract_sv_string(obj, "wb"));
+            row.balance_change =
+                to_double(binance::extract_sv_string(obj, "bc"));
+            if (!row.asset.empty())
+                out.balances.push_back(std::move(row));
+        });
+
+        // Walk P[] (positions).
+        for_each_object_in_array(inner, "P", [&](std::string_view obj) {
+            parsed_position_snapshot::position_row row;
+            row.symbol = std::string(binance::extract_sv_string(obj, "s"));
+            row.qty    = to_double(binance::extract_sv_string(obj, "pa"));
+            auto mt    = binance::extract_sv_string(obj, "mt");
+            row.margin_type = canonical_margin_type(mt);
+            row.position_side =
+                std::string(binance::extract_sv_string(obj, "ps"));
+            if (!row.symbol.empty())
+                out.positions.push_back(std::move(row));
+        });
+
+        return true;
+    }
+
     bool parse(std::string_view raw, parsed_exec& out) override
     {
         std::string json(raw);
@@ -81,6 +135,79 @@ private:
         if (!n.empty()) return std::string(n);
         auto s = binance::extract_sv_string(inner, key);
         return std::string(s);
+    }
+
+    // Walk a JSON array nested under `array_key` inside `body`. Calls
+    // `fn` once per top-level `{...}` object in the array. Brace-aware
+    // so nested objects (rare in ACCOUNT_UPDATE entries but cheap to
+    // handle) don't split prematurely.
+    template <typename Fn>
+    static void for_each_object_in_array(std::string_view body,
+                                         std::string_view array_key,
+                                         Fn fn)
+    {
+        std::string needle;
+        needle.reserve(array_key.size() + 4);
+        needle += '"';
+        needle += array_key;
+        needle += "\":[";
+        auto start = body.find(needle);
+        if (start == std::string_view::npos) return;
+        std::size_t i = start + needle.size();
+
+        while (i < body.size())
+        {
+            if (body[i] == ']') return;
+            auto open = body.find('{', i);
+            if (open == std::string_view::npos) return;
+            int depth = 0;
+            std::size_t j = open;
+            for (; j < body.size(); ++j)
+            {
+                if (body[j] == '{') ++depth;
+                else if (body[j] == '}')
+                {
+                    --depth;
+                    if (depth == 0) { ++j; break; }
+                }
+            }
+            fn(body.substr(open, j - open));
+            i = j;
+        }
+    }
+
+    // a.m → reason. Binance enumerates many; we collapse to a coarse
+    // set the engine actually distinguishes. "ORDER" is folded into a
+    // distinct value so a consumer can dedupe against ORDER_TRADE_UPDATE
+    // (the same underlying fill drives both messages on a typical fill).
+    static parsed_position_snapshot::reason
+    classify_reason(const std::string& m)
+    {
+        if (m == "ORDER")              return parsed_position_snapshot::reason::order;
+        if (m == "FUNDING_FEE")        return parsed_position_snapshot::reason::funding_fee;
+        if (m == "ADJUSTMENT")         return parsed_position_snapshot::reason::adjustment;
+        if (m == "DEPOSIT")            return parsed_position_snapshot::reason::deposit;
+        if (m == "WITHDRAW")           return parsed_position_snapshot::reason::withdraw;
+        if (m == "MARGIN_TRANSFER")    return parsed_position_snapshot::reason::margin_transfer;
+        if (m == "MARGIN_TYPE_CHANGE") return parsed_position_snapshot::reason::margin_type_change;
+        if (m == "INSURANCE_CLEAR")    return parsed_position_snapshot::reason::liquidation;
+        if (m == "ADMIN_DEPOSIT" ||
+            m == "ADMIN_WITHDRAW")     return parsed_position_snapshot::reason::admin;
+        if (m.empty())                 return parsed_position_snapshot::reason::unknown;
+        return parsed_position_snapshot::reason::other;
+    }
+
+    // Binance returns marginType as lowercase ("isolated" / "cross").
+    // Canonicalize so downstream comparisons line up with the operator's
+    // expected_margin_type (which compute_advisories also normalizes).
+    static std::string canonical_margin_type(std::string_view sv)
+    {
+        if (sv.empty()) return {};
+        char first = static_cast<char>(
+            std::toupper(static_cast<unsigned char>(sv[0])));
+        if (first == 'I') return "ISOLATED";
+        if (first == 'C') return "CROSSED";
+        return std::string(sv);
     }
 
     static parsed_exec::kind classify(const std::string& x,

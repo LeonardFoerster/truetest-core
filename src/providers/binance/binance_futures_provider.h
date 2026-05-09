@@ -310,6 +310,16 @@ public:
             d.parser   = std::make_shared<BinanceFuturesUserDataParser>();
             d.order_rate_limiter = order_rate_limiter_;
             d.client_id_fn = [m = minter_](uint64_t) { return m->next(); };
+            // ACCOUNT_UPDATE handler: log to stderr, scoped to this
+            // provider's symbol. Intentionally does NOT mutate the
+            // local portfolio yet — snap-to-venue races with in-flight
+            // orders the engine hasn't confirmed; that needs a design
+            // pass before it becomes safe to take action automatically.
+            // Surfacing the events is the value-add here.
+            d.position_snapshot_handler =
+                [sym = upper(symbol_)](const parsed_position_snapshot& s) {
+                    log_position_snapshot(s, sym);
+                };
 
             bridge_ = std::make_shared<ExecutionBridge>(std::move(d));
             if (!bridge_->open())
@@ -443,6 +453,59 @@ private:
         for (auto& c : out)
             c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return out;
+    }
+
+    static const char* reason_str(parsed_position_snapshot::reason r)
+    {
+        using R = parsed_position_snapshot::reason;
+        switch (r)
+        {
+        case R::order:              return "ORDER";
+        case R::funding_fee:        return "FUNDING_FEE";
+        case R::adjustment:         return "ADJUSTMENT";
+        case R::deposit:            return "DEPOSIT";
+        case R::withdraw:           return "WITHDRAW";
+        case R::margin_transfer:    return "MARGIN_TRANSFER";
+        case R::margin_type_change: return "MARGIN_TYPE_CHANGE";
+        case R::liquidation:        return "LIQUIDATION";
+        case R::admin:              return "ADMIN";
+        case R::unknown:            return "UNKNOWN";
+        case R::other:              return "OTHER";
+        }
+        return "UNKNOWN";
+    }
+
+    // Logs the parts of an ACCOUNT_UPDATE that concern this provider's
+    // symbol. ORDER-reason snapshots are quieter — they overlap with
+    // ORDER_TRADE_UPDATE and would be noise if logged at the same level.
+    static void log_position_snapshot(const parsed_position_snapshot& s,
+                                      const std::string& provider_symbol)
+    {
+        for (const auto& p : s.positions)
+        {
+            if (p.symbol != provider_symbol) continue;
+            if (s.r == parsed_position_snapshot::reason::order)
+            {
+                // Same fill we'll see via ORDER_TRADE_UPDATE; suppress
+                // the position-row log here to keep the channel low-noise.
+                continue;
+            }
+            std::fprintf(stderr,
+                "  [POSITION-SNAPSHOT] %s reason=%s qty=%.8f margin=%s side=%s\n",
+                p.symbol.c_str(), reason_str(s.r), p.qty,
+                p.margin_type.c_str(), p.position_side.c_str());
+        }
+        for (const auto& b : s.balances)
+        {
+            // Balance changes for funding/adjustment/etc. are always
+            // worth surfacing; ORDER-reason balance changes are the
+            // commission side of a fill we already track.
+            if (s.r == parsed_position_snapshot::reason::order) continue;
+            std::fprintf(stderr,
+                "  [POSITION-SNAPSHOT] %s reason=%s balance=%.8f delta=%.8f\n",
+                b.asset.c_str(), reason_str(s.r),
+                b.wallet_balance, b.balance_change);
+        }
     }
 
     static std::string lower(const std::string& s)
