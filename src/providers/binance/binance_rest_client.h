@@ -37,11 +37,13 @@ public:
         const std::string& api_key,
         const std::string& api_secret,
         const std::string& host = "api.binance.com",
-        const std::string& port = "443")
+        const std::string& port = "443",
+        const std::string& time_path = "/api/v3/time")
         : api_key_(api_key)
         , api_secret_(api_secret)
         , host_(host)
         , port_(port)
+        , time_path_(time_path)
         , ctx_(ssl::context::tlsv12_client)
         , signer_(api_secret)
     {
@@ -117,12 +119,16 @@ public:
     // server_time_ms - local_time_ms; negative = we're ahead. LLONG_MIN on failure.
     using get_fn_t = std::function<response(const std::string&, const std::string&)>;
 
-    static long long server_time_offset_ms(const get_fn_t& get_fn)
+    // `time_path` defaults to spot's `/api/v3/time`; futures passes
+    // `/fapi/v1/time`. Tests inject a get_fn that ignores the path arg.
+    static long long server_time_offset_ms(
+        const get_fn_t& get_fn,
+        const std::string& time_path = "/api/v3/time")
     {
         if (!get_fn) return LLONG_MIN;
         try
         {
-            auto resp = get_fn("/api/v3/time", "");
+            auto resp = get_fn(time_path, "");
             if (resp.status < 200 || resp.status >= 300) return LLONG_MIN;
             auto sv = binance::extract_sv_number(resp.body, "serverTime");
             long long server_ms = 0;
@@ -145,7 +151,8 @@ public:
                 return execute(http::verb::get,
                                ep + (p.empty() ? "" : "?" + p),
                                "");
-            });
+            },
+            time_path_);
     }
 
     void set_weight_cap(int cap) { weight_cap_ = cap; }
@@ -167,7 +174,8 @@ public:
             [this](const std::string& ep, const std::string& p) {
                 return execute(http::verb::get,
                                ep + (p.empty() ? "" : "?" + p), "");
-            });
+            },
+            time_path_);
         if (offset == LLONG_MIN)
         {
             if (!sync_failed_logged_.exchange(true))
@@ -242,6 +250,7 @@ private:
     std::string api_secret_;
     std::string host_;
     std::string port_;
+    std::string time_path_;
     ssl::context ctx_;
     std::atomic<SSL_SESSION*> cached_session_{nullptr};
     binance::HmacSha256Signer signer_;

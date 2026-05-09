@@ -107,10 +107,13 @@ public:
     BinanceUserDataTransport(std::shared_ptr<BinanceRestClient> rest,
                              std::string ws_host = "stream.binance.com",
                              std::string ws_port = "9443",
-                             binance_keepalive_policy policy = {})
+                             binance_keepalive_policy policy = {},
+                             std::string listen_key_path
+                                 = "/api/v3/userDataStream")
         : rest_(std::move(rest))
         , ws_host_(std::move(ws_host))
         , ws_port_(std::move(ws_port))
+        , listen_key_path_(std::move(listen_key_path))
         , keepalive_policy_(policy)
         , ws_ctx_(boost::asio::ssl::context::tlsv12_client)
     {
@@ -157,7 +160,7 @@ public:
             return false;
         }
 
-        auto resp = rest_->post_unsigned("/api/v3/userDataStream");
+        auto resp = rest_->post_unsigned(listen_key_path_);
         if (resp.status < 200 || resp.status >= 300)
         {
             set_state(lifecycle::error,
@@ -209,7 +212,7 @@ public:
         {
             try
             {
-                rest_->del("/api/v3/userDataStream",
+                rest_->del(listen_key_path_,
                            "listenKey=" + key_to_delete);
             }
             catch (...) {}
@@ -449,10 +452,10 @@ private:
         try
         {
             auto r = rest_->put_unsigned(
-                "/api/v3/userDataStream", "listenKey=" + current);
+                listen_key_path_, "listenKey=" + current);
             if (r.status < 200 || r.status >= 300)
             {
-                auto post = rest_->post_unsigned("/api/v3/userDataStream");
+                auto post = rest_->post_unsigned(listen_key_path_);
                 if (post.status >= 200 && post.status < 300)
                 {
                     auto key = binance::extract_string(post.body, "listenKey");
@@ -490,11 +493,11 @@ private:
             using binance_keepalive_detail::ka_response;
             auto put_call = [this](const std::string& key) {
                 auto r = rest_->put_unsigned(
-                    "/api/v3/userDataStream", "listenKey=" + key);
+                    listen_key_path_, "listenKey=" + key);
                 return ka_response{r.status};
             };
             auto post_call = [this](std::string& out_key) {
-                auto r = rest_->post_unsigned("/api/v3/userDataStream");
+                auto r = rest_->post_unsigned(listen_key_path_);
                 if (r.status >= 200 && r.status < 300)
                 {
                     out_key = binance::extract_string(r.body, "listenKey");
@@ -539,6 +542,7 @@ private:
     std::shared_ptr<BinanceRestClient> rest_;
     std::string ws_host_;
     std::string ws_port_;
+    std::string listen_key_path_;
     mutable std::mutex listen_key_mu_;
     std::string listen_key_;
     binance_keepalive_policy keepalive_policy_;

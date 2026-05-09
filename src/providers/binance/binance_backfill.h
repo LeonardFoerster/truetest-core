@@ -18,8 +18,9 @@ struct backfill_bar {
 class BinanceBackfill {
 public:
     explicit BinanceBackfill(const std::string& host = "api.binance.com",
-                             const std::string& port = "443")
-        : host_(host), port_(port)
+                             const std::string& port = "443",
+                             const std::string& klines_path = "/api/v3/klines")
+        : host_(host), port_(port), klines_path_(klines_path)
     {}
 
     std::vector<backfill_bar> fetch(
@@ -55,6 +56,7 @@ public:
 private:
     std::string host_;
     std::string port_;
+    std::string klines_path_;
 
     std::vector<backfill_bar> fetch_batch(
         const std::string& symbol,
@@ -88,7 +90,7 @@ private:
         stream.handshake(ssl::stream_base::client);
 
         http::request<http::string_body> req(
-            http::verb::get, "/api/v3/klines?" + query, 11);
+            http::verb::get, klines_path_ + "?" + query, 11);
         req.set(http::field::host, host_);
         req.set(http::field::user_agent, "TrueTest/1.0");
 
