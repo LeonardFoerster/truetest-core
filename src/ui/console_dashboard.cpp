@@ -1022,6 +1022,34 @@ void ConsoleDashboard::render_plain(std::string& buf)
     const auto state = static_cast<connection_state>(
         stats_.state.load(std::memory_order_relaxed));
 
+    // Halt banner: prepended to the status line so an operator skimming
+    // a non-TTY pipe (logs, ssh session in raw mode) cannot miss it.
+    // Rate-limited to 1 Hz; bell rings once on the rising edge.
+    if (stats_.halt_flag.load(std::memory_order_acquire))
+    {
+        const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const bool due = (now_ms - plain_halt_banner_last_ms_) >= 1000;
+        if (due)
+        {
+            std::string reason = shutdown_reason();
+            if (reason.empty()) reason = "halt";
+
+            if (!plain_halt_bell_fired_)
+            {
+                buf += ansi::bell;
+                plain_halt_bell_fired_ = true;
+            }
+            buf += ansi::alarm_on;
+            buf += "  HALT - ";
+            buf += reason;
+            buf += "  ";
+            buf += ansi::reset;
+            buf += '\n';
+            plain_halt_banner_last_ms_ = now_ms;
+        }
+    }
+
     char line[256];
     std::snprintf(line, sizeof(line),
                   "[%s] events=%llu fills=%llu trades=%llu rate=%.0f/s\n",

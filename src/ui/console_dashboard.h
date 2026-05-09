@@ -231,6 +231,14 @@ private:
     std::uint64_t last_digest_{0};
     int           last_uptime_sec_{-1};
     bool          have_digest_{false};
+
+    // Plain-mode halt-banner state.
+    //   plain_halt_bell_fired_  rising-edge gate: emit '\a' once per halt
+    //   plain_halt_banner_last_ wall-clock ms of last banner emission;
+    //                           we rate-limit to <=1Hz so a 100 ms render
+    //                           tick doesn't spam the terminal.
+    bool          plain_halt_bell_fired_{false};
+    std::int64_t  plain_halt_banner_last_ms_{0};
 };
 
 } // namespace truetest::ui

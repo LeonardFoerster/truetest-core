@@ -188,6 +188,10 @@ void TabbedDashboard::start()
             init_pair(5, COLOR_WHITE,  -1);
             break;
         }
+        // Pair 6 is the halt-banner alarm: white-on-red regardless of
+        // theme. The banner is drawn over chrome and overrides whatever
+        // palette is in use, so consistency wins over theme adherence.
+        init_pair(6, COLOR_WHITE, COLOR_RED);
     }
 
     start_time_ = std::chrono::steady_clock::now();
@@ -840,6 +844,35 @@ void TabbedDashboard::draw_status_bar(int width,
     (void)width;  // current bar fits any reasonable terminal
 }
 
+void TabbedDashboard::draw_halt_banner(int width)
+{
+    if (!data_) return;
+    if (!data_->stats().halt_flag.load(std::memory_order_acquire)) return;
+    if (width <= 0) return;
+
+    constexpr int kPairAlarm = 6;
+
+    // Rising edge: ring the bell once. ncurses beep() is a no-op on
+    // terminals that have it disabled — silent failure is fine.
+    if (!halt_bell_fired_.exchange(true, std::memory_order_acq_rel))
+        ::beep();
+
+    std::string reason = data_->shutdown_reason();
+    if (reason.empty()) reason = "halt";
+
+    // Compose " ▶ HALT — <reason> " then pad/truncate to full width so
+    // the bg color fills the row edge-to-edge with no gaps.
+    std::string body = "  HALT - ";
+    body += reason;
+    if (static_cast<int>(body.size()) > width)
+        body.resize(static_cast<std::size_t>(width));
+    body.append(static_cast<std::size_t>(width) - body.size(), ' ');
+
+    attron(COLOR_PAIR(kPairAlarm) | A_BOLD | A_BLINK);
+    mvaddstr(0, 0, body.c_str());
+    attroff(COLOR_PAIR(kPairAlarm) | A_BOLD | A_BLINK);
+}
+
 std::uint64_t TabbedDashboard::compute_render_digest(
     int active, const dashboard_snapshot* snap)
 {
@@ -1034,6 +1067,10 @@ void TabbedDashboard::render_loop()
         draw_confirm_overlay(w, h);
         draw_help_overlay(w, h);
         draw_toast(w, h);
+        // Halt banner is drawn after every other overlay so nothing else
+        // (toast, confirm) can hide it. Once halt fires, it's the only
+        // signal that matters.
+        draw_halt_banner(w);
 
         refresh();
         last_digest = digest;

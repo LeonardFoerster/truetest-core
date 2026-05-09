@@ -25,6 +25,13 @@ inline constexpr const char* fg_br_red   = "\x1b[91m";
 inline constexpr const char* fg_br_green = "\x1b[92m";
 inline constexpr const char* fg_br_yel   = "\x1b[93m";
 
+// Halt-banner palette: bright white text on a red background, bold +
+// blink. The blink degrades to plain bold on terminals that drop the
+// SGR-5 attribute, which is fine — the bg color is the load-bearing
+// alarm signal.
+inline constexpr const char* alarm_on    = "\x1b[1;5;97;41m";
+inline constexpr const char* bell        = "\a";
+
 inline constexpr const char* clear_screen   = "\x1b[2J";
 inline constexpr const char* cursor_home    = "\x1b[H";
 inline constexpr const char* clear_to_eol   = "\x1b[K";

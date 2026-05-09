@@ -89,6 +89,12 @@ private:
     void draw_toast(int width, int height);
     void set_toast(const std::string& msg);
 
+    // Full-width red overlay row painted on top of the chrome row when
+    // streaming_stats::halt_flag is set. Drawn last in render_loop so it
+    // covers tabs/status — the halt is the only thing that matters once
+    // it fires. Rings the terminal bell once on rising edge.
+    void draw_halt_banner(int width);
+
     // Cheap state digest for frame-skip. Captures status-bar atomics +
     // active tab + a few snapshot scalars whose change implies the
     // visible UI changed. Conservative — when in doubt, re-render.
@@ -126,6 +132,12 @@ private:
     std::atomic<int>  active_tab_{0};
     std::atomic<bool> running_{false};
     std::thread       thread_;
+
+    // Rising-edge tracker for the halt-banner bell. Set once when we
+    // first observe halt_flag=true; never cleared (halt is terminal in
+    // live mode — even if it weren't, the operator only needs to be
+    // alerted once per halt event).
+    std::atomic<bool> halt_bell_fired_{false};
 
     // ── Comfort/usability state ─────────────────────────────────────
     // `?`     toggles a full-screen help overlay (paused engine UI but
