@@ -108,6 +108,7 @@ function(tt_wire_optional_backends target)
         find_package(OpenSSL REQUIRED)
         target_sources(${target} PRIVATE
             ${CMAKE_SOURCE_DIR}/src/providers/binance/binance_register.cpp
+            ${CMAKE_SOURCE_DIR}/src/providers/binance/binance_futures_register.cpp
             ${CMAKE_SOURCE_DIR}/src/providers/binance/binance_backfill.h)
         target_link_libraries(${target} PUBLIC
             Boost::headers OpenSSL::SSL OpenSSL::Crypto)

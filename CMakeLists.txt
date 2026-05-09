@@ -222,6 +222,9 @@ if(BUILD_TESTS)
         tests/test_binance_user_data_transport_reconnect.cpp
         tests/test_binance_endpoints.cpp
         tests/test_binance_testnet_live.cpp
+        tests/test_binance_futures_order_encoder.cpp
+        tests/test_binance_futures_user_data_parser.cpp
+        tests/test_binance_futures_register.cpp
         tests/test_provider_transport.cpp
         tests/test_data_bridge.cpp
         tests/test_provider_event.cpp
