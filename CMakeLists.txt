@@ -227,6 +227,7 @@ if(BUILD_TESTS)
         tests/test_binance_futures_register.cpp
         tests/test_binance_futures_reconciler.cpp
         tests/test_binance_futures_kill_switch.cpp
+        tests/test_binance_futures_bracket_adapter.cpp
         tests/test_provider_transport.cpp
         tests/test_data_bridge.cpp
         tests/test_provider_event.cpp
