@@ -4,9 +4,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -56,6 +58,17 @@ public:
     // The watchdog sets this when a registered source misses its
     // deadline. Caller wires it to engine.halt_flag_.
     void set_halt_flag(std::atomic<bool>& flag) { halt_flag_ = &flag; }
+
+    // Optional callback fired when the first source goes hung. Receives
+    // the source's name and the observed age in ms. Engine wires this to
+    // trigger_halt() so the dashboard banner / event ring stay in sync.
+    // Called BEFORE halt_flag_ is set so trigger_halt's exchange-gate
+    // sees halt_flag_ still false on entry.
+    void set_halt_callback(
+        std::function<void(std::string_view name, std::int64_t age_ms)> cb)
+    {
+        halt_callback_ = std::move(cb);
+    }
 
     void start()
     {
@@ -118,6 +131,8 @@ private:
 
             const int64_t now = now_monotonic_ms();
             bool any_hung = false;
+            std::string  first_hung_name;
+            std::int64_t first_hung_age_ms = 0;
 
             {
                 std::lock_guard<std::mutex> lk(mu_);
@@ -132,6 +147,11 @@ private:
                                   << (now - last) << "ms since last beat, "
                                   << "deadline " << s.deadline_ms
                                   << "ms) — halting engine.\n";
+                        if (!any_hung)
+                        {
+                            first_hung_name = s.name;
+                            first_hung_age_ms = now - last;
+                        }
                         any_hung = true;
                     }
                 }
@@ -140,6 +160,11 @@ private:
             if (any_hung)
             {
                 triggered_.store(true, std::memory_order_release);
+                // Callback first: trigger_halt's halt_flag_.exchange gate
+                // must observe halt_flag_ still false to publish the
+                // reason / push the dashboard event.
+                if (halt_callback_)
+                    halt_callback_(first_hung_name, first_hung_age_ms);
                 if (halt_flag_)
                     halt_flag_->store(true, std::memory_order_release);
                 // Single-shot: stop polling so subsequent ticks don't
@@ -155,6 +180,7 @@ private:
     std::mutex mu_;
     std::vector<registration> sources_;
     std::atomic<bool>* halt_flag_ = nullptr;
+    std::function<void(std::string_view, std::int64_t)> halt_callback_;
 
     std::atomic<bool> running_{false};
     std::atomic<bool> triggered_{false};

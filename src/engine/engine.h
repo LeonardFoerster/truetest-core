@@ -32,6 +32,7 @@ namespace truetest::ui { struct streaming_stats; }
 #include <chrono>
 #include <deque>
 #include <mutex>
+#include <string_view>
 #include <unordered_map>
 #include "core/event.h"
 #include "core/event_log.h"
@@ -404,4 +405,11 @@ public:
     const OrderTracker& get_order_tracker() const { return order_tracker_; }
 
     std::atomic<bool>& get_halt_flag() { return halt_flag_; }
+
+    // Single thread-safe halt entry-point. Use this everywhere a halt is
+    // raised (ring drop, watchdog hang, network detector, operator action)
+    // so the dashboard banner, halt_flag_, and the recent-events ring stay
+    // in sync. Idempotent: only the first caller per run wins, the rest
+    // are no-ops. `reason` is truncated to streaming_stats::shutdown_reason_cap.
+    void trigger_halt(std::string_view reason);
 };

@@ -343,6 +343,40 @@ void ConsoleDashboard::set_feed_label(std::string label)
     cfg_.feed = std::move(label);
 }
 
+void ConsoleDashboard::set_shutdown_reason(std::string_view msg)
+{
+    auto& st = stats_;
+    const std::uint64_t cur = st.shutdown_reason_seq.load(std::memory_order_relaxed);
+
+    st.shutdown_reason_seq.store(cur + 1, std::memory_order_release);
+
+    const std::size_t n = (std::min)(msg.size(), streaming_stats::shutdown_reason_cap);
+    if (n > 0)
+        std::memcpy(st.shutdown_reason_buf, msg.data(), n);
+    st.shutdown_reason_len = static_cast<std::uint8_t>(n);
+
+    st.shutdown_reason_seq.store(cur + 2, std::memory_order_release);
+}
+
+std::string ConsoleDashboard::shutdown_reason() const
+{
+    const auto& st = stats_;
+    for (int retry = 0; retry < 4; ++retry)
+    {
+        const std::uint64_t s1 = st.shutdown_reason_seq.load(std::memory_order_acquire);
+        if (s1 & 1ULL) continue;
+        const std::uint8_t len = st.shutdown_reason_len;
+        char buf[streaming_stats::shutdown_reason_cap];
+        if (len > 0)
+            std::memcpy(buf, st.shutdown_reason_buf, len);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const std::uint64_t s2 = st.shutdown_reason_seq.load(std::memory_order_relaxed);
+        if (s1 == s2)
+            return std::string(buf, len);
+    }
+    return {};
+}
+
 void ConsoleDashboard::push_event(event_severity sev, std::string_view msg)
 {
     // MPSC seqlock: idx*2+1 marks the slot mid-write, idx*2+2 publishes it.

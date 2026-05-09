@@ -77,6 +77,16 @@ struct alignas(64) streaming_stats
     std::atomic<std::uint64_t> last_event_ns{0};
     std::atomic<std::uint32_t> backfill_done{0};
     std::atomic<std::uint32_t> backfill_total{0};
+
+    // Short halt reason published by engine::trigger_halt; the TUI banner
+    // and the plain-mode renderer read this when halt_flag is set.
+    // Single-writer (gated by halt_flag_.exchange) → standard seqlock:
+    // odd seq = mid-write, even = published. Cap is generous for "WS lost
+    // — idle 1500ms"-style strings; truncation is fine.
+    static constexpr std::size_t shutdown_reason_cap = 96;
+    alignas(64) std::atomic<std::uint64_t> shutdown_reason_seq{0};
+    std::uint8_t shutdown_reason_len{0};
+    char         shutdown_reason_buf[shutdown_reason_cap]{};
 };
 
 struct dashboard_config
@@ -115,6 +125,12 @@ public:
 
     void set_state(connection_state s);
     void set_feed_label(std::string label);
+
+    // Publishes the short halt reason ("market-data WS lost — idle 1500ms")
+    // through the seqlock in stats_; renderers call shutdown_reason() to
+    // read it. Called once per halt by engine::trigger_halt.
+    void set_shutdown_reason(std::string_view msg);
+    std::string shutdown_reason() const;
 
     void render_banner();
 

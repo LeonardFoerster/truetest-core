@@ -67,6 +67,15 @@ engine::engine(std::shared_ptr<data_handler> dh,
                     worker_watchdog_->register_source(
                         std::move(s.name), s.last_alive_ms, s.deadline_ms);
             }
+            worker_watchdog_->set_halt_callback(
+                [this](std::string_view source, std::int64_t age_ms) {
+                    char msg[128];
+                    std::snprintf(msg, sizeof(msg),
+                                  "watchdog: '%.*s' silent for %lldms",
+                                  static_cast<int>(source.size()), source.data(),
+                                  static_cast<long long>(age_ms));
+                    trigger_halt(msg);
+                });
             worker_watchdog_->set_halt_flag(halt_flag_);
             worker_watchdog_->start();
         }
@@ -277,26 +286,13 @@ void engine::publish_event(const event_pointer& ev)
                 else if (std::string_view(name) == "risk_stats") st.ring_drops_risk_stats.store(drops, std::memory_order_relaxed);
                 else if (std::string_view(name) == "mm")         st.ring_drops_mm.store(drops, std::memory_order_relaxed);
             }
-            if (safety &&
-                config_.drop_policy == ring_drop_policy::halt_on_drop &&
-                !halt_flag_.exchange(true, std::memory_order_acq_rel))
+            if (safety && config_.drop_policy == ring_drop_policy::halt_on_drop)
             {
-                if (auto* dash = config_.dashboard.get())
-                {
-                    dash->stats().halt_flag.store(true, std::memory_order_release);
-                    dash->set_state(truetest::ui::connection_state::halted);
-                    char msg[128];
-                    std::snprintf(msg, sizeof(msg),
-                                  "ring drop on '%s' (%zu dropped) — halted",
-                                  name, drops);
-                    dash->push_event(truetest::ui::event_severity::error, msg);
-                }
-                else
-                {
-                    std::cerr << "  ! ring drop on safety ring '" << name
-                              << "' (" << drops
-                              << " dropped) with halt_on_drop — halting engine\n";
-                }
+                char msg[128];
+                std::snprintf(msg, sizeof(msg),
+                              "ring drop on '%s' (%zu dropped) — halted",
+                              name, drops);
+                trigger_halt(msg);
             }
         }
 #ifdef HAS_DEBUG
@@ -340,6 +336,24 @@ void engine::publish_event(const event_pointer& ev)
     }
 
 #undef TT_PUSH
+}
+
+void engine::trigger_halt(std::string_view reason)
+{
+    if (halt_flag_.exchange(true, std::memory_order_acq_rel))
+        return;
+
+    if (auto* dash = config_.dashboard.get())
+    {
+        dash->stats().halt_flag.store(true, std::memory_order_release);
+        dash->set_state(truetest::ui::connection_state::halted);
+        dash->set_shutdown_reason(reason);
+        dash->push_event(truetest::ui::event_severity::error, reason);
+    }
+    else
+    {
+        std::cerr << "  ! engine halt — " << reason << "\n";
+    }
 }
 
 bool engine::snapshot_dashboard(truetest::ui::dashboard_snapshot& out) const
