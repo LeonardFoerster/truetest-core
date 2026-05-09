@@ -243,7 +243,8 @@ public:
                 rest_, upper(symbol_), endpoints_.is_testnet);
             kill_switch_ = std::make_shared<BinanceFuturesKillSwitch>(
                 rest_, upper(symbol_), minter_);
-            bracket_adapter_ = make_binance_futures_bracket_adapter(rest_);
+            bracket_adapter_ = make_binance_futures_bracket_adapter(
+                rest_, upper(symbol_));
 
             ExecutionBridge::deps d;
             d.order_tx = make_binance_rest_order_transport(rest_);

@@ -47,13 +47,22 @@ public:
     using request_fn = std::function<response(std::string_view endpoint,
                                               std::string_view params)>;
 
+    // `symbol` is the futures contract this adapter manages (e.g. BTCUSDT).
+    // Required because /fapi/v1/order DELETE needs a symbol param, and
+    // bracket_handles do not carry it (the type is shared with spot OCO,
+    // whose cancel-orderList path doesn't need it). One adapter per
+    // provider per symbol — matches how providers are constructed today.
     BinanceFuturesBracketAdapter(request_fn post,
                                  request_fn del,
-                                 request_fn get = nullptr)
+                                 request_fn get = nullptr,
+                                 std::string symbol = "")
         : post_(std::move(post))
         , del_(std::move(del))
         , get_(std::move(get))
+        , symbol_(upper(std::move(symbol)))
     {}
+
+    void set_symbol(std::string sym) { symbol_ = upper(std::move(sym)); }
 
     truetest::exits::bracket_caps capabilities() const override
     {
@@ -145,17 +154,25 @@ public:
         for (const auto& l : legs)
         {
             if (!*l.id) continue;
-            // /fapi/v1/order needs &symbol= too; recover it from open
-            // orders if we ever lose track. For now require the caller
-            // to have set sl_exchange_id / tp_exchange_id alongside a
-            // stable symbol — the live wiring always does.
-            std::string params = "orderId=" + **l.id;
-            // Symbol is required for /fapi/v1/order DELETE. The handles
-            // type doesn't carry it; we read it back from the open
-            // orders endpoint via list_open() at recovery time, and at
-            // place() time the engine knows the symbol from the intent.
-            // Wiring it through cancel() cleanly is a follow-up — for now
-            // we omit and let the venue surface "missing symbol" as 4xx.
+            // /fapi/v1/order DELETE requires symbol. Adapter holds it
+            // from construction (per-provider per-symbol invariant). If
+            // a future multi-symbol setup needs to span symbols here,
+            // bracket_handles or the IBracketAdapter contract has to
+            // carry symbol — at that point this branch becomes the
+            // forcing function for that change.
+            std::string params;
+            if (!symbol_.empty())
+            {
+                params.reserve(symbol_.size() + 32);
+                params.append("symbol=", 7);
+                params.append(symbol_);
+                params.append("&orderId=", 9);
+            }
+            else
+            {
+                params.append("orderId=", 8);
+            }
+            params.append(**l.id);
             auto resp = del_("/fapi/v1/order", params);
             if (resp.status >= 400 &&
                 resp.body.find("-2011") == std::string::npos &&
@@ -285,6 +302,7 @@ private:
     request_fn post_;
     request_fn del_;
     request_fn get_;
+    std::string symbol_;
 
     // Returns the orderId on success, "" on failure (caller treats as decline).
     std::string place_leg(const char* type,
@@ -350,7 +368,8 @@ private:
 };
 
 inline std::shared_ptr<BinanceFuturesBracketAdapter>
-make_binance_futures_bracket_adapter(std::shared_ptr<BinanceRestClient> client)
+make_binance_futures_bracket_adapter(std::shared_ptr<BinanceRestClient> client,
+                                     std::string symbol = "")
 {
     auto post = [client](std::string_view ep, std::string_view p)
         -> BinanceFuturesBracketAdapter::response
@@ -371,7 +390,8 @@ make_binance_futures_bracket_adapter(std::shared_ptr<BinanceRestClient> client)
         return {r.status, r.body};
     };
     return std::make_shared<BinanceFuturesBracketAdapter>(
-        std::move(post), std::move(del), std::move(get));
+        std::move(post), std::move(del), std::move(get),
+        std::move(symbol));
 }
 
 #endif // HAS_BINANCE

@@ -192,13 +192,14 @@ TEST(BinanceFuturesBracketAdapter, PlaceSecondLegFailureLeavesSlOnly)
     EXPECT_EQ(post->log.size(), 2u);
 }
 
-TEST(BinanceFuturesBracketAdapter, CancelHitsBothLegEndpoints)
+TEST(BinanceFuturesBracketAdapter, CancelHitsBothLegEndpointsWithSymbol)
 {
     auto post = std::make_shared<fake_caller>();
     auto del  = std::make_shared<fake_caller>();
     del->default_resp = {200, "{}"};
 
-    BinanceFuturesBracketAdapter a(wrap(post), wrap(del));
+    BinanceFuturesBracketAdapter a(wrap(post), wrap(del),
+                                    /*get=*/nullptr, "btcusdt");
 
     truetest::exits::bracket_handles h;
     h.sl_exchange_id = "111";
@@ -208,8 +209,12 @@ TEST(BinanceFuturesBracketAdapter, CancelHitsBothLegEndpoints)
     ASSERT_EQ(del->log.size(), 2u);
     EXPECT_EQ(del->log[0].first, "/fapi/v1/order");
     EXPECT_EQ(del->log[1].first, "/fapi/v1/order");
-    EXPECT_NE(del->log[0].second.find("orderId=111"), std::string::npos);
-    EXPECT_NE(del->log[1].second.find("orderId=222"), std::string::npos);
+    // /fapi/v1/order DELETE requires symbol; adapter must include it
+    // (and uppercase it, matching the rest of the wire format).
+    EXPECT_NE(del->log[0].second.find("symbol=BTCUSDT"), std::string::npos);
+    EXPECT_NE(del->log[1].second.find("symbol=BTCUSDT"), std::string::npos);
+    EXPECT_NE(del->log[0].second.find("orderId=111"),    std::string::npos);
+    EXPECT_NE(del->log[1].second.find("orderId=222"),    std::string::npos);
 }
 
 TEST(BinanceFuturesBracketAdapter, CancelEmptyHandlesIsNoop)
