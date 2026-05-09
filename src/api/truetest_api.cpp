@@ -160,8 +160,6 @@ tt_engine_handle tt_create_engine(const char* config_json)
             w->config.fill_rng_seed = cfg["fill_rng_seed"].get<unsigned>();
         if (cfg.contains("spread_step_factor") && cfg["spread_step_factor"].is_number())
             w->config.spread_step_factor = cfg["spread_step_factor"].get<double>();
-        if (cfg.contains("db_path") && cfg["db_path"].is_string())
-            w->config.db_path = cfg["db_path"].get<std::string>();
         if (cfg.contains("event_log_path") && cfg["event_log_path"].is_string())
             w->config.event_log_path = cfg["event_log_path"].get<std::string>();
 
