@@ -411,6 +411,26 @@ Live-mode safety hooks (futures-specific implementations):
   (`--liquidation-warn-pct`, default 5%). Tolerate
   `liquidationPrice == 0` / `markPrice == 0` (unfunded testnet
   accounts, just-opened positions).
+- `BinanceFuturesDeadMansSwitch` — server-side `POST
+  /fapi/v1/countdownCancelAll` with a heartbeat thread. Bounds
+  catastrophic-shutdown order exposure (SIGKILL / OOM / kernel
+  panic / network gone) from "indefinite" to "≤ countdown_ms after
+  last successful heartbeat." Default ON at 30s countdown / 10s
+  heartbeat (`--dead-man-countdown-ms` / `--dead-man-heartbeat-ms`
+  / `--disarm-deadman`). The heartbeat thread itself is monitored
+  by `WorkerWatchdog` (`src/threading/worker_watchdog.h`); if the
+  heartbeat hangs for `3 × heartbeat_ms`, the watchdog fires
+  `halt_flag_` so the orderly kill-switch runs before the venue
+  countdown cancels orders mid-quote. Cancels orders only — does
+  NOT flatten positions; the kill-switch's flatten step is the
+  other half of the safety net.
+- Pre-trade venue risk check (`FuturesRiskCheck`,
+  `src/risk/futures_risk_check.h`) — notional / leverage /
+  projected-liquidation-distance caps applied per outgoing order
+  before `RiskManager::check_order`. Refusals emit
+  `rejection_event` with reason `venue_risk_reject` and the engine
+  continues (reject, not halt). Off by default; enable via
+  `--max-notional` / `--max-leverage` / `--min-liq-distance-pct`.
 
 Bracket adapter: `BinanceFuturesBracketAdapter` places SL+TP as two
 separate conditional orders (`STOP_MARKET` + `TAKE_PROFIT_MARKET`),

@@ -65,6 +65,14 @@ export TRUETEST_BINANCE_API_SECRET=...
     --testnet
 ```
 
+> **Heads up: the dead-man's switch is on by default.** Default countdown
+> is 30 s; the engine refreshes it every 10 s by default. If the engine
+> dies, hangs, or is suspended for longer than the countdown, Binance
+> auto-cancels every open order on the symbol. Pass `--disarm-deadman`
+> for a single run with the DMS off (debug, deploy, deliberate pause),
+> or `--dead-man-countdown-ms 0` to disable. See "Dead-man's switch"
+> below for tuning + foot-guns.
+
 `--testnet` selects `binance::usdm_testnet()`:
 - WebSocket: `stream.binancefuture.com:9443`
 - REST: `testnet.binancefuture.com:443`
@@ -174,6 +182,65 @@ the cap describes the operator's prudent-trading envelope, not a
 market-wide risk-of-ruin condition that should stop everything. The
 existing `--max-daily-loss` and `--risk-unwind` flags handle that
 distinction.
+
+### Dead-man's switch
+
+The dead-man's switch is the catastrophic-shutdown safety net. Where
+the orderly kill-switch handles "engine exits cleanly via SIGINT or
+risk-halt," the DMS handles "engine vanishes" — SIGKILL, OOM,
+kernel panic, network gone. It posts to `/fapi/v1/countdownCancelAll`
+on startup, and a heartbeat thread refreshes the timer periodically.
+If the engine fails to refresh, Binance cancels every open order on
+the symbol within `countdown_ms` of the last successful heartbeat.
+
+```bash
+./engine_live --provider binance-futures \
+    --symbol btcusdt --stream kline_1m --mode live --live --testnet \
+    --dead-man-countdown-ms 30000 \
+    --dead-man-heartbeat-ms  10000
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--dead-man-countdown-ms <ms>` | 30000 | Server-side countdown. After this many ms without a heartbeat refresh, Binance cancels open orders. 0 disables. |
+| `--dead-man-heartbeat-ms <ms>` | 0 (= countdown / 3) | How often the engine refreshes the timer. With the default ratio, two consecutive missed cycles trigger auto-cancel; one missed cycle is tolerated. |
+| `--disarm-deadman` | off | Single-run kill switch for the DMS. Equivalent to `countdown_ms=0` but intent-revealing for debug / deploy workflows. |
+
+The engine also runs an internal liveness watchdog (see
+`src/threading/worker_watchdog.h`): if the heartbeat thread itself
+hangs (stuck socket, deadlock, scheduler pause) for longer than
+`3 × heartbeat_ms`, it sets `halt_flag_` so the orderly kill-switch
+runs *before* the venue-side countdown fires mid-quote. Belt and
+braces.
+
+#### Foot-guns to internalize before relying on this
+
+1. **The DMS does NOT close positions.** Only cancels orders. Open
+   futures positions stay open after auto-cancel; an operator must
+   close them out. The DMS is half a safety net; the kill-switch's
+   flatten step is the other half.
+2. **Process suspension (SIGSTOP) cancels your book.** If you `kill
+   -STOP` the engine for debugging, the heartbeat thread can't run
+   while paused → countdown fires → orders cancelled. Resume picks
+   up an empty book. Pass `--disarm-deadman` before deliberate-pause
+   workflows, or stop and restart cleanly.
+3. **Network flaps inside the countdown window can trigger spurious
+   cancels.** A 10s outage on a 30s countdown plus a heartbeat that
+   was already 25s old at the start of the outage = countdown
+   expires. This is why heartbeat-interval defaults to 1/3 the
+   countdown, not 1/2 — gives slack for one missed cycle without
+   losing the book.
+4. **Heartbeat thread bugs are catastrophic in the wrong direction.**
+   A heartbeat that silently hangs (stuck socket, mutex deadlock)
+   while the engine is otherwise alive cancels orders mid-trade.
+   The internal watchdog is the mitigation, but it depends on
+   `halt_flag_` being honored quickly. Run the operator validation
+   playbook (below) on every change to the heartbeat thread.
+
+If the foot-guns above are net-negative for your use case, the
+escape hatch is `--disarm-deadman` per run, or `--dead-man-countdown-ms
+0` to keep the DMS disarmed across the run. Both are loud and
+intent-revealing in operator dashboards / process listings.
 
 ## Refusal modes (what the messages mean)
 

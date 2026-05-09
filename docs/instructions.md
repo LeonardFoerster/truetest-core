@@ -411,6 +411,9 @@ All three binaries accept the same CLI.
 | `--max-notional` | float (USDT) | 0 (disabled) | (`binance-futures` only) Per-order notional cap: refuses if `\|post_qty\| × mark` exceeds this |
 | `--max-leverage` | float | 0 (disabled) | (`binance-futures` only) Per-order leverage cap: refuses if `post_notional / cash` exceeds this |
 | `--min-liq-distance-pct` | float | 0 (disabled) | (`binance-futures` only) Per-order minimum projected buffer to liquidation. 0.05 = 5%. See `docs/futures-testnet.md` for the approximation caveats |
+| `--dead-man-countdown-ms` | long (ms) | 30000 | (`binance-futures` only) Server-side dead-man's switch via `POST /fapi/v1/countdownCancelAll`. If the engine dies between heartbeats, Binance auto-cancels open orders within this many ms of the last heartbeat. 0 disables for the run |
+| `--dead-man-heartbeat-ms` | long (ms) | 0 (= countdown / 3) | (`binance-futures` only) Heartbeat interval. Smaller = tighter recovery, more API calls. Larger = fewer calls, more network-flap tolerance |
+| `--disarm-deadman` | flag | off | (`binance-futures` only) Don't arm the DMS for this run. Intent-revealing alternative to `--dead-man-countdown-ms 0`; useful for debug / deploy workflows where the operator deliberately wants to pause without venue-side auto-cancel |
 
 ### Binance credentials
 

@@ -246,10 +246,12 @@ struct cli_options
     double      max_leverage                 = -1.0;
     double      min_liquidation_distance_pct = -1.0;
 
-    // Futures-only dead-man's switch. countdown_ms == 0 disables;
+    // Futures-only dead-man's switch. Default 30000ms (30s); set to 0
+    // (or pass --disarm-deadman) to disable for a specific run.
     // heartbeat_ms == 0 means "use countdown / 3" inside the provider.
-    long        dead_man_countdown_ms = -1;
-    long        dead_man_heartbeat_ms = -1;
+    long        dead_man_countdown_ms = 30000;
+    long        dead_man_heartbeat_ms = 0;
+    bool        disarm_deadman = false;
 
     double balance = 10000.0;
     double risk_fraction = 0.02;
@@ -646,13 +648,19 @@ static void register_cli_options(CLI::App& app, cli_options& o)
         "engine's heartbeat refreshes the timer; if the engine dies, "
         "Binance auto-cancels all orders for the symbol within this "
         "many ms of the last successful heartbeat. 0 disables. "
-        "Default: 0.");
+        "Default: 30000 (30s).");
     app.add_option("--dead-man-heartbeat-ms", o.dead_man_heartbeat_ms,
         "(binance-futures only) Heartbeat interval for the dead-man's "
         "switch. Smaller = tighter recovery from server-side timer "
         "expiry; larger = fewer API calls and more tolerance for "
         "transient network jitter. 0 means use countdown / 3. "
         "Default: 0.");
+    app.add_flag("--disarm-deadman", o.disarm_deadman,
+        "(binance-futures only) Don't arm the dead-man's switch for "
+        "this run. Equivalent to --dead-man-countdown-ms 0 but "
+        "intent-revealing for debug / deploy workflows where the "
+        "operator deliberately wants to pause without venue-side "
+        "auto-cancel.");
 
     app.add_option("--api-key", o.api_key, "API key for exchange");
     app.add_option("--api-secret", o.api_secret, "API secret for exchange");
@@ -999,9 +1007,13 @@ static int run_provider_mode(const cli_options& o)
     if (o.min_liquidation_distance_pct >= 0.0)
         pcfg["min_liquidation_distance_pct"] =
             std::to_string(o.min_liquidation_distance_pct);
-    if (o.dead_man_countdown_ms >= 0)
-        pcfg["dead_man_countdown_ms"] = std::to_string(o.dead_man_countdown_ms);
-    if (o.dead_man_heartbeat_ms >= 0)
+    // --disarm-deadman wins over --dead-man-countdown-ms — operator
+    // intent for "this specific run, no DMS" is unambiguous when both
+    // appear on the command line.
+    const long effective_countdown = o.disarm_deadman ? 0L
+                                                      : o.dead_man_countdown_ms;
+    pcfg["dead_man_countdown_ms"] = std::to_string(effective_countdown);
+    if (o.dead_man_heartbeat_ms > 0)
         pcfg["dead_man_heartbeat_ms"] = std::to_string(o.dead_man_heartbeat_ms);
 
     std::shared_ptr<IProvider> provider;
