@@ -10,9 +10,12 @@
 #include "risk/futures_risk_check.h"
 #include "exits/bracket_adapter.h"
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 class engine_config;
 
@@ -74,4 +77,18 @@ public:
 
 	virtual std::shared_ptr<IDataParser<provider::event>>
 	get_event_parser() { return nullptr; }
+
+	// Long-lived threads owned by the provider can advertise themselves
+	// here so the engine's WorkerWatchdog halts the engine if any of
+	// them goes silent. Empty default → no liveness monitoring (engine
+	// won't even create a watchdog). The atomic must outlive both this
+	// provider and the engine — the same lifetime constraint Worker's
+	// failure_flag follows.
+	struct liveness_source
+	{
+		std::string name;
+		std::atomic<int64_t>* last_alive_ms = nullptr;
+		int64_t deadline_ms = 0;
+	};
+	virtual std::vector<liveness_source> get_liveness_sources() { return {}; }
 };

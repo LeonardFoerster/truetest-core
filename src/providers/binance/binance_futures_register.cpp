@@ -83,6 +83,15 @@ REGISTER_PROVIDER("binance-futures", [](const provider_config& cfg) {
     parse_double("min_liquidation_distance_pct", &BinanceFuturesProvider::set_min_liquidation_distance_pct);
     parse_double("maintenance_margin_pct",       &BinanceFuturesProvider::set_maintenance_margin_pct);
 
+    auto parse_int64 = [&](const char* key, void(BinanceFuturesProvider::*set)(int64_t)) {
+        auto raw = get(key);
+        if (raw.empty()) return;
+        try { (provider.get()->*set)(static_cast<int64_t>(std::stoll(raw))); }
+        catch (...) {}
+    };
+    parse_int64("dead_man_countdown_ms",  &BinanceFuturesProvider::set_dead_man_countdown_ms);
+    parse_int64("dead_man_heartbeat_ms",  &BinanceFuturesProvider::set_dead_man_heartbeat_ms);
+
     return provider;
 });
 

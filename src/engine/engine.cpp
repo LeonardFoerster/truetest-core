@@ -54,6 +54,23 @@ engine::engine(std::shared_ptr<data_handler> dh,
         if (auto rc = config_.provider->get_risk_check())
             risk_check_ = std::move(rc);
 
+        // Register any liveness sources the provider exposes. Only
+        // create the watchdog if there's something to watch — engine
+        // shouldn't pay for a poll thread it doesn't need.
+        auto sources = config_.provider->get_liveness_sources();
+        if (!sources.empty())
+        {
+            worker_watchdog_ = std::make_unique<WorkerWatchdog>();
+            for (auto& s : sources)
+            {
+                if (s.last_alive_ms && s.deadline_ms > 0)
+                    worker_watchdog_->register_source(
+                        std::move(s.name), s.last_alive_ms, s.deadline_ms);
+            }
+            worker_watchdog_->set_halt_flag(halt_flag_);
+            worker_watchdog_->start();
+        }
+
         if (auto ba = config_.provider->get_bracket_adapter())
             exit_manager_.set_bracket_adapter(std::move(ba));
 
@@ -1222,6 +1239,14 @@ void engine::stop_workers()
 
     if (config_.mode == engine_mode::live)
     {
+        // Stop the watchdog before kill-switch begins. Otherwise its
+        // poll thread can race against the kill-switch's halt_flag_
+        // observation: heartbeat thread (provider-owned) is about to
+        // be torn down, so its liveness atomic will go stale during
+        // the kill-switch's REST sequence — we don't want that to
+        // re-trigger halt as a "watchdog said the heartbeat hung."
+        if (worker_watchdog_) worker_watchdog_->stop();
+
         auto kill_switch = config_.kill_switch;
         if (!kill_switch && config_.provider)
             kill_switch = config_.provider->get_kill_switch();

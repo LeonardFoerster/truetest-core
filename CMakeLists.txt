@@ -233,6 +233,7 @@ if(BUILD_TESTS)
         tests/test_futures_risk_check.cpp
         tests/test_engine_venue_risk_check.cpp
         tests/test_worker_watchdog.cpp
+        tests/test_binance_futures_dead_mans_switch.cpp
         tests/test_provider_transport.cpp
         tests/test_data_bridge.cpp
         tests/test_provider_event.cpp

@@ -16,6 +16,7 @@
 #include "providers/binance/binance_backfill.h"
 #include "providers/binance/binance_endpoints.h"
 #include "providers/binance/binance_futures_bracket_adapter.h"
+#include "providers/binance/binance_futures_dead_mans_switch.h"
 #include "providers/binance/binance_futures_kill_switch.h"
 #include "providers/binance/binance_futures_order_encoder.h"
 #include "providers/binance/binance_futures_reconciler.h"
@@ -98,6 +99,12 @@ public:
     void set_max_leverage(double v)                  { rc_cfg_.max_leverage = v; }
     void set_min_liquidation_distance_pct(double v)  { rc_cfg_.min_liquidation_distance_pct = v; }
     void set_maintenance_margin_pct(double v)        { rc_cfg_.maintenance_margin_pct = v; }
+
+    // Dead-man's switch. countdown_ms == 0 disables. heartbeat_ms == 0
+    // means "use countdown / 3" so a single missed beat tolerates one
+    // network flap without the venue auto-cancelling.
+    void set_dead_man_countdown_ms(int64_t v)        { dead_man_countdown_ms_ = v; }
+    void set_dead_man_heartbeat_ms(int64_t v)        { dead_man_heartbeat_ms_ = v; }
 
     void set_endpoints(binance::endpoints ep)
     {
@@ -369,6 +376,30 @@ public:
                 return false;
             }
             executor_ = bridge_;
+
+            // Dead-man's switch — last to arm, first to disarm. The
+            // venue countdown should bracket the live order routing so
+            // a crash between bridge open and now doesn't go unprotected.
+            if (dead_man_countdown_ms_ > 0)
+            {
+                const int64_t hb = dead_man_heartbeat_ms_ > 0
+                    ? dead_man_heartbeat_ms_
+                    : dead_man_countdown_ms_ / 3;
+                dms_ = make_binance_futures_dead_mans_switch(
+                    rest_, upper(symbol_),
+                    dead_man_countdown_ms_, hb);
+                if (!dms_->start())
+                {
+                    std::cerr << "BinanceFuturesProvider: dead-man's switch "
+                                 "failed to arm — refusing to go live.\n";
+                    bridge_->close();
+                    state_ = lifecycle::error;
+                    return false;
+                }
+                std::cerr << "  BinanceFuturesProvider: dead-man's switch "
+                             "armed (countdown=" << dead_man_countdown_ms_
+                          << "ms, heartbeat=" << hb << "ms)\n";
+            }
         }
         else if (mode_ == engine_mode::shadow)
         {
@@ -396,6 +427,18 @@ public:
 
     void close() override
     {
+        // Stop the heartbeat thread first so it doesn't refresh the
+        // countdown while we're trying to disarm. Then disarm — best
+        // effort; failure logs but doesn't block shutdown, since the
+        // server-side timer will expire on its own anyway.
+        if (dms_)
+        {
+            dms_->stop();
+            if (!dms_->disarm())
+                std::cerr << "BinanceFuturesProvider: dead-man's-switch "
+                             "disarm failed; relying on countdown to "
+                             "expire server-side.\n";
+        }
         if (transport_) transport_->close();
         if (bridge_)    bridge_->close();
         state_ = lifecycle::closed;
@@ -426,6 +469,26 @@ public:
         return bracket_adapter_;
     }
     std::shared_ptr<IRiskCheck> get_risk_check() override { return risk_check_; }
+
+    std::vector<liveness_source> get_liveness_sources() override
+    {
+        std::vector<liveness_source> out;
+        if (dms_)
+        {
+            // Deadline = 3 × heartbeat: tolerate a single missed cycle
+            // before halting the engine. Smaller multipliers spuriously
+            // halt under transient network jitter; larger multipliers
+            // let the heartbeat hang silently for longer than the venue
+            // countdown, which is the very failure mode this exists to
+            // catch.
+            liveness_source s;
+            s.name = "binance-futures-dms-heartbeat";
+            s.last_alive_ms = &dms_->liveness_ts();
+            s.deadline_ms = dms_->heartbeat_interval_ms() * 3;
+            out.push_back(std::move(s));
+        }
+        return out;
+    }
 
     bool supports_event_stream() const override
     {
@@ -490,6 +553,10 @@ private:
 
     FuturesRiskCheck::config rc_cfg_{};        // all zero = check skipped
     std::shared_ptr<IRiskCheck> risk_check_;   // null until open() if any cap > 0
+
+    int64_t dead_man_countdown_ms_ = 0;        // 0 disables DMS
+    int64_t dead_man_heartbeat_ms_ = 0;        // 0 = countdown / 3
+    std::shared_ptr<BinanceFuturesDeadMansSwitch> dms_;
 
     static std::string upper(const std::string& s)
     {

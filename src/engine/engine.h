@@ -15,6 +15,7 @@
 #include "analytics/bar_aggregator.h"
 #include "risk/risk_manager.h"
 #include "risk/futures_risk_check.h"
+#include "threading/worker_watchdog.h"
 #include "threading/ring_buffer.h"
 #include "threading/thread_config.h"
 #include "logging_worker.h"
@@ -93,6 +94,10 @@ private:
     // provider->get_risk_check() at construct time; null when the
     // provider doesn't supply one (spot, backtest providers, etc.).
     std::shared_ptr<IRiskCheck> risk_check_;
+    // Optional liveness watchdog. Created in the constructor only if
+    // the provider returns at least one liveness_source — currently
+    // only the futures dead-man's switch heartbeat opts in.
+    std::unique_ptr<WorkerWatchdog> worker_watchdog_;
     MarketMaker market_maker_;
     double last_mid_price_ = 0.0;
     std::string last_mark_symbol_;
