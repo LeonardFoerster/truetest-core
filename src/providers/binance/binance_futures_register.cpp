@@ -70,6 +70,19 @@ REGISTER_PROVIDER("binance-futures", [](const provider_config& cfg) {
     if (strict == "1" || strict == "true")
         provider->set_margin_type_strict(true);
 
+    // Position-based risk caps. Each is independent; absent / malformed
+    // input leaves the cap at 0 (= disabled).
+    auto parse_double = [&](const char* key, void(BinanceFuturesProvider::*set)(double)) {
+        auto raw = get(key);
+        if (raw.empty()) return;
+        try { (provider.get()->*set)(std::stod(raw)); }
+        catch (...) {}
+    };
+    parse_double("max_notional_usdt",            &BinanceFuturesProvider::set_max_notional_usdt);
+    parse_double("max_leverage",                 &BinanceFuturesProvider::set_max_leverage);
+    parse_double("min_liquidation_distance_pct", &BinanceFuturesProvider::set_min_liquidation_distance_pct);
+    parse_double("maintenance_margin_pct",       &BinanceFuturesProvider::set_maintenance_margin_pct);
+
     return provider;
 });
 

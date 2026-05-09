@@ -108,6 +108,73 @@ cross-margin awareness is out of scope for v1. Both tolerate
 `liquidationPrice == 0` and `markPrice == 0` silently (unfunded testnet
 accounts and just-opened positions both legitimately surface zeros).
 
+### Pre-trade risk caps
+
+In addition to advisories (which run once at startup), the futures
+provider can refuse individual orders that would exceed operator-set
+notional, leverage, or projected liquidation-distance caps. These run
+on every order, before the venue-agnostic `RiskManager`. All three
+caps are independent — disabling all of them (the default) means the
+engine queries `provider->get_risk_check()`, gets `nullptr`, and
+applies no extra check.
+
+```bash
+./engine_live --provider binance-futures \
+    --symbol btcusdt --stream kline_1m --mode live --live --testnet \
+    --max-notional 5000 \
+    --max-leverage 5 \
+    --min-liq-distance-pct 0.10
+```
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--max-notional <usdt>` | 0 (disabled) | Refuses if `\|post_qty\| × mark_price` exceeds the cap. Magnitude-based, so flipping long↔short is captured naturally. |
+| `--max-leverage <multiplier>` | 0 (disabled) | Refuses if `post_notional / cash` exceeds the cap. Skipped cleanly when local cash is zero. |
+| `--min-liq-distance-pct <fraction>` | 0 (disabled) | Refuses if the projected post-trade buffer to liquidation, expressed as a fraction of mark, is smaller than this. `0.05` = require ≥ 5% room. |
+
+#### How the liquidation projection works
+
+The buffer is approximated as `cash / post_notional − maintenance_margin`.
+That's `1/leverage − mm`. At a maintenance margin of 0.5% (Binance
+BTCUSDT first tier):
+
+| Implied leverage | Projected buffer |
+|---:|---:|
+| 5× | 19.5% |
+| 10× | 9.5% |
+| 20× | 4.5% |
+| 50× | 1.5% |
+| 100× | 0.5% |
+
+Setting `--min-liq-distance-pct 0.05` therefore caps effective
+leverage around 18–19× under the default maintenance margin. Setting
+it to `0.10` caps around 9–10×.
+
+Three things to know before you tune this number:
+
+1. **Cash is a coarse proxy for available margin.** Under cross-margin
+   or multi-symbol setups, the venue's `availableBalance` may be very
+   different from the engine's `portfolio.get_cash()`. The check uses
+   the local figure. Conservative if local < venue, optimistic if
+   higher. Operators with cross-margin should set caps tighter than
+   the strictly-necessary venue limits.
+2. **Maintenance margin is flat.** Binance USDT-M uses notional-tiered
+   MM rates (BTCUSDT: 0.5% up to 1M USDT, then 0.65%, then …). This
+   impl uses a flat default; raise via the `maintenance_margin_pct`
+   provider config key for high-notional accounts where tiers bite.
+3. **Pre-trade entry approximation.** We don't know the entry price of
+   the new position, so the projection assumes entry ≈ mark. Small
+   error for ack-fast venues (mark moves under microseconds, fill
+   happens within seconds), but still an approximation: don't tune
+   the threshold below `maintenance_margin + safety_factor`.
+
+Refusals are pure rejections — they emit a `rejection_event` reason
+`venue_risk_reject` and the engine continues. They are **not** halts:
+the cap describes the operator's prudent-trading envelope, not a
+market-wide risk-of-ruin condition that should stop everything. The
+existing `--max-daily-loss` and `--risk-unwind` flags handle that
+distinction.
+
 ## Refusal modes (what the messages mean)
 
 The live `open()` runs a strict refusal pipeline. Each gate exists

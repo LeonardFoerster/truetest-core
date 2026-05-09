@@ -6,6 +6,7 @@
 #include "execution/execution_bridge.h"
 #include "execution/rate_limiter.h"
 #include "execution/trade_tape_shadow_adapter.h"
+#include "risk/futures_risk_check.h"
 #include "providers/provider.h"
 #include "providers/prepend_transport.h"
 #include "providers/binance/binance_combined_parser.h"
@@ -90,6 +91,14 @@ public:
         margin_type_strict_ = strict;
     }
 
+    // Position-based pre-trade risk caps. 0 disables each individually;
+    // all-zero (the default) means no FuturesRiskCheck is constructed
+    // and get_risk_check() returns nullptr (engine skips the check).
+    void set_max_notional_usdt(double v)             { rc_cfg_.max_notional_usdt = v; }
+    void set_max_leverage(double v)                  { rc_cfg_.max_leverage = v; }
+    void set_min_liquidation_distance_pct(double v)  { rc_cfg_.min_liquidation_distance_pct = v; }
+    void set_maintenance_margin_pct(double v)        { rc_cfg_.maintenance_margin_pct = v; }
+
     void set_endpoints(binance::endpoints ep)
     {
         endpoints_ = std::move(ep);
@@ -127,6 +136,17 @@ public:
     bool open() override
     {
         state_ = lifecycle::opening;
+
+        // Construct the futures risk check before mode dispatch so it
+        // applies in shadow / paper / live alike. The engine queries
+        // get_risk_check() once after configure() — we need this set
+        // by the time open() returns.
+        if (rc_cfg_.max_notional_usdt > 0.0
+            || rc_cfg_.max_leverage > 0.0
+            || rc_cfg_.min_liquidation_distance_pct > 0.0)
+        {
+            risk_check_ = std::make_shared<FuturesRiskCheck>(rc_cfg_);
+        }
 
         std::cerr << "  BinanceFuturesProvider: "
                   << (endpoints_.is_testnet ? "[TESTNET] " : "")
@@ -405,6 +425,7 @@ public:
     {
         return bracket_adapter_;
     }
+    std::shared_ptr<IRiskCheck> get_risk_check() override { return risk_check_; }
 
     bool supports_event_stream() const override
     {
@@ -466,6 +487,9 @@ private:
     std::string expected_margin_type_;        // "" disables check
     double      liquidation_warn_pct_ = 0.05; // 5%; <=0 disables check
     bool        margin_type_strict_   = false;
+
+    FuturesRiskCheck::config rc_cfg_{};        // all zero = check skipped
+    std::shared_ptr<IRiskCheck> risk_check_;   // null until open() if any cap > 0
 
     static std::string upper(const std::string& s)
     {

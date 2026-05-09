@@ -51,6 +51,9 @@ engine::engine(std::shared_ptr<data_handler> dh,
     // adapter (e.g. shadow-mode replay of venue brackets) plugs in here.
     if (config_.provider)
     {
+        if (auto rc = config_.provider->get_risk_check())
+            risk_check_ = std::move(rc);
+
         if (auto ba = config_.provider->get_bracket_adapter())
             exit_manager_.set_bracket_adapter(std::move(ba));
 
@@ -1403,6 +1406,42 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                            bool& halt_requested)
 {
     {
+        // Venue-specific pre-trade check (futures notional / leverage /
+        // liquidation distance) runs first. Refusals here are pure
+        // rejections — no halt semantics, since these caps describe
+        // the operator's prudent-trading envelope, not a market-wide
+        // risk-of-ruin trigger.
+        if (risk_check_)
+        {
+            auto vd = risk_check_->evaluate(*o, portfolio_, last_mid_price_);
+            if (!vd.allow)
+            {
+                const std::string reason_str =
+                    "venue risk check refused: " + vd.reason;
+                auto rej = std::make_shared<rejection_event>(
+                    o->get_timestamp(), o->get_symbol(),
+                    o->get_order_id(), reason_str.c_str());
+                log_event(*rej);
+                publish_event(rej);
+#ifdef HAS_QUESTDB
+                if (questdb_active_ && questdb_store_)
+                {
+                    questdb_store_->record_order_submitted(*o, "rejected");
+                    questdb_store_->record_rejection(*o, "venue_risk_reject",
+                                                     reason_str.c_str());
+                    questdb_total_rejections_++;
+                }
+#endif
+                order_tracker_.set_status(o->get_order_id(),
+                                          order_status::rejected);
+                erase_open_order(o->get_order_id());
+                // Reject, not halt — engine continues. The cap describes
+                // what this operator considers prudent, not a market-wide
+                // risk-of-ruin condition that should stop everything.
+                return true;
+            }
+        }
+
         auto snap = analytics_.risk_view();
         auto action = risk_manager_.check_order(*o, portfolio_, snap);
         if (action == risk_action::halt || action == risk_action::reject)

@@ -14,6 +14,7 @@
 #include "analytics/analytics.h"
 #include "analytics/bar_aggregator.h"
 #include "risk/risk_manager.h"
+#include "risk/futures_risk_check.h"
 #include "threading/ring_buffer.h"
 #include "threading/thread_config.h"
 #include "logging_worker.h"
@@ -88,6 +89,10 @@ private:
     void write_adapter_diagnostics(truetest::ui::streaming_stats& st);
     void refresh_top_of_book_atomics(const orderbook& ob);
     RiskManager risk_manager_;
+    // Optional venue-specific pre-trade gate. Stashed from
+    // provider->get_risk_check() at construct time; null when the
+    // provider doesn't supply one (spot, backtest providers, etc.).
+    std::shared_ptr<IRiskCheck> risk_check_;
     MarketMaker market_maker_;
     double last_mid_price_ = 0.0;
     std::string last_mark_symbol_;

@@ -239,6 +239,13 @@ struct cli_options
     double      liquidation_warn_pct = -1.0;
     bool        margin_type_strict   = false;
 
+    // Futures-only pre-trade risk caps. Sentinel <0 = operator didn't
+    // set; the provider treats zero as disabled and won't construct
+    // a FuturesRiskCheck unless at least one cap is positive.
+    double      max_notional_usdt            = -1.0;
+    double      max_leverage                 = -1.0;
+    double      min_liquidation_distance_pct = -1.0;
+
     double balance = 10000.0;
     double risk_fraction = 0.02;
     double sl_pct = 0.005;
@@ -617,6 +624,17 @@ static void register_cli_options(CLI::App& app, cli_options& o)
         "(binance-futures only) Escalate margin-mode mismatch from "
         "advisory (warning) to refusal. Requires --margin-type to be "
         "set; otherwise has no effect.");
+    app.add_option("--max-notional", o.max_notional_usdt,
+        "(binance-futures only) Pre-trade notional cap in USDT: "
+        "|post_qty| * mark_price <= cap. 0 disables. Default: 0.");
+    app.add_option("--max-leverage", o.max_leverage,
+        "(binance-futures only) Pre-trade implied-leverage cap: "
+        "post_notional / cash <= cap. 0 disables. Default: 0.");
+    app.add_option("--min-liq-distance-pct", o.min_liquidation_distance_pct,
+        "(binance-futures only) Minimum projected post-trade buffer "
+        "to liquidation, as a fraction (0.05 = 5%). 0 disables. "
+        "Default: 0. See docs/futures-testnet.md for caveats on the "
+        "approximation.");
 
     app.add_option("--api-key", o.api_key, "API key for exchange");
     app.add_option("--api-secret", o.api_secret, "API secret for exchange");
@@ -956,6 +974,13 @@ static int run_provider_mode(const cli_options& o)
     if (o.liquidation_warn_pct >= 0.0)
         pcfg["liquidation_warn_pct"] = std::to_string(o.liquidation_warn_pct);
     if (o.margin_type_strict)   pcfg["margin_type_strict"] = "1";
+    if (o.max_notional_usdt >= 0.0)
+        pcfg["max_notional_usdt"] = std::to_string(o.max_notional_usdt);
+    if (o.max_leverage >= 0.0)
+        pcfg["max_leverage"] = std::to_string(o.max_leverage);
+    if (o.min_liquidation_distance_pct >= 0.0)
+        pcfg["min_liquidation_distance_pct"] =
+            std::to_string(o.min_liquidation_distance_pct);
 
     std::shared_ptr<IProvider> provider;
     try {

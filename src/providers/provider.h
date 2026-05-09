@@ -7,6 +7,7 @@
 #include "execution/execution_adapter.h"
 #include "execution/instrument.h"
 #include "execution/live_safety.h"
+#include "risk/futures_risk_check.h"
 #include "exits/bracket_adapter.h"
 
 #include <memory>
@@ -54,6 +55,12 @@ public:
 	// nullptr → engine installs Noop* safety shims; venue providers override.
 	virtual std::shared_ptr<IReconciler> get_reconciler() { return nullptr; }
 	virtual std::shared_ptr<IKillSwitch> get_kill_switch() { return nullptr; }
+
+	// nullptr → engine skips the venue-specific pre-trade check (the
+	// venue-agnostic RiskManager always runs). Futures providers
+	// override to enforce notional / leverage / liquidation-distance
+	// caps. See risk/futures_risk_check.h.
+	virtual std::shared_ptr<IRiskCheck> get_risk_check() { return nullptr; }
 
 	// nullptr → ExitManager runs engine-side eval only (current behavior,
 	// always used by backtest/shadow). Live providers override to push
