@@ -27,6 +27,7 @@
 #include "execution/fee_model.h"
 #include "execution/latency_model.h"
 #include "execution/queue_position_model.h"
+#include "execution/impact_model.h"
 #include "orderbook/orderbook.h"
 #include "strategy/strategy_registry.h"
 #include "strategy/mean_reversion_strategy.h"
@@ -286,6 +287,8 @@ struct cli_options
     int wire_latency_us = 0;
     int order_latency_us = 0;
     int order_latency_stddev_us = 0;
+    double impact_k_bps = 0.0;
+    double impact_adv = 0.0;
     bool realistic_fills = false;
     double bar_spread_bps = 0.0;
     std::string queue_model = "none";
@@ -526,6 +529,8 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_int("wire_latency_us", o.wire_latency_us);
     get_int("order_latency_us", o.order_latency_us);
     get_int("order_latency_stddev_us", o.order_latency_stddev_us);
+    get_double("impact_k_bps", o.impact_k_bps);
+    get_double("impact_adv", o.impact_adv);
     get_bool("realistic_fills", o.realistic_fills);
     get_double("bar_spread_bps", o.bar_spread_bps);
     get_str("queue_model", o.queue_model);
@@ -576,6 +581,8 @@ static void dump_config(const cli_options& o)
     j["wire_latency_us"] = o.wire_latency_us;
     j["order_latency_us"] = o.order_latency_us;
     j["order_latency_stddev_us"] = o.order_latency_stddev_us;
+    j["impact_k_bps"] = o.impact_k_bps;
+    j["impact_adv"] = o.impact_adv;
     j["realistic_fills"] = o.realistic_fills;
     j["bar_spread_bps"] = o.bar_spread_bps;
     j["queue_model"] = o.queue_model;
@@ -752,6 +759,18 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Standard deviation in microseconds for stochastic order latency. "
                    "Requires --order-latency-us > 0. 0 (default) = fixed delay.")
         ->default_val(0);
+    app.add_option("--impact-k-bps", o.impact_k_bps,
+                   "Square-root market impact coefficient in basis points. Effective "
+                   "price = ref × (1 ± k·sqrt(qty/adv)/1e4). Typical crypto k ~ O(10) "
+                   "for qty ≈ 1% of ADV. Requires --impact-adv > 0. 0 (default) = no "
+                   "impact applied. Ignored in --mode live.")
+        ->default_val(0.0);
+    app.add_option("--impact-adv", o.impact_adv,
+                   "Reference average daily volume (in base units, same scale as order "
+                   "qty) used as the denominator for the impact model. Set to a per-"
+                   "symbol value calibrated from prod tape. Required when --impact-k-bps "
+                   "is set; 0 (default) disables.")
+        ->default_val(0.0);
     app.add_flag("--realistic-fills", o.realistic_fills,
                  "Record fills at the resting counterparty's price (one event per walked "
                  "level) instead of the aggressor's mid×aggression markup. Auto-suppresses "
@@ -869,6 +888,8 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--order-latency-us")) opts.order_latency_us = file_opts.order_latency_us;
     if (!was_set("--order-latency-stddev-us"))
         opts.order_latency_stddev_us = file_opts.order_latency_stddev_us;
+    if (!was_set("--impact-k-bps")) opts.impact_k_bps = file_opts.impact_k_bps;
+    if (!was_set("--impact-adv")) opts.impact_adv = file_opts.impact_adv;
     if (!was_set("--realistic-fills")) opts.realistic_fills = file_opts.realistic_fills;
     if (!was_set("--bar-spread-bps")) opts.bar_spread_bps = file_opts.bar_spread_bps;
     if (!was_set("--queue-model")) opts.queue_model = file_opts.queue_model;
@@ -1153,6 +1174,14 @@ static int run_provider_mode(const cli_options& o)
             prov_cfg.latency_model = std::make_shared<FixedLatencyModel>(
                 latency_duration(o.order_latency_us));
         }
+    }
+    if (o.impact_k_bps > 0.0 && o.mode != "live" && !o.live) {
+        if (!(o.impact_adv > 0.0)) {
+            std::cerr << "[error] --impact-k-bps requires --impact-adv > 0\n";
+            return 1;
+        }
+        prov_cfg.impact_model = std::make_shared<SquareRootImpactModel>(
+            o.impact_k_bps, o.impact_adv);
     }
     if (o.mode != "live" && !o.live) {
         prov_cfg.realistic_fills = o.realistic_fills;
@@ -1740,6 +1769,16 @@ static int run_tui_mode(const cli_options& o)
         }
     } else if (o.order_latency_us > 0 && (o.mode == "live" || o.live)) {
         std::cerr << "[warn] --order-latency-us ignored in live mode\n";
+    }
+    if (o.impact_k_bps > 0.0 && o.mode != "live" && !o.live) {
+        if (!(o.impact_adv > 0.0)) {
+            std::cerr << "[error] --impact-k-bps requires --impact-adv > 0\n";
+            return 1;
+        }
+        config.impact_model = std::make_shared<SquareRootImpactModel>(
+            o.impact_k_bps, o.impact_adv);
+    } else if (o.impact_k_bps > 0.0 && (o.mode == "live" || o.live)) {
+        std::cerr << "[warn] --impact-k-bps ignored in live mode\n";
     }
     if (o.mode != "live" && !o.live) {
         config.realistic_fills = o.realistic_fills;

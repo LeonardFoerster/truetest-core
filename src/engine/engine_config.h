@@ -16,6 +16,7 @@
 class IFeeModel;
 class IFillModel;
 class ILatencyModel;
+class IImpactModel;
 class IProvider;
 class IQueuePositionModel;
 
@@ -40,6 +41,12 @@ struct engine_config
     // order-ready). Used by TradeTapeShadowAdapter and HybridExecutor so
     // fills wait for the wire-latency window before releasing.
     std::shared_ptr<ILatencyModel> wire_latency_model;
+
+    // Slippage model applied by LocalBookAdapter to the reference price
+    // for market orders before aggression markup. Null → ZeroImpactModel
+    // (silent default, current behaviour). Ignored in engine_mode::live
+    // (real exchange supplies real impact).
+    std::shared_ptr<IImpactModel> impact_model;
 
     std::size_t ring_buffer_capacity = 65536;
 

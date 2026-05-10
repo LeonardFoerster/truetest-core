@@ -187,6 +187,31 @@ TEST(DryRun, OrderLatencyAcceptedInBacktest)
     EXPECT_NE(out.find("Config is VALID"), std::string::npos);
 }
 
+// Impact model CLI binding: realism-wiring Task 2. SquareRootImpactModel
+// is unit-tested in test_impact_model.cpp; this guards the CLI surface.
+TEST(DumpConfig, ReflectsImpactModel)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--dump-config --impact-k-bps 12 --impact-adv 1000000", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("\"impact_k_bps\": 12.0"), std::string::npos);
+    EXPECT_NE(out.find("\"impact_adv\": 1000000.0"), std::string::npos);
+}
+
+// --impact-k-bps without --impact-adv must hard-fail rather than silently
+// fall through (ZeroImpactModel hides the misconfiguration). Provide a
+// full config so we don't fall into interactive setup before the gate.
+TEST(CLI, ImpactKBpsRequiresAdv)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--provider local --path market_data.csv "
+        "--strategy sma --mode backtest --impact-k-bps 10", out);
+    EXPECT_NE(rc, 0);
+    EXPECT_NE(out.find("requires --impact-adv"), std::string::npos);
+}
+
 // ─── B3: --dry-run ─────────────────────────────────────────────────────────
 
 TEST(DryRun, ValidConfigExitsZero)
