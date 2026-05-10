@@ -66,7 +66,8 @@ public:
                      std::shared_ptr<ILatencyModel> latency_model = nullptr,
                      std::shared_ptr<IImpactModel>  impact_model  = nullptr,
                      bool realistic_fills = false,
-                     double bar_spread_bps = 0.0)
+                     double bar_spread_bps = 0.0,
+                     bool walked_book_impact = false)
         : ob_(std::move(ob))
         , fee_model_(std::move(fee_model))
         , fill_model_(std::move(fill_model))
@@ -77,7 +78,8 @@ public:
         , latency_model_(std::move(latency_model))
         , impact_model_(std::move(impact_model))
         , realistic_fills_(realistic_fills)
-        , bar_spread_bps_(bar_spread_bps) {}
+        , bar_spread_bps_(bar_spread_bps)
+        , walked_book_impact_(walked_book_impact) {}
 
     void set_mid_price(double price) { mid_price_ = price; }
     // Symbol carries real L2 depth — bar_spread shift is suppressed
@@ -116,22 +118,44 @@ public:
         if (o.get_order_type() == order_type::market)
         {
             double ref_price = (mid_price_ > 0.0) ? mid_price_ : o.get_price();
+            bool walked_used = false;
 
-            // Bar-spread shift: lift mid to the BBO before impact. Skipped
-            // when realistic_fills is on (resting walk already incorporates
-            // the seeded spread) and when symbol carries real L2 depth.
-            if (bar_spread_bps_ > 0.0 && !realistic_fills_ && !l2_seeded_)
+            // Walked-book impact: when L2 depth is real, the actual VWAP
+            // of the levels we'd consume IS the honest reference price.
+            // Suppresses bar-spread (already does on l2_seeded_) AND the
+            // parametric impact model — the walk doesn't compose with a
+            // square-root guess on top of the same depth.
+            if (walked_book_impact_ && l2_seeded_)
             {
-                const double half = bar_spread_bps_ * 0.5 * 1e-4;
-                ref_price *= (o.get_side() == order_side::buy) ? (1.0 + half) : (1.0 - half);
+                const double vwap = walked_book_vwap(o.get_side(), o.get_quantity());
+                if (vwap > 0.0) {
+                    ref_price = vwap;
+                    walked_used = true;
+                }
+                // vwap == 0 → insufficient depth, fall through to mid +
+                // impact_model. Underpricing impact for a sweep is worse
+                // than admitting the parametric estimate.
             }
 
-            // Impact BEFORE aggression so aggression still guarantees an
-            // immediate cross. ZeroImpactModel (default) is a pass-through.
-            if (impact_model_)
-                ref_price = impact_model_->effective_price(o.get_side(),
-                                                           o.get_quantity(),
-                                                           ref_price);
+            if (!walked_used)
+            {
+                // Bar-spread shift: lift mid to the BBO before impact. Skipped
+                // when realistic_fills is on (resting walk already incorporates
+                // the seeded spread) and when symbol carries real L2 depth.
+                if (bar_spread_bps_ > 0.0 && !realistic_fills_ && !l2_seeded_)
+                {
+                    const double half = bar_spread_bps_ * 0.5 * 1e-4;
+                    ref_price *= (o.get_side() == order_side::buy) ? (1.0 + half) : (1.0 - half);
+                }
+
+                // Impact BEFORE aggression so aggression still guarantees an
+                // immediate cross. ZeroImpactModel (default) is a pass-through.
+                if (impact_model_)
+                    ref_price = impact_model_->effective_price(o.get_side(),
+                                                               o.get_quantity(),
+                                                               ref_price);
+            }
+
             book_price = (book_side == side::buy) ? Price::from_double(ref_price * market_aggression_)
                                                   : Price::from_double(ref_price * (2.0 - market_aggression_));
         }
@@ -295,11 +319,38 @@ private:
     uint64_t next_fill_id_ = 1;
     bool debug_fills_ = false;
     int debug_fills_left_ = 0;
+    // Volume-weighted average price for walking `qty` through the
+    // passive side of the book. Returns 0 when the book has fewer
+    // resting units than requested — the caller falls back to its
+    // parametric path because partial-walk VWAP systematically
+    // understates impact for sweeps. Cost: a single
+    // ob_->get_order_infos() snapshot per call; only invoked from
+    // submit_order, not from the market-data hot path.
+    double walked_book_vwap(order_side side, double qty) const
+    {
+        const auto infos = ob_->get_order_infos();
+        const auto& levels = (side == order_side::buy)
+            ? infos.get_asks() : infos.get_bids();
+        double remaining = qty * qty_scale_;
+        double cost = 0.0, consumed = 0.0;
+        for (const auto& lvl : levels) {
+            if (remaining <= 0.0) break;
+            const double take = std::min(remaining,
+                static_cast<double>(lvl.quantity_));
+            cost     += take * lvl.price_.to_double();
+            consumed += take;
+            remaining -= take;
+        }
+        if (remaining > 0.0 || consumed <= 0.0) return 0.0;
+        return cost / consumed;
+    }
+
     std::shared_ptr<ILatencyModel> latency_model_;
     std::shared_ptr<IImpactModel>  impact_model_;
     bool realistic_fills_ = false;
     double bar_spread_bps_ = 0.0;
     bool l2_seeded_ = false;
+    bool walked_book_impact_ = false;
     std::unordered_map<uint64_t, std::chrono::system_clock::time_point> pending_cancels_;
     std::chrono::system_clock::time_point current_time_{};
 };

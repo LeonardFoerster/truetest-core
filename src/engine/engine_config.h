@@ -48,6 +48,14 @@ struct engine_config
     // (real exchange supplies real impact).
     std::shared_ptr<IImpactModel> impact_model;
 
+    // When set, market orders on L2-seeded symbols use the live book's
+    // walked VWAP as their reference price (the actual price you'd pay
+    // for that qty) instead of mid + parametric impact_model. Falls
+    // back to mid + impact_model when the symbol has no L2 or the
+    // requested qty exceeds the book's depth. Ignored in
+    // engine_mode::live.
+    bool walked_book_impact = false;
+
     std::size_t ring_buffer_capacity = 65536;
 
     thread_preset threading = thread_preset::inline_mode;

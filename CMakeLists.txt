@@ -194,6 +194,7 @@ if(BUILD_TESTS)
         tests/test_realistic_fills.cpp
         tests/test_queue_position_model.cpp
         tests/test_trade_tape_shadow_queue.cpp
+        tests/test_walked_book_impact.cpp
         tests/test_execution_bridge.cpp
         tests/test_engine.cpp
         tests/test_engine_lookahead.cpp

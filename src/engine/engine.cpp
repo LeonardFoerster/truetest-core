@@ -249,7 +249,8 @@ std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol
             config_.seed != 0 ? static_cast<unsigned>(config_.seed + 2) : config_.fill_rng_seed,
             config_.market_aggression, config_.qty_scale,
             config_.latency_model, config_.impact_model,
-            config_.realistic_fills, config_.bar_spread_bps);
+            config_.realistic_fills, config_.bar_spread_bps,
+            config_.walked_book_impact);
         if (config_.debug_fills)
             local->set_debug_fills(true, config_.debug_fills_budget);
         adapter = local;
