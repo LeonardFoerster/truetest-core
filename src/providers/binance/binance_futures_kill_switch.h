@@ -6,6 +6,7 @@
 #include "providers/binance/binance_futures_reconciler.h"
 #include "providers/binance/binance_rest_client.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -45,6 +46,19 @@ public:
 
         const auto start = std::chrono::steady_clock::now();
         const auto expires_at = start + deadline;
+
+        // Bound each REST call so a still-down LAN can't wedge shutdown.
+        // Three calls fit inside `deadline`; min(1500ms, deadline/3) leaves
+        // slack for TLS handshake reuse hits and the wall-clock checks
+        // between calls. Set once and left in place — the rest client is
+        // only used for the remainder of shutdown.
+        {
+            const long long per_call_ms =
+                std::min<long long>(1500, deadline.count() / 3);
+            if (per_call_ms > 0)
+                rest_->set_per_call_timeout(
+                    std::chrono::milliseconds(per_call_ms));
+        }
 
         {
             const std::string params = "symbol=" + symbol_;

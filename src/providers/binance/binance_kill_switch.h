@@ -7,6 +7,7 @@
 #include "providers/binance/binance_reconciler.h"
 #include "providers/binance/binance_rest_client.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -40,6 +41,19 @@ public:
 
         const auto start = std::chrono::steady_clock::now();
         const auto expires_at = start + deadline;
+
+        // Bound each REST call so a still-down LAN can't wedge shutdown.
+        // See BinanceFuturesKillSwitch for the same rationale; min(1500ms,
+        // deadline/3) splits the budget across cancel_all / account /
+        // MARKET SELL with the wall-clock check between calls catching
+        // anything that overruns.
+        {
+            const long long per_call_ms =
+                std::min<long long>(1500, deadline.count() / 3);
+            if (per_call_ms > 0)
+                rest_->set_per_call_timeout(
+                    std::chrono::milliseconds(per_call_ms));
+        }
 
         {
             const std::string params = "symbol=" + symbol_;

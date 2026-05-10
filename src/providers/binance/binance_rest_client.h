@@ -24,6 +24,9 @@
 #include <stdexcept>
 #include <thread>
 
+#include <sys/socket.h>
+#include <sys/time.h>
+
 namespace beast = boost::beast;
 namespace http = beast::http;
 namespace net = boost::asio;
@@ -158,6 +161,19 @@ public:
     void set_weight_cap(int cap) { weight_cap_ = cap; }
     void set_soft_threshold_pct(int pct) { soft_threshold_pct_ = pct; }
 
+    // Per-call socket timeout. When > 0, applied via SO_RCVTIMEO and
+    // SO_SNDTIMEO on each new connection right after net::connect, so
+    // individual TLS-handshake / HTTP read+write syscalls return with
+    // an error instead of blocking. Zero (default) preserves the
+    // legacy "no timeout — kernel TCP retransmit limits dominate"
+    // behaviour. Engine wires this from the kill-switch path so
+    // shutdown can't get wedged on a still-down LAN.
+    void set_per_call_timeout(std::chrono::milliseconds t)
+    {
+        per_call_timeout_ms_.store(static_cast<long long>(t.count()),
+                                   std::memory_order_release);
+    }
+
     // Signed requests stamp timestamp = local + clock_offset, learned from
     // /api/v3/time. Without this, drift past recvWindow (5s) → -1021 on
     // every call. Refreshed lazily and reactively on -1021.
@@ -259,6 +275,7 @@ private:
     std::atomic<long long> window_anchor_ms_{0};
     int weight_cap_ = 6000;
     int soft_threshold_pct_ = 80;
+    std::atomic<long long> per_call_timeout_ms_{0};
 
     std::atomic<long long> clock_offset_ms_{0};
     std::atomic<long long> last_sync_steady_ms_{0};
@@ -385,6 +402,24 @@ private:
 
             auto& lowest = beast::get_lowest_layer(stream);
             net::connect(lowest, results);
+
+            // Optional per-call socket timeout. Applied after connect so
+            // TLS handshake + HTTP read/write are bounded but the connect
+            // itself relies on the kernel's TCP error path. The kill-switch
+            // sets this aggressively at shutdown so a dead network can't
+            // wedge cancel/flatten beyond the wall-clock budget.
+            const long long pct_ms =
+                per_call_timeout_ms_.load(std::memory_order_acquire);
+            if (pct_ms > 0)
+            {
+                struct timeval tv{};
+                tv.tv_sec  = pct_ms / 1000;
+                tv.tv_usec = (pct_ms % 1000) * 1000;
+                const int fd = lowest.native_handle();
+                ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            }
+
             stream.handshake(ssl::stream_base::client);
 
             http::request<http::string_body> req{method, target, 11};
