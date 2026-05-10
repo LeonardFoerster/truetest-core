@@ -12,9 +12,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 class engine_config;
@@ -91,4 +93,13 @@ public:
 		int64_t deadline_ms = 0;
 	};
 	virtual std::vector<liveness_source> get_liveness_sources() { return {}; }
+
+	// Engine wires this in live mode so a fatal transport disconnect (WS
+	// idle timeout, listenKey HTTP failure beyond retry budget) routes
+	// straight into engine::trigger_halt instead of the transport's
+	// reconnect loop. Default no-op — backtest/shadow paths keep their
+	// reconnect behavior. The reason string is short ("market-data WS
+	// lost") and is published to the dashboard banner verbatim.
+	virtual void set_halt_callback(
+		std::function<void(std::string_view reason)> /*cb*/) {}
 };

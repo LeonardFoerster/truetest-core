@@ -164,8 +164,9 @@ public:
         std::shared_ptr<IDataTransport> live_transport;
         if (depth_stream_.empty())
         {
-            live_transport = std::make_shared<BinanceTransport>(
+            binance_transport_ = std::make_shared<BinanceTransport>(
                 symbol_, stream_type_, endpoints_.ws_host, endpoints_.ws_port);
+            live_transport = binance_transport_;
         }
         else
         {
@@ -174,9 +175,11 @@ public:
             streams.reserve(2);
             streams.push_back(sym_lower + "@" + stream_type_);
             streams.push_back(sym_lower + "@" + depth_stream_);
-            live_transport = std::make_shared<BinanceCombinedTransport>(
+            binance_combined_transport_ = std::make_shared<BinanceCombinedTransport>(
                 streams, endpoints_.ws_host, endpoints_.ws_port);
+            live_transport = binance_combined_transport_;
         }
+        apply_halt_cb_to_transports();
 
         std::string rest_host = rest_host_for_stream();
 
@@ -348,10 +351,12 @@ public:
 
             ExecutionBridge::deps d;
             d.order_tx = make_binance_rest_order_transport(rest_);
-            d.fill_tx  = std::make_shared<BinanceUserDataTransport>(
+            binance_user_data_ = std::make_shared<BinanceUserDataTransport>(
                              rest_, endpoints_.ws_host, endpoints_.ws_port,
                              binance_keepalive_policy{},
                              "/fapi/v1/listenKey");
+            d.fill_tx = binance_user_data_;
+            apply_halt_cb_to_transports();
             d.encoder  = std::make_shared<BinanceFuturesOrderEncoder>(symbol_);
             d.parser   = std::make_shared<BinanceFuturesUserDataParser>();
             d.order_rate_limiter = order_rate_limiter_;
@@ -470,6 +475,13 @@ public:
     }
     std::shared_ptr<IRiskCheck> get_risk_check() override { return risk_check_; }
 
+    void set_halt_callback(
+        std::function<void(std::string_view reason)> cb) override
+    {
+        halt_cb_ = std::move(cb);
+        apply_halt_cb_to_transports();
+    }
+
     std::vector<liveness_source> get_liveness_sources() override
     {
         std::vector<liveness_source> out;
@@ -557,6 +569,25 @@ private:
     int64_t dead_man_countdown_ms_ = 0;        // 0 disables DMS
     int64_t dead_man_heartbeat_ms_ = 0;        // 0 = countdown / 3
     std::shared_ptr<BinanceFuturesDeadMansSwitch> dms_;
+
+    // Concrete handles so set_halt_callback can route the engine's halt
+    // hook into our WS transports — see BinanceProvider for the same
+    // pattern.
+    std::shared_ptr<BinanceTransport>          binance_transport_;
+    std::shared_ptr<BinanceCombinedTransport>  binance_combined_transport_;
+    std::shared_ptr<BinanceUserDataTransport>  binance_user_data_;
+    std::function<void(std::string_view)>      halt_cb_;
+
+    void apply_halt_cb_to_transports()
+    {
+        if (!halt_cb_) return;
+        if (binance_transport_)
+            binance_transport_->set_fatal_disconnect_callback(halt_cb_);
+        if (binance_combined_transport_)
+            binance_combined_transport_->set_fatal_disconnect_callback(halt_cb_);
+        if (binance_user_data_)
+            binance_user_data_->set_fatal_disconnect_callback(halt_cb_);
+    }
 
     static std::string upper(const std::string& s)
     {

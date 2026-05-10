@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -234,6 +235,17 @@ public:
     void set_on_message(message_cb cb) override { message_cb_ = std::move(cb); }
     void set_on_status(status_cb cb)   override { status_cb_  = std::move(cb); }
 
+    // Engine wires this in live mode. When set, a fatal user-data
+    // disconnect (network_error / handshake_error past retry budget)
+    // calls back here and the run() loop returns immediately — bypasses
+    // the up-to-10-attempt reconnect schedule. Default unset preserves
+    // the original behaviour for unit tests / non-live paths.
+    void set_fatal_disconnect_callback(
+        std::function<void(std::string_view reason)> cb) override
+    {
+        fatal_cb_ = std::move(cb);
+    }
+
     std::string listen_key() const
     {
         std::lock_guard<std::mutex> lk(listen_key_mu_);
@@ -449,6 +461,23 @@ private:
 
             if (r == run_result::stopped) return;
 
+            // In live mode the engine cannot tolerate a multi-second
+            // reconnect schedule on this stream — fills would arrive
+            // late or not at all. Fire the halt callback on the first
+            // network/handshake error and exit the loop immediately.
+            if (fatal_cb_)
+            {
+                const char* what =
+                    (r == run_result::network_error) ? "network error"
+                                                     : "handshake error";
+                char buf[160];
+                std::snprintf(buf, sizeof(buf),
+                              "binance user-data WS lost: %s", what);
+                fatal_cb_(buf);
+                stop_flag_.store(true);
+                return;
+            }
+
             if (r == run_result::network_error &&
                 (open_end_ms - open_start_ms) > k_reset_threshold_ms)
             {
@@ -587,6 +616,7 @@ private:
 
     message_cb message_cb_;
     status_cb  status_cb_;
+    std::function<void(std::string_view)> fatal_cb_;
 
     std::thread reader_;
     std::thread keepalive_;

@@ -5,6 +5,7 @@
 #include "data/data_source.h"
 #include "data/data_handler.h"
 
+#include <atomic>
 #include <memory>
 #include <functional>
 #include <iostream>
@@ -65,6 +66,13 @@ public:
 
 	using record_callback = std::function<void(const T&)>;
 
+	// Engine wires its halt_flag_ here in live mode so a fatal transport
+	// disconnect drops the loop on the next iteration instead of waiting
+	// for the transport's read to return. Pre-existing callers that pass
+	// no halt flag keep the original "loop until is_open() goes false"
+	// behaviour.
+	void set_halt_flag(std::atomic<bool>* halt) { halt_flag_ = halt; }
+
 	void run_streaming(
 		std::shared_ptr<data_handler> handler,
 		record_callback on_record = nullptr)
@@ -84,7 +92,11 @@ public:
 		std::string_view frame;
 		while (transport_->is_open())
 		{
+			if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))
+				break;
 			if (!transport_->read_frame_blocking(frame))
+				break;
+			if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))
 				break;
 
 			if (auto record = parser_->parse_record(frame))
@@ -108,4 +120,5 @@ private:
 	std::shared_ptr<IDataTransport> transport_;
 	std::shared_ptr<IDataParser<T>> parser_;
 	sink_fn sink_;
+	std::atomic<bool>* halt_flag_ = nullptr;
 };

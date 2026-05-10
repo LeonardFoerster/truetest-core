@@ -13,10 +13,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <iostream>
 
 #include <netinet/in.h>
@@ -193,6 +196,17 @@ public:
             if (stopped_.load())
                 return false;
 
+            if (fatal_cb_)
+            {
+                char buf[160];
+                std::snprintf(buf, sizeof(buf),
+                              "binance market-data WS lost: %s",
+                              se.code().message().c_str());
+                fatal_cb_(buf);
+                stopped_ = true;
+                return false;
+            }
+
             if (reconnect())
                 return read_frame_blocking(out);
 
@@ -205,6 +219,16 @@ public:
 
             if (stopped_.load())
                 return false;
+
+            if (fatal_cb_)
+            {
+                char buf[160];
+                std::snprintf(buf, sizeof(buf),
+                              "binance market-data WS lost: %s", e.what());
+                fatal_cb_(buf);
+                stopped_ = true;
+                return false;
+            }
 
             if (reconnect())
                 return read_frame_blocking(out);
@@ -236,6 +260,17 @@ public:
         return open();
     }
 
+    // Engine wires this in live mode. When set, a read/handshake error
+    // routes here directly and the transport STOPS — no reconnect loop.
+    // When unset (backtest/shadow paths), the existing reconnect-on-error
+    // behaviour stands. The reason string is published verbatim through
+    // engine::trigger_halt to the dashboard banner.
+    void set_fatal_disconnect_callback(
+        std::function<void(std::string_view reason)> cb)
+    {
+        fatal_cb_ = std::move(cb);
+    }
+
 private:
     std::string symbol_;
     std::string stream_type_;
@@ -251,6 +286,8 @@ private:
     std::mutex mu_;
     std::atomic<bool> open_{false};
     std::atomic<bool> stopped_{false};
+
+    std::function<void(std::string_view)> fatal_cb_;
 
     static constexpr unsigned MAX_RECONNECTS = 30;
 

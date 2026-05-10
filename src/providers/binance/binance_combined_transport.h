@@ -13,10 +13,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <netinet/in.h>
@@ -161,15 +164,42 @@ public:
                 return std::nullopt;
             }
 
-            if (!stopped_.load() && reconnect())
+            open_ = false;
+
+            if (stopped_.load())
+                return std::nullopt;
+
+            if (fatal_cb_)
+            {
+                char buf[160];
+                std::snprintf(buf, sizeof(buf),
+                              "binance combined WS lost: %s",
+                              se.code().message().c_str());
+                fatal_cb_(buf);
+                stopped_ = true;
+                return std::nullopt;
+            }
+
+            if (reconnect())
                 return read_line_blocking();
 
-            open_ = false;
             return std::nullopt;
         }
-        catch (const std::exception&)
+        catch (const std::exception& e)
         {
             open_ = false;
+
+            if (stopped_.load())
+                return std::nullopt;
+
+            if (fatal_cb_)
+            {
+                char buf[160];
+                std::snprintf(buf, sizeof(buf),
+                              "binance combined WS lost: %s", e.what());
+                fatal_cb_(buf);
+                stopped_ = true;
+            }
             return std::nullopt;
         }
     }
@@ -178,6 +208,13 @@ public:
     {
         stopped_ = true;
         close();
+    }
+
+    // Engine wires this in live mode — see BinanceTransport for semantics.
+    void set_fatal_disconnect_callback(
+        std::function<void(std::string_view reason)> cb)
+    {
+        fatal_cb_ = std::move(cb);
     }
 
 private:
@@ -192,6 +229,8 @@ private:
     std::mutex mu_;
     std::atomic<bool> open_{false};
     std::atomic<bool> stopped_{false};
+
+    std::function<void(std::string_view)> fatal_cb_;
 
     static constexpr unsigned MAX_RECONNECTS = 5;
 

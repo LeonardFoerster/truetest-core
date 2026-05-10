@@ -124,6 +124,20 @@ engine::engine(std::shared_ptr<data_handler> dh,
 
     if (config_.mode == engine_mode::live)
     {
+        // Route a fatal transport disconnect (WS idle timeout, listenKey
+        // failure beyond retry budget) straight into trigger_halt so the
+        // engine begins shutdown within ~2.5s of the loss instead of
+        // burning minutes in the transport-level reconnect loop. Backtest
+        // and shadow paths leave halt_callback unset; their providers
+        // keep the original reconnect-and-continue behaviour.
+        if (config_.provider)
+        {
+            config_.provider->set_halt_callback(
+                [this](std::string_view reason) {
+                    trigger_halt(reason);
+                });
+        }
+
         auto reconciler = config_.reconciler;
         if (!reconciler && config_.provider)
             reconciler = config_.provider->get_reconciler();
@@ -2492,6 +2506,8 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
     start_workers();
     pin_event_loop_thread();
 
+    bridge->set_halt_flag(&halt_flag_);
+
     const auto start = std::chrono::high_resolution_clock::now();
     std::size_t event_count = 0;
     std::size_t bar_index = 0;
@@ -2641,6 +2657,8 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     start_workers();
     pin_event_loop_thread();
 
+    bridge->set_halt_flag(&halt_flag_);
+
     const auto start = std::chrono::high_resolution_clock::now();
     std::size_t event_count = 0;
     std::size_t tick_count = 0;
@@ -2776,6 +2794,8 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
 #endif
     start_workers();
     pin_event_loop_thread();
+
+    bridge->set_halt_flag(&halt_flag_);
 
     const auto start = std::chrono::high_resolution_clock::now();
     std::size_t event_count = 0;
