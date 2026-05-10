@@ -192,6 +192,8 @@ if(BUILD_TESTS)
         tests/test_engine_l2_ingestion.cpp
         tests/test_execution_adapter.cpp
         tests/test_realistic_fills.cpp
+        tests/test_queue_position_model.cpp
+        tests/test_trade_tape_shadow_queue.cpp
         tests/test_execution_bridge.cpp
         tests/test_engine.cpp
         tests/test_engine_lookahead.cpp

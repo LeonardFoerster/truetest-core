@@ -17,6 +17,7 @@ class IFeeModel;
 class IFillModel;
 class ILatencyModel;
 class IProvider;
+class IQueuePositionModel;
 
 namespace truetest::ui { class ConsoleDashboard; }
 
@@ -126,6 +127,13 @@ struct engine_config
     // depth, and suppressed under realistic_fills (the seeded MM spread
     // already drives the fill price). Ignored in engine_mode::live.
     double bar_spread_bps = 0.0;
+
+    // Shadow-mode queue-position estimate. Null → NoQueueModel default
+    // (legacy fill-on-cross). When set, TradeTapeShadowAdapter holds
+    // simulated limits until the real tape has consumed the queue
+    // ahead of them. Requires a depth subscription. Ignored in
+    // engine_mode::live.
+    std::shared_ptr<IQueuePositionModel> queue_position_model;
 
     bool debug_fills = false;
     int debug_fills_budget = 20;

@@ -8,6 +8,7 @@
 #include "execution/portfolio.h"
 #include "execution/latency_model.h"
 #include "execution/execution_bridge.h"
+#include "execution/trade_tape_shadow_adapter.h"
 #include "execution/fill_parser.h"
 #include "providers/provider.h"
 #include "providers/provider_convert.h"
@@ -1434,6 +1435,23 @@ void engine::print_summary()
 
     if (shadow_tracker_)
         shadow_tracker_->print_report();
+
+    // Queue-position telemetry (shadow + --queue-model l2-snapshot only).
+    if (config_.mode == engine_mode::shadow && config_.provider)
+    {
+        auto exec = config_.provider->get_execution_adapter();
+        if (auto* ts = dynamic_cast<TradeTapeShadowAdapter*>(exec.get()))
+        {
+            const auto qs = ts->get_queue_stats();
+            if (qs.submitted_with_queue > 0)
+            {
+                std::cout << "  Queue model:\n"
+                          << "    Submitted with queue ahead: " << qs.submitted_with_queue << "\n"
+                          << "    Filled after queue drained: " << qs.filled_after_drain << "\n"
+                          << "    Still queue-blocked at EOS: " << qs.blocked_at_eos << "\n";
+            }
+        }
+    }
 }
 
 const Analytics& engine::get_analytics() const

@@ -4,6 +4,7 @@
 #include "execution_adapter.h"
 #include "fee_model.h"
 #include "latency_model.h"
+#include "queue_position_model.h"
 
 #include <algorithm>
 #include <chrono>
@@ -38,6 +39,7 @@ public:
         , fee_model_(std::move(fee_model)) {}
 
     void set_fee_model(std::shared_ptr<IFeeModel> fm) { fee_model_ = std::move(fm); }
+    void set_queue_model(std::shared_ptr<IQueuePositionModel> qm) { queue_model_ = std::move(qm); }
 
     void submit_order(const order_event& o) override
     {
@@ -52,6 +54,14 @@ public:
         if (latency_model_)
             arrival_ts += latency_model_->get_order_latency();
         oo.submit_ts     = arrival_ts;
+        if (queue_model_ && o.get_order_type() == order_type::limit)
+        {
+            oo.queue_ahead   = queue_model_->queue_ahead(
+                oo.symbol, oo.side, oo.limit_price, arrival_ts);
+            oo.initial_queue = oo.queue_ahead;
+            if (oo.queue_ahead > 0.0)
+                ++stats_.submitted_with_queue;
+        }
         open_orders_.push_back(std::move(oo));
     }
 
@@ -155,6 +165,30 @@ public:
                 continue;
             }
 
+            // Drain queue ahead before our order can fill. A trade at-or-
+            // better-than our limit consumes the level we sit on, so the
+            // tape qty pays down our queue first; only what's left can
+            // touch our resting size.
+            if (oo.queue_ahead > 0.0)
+            {
+                const double eaten = std::min(oo.queue_ahead, remaining_tape_qty);
+                oo.queue_ahead    -= eaten;
+                oo.queue_consumed += eaten;
+                remaining_tape_qty -= eaten;
+                if (oo.queue_ahead > 1e-12 || remaining_tape_qty <= 0.0)
+                {
+                    ++it;
+                    continue;
+                }
+                // Queue just drained on this print; the remainder of
+                // this trade can fill our order. Count once per order.
+                if (oo.initial_queue > 0.0 && !oo.counted_drain)
+                {
+                    ++stats_.filled_after_drain;
+                    oo.counted_drain = true;
+                }
+            }
+
             const double fill_qty = std::min(oo.qty_remaining, remaining_tape_qty);
             // Fill at the trade price — the level the rest of the market
             // got. Using the limit would put BUY @100 worse than a @99 tape.
@@ -185,26 +219,70 @@ public:
         }
     }
 
+    void on_l2_snapshot(
+        const std::string& symbol,
+        const std::vector<std::pair<double, double>>& bids,
+        const std::vector<std::pair<double, double>>& asks) override
+    {
+        if (queue_model_) queue_model_->on_snapshot(symbol, bids, asks);
+    }
+
+    void on_l2_update(
+        const std::string& symbol, order_side side,
+        double price, double new_size) override
+    {
+        if (queue_model_) queue_model_->on_update(symbol, side, price, new_size);
+    }
+
     std::size_t open_order_count() const { return open_orders_.size(); }
     std::size_t pending_fill_count() const { return pending_fills_.size(); }
+
+    struct queue_stats
+    {
+        std::size_t submitted_with_queue = 0; // orders that saw initial_queue > 0
+        std::size_t filled_after_drain   = 0; // ... and where queue drained, fill emitted
+        std::size_t blocked_at_eos       = 0; // ... and still queue-blocked at session end
+    };
+    // Caller-side: difference (submitted_with_queue - filled_after_drain
+    // - blocked_at_eos) is "queue drained but session ended before our
+    // turn touched the tape" — typically the same as blocked_at_eos for
+    // short sessions, divergent on long ones.
+    queue_stats get_queue_stats() const
+    {
+        auto s = stats_;
+        for (const auto& oo : open_orders_)
+            if (oo.initial_queue > 0.0 && oo.queue_ahead > 0.0)
+                ++s.blocked_at_eos;
+        return s;
+    }
 
 private:
     struct open_order
     {
-        uint64_t     engine_id     = 0;
+        uint64_t     engine_id      = 0;
         std::string  symbol;
-        order_side   side          = order_side::buy;
-        order_type   type          = order_type::limit;
-        double       limit_price   = 0.0;
-        double       qty_remaining = 0.0;
+        order_side   side           = order_side::buy;
+        order_type   type           = order_type::limit;
+        double       limit_price    = 0.0;
+        double       qty_remaining  = 0.0;
+        // L2-snapshot queue position. Default 0 means "no queue model
+        // configured" or "we improve the BBO" — both fall through to
+        // the legacy fill-on-cross behaviour.
+        double       queue_ahead    = 0.0;
+        double       initial_queue  = 0.0;
+        double       queue_consumed = 0.0;
+        bool         counted_drain  = false;
         std::chrono::system_clock::time_point submit_ts;
     };
+
+    queue_stats stats_;
 
     std::vector<open_order> open_orders_;
     std::vector<fill_event> pending_fills_;
     uint64_t next_fill_id_ = 0;
-    std::shared_ptr<ILatencyModel> latency_model_;
-    std::shared_ptr<IFeeModel>     fee_model_;
+    std::shared_ptr<ILatencyModel>       latency_model_;
+    std::shared_ptr<IFeeModel>           fee_model_;
+    std::shared_ptr<IQueuePositionModel> queue_model_;
     std::unordered_map<uint64_t, std::chrono::system_clock::time_point> pending_cancels_;
     std::chrono::system_clock::time_point current_time_{};
 };

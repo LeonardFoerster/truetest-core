@@ -86,6 +86,7 @@ public:
         fee_model_ = cfg.fee_model;
         fill_model_ = cfg.fill_model;
         wire_latency_model_ = cfg.wire_latency_model;
+        queue_model_ = cfg.queue_position_model;
         qty_scale_ = cfg.qty_scale;
         spread_step_factor_ = cfg.spread_step_factor;
         backfill_bars_ = cfg.backfill_bars;
@@ -259,6 +260,8 @@ public:
         {
             shadow_exec_ = std::make_shared<TradeTapeShadowAdapter>(
                 wire_latency_model_, fee_model_);
+            if (queue_model_)
+                shadow_exec_->set_queue_model(queue_model_);
             executor_ = shadow_exec_;
         }
         else
@@ -351,6 +354,7 @@ private:
     std::shared_ptr<IFeeModel> fee_model_;
     std::shared_ptr<IFillModel> fill_model_;
     std::shared_ptr<ILatencyModel> wire_latency_model_;
+    std::shared_ptr<IQueuePositionModel> queue_model_;
     double qty_scale_ = 1e8;
     double spread_step_factor_ = 0.0001;
     int backfill_bars_ = 0;

@@ -26,6 +26,7 @@
 #include "data/tick_csv_data_source.h"
 #include "execution/fee_model.h"
 #include "execution/latency_model.h"
+#include "execution/queue_position_model.h"
 #include "orderbook/orderbook.h"
 #include "strategy/strategy_registry.h"
 #include "strategy/mean_reversion_strategy.h"
@@ -285,6 +286,7 @@ struct cli_options
     int wire_latency_us = 0;
     bool realistic_fills = false;
     double bar_spread_bps = 0.0;
+    std::string queue_model = "none";
     std::vector<std::string> instrument_specs;
     double reconcile_tolerance_bps = 10.0;
     long kill_switch_deadline_ms = 5000;
@@ -522,6 +524,7 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_int("wire_latency_us", o.wire_latency_us);
     get_bool("realistic_fills", o.realistic_fills);
     get_double("bar_spread_bps", o.bar_spread_bps);
+    get_str("queue_model", o.queue_model);
     get_str("output", o.output);
     get_str("output_format", o.output_format);
 #ifdef HAS_QUESTDB
@@ -569,6 +572,7 @@ static void dump_config(const cli_options& o)
     j["wire_latency_us"] = o.wire_latency_us;
     j["realistic_fills"] = o.realistic_fills;
     j["bar_spread_bps"] = o.bar_spread_bps;
+    j["queue_model"] = o.queue_model;
     j["risk"] = {
         {"max_position_value", o.risk_max_position_value},
         {"max_drawdown", o.risk_max_drawdown},
@@ -741,6 +745,14 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "aggression. Suppressed for symbols with real L2 depth and under "
                    "--realistic-fills. 0 (default) = no shift. Ignored in --mode live.")
         ->default_val(0.0);
+    app.add_option("--queue-model", o.queue_model,
+                   "Shadow-mode queue-position estimate. 'none' (default) keeps the "
+                   "legacy fill-on-cross behaviour. 'l2-snapshot' samples depth at our "
+                   "limit price at submit time and only fills once the queue has been "
+                   "consumed by subsequent prints; requires --depth-stream. Ignored in "
+                   "--mode live.")
+        ->default_val("none")
+        ->check(CLI::IsMember({"none", "l2-snapshot"}));
     app.add_option("--instrument", o.instrument_specs,
                    "Per-symbol trading rules. Repeatable. Format: "
                    "SYMBOL:tick=X,lot=Y,minq=Q,minn=N,maker=M,taker=T "
@@ -838,6 +850,7 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--wire-latency-us")) opts.wire_latency_us = file_opts.wire_latency_us;
     if (!was_set("--realistic-fills")) opts.realistic_fills = file_opts.realistic_fills;
     if (!was_set("--bar-spread-bps")) opts.bar_spread_bps = file_opts.bar_spread_bps;
+    if (!was_set("--queue-model")) opts.queue_model = file_opts.queue_model;
     if (!was_set("--output")) opts.output = file_opts.output;
     if (!was_set("--output-format")) opts.output_format = file_opts.output_format;
 
@@ -1112,6 +1125,13 @@ static int run_provider_mode(const cli_options& o)
     if (o.mode != "live" && !o.live) {
         prov_cfg.realistic_fills = o.realistic_fills;
         prov_cfg.bar_spread_bps  = o.bar_spread_bps;
+        if (o.queue_model == "l2-snapshot") {
+            if (o.depth_stream.empty()) {
+                std::cerr << "[error] --queue-model l2-snapshot requires --depth-stream\n";
+                return 1;
+            }
+            prov_cfg.queue_position_model = std::make_shared<L2SnapshotQueueModel>();
+        }
     }
     prov_cfg.instrument_overrides = parse_instrument_specs(o.instrument_specs);
     prov_cfg.reconcile_tolerance_bps = o.reconcile_tolerance_bps;
@@ -1679,8 +1699,15 @@ static int run_tui_mode(const cli_options& o)
     if (o.mode != "live" && !o.live) {
         config.realistic_fills = o.realistic_fills;
         config.bar_spread_bps  = o.bar_spread_bps;
-    } else if (o.realistic_fills || o.bar_spread_bps > 0.0) {
-        std::cerr << "[warn] --realistic-fills / --bar-spread-bps ignored in live mode\n";
+        if (o.queue_model == "l2-snapshot") {
+            if (o.depth_stream.empty()) {
+                std::cerr << "[error] --queue-model l2-snapshot requires --depth-stream\n";
+                return 1;
+            }
+            config.queue_position_model = std::make_shared<L2SnapshotQueueModel>();
+        }
+    } else if (o.realistic_fills || o.bar_spread_bps > 0.0 || o.queue_model != "none") {
+        std::cerr << "[warn] --realistic-fills / --bar-spread-bps / --queue-model ignored in live mode\n";
     }
     config.instrument_overrides = parse_instrument_specs(o.instrument_specs);
     config.reconcile_tolerance_bps = o.reconcile_tolerance_bps;
