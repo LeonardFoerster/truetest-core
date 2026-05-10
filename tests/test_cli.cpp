@@ -199,6 +199,14 @@ TEST(DumpConfig, ReflectsImpactModel)
     EXPECT_NE(out.find("\"impact_adv\": 1000000.0"), std::string::npos);
 }
 
+TEST(DumpConfig, ReflectsWalkedBookImpact)
+{
+    std::string out;
+    int rc = run_truetest("--dump-config --walked-book-impact", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("\"walked_book_impact\": true"), std::string::npos);
+}
+
 // --impact-k-bps without --impact-adv must hard-fail rather than silently
 // fall through (ZeroImpactModel hides the misconfiguration). Provide a
 // full config so we don't fall into interactive setup before the gate.

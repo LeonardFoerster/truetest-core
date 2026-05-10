@@ -291,6 +291,7 @@ struct cli_options
     double impact_adv = 0.0;
     bool realistic_fills = false;
     double bar_spread_bps = 0.0;
+    bool walked_book_impact = false;
     std::string queue_model = "none";
     std::vector<std::string> instrument_specs;
     double reconcile_tolerance_bps = 10.0;
@@ -533,6 +534,7 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_double("impact_adv", o.impact_adv);
     get_bool("realistic_fills", o.realistic_fills);
     get_double("bar_spread_bps", o.bar_spread_bps);
+    get_bool("walked_book_impact", o.walked_book_impact);
     get_str("queue_model", o.queue_model);
     get_str("output", o.output);
     get_str("output_format", o.output_format);
@@ -585,6 +587,7 @@ static void dump_config(const cli_options& o)
     j["impact_adv"] = o.impact_adv;
     j["realistic_fills"] = o.realistic_fills;
     j["bar_spread_bps"] = o.bar_spread_bps;
+    j["walked_book_impact"] = o.walked_book_impact;
     j["queue_model"] = o.queue_model;
     j["risk"] = {
         {"max_position_value", o.risk_max_position_value},
@@ -782,6 +785,13 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "aggression. Suppressed for symbols with real L2 depth and under "
                    "--realistic-fills. 0 (default) = no shift. Ignored in --mode live.")
         ->default_val(0.0);
+    app.add_flag("--walked-book-impact", o.walked_book_impact,
+                 "On L2-seeded symbols, price market orders against the actual VWAP of "
+                 "the levels they'd walk instead of mid + --impact-k-bps. Walked depth is "
+                 "deterministic for sub-book clips; the parametric model is suppressed for "
+                 "those submits. Falls back to mid + impact_model when the symbol has no "
+                 "L2 depth or the qty exceeds the book. Default off — byte-identical until "
+                 "set. Ignored in --mode live.");
     app.add_option("--queue-model", o.queue_model,
                    "Shadow-mode queue-position estimate. 'none' (default) keeps the "
                    "legacy fill-on-cross behaviour. 'l2-snapshot' samples depth at our "
@@ -892,6 +902,8 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--impact-adv")) opts.impact_adv = file_opts.impact_adv;
     if (!was_set("--realistic-fills")) opts.realistic_fills = file_opts.realistic_fills;
     if (!was_set("--bar-spread-bps")) opts.bar_spread_bps = file_opts.bar_spread_bps;
+    if (!was_set("--walked-book-impact"))
+        opts.walked_book_impact = file_opts.walked_book_impact;
     if (!was_set("--queue-model")) opts.queue_model = file_opts.queue_model;
     if (!was_set("--output")) opts.output = file_opts.output;
     if (!was_set("--output-format")) opts.output_format = file_opts.output_format;
@@ -1184,8 +1196,9 @@ static int run_provider_mode(const cli_options& o)
             o.impact_k_bps, o.impact_adv);
     }
     if (o.mode != "live" && !o.live) {
-        prov_cfg.realistic_fills = o.realistic_fills;
-        prov_cfg.bar_spread_bps  = o.bar_spread_bps;
+        prov_cfg.realistic_fills    = o.realistic_fills;
+        prov_cfg.bar_spread_bps     = o.bar_spread_bps;
+        prov_cfg.walked_book_impact = o.walked_book_impact;
         if (o.queue_model == "l2-snapshot") {
             if (o.depth_stream.empty()) {
                 std::cerr << "[error] --queue-model l2-snapshot requires --depth-stream\n";
@@ -1781,8 +1794,9 @@ static int run_tui_mode(const cli_options& o)
         std::cerr << "[warn] --impact-k-bps ignored in live mode\n";
     }
     if (o.mode != "live" && !o.live) {
-        config.realistic_fills = o.realistic_fills;
-        config.bar_spread_bps  = o.bar_spread_bps;
+        config.realistic_fills    = o.realistic_fills;
+        config.bar_spread_bps     = o.bar_spread_bps;
+        config.walked_book_impact = o.walked_book_impact;
         if (o.queue_model == "l2-snapshot") {
             if (o.depth_stream.empty()) {
                 std::cerr << "[error] --queue-model l2-snapshot requires --depth-stream\n";
@@ -1790,8 +1804,10 @@ static int run_tui_mode(const cli_options& o)
             }
             config.queue_position_model = std::make_shared<L2SnapshotQueueModel>();
         }
-    } else if (o.realistic_fills || o.bar_spread_bps > 0.0 || o.queue_model != "none") {
-        std::cerr << "[warn] --realistic-fills / --bar-spread-bps / --queue-model ignored in live mode\n";
+    } else if (o.realistic_fills || o.bar_spread_bps > 0.0 || o.walked_book_impact ||
+               o.queue_model != "none") {
+        std::cerr << "[warn] --realistic-fills / --bar-spread-bps / --walked-book-impact "
+                     "/ --queue-model ignored in live mode\n";
     }
     config.instrument_overrides = parse_instrument_specs(o.instrument_specs);
     config.reconcile_tolerance_bps = o.reconcile_tolerance_bps;
