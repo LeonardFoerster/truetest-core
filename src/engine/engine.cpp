@@ -246,7 +246,9 @@ std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol
         auto local = std::make_shared<LocalBookAdapter>(
             ob, config_.fee_model, config_.fill_model,
             config_.seed != 0 ? static_cast<unsigned>(config_.seed + 2) : config_.fill_rng_seed,
-            config_.market_aggression, config_.qty_scale);
+            config_.market_aggression, config_.qty_scale,
+            config_.latency_model, /*impact_model=*/nullptr,
+            config_.realistic_fills, config_.bar_spread_bps);
         if (config_.debug_fills)
             local->set_debug_fills(true, config_.debug_fills_budget);
         adapter = local;
@@ -1550,7 +1552,10 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     auto adapter = get_adapter(o->get_symbol());
 
     if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
+    {
         local->set_mid_price(last_mid_price_);
+        local->set_l2_seeded(l2_seeded_symbols_.count(o->get_symbol()) > 0);
+    }
 
     adapter->submit_order(*o);
 
@@ -1756,7 +1761,10 @@ void engine::unwind_positions(std::size_t& event_count)
 
         auto adapter = get_adapter(symbol);
         if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
+        {
             local->set_mid_price(last_mid_price_);
+            local->set_l2_seeded(l2_seeded_symbols_.count(symbol) > 0);
+        }
 
         adapter->submit_order(*close_order);
 

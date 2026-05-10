@@ -112,6 +112,21 @@ struct engine_config
     unsigned fill_rng_seed = 42;
     double spread_step_factor = 0.0001;
 
+    // Opt into passive-side fill pricing. Default off for byte-identical
+    // backtest output. When on, market and marketable-limit orders record
+    // each fill at the resting counterparty's price (one fill_event per
+    // walked level) instead of the aggressor's marked-up book price.
+    // Auto-suppresses bar_spread_bps to avoid double-counting the seeded
+    // book's spread. Ignored in engine_mode::live.
+    bool realistic_fills = false;
+
+    // Calibrated full bid-ask charged to bar-mode market orders. The
+    // reference price is shifted by ±(bar_spread_bps/2)/1e4 × mid before
+    // impact and aggression. Suppressed for symbols carrying real L2
+    // depth, and suppressed under realistic_fills (the seeded MM spread
+    // already drives the fill price). Ignored in engine_mode::live.
+    double bar_spread_bps = 0.0;
+
     bool debug_fills = false;
     int debug_fills_budget = 20;
 

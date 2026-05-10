@@ -283,6 +283,8 @@ struct cli_options
     std::size_t max_equity_points = 100000;
     std::size_t exec_bar_delay = 1;
     int wire_latency_us = 0;
+    bool realistic_fills = false;
+    double bar_spread_bps = 0.0;
     std::vector<std::string> instrument_specs;
     double reconcile_tolerance_bps = 10.0;
     long kill_switch_deadline_ms = 5000;
@@ -518,6 +520,8 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_size("max_equity_points", o.max_equity_points);
     get_size("exec_bar_delay", o.exec_bar_delay);
     get_int("wire_latency_us", o.wire_latency_us);
+    get_bool("realistic_fills", o.realistic_fills);
+    get_double("bar_spread_bps", o.bar_spread_bps);
     get_str("output", o.output);
     get_str("output_format", o.output_format);
 #ifdef HAS_QUESTDB
@@ -563,6 +567,8 @@ static void dump_config(const cli_options& o)
     j["backfill"] = o.backfill;
     j["backfill_interval"] = o.backfill_interval;
     j["wire_latency_us"] = o.wire_latency_us;
+    j["realistic_fills"] = o.realistic_fills;
+    j["bar_spread_bps"] = o.bar_spread_bps;
     j["risk"] = {
         {"max_position_value", o.risk_max_position_value},
         {"max_drawdown", o.risk_max_drawdown},
@@ -724,6 +730,17 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Backtest with paper-hybrid exec: delays fill visibility by this window. "
                    "0 (default) = none.")
         ->default_val(0);
+    app.add_flag("--realistic-fills", o.realistic_fills,
+                 "Record fills at the resting counterparty's price (one event per walked "
+                 "level) instead of the aggressor's mid×aggression markup. Auto-suppresses "
+                 "--bar-spread-bps. Default off — backtests stay byte-identical until set. "
+                 "Ignored in --mode live.");
+    app.add_option("--bar-spread-bps", o.bar_spread_bps,
+                   "Calibrated full bid-ask in basis points charged to bar-mode market "
+                   "orders: reference price is shifted by ±half-spread before impact and "
+                   "aggression. Suppressed for symbols with real L2 depth and under "
+                   "--realistic-fills. 0 (default) = no shift. Ignored in --mode live.")
+        ->default_val(0.0);
     app.add_option("--instrument", o.instrument_specs,
                    "Per-symbol trading rules. Repeatable. Format: "
                    "SYMBOL:tick=X,lot=Y,minq=Q,minn=N,maker=M,taker=T "
@@ -819,6 +836,8 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--max-equity-points")) opts.max_equity_points = file_opts.max_equity_points;
     if (!was_set("--exec-bar-delay")) opts.exec_bar_delay = file_opts.exec_bar_delay;
     if (!was_set("--wire-latency-us")) opts.wire_latency_us = file_opts.wire_latency_us;
+    if (!was_set("--realistic-fills")) opts.realistic_fills = file_opts.realistic_fills;
+    if (!was_set("--bar-spread-bps")) opts.bar_spread_bps = file_opts.bar_spread_bps;
     if (!was_set("--output")) opts.output = file_opts.output;
     if (!was_set("--output-format")) opts.output_format = file_opts.output_format;
 
@@ -1089,6 +1108,10 @@ static int run_provider_mode(const cli_options& o)
     if (o.wire_latency_us > 0 && o.mode != "live" && !o.live) {
         prov_cfg.wire_latency_model = std::make_shared<FixedLatencyModel>(
             latency_duration(o.wire_latency_us));
+    }
+    if (o.mode != "live" && !o.live) {
+        prov_cfg.realistic_fills = o.realistic_fills;
+        prov_cfg.bar_spread_bps  = o.bar_spread_bps;
     }
     prov_cfg.instrument_overrides = parse_instrument_specs(o.instrument_specs);
     prov_cfg.reconcile_tolerance_bps = o.reconcile_tolerance_bps;
@@ -1652,6 +1675,12 @@ static int run_tui_mode(const cli_options& o)
     if (o.wire_latency_us > 0 && o.mode != "live" && !o.live) {
         config.wire_latency_model = std::make_shared<FixedLatencyModel>(
             latency_duration(o.wire_latency_us));
+    }
+    if (o.mode != "live" && !o.live) {
+        config.realistic_fills = o.realistic_fills;
+        config.bar_spread_bps  = o.bar_spread_bps;
+    } else if (o.realistic_fills || o.bar_spread_bps > 0.0) {
+        std::cerr << "[warn] --realistic-fills / --bar-spread-bps ignored in live mode\n";
     }
     config.instrument_overrides = parse_instrument_specs(o.instrument_specs);
     config.reconcile_tolerance_bps = o.reconcile_tolerance_bps;

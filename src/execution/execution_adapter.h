@@ -64,7 +64,9 @@ public:
                      double market_aggression = 1.1,
                      double qty_scale = 1e8,
                      std::shared_ptr<ILatencyModel> latency_model = nullptr,
-                     std::shared_ptr<IImpactModel>  impact_model  = nullptr)
+                     std::shared_ptr<IImpactModel>  impact_model  = nullptr,
+                     bool realistic_fills = false,
+                     double bar_spread_bps = 0.0)
         : ob_(std::move(ob))
         , fee_model_(std::move(fee_model))
         , fill_model_(std::move(fill_model))
@@ -73,9 +75,14 @@ public:
         , market_aggression_(market_aggression)
         , qty_scale_(qty_scale)
         , latency_model_(std::move(latency_model))
-        , impact_model_(std::move(impact_model)) {}
+        , impact_model_(std::move(impact_model))
+        , realistic_fills_(realistic_fills)
+        , bar_spread_bps_(bar_spread_bps) {}
 
     void set_mid_price(double price) { mid_price_ = price; }
+    // Symbol carries real L2 depth — bar_spread shift is suppressed
+    // because the seeded book's spread already prices the fill correctly.
+    void set_l2_seeded(bool seeded) { l2_seeded_ = seeded; }
 
     void set_debug_fills(bool enabled, int budget = 20)
     {
@@ -109,6 +116,16 @@ public:
         if (o.get_order_type() == order_type::market)
         {
             double ref_price = (mid_price_ > 0.0) ? mid_price_ : o.get_price();
+
+            // Bar-spread shift: lift mid to the BBO before impact. Skipped
+            // when realistic_fills is on (resting walk already incorporates
+            // the seeded spread) and when symbol carries real L2 depth.
+            if (bar_spread_bps_ > 0.0 && !realistic_fills_ && !l2_seeded_)
+            {
+                const double half = bar_spread_bps_ * 0.5 * 1e-4;
+                ref_price *= (o.get_side() == order_side::buy) ? (1.0 + half) : (1.0 - half);
+            }
+
             // Impact BEFORE aggression so aggression still guarantees an
             // immediate cross. ZeroImpactModel (default) is a pass-through.
             if (impact_model_)
@@ -142,13 +159,19 @@ public:
 
         for (const auto& trade : resulting_trades)
         {
-            const auto& our_trade_info =
-                (trade.get_bid_trade().orderId_ == o.get_order_id())
-                    ? trade.get_bid_trade() : trade.get_ask_trade();
+            const bool we_are_bid = (trade.get_bid_trade().orderId_ == o.get_order_id());
+            const auto& our_trade_info  = we_are_bid ? trade.get_bid_trade() : trade.get_ask_trade();
+            const auto& counter_trade   = we_are_bid ? trade.get_ask_trade() : trade.get_bid_trade();
 
             if (our_trade_info.orderId_ == o.get_order_id())
             {
-                double fill_price = our_trade_info.price_.to_double();
+                // Legacy: fill at the aggressor's submitted book price
+                // (mid × aggression for market, our limit otherwise).
+                // Realistic: fill at the resting counterparty's price —
+                // honest passive-side pricing, one event per walked level.
+                double fill_price = realistic_fills_
+                    ? counter_trade.price_.to_double()
+                    : our_trade_info.price_.to_double();
                 double fill_qty = static_cast<double>(our_trade_info.quantity_) / qty_scale_;
 
                 if (fade_rate > 0.0)
@@ -274,6 +297,9 @@ private:
     int debug_fills_left_ = 0;
     std::shared_ptr<ILatencyModel> latency_model_;
     std::shared_ptr<IImpactModel>  impact_model_;
+    bool realistic_fills_ = false;
+    double bar_spread_bps_ = 0.0;
+    bool l2_seeded_ = false;
     std::unordered_map<uint64_t, std::chrono::system_clock::time_point> pending_cancels_;
     std::chrono::system_clock::time_point current_time_{};
 };
