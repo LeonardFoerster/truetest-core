@@ -284,6 +284,8 @@ struct cli_options
     std::size_t max_equity_points = 100000;
     std::size_t exec_bar_delay = 1;
     int wire_latency_us = 0;
+    int order_latency_us = 0;
+    int order_latency_stddev_us = 0;
     bool realistic_fills = false;
     double bar_spread_bps = 0.0;
     std::string queue_model = "none";
@@ -522,6 +524,8 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_size("max_equity_points", o.max_equity_points);
     get_size("exec_bar_delay", o.exec_bar_delay);
     get_int("wire_latency_us", o.wire_latency_us);
+    get_int("order_latency_us", o.order_latency_us);
+    get_int("order_latency_stddev_us", o.order_latency_stddev_us);
     get_bool("realistic_fills", o.realistic_fills);
     get_double("bar_spread_bps", o.bar_spread_bps);
     get_str("queue_model", o.queue_model);
@@ -570,6 +574,8 @@ static void dump_config(const cli_options& o)
     j["backfill"] = o.backfill;
     j["backfill_interval"] = o.backfill_interval;
     j["wire_latency_us"] = o.wire_latency_us;
+    j["order_latency_us"] = o.order_latency_us;
+    j["order_latency_stddev_us"] = o.order_latency_stddev_us;
     j["realistic_fills"] = o.realistic_fills;
     j["bar_spread_bps"] = o.bar_spread_bps;
     j["queue_model"] = o.queue_model;
@@ -734,6 +740,18 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Backtest with paper-hybrid exec: delays fill visibility by this window. "
                    "0 (default) = none.")
         ->default_val(0);
+    app.add_option("--order-latency-us", o.order_latency_us,
+                   "Strategy → order-eligible delay (microseconds). The engine routes "
+                   "orders through pending_orders_ with bumped earliest_eligible_ts and "
+                   "releases them on a bar/tick crossing that ts. With stddev=0 a fixed "
+                   "delay is used; with stddev>0 a normal distribution is sampled. "
+                   "Bar-mode caveat: latencies smaller than the bar interval are invisible. "
+                   "0 (default) = none. Ignored in --mode live.")
+        ->default_val(0);
+    app.add_option("--order-latency-stddev-us", o.order_latency_stddev_us,
+                   "Standard deviation in microseconds for stochastic order latency. "
+                   "Requires --order-latency-us > 0. 0 (default) = fixed delay.")
+        ->default_val(0);
     app.add_flag("--realistic-fills", o.realistic_fills,
                  "Record fills at the resting counterparty's price (one event per walked "
                  "level) instead of the aggressor's mid×aggression markup. Auto-suppresses "
@@ -848,6 +866,9 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--max-equity-points")) opts.max_equity_points = file_opts.max_equity_points;
     if (!was_set("--exec-bar-delay")) opts.exec_bar_delay = file_opts.exec_bar_delay;
     if (!was_set("--wire-latency-us")) opts.wire_latency_us = file_opts.wire_latency_us;
+    if (!was_set("--order-latency-us")) opts.order_latency_us = file_opts.order_latency_us;
+    if (!was_set("--order-latency-stddev-us"))
+        opts.order_latency_stddev_us = file_opts.order_latency_stddev_us;
     if (!was_set("--realistic-fills")) opts.realistic_fills = file_opts.realistic_fills;
     if (!was_set("--bar-spread-bps")) opts.bar_spread_bps = file_opts.bar_spread_bps;
     if (!was_set("--queue-model")) opts.queue_model = file_opts.queue_model;
@@ -1121,6 +1142,17 @@ static int run_provider_mode(const cli_options& o)
     if (o.wire_latency_us > 0 && o.mode != "live" && !o.live) {
         prov_cfg.wire_latency_model = std::make_shared<FixedLatencyModel>(
             latency_duration(o.wire_latency_us));
+    }
+    if (o.order_latency_us > 0 && o.mode != "live" && !o.live) {
+        if (o.order_latency_stddev_us > 0) {
+            prov_cfg.latency_model = std::make_shared<StochasticLatencyModel>(
+                static_cast<double>(o.order_latency_us),
+                static_cast<double>(o.order_latency_stddev_us),
+                o.fill_rng_seed);
+        } else {
+            prov_cfg.latency_model = std::make_shared<FixedLatencyModel>(
+                latency_duration(o.order_latency_us));
+        }
     }
     if (o.mode != "live" && !o.live) {
         prov_cfg.realistic_fills = o.realistic_fills;
@@ -1695,6 +1727,19 @@ static int run_tui_mode(const cli_options& o)
     if (o.wire_latency_us > 0 && o.mode != "live" && !o.live) {
         config.wire_latency_model = std::make_shared<FixedLatencyModel>(
             latency_duration(o.wire_latency_us));
+    }
+    if (o.order_latency_us > 0 && o.mode != "live" && !o.live) {
+        if (o.order_latency_stddev_us > 0) {
+            config.latency_model = std::make_shared<StochasticLatencyModel>(
+                static_cast<double>(o.order_latency_us),
+                static_cast<double>(o.order_latency_stddev_us),
+                o.fill_rng_seed);
+        } else {
+            config.latency_model = std::make_shared<FixedLatencyModel>(
+                latency_duration(o.order_latency_us));
+        }
+    } else if (o.order_latency_us > 0 && (o.mode == "live" || o.live)) {
+        std::cerr << "[warn] --order-latency-us ignored in live mode\n";
     }
     if (o.mode != "live" && !o.live) {
         config.realistic_fills = o.realistic_fills;

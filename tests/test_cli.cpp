@@ -163,6 +163,30 @@ TEST(DumpConfig, ReflectsCLIValues)
     EXPECT_NE(out.find("\"seed\": 999"), std::string::npos);
 }
 
+// Order-latency CLI binding: realism-wiring Task 1. The latency model
+// itself is unit-tested in test_latency_model.cpp; this guards that the
+// flags reach the config dump and the engine binary builds with the
+// underlying StochasticLatencyModel/FixedLatencyModel constructors.
+TEST(DumpConfig, ReflectsOrderLatency)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--dump-config --order-latency-us 5000 --order-latency-stddev-us 1500",
+        out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("\"order_latency_us\": 5000"), std::string::npos);
+    EXPECT_NE(out.find("\"order_latency_stddev_us\": 1500"), std::string::npos);
+}
+
+TEST(DryRun, OrderLatencyAcceptedInBacktest)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--dry-run --strategy sma --mode backtest --order-latency-us 1000", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+}
+
 // ─── B3: --dry-run ─────────────────────────────────────────────────────────
 
 TEST(DryRun, ValidConfigExitsZero)
