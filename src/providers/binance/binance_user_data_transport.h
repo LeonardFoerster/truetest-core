@@ -25,6 +25,10 @@
 #include <thread>
 #include <utility>
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
 struct binance_keepalive_policy
 {
     std::chrono::seconds interval     = std::chrono::seconds(30 * 60);
@@ -319,6 +323,20 @@ private:
             auto& lowest = beast::get_lowest_layer(*ws_);
             net::connect(lowest, results);
 
+            // TCP keepalive on the underlying socket — see BinanceTransport
+            // for rationale. 1s idle / 1s probe / 2 probes -> kernel-side
+            // detection within ~3s when WS pings themselves are wedged.
+            // Best-effort.
+            {
+                const int yes = 1;
+                const int idle = 1, intvl = 1, cnt = 2;
+                const int fd = lowest.native_handle();
+                ::setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE,  &yes,   sizeof(yes));
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
+            }
+
             if (!SSL_set_tlsext_host_name(
                     ws_->next_layer().native_handle(), ws_host_.c_str()))
             {
@@ -330,6 +348,21 @@ private:
                 SSL_set_session(ws_->next_layer().native_handle(), sess);
 
             ws_->next_layer().handshake(ssl::stream_base::client);
+
+            // WS idle/handshake timeout: dead user-data stream errors out
+            // within idle_timeout (Beast pings on idle, treats no-pong as
+            // failure). The user-data stream is normally quiet — fills
+            // are bursty, listenKey keepalive is server→client every
+            // ~30 min — so without this, an unplugged cable would only
+            // be detected when the next REST listenKey refresh fails.
+            {
+                websocket::stream_base::timeout opt;
+                opt.handshake_timeout = std::chrono::seconds(3);
+                opt.idle_timeout      = std::chrono::milliseconds(1500);
+                opt.keep_alive_pings  = true;
+                ws_->set_option(opt);
+            }
+
             ws_->set_option(websocket::stream_base::decorator(
                 [](websocket::request_type& req) {
                     req.set(boost::beast::http::field::user_agent, "TrueTest/1.0");

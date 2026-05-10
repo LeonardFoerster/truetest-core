@@ -19,6 +19,10 @@
 #include <thread>
 #include <iostream>
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;
 namespace net = boost::asio;
@@ -56,6 +60,24 @@ public:
             auto& lowest = beast::get_lowest_layer(*ws_);
             net::connect(lowest, results);
 
+            // TCP keepalive: belt-and-suspenders detection for a dead
+            // peer when the Beast WS-ping path is itself wedged (we are
+            // primarily a receiver, so without keepalive the kernel
+            // never retransmits and a cable-pull goes undetected for
+            // ~indefinitely). Aggressive thresholds (1s idle / 1s probe
+            // interval / 2 probes) bound kernel-side detection to ~3s.
+            // Best-effort: setsockopt failures are non-fatal — the WS
+            // idle_timeout below is the primary detector regardless.
+            {
+                const int yes = 1;
+                const int idle = 1, intvl = 1, cnt = 2;
+                const int fd = lowest.native_handle();
+                ::setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE,  &yes,   sizeof(yes));
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
+            }
+
             if (!SSL_set_tlsext_host_name(
                     ws_->next_layer().native_handle(), host_.c_str()))
             {
@@ -64,6 +86,19 @@ public:
             }
 
             ws_->next_layer().handshake(ssl::stream_base::client);
+
+            // Idle / handshake timeout: a dead stream errors out within
+            // idle_timeout. keep_alive_pings=true makes Beast send WS
+            // pings on idle and treat absence of pong as failure — the
+            // primary detector for a silent cable-pull. handshake_timeout
+            // bounds the WS upgrade so a hung server can't stall startup.
+            {
+                websocket::stream_base::timeout opt;
+                opt.handshake_timeout = std::chrono::seconds(3);
+                opt.idle_timeout      = std::chrono::milliseconds(1500);
+                opt.keep_alive_pings  = true;
+                ws_->set_option(opt);
+            }
 
             ws_->set_option(websocket::stream_base::decorator(
                 [](websocket::request_type& req) {
