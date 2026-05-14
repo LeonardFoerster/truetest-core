@@ -87,6 +87,7 @@ public:
         fill_model_ = cfg.fill_model;
         wire_latency_model_ = cfg.wire_latency_model;
         queue_model_ = cfg.queue_position_model;
+        maker_queue_model_ = cfg.maker_queue_model;
         qty_scale_ = cfg.qty_scale;
         spread_step_factor_ = cfg.spread_step_factor;
         backfill_bars_ = cfg.backfill_bars;
@@ -355,6 +356,7 @@ private:
     std::shared_ptr<IFillModel> fill_model_;
     std::shared_ptr<ILatencyModel> wire_latency_model_;
     std::shared_ptr<IQueuePositionModel> queue_model_;
+    std::shared_ptr<IQueueModel> maker_queue_model_;
     double qty_scale_ = 1e8;
     double spread_step_factor_ = 0.0001;
     int backfill_bars_ = 0;

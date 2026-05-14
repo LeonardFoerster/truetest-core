@@ -19,6 +19,7 @@ class ILatencyModel;
 class IImpactModel;
 class IProvider;
 class IQueuePositionModel;
+class IQueueModel;
 
 namespace truetest::ui { class ConsoleDashboard; }
 
@@ -149,6 +150,13 @@ struct engine_config
     // ahead of them. Requires a depth subscription. Ignored in
     // engine_mode::live.
     std::shared_ptr<IQueuePositionModel> queue_position_model;
+
+    // Maker queue model for paper and backtest passive limit orders.
+    // When set, the engine uses QueueAwareBookAdapter (instead of
+    // LocalBookAdapter) for limit orders. This gives realistic queue
+    // position + cancel attribution (Front/Uniform/Back). Requires L2
+    // data (depth stream). Ignored in engine_mode::live.
+    std::shared_ptr<IQueueModel> maker_queue_model;
 
     bool debug_fills = false;
     int debug_fills_budget = 20;

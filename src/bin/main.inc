@@ -293,6 +293,7 @@ struct cli_options
     double bar_spread_bps = 0.0;
     bool walked_book_impact = false;
     std::string queue_model = "none";
+    std::string maker_queue_model = "none";
     std::vector<std::string> instrument_specs;
     double reconcile_tolerance_bps = 10.0;
     long kill_switch_deadline_ms = 5000;
@@ -536,6 +537,7 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_double("bar_spread_bps", o.bar_spread_bps);
     get_bool("walked_book_impact", o.walked_book_impact);
     get_str("queue_model", o.queue_model);
+    get_str("maker_queue_model", o.maker_queue_model);
     get_str("output", o.output);
     get_str("output_format", o.output_format);
 #ifdef HAS_QUESTDB
@@ -589,6 +591,7 @@ static void dump_config(const cli_options& o)
     j["bar_spread_bps"] = o.bar_spread_bps;
     j["walked_book_impact"] = o.walked_book_impact;
     j["queue_model"] = o.queue_model;
+    j["maker_queue_model"] = o.maker_queue_model;
     j["risk"] = {
         {"max_position_value", o.risk_max_position_value},
         {"max_drawdown", o.risk_max_drawdown},
@@ -800,6 +803,11 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "--mode live.")
         ->default_val("none")
         ->check(CLI::IsMember({"none", "l2-snapshot"}));
+    app.add_option("--maker-queue-model", o.maker_queue_model,
+                   "Maker queue model for paper/backtest limit orders. 'none' (default) = "
+                   "optimistic front-of-queue. 'uniform'/'front'/'back' use cancel attribution. "
+                   "Requires --depth-stream. Ignored in --mode live.")
+        ->default_val("none");
     app.add_option("--instrument", o.instrument_specs,
                    "Per-symbol trading rules. Repeatable. Format: "
                    "SYMBOL:tick=X,lot=Y,minq=Q,minn=N,maker=M,taker=T "
@@ -905,6 +913,7 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--walked-book-impact"))
         opts.walked_book_impact = file_opts.walked_book_impact;
     if (!was_set("--queue-model")) opts.queue_model = file_opts.queue_model;
+    if (!was_set("--maker-queue-model")) opts.maker_queue_model = file_opts.maker_queue_model;
     if (!was_set("--output")) opts.output = file_opts.output;
     if (!was_set("--output-format")) opts.output_format = file_opts.output_format;
 
@@ -1805,9 +1814,9 @@ static int run_tui_mode(const cli_options& o)
             config.queue_position_model = std::make_shared<L2SnapshotQueueModel>();
         }
     } else if (o.realistic_fills || o.bar_spread_bps > 0.0 || o.walked_book_impact ||
-               o.queue_model != "none") {
+               o.queue_model != "none" || o.maker_queue_model != "none") {
         std::cerr << "[warn] --realistic-fills / --bar-spread-bps / --walked-book-impact "
-                     "/ --queue-model ignored in live mode\n";
+                     "/ --queue-model / --maker-queue-model ignored in live mode\n";
     }
     config.instrument_overrides = parse_instrument_specs(o.instrument_specs);
     config.reconcile_tolerance_bps = o.reconcile_tolerance_bps;
