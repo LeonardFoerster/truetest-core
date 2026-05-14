@@ -27,6 +27,7 @@
 #include "execution/fee_model.h"
 #include "execution/latency_model.h"
 #include "execution/queue_position_model.h"
+#include "execution/queue_model.h"
 #include "execution/impact_model.h"
 #include "orderbook/orderbook.h"
 #include "strategy/strategy_registry.h"
@@ -807,7 +808,8 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Maker queue model for paper/backtest limit orders. 'none' (default) = "
                    "optimistic front-of-queue. 'uniform'/'front'/'back' use cancel attribution. "
                    "Requires --depth-stream. Ignored in --mode live.")
-        ->default_val("none");
+        ->default_val("none")
+        ->check(CLI::IsMember({"none", "uniform", "front", "back"}));
     app.add_option("--instrument", o.instrument_specs,
                    "Per-symbol trading rules. Repeatable. Format: "
                    "SYMBOL:tick=X,lot=Y,minq=Q,minn=N,maker=M,taker=T "
@@ -938,6 +940,12 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
 
 static int run_dry_run(const cli_options& o)
 {
+    if (o.maker_queue_model != "none" && o.depth_stream.empty()) {
+        std::cerr << "[error] --maker-queue-model " << o.maker_queue_model
+                  << " requires --depth-stream\n";
+        return 1;
+    }
+
     std::string resolved_strategy = o.strategy.empty() ? "mean-reversion" : o.strategy;
     std::string resolved_mode = o.mode.empty() ? TT_DEFAULT_MODE : o.mode;
     std::string resolved_preset = o.thread_preset_str.empty()
@@ -1214,6 +1222,19 @@ static int run_provider_mode(const cli_options& o)
                 return 1;
             }
             prov_cfg.queue_position_model = std::make_shared<L2SnapshotQueueModel>();
+        }
+        if (o.maker_queue_model != "none") {
+            if (o.depth_stream.empty()) {
+                std::cerr << "[error] --maker-queue-model " << o.maker_queue_model
+                          << " requires --depth-stream\n";
+                return 1;
+            }
+            if (o.maker_queue_model == "uniform")
+                prov_cfg.maker_queue_model = std::make_shared<UniformCancelModel>();
+            else if (o.maker_queue_model == "front")
+                prov_cfg.maker_queue_model = std::make_shared<FrontCancelModel>();
+            else if (o.maker_queue_model == "back")
+                prov_cfg.maker_queue_model = std::make_shared<BackCancelModel>();
         }
     }
     prov_cfg.instrument_overrides = parse_instrument_specs(o.instrument_specs);
@@ -1813,11 +1834,31 @@ static int run_tui_mode(const cli_options& o)
             }
             config.queue_position_model = std::make_shared<L2SnapshotQueueModel>();
         }
+        if (o.maker_queue_model != "none") {
+            if (o.depth_stream.empty()) {
+                std::cerr << "[error] --maker-queue-model " << o.maker_queue_model
+                          << " requires --depth-stream\n";
+                return 1;
+            }
+            if (o.maker_queue_model == "uniform")
+                config.maker_queue_model = std::make_shared<UniformCancelModel>();
+            else if (o.maker_queue_model == "front")
+                config.maker_queue_model = std::make_shared<FrontCancelModel>();
+            else if (o.maker_queue_model == "back")
+                config.maker_queue_model = std::make_shared<BackCancelModel>();
+        }
     } else if (o.realistic_fills || o.bar_spread_bps > 0.0 || o.walked_book_impact ||
                o.queue_model != "none" || o.maker_queue_model != "none") {
         std::cerr << "[warn] --realistic-fills / --bar-spread-bps / --walked-book-impact "
                      "/ --queue-model / --maker-queue-model ignored in live mode\n";
     }
+    // General validation for maker queue model (works for local + binance providers)
+    if (o.maker_queue_model != "none" && o.depth_stream.empty()) {
+        std::cerr << "[error] --maker-queue-model " << o.maker_queue_model
+                  << " requires --depth-stream\n";
+        return 1;
+    }
+
     config.instrument_overrides = parse_instrument_specs(o.instrument_specs);
     config.reconcile_tolerance_bps = o.reconcile_tolerance_bps;
     config.kill_switch_deadline = std::chrono::milliseconds(o.kill_switch_deadline_ms);

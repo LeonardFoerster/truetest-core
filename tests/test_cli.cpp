@@ -286,3 +286,23 @@ TEST(CLI, PersistFlagRejectedWhenQuestDbDisabled)
 }
 
 #endif // HAS_QUESTDB
+
+// ─── B5: Maker queue model (Phase 1) ───────────────────────────────────────
+
+TEST(CLI, MakerQueueModelRequiresDepthStream)
+{
+    std::string out;
+    int rc = run_truetest("--maker-queue-model uniform --dry-run", out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("--maker-queue-model"), std::string::npos);
+    EXPECT_NE(out.find("requires --depth-stream"), std::string::npos);
+}
+
+TEST(CLI, MakerQueueModelAcceptedWithDepth)
+{
+    std::string out;
+    int rc = run_truetest("--maker-queue-model uniform --depth-stream depth20 "
+                          "--dry-run --strategy sma --provider local --path market_data.csv", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+}
