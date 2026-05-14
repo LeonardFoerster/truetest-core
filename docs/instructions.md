@@ -1003,6 +1003,44 @@ Full operational notes (gotchas, account-reset semantics, `MIN_NOTIONAL`
 threshold, futures-testnet scope, etc.) in
 [`docs/testnet.md`](testnet.md).
 
+#### 16.2.3 Maker queue modeling (paper & backtest realism)
+
+When you run paper or backtest strategies with real L2 (`--depth-stream`),
+you can enable realistic passive limit order behavior using:
+
+```bash
+--maker-queue-model uniform   # recommended
+--maker-queue-model front     # optimistic (cancels always help you)
+--maker-queue-model back      # pessimistic (cancels never help you)
+```
+
+**How it works:**
+- `QueueAwareBookAdapter` (used by `HybridExecutor` and the pure paper path)
+  tracks every one of your resting limits.
+- On submit it records `size_ahead` from the current L2 level.
+- Every real trade print consumes the front of the level first.
+- L2 shrinkage beyond observed trades is attributed to cancels using the
+  selected `IQueueModel` (Uniform is the realistic middle ground).
+- Your order only fills once `size_ahead` has been fully consumed.
+
+**Requirements:**
+- Must be used together with `--depth-stream` (otherwise silently falls back
+  to the legacy "always at the front" behaviour).
+- Only affects paper/backtest modes. Completely ignored in `--mode live`.
+
+**Observability:**
+- The rich TUI and `ConsoleDashboard` show **live quote count** and
+  **average queue position** (in basis points: 0 = front of queue, 10000 = back).
+- At session end a summary is printed:
+  ```
+    Maker queue model:
+      Live passive limits: 23
+      Avg queue position:  41%
+  ```
+
+See [`docs/realism.md`](realism.md#queue-modeling) for the full conceptual
+explanation and comparison with the shadow-mode `--queue-model` flag.
+
 ---
 
 ## 17. Replay Mode

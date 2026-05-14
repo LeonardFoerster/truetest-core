@@ -1,5 +1,34 @@
 # CLAUDE.md
 
+## AI assistant note: model selection
+
+For AI coding assistants working in this repo: this codebase has two
+tiers of edits with different model requirements. **Full rationale,
+file list, and pre-merge checklist live in `docs/MODEL.md`.**
+
+**Default — Sonnet 4.6** is sufficient for: new strategies, indicators,
+tests, CLI flags, docs, single-file refactors, provider-stack additions
+that follow existing patterns.
+
+**Switch to Opus 4.7 (`/model opus`) before editing any of:**
+- `src/engine/engine.{h,cpp}`, `src/engine/engine_config.h`
+- Anything matching `*kill_switch*`, `*dead_mans_switch*`,
+  `*reconciler*`, `*watchdog*`
+- `src/core/tt_target.h` and any `TT_TARGET` / `target_allows_live_orders`
+  callsite
+- `src/threading/` (SPSC rings, spin policy, CPU affinity)
+- `src/risk/` and any code that touches `halt_flag_`
+- Hot-path code (no `nlohmann/json`, CI-enforced via
+  `scripts/check-hotpath-json.sh`)
+- Binance live-mode safety glue: refusal gates, time sync, OCO/bracket
+  placement, REST signing, dead-man's-switch heartbeats
+
+These areas carry **cross-file invariants** (compile-time live-order
+gating, manual-recovery-only halt semantics, no hot-path allocations,
+no auto-retry on safety paths) that Sonnet has a measurable tendency
+to break by adding "helpful" fallback/retry logic. When in doubt:
+upgrade to Opus, then downgrade after the edit.
+
 ## What this is
 
 TrueTest — a modular C++23 engine that starts as a backtesting platform but is
@@ -82,6 +111,9 @@ hft-engine/
     │   ├── live_safety.h               # IReconciler / IKillSwitch + Noop impls
     │   ├── rate_limiter.h              # token-bucket order rate limiter
     │   ├── trade_tape_shadow_adapter.h # shadow-mode fill replay
+    │   ├── queue_aware_book_adapter.h  # paper maker queue simulation (QueueAwareBookAdapter + IQueueModel)
+    │   ├── queue_model.h               # Front/Uniform/BackCancelModel for maker queue
+    │   ├── queue_position_model.h      # L2SnapshotQueueModel for shadow queue position
     │   ├── portfolio.h/.cpp            # position tracking, PnL
     │   ├── fee_model.h                 # IFeeModel (Zero, Fixed, Tiered)
     │   └── latency_model.h             # execution latency simulation
