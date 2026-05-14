@@ -1461,11 +1461,54 @@ void engine::print_summary()
             const auto qs = ts->get_queue_stats();
             if (qs.submitted_with_queue > 0)
             {
-                std::cout << "  Queue model:\n"
+                std::cout << "  Queue model (shadow):\n"
                           << "    Submitted with queue ahead: " << qs.submitted_with_queue << "\n"
                           << "    Filled after queue drained: " << qs.filled_after_drain << "\n"
                           << "    Still queue-blocked at EOS: " << qs.blocked_at_eos << "\n";
             }
+        }
+    }
+
+    // Maker queue telemetry (paper/backtest + --maker-queue-model).
+    {
+        std::size_t total_live = 0;
+        double      total_qpos = 0.0;
+        int         n = 0;
+
+        for (auto& [_, ad] : execution_adapters_)
+        {
+            if (ad)
+            {
+                auto c = ad->live_quote_count();
+                if (c > 0)
+                {
+                    total_live += c;
+                    total_qpos += ad->avg_queue_position_bps();
+                    ++n;
+                }
+            }
+        }
+        if (config_.provider)
+        {
+            auto pa = config_.provider->get_execution_adapter();
+            if (pa)
+            {
+                auto c = pa->live_quote_count();
+                if (c > 0)
+                {
+                    total_live += c;
+                    total_qpos += pa->avg_queue_position_bps();
+                    ++n;
+                }
+            }
+        }
+
+        if (total_live > 0)
+        {
+            uint32_t avg_bps = static_cast<uint32_t>(total_qpos / n);
+            std::cout << "  Maker queue model:\n"
+                      << "    Live passive limits: " << total_live << "\n"
+                      << "    Avg queue position:  " << (avg_bps / 100) << "%\n";
         }
     }
 }

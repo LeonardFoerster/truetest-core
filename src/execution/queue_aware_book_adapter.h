@@ -39,6 +39,8 @@ public:
         , fee_model_(std::move(fee_model))
         , latency_model_(std::move(latency_model)) {}
 
+    void set_mid_price(double price) override { mid_price_ = price; }
+
     void submit_order(const order_event& o) override
     {
         if (o.get_order_type() != order_type::limit)
@@ -265,4 +267,5 @@ private:
     std::vector<fill_event>                        pending_fills_;
     std::unordered_map<std::uint64_t, std::chrono::system_clock::time_point> pending_cancels_;
     std::chrono::system_clock::time_point          current_time_{};
+    double                                         mid_price_ = 0.0;
 };
