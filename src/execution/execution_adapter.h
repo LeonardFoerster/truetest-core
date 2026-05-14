@@ -48,6 +48,10 @@ public:
         double /*price*/,
         double /*new_size*/) {}
 
+    // Optional hook for adapters that maintain a seeded book (LocalBookAdapter
+    // and QueueAwareBookAdapter). Default no-op.
+    virtual void set_mid_price(double /*price*/) {}
+
     // Returns 0 from adapters that don't model queue position; dashboard
     // renders em-dash. QueueAwareBookAdapter overrides.
     virtual std::size_t   live_quote_count()         const { return 0; }

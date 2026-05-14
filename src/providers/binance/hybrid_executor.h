@@ -4,6 +4,8 @@
 #include "../../execution/execution_adapter.h"
 #include "../../execution/fee_model.h"
 #include "../../execution/latency_model.h"
+#include "../../execution/queue_aware_book_adapter.h"
+#include "../../execution/queue_model.h"
 #include "../../orderbook/orderbook.h"
 #include "../../orderbook/fill_model.h"
 #include "../../types/order_id.h"
@@ -24,18 +26,31 @@ public:
                    std::shared_ptr<IFillModel> fill_model = nullptr,
                    double qty_scale = 1e8,
                    double spread_step_factor = 0.0001,
-                   std::shared_ptr<ILatencyModel> latency_model = nullptr)
+                   std::shared_ptr<ILatencyModel> latency_model = nullptr,
+                   std::shared_ptr<IQueueModel> maker_queue_model = nullptr)
         : paper_(std::move(paper_exec))
         , book_(std::move(book))
-        , book_adapter_(std::make_unique<LocalBookAdapter>(
-              book_,
-              fee_model ? std::move(fee_model) : std::make_shared<ZeroFeeModel>(),
-              fill_model ? std::move(fill_model)
-                         : std::make_shared<RealisticFillModel>(0.05, 0.8, 5.0)))
         , qty_scale_(qty_scale)
         , spread_step_factor_(spread_step_factor)
         , latency_model_(std::move(latency_model))
-    {}
+    {
+        if (maker_queue_model)
+        {
+            // Use realistic queue-position modeling for passive limits
+            book_adapter_ = std::make_unique<QueueAwareBookAdapter>(
+                std::move(maker_queue_model),
+                fee_model ? std::move(fee_model) : std::make_shared<ZeroFeeModel>(),
+                latency_model_);   // reuse the same latency model if present
+        }
+        else
+        {
+            book_adapter_ = std::make_unique<LocalBookAdapter>(
+                book_,
+                fee_model ? std::move(fee_model) : std::make_shared<ZeroFeeModel>(),
+                fill_model ? std::move(fill_model)
+                           : std::make_shared<RealisticFillModel>(0.05, 0.8, 5.0));
+        }
+    }
 
     void submit_order(const order_event& o) override
     {
@@ -148,7 +163,7 @@ private:
 
     std::shared_ptr<BinanceExecutor> paper_;
     std::shared_ptr<orderbook> book_;
-    std::unique_ptr<LocalBookAdapter> book_adapter_;
+    std::unique_ptr<IExecutionAdapter> book_adapter_;
     double qty_scale_ = 1e8;
     double spread_step_factor_ = 0.0001;
 

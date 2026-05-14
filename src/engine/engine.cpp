@@ -10,6 +10,8 @@
 #include "execution/execution_bridge.h"
 #include "execution/trade_tape_shadow_adapter.h"
 #include "execution/fill_parser.h"
+#include "execution/queue_aware_book_adapter.h"
+#include "execution/queue_model.h"
 #include "providers/provider.h"
 #include "providers/provider_convert.h"
 #include "ui/console_dashboard.h"
@@ -244,16 +246,29 @@ std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol
     if (!adapter)
     {
         auto ob = orderbook_registry_.get_or_create(symbol);
-        auto local = std::make_shared<LocalBookAdapter>(
-            ob, config_.fee_model, config_.fill_model,
-            config_.seed != 0 ? static_cast<unsigned>(config_.seed + 2) : config_.fill_rng_seed,
-            config_.market_aggression, config_.qty_scale,
-            config_.latency_model, config_.impact_model,
-            config_.realistic_fills, config_.bar_spread_bps,
-            config_.walked_book_impact);
-        if (config_.debug_fills)
-            local->set_debug_fills(true, config_.debug_fills_budget);
-        adapter = local;
+
+        if (config_.maker_queue_model)
+        {
+            // Use queue-aware paper execution for passive limits
+            auto qa = std::make_shared<QueueAwareBookAdapter>(
+                config_.maker_queue_model,
+                config_.fee_model,
+                config_.latency_model);
+            adapter = qa;
+        }
+        else
+        {
+            auto local = std::make_shared<LocalBookAdapter>(
+                ob, config_.fee_model, config_.fill_model,
+                config_.seed != 0 ? static_cast<unsigned>(config_.seed + 2) : config_.fill_rng_seed,
+                config_.market_aggression, config_.qty_scale,
+                config_.latency_model, config_.impact_model,
+                config_.realistic_fills, config_.bar_spread_bps,
+                config_.walked_book_impact);
+            if (config_.debug_fills)
+                local->set_debug_fills(true, config_.debug_fills_budget);
+            adapter = local;
+        }
     }
 
     execution_adapters_[symbol] = adapter;
