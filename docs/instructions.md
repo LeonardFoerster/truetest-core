@@ -540,6 +540,8 @@ See [§23](#23-questdb-persistence) for schema, write pipeline, and example quer
 | `--wire-latency-us` | `0` | Extra wire + exchange-ingest latency (microseconds) applied by the execution adapter on top of any engine-side latency model. Shadow: gates real trade prints matching open orders, surfacing "sim filled, exchange didn't" cases. Backtest against the Binance paper-hybrid executor: holds fills in a release buffer for this window before returning them. Ignored in live mode. See [§16.2.2](#1622-wire-latency-modeling) |
 | `--instrument` | none | Per-symbol trading rules (repeatable). Format: `SYMBOL:tick=X,lot=Y,minq=Q,minn=N,maker=M,taker=T` (any field optional). Price/qty get quantized before routing; orders below `min_qty` or `min_notional` are rejected |
 | `--depth-stream` | none | Optional L2 depth stream subscribed alongside `--stream` on a single combined WebSocket (provider-specific suffix; for Binance e.g. `depth20@100ms`). When set, the provider's orderbook is driven by real exchange levels and the paper market-maker is suppressed for that symbol. See [§16.2 Binance provider](#162-binance-provider) |
+| `--queue-model` | `none` | Shadow-mode only. `l2-snapshot` records depth at your limit price on submit and only releases the shadow fill once real tape has consumed that queue. Requires `--depth-stream`. |
+| `--maker-queue-model` | `none` | Paper/backtest only. `uniform` (recommended), `front`, or `back` cancel attribution for passive limits using real L2. Produces realistic maker fill rates and adverse selection. Requires `--depth-stream`. See [realism.md §Queue modeling](realism.md#queue-modeling). |
 
 ### Analytics & output
 
