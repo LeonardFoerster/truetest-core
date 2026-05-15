@@ -4,6 +4,7 @@
 
 #include "../console_dashboard.h"
 #include "../dashboard_snapshot.h"
+#include "../tui_style.h"
 
 #include <ncurses.h>
 
@@ -19,12 +20,7 @@ namespace truetest::ui {
 
 namespace {
 
-constexpr int kPairGreen  = 1;
-constexpr int kPairRed    = 2;
-constexpr int kPairYellow = 3;
-constexpr int kPairCyan   = 4;
-constexpr int kPairWhite  = 5;
-constexpr int kBarWidth   = 28;
+constexpr int kBarWidth = 28;
 
 const char* sev_text(event_severity s)
 {
@@ -38,16 +34,7 @@ const char* sev_text(event_severity s)
     return "?    ";
 }
 
-int sev_pair(event_severity s)
-{
-    switch (s)
-    {
-        case event_severity::error:  return kPairRed;
-        case event_severity::warn:   return kPairYellow;
-        case event_severity::notice: return kPairCyan;
-        default:                     return kPairWhite;
-    }
-}
+
 
 std::string fmt_hhmmss(std::chrono::system_clock::time_point tp)
 {
@@ -64,55 +51,22 @@ std::string fmt_hhmmss(std::chrono::system_clock::time_point tp)
     return buf;
 }
 
-void label(int y, int x, const char* text)
-{
-    attron(COLOR_PAIR(kPairCyan));
-    mvaddstr(y, x, text);
-    attroff(COLOR_PAIR(kPairCyan));
-}
 
-// Draw a horizontal usage gauge: [████████....] 65%
-// `frac` is current/limit clamped to [0, 1]. Color escalates with usage.
-void draw_gauge(int y, int x, double frac, double warn_frac = 0.8)
+
+// Draw a horizontal usage gauge using the new style system.
+// Color escalates based on usage.
+void draw_gauge(int y, int x, double frac)
 {
     if (frac < 0.0) frac = 0.0;
     if (frac > 1.0) frac = 1.0;
-    int filled = static_cast<int>(std::lround(frac * kBarWidth));
-    int empty  = kBarWidth - filled;
 
-    int pair = (frac >= 0.85) ? kPairRed
-              : (frac >= 0.6) ? kPairYellow
-              : kPairGreen;
+    Color bar_color = Color::Positive;
+    if (frac >= 0.9)      bar_color = Color::Danger;
+    else if (frac >= 0.7) bar_color = Color::Danger;
+    else if (frac >= 0.5) bar_color = Color::Warning;
+    else if (frac >= 0.3) bar_color = Color::Warning;
 
-    // Batched: build one filled string + one empty string, two
-    // mvaddstr calls instead of (filled+empty) mvaddch loops. ~20× fewer
-    // ncurses calls per gauge.
-    char filled_buf[64];
-    char empty_buf [64];
-    const int fw = std::min<int>(filled, sizeof(filled_buf) - 1);
-    const int ew = std::min<int>(empty,  sizeof(empty_buf)  - 1);
-    std::memset(filled_buf, '#', fw); filled_buf[fw] = '\0';
-    std::memset(empty_buf,  '.', ew); empty_buf[ew]  = '\0';
-
-    mvaddch(y, x, '[');
-    attron(COLOR_PAIR(pair));
-    mvaddstr(y, x + 1, filled_buf);
-    attroff(COLOR_PAIR(pair));
-    attron(A_DIM);
-    mvaddstr(y, x + 1 + filled, empty_buf);
-    attroff(A_DIM);
-    mvaddch(y, x + 1 + kBarWidth, ']');
-
-    // Warn-line tick at warn_frac (default 80%) — visible early-warning
-    // line so the eye sees how close we are to the danger zone before
-    // the bar itself goes yellow/red.
-    if (warn_frac > 0.0 && warn_frac < 1.0)
-    {
-        const int wx = static_cast<int>(std::lround(warn_frac * kBarWidth));
-        attron(COLOR_PAIR(kPairYellow) | A_BOLD);
-        mvaddch(y, x + 1 + wx, '|');
-        attroff(COLOR_PAIR(kPairYellow) | A_BOLD);
-    }
+    draw_bar(y, x, kBarWidth, frac, bar_color);
 
     char b[16];
     std::snprintf(b, sizeof(b), " %4.0f%%", frac * 100.0);
@@ -134,33 +88,74 @@ void RiskPanel::draw(int body_y0, int width, int height,
     int y = body_y0;
     int y_end = body_y0 + height;
 
-    // Halt banner
-    label(y, 2, "Status");
+    // Status line — now using semantic colors
+    draw_label(y, 2, "Status");
     {
-        int p = snap->risk.halted ? kPairRed : kPairGreen;
-        attron(COLOR_PAIR(p) | A_BOLD);
-        mvaddstr(y, 14, snap->risk.halted ? "HALTED  ⚠"  : "RUNNING");
-        attroff(COLOR_PAIR(p) | A_BOLD);
+        Color status_color = snap->risk.halted ? Color::Danger : Color::Positive;
+        set_color_bold(status_color);
+        mvaddstr(y, 14, snap->risk.halted ? "HALTED  ⚠" : "RUNNING");
+        unset_color_bold(status_color);
     }
     ++y;
 
     if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
 
-    // ── Risk gauges ──
-    label(y++, 2, "Limits");
+    // ── Overall Risk Level (new in Phase 2) ──
+    RiskLevel overall_risk = RiskLevel::Safe;
+
+    if (snap->risk.daily_loss_limit > 0.0)
+    {
+        double daily_frac = snap->risk.daily_loss / snap->risk.daily_loss_limit;
+        if (daily_frac >= 0.9)      overall_risk = RiskLevel::Critical;
+        else if (daily_frac >= 0.7) overall_risk = RiskLevel::Danger;
+        else if (daily_frac >= 0.5) overall_risk = RiskLevel::Warning;
+        else if (daily_frac >= 0.3) overall_risk = RiskLevel::Caution;
+    }
+
+    if (snap->risk.max_drawdown_limit > 0.0)
+    {
+        double dd_frac = std::abs(snap->risk.max_drawdown_pct) / snap->risk.max_drawdown_limit;
+        if (dd_frac >= 0.9 && overall_risk < RiskLevel::Critical) overall_risk = RiskLevel::Critical;
+        else if (dd_frac >= 0.7 && overall_risk < RiskLevel::Danger) overall_risk = RiskLevel::Danger;
+        else if (dd_frac >= 0.5 && overall_risk < RiskLevel::Warning) overall_risk = RiskLevel::Warning;
+        else if (dd_frac >= 0.3 && overall_risk < RiskLevel::Caution) overall_risk = RiskLevel::Caution;
+    }
+
+    // Overall Risk Level — very prominent (critical for futures)
+    draw_label(y, 2, "Overall Risk");
+    Color risk_col = risk_level_to_color(overall_risk);
+    set_color_bold(risk_col);
+    mvaddstr(y, 16, risk_level_to_string(overall_risk));
+    unset_color_bold(risk_col);
+    ++y;
+
+    if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
+
+    // ── Risk Limits ──
+    draw_label(y++, 2, "Risk Limits");
     if (y >= y_end) return;
 
-    auto gauge_row = [&](const char* lbl, double cur, double limit,
-                         const char* unit) {
+    // Helper for risk limits — gives stronger treatment to the really dangerous ones
+    auto risk_limit_row = [&](const char* lbl, double cur, double limit, const char* unit, bool is_critical = false) {
         if (y >= y_end) return;
-        mvprintw(y, 2, "%-22s", lbl);
+
+        draw_label(y, 2, lbl);
+
         if (limit > 0.0)
         {
-            draw_gauge(y, 26, cur / limit);
+            double frac = cur / limit;
+            Color bar_c = (frac >= 0.9) ? Color::Danger :
+                          (frac >= 0.7) ? Color::Danger :
+                          (frac >= 0.5) ? Color::Warning : Color::Positive;
+
+            draw_bar(y, 26, kBarWidth, frac, bar_c);
+
+            // Make the text more prominent for critical limits (Daily Loss & Drawdown)
+            if (is_critical) set_color_bold(bar_c);
             char b[64];
-            std::snprintf(b, sizeof(b), "%.2f%s / %.2f%s",
-                          cur, unit, limit, unit);
+            std::snprintf(b, sizeof(b), "%.2f%s / %.2f%s", cur, unit, limit, unit);
             mvaddstr(y, 64, b);
+            if (is_critical) unset_color_bold(bar_c);
         }
         else
         {
@@ -174,44 +169,42 @@ void RiskPanel::draw(int body_y0, int width, int height,
         ++y;
     };
 
-    gauge_row("Drawdown",       std::abs(snap->risk.max_drawdown_pct),
-              snap->risk.max_drawdown_limit, "%");
-    gauge_row("Open orders",    static_cast<double>(snap->risk.open_orders),
-              static_cast<double>(snap->risk.open_orders_limit), "");
-    gauge_row("Exposure",       snap->risk.exposure,
-              snap->risk.exposure_limit, "");
-    if (snap->risk.daily_loss_limit > 0.0)
-        gauge_row("Daily loss",  snap->risk.daily_loss,
-                  snap->risk.daily_loss_limit, "");
+    risk_limit_row("Drawdown",   std::abs(snap->risk.max_drawdown_pct), snap->risk.max_drawdown_limit, "%", true);
+    risk_limit_row("Daily Loss", snap->risk.daily_loss,                  snap->risk.daily_loss_limit,    "",  true);
+    risk_limit_row("Exposure",   snap->risk.exposure,                    snap->risk.exposure_limit,      "");
+    risk_limit_row("Open Orders", static_cast<double>(snap->risk.open_orders), 
+                   static_cast<double>(snap->risk.open_orders_limit), "");
 
     if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
 
     // ── Performance ──
-    label(y++, 2, "Performance");
+    draw_label(y++, 2, "Performance");
     if (y >= y_end) return;
 
-    auto perf_row = [&](const char* lbl, double v, const char* unit,
-                        int color = kPairWhite) {
+    auto perf_row = [&](const char* lbl, double v, const char* unit) {
         if (y >= y_end) return;
-        mvprintw(y, 2, "%-22s", lbl);
-        attron(COLOR_PAIR(color));
+        draw_label(y, 2, lbl);
+
+        Color c = Color::Neutral;
+        if (std::string(lbl).find("Sharpe") != std::string::npos) {
+            c = (v > 1.0) ? Color::Positive : (v < 0.0 ? Color::Negative : Color::Neutral);
+        } else if (std::string(lbl).find("Win") != std::string::npos) {
+            c = (v >= 55.0) ? Color::Positive : (v >= 45.0 ? Color::Neutral : Color::Warning);
+        } else if (std::string(lbl).find("markout") != std::string::npos) {
+            c = (v < 0.0) ? Color::Positive : (v > 2.0 ? Color::Danger : (v > 0.5 ? Color::Warning : Color::Neutral));
+        }
+
+        set_color(c);
         char b[32];
         std::snprintf(b, sizeof(b), "%+10.4f%s", v, unit);
         mvaddstr(y, 26, b);
-        attroff(COLOR_PAIR(color));
+        unset_color(c);
         ++y;
     };
 
-    perf_row("Sharpe (rolling)", snap->perf.sharpe, "",
-             snap->perf.sharpe > 1.0 ? kPairGreen
-              : snap->perf.sharpe < 0.0 ? kPairRed : kPairWhite);
-    perf_row("Win rate",         snap->perf.win_rate, "%",
-             snap->perf.win_rate >= 55.0 ? kPairGreen
-              : snap->perf.win_rate >= 45.0 ? kPairWhite : kPairYellow);
-    perf_row("Avg markout",      snap->perf.avg_markout_bps, " bps",
-             snap->perf.avg_markout_bps < 0.0 ? kPairGreen
-              : snap->perf.avg_markout_bps > 2.0 ? kPairRed
-              : snap->perf.avg_markout_bps > 0.5 ? kPairYellow : kPairWhite);
+    perf_row("Sharpe (rolling)", snap->perf.sharpe, "");
+    perf_row("Win rate",         snap->perf.win_rate, "%");
+    perf_row("Avg markout",      snap->perf.avg_markout_bps, " bps");
 
     // ── Per-symbol exposure mini-grid ──
     if (y < y_end && !snap->positions.empty())
@@ -246,22 +239,13 @@ void RiskPanel::draw(int body_y0, int width, int height,
                 : std::abs(p.qty) * p.avg_entry;
             const double frac = (snap->risk.exposure_limit > 0.0)
                 ? notional / snap->risk.exposure_limit : 0.0;
-            mvprintw(y, 2,  "%-10.10s", p.symbol.c_str());
-            // Tiny inline gauge.
+            draw_label(y, 2, p.symbol.c_str());
+
+            // Tiny inline gauge
             const int bw = 20;
-            const int filled = std::min(bw, static_cast<int>(std::lround(frac * bw)));
-            int p_pair = (frac >= 0.85) ? kPairRed
-                       : (frac >= 0.6)  ? kPairYellow : kPairGreen;
-            mvaddch(y, 14, '[');
-            attron(COLOR_PAIR(p_pair));
-            for (int i = 0; i < filled; ++i)
-                mvaddch(y, 15 + i, ACS_CKBOARD);
-            attroff(COLOR_PAIR(p_pair));
-            attron(A_DIM);
-            for (int i = filled; i < bw; ++i)
-                mvaddch(y, 15 + i, '.');
-            attroff(A_DIM);
-            mvaddch(y, 15 + bw, ']');
+            Color bar_c = (frac >= 0.85) ? Color::Danger : (frac >= 0.5 ? Color::Warning : Color::Positive);
+            draw_bar(y, 14, bw, frac, bar_c);
+
             mvprintw(y, 50, "%14.2f", notional);
             const double pct_port = (total_exp > 0.0) ? notional / total_exp * 100.0 : 0.0;
             mvprintw(y, 66, "%7.1f%%", pct_port);
@@ -285,9 +269,9 @@ void RiskPanel::draw(int body_y0, int width, int height,
 
     if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
 
-    // ── Recent events (fills the remaining vertical space) ──
+    // ── Recent Events ──
     if (y >= y_end) return;
-    label(y++, 2, "Recent events");
+    draw_label(y++, 2, "Recent Events");
 
     int max_lines = y_end - y;
     if (max_lines <= 0) return;
@@ -298,9 +282,12 @@ void RiskPanel::draw(int body_y0, int width, int height,
         if (y >= y_end) break;
         std::string ts = fmt_hhmmss(e.ts);
         mvaddstr(y, 2, ts.c_str());
-        attron(COLOR_PAIR(sev_pair(e.sev)));
+        Color sev_col = (e.sev == event_severity::error) ? Color::Danger :
+                        (e.sev == event_severity::warn)  ? Color::Warning :
+                        (e.sev == event_severity::notice)? Color::Accent : Color::Neutral;
+        set_color(sev_col);
         mvaddstr(y, 12, sev_text(e.sev));
-        attroff(COLOR_PAIR(sev_pair(e.sev)));
+        unset_color(sev_col);
         int maxw = width - 19;
         if (maxw < 1) maxw = 1;
         std::string msg = e.msg;

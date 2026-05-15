@@ -13,6 +13,7 @@
 #include "panels/health_panel.h"
 #include "panels/debug_panel.h"
 #include "panels/l2_panel.h"
+#include "tui_style.h"
 
 #include <ncurses.h>
 
@@ -193,6 +194,9 @@ void TabbedDashboard::start()
         // palette is in use, so consistency wins over theme adherence.
         init_pair(6, COLOR_WHITE, COLOR_RED);
     }
+
+    // Initialize the new semantic style system (Phase 2)
+    init_colors();
 
     start_time_ = std::chrono::steady_clock::now();
 
@@ -683,12 +687,8 @@ void TabbedDashboard::draw_status_bar(int width,
     const double dd   = static_cast<double>(dd_fp4)   / 1e2;
     const double eq   = snap ? snap->equity : 0.0;
 
-    // Constants for color pairs (same as panels — see overview_panel.cpp).
-    constexpr int kPairGreen  = 1;
-    constexpr int kPairRed    = 2;
-    constexpr int kPairYellow = 3;
-    constexpr int kPairCyan   = 4;
-    constexpr int kPairWhite  = 5;
+    // Using new semantic style system (Phase 2)
+    using Color = truetest::ui::Color;
 
     auto state_text = [](connection_state st) {
         switch (st) {
@@ -702,94 +702,99 @@ void TabbedDashboard::draw_status_bar(int width,
         }
         return "?";
     };
-    auto state_pair = [](connection_state st) {
+    auto get_state_color = [](connection_state st) -> Color {
         switch (st) {
-            case connection_state::live:         return kPairGreen;
-            case connection_state::halted:       return kPairRed;
+            case connection_state::live:         return Color::Positive;
+            case connection_state::halted:       return Color::Danger;
             case connection_state::reconnecting:
             case connection_state::backfill:
-            case connection_state::waiting:      return kPairYellow;
-            default:                             return kPairWhite;
+            case connection_state::waiting:      return Color::Warning;
+            default:                             return Color::Neutral;
         }
     };
 
     int y = 1;
     move(y, 0); clrtoeol();
 
-    // Pause tint: when the engine is paused, draw the entire status-bar
-    // row with a yellow background so the eye registers state without
-    // having to read text. The toast fades after 2.5 s — without this
-    // banner, users forget they're paused.
+    // Pause background — subtle but clear visual signal across the whole bar
     const bool paused = actions_.pause_state && actions_.pause_state();
     if (paused)
     {
-        attron(COLOR_PAIR(kPairYellow) | A_REVERSE);
+        set_color(Color::Warning);
+        attron(A_REVERSE);
         for (int xi = 0; xi < width; ++xi) mvaddch(y, xi, ' ');
-        attroff(COLOR_PAIR(kPairYellow) | A_REVERSE);
+        attroff(A_REVERSE);
+        unset_color(Color::Warning);
     }
 
     int x = 1;
-    auto put_pair = [&](const char* lbl, const char* val, int val_pair) {
+
+    // Helper for dim label + bold value (common pattern in good trading UIs)
+    auto put_field = [&](const char* lbl, const char* val, Color c, bool bold_value = true) {
         attron(A_DIM); mvaddstr(y, x, lbl); attroff(A_DIM);
         x += static_cast<int>(std::strlen(lbl));
-        attron(COLOR_PAIR(val_pair) | A_BOLD);
+        if (bold_value) set_color_bold(c); else set_color(c);
         mvaddstr(y, x, val);
-        attroff(COLOR_PAIR(val_pair) | A_BOLD);
-        x += static_cast<int>(std::strlen(val));
+        if (bold_value) unset_color_bold(c); else unset_color(c);
+        x += static_cast<int>(std::strlen(val)) + 2;
     };
 
     char buf[48];
 
-    put_pair(" ", state_text(state), state_pair(state));
-    x += 2;
+    // State (most important leftmost item)
+    Color state_col = get_state_color(state);
+    set_color_bold(state_col);
+    mvaddstr(y, x, state_text(state));
+    unset_color_bold(state_col);
+    x += static_cast<int>(std::strlen(state_text(state))) + 3;
 
+    // Market data
     if (last_fp8 >= 0) {
         std::snprintf(buf, sizeof(buf), "%.2f", last);
-        put_pair("last ", buf, kPairCyan);
-        x += 2;
+        put_field("last:", buf, Color::Accent, false);
     }
     if (bid_fp8 > 0 && ask_fp8 > 0) {
         const double mid = (bid + ask) * 0.5;
         const double bps = mid > 0 ? (ask - bid) / mid * 1e4 : 0.0;
         std::snprintf(buf, sizeof(buf), "%.1fbp", bps);
-        put_pair("spr ", buf, kPairWhite);
-        x += 2;
+        put_field("spr:", buf, Color::Muted, false);
     }
 
+    // Position
     std::snprintf(buf, sizeof(buf), "%+.4f", pos);
-    put_pair("pos ", buf,
-             pos > 0 ? kPairGreen : pos < 0 ? kPairRed : kPairWhite);
-    x += 2;
+    put_field("pos:", buf, pos > 0 ? Color::Positive : (pos < 0 ? Color::Negative : Color::Neutral));
 
+    // Equity
     std::snprintf(buf, sizeof(buf), "%.2f", eq);
-    put_pair("eq ", buf, kPairWhite);
-    x += 2;
+    put_field("eq:", buf, Color::Neutral);
 
+    // Total PnL — one of the most important numbers on screen
     std::snprintf(buf, sizeof(buf), "%+.2f", pnl + unrl);
-    put_pair("pnl ", buf,
-             (pnl + unrl) > 0 ? kPairGreen : (pnl + unrl) < 0 ? kPairRed : kPairWhite);
-    x += 2;
+    Color pnl_col = (pnl + unrl) > 0 ? Color::Positive : ((pnl + unrl) < 0 ? Color::Negative : Color::Neutral);
+    put_field("pnl:", buf, pnl_col, true);
 
+    // Drawdown — critical risk metric
     std::snprintf(buf, sizeof(buf), "%.2f%%", dd);
-    put_pair("dd ", buf,
-             dd <= -5.0 ? kPairRed : dd <= -1.0 ? kPairYellow : kPairWhite);
-    x += 2;
+    Color dd_col = (dd <= -5.0) ? Color::Danger : (dd <= -1.0 ? Color::Warning : Color::Muted);
+    put_field("dd:", buf, dd_col, true);
 
     if (halted) {
-        attron(COLOR_PAIR(kPairRed) | A_BOLD | A_REVERSE);
+        set_color_bold(Color::Danger);
+        attron(A_REVERSE);
         mvaddstr(y, x, " HALT ");
-        attroff(COLOR_PAIR(kPairRed) | A_BOLD | A_REVERSE);
+        attroff(A_REVERSE);
+        unset_color_bold(Color::Danger);
         x += 7;
     }
 
     if (drops_total > 0) {
         std::snprintf(buf, sizeof(buf), "%llu",
                       static_cast<unsigned long long>(drops_total));
-        put_pair("drops ", buf, kPairRed);
+        put_pair("drops ", buf, Color::Danger);
         x += 2;
     }
 
-    // ── Right edge: PAUSED label · clock · uptime ───────────────────
+    // ── Right side: PAUSED + Clock + Uptime ────────────────────────
     char right_buf[64] = {0};
     {
         // Wall clock (HH:MM:SS).
@@ -830,14 +835,14 @@ void TabbedDashboard::draw_status_bar(int width,
     const int rlen = static_cast<int>(std::strlen(right_buf));
     const int rx = std::max(x + 2, width - rlen - 1);
     if (paused) {
-        attron(COLOR_PAIR(kPairRed) | A_BOLD | A_REVERSE);
+        set_color_bold(Color::Warning);
+        attron(A_REVERSE);
+        mvaddstr(y, rx, right_buf);
+        attroff(A_REVERSE);
+        unset_color_bold(Color::Warning);
     } else {
         attron(A_DIM);
-    }
-    mvaddstr(y, rx, right_buf);
-    if (paused) {
-        attroff(COLOR_PAIR(kPairRed) | A_BOLD | A_REVERSE);
-    } else {
+        mvaddstr(y, rx, right_buf);
         attroff(A_DIM);
     }
 

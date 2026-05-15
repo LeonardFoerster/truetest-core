@@ -48,6 +48,17 @@ engine::engine(std::shared_ptr<data_handler> dh,
     if (config_.mode == engine_mode::shadow)
         shadow_tracker_ = std::make_unique<ShadowTracker>();
 
+    if (config_.mode == engine_mode::shadow)
+    {
+        exchange_portfolio_.emplace(config_.initial_balance);
+        exchange_analytics_.emplace(
+            config_.initial_balance,
+            config_.rolling_window,
+            config_.risk_free_rate,
+            config_.periods_per_year,
+            config_.max_equity_points);
+    }
+
     // Wire venue-bracket adapter if the provider offers one. Live mode
     // is the only setting where this currently kicks in (Binance OCO),
     // but the wiring is provider-driven, not mode-driven, so any future
@@ -1511,6 +1522,35 @@ void engine::print_summary()
                       << "    Avg queue position:  " << (avg_bps / 100) << "%\n";
         }
     }
+
+    // Dual Portfolio Shadow Report (Phase 2 - text version for non-TUI runs)
+    if (config_.mode == engine_mode::shadow)
+    {
+        const portfolio* exch = get_exchange_portfolio();
+        const Analytics* exch_analytics = get_exchange_analytics();
+
+        if (exch && exch_analytics)
+        {
+            double last_price = (last_mid_price_ > 0.0) ? last_mid_price_ : 0.0;
+
+            double sim_equity   = portfolio_.get_equity(last_price);
+            double exch_equity  = exch->get_equity(last_price);
+            double delta        = exch_equity - sim_equity;
+            double delta_pct    = (sim_equity > 0.0) ? (delta / sim_equity * 100.0) : 0.0;
+
+            std::cout << "\n";
+            std::cout << "  ============================================\n";
+            std::cout << "    Dual Portfolio Shadow Report (Text)\n";
+            std::cout << "  ============================================\n";
+            std::cout << std::fixed << std::setprecision(2);
+            std::cout << "    Sim Equity:      $" << sim_equity << "\n";
+            std::cout << "    Exchange Equity: $" << exch_equity << "\n";
+            std::cout << "    Delta:           $" << delta 
+                      << " (" << (delta >= 0 ? "+" : "") << delta_pct << "%)\n";
+            std::cout << "    Sim Cash:        $" << portfolio_.get_cash() << "\n";
+            std::cout << "    Exchange Cash:   $" << exch->get_cash() << "\n";
+        }
+    }
 }
 
 const Analytics& engine::get_analytics() const
@@ -1531,6 +1571,20 @@ const Analytics& engine::get_analytics() const
         break;
     }
     return analytics_;
+}
+
+const portfolio* engine::get_exchange_portfolio() const
+{
+    if (config_.mode != engine_mode::shadow || !exchange_portfolio_.has_value())
+        return nullptr;
+    return &exchange_portfolio_.value();
+}
+
+const Analytics* engine::get_exchange_analytics() const
+{
+    if (config_.mode != engine_mode::shadow || !exchange_analytics_.has_value())
+        return nullptr;
+    return &exchange_analytics_.value();
 }
 
 bool engine::process_order(const std::shared_ptr<order_event>& o,
@@ -1713,6 +1767,12 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                 {
                     if (shadow_tracker_)
                         shadow_tracker_->on_exchange_fill(ef);
+
+                    if (exchange_portfolio_.has_value())
+                    {
+                        exchange_portfolio_->on_fill(ef, lookup_opener(ef.get_order_id()),
+                                                   lookup_strategy_name(ef.get_order_id()));
+                    }
                 }
             }
         }
@@ -2423,6 +2483,18 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                 {
                     if (shadow_tracker_)
                         shadow_tracker_->on_exchange_fill(f);
+
+                    if (exchange_portfolio_.has_value())
+                    {
+                        exchange_portfolio_->on_fill(f, lookup_opener(f.get_order_id()),
+                                                   lookup_strategy_name(f.get_order_id()));
+                    }
+                    if (exchange_analytics_.has_value())
+                    {
+                        // Feed to second analytics for equity curve / metrics
+                        auto fill_ptr = fill_pool_.acquire(f);
+                        exchange_analytics_->on_event(fill_ptr);
+                    }
                     continue;
                 }
                 cache_fill(f);
@@ -2519,6 +2591,18 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                 {
                     if (shadow_tracker_)
                         shadow_tracker_->on_exchange_fill(f);
+
+                    if (exchange_portfolio_.has_value())
+                    {
+                        exchange_portfolio_->on_fill(f, lookup_opener(f.get_order_id()),
+                                                   lookup_strategy_name(f.get_order_id()));
+                    }
+                    if (exchange_analytics_.has_value())
+                    {
+                        // Feed to second analytics for equity curve / metrics
+                        auto fill_ptr = fill_pool_.acquire(f);
+                        exchange_analytics_->on_event(fill_ptr);
+                    }
                     continue;
                 }
                 cache_fill(f);

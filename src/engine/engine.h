@@ -84,8 +84,10 @@ private:
     std::string primary_strategy_name_;
     std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>> execution_adapters_;
     portfolio portfolio_;
+    std::optional<portfolio> exchange_portfolio_;     // only used in shadow mode: real tape view
     OrderTracker order_tracker_;
     Analytics analytics_;
+    std::optional<Analytics> exchange_analytics_;     // only used in shadow mode
     AdverseSelectionTracker adverse_selection_;
 
     void write_adapter_diagnostics(truetest::ui::streaming_stats& st);
@@ -384,6 +386,10 @@ public:
                          tick_side side, double price, int64_t new_qty);
     void print_summary();
     const Analytics& get_analytics() const;
+
+    // Only valid in shadow mode. Returns nullptr otherwise.
+    const portfolio* get_exchange_portfolio() const;
+    const Analytics* get_exchange_analytics() const;
 
     // Fill `out` with a coherent dashboard snapshot. Returns false when no
     // snapshot exists yet (engine just constructed; first refresh hasn't

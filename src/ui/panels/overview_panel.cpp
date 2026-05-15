@@ -4,6 +4,7 @@
 
 #include "../console_dashboard.h"
 #include "../dashboard_snapshot.h"
+#include "../tui_style.h"
 #include "analytics/ascii_widgets.h"
 
 #include <ncurses.h>
@@ -20,24 +21,18 @@ namespace truetest::ui {
 
 namespace {
 
-constexpr int kPairGreen  = 1;
-constexpr int kPairRed    = 2;
-constexpr int kPairYellow = 3;
-constexpr int kPairCyan   = 4;
-constexpr int kPairWhite  = 5;
+using Color = truetest::ui::Color;
 
 void label(int y, int x, const char* text)
 {
-    attron(COLOR_PAIR(kPairCyan));
-    mvaddstr(y, x, text);
-    attroff(COLOR_PAIR(kPairCyan));
+    draw_label(y, x, text);   // Now uses the new style system
 }
 
-int pnl_pair(double v)
+Color pnl_color(double v)
 {
-    if (v > 0) return kPairGreen;
-    if (v < 0) return kPairRed;
-    return kPairWhite;
+    if (v > 0) return Color::Positive;
+    if (v < 0) return Color::Negative;
+    return Color::Neutral;
 }
 
 std::string fmt_int(std::uint64_t v)
@@ -188,28 +183,51 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     int y = body_y0;
     if (y >= body_y0 + height) return;
 
-    // Row: bid · ask · spread (last is in status bar) + rate
-    label(y, x_label, "Bid/Ask");
-    if (bid_fp8 > 0 && ask_fp8 > 0)
-    {
-        char b[64];
-        const double mid = (bid + ask) * 0.5;
-        const double bps = mid > 0 ? (ask - bid) / mid * 1e4 : 0.0;
-        std::snprintf(b, sizeof(b), "%.2f / %.2f  (%.1fbp)", bid, ask, bps);
-        mvaddstr(y, x_value, b);
-    }
-    else mvaddstr(y, x_value, "—");
-    label(y, x_label2, "Rate");
-    {
-        char rb[32];
-        std::snprintf(rb, sizeof(rb), "%6.1f ev/s", data.rate_ema());
-        mvaddstr(y, x_value2, rb);
-    }
+    // ── Key Money Metrics ──
+    // These 5 numbers are what most traders look at first and most often.
+
+    // Equity
+    draw_label(y, x_label, "Equity");
+    set_color_bold(Color::Neutral);
+    mvaddstr(y, x_value, fmt_money(eq).c_str());
+    unset_color_bold(Color::Neutral);
     ++y;
+
+    // Realized PnL
+    draw_label(y, x_label, "Realized");
+    set_color_bold(pnl_color(pnl));
+    mvaddstr(y, x_value, fmt_money(pnl).c_str());
+    unset_color_bold(pnl_color(pnl));
+    ++y;
+
+    // Unrealized PnL
+    draw_label(y, x_label, "Unrealized");
+    set_color_bold(pnl_color(unrl));
+    mvaddstr(y, x_value, fmt_money(unrl).c_str());
+    unset_color_bold(pnl_color(unrl));
+    ++y;
+
+    // TOTAL PnL — the single most important number (make it stand out)
+    double total_pnl = pnl + unrl;
+    draw_label(y, x_label, "TOTAL PnL");
+    set_color_bold(pnl_color(total_pnl));
+    mvaddstr(y, x_value, fmt_money(total_pnl).c_str());
+    unset_color_bold(pnl_color(total_pnl));
+    ++y;
+
+    // Current Position
+    draw_label(y, x_label, "Position");
+    Color pos_col = (pos > 0) ? Color::Positive : (pos < 0 ? Color::Negative : Color::Neutral);
+    set_color_bold(pos_col);
+    mvaddstr(y, x_value, fmt_qty(pos).c_str());
+    unset_color_bold(pos_col);
+    ++y;
+
+    if (y < body_y0 + height) mvhline(y++, 1, ACS_HLINE, width - 2);
 
     if (bf_total > 0)
     {
-        label(y, x_label, "Backfill");
+        draw_label(y, x_label, "Backfill");
         char b[32];
         std::snprintf(b, sizeof(b), "%u/%u %s", bf_done, bf_total,
                       bf_done >= bf_total ? "done" : "...");
@@ -220,75 +238,56 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     // Spacer
     if (y < body_y0 + height) mvhline(y++, 1, ACS_HLINE, width - 2);
 
-    // Row: events / fills / trades
-    label(y, x_label, "Events");
+    // ========== ACTIVITY SECTION ==========
+    // Activity
+    draw_label(y, x_label, "Events");
     mvaddstr(y, x_value, fmt_int(events).c_str());
-    label(y, x_label2, "Fills");
+    draw_label(y, x_label2, "Fills");
     mvaddstr(y, x_value2, fmt_int(fills).c_str());
     ++y;
-    label(y, x_label, "Round-trips");
+
+    draw_label(y, x_label, "Trades");
     mvaddstr(y, x_value, fmt_int(trades).c_str());
-    label(y, x_label2, "Open ord");
+    draw_label(y, x_label2, "Open Orders");
     mvaddstr(y, x_value2, fmt_int(open_ord).c_str());
     ++y;
 
-    // Row: realized / drawdown
-    label(y, x_label, "Realized");
-    attron(COLOR_PAIR(pnl_pair(pnl)));
-    mvaddstr(y, x_value, fmt_money(pnl).c_str());
-    attroff(COLOR_PAIR(pnl_pair(pnl)));
-    label(y, x_label2, "Drawdown");
-    {
-        int p = dd <= -5.0 ? kPairRed : (dd <= -1.0 ? kPairYellow : kPairWhite);
-        attron(COLOR_PAIR(p));
-        char b[16];
-        std::snprintf(b, sizeof(b), "%+6.2f%%", dd);
-        mvaddstr(y, x_value2, b);
-        attroff(COLOR_PAIR(p));
-    }
-    ++y;
+    if (y < body_y0 + height) mvhline(y++, 1, ACS_HLINE, width - 2);
 
-    // Row: unrealized / position
-    label(y, x_label, "Unrealized");
-    attron(COLOR_PAIR(pnl_pair(unrl)));
-    mvaddstr(y, x_value, fmt_money(unrl).c_str());
-    attroff(COLOR_PAIR(pnl_pair(unrl)));
-    label(y, x_label2, "Position");
-    {
-        int p = pos > 0 ? kPairGreen : (pos < 0 ? kPairRed : kPairWhite);
-        attron(COLOR_PAIR(p));
-        mvaddstr(y, x_value2, fmt_qty(pos).c_str());
-        attroff(COLOR_PAIR(p));
-    }
-    ++y;
-
-    // Row: toxicity / win rate
-    label(y, x_label, "Toxicity");
-    if (tox_n > 0)
-    {
-        int p = tox >  2.0 ? kPairRed
-              : tox >  0.5 ? kPairYellow
-              : tox <  0.0 ? kPairGreen
-              : kPairWhite;
-        attron(COLOR_PAIR(p));
-        char b[32];
-        std::snprintf(b, sizeof(b), "%+5.2f bps (n=%u)", tox, tox_n);
-        mvaddstr(y, x_value, b);
-        attroff(COLOR_PAIR(p));
-    }
-    else mvaddstr(y, x_value, "—");
-    label(y, x_label2, "Win rate");
+    // ── Performance ──
+    draw_label(y, x_label, "Win Rate");
     if (trades > 0)
     {
         int pct = static_cast<int>(wr_bps / 100);
-        int p = pct >= 55 ? kPairGreen : (pct >= 45 ? kPairWhite : kPairYellow);
-        attron(COLOR_PAIR(p));
+        Color c = (pct >= 55) ? Color::Positive : (pct >= 45 ? Color::Neutral : Color::Warning);
+        set_color_bold(c);
         char b[8];
         std::snprintf(b, sizeof(b), "%d%%", pct);
+        mvaddstr(y, x_value, b);
+        unset_color_bold(c);
+    }
+    else mvaddstr(y, x_value, "—");
+
+    draw_label(y, x_label2, "Toxicity");
+    if (tox_n > 0)
+    {
+        Color c = (tox > 2.0) ? Color::Danger : (tox > 0.5 ? Color::Warning : (tox < 0.0 ? Color::Positive : Color::Neutral));
+        set_color(c);
+        char b[32];
+        std::snprintf(b, sizeof(b), "%+5.2f bps", tox);
         mvaddstr(y, x_value2, b);
-        attroff(COLOR_PAIR(p));
+        unset_color(c);
     }
     else mvaddstr(y, x_value2, "—");
+    ++y;
+
+    label(y, x_label, "Drawdown");
+    Color dd_col = (dd <= -5.0) ? Color::Danger : (dd <= -1.0 ? Color::Warning : Color::Neutral);
+    set_color(dd_col);
+    char dd_buf[16];
+    std::snprintf(dd_buf, sizeof(dd_buf), "%+6.2f%%", dd);
+    mvaddstr(y, x_value, dd_buf);
+    unset_color(dd_col);
     ++y;
 
     // Row: inventory bar (current exposure vs limit) + cash

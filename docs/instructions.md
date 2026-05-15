@@ -923,12 +923,19 @@ prompts the operator to solve a fresh random addition challenge — two
 integers in `[100, 9999]`. The run aborts cleanly on a wrong answer,
 non-numeric input, or EOF, so a stray `Enter` cannot launch live trading.
 The challenge is skipped only when `--testnet` is set. Orders are signed
-with HMAC-SHA256 and submitted to `/api/v3/order`. Always pair with tight
-`--max-daily-loss`, `--max-trades-per-hour`, and `--risk-unwind` so a bug
-cannot drain the account.
+with HMAC-SHA256 and submitted to `/api/v3/order` (spot) or `/fapi/v1/order`
+(futures). Always pair with tight `--max-daily-loss`, `--max-trades-per-hour`,
+and `--risk-unwind` so a bug cannot drain the account.
 
-For testnet, see [§16.5](#165-binance-spot-testnet) below or
-[`docs/testnet.md`](testnet.md) for the full walkthrough.
+For a detailed step-by-step of what happens to a live futures order after
+submission (REST ack → user-data WS → brackets → kill switch → dead-man's
+switch), see [`docs/futures-order-lifecycle.md`](futures-order-lifecycle.md).
+
+For **spot** testnet, see [§16.5](#165-binance-spot-testnet) below or
+[`docs/testnet.md`](testnet.md).  
+For **USDT-M futures testnet**, use [`docs/futures-testnet.md`](futures-testnet.md)
+instead — it covers one-way mode, dead-man's switch, liquidation warnings,
+and futures-specific refusal reasons.
 
 ### 16.5 Binance spot testnet
 
@@ -1001,7 +1008,7 @@ curl -G "http://127.0.0.1:9000/exec" --data-urlencode \
 
 Full operational notes (gotchas, account-reset semantics, `MIN_NOTIONAL`
 threshold, futures-testnet scope, etc.) in
-[`docs/testnet.md`](testnet.md).
+[`docs/testnet.md`](testnet.md) (spot) or [`docs/futures-testnet.md`](futures-testnet.md) (USDT-M futures).
 
 #### 16.2.3 Maker queue modeling (paper & backtest realism)
 
@@ -2670,7 +2677,8 @@ cmake --build build
 ### 34.9 Binance testnet live execution
 
 Same code path as mainnet live; the captcha is skipped because `--testnet`
-is set. See [`docs/testnet.md`](testnet.md) for the full walkthrough,
+is set. See [`docs/testnet.md`](testnet.md) (spot) or
+[`docs/futures-testnet.md`](futures-testnet.md) (USDT-M futures) for the full walkthrough.
 account setup, refusal gates, and gotchas.
 
 ```bash
@@ -2924,7 +2932,7 @@ cmake --install build
 # If BUILD_SHARED_LIB=ON: libtruetest.so to lib/, truetest_api.h to include/truetest/
 ```
 
-### 34.34 Production-style live run
+### 34.34 Production-style live run (Spot)
 
 ```bash
 ./build/engine_live \
@@ -2938,6 +2946,27 @@ cmake --install build
   --output /var/log/truetest/results.json
 ```
 
-Combines tight risk caps with automatic unwind, periodic checkpointing,
-rotated event logging, and a JSON analytics export — the shape of a run you
-would actually leave unattended.
+### 34.35 Production-style live run — USDT-M Futures (recommended)
+
+```bash
+./build/engine_live \
+  --provider binance-futures --symbol btcusdt --stream kline_1m \
+  --live --api-key "$BINANCE_FUTURES_API_KEY" --api-secret "$BINANCE_FUTURES_API_SECRET" \
+  --strategy your_futures_strategy --balance 5000 \
+  --risk-fraction 0.005 \
+  --max-daily-loss 80 --max-trades-per-hour 15 --risk-unwind \
+  --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 10000 \
+  --min-liq-distance-pct 0.08 \
+  --checkpoint /var/lib/truetest/live_futures.ckpt \
+  --log-events /var/log/truetest/futures_events.bin \
+  --persist --run-tag live_futures_$(date +%F)
+```
+
+**Futures-specific safety additions**:
+- `--dead-man-countdown-ms` + heartbeat (on by default, shown explicitly here)
+- `--min-liq-distance-pct` (pre-trade liquidation buffer check)
+- Smaller `--risk-fraction` and tight daily loss (futures leverage amplifies mistakes)
+- `--persist` + meaningful `run-tag` for later analysis in QuestDB
+
+This is the shape of a defensible unattended futures run. Always start
+much smaller on mainnet than these numbers.

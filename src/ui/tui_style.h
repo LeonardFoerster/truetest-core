@@ -1,0 +1,89 @@
+#pragma once
+#ifdef HAS_RICH_TUI
+
+#include <ncurses.h>
+
+#include <string>
+
+namespace truetest::ui {
+
+/**
+ * TUI Style System (Lightweight version)
+ *
+ * This file provides semantic colors and helper functions to improve
+ * visual hierarchy and danger signaling without a full theming engine.
+ *
+ * Color philosophy:
+ * - Use semantic names (Positive, Danger, Warning, etc.) instead of raw pairs.
+ * - Danger states should be loud and obvious.
+ * - Muted/dim for secondary information to reduce visual noise.
+ */
+
+// ─────────────────────────────────────────────────────────────
+// Semantic Color Pairs
+// ─────────────────────────────────────────────────────────────
+
+enum class Color {
+    Positive,      // Good PnL, healthy state
+    Negative,      // Bad PnL
+    Warning,       // Caution zone
+    Danger,        // Critical / high risk
+    Neutral,       // Default text
+    Muted,         // Secondary / less important info
+    Accent,        // Cyan-style labels (use sparingly)
+    White,
+    Black,
+};
+
+// Initialize color pairs. Call once during TabbedDashboard startup.
+void init_colors();
+
+// Apply a semantic color (foreground only)
+void set_color(Color c);
+void unset_color(Color c);
+
+// Apply color + bold
+void set_color_bold(Color c);
+void unset_color_bold(Color c);
+
+// Apply color + dim (for secondary information)
+void set_color_dim(Color c);
+void unset_color_dim(Color c);
+
+// ─────────────────────────────────────────────────────────────
+// Helper Drawing Functions
+// ─────────────────────────────────────────────────────────────
+
+// Draw a label in accent color
+void draw_label(int y, int x, const char* text);
+
+// Draw a value with automatic positive/negative coloring
+void draw_value(int y, int x, double value, int precision = 2);
+
+// Draw a value with explicit color
+void draw_value(int y, int x, double value, Color color, int precision = 2);
+
+// Draw a percentage bar
+void draw_bar(int y, int x, int width, double percentage, Color color);
+
+// Draw a simple risk level indicator
+void draw_risk_level(int y, int x, const std::string& level, Color color);
+
+// ─────────────────────────────────────────────────────────────
+// Risk Level Helpers (very important for futures)
+// ─────────────────────────────────────────────────────────────
+
+enum class RiskLevel {
+    Safe,
+    Caution,
+    Warning,
+    Danger,
+    Critical,
+};
+
+Color risk_level_to_color(RiskLevel level);
+const char* risk_level_to_string(RiskLevel level);
+
+} // namespace truetest::ui
+
+#endif // HAS_RICH_TUI

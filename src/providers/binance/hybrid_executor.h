@@ -133,6 +133,23 @@ public:
         return book_adapter_->modify_order(order_id, new_price, new_qty);
     }
 
+    void on_l2_snapshot(
+        const std::string& symbol,
+        const std::vector<std::pair<double, double>>& bids,
+        const std::vector<std::pair<double, double>>& asks) override
+    {
+        book_adapter_->on_l2_snapshot(symbol, bids, asks);
+    }
+
+    void on_l2_update(
+        const std::string& symbol,
+        order_side side,
+        double price,
+        double new_size) override
+    {
+        book_adapter_->on_l2_update(symbol, side, price, new_size);
+    }
+
     void on_mid_price(double mid)
     {
         if (!(mid > 0.0) || !book_) return;

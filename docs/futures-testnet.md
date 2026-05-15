@@ -11,6 +11,28 @@ This is a separate stack from spot. Different host, different signup,
 different keys, different engine provider (`binance-futures`). It is not
 a flag on the spot provider.
 
+> **If you are trading USDT-M futures only**, this document + the realistic
+> demo workflow in [`docs/demo-trading-workflow.md`](demo-trading-workflow.md)
+> (with the futures adaptations) + [`docs/futures-testnet.md`](futures-testnet.md)
+> form your complete pre-real-money path.
+
+## Recommended pre-mainnet validation path for futures traders
+
+For a clear picture of what actually happens to an order once it leaves your strategy,
+read [`docs/futures-order-lifecycle.md`](futures-order-lifecycle.md).
+
+1. **Backtest + realism** on recorded mainnet futures tape (see
+   `demo-trading-workflow.md` "Futures example").
+2. **Deterministic replay** of that tape.
+3. **Live shadow** on mainnet futures feed (`--provider binance-futures` +
+   `--depth-stream depth20@100ms`).
+4. **Protocol + safety validation** on futures testnet (this document).
+5. **Tiny-size mainnet** with dead-man's switch armed, tight
+   `--min-liq-distance-pct`, `--max-daily-loss`, and `--risk-unwind`.
+
+Only after steps 1–3 show acceptable sim-vs-reality divergence should you
+proceed to step 4 (testnet) and then step 5 (tiny mainnet).
+
 ## What you need
 
 - An `engine_live` binary built with `-DENABLE_BINANCE=ON`. Same compile-

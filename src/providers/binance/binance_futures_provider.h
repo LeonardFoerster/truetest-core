@@ -421,7 +421,8 @@ public:
             auto book = std::make_shared<orderbook>();
             hybrid_exec_ = std::make_shared<HybridExecutor>(
                 binance_exec_, book, fee_model_, fill_model_,
-                qty_scale_, spread_step_factor_, wire_latency_model_);
+                qty_scale_, spread_step_factor_, wire_latency_model_,
+                maker_queue_model_);
             executor_ = hybrid_exec_;
         }
 
