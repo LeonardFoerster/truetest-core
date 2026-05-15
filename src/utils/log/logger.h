@@ -110,7 +110,7 @@ private:
     std::atomic<int> min_level_{static_cast<int>(level::info)};
 };
 
-} // namespace tt_log
+}
 
 #define LOG_INFO(component, ...)  ::tt_log::Logger::instance().log(::tt_log::level::info,  component, __VA_ARGS__)
 #define LOG_WARN(component, ...)  ::tt_log::Logger::instance().log(::tt_log::level::warn,  component, __VA_ARGS__)

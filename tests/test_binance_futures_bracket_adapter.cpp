@@ -60,7 +60,7 @@ truetest::exits::exit_intent make_long_intent(std::uint64_t opener,
     return ei;
 }
 
-} // namespace
+}
 
 TEST(BinanceFuturesBracketAdapter, AdvertisesStopMarketNotOco)
 {

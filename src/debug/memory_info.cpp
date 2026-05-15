@@ -91,6 +91,6 @@ void MemorySampler::log() const
             fmt_delta(static_cast<int64_t>(end_.heap_bytes) - static_cast<int64_t>(start_.heap_bytes)).c_str());
 }
 
-} // namespace debug
+}
 
 #endif

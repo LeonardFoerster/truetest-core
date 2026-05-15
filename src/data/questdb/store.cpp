@@ -33,7 +33,7 @@ QuestdbStore::HttpExecFn make_default_http_exec(const std::string& host,
     };
 }
 
-} // namespace
+}
 
 QuestdbStore::QuestdbStore(StoreConfig cfg)
     : cfg_(std::move(cfg))
@@ -302,6 +302,6 @@ void QuestdbStore::flush()
     if (ilp_) ilp_->flush();
 }
 
-} // namespace truetest::questdb
+}
 
 #endif // HAS_QUESTDB

@@ -97,7 +97,7 @@ std::string render_attribution(
     return oss.str();
 }
 
-} // namespace
+}
 
 std::string render_returns_section(const AnalyticsReport& r, const report_options& o)
 {
@@ -299,4 +299,4 @@ std::string render_report(const AnalyticsReport& r, const report_options& o)
     return oss.str();
 }
 
-} // namespace tt
+}

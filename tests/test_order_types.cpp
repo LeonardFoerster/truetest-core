@@ -16,7 +16,7 @@ struct SilenceCout_OT {
     SilenceCout_OT() : sink(), orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceCout_OT() { std::cout.rdbuf(orig); }
 };
-} // namespace
+}
 
 static auto epoch_ms(int64_t ms)
 {

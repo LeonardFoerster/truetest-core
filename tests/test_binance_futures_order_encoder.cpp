@@ -24,7 +24,7 @@ order_event make_order(const std::string& symbol,
     return o;
 }
 
-} // namespace
+}
 
 TEST(BinanceFuturesOrderEncoder, SubmitLimitUsesFapiEndpoint)
 {

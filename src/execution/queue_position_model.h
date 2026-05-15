@@ -11,7 +11,6 @@
 #include <vector>
 
 // Queue-position estimate for shadow-mode passive limits.
-//
 // TradeTapeShadowAdapter without this model fills any limit the moment a
 // real trade crosses it — optimistic for makers, because real life would
 // have served the volume sitting ahead of you first. The model snapshots
@@ -59,7 +58,6 @@ public:
 // L2 snapshot model. Maintains the most recent bid/ask ladder per
 // symbol from `on_snapshot` + `on_update`. queue_ahead(side, P) returns
 // the size resting at level P on the corresponding side.
-//
 // Refuses (returns 0) when the snapshot is older than max_staleness_;
 // 100ms diff streams plus WS jitter put fresh snapshots typically under
 // 200ms, so 1s is a wide tolerance that still catches stalls.

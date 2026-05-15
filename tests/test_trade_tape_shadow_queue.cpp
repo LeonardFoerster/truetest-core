@@ -24,7 +24,7 @@ order_event limit_buy(uint64_t id, double price, double qty, tp ts,
     return o;
 }
 
-} // namespace
+}
 
 // Baseline: snapshot says 5 BTC ahead of us; trade prints below the
 // queue (3 BTC) leave 2 ahead, no fill yet. The next print finishes the

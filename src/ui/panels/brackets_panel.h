@@ -27,6 +27,6 @@ private:
     std::string filter_;
 };
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

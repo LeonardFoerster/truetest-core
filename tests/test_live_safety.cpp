@@ -45,7 +45,7 @@ public:
     }
 };
 
-} // namespace
+}
 
 TEST(LiveSafety, ReconcilerFailure_BlocksConstruction)
 {

@@ -57,7 +57,7 @@ wrap(std::shared_ptr<fake_post> f)
     };
 }
 
-} // namespace
+}
 
 TEST(BinanceFuturesDeadMansSwitch, StartArmsCountdown)
 {

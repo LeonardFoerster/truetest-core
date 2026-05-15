@@ -22,18 +22,15 @@
 // timer. If the engine dies between refreshes, Binance auto-cancels
 // every open order on the configured symbol within `countdown_ms` of
 // the last successful heartbeat.
-//
 // Layered safety with the orderly kill-switch:
 //   - Orderly shutdown: kill-switch cancels orders + flattens position;
 //     this DMS gets disarm()ed afterward (countdownTime=0).
 //   - Catastrophic shutdown (SIGKILL / OOM / kernel panic / network gone):
 //     kill-switch never runs. The DMS countdown still expires server-side
 //     and Binance cancels orders.
-//
 // Critically: this only cancels ORDERS. Open futures positions stay
 // open after auto-cancel; operator must close manually. The DMS is
 // half a safety net; the kill-switch's flatten step is the other half.
-//
 // The class itself doesn't touch a socket — it routes everything
 // through a `post_fn` callable, matching the bracket adapter's pattern.
 // `make_binance_futures_dead_mans_switch(rest_client, ...)` is the

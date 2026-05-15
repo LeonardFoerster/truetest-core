@@ -202,6 +202,6 @@ void hardware_info::log() const
     DBG_HW("  Isolated cores  : %s", isolated_cores.c_str());
 }
 
-} // namespace debug
+}
 
 #endif

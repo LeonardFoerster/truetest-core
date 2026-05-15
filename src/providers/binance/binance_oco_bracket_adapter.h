@@ -18,7 +18,6 @@
 // Single-bracket only (one SL + one TP per opener) — multi-leg scale-outs
 // (TP1/TP2/SL) are deferred; for those the engine-side eval remains the
 // only enforcement until a higher-fidelity adapter ships.
-//
 // Constructed with two callables (post + del) following the same pattern
 // as BinanceRestOrderTransport so production wiring uses the real signed
 // REST client and tests inject a fake. The adapter never touches a socket

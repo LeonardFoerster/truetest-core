@@ -27,7 +27,7 @@ struct fake_caller
     }
 };
 
-} // namespace
+}
 
 TEST(BinanceRestOrderTransport, SubmitSuccessExtractsExchangeOrderId)
 {

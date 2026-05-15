@@ -12,7 +12,6 @@
 // venue-agnostic RiskManager. Providers expose an instance via
 // IProvider::get_risk_check(); the engine consults it before the
 // existing RiskManager::check_order pass.
-//
 // Concrete subclasses are venue-specific. FuturesRiskCheck is the
 // USDT-M futures impl. Spot has no separate check today (its rules
 // are cash-bound and already covered by RiskManager + the portfolio's
@@ -50,21 +49,17 @@ public:
 
 // USDT-M futures pre-trade risk: notional cap, leverage cap, projected
 // post-trade liquidation distance.
-//
 // Important caveats encoded here (read before tuning the caps):
-//
 //  - Cash proxy. The check uses portfolio.get_cash() as the available
 //    margin. For isolated positions on a single symbol that's accurate;
 //    for cross-margin or multi-symbol setups it's a coarse proxy.
 //    Conservative when local cash < venue available_balance; optimistic
 //    when it's higher. Operators with cross-margin risk should set
 //    caps tighter than the strictly-necessary venue limits.
-//
 //  - Maintenance margin tiers. Binance USDT-M uses notional-tiered MM
 //    rates (BTCUSDT: 0.5% up to 1M, then 0.65%, then …). This impl
 //    uses a flat default (0.5%); raise via config for higher-notional
 //    accounts where tiers actually bite.
-//
 //  - Pre-trade entry approximation. We don't know the entry price of
 //    the new position, so the liquidation projection assumes entry ≈
 //    mark. This is a small error for ack-fast venues like Binance

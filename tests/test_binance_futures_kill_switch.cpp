@@ -18,7 +18,7 @@ struct SilenceStderr {
     ~SilenceStderr() { std::cerr.rdbuf(orig); }
 };
 
-} // namespace
+}
 
 TEST(BinanceFuturesKillSwitch, NullRestReturnsFalseAndDoesNotCrash)
 {

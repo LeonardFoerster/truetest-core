@@ -36,7 +36,7 @@ std::string report(const std::string& x, const std::string& X,
     return j;
 }
 
-} // namespace
+}
 
 TEST(BinanceUserDataParser, RejectsNonExecutionReports)
 {

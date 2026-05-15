@@ -54,7 +54,7 @@ std::string make_tag()
     return "itest_" + std::to_string(std::time(nullptr));
 }
 
-} // namespace
+}
 
 // End-to-end test against a live QuestDB daemon. Skipped (not failed)
 // when QUESTDB_TEST_HOST is not set, so CI without the daemon is safe.

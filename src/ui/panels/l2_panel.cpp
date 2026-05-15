@@ -50,7 +50,7 @@ int source_pair(dashboard_snapshot::l2_source s)
     }
 }
 
-} // namespace
+}
 
 void L2Panel::draw(int body_y0, int width, int height,
                    const ConsoleDashboard& data,
@@ -257,6 +257,6 @@ void L2Panel::draw(int body_y0, int width, int height,
     }
 }
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

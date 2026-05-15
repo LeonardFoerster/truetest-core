@@ -79,4 +79,4 @@ inline exit_intent make_short_exit_intent(const std::string& symbol,
     return ei;
 }
 
-} // namespace truetest::exits
+}

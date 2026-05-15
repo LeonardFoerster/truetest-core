@@ -185,4 +185,4 @@ private:
     void release_venue_bracket(std::uint64_t opener_order_id);
 };
 
-} // namespace truetest::exits
+}

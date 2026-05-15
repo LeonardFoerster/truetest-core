@@ -51,7 +51,6 @@ struct bracket_caps
 // Translates ExitManager intents into venue-resting orders. One adapter
 // per provider; nullptr provider means engine-side eval is the only path
 // (current behavior, used by backtest and shadow).
-//
 // Defense-in-depth contract: the in-process armed intent in ExitManager
 // stays armed even after place() succeeds. Both paths watching the same
 // price stream is intentional — if the venue lags or the WS gaps, the
@@ -67,7 +66,6 @@ public:
     // Called once after the opener fills. Returns handles describing
     // what was placed; empty handles means "could not place — engine
     // remains the sole enforcer" (logged as a warning; not fatal).
-    //
     // opener_fill_price is provided so adapters that need a price
     // anchor (rounding to tick size, sanity bounds) have it without
     // re-deriving from the intent. The intent's stop_loss/take_profit
@@ -94,7 +92,6 @@ public:
     // from a previous run. Called once at startup AFTER the regular
     // reconciler so the venue's view of orders is trusted. Returns
     // empty if the adapter doesn't model restart recovery (default).
-    //
     // strategy_name is best-effort — venues like Binance OCO don't
     // round-trip it through the listClientOrderId, so adapters that
     // can't recover it return "" and the engine carries on without
@@ -132,4 +129,4 @@ public:
     std::vector<recovered_bracket> list_open() override { return {}; }
 };
 
-} // namespace truetest::exits
+}

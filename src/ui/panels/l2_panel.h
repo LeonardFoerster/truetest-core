@@ -14,6 +14,6 @@ public:
               const dashboard_snapshot* snap) override;
 };
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

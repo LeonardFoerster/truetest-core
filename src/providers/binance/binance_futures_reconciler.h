@@ -17,7 +17,6 @@
 // `availableBalance` (top-level on /fapi/v2/account) and local
 // per-symbol position quantity vs venue `positionAmt`
 // (/fapi/v2/positionRisk?symbol=...).
-//
 // Differences from the spot reconciler:
 //   - venue cash comes from a single `availableBalance` field, not a
 //     per-asset `free + locked` walk over the balances array;

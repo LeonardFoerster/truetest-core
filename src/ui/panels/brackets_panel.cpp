@@ -54,7 +54,7 @@ int dist_pair(double abs_pct)
     return kPairWhite;
 }
 
-} // namespace
+}
 
 void BracketsPanel::draw(int body_y0, int width, int height,
                          const ConsoleDashboard& data,
@@ -267,6 +267,6 @@ void BracketsPanel::draw(int body_y0, int width, int height,
     }
 }
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

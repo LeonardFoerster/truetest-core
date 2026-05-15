@@ -22,6 +22,6 @@ inline constexpr const char* kTableRejections    = "rejections";
 inline constexpr const char* kTableCancellations = "cancellations";
 inline constexpr const char* kTableAmendments    = "amendments";
 
-} // namespace truetest::questdb::schema
+}
 
 #endif // HAS_QUESTDB

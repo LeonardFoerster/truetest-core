@@ -4,7 +4,6 @@
 // before this file there was nothing asserting that the engine
 // actually consults provider->get_risk_check() in the order-routing
 // path and honors a rejection.
-//
 // Strategy: stub a minimal MockProvider that exposes a controllable
 // MockRiskCheck. Run the engine on synthetic bars. The TestStrategy
 // emits a BUY at bar 3; we verify whether the engine rejects or
@@ -121,7 +120,7 @@ std::shared_ptr<data_handler> make_bars(int n)
     return dh;
 }
 
-} // namespace
+}
 
 // Without a venue risk check, the engine emits and fills both legs
 // — establishes the baseline so the rejection test below has a clean

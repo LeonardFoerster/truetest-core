@@ -60,7 +60,6 @@ public:
     // enqueues the fill alongside normal fills AND records the
     // (engine_order_id → opener_order_id + strategy) metadata for the
     // engine to register in its order_meta_ on the main thread.
-    //
     // Handler runs on the fill transport's worker thread → must be
     // thread-safe. ExitManager's venue lookups are mutex-guarded; the
     // engine-side OrderIdGenerator::next() is atomic.

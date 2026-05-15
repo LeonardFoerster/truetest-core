@@ -34,6 +34,6 @@ struct thread_utilization
     }
 };
 
-} // namespace debug
+}
 
 #endif

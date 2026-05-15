@@ -30,6 +30,6 @@ struct hardware_info
     void log() const;
 };
 
-} // namespace debug
+}
 
 #endif

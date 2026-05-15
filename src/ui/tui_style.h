@@ -84,6 +84,6 @@ enum class RiskLevel {
 Color risk_level_to_color(RiskLevel level);
 const char* risk_level_to_string(RiskLevel level);
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

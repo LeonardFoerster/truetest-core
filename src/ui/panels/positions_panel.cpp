@@ -50,7 +50,7 @@ std::string fmt_age(std::int64_t s)
     return buf;
 }
 
-} // namespace
+}
 
 void PositionsPanel::draw(int body_y0, int width, int height,
                           const ConsoleDashboard& /*data*/,
@@ -267,6 +267,6 @@ void PositionsPanel::draw(int body_y0, int width, int height,
     }
 }
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

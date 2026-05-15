@@ -51,6 +51,6 @@ inline clock_check verify_clock_skew(BinanceRestClient& rest,
     return verify_clock_skew_offset(offset, tolerance_ms);
 }
 
-} // namespace binance
+}
 
 #endif // HAS_BINANCE

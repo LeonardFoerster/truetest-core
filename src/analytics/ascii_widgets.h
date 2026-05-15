@@ -40,4 +40,4 @@ std::string fmt_pct(double fraction, int precision = 2);
 std::string fmt_money(double v, int precision = 2);
 std::string fmt_signed(double v, int precision = 2);
 
-} // namespace tt::ascii
+}

@@ -155,7 +155,7 @@ bool wait_readable(int fd, int timeout_ms)
     return sel > 0;
 }
 
-} // namespace
+}
 
 std::string TcpClient::read_until_header_end(std::size_t max_bytes,
                                              int read_timeout_ms)
@@ -203,6 +203,6 @@ std::string TcpClient::read_n(std::size_t n, int read_timeout_ms)
     return out;
 }
 
-} // namespace truetest::questdb
+}
 
 #endif // HAS_QUESTDB

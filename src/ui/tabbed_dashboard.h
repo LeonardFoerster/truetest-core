@@ -152,6 +152,6 @@ private:
     std::chrono::steady_clock::time_point start_time_{};
 };
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

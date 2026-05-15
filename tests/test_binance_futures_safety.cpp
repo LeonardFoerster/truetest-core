@@ -38,7 +38,7 @@ std::string array_of(const std::vector<std::string>& rows)
     return out;
 }
 
-} // namespace
+}
 
 TEST(BinanceFuturesSafety, EmptyArrayProducesNoAdvisories)
 {

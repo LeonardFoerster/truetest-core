@@ -17,7 +17,7 @@ std::shared_ptr<BinanceFuturesProvider> create(const provider_config& cfg)
     return std::dynamic_pointer_cast<BinanceFuturesProvider>(p);
 }
 
-} // namespace
+}
 
 TEST(BinanceFuturesRegister, IsRegistered)
 {

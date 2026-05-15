@@ -334,4 +334,4 @@ struct dashboard_snapshot
     trend_view trend;
 };
 
-} // namespace truetest::ui
+}

@@ -86,7 +86,7 @@ inline double to_double_or_zero(std::string_view sv)
     return out;
 }
 
-} // namespace detail
+}
 
 // `position_risk_json` is the body of GET /fapi/v2/positionRisk (an
 // array). `expected_margin_type` empty → margin-mode check disabled.
@@ -187,6 +187,6 @@ inline std::optional<std::string> first_strict_refusal(
     return std::nullopt;
 }
 
-} // namespace binance::futures
+}
 
 #endif // HAS_BINANCE

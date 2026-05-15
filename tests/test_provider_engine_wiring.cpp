@@ -94,7 +94,7 @@ std::shared_ptr<data_handler> make_three_bars()
     return dh;
 }
 
-} // namespace
+}
 
 TEST(ProviderEngineWiring, EngineRoutesOrdersThroughProviderAdapter)
 {

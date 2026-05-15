@@ -29,7 +29,7 @@ std::string pad(const std::string& s, std::size_t w, bool right_pad)
     return right_pad ? s + p : p + s;
 }
 
-} // namespace
+}
 
 std::size_t display_width(const std::string& s)
 {
@@ -280,4 +280,4 @@ std::string fmt_signed(double v, int precision)
     return buf;
 }
 
-} // namespace tt::ascii
+}

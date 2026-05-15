@@ -1,9 +1,7 @@
 // Opt-in integration tests against the Binance USDT-M futures testnet.
-//
 // Skipped unless TRUETEST_FUTURES_TESTNET_KEY and
 // TRUETEST_FUTURES_TESTNET_SECRET are set. Different keys from spot —
 // futures testnet has a separate signup at testnet.binancefuture.com.
-//
 // What it covers, across four TEST blocks:
 //   - Place + cancel — symbol probe, position-mode probe, place a
 //     LIMIT BUY at half mark so it can't fill, cancel by clientOrderId.
@@ -14,7 +12,6 @@
 //   - Reconciler round-trip — build a reconciler against the live
 //     account, call reconcile() with an empty portfolio at very high
 //     tolerance, assert it doesn't throw or hang.
-//
 // User-data WebSocket events (ORDER_TRADE_UPDATE, ACCOUNT_UPDATE) are
 // async and out of scope here — covered by unit-level parser tests.
 // The point of this file is to assert our wire format matches what
@@ -83,7 +80,7 @@ std::uint64_t unique_id()
             std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
-} // namespace
+}
 
 TEST(BinanceFuturesTestnetLive, PlaceAndCancelLimitOrder)
 {

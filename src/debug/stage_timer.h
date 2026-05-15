@@ -78,7 +78,7 @@ private:
     stage_stats stats_[static_cast<size_t>(stage::COUNT)] = {};
 };
 
-} // namespace debug
+}
 
 #define DEBUG_STAGE(timer, s) debug::StageTimer::scoped _stage_##s(timer, debug::stage::s)
 

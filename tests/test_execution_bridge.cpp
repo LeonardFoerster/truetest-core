@@ -180,7 +180,7 @@ struct bridge_harness
     }
 };
 
-} // namespace
+}
 
 TEST(ExecutionBridge, OpensTransports)
 {

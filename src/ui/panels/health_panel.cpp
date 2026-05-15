@@ -55,7 +55,7 @@ int state_pair(int s)
     }
 }
 
-} // namespace
+}
 
 void HealthPanel::draw(int body_y0, int width, int height,
                        const ConsoleDashboard& data,
@@ -211,6 +211,6 @@ void HealthPanel::draw(int body_y0, int width, int height,
     }
 }
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

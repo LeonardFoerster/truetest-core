@@ -133,6 +133,6 @@ inline std::string url_encode(const std::string& value)
     return ss.str();
 }
 
-} // namespace binance
+}
 
 #endif // HAS_BINANCE

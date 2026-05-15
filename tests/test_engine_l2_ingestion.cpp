@@ -20,7 +20,7 @@ public:
     void set_position_open(const std::string&, bool) override {}
 };
 
-} // namespace
+}
 
 TEST(EngineL2Ingestion, SnapshotPopulatesOrderbook)
 {

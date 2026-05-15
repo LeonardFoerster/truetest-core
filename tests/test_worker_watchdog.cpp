@@ -18,7 +18,7 @@ struct SilenceStderr
     ~SilenceStderr() { std::cerr.rdbuf(orig); }
 };
 
-} // namespace
+}
 
 // --- Pure decision logic ----------------------------------------------------
 
@@ -57,7 +57,6 @@ TEST(WorkerWatchdog, IsHungPastDeadlineFires)
 }
 
 // --- Threaded behaviour -----------------------------------------------------
-//
 // All threaded tests use small intervals (poll 20ms, deadline 80ms) so
 // they finish in well under a second. Tighten further only carefully —
 // scheduling jitter on heavily-loaded CI can produce flakes below ~10ms.

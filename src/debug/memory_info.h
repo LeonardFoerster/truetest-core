@@ -34,6 +34,6 @@ private:
     memory_snapshot end_;
 };
 
-} // namespace debug
+}
 
 #endif

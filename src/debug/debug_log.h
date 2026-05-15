@@ -47,7 +47,7 @@ private:
     uint64_t count_ = 0;
 };
 
-} // namespace debug
+}
 
 
 #define DBG_INFO(...)  LOG(INFO) << absl::StrFormat(__VA_ARGS__)

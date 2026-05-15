@@ -24,7 +24,7 @@ constexpr int PAIR_ACCENT     = 16;
 constexpr int PAIR_WHITE      = 17;
 constexpr int PAIR_BLACK      = 18;
 
-} // anonymous namespace
+}
 
 void init_colors()
 {
@@ -198,6 +198,6 @@ const char* risk_level_to_string(RiskLevel level)
     return "UNKNOWN";
 }
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

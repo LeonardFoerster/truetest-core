@@ -41,4 +41,4 @@ inline tick from_tick_record(const tick_record& r)
 	            static_cast<uint8_t>(r.side)};
 }
 
-} // namespace provider
+}

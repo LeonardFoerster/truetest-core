@@ -22,13 +22,11 @@
 // and reduceOnly=true. Binance has no /fapi/v1/order/oco endpoint, so
 // placement is NOT atomic — if the second POST fails after the first
 // succeeds, we have a hanging leg that cancel() must clean up.
-//
 // Cancel-other-when-fires is delivered by Binance's `closePosition=true`
 // semantics: when a closePosition order triggers and brings the position
 // to zero, the venue automatically cancels every other closePosition
 // order on that symbol. So once both legs are placed, fill-of-one →
 // cancellation-of-other is exchange-side, exactly like spot OCO.
-//
 // Constraint: closePosition=true requires the order to close the entire
 // position. Partial brackets (qty_fraction < 1.0 for TP1/TP2 scale-outs)
 // cannot use closePosition=true without splitting into a different

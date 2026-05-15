@@ -72,6 +72,6 @@ std::string make_run_tag(const std::string& user_override,
     return std::string(buf);
 }
 
-} // namespace truetest::questdb
+}
 
 #endif // HAS_QUESTDB

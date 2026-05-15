@@ -94,6 +94,6 @@ void DebugReport::log_all(
     LOG(INFO) << "";
 }
 
-} // namespace debug
+}
 
 #endif

@@ -52,7 +52,7 @@ std::size_t find_content_length(std::string_view headers)
     catch (...) { return 0; }
 }
 
-} // namespace
+}
 
 std::string url_encode(std::string_view s)
 {
@@ -131,6 +131,6 @@ bool ping(const std::string& host, std::uint16_t port, int timeout_ms)
     return r && r->status == 200;
 }
 
-} // namespace truetest::questdb
+}
 
 #endif // HAS_QUESTDB

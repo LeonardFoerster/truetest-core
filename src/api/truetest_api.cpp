@@ -110,7 +110,7 @@ std::string report_to_json(const AnalyticsReport& r)
     return j.dump();
 }
 
-} // namespace
+}
 
 extern "C" {
 

@@ -54,7 +54,7 @@ private:
     bool connected_ = false;
 };
 
-} // namespace
+}
 
 // ── LineBuilder ──────────────────────────────────────────────────────────────
 

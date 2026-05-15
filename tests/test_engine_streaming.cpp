@@ -22,7 +22,7 @@ struct SilenceOutput {
     SilenceOutput() : orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceOutput() { std::cout.rdbuf(orig); }
 };
-} // namespace
+}
 
 // Test strategy: buys on bar 3, sells on bar 6
 class StreamTestStrategy : public IStrategy

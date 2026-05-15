@@ -12,7 +12,6 @@
 // `ORDER_TRADE_UPDATE` with a nested `o:{...}`. The inner field codes
 // overlap with spot's flat `executionReport`, so we slice the inner
 // object and reuse the same `binance::extract_*` helpers.
-//
 // Wrapper keys we read top-level: `e` (event guard), `E` (event time).
 // Everything else lives one nesting level down. The wrapper key `o`
 // itself collides with the inner type field of the same name, so we

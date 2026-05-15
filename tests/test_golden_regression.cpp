@@ -1,13 +1,10 @@
 // O2: Golden-file backtest regression tests.
-//
 // Runs a deterministic backtest against a checked-in fixture CSV and diffs
 // the resulting metrics against a committed "golden" JSON file.
-//
 // The golden file (tests/golden/sma_basic_expected.json) was produced by
 // running this same engine configuration once and is intentionally checked
 // in. Any future code change that alters backtest outputs will fail this
 // test, surfacing unintended behavior drift.
-//
 // Regenerating the golden file:
 //   TRUETEST_REGENERATE_GOLDEN=1 ./build/truetest_tests \
 //       --gtest_filter='GoldenRegression.*'
@@ -127,7 +124,7 @@ bool regenerate_mode()
     return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
-} // namespace
+}
 
 
 TEST(GoldenRegression, SmaBasic)

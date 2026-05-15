@@ -76,6 +76,6 @@ void StageTimer::reset()
     }
 }
 
-} // namespace debug
+}
 
 #endif

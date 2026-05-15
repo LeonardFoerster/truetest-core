@@ -105,6 +105,6 @@ private:
     static const char* status_str(order_status s);
 };
 
-} // namespace truetest::questdb
+}
 
 #endif // HAS_QUESTDB

@@ -241,4 +241,4 @@ private:
     std::int64_t  plain_halt_banner_last_ms_{0};
 };
 
-} // namespace truetest::ui
+}

@@ -23,10 +23,8 @@
 // the trade tape consumes the front of each level, and fires a fill once
 // a trade overflows size_ahead. Cancel attribution on L2 shrinkage beyond
 // observed trade volume is delegated to a pluggable IQueueModel.
-//
 // Requires a trade tape (no trades → no fills, by design). Without L2,
 // every order starts at the front (over-optimistic).
-//
 // V1 limitations: trade side ignored (correct when at top-of-book, approx
 // otherwise); market orders rejected; modify = cancel + submit.
 class QueueAwareBookAdapter : public IExecutionAdapter

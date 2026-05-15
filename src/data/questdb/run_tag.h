@@ -18,6 +18,6 @@ std::string make_run_tag(const std::string& user_override,
 // True iff tag is a valid QuestDB table-name prefix.
 bool is_valid_run_tag(const std::string& tag);
 
-} // namespace truetest::questdb
+}
 
 #endif // HAS_QUESTDB

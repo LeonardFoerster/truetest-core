@@ -73,7 +73,7 @@ void draw_gauge(int y, int x, double frac)
     mvaddstr(y, x + kBarWidth + 3, b);
 }
 
-} // namespace
+}
 
 void RiskPanel::draw(int body_y0, int width, int height,
                      const ConsoleDashboard& data,
@@ -297,6 +297,6 @@ void RiskPanel::draw(int body_y0, int width, int height,
     }
 }
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

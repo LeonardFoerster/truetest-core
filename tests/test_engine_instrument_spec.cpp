@@ -52,7 +52,7 @@ std::shared_ptr<data_handler> make_flat_bars(int n)
     return dh;
 }
 
-} // namespace
+}
 
 TEST(EngineInstrumentSpec, QuantizesLimitPriceAndQty)
 {

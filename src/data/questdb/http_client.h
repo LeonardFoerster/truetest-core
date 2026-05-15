@@ -32,6 +32,6 @@ std::optional<HttpResponse> query_exec(const std::string& host,
 bool ping(const std::string& host, std::uint16_t port,
           int timeout_ms = 2000);
 
-} // namespace truetest::questdb
+}
 
 #endif // HAS_QUESTDB

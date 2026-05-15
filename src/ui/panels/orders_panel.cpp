@@ -71,7 +71,7 @@ std::string fmt_hhmmss(std::chrono::system_clock::time_point tp)
     return buf;
 }
 
-} // namespace
+}
 
 void OrdersPanel::draw(int body_y0, int width, int height,
                        const ConsoleDashboard& /*data*/,
@@ -280,6 +280,6 @@ void OrdersPanel::draw(int body_y0, int width, int height,
     }
 }
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

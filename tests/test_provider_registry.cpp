@@ -25,7 +25,7 @@ struct SilenceRegistry {
 		std::cerr.rdbuf(orig_err);
 	}
 };
-} // namespace
+}
 
 TEST(ProviderRegistry, CreateThrowsForUnregistered)
 {

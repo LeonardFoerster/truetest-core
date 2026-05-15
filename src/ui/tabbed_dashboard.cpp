@@ -96,7 +96,7 @@ void save_prefs(const prefs_state& in)
     f << "}\n";
 }
 
-} // namespace
+}
 
 TabbedDashboard::TabbedDashboard(std::shared_ptr<ConsoleDashboard> data,
                                  snapshot_fn snap_fn,
@@ -1084,6 +1084,6 @@ void TabbedDashboard::render_loop()
     }
 }
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

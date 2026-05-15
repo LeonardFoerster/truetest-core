@@ -36,7 +36,7 @@ int signed_pair(double v)
     return kPairWhite;
 }
 
-} // namespace
+}
 
 void StrategyPanel::draw(int body_y0, int width, int height,
                          const ConsoleDashboard& data,
@@ -192,6 +192,6 @@ void StrategyPanel::draw(int body_y0, int width, int height,
     }
 }
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

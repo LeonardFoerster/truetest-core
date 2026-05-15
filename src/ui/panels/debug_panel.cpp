@@ -43,7 +43,7 @@ void section(int y, int x, int width, const char* text)
 
 int yes_no_pair(bool b) { return b ? kPairGreen : kPairWhite; }
 
-} // namespace
+}
 
 void DebugPanel::draw(int body_y0, int width, int height,
                       const ConsoleDashboard& data,
@@ -490,6 +490,6 @@ void DebugPanel::draw(int body_y0, int width, int height,
     }
 }
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

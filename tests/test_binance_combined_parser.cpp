@@ -17,7 +17,7 @@ namespace {
 
 BinanceCombinedParser make_parser() { return {}; }
 
-} // namespace
+}
 
 TEST(BinanceCombinedParser, RawTradeFrame_ProducesTick)
 {

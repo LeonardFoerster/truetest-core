@@ -13,7 +13,7 @@ using state_t    = BinanceUserDataTransport::reconnect_state;
 constexpr int k_max = 10;
 constexpr long long k_reset_ms = 5 * 60 * 1000;
 
-} // namespace
+}
 
 TEST(BinanceUserDataReconnect, StoppedResultIsStop)
 {

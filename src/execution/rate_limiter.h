@@ -2,7 +2,6 @@
 
 // Token-bucket rate limiter for signed REST calls (Binance IP weight limits,
 // order-rate caps, etc.). Thread-safe: callers can hit it from any worker.
-//
 // Capacity = burst size. refill_per_sec = sustained rate. `try_acquire` is the
 // primary API — non-blocking; returns false if not enough tokens. Callers that
 // want to wait should consult `time_until` and sleep themselves, or use

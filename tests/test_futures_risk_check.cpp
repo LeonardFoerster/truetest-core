@@ -40,7 +40,7 @@ FuturesRiskCheck::config disabled()
     return FuturesRiskCheck::config{};
 }
 
-} // namespace
+}
 
 TEST(FuturesRiskCheck, AllCapsDisabledAllows)
 {

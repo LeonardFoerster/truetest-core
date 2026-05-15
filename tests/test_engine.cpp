@@ -20,7 +20,7 @@ struct SilenceCout {
     SilenceCout() : sink(), orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceCout() { std::cout.rdbuf(orig); }
 };
-} // namespace
+}
 
 static auto epoch_ms(int64_t ms)
 {

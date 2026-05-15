@@ -40,6 +40,6 @@ private:
     int fd_ = -1;
 };
 
-} // namespace truetest::questdb
+}
 
 #endif // HAS_QUESTDB

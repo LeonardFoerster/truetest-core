@@ -1,14 +1,11 @@
 // Opt-in integration test against the Binance spot testnet.
-//
 // Skipped unless TRUETEST_TESTNET_KEY and TRUETEST_TESTNET_SECRET are
 // set in the environment. Hits the real testnet REST endpoint:
-//
 //   - resyncs the clock (catches local-time skew before signed call)
 //   - probes /api/v3/exchangeInfo for BTCUSDT (the gate we added in
 //     BinanceProvider::open)
 //   - places a LIMIT BUY at half of market price so it cannot fill
 //   - cancels the order
-//
 // Quantity is tuned to clear the testnet's 10 USDT MIN_NOTIONAL filter
 // (0.001 BTC * 0.5 * mark = ~30 USDT). Placement and cancel are the
 // only paths verified — user-data executionReport is async and out of
@@ -34,7 +31,7 @@ std::string env_or_empty(const char* name)
     return v ? std::string(v) : std::string{};
 }
 
-} // namespace
+}
 
 TEST(BinanceTestnetLive, PlaceAndCancelLimitOrder)
 {

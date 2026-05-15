@@ -15,7 +15,7 @@ struct SilenceCout {
     SilenceCout() : sink(), orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceCout() { std::cout.rdbuf(orig); }
 };
-} // namespace
+}
 
 // Strategy: buys on bar 3, sells on bar 6 (deterministic)
 class CorrectnessStrategy : public IStrategy

@@ -130,7 +130,7 @@ int sev_pair(event_severity s)
     }
 }
 
-} // namespace
+}
 
 void OverviewPanel::draw(int body_y0, int width, int height,
                          const ConsoleDashboard& data,
@@ -438,6 +438,6 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     }
 }
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

@@ -33,7 +33,7 @@ order_event make_market(uint64_t id, order_side side, double qty, tp submit_ts,
     return o;
 }
 
-} // namespace
+}
 
 TEST(TradeTapeShadowAdapter, BuyLimit_CrossingTradeFillsAtTradePrice)
 {

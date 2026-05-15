@@ -59,7 +59,7 @@ std::shared_ptr<data_handler> make_gap_bars()
     return dh;
 }
 
-} // namespace
+}
 
 TEST(EngineLookahead, Default_OrderFillsAtNextBarOpen)
 {

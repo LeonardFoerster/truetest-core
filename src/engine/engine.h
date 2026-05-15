@@ -346,7 +346,6 @@ public:
     // Operator controls callable from the live TUI. Each is a single
     // atomic action; the engine checks the flags from the hot path on
     // the next event. Safe to invoke from any thread.
-    //
     // Pause/resume: when paused, the engine still drains events and
     // updates portfolio/analytics from inbound fills, but skips the
     // strategy.on_market/on_tick calls so no new orders are emitted.

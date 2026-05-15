@@ -21,7 +21,7 @@ struct SilenceOutput {
         std::cerr.rdbuf(orig_err);
     }
 };
-} // namespace
+}
 
 // Helper: path to test fixtures relative to the test binary
 // We use an absolute path since ctest may run from build dir

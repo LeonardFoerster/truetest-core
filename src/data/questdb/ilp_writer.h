@@ -106,6 +106,6 @@ private:
     bool ensure_connected();
 };
 
-} // namespace truetest::questdb
+}
 
 #endif // HAS_QUESTDB

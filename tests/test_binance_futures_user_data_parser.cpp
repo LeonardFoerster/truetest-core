@@ -42,7 +42,7 @@ std::string update(const std::string& x, const std::string& X,
     return j;
 }
 
-} // namespace
+}
 
 TEST(BinanceFuturesUserDataParser, RejectsNonOrderTradeUpdates)
 {

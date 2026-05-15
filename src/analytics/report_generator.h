@@ -45,4 +45,4 @@ std::string render_per_symbol_section       (const AnalyticsReport& r, const rep
 std::string render_per_strategy_section     (const AnalyticsReport& r, const report_options& o);
 std::string render_worst_trades_section     (const AnalyticsReport& r, const report_options& o);
 
-} // namespace tt
+}

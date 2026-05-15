@@ -499,7 +499,7 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
     throw std::runtime_error("event_log: unknown event type " + std::to_string(static_cast<int>(type)));
 }
 
-} // namespace event_serial
+}
 
 struct EventLogIndexEntry {
     int64_t  timestamp_us;

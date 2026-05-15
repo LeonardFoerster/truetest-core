@@ -245,7 +245,7 @@ std::string clock_hhmmss(std::chrono::system_clock::time_point tp)
     return buf;
 }
 
-} // namespace
+}
 
 bool ConsoleDashboard::stdout_is_tty()
 {
@@ -1094,4 +1094,4 @@ void ConsoleDashboard::print_summary(std::uint64_t events,
     write_all(STDOUT_FILENO, buf);
 }
 
-} // namespace truetest::ui
+}

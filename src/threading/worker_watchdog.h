@@ -20,12 +20,10 @@
 // registered source; if any goes longer than its deadline without a
 // beat, the watchdog sets the engine halt flag and stops monitoring
 // (single-shot — no stderr spam, no double-set).
-//
 // The "I'm alive" channel is a pull, not a push: the watchdog reads,
 // the source writes. No callbacks back to the source. Sources that
 // can't even update their atomic (deadlocked, OS-paused) are exactly
 // the ones we want to detect, so we don't trust them to call us.
-//
 // Sources must outlive the watchdog. There's no unregister() because
 // the only realistic lifecycle is "engine startup → run → shutdown",
 // where everything goes down together.

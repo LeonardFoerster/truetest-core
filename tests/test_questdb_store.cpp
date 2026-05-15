@@ -106,7 +106,7 @@ std::shared_ptr<order_event> make_order(std::uint64_t id = 42)
     return o;
 }
 
-} // namespace
+}
 
 TEST(QuestdbStore, BeginIssues7DdlsInOrder)
 {

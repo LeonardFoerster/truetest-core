@@ -47,7 +47,7 @@ inline void skip_ws(std::string_view json, std::size_t& pos)
         ++pos;
 }
 
-} // namespace detail
+}
 
 inline std::string_view extract_sv_string(std::string_view json, std::string_view key)
 {
@@ -225,7 +225,7 @@ inline std::optional<bar_record> parse_kline(std::string_view json)
     return rec;
 }
 
-} // namespace binance
+}
 
 class BinanceTradeParser : public IDataParser<tick_record>
 {

@@ -55,6 +55,6 @@ struct ring_diagnostics
     }
 };
 
-} // namespace debug
+}
 
 #endif

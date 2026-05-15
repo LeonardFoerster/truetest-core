@@ -403,4 +403,4 @@ void ExitManager::untrack_opener(std::uint64_t opener_order_id,
     }
 }
 
-} // namespace truetest::exits
+}

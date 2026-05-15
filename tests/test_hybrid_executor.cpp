@@ -38,7 +38,7 @@ std::shared_ptr<HybridExecutor> make_hybrid(
     return hx;
 }
 
-} // namespace
+}
 
 TEST(HybridExecutor, NoLatency_FillsVisibleImmediately)
 {

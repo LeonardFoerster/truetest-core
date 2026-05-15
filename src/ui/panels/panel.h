@@ -45,6 +45,6 @@ public:
     virtual void set_filter(const std::string& /*needle*/) {}
 };
 
-} // namespace truetest::ui
+}
 
 #endif // HAS_RICH_TUI

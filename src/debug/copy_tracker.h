@@ -54,13 +54,13 @@ struct CopyTracker
     CopyTracker& operator=(CopyTracker&&) noexcept { stats().move_assigns.fetch_add(1, std::memory_order_relaxed); return *this; }
 };
 
-} // namespace debug
+}
 
 #else
 
 namespace debug {
 template <typename Derived>
 struct CopyTracker {};
-} // namespace debug
+}
 
 #endif

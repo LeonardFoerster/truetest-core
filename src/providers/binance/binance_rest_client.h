@@ -298,7 +298,6 @@ private:
 
     // Retries once on -1021 by rebuilding the signed query (new ts+sig)
     // after a resync — must live above execute_with_retry for that reason.
-    //
     // Builds the signed query into a thread-local scratch buffer to avoid
     // 4–6 string allocations per order. Reuses a keyed HMAC_CTX (signer_)
     // so we don't pay the per-call key-schedule setup. Hex encoding is

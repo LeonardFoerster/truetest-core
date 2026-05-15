@@ -104,7 +104,7 @@ inline tick_result keepalive_tick(const binance_keepalive_policy& pol,
     return r;
 }
 
-} // namespace binance_keepalive_detail
+}
 
 class BinanceUserDataTransport : public IFillTransport
 {

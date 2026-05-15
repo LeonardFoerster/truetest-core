@@ -124,7 +124,7 @@ private:
     TcpClient tcp_;
 };
 
-} // namespace
+}
 
 // ── IlpWriter ───────────────────────────────────────────────────────────────
 
@@ -208,6 +208,6 @@ void IlpWriter::maybe_time_flush()
     if (now - last_flush_ >= flush_every_) flush();
 }
 
-} // namespace truetest::questdb
+}
 
 #endif // HAS_QUESTDB

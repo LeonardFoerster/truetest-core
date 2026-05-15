@@ -57,4 +57,4 @@ struct status
 
 using event = std::variant<bar, tick, l2_snapshot, l2_update, status>;
 
-} // namespace provider
+}

@@ -25,7 +25,7 @@ struct SilenceBridge {
 		std::cerr.rdbuf(orig_err);
 	}
 };
-} // namespace
+}
 
 // --- Batch mode tests ---
 

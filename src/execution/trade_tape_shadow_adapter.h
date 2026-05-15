@@ -20,11 +20,9 @@
 // when a real trade prints at a price crossing our limit, synthesize a
 // fill at the trade price. ShadowTracker compares these against the sim
 // fills to surface real slippage and fill-rate divergence.
-//
 // BUY @P: trade_price ≤ P. SELL @P: trade_price ≥ P. MARKET: first trade.
 // Pre-submit trades (ts < submit_ts) ignored. No queue modeling
 // (optimistic). Not thread-safe.
-//
 // Optional ILatencyModel represents wire + exchange-ingest delay ON TOP of
 // the engine-side latency already applied — so submit_ts is
 // earliest_eligible_ts + wire_latency, and trades printing during that

@@ -41,4 +41,4 @@ inline constexpr const char* cursor_show    = "\x1b[?25h";
 inline constexpr const char* alt_screen_on  = "\x1b[?1049h";
 inline constexpr const char* alt_screen_off = "\x1b[?1049l";
 
-} // namespace truetest::ansi
+}

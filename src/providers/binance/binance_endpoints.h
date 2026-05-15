@@ -87,4 +87,4 @@ inline endpoints from_host(const std::string& ws_host)
     return ep;
 }
 
-} // namespace binance
+}

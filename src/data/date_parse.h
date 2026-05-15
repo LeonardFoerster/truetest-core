@@ -40,7 +40,7 @@ inline std::int64_t utc_tm_to_epoch_s(const std::tm& t)
     return days * 86400LL + t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec;
 }
 
-} // namespace detail
+}
 
 inline std::optional<std::chrono::system_clock::time_point>
 parse(std::string_view s)
@@ -89,4 +89,4 @@ parse(std::string_view s)
     return std::nullopt;
 }
 
-} // namespace tt::date_parse
+}

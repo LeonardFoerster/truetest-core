@@ -60,4 +60,4 @@ inline void event_sink_l2(const event& ev, std::shared_ptr<orderbook> ob)
 	}, ev);
 }
 
-} // namespace provider
+}

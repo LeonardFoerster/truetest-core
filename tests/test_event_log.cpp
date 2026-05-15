@@ -36,7 +36,7 @@ struct SilenceCout {
     SilenceCout() : sink(), orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceCout() { std::cout.rdbuf(orig); }
 };
-} // namespace
+}
 
 // ─── Round-trip tests for each event type ───────────────────────────────────
 

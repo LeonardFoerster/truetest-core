@@ -49,7 +49,7 @@ auto zero_wait()
     };
 }
 
-} // namespace
+}
 
 TEST(BinanceKeepalive, FirstAttemptSucceedsStaysOpen)
 {

@@ -28,6 +28,6 @@ public:
                  const std::vector<const ring_diagnostics*>& rings);
 };
 
-} // namespace debug
+}
 
 #endif

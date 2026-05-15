@@ -1,5 +1,4 @@
 // Pins the engine-side SL/TP/trailing enforcement module.
-//
 // The ExitManager owns stop-loss / take-profit / trailing / time exits
 // for every strategy: strategies declare intent, the manager arms on
 // opener fill, and returns a synthetic close order on trigger. These
@@ -45,7 +44,7 @@ fill_event make_opener_fill(std::uint64_t id, const std::string& sym,
                       /*remaining=*/0.0, /*fill_id=*/1);
 }
 
-} // namespace
+}
 
 TEST(ExitManager, PendingOnlyFiresAfterOpenerFill)
 {
@@ -421,7 +420,7 @@ struct FakeAdapter : public IBracketAdapter
     }
 };
 
-} // namespace
+}
 
 TEST(ExitManagerAdapter, OpenerFillTriggersPlaceWithStableHandles)
 {

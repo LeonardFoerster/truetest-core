@@ -65,7 +65,7 @@ struct ScriptedParser : public IFillParser
     }
 };
 
-} // namespace
+}
 
 TEST(ExecutionBridgeUnknownFill, HandlerInvokedAndFillEnqueued)
 {

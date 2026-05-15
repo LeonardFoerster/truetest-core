@@ -25,7 +25,7 @@ get_fn_t make_ok(long long server_ms, int status = 200)
     };
 }
 
-} // namespace
+}
 
 TEST(BinanceClockSkew, OffsetFailsOnNetworkError)
 {

@@ -103,4 +103,4 @@ inline CheckpointData read_file(const std::string& path)
     return cp;
 }
 
-} // namespace checkpoint
+}

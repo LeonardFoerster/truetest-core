@@ -131,7 +131,7 @@ inline std::vector<provider::l2_update> parse_depth_updates(const std::string& j
     return updates;
 }
 
-} // namespace binance
+}
 
 class BinanceDepthSnapshotParser : public IDataParser<provider::l2_snapshot>
 {

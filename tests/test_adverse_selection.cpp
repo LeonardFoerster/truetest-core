@@ -20,7 +20,7 @@ fill_event make_fill(int64_t ts_ms, const std::string& sym,
     return fill_event(epoch_ms(ts_ms), sym, /*order_id=*/1, side, qty, price, /*comm=*/0.0);
 }
 
-} // namespace
+}
 
 TEST(AdverseSelection, EmptyState)
 {

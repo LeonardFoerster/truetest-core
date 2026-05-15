@@ -131,7 +131,7 @@ static auto make_data(std::initializer_list<std::array<double,4>> bars)
         dh->load_into_queue("2024-01-01", "TEST", b[0], b[1], b[2], b[3], 1000);
     return dh;
 }
-} // namespace
+}
 
 TEST(EngineBrackets, SlFiresOnIntraBarWickEvenWhenCloseRecovers)
 {
