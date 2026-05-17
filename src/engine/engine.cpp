@@ -2564,9 +2564,12 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     last_mid_price_ = rec.price;
     last_mark_symbol_ = rec.symbol;
 
-    auto ob = orderbook_registry_.get_or_create(rec.symbol);
-    if (!l2_seeded_symbols_.count(rec.symbol))
-        market_maker_.replenish(ob, last_mid_price_);
+    {
+        DEBUG_STAGE(stage_timer_, mm_replenish);
+        auto ob = orderbook_registry_.get_or_create(rec.symbol);
+        if (!l2_seeded_symbols_.count(rec.symbol))
+            market_maker_.replenish(ob, last_mid_price_);
+    }
 
     if (config_.provider && config_.provider->has_execution())
     {
@@ -2624,23 +2627,32 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 
     bool halt = false;
 
-    while (!pending_orders_.empty() &&
-           pending_orders_.top().order->get_earliest_eligible_ts() <= rec.timestamp)
     {
-        auto entry = pending_orders_.top();
-        pending_orders_.pop();
-        if (entry.order->get_tif() == time_in_force::day)
-            day_order_ids_.push_back({entry.order->get_symbol(), entry.order->get_order_id()});
-        if (!process_order(entry.order, event_count, halt)) break;
+        DEBUG_STAGE(stage_timer_, pending_drain);
+        while (!pending_orders_.empty() &&
+               pending_orders_.top().order->get_earliest_eligible_ts() <= rec.timestamp)
+        {
+            auto entry = pending_orders_.top();
+            pending_orders_.pop();
+            if (entry.order->get_tif() == time_in_force::day)
+                day_order_ids_.push_back({entry.order->get_symbol(), entry.order->get_order_id()});
+            if (!process_order(entry.order, event_count, halt)) break;
+        }
     }
     if (halt) return;
 
-    check_pending_stops(rec.price, rec.price, rec.timestamp, event_count, halt);
+    {
+        DEBUG_STAGE(stage_timer_, stop_check);
+        check_pending_stops(rec.price, rec.price, rec.timestamp, event_count, halt);
+    }
     if (halt) return;
 
     auto tick_ptr = tick_pool_.acquire(te);
     log_event(te);
-    publish_event(tick_ptr);
+    {
+        DEBUG_STAGE(stage_timer_, ring_publish);
+        publish_event(tick_ptr);
+    }
     if (!config_.is_threaded())
         analytics_.on_event(tick_ptr);
     event_count++;
@@ -2649,7 +2661,11 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                        event_count, te.get_recv_ns()))
         return;
 
-    auto order_opt = strategy_->on_tick(te);
+    std::optional<order_event> order_opt;
+    {
+        DEBUG_STAGE(stage_timer_, strategy);
+        order_opt = strategy_->on_tick(te);
+    }
     if (order_opt)
     {
         order_opt->set_recv_ns(te.get_recv_ns());
@@ -3415,6 +3431,10 @@ void engine::run_tick_data()
     order_seq_ = 0;
     day_order_ids_.clear();
 
+#ifdef HAS_DEBUG
+    memory_sampler_.set_start(debug::memory_snapshot::capture());
+#endif
+
 #ifdef HAS_QUESTDB
     questdb_begin();
 #endif
@@ -3467,22 +3487,31 @@ void engine::run_tick_data()
 
         last_mid_price_ = tick.price;
 
-        auto ob = orderbook_registry_.get_or_create(tick.symbol);
-        if (!l2_seeded_symbols_.count(tick.symbol))
-            market_maker_.replenish(ob, last_mid_price_);
-
-        while (!pending_orders_.empty() &&
-               pending_orders_.top().order->get_earliest_eligible_ts() <= tick.timestamp)
         {
-            auto entry = pending_orders_.top();
-            pending_orders_.pop();
-            if (entry.order->get_tif() == time_in_force::day)
-                day_order_ids_.push_back({entry.order->get_symbol(), entry.order->get_order_id()});
-            if (!process_order(entry.order, event_count, halt_requested)) break;
+            DEBUG_STAGE(stage_timer_, mm_replenish);
+            auto ob = orderbook_registry_.get_or_create(tick.symbol);
+            if (!l2_seeded_symbols_.count(tick.symbol))
+                market_maker_.replenish(ob, last_mid_price_);
+        }
+
+        {
+            DEBUG_STAGE(stage_timer_, pending_drain);
+            while (!pending_orders_.empty() &&
+                   pending_orders_.top().order->get_earliest_eligible_ts() <= tick.timestamp)
+            {
+                auto entry = pending_orders_.top();
+                pending_orders_.pop();
+                if (entry.order->get_tif() == time_in_force::day)
+                    day_order_ids_.push_back({entry.order->get_symbol(), entry.order->get_order_id()});
+                if (!process_order(entry.order, event_count, halt_requested)) break;
+            }
         }
         if (halt_requested) break;
 
-        check_pending_stops(tick.price, tick.price, tick.timestamp, event_count, halt_requested);
+        {
+            DEBUG_STAGE(stage_timer_, stop_check);
+            check_pending_stops(tick.price, tick.price, tick.timestamp, event_count, halt_requested);
+        }
         if (halt_requested) break;
 
         tick_side ts = tick_side::unknown;
@@ -3495,7 +3524,10 @@ void engine::run_tick_data()
 
         auto tick_ptr = tick_pool_.acquire(te);
         log_event(te);
-        publish_event(tick_ptr);
+        {
+            DEBUG_STAGE(stage_timer_, ring_publish);
+            publish_event(tick_ptr);
+        }
         if (!config_.is_threaded())
             analytics_.on_event(tick_ptr);
         event_count++;
@@ -3504,7 +3536,11 @@ void engine::run_tick_data()
                            event_count, te.get_recv_ns()))
             break;
 
-        auto order_opt = strategy_->on_tick(te);
+        std::optional<order_event> order_opt;
+        {
+            DEBUG_STAGE(stage_timer_, strategy);
+            order_opt = strategy_->on_tick(te);
+        }
         if (order_opt)
         {
             order_opt->set_recv_ns(te.get_recv_ns());
@@ -3555,6 +3591,27 @@ void engine::run_tick_data()
     stop_workers();
 #ifdef HAS_QUESTDB
     questdb_end();
+#endif
+
+#ifdef HAS_DEBUG
+    memory_sampler_.set_end(debug::memory_snapshot::capture());
+    {
+        debug::DebugReport report;
+        std::vector<std::pair<const char*, const debug::thread_utilization*>> worker_utils;
+        if (logging_worker_)    worker_utils.push_back({"logging", &logging_worker_->debug_utilization()});
+        if (risk_worker_)       worker_utils.push_back({"risk", &risk_worker_->debug_utilization()});
+        if (stats_worker_)      worker_utils.push_back({"stats", &stats_worker_->debug_utilization()});
+        if (observer_worker_)   worker_utils.push_back({"observer", &observer_worker_->debug_utilization()});
+        if (risk_stats_worker_) worker_utils.push_back({"risk_stats", &risk_stats_worker_->debug_utilization()});
+        if (mm_worker_)         worker_utils.push_back({"market_maker", &mm_worker_->debug_utilization()});
+
+        std::vector<const debug::ring_diagnostics*> ring_diags = {
+            &logging_diag_, &risk_diag_, &stats_diag_,
+            &observer_diag_, &risk_stats_diag_, &mm_diag_
+        };
+
+        report.log_all(stage_timer_, memory_sampler_, worker_utils, ring_diags);
+    }
 #endif
 }
 

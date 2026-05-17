@@ -57,6 +57,22 @@ void unset_color_dim(Color c);
 // Draw a label in accent color
 void draw_label(int y, int x, const char* text);
 
+// Convenience wrapper used across all panels (dim accent label)
+void label(int y, int x, const char* text);
+
+} // namespace truetest::ui
+
+// Legacy raw color pair constants — declared at GLOBAL scope
+// (before the truetest::ui namespace) so every panel can see
+// kPairGreen etc. directly.
+constexpr int kPairGreen  = 1;
+constexpr int kPairRed    = 2;
+constexpr int kPairYellow = 3;
+constexpr int kPairCyan   = 4;
+constexpr int kPairWhite  = 5;
+
+namespace truetest::ui {
+
 // Draw a value with automatic positive/negative coloring
 void draw_value(int y, int x, double value, int precision = 2);
 

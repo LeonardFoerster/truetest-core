@@ -23,11 +23,6 @@ namespace {
 
 using Color = truetest::ui::Color;
 
-void label(int y, int x, const char* text)
-{
-    draw_label(y, x, text);   // Now uses the new style system
-}
-
 Color pnl_color(double v)
 {
     if (v > 0) return Color::Positive;
@@ -77,34 +72,6 @@ std::string fmt_hhmmss(std::chrono::system_clock::time_point tp)
     std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
                   tm.tm_hour, tm.tm_min, tm.tm_sec);
     return buf;
-}
-
-const char* state_text(connection_state s)
-{
-    switch (s)
-    {
-        case connection_state::idle:         return "idle";
-        case connection_state::backfill:     return "backfill";
-        case connection_state::waiting:      return "waiting";
-        case connection_state::live:         return "live";
-        case connection_state::reconnecting: return "reconnecting";
-        case connection_state::halted:       return "halted";
-        case connection_state::closed:       return "closed";
-    }
-    return "?";
-}
-
-int state_pair(connection_state s)
-{
-    switch (s)
-    {
-        case connection_state::live:         return kPairGreen;
-        case connection_state::halted:       return kPairRed;
-        case connection_state::reconnecting: return kPairYellow;
-        case connection_state::backfill:     return kPairYellow;
-        case connection_state::waiting:      return kPairYellow;
-        default:                             return kPairWhite;
-    }
 }
 
 const char* sev_text(event_severity s)
@@ -189,7 +156,8 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     // Equity
     draw_label(y, x_label, "Equity");
     set_color_bold(Color::Neutral);
-    mvaddstr(y, x_value, fmt_money(eq).c_str());
+    double equity_val = snap ? snap->equity : 0.0;
+    mvaddstr(y, x_value, fmt_money(equity_val).c_str());
     unset_color_bold(Color::Neutral);
     ++y;
 

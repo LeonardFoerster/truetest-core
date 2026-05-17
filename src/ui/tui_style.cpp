@@ -121,6 +121,11 @@ void draw_label(int y, int x, const char* text)
     unset_color(Color::Accent);
 }
 
+void label(int y, int x, const char* text)
+{
+    draw_label(y, x, text);
+}
+
 void draw_value(int y, int x, double value, int precision)
 {
     Color c = (value > 0) ? Color::Positive :

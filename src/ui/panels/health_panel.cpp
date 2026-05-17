@@ -4,6 +4,7 @@
 
 #include "../console_dashboard.h"
 #include "../dashboard_snapshot.h"
+#include "../tui_style.h"
 
 #include <ncurses.h>
 
@@ -15,19 +16,6 @@
 namespace truetest::ui {
 
 namespace {
-
-constexpr int kPairGreen  = 1;
-constexpr int kPairRed    = 2;
-constexpr int kPairYellow = 3;
-constexpr int kPairCyan   = 4;
-constexpr int kPairWhite  = 5;
-
-void label(int y, int x, const char* text)
-{
-    attron(COLOR_PAIR(kPairCyan));
-    mvaddstr(y, x, text);
-    attroff(COLOR_PAIR(kPairCyan));
-}
 
 const char* state_text(int s)
 {

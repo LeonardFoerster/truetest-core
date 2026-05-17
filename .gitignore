@@ -373,9 +373,11 @@ to_do.md
 CLAUDE.MD
 features.md
 *.md
+*.csv
 # Project documentation under docs/ is intentionally tracked.
 !docs/*.md
 .claude/
+upcmoing/
 
 # CMake build directory — single canonical build dir only
 build/

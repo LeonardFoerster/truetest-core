@@ -40,8 +40,16 @@ void StageTimer::record(stage s, std::chrono::high_resolution_clock::time_point 
 
 void StageTimer::log() const
 {
+    // Prefer market_create (bar or tick event creation); fall back to any stage with calls
     uint64_t iterations = stats_[static_cast<size_t>(stage::market_create)].call_count;
-    DBG_PERF("═══ Stage Latency (bar loop, %lu iterations) ════", iterations);
+    if (iterations == 0)
+    {
+        for (const auto& st : stats_)
+        {
+            if (st.call_count > iterations) iterations = st.call_count;
+        }
+    }
+    DBG_PERF("═══ Stage Latency (event loop, %lu iterations) ════", iterations);
     DBG_PERF("  %-18s  %-8s  %-12s  %-10s  %-10s  %-10s",
              "Stage", "Calls", "Total(ms)", "Avg(ns)", "Max(ns)", "Min(ns)");
 

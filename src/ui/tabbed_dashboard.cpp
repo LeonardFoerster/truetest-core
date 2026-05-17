@@ -790,8 +790,15 @@ void TabbedDashboard::draw_status_bar(int width,
     if (drops_total > 0) {
         std::snprintf(buf, sizeof(buf), "%llu",
                       static_cast<unsigned long long>(drops_total));
-        put_pair("drops ", buf, Color::Danger);
-        x += 2;
+        // Inline replacement for the missing put_pair helper
+        attron(A_DIM);
+        mvaddstr(y, x, "drops ");
+        attroff(A_DIM);
+        x += 6;
+        set_color_bold(Color::Danger);
+        mvaddstr(y, x, buf);
+        unset_color_bold(Color::Danger);
+        x += static_cast<int>(std::strlen(buf)) + 2;
     }
 
     // ── Right side: PAUSED + Clock + Uptime ────────────────────────
