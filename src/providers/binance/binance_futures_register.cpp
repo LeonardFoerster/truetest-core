@@ -92,6 +92,14 @@ REGISTER_PROVIDER("binance-futures", [](const provider_config& cfg) {
     parse_int64("dead_man_countdown_ms",  &BinanceFuturesProvider::set_dead_man_countdown_ms);
     parse_int64("dead_man_heartbeat_ms",  &BinanceFuturesProvider::set_dead_man_heartbeat_ms);
 
+    auto parse_bool = [&](const char* key, void(BinanceFuturesProvider::*set)(bool)) {
+        auto raw = get(key);
+        if (raw.empty()) return;
+        bool v = (raw == "1" || raw == "true" || raw == "on" || raw == "yes");
+        (provider.get()->*set)(v);
+    };
+    parse_bool("dms_attempt_position_close", &BinanceFuturesProvider::set_dms_attempt_position_close);
+
     return provider;
 });
 

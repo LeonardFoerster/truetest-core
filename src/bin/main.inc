@@ -255,6 +255,7 @@ struct cli_options
     long        dead_man_countdown_ms = 30000;
     long        dead_man_heartbeat_ms = 0;
     bool        disarm_deadman = false;
+    bool        dms_attempt_position_close = false;  // Phase 3 DMS hardening
 
     double balance = 10000.0;
     double risk_fraction = 0.02;
@@ -692,6 +693,16 @@ static void register_cli_options(CLI::App& app, cli_options& o)
         "operator deliberately wants to pause without venue-side "
         "auto-cancel.");
 
+    app.add_flag("--dms-attempt-position-close", o.dms_attempt_position_close,
+        "(binance-futures only, Phase 3) When the DMS heartbeat thread "
+        "detects persistent failure to refresh /countdownCancelAll, "
+        "invoke a reduceOnly MARKET close of the current position "
+        "(queried live via positionRisk) in addition to the venue "
+        "order-cancel countdown. This hardens the DMS into a full "
+        "in-process last-resort flattener. Pairs with the external "
+        "tt_watchdog for total process death. Default: false (safe, "
+        "no behavior change for existing Phase 0 runs).");
+
     app.add_option("--api-key", o.api_key, "API key for exchange");
     app.add_option("--api-secret", o.api_secret, "API secret for exchange");
     app.add_option("--host", o.host, "WebSocket host");
@@ -1118,6 +1129,8 @@ static int run_provider_mode(const cli_options& o)
     pcfg["dead_man_countdown_ms"] = std::to_string(effective_countdown);
     if (o.dead_man_heartbeat_ms > 0)
         pcfg["dead_man_heartbeat_ms"] = std::to_string(o.dead_man_heartbeat_ms);
+    if (o.dms_attempt_position_close)
+        pcfg["dms_attempt_position_close"] = "true";
 
     std::shared_ptr<IProvider> provider;
     try {
@@ -1251,6 +1264,28 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.risk.max_trades_per_hour = o.risk_max_trades_per_hour;
     prov_cfg.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
     prov_cfg.risk_unwind = o.risk_unwind;
+
+    // Phase 0 soft guidance for live binance-futures (prod.md + futures-phase0-operator-sop.md)
+    if (o.provider_name == "binance-futures" && o.mode == "live")
+    {
+        const bool has_venue_caps =
+            o.max_notional_usdt > 0.0 ||
+            o.max_leverage > 0.0 ||
+            o.min_liquidation_distance_pct > 0.0;
+
+        if (!has_venue_caps)
+        {
+            std::cout << "  [Phase 0] WARNING: No venue risk caps set (--max-notional / --max-leverage / --min-liq-distance-pct).\n"
+                      << "           These are strongly recommended for safe tiny-size mainnet validation runs.\n"
+                      << "           See prod.md (Phase 0) and docs/futures-phase0-operator-sop.md\n";
+        }
+
+        if (o.risk_max_daily_loss <= 0.0)
+        {
+            std::cout << "  [Phase 0] WARNING: --max-daily-loss is 0 (disabled). A conservative daily loss limit is recommended.\n"
+                      << "           See the official Phase 0 command template in prod.md and the Operator SOP.\n";
+        }
+    }
 
 #ifdef HAS_QUESTDB
     prov_cfg.persist_enabled = o.persist;

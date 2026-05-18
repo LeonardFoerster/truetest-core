@@ -1,6 +1,15 @@
 #pragma once
 #ifdef HAS_BINANCE
 
+// ============================================================
+// LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md)
+// Any edit requires explicit two-person CCB review + 4 h
+// mainnet shadow run on engine_shadow before merge.
+// Files in this set: tt_target.h, engine.{h,cpp}, all
+// *kill_switch*, *dead_mans_switch*, *reconciler* under
+// providers/binance/, risk/*, ExecutionBridge, live_safety.h
+// ============================================================
+
 #include "providers/binance/binance_rest_client.h"
 #include "threading/worker_watchdog.h"
 
@@ -31,6 +40,16 @@
 // Critically: this only cancels ORDERS. Open futures positions stay
 // open after auto-cancel; operator must close manually. The DMS is
 // half a safety net; the kill-switch's flatten step is the other half.
+// With the Phase 3 extension, when persistent heartbeat failure is
+// detected (and attempt_position_close_on_failure_ is set), the
+// close_position_fn is invoked on this thread before the liveness
+// timestamp goes permanently stale. The provider-supplied fn performs
+// a fresh /fapi/v2/positionRisk query + reduceOnly MARKET close.
+// This turns DMS into a full in-process last-resort flattener for
+// cases where the heartbeat thread is still alive but the broader
+// engine is compromised; the external tt_watchdog covers total process
+// death. The kill-switch remains the canonical clean path on orderly
+// shutdown (DMS is disarmed first).
 // The class itself doesn't touch a socket — it routes everything
 // through a `post_fn` callable, matching the bracket adapter's pattern.
 // `make_binance_futures_dead_mans_switch(rest_client, ...)` is the
@@ -46,15 +65,20 @@ public:
 
     using post_fn = std::function<response(std::string_view endpoint,
                                            std::string_view params)>;
+    using close_position_fn = std::function<void(const std::string& symbol)>;
 
     BinanceFuturesDeadMansSwitch(post_fn post,
                                  std::string symbol,
                                  int64_t countdown_ms,
-                                 int64_t heartbeat_interval_ms)
+                                 int64_t heartbeat_interval_ms,
+                                 bool attempt_close = false,
+                                 close_position_fn closer = nullptr)
         : post_(std::move(post))
         , symbol_(std::move(symbol))
         , countdown_ms_(countdown_ms)
         , heartbeat_interval_ms_(heartbeat_interval_ms)
+        , attempt_position_close_on_failure_(attempt_close)
+        , close_position_fn_(std::move(closer))
     {}
 
     ~BinanceFuturesDeadMansSwitch() { stop(); }
@@ -116,6 +140,15 @@ public:
     int64_t heartbeat_interval_ms() const { return heartbeat_interval_ms_; }
     int64_t countdown_ms() const { return countdown_ms_; }
 
+    // Phase 3: enable optional position flattening when the DMS
+    // detects persistent failure to refresh the server-side countdown.
+    // The fn (typically a lambda capturing the provider's REST client +
+    // encoder) is called from the heartbeat thread on the second
+    // consecutive post failure. It is the caller's responsibility to
+    // query fresh position and issue a reduceOnly MARKET.
+    void set_attempt_position_close(bool v) { attempt_position_close_on_failure_ = v; }
+    void set_close_position_fn(close_position_fn fn) { close_position_fn_ = std::move(fn); }
+
 private:
     bool post_countdown(int64_t ms)
     {
@@ -176,6 +209,18 @@ private:
             std::cerr << "BinanceFuturesDeadMansSwitch: heartbeat failed "
                          "twice for symbol=" << symbol_
                       << "; watchdog will halt engine if persistent.\n";
+
+            // Phase 3: if configured, attempt position close from this
+            // still-living thread before we go permanently silent. The
+            // provider fn will query positionRisk fresh and POST the
+            // reduceOnly MARKET. This complements (does not replace) the
+            // kill-switch on orderly shutdown and the external watchdog
+            // for total process death.
+            if (attempt_position_close_on_failure_ && close_position_fn_)
+            {
+                close_position_fn_(symbol_);
+            }
+
             // Don't update last_beat_ms_ — watchdog reads it, sees the
             // stale value, halts when deadline elapses.
         }
@@ -185,6 +230,9 @@ private:
     std::string symbol_;
     int64_t countdown_ms_;
     int64_t heartbeat_interval_ms_;
+
+    bool attempt_position_close_on_failure_ = false;
+    close_position_fn close_position_fn_{};
 
     std::atomic<int64_t> last_beat_ms_{0};
     std::atomic<bool>    running_{false};
@@ -198,7 +246,9 @@ make_binance_futures_dead_mans_switch(
     std::shared_ptr<BinanceRestClient> client,
     std::string symbol,
     int64_t countdown_ms,
-    int64_t heartbeat_interval_ms)
+    int64_t heartbeat_interval_ms,
+    bool attempt_close = false,
+    BinanceFuturesDeadMansSwitch::close_position_fn closer = nullptr)
 {
     auto post = [client](std::string_view ep, std::string_view p)
         -> BinanceFuturesDeadMansSwitch::response
@@ -209,7 +259,8 @@ make_binance_futures_dead_mans_switch(
     };
     return std::make_shared<BinanceFuturesDeadMansSwitch>(
         std::move(post), std::move(symbol),
-        countdown_ms, heartbeat_interval_ms);
+        countdown_ms, heartbeat_interval_ms,
+        attempt_close, std::move(closer));
 }
 
 #endif // HAS_BINANCE

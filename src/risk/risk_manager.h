@@ -1,5 +1,14 @@
 #pragma once
 
+// ============================================================
+// LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md)
+// Any edit requires explicit two-person CCB review + 4 h
+// mainnet shadow run on engine_shadow before merge.
+// Files in this set: tt_target.h, engine.{h,cpp}, all
+// *kill_switch*, *dead_mans_switch*, *reconciler* under
+// providers/binance/, risk/*, ExecutionBridge, live_safety.h
+// ============================================================
+
 #include "../core/event.h"
 #include "../execution/portfolio.h"
 
@@ -23,6 +32,14 @@ struct risk_limits
     int daily_reset_hour = 0;
     int max_trades_per_hour = 0;
     int max_orders_per_minute = 0;
+
+    // Phase 2.3 — position sizing as % of equity + volatility
+    double max_position_pct_of_equity = 0.0;  // 0 = disabled
+    double max_portfolio_var_estimate = 0.0;  // 0 = disabled
+
+    // Phase 2.4 — circuit breakers
+    double max_spread_bps = 0.0;         // 0 = disabled
+    double max_funding_8h_rate = 0.0;    // 0 = disabled (as fraction, e.g. 0.0005 = 0.05%)
 };
 
 enum class risk_action { pass, reject, halt, unwind };
@@ -37,6 +54,14 @@ struct risk_snapshot
     std::size_t  total_fills    = 0;
     double       last_trade_pnl = 0.0;
     bool         has_last_trade = false;
+
+    // Phase 2.3 — filled by analytics worker before passing to RiskManager
+    double equity = 0.0;
+    double realized_vol_1h = 0.0;   // simple Welford or EWMA proxy
+
+    // Phase 2.4 — current market conditions for circuit breakers
+    double current_spread_bps = 0.0;
+    double current_funding_8h_rate = 0.0;  // last known 8h funding rate (fraction)
 };
 
 class RiskManager

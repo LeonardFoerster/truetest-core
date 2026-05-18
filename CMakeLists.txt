@@ -78,6 +78,7 @@ set(ENGINE_CORE_SOURCES
     src/strategy/sma.cpp
     src/market_maker/market_maker.cpp
     src/risk/risk_manager.cpp
+    src/risk/maintenance_margin_table.cpp
     src/providers/local/local_register.cpp
     src/ui/console_dashboard.cpp
     src/exits/exit_manager.cpp

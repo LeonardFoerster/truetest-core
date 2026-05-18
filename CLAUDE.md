@@ -29,6 +29,18 @@ no auto-retry on safety paths) that Sonnet has a measurable tendency
 to break by adding "helpful" fallback/retry logic. When in doubt:
 upgrade to Opus, then downgrade after the edit.
 
+**Phase 1 Live-Safety Freeze (see `prod.md` Phase 1)**:
+The files that carry the `LIVE-SAFETY SURFACE — Phase 1 freeze` comment
+block (tt_target.h, engine.cpp + the full list in prod.md) are now under
+an additional mechanical gate:
+- Any edit requires the commit message to contain the token
+  `LIVE_SAFETY_CCB_APPROVED`
+- Two-person CCB review + a clean 4-hour mainnet `engine_shadow` run
+  before merge (enforced by `scripts/check-live-safety-freeze.sh`).
+Even Opus-level changes must still carry the token and go through the
+CCB process. The initial freeze marking PR itself was the last
+unrestricted change to this surface.
+
 ## What this is
 
 TrueTest — a modular C++23 engine that starts as a backtesting platform but is

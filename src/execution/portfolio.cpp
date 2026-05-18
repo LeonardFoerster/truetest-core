@@ -24,6 +24,13 @@ void portfolio::on_fill(const fill_event& fill,
         apply_lot_fill(fill, opener_order_id, strategy_name);
 }
 
+void portfolio::on_funding(const funding_event& fe)
+{
+    cash_ += fe.get_cash_delta();
+    total_funding_pnl_ += fe.get_cash_delta();
+    // Note: we do not touch lots_ here. Funding is a pure cash adjustment.
+}
+
 void portfolio::apply_netted_fill(const fill_event& fill)
 {
     auto& pos = positions_[fill.get_symbol()];

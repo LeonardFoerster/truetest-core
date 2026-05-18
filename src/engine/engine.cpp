@@ -29,6 +29,15 @@
 #include <chrono>
 #include <iomanip>
 
+// ============================================================
+// LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md)
+// Any edit requires explicit two-person CCB review + 4 h
+// mainnet shadow run on engine_shadow before merge.
+// Files in this set: tt_target.h, engine.{h,cpp}, all
+// *kill_switch*, *dead_mans_switch*, *reconciler* under
+// providers/binance/, risk/*, ExecutionBridge, live_safety.h
+// ============================================================
+
 engine::engine(std::shared_ptr<data_handler> dh,
                std::shared_ptr<orderbook> ob,
                std::shared_ptr<IStrategy> strategy,
@@ -67,6 +76,11 @@ engine::engine(std::shared_ptr<data_handler> dh,
     {
         if (auto rc = config_.provider->get_risk_check())
             risk_check_ = std::move(rc);
+
+        // Phase 2: allow providers to publish custom events (funding_event, future liquidation_opportunity, etc.)
+        // back into the engine's ring so they reach QuestDbWorker, analytics, risk workers, TUI, etc.
+        config_.provider->set_event_publisher(
+            [this](std::shared_ptr<event> ev) { publish_event(ev); });
 
         // Register any liveness sources the provider exposes. Only
         // create the watchdog if there's something to watch — engine
@@ -297,6 +311,19 @@ void engine::log_event(const event& ev)
 void engine::publish_event(const event_pointer& ev)
 {
     refresh_dashboard_view_if_due();
+
+    // Phase 2: funding settlements update the primary portfolio cash immediately
+    // (advisory for now; later will also feed risk_snapshot / RiskManager).
+    if (ev && ev->get_type() == event_type::funding) {
+        if (auto* fe = dynamic_cast<funding_event*>(ev.get())) {
+            portfolio_.on_funding(*fe);
+#ifdef HAS_QUESTDB
+            if (questdb_store_) {
+                questdb_store_->record_funding(*fe, questdb_store_->run_tag());
+            }
+#endif
+        }
+    }
 
     if (config_.threading == thread_preset::inline_mode) {
         return;

@@ -27,11 +27,12 @@ read [`docs/futures-order-lifecycle.md`](futures-order-lifecycle.md).
 3. **Live shadow** on mainnet futures feed (`--provider binance-futures` +
    `--depth-stream depth20@100ms`).
 4. **Protocol + safety validation** on futures testnet (this document).
-5. **Tiny-size mainnet** with dead-man's switch armed, tight
-   `--min-liq-distance-pct`, `--max-daily-loss`, and `--risk-unwind`.
+5. **Tiny-size mainnet Phase 0** (see `prod.md` Phase 0 section) with
+   dead-man's switch armed, venue risk caps, daily loss limit, and the
+   official Operator SOP (`docs/futures-phase0-operator-sop.md`).
 
 Only after steps 1–3 show acceptable sim-vs-reality divergence should you
-proceed to step 4 (testnet) and then step 5 (tiny mainnet).
+proceed to step 4 (testnet) and then step 5 (tiny mainnet Phase 0 under the SOP).
 
 ## What you need
 

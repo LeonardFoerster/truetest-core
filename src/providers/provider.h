@@ -102,4 +102,11 @@ public:
 	// lost") and is published to the dashboard banner verbatim.
 	virtual void set_halt_callback(
 		std::function<void(std::string_view reason)> /*cb*/) {}
+
+	// Optional hook so providers (especially future non-CEX ones like Drift)
+	// can publish custom events (e.g. funding_event) back into the engine's
+	// event ring so they flow to workers, QuestDB, analytics, etc.
+	// Default is no-op. Wired by the engine after construction.
+	virtual void set_event_publisher(
+		std::function<void(std::shared_ptr<event>)> /*fn*/) {}
 };

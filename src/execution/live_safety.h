@@ -1,5 +1,14 @@
 #pragma once
 
+// ============================================================
+// LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md)
+// Any edit requires explicit two-person CCB review + 4 h
+// mainnet shadow run on engine_shadow before merge.
+// Files in this set: tt_target.h, engine.{h,cpp}, all
+// *kill_switch*, *dead_mans_switch*, *reconciler* under
+// providers/binance/, risk/*, ExecutionBridge, live_safety.h
+// ============================================================
+
 // Live-mode only (gated by config_.mode). Noop defaults are placeholders
 // until venue providers (e.g. BinanceReconciler) override — not safe for
 // real production.

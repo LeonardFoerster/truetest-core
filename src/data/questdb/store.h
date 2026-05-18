@@ -82,6 +82,9 @@ public:
                                   double old_qty, double new_qty,
                                   std::chrono::system_clock::time_point ts);
 
+    // Phase 2: funding settlements (cash deltas)
+    virtual void record_funding(const funding_event& fe, const std::string& run_tag);
+
     virtual void tick();   // honours time-based flush cadence
     virtual void flush();  // force-flush ILP buffer
 

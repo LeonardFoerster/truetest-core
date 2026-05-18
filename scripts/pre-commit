@@ -60,4 +60,14 @@ if ((${#bad[@]})); then
     exit 1
 fi
 
+# Phase 1 live-safety freeze check (prod.md)
+if [[ -x "./scripts/check-live-safety-freeze.sh" ]]; then
+    if ! ./scripts/check-live-safety-freeze.sh; then
+        echo ""
+        echo "[pre-commit] Live-safety freeze check failed. See error above."
+        echo "             Use --no-verify only in extreme emergencies (policy violation)."
+        exit 1
+    fi
+fi
+
 exit 0

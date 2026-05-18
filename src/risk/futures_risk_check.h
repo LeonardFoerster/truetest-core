@@ -1,10 +1,23 @@
 #pragma once
 
+// ============================================================
+// LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md)
+// Any edit requires explicit two-person CCB review + 4 h
+// mainnet shadow run on engine_shadow before merge.
+// Files in this set: tt_target.h, engine.{h,cpp}, all
+// *kill_switch*, *dead_mans_switch*, *reconciler* under
+// providers/binance/, risk/*, ExecutionBridge, live_safety.h
+// ============================================================
+
 #include "../core/event.h"
 #include "../execution/portfolio.h"
+#include "maintenance_margin_table.h"
+
+using truetest::risk::MaintenanceMarginTable;
 
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -83,10 +96,13 @@ public:
 
         // Maintenance margin rate as a fraction (Binance BTCUSDT
         // first tier = 0.005). Used in the liquidation projection.
+        // Overridden by the tiered table when provided.
         double maintenance_margin_pct = 0.005;
     };
 
-    explicit FuturesRiskCheck(const config& c) : c_(c) {}
+    explicit FuturesRiskCheck(const config& c,
+                              std::shared_ptr<MaintenanceMarginTable> mm_table = nullptr)
+        : c_(c), mm_table_(std::move(mm_table)) {}
 
     decision evaluate(const order_event& order,
                       const portfolio& port,
@@ -156,9 +172,14 @@ public:
                 // Approx: distance ≈ cash / notional − maintenance_margin.
                 // Equivalent to 1/L − mm. Used as the post-trade buffer
                 // measured in units of mark price.
+                double mm_rate = c_.maintenance_margin_pct;
+                if (mm_table_ && !mm_table_->empty()) {
+                    mm_rate = mm_table_->maintenance_margin_rate_for_notional(post_notional);
+                }
+
                 const double margin_ratio = cash / post_notional;
-                const double distance =
-                    margin_ratio - c_.maintenance_margin_pct;
+                const double distance = margin_ratio - mm_rate;
+
                 if (distance < c_.min_liquidation_distance_pct)
                 {
                     char buf[224];
@@ -169,7 +190,7 @@ public:
                         distance * 100.0,
                         c_.min_liquidation_distance_pct * 100.0,
                         cash, post_notional,
-                        c_.maintenance_margin_pct * 100.0);
+                        mm_rate * 100.0);
                     out.allow = false;
                     out.reason = buf;
                     return out;
@@ -182,6 +203,11 @@ public:
 
     const config& cfg() const { return c_; }
 
+    void set_maintenance_margin_table(std::shared_ptr<MaintenanceMarginTable> table) {
+        mm_table_ = std::move(table);
+    }
+
 private:
     config c_;
+    std::shared_ptr<MaintenanceMarginTable> mm_table_;
 };

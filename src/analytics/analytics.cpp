@@ -66,10 +66,15 @@ void Analytics::on_event(const event_pointer& ev)
             break;
         case event_type::signal:
         case event_type::l2_snapshot:
+            on_l2_snapshot(*std::static_pointer_cast<l2_snapshot_event>(ev));
+            break;
         case event_type::l2_update:
+            on_l2_update(*std::static_pointer_cast<l2_update_event>(ev));
+            break;
         case event_type::cancel:
         case event_type::amend:
         case event_type::rejection:
+        case event_type::funding:
             break;
     }
 }
@@ -77,6 +82,15 @@ void Analytics::on_event(const event_pointer& ev)
 void Analytics::on_market(const market_event& m)
 {
     last_close_ = m.get_close();
+
+    // Phase 2.3 — track mid and simple realized vol (EWMA of log returns)
+    double mid = m.get_close();  // for bar data we use close as proxy for mid
+    if (last_mid_price_ > 0.0 && mid > 0.0) {
+        double ret = std::log(mid / last_mid_price_);
+        double alpha = 0.02;  // ~ 1h half-life rough for 1m bars
+        realized_vol_1h_ = alpha * std::abs(ret) + (1.0 - alpha) * realized_vol_1h_;
+    }
+    last_mid_price_ = mid;
 
     if (!first_price_set_)
     {
@@ -144,6 +158,16 @@ void Analytics::on_market(const market_event& m)
 void Analytics::on_tick(const tick_event& t)
 {
     last_close_ = t.get_price();
+
+    // Phase 2.3 — update vol from tick mid (price)
+    double mid = t.get_price();
+    if (last_mid_price_ > 0.0 && mid > 0.0) {
+        double ret = std::log(mid / last_mid_price_);
+        double alpha = 0.02;
+        realized_vol_1h_ = alpha * std::abs(ret) + (1.0 - alpha) * realized_vol_1h_;
+    }
+    last_mid_price_ = mid;
+
     if (!first_price_set_)
     {
         first_price_ = t.get_price();
@@ -290,6 +314,27 @@ void Analytics::on_fill(const fill_event& f)
     }
 
     trades_.push_back(rec);
+}
+
+void Analytics::on_l2_snapshot(const l2_snapshot_event& ev)
+{
+    const auto& bids = ev.get_bids();
+    const auto& asks = ev.get_asks();
+
+    if (!bids.empty() && !asks.empty()) {
+        double best_bid = bids.front().price;
+        double best_ask = asks.front().price;
+        if (best_ask > best_bid && best_bid > 0) {
+            double mid = (best_ask + best_bid) / 2.0;
+            current_spread_bps_ = ((best_ask - best_bid) / mid) * 10000.0;
+        }
+    }
+}
+
+void Analytics::on_l2_update(const l2_update_event& /*ev*/)
+{
+    // Incremental updates would require maintaining a local book.
+    // Snapshots from the depth stream are sufficient for Phase 2 circuit breakers.
 }
 
 std::vector<double> Analytics::equity_tail(std::size_t n) const

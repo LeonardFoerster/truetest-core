@@ -48,6 +48,10 @@ public:
     void on_fill(const fill_event& fill, std::uint64_t opener_order_id,
                  const std::string& strategy_name = {});
 
+    // Funding settlement (non-lot event). Updates cash and a separate P&L accumulator.
+    // Does not affect lots (funding does not open or close positions in the bookkeeping sense).
+    void on_funding(const funding_event& fe);
+
     void print_summary() const;
 
     bool position_open() const;
@@ -63,6 +67,7 @@ public:
     double get_cash() const { return cash_; }
     double get_initial_balance() const { return initial_balance_; }
     double get_equity(double last_price) const;
+    double get_total_funding_pnl() const { return total_funding_pnl_; }
 
     const std::unordered_map<std::string, position>& get_positions() const { return positions_; }
 
@@ -87,6 +92,7 @@ private:
     std::unordered_map<std::uint64_t, lot>    lots_;
     std::size_t total_trades_ = 0;
     std::size_t total_fills_ = 0;
+    double total_funding_pnl_ = 0.0;   // separate accumulator for funding P&L
 
     void apply_netted_fill(const fill_event& fill);
     void apply_lot_fill(const fill_event& fill, std::uint64_t opener_order_id,

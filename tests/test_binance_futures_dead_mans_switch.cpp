@@ -214,4 +214,51 @@ TEST(BinanceFuturesDeadMansSwitch, StopBeforeStartIsNoop)
     EXPECT_EQ(post->call_count(), 0u);
 }
 
+// Phase 3: when attempt_close=true and persistent post failures occur,
+// the close_position_fn must be invoked exactly once from the heartbeat
+// thread (before liveness goes permanently stale).
+TEST(BinanceFuturesDeadMansSwitch, PersistentFailureInvokesCloseFn)
+{
+    SilenceStderr quiet;
+
+    struct CloseRecorder
+    {
+        std::string last_symbol;
+        int call_count = 0;
+        void operator()(const std::string& sym)
+        {
+            last_symbol = sym;
+            ++call_count;
+        }
+    };
+
+    auto post = std::make_shared<fake_post>();
+    // Initial arm succeeds, then every subsequent heartbeat fails.
+    post->responses = {
+        {200, "{}"},                                  // initial arm
+        {500, "{\"msg\":\"down\"}"},
+        {500, "{\"msg\":\"down\"}"},
+        {500, "{\"msg\":\"down\"}"},
+    };
+    post->default_resp = {500, "{\"msg\":\"down\"}"};
+
+    CloseRecorder recorder;
+    BinanceFuturesDeadMansSwitch dms(
+        wrap(post), "BTCUSDT",
+        /*countdown_ms=*/30000,
+        /*heartbeat_ms=*/20,   // fast for test
+        /*attempt_close=*/true,
+        /*closer=*/[&recorder](const std::string& s){ recorder(s); });
+
+    ASSERT_TRUE(dms.start());
+
+    // Give time for arm + at least two heartbeats + the failure branch.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    dms.stop();
+
+    EXPECT_GE(post->call_count(), 3u) << "arm + at least two failed heartbeats";
+    EXPECT_EQ(recorder.call_count, 1) << "close fn must fire exactly once on persistent failure";
+    EXPECT_EQ(recorder.last_symbol, "BTCUSDT");
+}
+
 #endif // HAS_BINANCE

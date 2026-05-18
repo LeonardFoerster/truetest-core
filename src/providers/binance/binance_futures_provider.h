@@ -1,12 +1,21 @@
 #pragma once
 #ifdef HAS_BINANCE
 
+// ============================================================
+// LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md)
+// Any edit requires explicit two-person CCB review + 4 h
+// mainnet shadow run on engine_shadow before merge.
+// The entire `if (mode_ == engine_mode::live …)` block (starting ~line 224)
+// is the critical surface.
+// ============================================================
+
 #include "engine/engine_config.h"
 #include "execution/client_order_id.h"
 #include "execution/execution_bridge.h"
 #include "execution/rate_limiter.h"
 #include "execution/trade_tape_shadow_adapter.h"
 #include "risk/futures_risk_check.h"
+#include "risk/maintenance_margin_table.h"
 #include "providers/provider.h"
 #include "providers/prepend_transport.h"
 #include "providers/binance/binance_combined_parser.h"
@@ -106,6 +115,11 @@ public:
     void set_dead_man_countdown_ms(int64_t v)        { dead_man_countdown_ms_ = v; }
     void set_dead_man_heartbeat_ms(int64_t v)        { dead_man_heartbeat_ms_ = v; }
 
+    // Phase 3 DMS hardening: when true and DMS is armed, the DMS will
+    // invoke a provider-supplied close fn on persistent heartbeat
+    // failure (in addition to the venue-side order cancel countdown).
+    void set_dms_attempt_position_close(bool v)      { dms_attempt_position_close_ = v; }
+
     void set_endpoints(binance::endpoints ep)
     {
         endpoints_ = std::move(ep);
@@ -154,7 +168,7 @@ public:
             || rc_cfg_.max_leverage > 0.0
             || rc_cfg_.min_liquidation_distance_pct > 0.0)
         {
-            risk_check_ = std::make_shared<FuturesRiskCheck>(rc_cfg_);
+            risk_check_ = std::make_shared<FuturesRiskCheck>(rc_cfg_, mm_table_);
         }
 
         std::cerr << "  BinanceFuturesProvider: "
@@ -256,6 +270,25 @@ public:
                               << "): " << info.body.substr(0, 160) << "\n";
                     state_ = lifecycle::error;
                     return false;
+                }
+            }
+
+            // Phase 2: load real tiered maintenance margin brackets
+            {
+                auto br = rest_->get("/fapi/v1/leverageBracket",
+                                     "symbol=" + upper(symbol_));
+                if (br.status >= 200 && br.status < 300) {
+                    mm_table_ = std::make_shared<truetest::risk::MaintenanceMarginTable>();
+                    mm_table_->load_from_leverage_bracket_json(br.body);
+                    if (risk_check_) {
+                        if (auto* frc = dynamic_cast<FuturesRiskCheck*>(risk_check_.get())) {
+                            frc->set_maintenance_margin_table(mm_table_);
+                        }
+                    }
+                } else {
+                    std::cerr << "BinanceFuturesProvider: warning – could not "
+                                 "load leverage brackets (HTTP " << br.status
+                              << "), falling back to flat maintenance margin.\n";
                 }
             }
 
@@ -370,8 +403,28 @@ public:
             // pass before it becomes safe to take action automatically.
             // Surfacing the events is the value-add here.
             d.position_snapshot_handler =
-                [sym = upper(symbol_)](const parsed_position_snapshot& s) {
+                [this, sym = upper(symbol_)](const parsed_position_snapshot& s) {
                     log_position_snapshot(s, sym);
+
+                    // Phase 2 funding path
+                    if (s.r == parsed_position_snapshot::reason::funding_fee)
+                    {
+                        for (const auto& b : s.balances)
+                        {
+                            if (b.asset == "USDT" && b.balance_change != 0.0)
+                            {
+                                auto fe = std::make_shared<funding_event>(
+                                    s.ts, sym, 0.0, b.balance_change, "FUNDING_FEE");
+
+                                if (event_publisher_)
+                                    event_publisher_(fe);
+                                else
+                                    std::cerr << "  [FUNDING] " << sym
+                                              << " cash_delta=" << b.balance_change
+                                              << " (no publisher wired yet)\n";
+                            }
+                        }
+                    }
                 };
 
             bridge_ = std::make_shared<ExecutionBridge>(std::move(d));
@@ -392,9 +445,58 @@ public:
                 const int64_t hb = dead_man_heartbeat_ms_ > 0
                     ? dead_man_heartbeat_ms_
                     : dead_man_countdown_ms_ / 3;
+
+                // Phase 3: if opted-in, build a close fn that the DMS
+                // will call from its heartbeat thread on persistent
+                // refresh failure. The fn queries fresh positionRisk
+                // (safer than last snapshot) and issues reduceOnly
+                // MARKET — exactly the flatten half of the kill-switch.
+                BinanceFuturesDeadMansSwitch::close_position_fn closer = nullptr;
+                if (dms_attempt_position_close_)
+                {
+                    closer = [rest = rest_, sym = upper(symbol_), minter = minter_](const std::string& /*s*/)
+                    {
+                        if (!rest) return;
+                        auto pr = rest->get("/fapi/v2/positionRisk", "symbol=" + sym);
+                        if (pr.status < 200 || pr.status >= 300)
+                        {
+                            std::cerr << "  [DMS-CLOSE] positionRisk HTTP "
+                                      << pr.status << " " << pr.body.substr(0,80) << "\n";
+                            return;
+                        }
+                        double pos_amt = 0.0;
+                        if (!BinanceFuturesReconciler::extract_position_amt(pr.body, pos_amt) ||
+                            std::abs(pos_amt) < 1e-9)
+                            return;
+
+                        const char* side = (pos_amt > 0.0) ? "SELL" : "BUY";
+                        char qbuf[32];
+                        std::snprintf(qbuf, sizeof(qbuf), "%.8f", std::abs(pos_amt));
+                        std::string params = "symbol=" + sym
+                            + "&side=" + side
+                            + "&type=MARKET&reduceOnly=true&quantity=" + qbuf;
+                        if (minter)
+                            params += "&newClientOrderId=" + minter->next();
+
+                        auto r = rest->post("/fapi/v1/order", params);
+                        if (r.status >= 200 && r.status < 300)
+                        {
+                            std::cerr << "  [DMS-CLOSE] emergency reduceOnly MARKET "
+                                      << sym << " side=" << side << " qty=" << qbuf << "\n";
+                        }
+                        else
+                        {
+                            std::cerr << "  [DMS-CLOSE] order failed HTTP "
+                                      << r.status << " " << r.body.substr(0,120) << "\n";
+                        }
+                    };
+                }
+
                 dms_ = make_binance_futures_dead_mans_switch(
                     rest_, upper(symbol_),
-                    dead_man_countdown_ms_, hb);
+                    dead_man_countdown_ms_, hb,
+                    /*attempt_close=*/dms_attempt_position_close_,
+                    /*closer=*/std::move(closer));
                 if (!dms_->start())
                 {
                     std::cerr << "BinanceFuturesProvider: dead-man's switch "
@@ -405,7 +507,10 @@ public:
                 }
                 std::cerr << "  BinanceFuturesProvider: dead-man's switch "
                              "armed (countdown=" << dead_man_countdown_ms_
-                          << "ms, heartbeat=" << hb << "ms)\n";
+                          << "ms, heartbeat=" << hb << "ms";
+                if (dms_attempt_position_close_)
+                    std::cerr << ", position-close=ON";
+                std::cerr << ")\n";
             }
         }
         else if (mode_ == engine_mode::shadow)
@@ -485,6 +590,12 @@ public:
     {
         halt_cb_ = std::move(cb);
         apply_halt_cb_to_transports();
+    }
+
+    void set_event_publisher(
+        std::function<void(std::shared_ptr<event>)> fn) override
+    {
+        event_publisher_ = std::move(fn);
     }
 
     std::vector<liveness_source> get_liveness_sources() override
@@ -573,8 +684,12 @@ private:
     FuturesRiskCheck::config rc_cfg_{};        // all zero = check skipped
     std::shared_ptr<IRiskCheck> risk_check_;   // null until open() if any cap > 0
 
+    // Phase 2: real tiered maintenance margin (loaded once at open)
+    std::shared_ptr<truetest::risk::MaintenanceMarginTable> mm_table_;
+
     int64_t dead_man_countdown_ms_ = 0;        // 0 disables DMS
     int64_t dead_man_heartbeat_ms_ = 0;        // 0 = countdown / 3
+    bool    dms_attempt_position_close_ = false; // Phase 3: enable DMS close_fn path
     std::shared_ptr<BinanceFuturesDeadMansSwitch> dms_;
 
     // Concrete handles so set_halt_callback can route the engine's halt
@@ -584,6 +699,7 @@ private:
     std::shared_ptr<BinanceCombinedTransport>  binance_combined_transport_;
     std::shared_ptr<BinanceUserDataTransport>  binance_user_data_;
     std::function<void(std::string_view)>      halt_cb_;
+    std::function<void(std::shared_ptr<event>)>  event_publisher_;   // Phase 2 funding etc.
 
     void apply_halt_cb_to_transports()
     {

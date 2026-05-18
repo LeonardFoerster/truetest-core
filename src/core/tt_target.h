@@ -4,6 +4,15 @@
 // gating, and dead-path removal. Runtime mode switching is kept only at
 // the argument-parsing edge.
 
+// ============================================================
+// LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md)
+// Any edit requires explicit two-person CCB review + 4 h
+// mainnet shadow run on engine_shadow before merge.
+// Files in this set: tt_target.h, engine.{h,cpp}, all
+// *kill_switch*, *dead_mans_switch*, *reconciler* under
+// providers/binance/, risk/*, ExecutionBridge, live_safety.h
+// ============================================================
+
 #define TT_TARGET_BACKTEST 1
 #define TT_TARGET_SHADOW   2
 #define TT_TARGET_LIVE     3

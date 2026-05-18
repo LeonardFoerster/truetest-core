@@ -118,6 +118,18 @@ std::string amendments_ddl(const std::string& p)
         ") TIMESTAMP(ts) PARTITION BY DAY";
 }
 
+std::string funding_ddl(const std::string& p)
+{
+    return "CREATE TABLE IF NOT EXISTS " + p + "_funding (\n"
+        "    ts               TIMESTAMP,\n"
+        "    run_tag          SYMBOL CAPACITY 10000,\n"
+        "    symbol           SYMBOL CAPACITY 1024,\n"
+        "    qty_change       DOUBLE,\n"
+        "    cash_delta       DOUBLE,\n"
+        "    reason           SYMBOL CAPACITY 32\n"
+        ") TIMESTAMP(ts) PARTITION BY DAY";
+}
+
 }
 
 std::vector<std::string> per_run_ddls(const std::string& run_tag)
@@ -126,6 +138,7 @@ std::vector<std::string> per_run_ddls(const std::string& run_tag)
         orders_ddl(run_tag),
         order_status_ddl(run_tag),
         fills_ddl(run_tag),
+        funding_ddl(run_tag),   // Phase 2: funding settlements
         rejections_ddl(run_tag),
         cancellations_ddl(run_tag),
         amendments_ddl(run_tag),

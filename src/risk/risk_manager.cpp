@@ -59,6 +59,13 @@ risk_action RiskManager::check_order(const order_event& order,
         double order_notional = order.get_quantity() * order.get_price();
         if (current_notional + order_notional > limits_.max_position_value)
             return risk_action::reject;
+
+        // Phase 2.3 — max position as % of equity
+        if (limits_.max_position_pct_of_equity > 0.0 && snap.equity > 0.0) {
+            double max_notional = snap.equity * limits_.max_position_pct_of_equity;
+            if (current_notional + order_notional > max_notional)
+                return risk_action::reject;
+        }
     }
 
     if (order.get_side() == order_side::buy)
@@ -70,6 +77,24 @@ risk_action RiskManager::check_order(const order_event& order,
         double order_notional = order.get_quantity() * order.get_price();
         if (total_exposure + order_notional > limits_.max_portfolio_exposure)
             return risk_action::reject;
+
+        // Phase 2.3 — portfolio-wide % of equity
+        if (limits_.max_position_pct_of_equity > 0.0 && snap.equity > 0.0) {
+            double max_portfolio_notional = snap.equity * limits_.max_position_pct_of_equity;
+            if (total_exposure + order_notional > max_portfolio_notional)
+                return risk_action::reject;
+        }
+    }
+
+    // Phase 2.4 — spread circuit breaker (risk worker can feed current spread via snapshot)
+    if (limits_.max_spread_bps > 0.0 && snap.current_spread_bps > limits_.max_spread_bps) {
+        // For now return reject; engine can escalate to halt if desired
+        return risk_action::reject;  // or halt
+    }
+
+    // Funding rate circuit breaker (stub — rate populated from funding snapshots or separate feed)
+    if (limits_.max_funding_8h_rate > 0.0 && snap.current_funding_8h_rate > limits_.max_funding_8h_rate) {
+        return risk_action::reject;
     }
 
     if (limits_.max_orders_per_minute > 0)

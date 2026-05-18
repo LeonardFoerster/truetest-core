@@ -380,6 +380,33 @@ inline std::vector<uint8_t> serialise(const rejection_event& e)
     return buf;
 }
 
+inline std::vector<uint8_t> serialise(const funding_event& e)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(80);
+    auto append = [&](const void* ptr, std::size_t n) {
+        const auto* b = static_cast<const uint8_t*>(ptr);
+        buf.insert(buf.end(), b, b + n);
+    };
+    auto append_ts = [&](std::chrono::system_clock::time_point tp) {
+        int64_t us = std::chrono::duration_cast<std::chrono::microseconds>(tp.time_since_epoch()).count();
+        append(&us, 8);
+    };
+    auto append_str = [&](const std::string& s) {
+        uint16_t len = static_cast<uint16_t>(s.size());
+        append(&len, 2);
+        append(s.data(), len);
+    };
+    auto append_f64 = [&](double v) { append(&v, 8); };
+
+    append_ts(e.get_timestamp());
+    append_str(e.get_symbol());
+    append_f64(e.get_qty_change());
+    append_f64(e.get_cash_delta());
+    append_str(e.get_reason());
+    return buf;
+}
+
 
 inline event_pointer deserialise(event_type type, const uint8_t* data, std::size_t size)
 {
@@ -495,6 +522,14 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         auto reason = r.read_str();
         return std::make_shared<rejection_event>(ts, symbol, oid, reason);
     }
+    case event_type::funding: {
+        auto ts = r.read_ts();
+        auto symbol = r.read_str();
+        double qty = r.read_f64();
+        double cash = r.read_f64();
+        auto reason = r.read_str();
+        return std::make_shared<funding_event>(ts, symbol, qty, cash, reason);
+    }
     }
     throw std::runtime_error("event_log: unknown event type " + std::to_string(static_cast<int>(type)));
 }
@@ -578,6 +613,8 @@ public:
             payload = event_serial::serialise(static_cast<const amend_event&>(e)); break;
         case event_type::rejection:
             payload = event_serial::serialise(static_cast<const rejection_event&>(e)); break;
+        case event_type::funding:
+            payload = event_serial::serialise(static_cast<const funding_event&>(e)); break;
         }
 
         event_serial::write_u8(out_, static_cast<uint8_t>(e.get_type()));

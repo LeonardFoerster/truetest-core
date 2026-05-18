@@ -20,7 +20,8 @@ enum class event_type
         l2_update,
         cancel,
         amend,
-        rejection
+        rejection,
+        funding
 };
 
 
@@ -569,4 +570,42 @@ private:
         std::string symbol_;
         uint64_t order_id_;
         std::string reason_;
+};
+
+// Funding settlement from the exchange (e.g. ACCOUNT_UPDATE with reason FUNDING_FEE).
+// This is a non-hot-path event. It updates cash/equity but does not close lots
+// (unlike fill_event). See Phase 2 of prod.md.
+class funding_event : public event
+{
+public:
+    funding_event(std::chrono::system_clock::time_point ts,
+                  const std::string& symbol,
+                  double qty_change,          // signed asset quantity (usually 0 for USDT-M)
+                  double cash_delta,          // the actual USDT funding credit/debit
+                  const std::string& reason = "FUNDING_FEE")
+        : event(event_type::funding, ts)
+        , symbol_(symbol)
+        , qty_change_(qty_change)
+        , cash_delta_(cash_delta)
+        , reason_(reason)
+    {}
+
+    const std::string& get_symbol() const { return symbol_; }
+    double get_qty_change() const { return qty_change_; }
+    double get_cash_delta() const { return cash_delta_; }
+    const std::string& get_reason() const { return reason_; }
+
+    std::string to_string() const override
+    {
+        return "FundingEvent[" + symbol_ +
+               " qty=" + std::to_string(qty_change_) +
+               " cash=" + std::to_string(cash_delta_) +
+               " reason=" + reason_ + "]";
+    }
+
+private:
+    std::string symbol_;
+    double qty_change_;
+    double cash_delta_;
+    std::string reason_;
 };
