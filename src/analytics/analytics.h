@@ -144,10 +144,14 @@ public:
     void reserve_hint(std::size_t expected_bars);
 
     void on_event(const event_pointer& ev) override;
+    void on_funding(const funding_event& fe);   // Phase 2.1
 
     // Phase 2.4 — allow external update of the current 8h funding rate
     // (called from provider when better funding rate data is available)
     void set_current_funding_rate_8h(double rate) { current_funding_8h_rate_ = rate; }
+
+    // Phase 2.1 — cumulative funding P&L (cash deltas from funding events)
+    double total_funding_pnl() const { return total_funding_pnl_; }
 
     AnalyticsReport generate_report() const;
 
@@ -284,6 +288,9 @@ private:
     // Phase 2.4 — current spread and funding rate (updated from L2 / funding events)
     double current_spread_bps_ = 0.0;
     double current_funding_8h_rate_ = 0.0;
+
+    // Phase 2.1 — accumulated funding cash P&L
+    double total_funding_pnl_ = 0.0;
     double total_slippage_ = 0.0;
     double total_slippage_signed_ = 0.0;
     double total_adverse_slippage_ = 0.0;

@@ -74,9 +74,31 @@ void Analytics::on_event(const event_pointer& ev)
         case event_type::cancel:
         case event_type::amend:
         case event_type::rejection:
+            break;
         case event_type::funding:
+            on_funding(*std::static_pointer_cast<funding_event>(ev));
             break;
     }
+}
+
+void Analytics::on_funding(const funding_event& fe)
+{
+    // Phase 2.1 — funding cash deltas adjust our internal cash and equity curve.
+    // This makes funding visible in reports, TUI sparkline, and risk_view().
+    cash_ += fe.get_cash_delta();
+    total_funding_pnl_ += fe.get_cash_delta();
+
+    // Mirror the equity calculation from on_market
+    bool has_position = std::abs(position_qty_) > 1e-12;
+    double equity = cash_;
+    if (has_position)
+        equity += position_qty_ * last_close_;
+
+    last_equity_ = equity;
+
+    // Record a point so the equity curve (and any downstream reports) shows the funding step
+    record_equity_point(equity_curve_, equity_stride_, equity_counter_,
+                        {fe.get_timestamp(), equity});
 }
 
 void Analytics::on_market(const market_event& m)

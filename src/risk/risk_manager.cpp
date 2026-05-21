@@ -86,14 +86,21 @@ risk_action RiskManager::check_order(const order_event& order,
         }
     }
 
-    // Phase 2.4 — spread circuit breaker (risk worker can feed current spread via snapshot)
+    // Phase 2.4 — spread circuit breaker (populated in Analytics from L2 snapshots when --depth-stream is active)
     if (limits_.max_spread_bps > 0.0 && snap.current_spread_bps > limits_.max_spread_bps) {
-        // For now return reject; engine can escalate to halt if desired
-        return risk_action::reject;  // or halt
+        // Severe breaches (e.g. > 2x limit) escalate to halt to stop trading in obviously broken books
+        if (snap.current_spread_bps > limits_.max_spread_bps * 2.0) {
+            return risk_action::halt;
+        }
+        return risk_action::reject;
     }
 
-    // Funding rate circuit breaker (stub — rate populated from funding snapshots or separate feed)
+    // Funding rate circuit breaker (rate can be fed via Analytics::set_current_funding_rate_8h
+    // from the provider when ACCOUNT_UPDATE or dedicated funding rate messages are parsed)
     if (limits_.max_funding_8h_rate > 0.0 && snap.current_funding_8h_rate > limits_.max_funding_8h_rate) {
+        if (snap.current_funding_8h_rate > limits_.max_funding_8h_rate * 1.5) {
+            return risk_action::halt;
+        }
         return risk_action::reject;
     }
 
@@ -152,6 +159,8 @@ risk_action RiskManager::check_order(const order_event& order,
     rs.max_drawdown = snap.max_drawdown;
     rs.total_orders = snap.total_orders;
     rs.total_fills  = snap.total_fills;
+    // Phase 2 fields (best effort from full report; modern path uses risk_snapshot directly)
+    rs.equity = snap.final_equity;  // approximate
     return check_order(order, port, rs);
 }
 
@@ -166,6 +175,7 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
         rs.has_last_trade = true;
         rs.last_trade_pnl = snap.trades.back().pnl;
     }
+    rs.equity = snap.final_equity;
     return check_post_fill(fill, port, rs);
 }
 
