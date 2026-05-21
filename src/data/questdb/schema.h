@@ -23,8 +23,6 @@ inline constexpr const char* kTableCancellations = "cancellations";
 inline constexpr const char* kTableAmendments    = "amendments";
 inline constexpr const char* kTableFunding       = "funding";   // Phase 2: funding settlements (cash deltas)
 
-std::string funding_ddl(const std::string& run_tag_prefix);
-
 }
 
 #endif // HAS_QUESTDB

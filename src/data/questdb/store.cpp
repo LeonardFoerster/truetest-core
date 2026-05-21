@@ -258,10 +258,16 @@ void QuestdbStore::record_rejection(const order_event& o,
 
 void QuestdbStore::record_funding(const funding_event& fe, const std::string& /*run_tag*/)
 {
-    // Phase 2 first increment: table exists, event is published.
-    // Full ILP write can be added here (similar to record_fill).
-    // For now we just make the interface complete so the system doesn't crash.
-    (void)fe;
+    LineBuilder lb(table_name("funding"));
+    lb.add_tag("run_tag", cfg_.run_tag);
+    lb.add_tag("symbol", fe.get_symbol().empty() ? "unknown" : fe.get_symbol());
+    lb.add_tag("reason", fe.get_reason().empty() ? "FUNDING_FEE" : fe.get_reason());
+
+    lb.add_field_double("qty_change", fe.get_qty_change());
+    lb.add_field_double("cash_delta", fe.get_cash_delta());
+
+    std::lock_guard<std::mutex> lk(mu_);
+    ilp_->enqueue(lb.finish(ns_from(fe.get_timestamp())));
 }
 
 void QuestdbStore::record_cancellation(std::uint64_t order_id,

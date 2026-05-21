@@ -130,7 +130,7 @@ std::string funding_ddl(const std::string& p)
         ") TIMESTAMP(ts) PARTITION BY DAY";
 }
 
-}
+}  // end anonymous namespace
 
 std::vector<std::string> per_run_ddls(const std::string& run_tag)
 {
@@ -154,6 +154,6 @@ std::vector<std::string> all_ddls(const std::string& run_tag)
     return out;
 }
 
-}
+} // namespace truetest::questdb::schema
 
 #endif // HAS_QUESTDB
