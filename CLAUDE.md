@@ -289,11 +289,11 @@ The core engine never touches storage directly.
 ### Persistence: QuestDB (opt-in)
 `-DENABLE_QUESTDB=ON` (`HAS_QUESTDB`) at compile time, `--persist` at runtime.
 Captures every order-lifecycle event (submission, status transition, fill,
-rejection, cancellation, amendment) to a local QuestDB instance. Two writers
-serialised behind one `std::mutex`: a synchronous capture path inside the
-engine (full context — `opener_order_id`, `strategy_name`, fill `source`)
-and a `QuestDbWorker` draining `questdb_ring_`. Schema: one shared
-`runs_meta` table + six per-run tables prefixed with `--run-tag`. Wire:
+rejection, cancellation, amendment, and funding) to a local QuestDB instance.
+All `record_*` calls go directly to `QuestdbStore` and are serialized behind
+one `std::mutex` inside the store. Writes are handed to a batched `IlpWriter`
+(its own background flush thread). Schema: one shared `runs_meta` table +
+six (plus funding) per-run tables prefixed with `--run-tag`. Wire:
 ILP/TCP (port 9009) for ingest, HTTP /exec (port 9000) for DDL — raw POSIX
 sockets, no client library. **Soft-fail** on unreachable daemon: warning to
 stderr, persistence disabled, run continues. Spec in `docs/db.md`.
@@ -329,10 +329,10 @@ buffers (65536 slots). Five auto-detected presets scale with physical core count
 | full | 6-7 | LoggingWorker + RiskWorker + StatsWorker |
 | extended | 8+ | + MarketMakerWorker |
 
-`QuestDbWorker` (when `--persist` is set) runs as an additional worker in any
-preset. CPU affinity pinning via `sched_setaffinity` (Linux). Each worker holds
-a shadow copy of portfolio/analytics to avoid data races. Worker spin policy is
-configurable (`spin`, `yield`, `adaptive`).
+QuestDB writes (when `--persist` is set) happen via direct calls protected by
+a mutex inside `QuestdbStore`. The heavy I/O is offloaded to the `IlpWriter`'s
+internal flush thread. No dedicated `QuestDbWorker` exists. CPU affinity and
+worker presets apply to the other workers (Logging, Risk, Stats, etc.).
 
 ### Portfolio checkpointing
 When `checkpoint_path` is set, the engine writes a binary snapshot of portfolio
