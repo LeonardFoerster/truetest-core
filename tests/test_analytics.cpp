@@ -460,3 +460,22 @@ TEST(Analytics, Flipping_LongToShortInOneFill)
     ASSERT_EQ(r.trade_returns.size(), 2u);
     EXPECT_NEAR(r.trade_returns[1], 100.0, 1e-9);
 }
+
+TEST(Analytics, FundingEvent_UpdatesCashAndEquityAndRiskView)
+{
+    Analytics a(100000.0);
+
+    // Simulate a funding credit from the exchange
+    auto funding_ev = std::make_shared<funding_event>(
+        epoch_ms(1000), "BTCUSDT", 0.0, 250.0, "FUNDING_FEE");
+
+    a.on_event(funding_ev);
+
+    auto rv = a.risk_view();
+    EXPECT_NEAR(rv.equity, 100250.0, 1e-6);
+    EXPECT_NEAR(a.total_funding_pnl(), 250.0, 1e-6);
+
+    auto report = a.generate_report();
+    // Equity curve should have recorded the funding adjustment point
+    EXPECT_GE(report.equity_curve.size(), 1u);
+}

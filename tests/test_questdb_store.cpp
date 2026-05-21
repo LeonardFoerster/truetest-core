@@ -1,6 +1,7 @@
 #ifdef HAS_QUESTDB
 
 #include "data/questdb/store.h"
+#include "core/event.h"
 
 #include <gtest/gtest.h>
 
@@ -300,6 +301,29 @@ TEST(QuestdbStore, FlushIsCallableWithoutCrash)
     f.store->flush();
     f.store->tick();
     SUCCEED();
+}
+
+TEST(QuestdbStore, RecordFundingProducesFundingRow)
+{
+    Fixture f;
+    ASSERT_TRUE(f.store->begin());
+    f.transport->lines.clear();
+
+    funding_event fe(std::chrono::system_clock::now(),
+                     "BTCUSDT",
+                     /*qty_change=*/0.0,
+                     /*cash_delta=*/12.345,
+                     "FUNDING_FEE");
+
+    f.store->record_funding(fe, f.cfg.run_tag);
+
+    ASSERT_EQ(f.transport->lines.size(), 1u);
+    const auto& line = f.transport->lines[0];
+    EXPECT_TRUE(starts_with(line, "tt_test_funding,"));
+    EXPECT_TRUE(contains(line, "symbol=BTCUSDT"));
+    EXPECT_TRUE(contains(line, "reason=FUNDING_FEE"));
+    EXPECT_TRUE(contains(line, "cash_delta=12.345"));
+    EXPECT_TRUE(contains(line, "qty_change=0"));
 }
 
 #endif // HAS_QUESTDB
