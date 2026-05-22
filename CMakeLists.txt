@@ -78,6 +78,8 @@ set(ENGINE_CORE_SOURCES
     src/strategy/breakout_strategy.cpp
     src/strategy/coiled_spring_strategy.cpp
     src/strategy/sma.cpp
+    src/strategy/adaptive_hybrid_config.cpp
+    src/strategy/adaptive_hybrid_strategy.cpp
     src/market_maker/market_maker.cpp
     src/risk/risk_manager.cpp
     src/risk/maintenance_margin_table.cpp
@@ -176,6 +178,7 @@ if(BUILD_TESTS)
         tests/test_rsi.cpp
         tests/test_bollinger.cpp
         tests/test_strategies.cpp
+        tests/test_adaptive_hybrid.cpp
         tests/test_ring_buffer.cpp
         tests/test_bar_aggregator.cpp
         tests/test_analytics.cpp

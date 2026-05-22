@@ -1,0 +1,20 @@
+{
+  "comment": "Example configuration for AdaptiveHybridStrategy (20ms Frankfurt HFT, small-cap coins like TRX)",
+  "imbalance_long_threshold": 0.22,
+  "imbalance_short_threshold": -0.22,
+  "imbalance_defensive_abs": 0.60,
+  "spread_min_pct": 0.0012,
+  "spread_max_pct": 0.0045,
+  "maker_size_frac": 0.0035,
+  "taker_size_frac": 0.0065,
+  "inventory_max_pct": 0.04,
+  "spike_z_threshold": 3.8,
+  "spike_lookback_s": 15.0,
+  "spike_ewma_alpha": 0.25,
+  "max_latency_ms": 20.0,
+  "small_cap_mode": true,
+  "small_cap_inventory_pct": 0.025,
+  "imb_ewma_alpha": 0.28,
+  "top_k_levels": 8,
+  "rng_seed": 424242
+}
