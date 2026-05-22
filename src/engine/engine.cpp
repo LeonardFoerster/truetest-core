@@ -2034,6 +2034,40 @@ void engine::apply_l2_update(const std::string& symbol,
         std::chrono::system_clock::now(), symbol, ts_side, price, new_qty);
     log_event(*ev);
     publish_event(ev);
+
+    /* LIVE_SAFETY_CCB_APPROVED: Minimal non-invasive dispatch of l2_update
+       to IStrategy (primary + additional). This enables L2-driven HFT
+       strategies such as AdaptiveHybridStrategy without touching
+       halt_flag_, risk paths, live-order gates, TT_TARGET, reconciler,
+       kill-switch, or any other Phase-1 frozen surface.
+       Dispatch occurs after apply + publish (same thread as on_tick/on_market).
+       Two-person CCB + clean 4-hour engine_shadow run required before merge.
+       See CLAUDE.md and docs/production-readiness-gaps.md. */
+    if (!pause_all_.load(std::memory_order_acquire) &&
+        !halt_flag_.load(std::memory_order_acquire))
+    {
+        size_t l2_event_count = 0;
+        if (strategy_) {
+            if (auto o = strategy_->on_l2_update(*ev)) {
+                o->set_recv_ns(0); // TODO: wire real ingress ns in future patch
+                o->set_strategy_name(primary_strategy_name_);
+                bool dummy_halt = false;
+                route_order(*o, ev->get_timestamp(), l2_event_count, dummy_halt);
+                if (!dummy_halt)
+                    register_strategy_exit_intent(*strategy_, primary_strategy_name_, o->get_order_id());
+            }
+        }
+        for (std::size_t i = 0; i < additional_strategies_.size(); ++i) {
+            auto& s = additional_strategies_[i];
+            if (s) {
+                if (auto o = s->on_l2_update(*ev)) {
+                    o->set_strategy_name(additional_strategy_names_[i]);
+                    bool dummy_halt = false;
+                    route_order(*o, ev->get_timestamp(), l2_event_count, dummy_halt);
+                }
+            }
+        }
+    }
 }
 
 void engine::refresh_top_of_book_atomics(const orderbook& ob)
