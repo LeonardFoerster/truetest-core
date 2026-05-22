@@ -173,7 +173,7 @@ void DebugPanel::draw(int body_y0, int width, int height,
             attroff(A_DIM);
         } else {
             attron(COLOR_PAIR(kPairRed));
-            mvprintw(y, x_l_value, "%-.*s", width - x_l_value - 2, e.msg.c_str());
+            safe_mvprintw(y, x_l_value, width - x_l_value - 2, "%s", e.msg.c_str());
             attroff(COLOR_PAIR(kPairRed));
         }
         ++y;

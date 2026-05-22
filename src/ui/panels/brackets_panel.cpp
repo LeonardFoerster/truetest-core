@@ -77,6 +77,8 @@ void BracketsPanel::draw(int body_y0, int width, int height,
 
     // Column layout. Wide enough that "venue list-id" stays visible
     // when present, but degrades gracefully on narrow terminals.
+    const int strategy_x = std::max(80, width - 18);
+
     attron(A_DIM);
     mvprintw(y, 2,  "%-7s",  "OpId");
     mvprintw(y, 10, "%-3s",  "Sd");
@@ -90,7 +92,7 @@ void BracketsPanel::draw(int body_y0, int width, int height,
     mvprintw(y, 89, "%9s",   "→TP%");
     mvprintw(y, 99, "%-7s",  "Where");
     mvprintw(y, 107, "%6s",  "Age");
-    mvprintw(y, 114, "%-12s", "Strategy");
+    safe_mvprintw(y, strategy_x, width - strategy_x - 1, "%-12s", "Strategy");
     attroff(A_DIM);
     ++y;
 

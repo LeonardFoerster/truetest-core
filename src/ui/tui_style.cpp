@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 namespace truetest::ui {
 
@@ -171,6 +172,70 @@ void draw_risk_level(int y, int x, const std::string& level, Color color)
     set_color_bold(color);
     mvaddstr(y, x, level.c_str());
     unset_color_bold(color);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Layout & Safe Drawing Helpers (Fix #1)
+// ─────────────────────────────────────────────────────────────
+
+int remaining_width(int start_x, int total_width, int right_margin)
+{
+    if (total_width <= 0) return 0;
+    int avail = total_width - start_x - right_margin;
+    return (avail > 0) ? avail : 0;
+}
+
+int right_align(int total_width, int content_len, int right_margin)
+{
+    if (total_width <= 0) return 0;
+    int x = total_width - content_len - right_margin;
+    return (x < 0) ? 0 : x;
+}
+
+void safe_mvaddstr(int y, int x, int max_width, const char* str)
+{
+    if (!str || max_width <= 0) return;
+
+    int w = 0, h = 0;
+    getmaxyx(stdscr, h, w);
+    (void)h;
+
+    int max_x = (w > 0) ? w : 10000;
+    int end_x = x + max_width;
+    if (end_x > max_x) end_x = max_x;
+
+    // Truncate the string if needed
+    int len = static_cast<int>(std::strlen(str));
+    if (x + len > end_x)
+        len = std::max(0, end_x - x);
+
+    if (len > 0)
+        mvaddnstr(y, x, str, len);
+}
+
+void safe_mvprintw(int y, int x, int max_width, const char* fmt, ...)
+{
+    if (!fmt || max_width <= 0) return;
+
+    char buf[512];
+    va_list args;
+    va_start(args, fmt);
+    int n = std::vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    if (n > 0)
+    {
+        buf[sizeof(buf) - 1] = '\0';
+        safe_mvaddstr(y, x, max_width, buf);
+    }
+}
+
+int clamp_x(int x, int width)
+{
+    if (width <= 0) return 0;
+    if (x < 0) return 0;
+    if (x >= width) return width - 1;
+    return x;
 }
 
 // ─────────────────────────────────────────────────────────────

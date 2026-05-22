@@ -59,10 +59,9 @@ void StrategyPanel::draw(int body_y0, int width, int height,
     mvprintw(y, 43,  "%8s",   "Wins");
     mvprintw(y, 52,  "%8s",   "WinRate");
     mvprintw(y, 61,  "%8s",   "PF");
-    mvprintw(y, 70,  "%12s",  "ΣWin");
-    mvprintw(y, 83,  "%12s",  "ΣLoss");
-    mvprintw(y, 96,  "%6s",   "Lots");
-    mvprintw(y, 103, "%8s",   "Brkts");
+    const int right_start = 70;
+    safe_mvprintw(y, right_start, width - right_start - 1, "%12s %12s %6s %8s",
+                  "ΣWin", "ΣLoss", "Lots", "Brkts");
     attroff(A_DIM);
     ++y;
 

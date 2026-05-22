@@ -435,10 +435,23 @@ bool engine::snapshot_dashboard(truetest::ui::dashboard_snapshot& out) const
     return true;
 }
 
+void engine::request_dashboard_refresh()
+{
+    // Force the next refresh to happen immediately, bypassing the normal debounce.
+    // This is used by the rich TUI on tab switches, unfreeze, pause, etc. to
+    // give the operator fresh data right away (Fix #3 → Fixed).
+    dashboard_view_force_ = true;
+    dashboard_view_last_ = std::chrono::steady_clock::time_point{};
+}
+
 void engine::refresh_dashboard_view_if_due()
 {
     auto now = std::chrono::steady_clock::now();
-    if (dashboard_view_initialised_
+
+    // If a force was requested (e.g. from the rich TUI on tab switch / unfreeze),
+    // always refresh this time.
+    if (!dashboard_view_force_
+        && dashboard_view_initialised_
         && now - dashboard_view_last_ < dashboard_view_interval_)
     {
         return;
@@ -453,6 +466,7 @@ void engine::refresh_dashboard_view_if_due()
         dashboard_view_initialised_  = true;
     }
     dashboard_view_last_ = now;
+    dashboard_view_force_ = false;   // consumed
 }
 
 void engine::cache_open_order(const order_event& o)

@@ -111,6 +111,10 @@ private:
     std::vector<std::size_t>             tab_badges_prev_;
     std::vector<std::chrono::steady_clock::time_point> tab_flash_until_;
 
+    // Fix #8: Geometry recorded during the last draw_chrome for reliable mouse hit testing
+    struct TabHitRect { int left; int right; };
+    std::vector<TabHitRect> last_tab_rects_;
+
     operator_actions actions_{};
 
     // Confirm overlay state. When non-zero, render_loop draws a centered

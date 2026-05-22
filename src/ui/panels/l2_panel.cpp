@@ -127,16 +127,21 @@ void L2Panel::draw(int body_y0, int width, int height,
     for (const auto& l : v.bids) max_size = std::max(max_size, l.size);
     for (const auto& l : v.asks) max_size = std::max(max_size, l.size);
 
-    // Leave columns:  side(7) price(14) size(16) cum(16) bar(rest)
-    const int bar_x = 2 + 7 + 14 + 16 + 16;
-    const int bar_w = std::max(8, width - bar_x - 2);
+    const int label_w = 2 + 7 + 14 + 16 + 16;           // side + price + size + cum
+    const int bar_x   = label_w;
+    const int bar_w   = std::max(8, remaining_width(bar_x, width, 2));
 
     // Bars built into a single buffer + emitted via mvaddstr — one
     // ncurses call per bar instead of `filled` mvaddch calls. With
     // 20 levels × ~30-cell bars that's 600 → 20 calls per render.
     char bar_buf[256];
     auto draw_bar = [&](int yy, double size, int color_pair) {
-        if (max_size <= 0.0) return;
+        // Always clear the bar region first to prevent ghost characters
+        for (int i = 0; i < bar_w; ++i)
+            mvaddch(yy, bar_x + i, ' ');
+
+        if (max_size <= 0.0 || bar_w <= 0) return;
+
         const int filled = std::min<int>({bar_w,
             static_cast<int>(std::lround(size / max_size * bar_w)),
             static_cast<int>(sizeof(bar_buf) - 1)});

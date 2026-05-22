@@ -216,8 +216,8 @@ void RiskPanel::draw(int body_y0, int width, int height,
             attron(A_DIM);
             mvprintw(y, 2,  "%-10s", "Symbol");
             mvprintw(y, 14, "%-22s", "Exposure");
-            mvprintw(y, 50, "%14s", "Notional");
-            mvprintw(y, 66, "%8s",  "% port");
+            const int notional_x = 50;
+            safe_mvprintw(y, notional_x, width - notional_x - 1, "%14s", "Notional");
             attroff(A_DIM);
             ++y;
         }

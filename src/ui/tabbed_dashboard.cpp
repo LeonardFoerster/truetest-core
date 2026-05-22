@@ -215,11 +215,26 @@ void TabbedDashboard::start()
 void TabbedDashboard::stop()
 {
     if (!running_.exchange(false)) return;
-    if (thread_.joinable()) thread_.join();
+
+    // Give the render thread a chance to exit cleanly
+    if (thread_.joinable())
+    {
+        // Wait up to 1 second; if it's blocked in the filter prompt or sleep,
+        // we still want to restore the terminal.
+        auto start = std::chrono::steady_clock::now();
+        while (thread_.joinable() &&
+               (std::chrono::steady_clock::now() - start) < std::chrono::seconds(1))
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (thread_.joinable())
+            thread_.detach();   // last resort — don't hang the caller
+    }
+
+    // Fix #4: Always attempt to restore the terminal, even in bad cases
     endwin();
 
-    // Persist user-visible state across runs. Best-effort — failure to
-    // write (no HOME, read-only fs, etc.) is silent.
+    // Persist user-visible state across runs.
     prefs_state ps;
     ps.active_tab = active_tab_.load(std::memory_order_acquire);
     ps.theme      = static_cast<int>(theme_);
@@ -284,24 +299,36 @@ void TabbedDashboard::handle_input()
                     (me.bstate & (BUTTON1_CLICKED | BUTTON1_PRESSED)))
                 {
                     int x = 1;
-                    for (std::size_t i = 0; i < tab_names_.size(); ++i)
+                    // Use recorded geometry if available (Fix #8), otherwise fall back
+                    if (!last_tab_rects_.empty() && last_tab_rects_.size() == tab_names_.size())
                     {
-                        const auto& name = tab_names_[i];
-                        const std::size_t count = tab_badges_.size() > i
-                            ? tab_badges_[i] : 0;
-                        const int label_w = 4 + static_cast<int>(name.size());
-                        const int badge_w = (count > 0)
-                            ? static_cast<int>(std::snprintf(nullptr, 0,
-                                                             "[%zu]", count))
-                            : 0;
-                        const int span = label_w + badge_w + 2;
-                        if (me.x >= x && me.x < x + span)
+                        for (std::size_t i = 0; i < last_tab_rects_.size(); ++i)
                         {
-                            active_tab_.store(static_cast<int>(i),
-                                              std::memory_order_release);
-                            break;
+                            const auto& r = last_tab_rects_[i];
+                            if (me.x >= r.left && me.x < r.right)
+                            {
+                                active_tab_.store(static_cast<int>(i), std::memory_order_release);
+                                break;
+                            }
                         }
-                        x += span;
+                    }
+                    else
+                    {
+                        // Fallback to old calculation
+                        for (std::size_t i = 0; i < tab_names_.size(); ++i)
+                        {
+                            const auto& name = tab_names_[i];
+                            const std::size_t count = tab_badges_.size() > i ? tab_badges_[i] : 0;
+                            const int label_w = 4 + static_cast<int>(name.size());
+                            const int badge_w = (count > 0) ? static_cast<int>(std::snprintf(nullptr, 0, "[%zu]", count)) : 0;
+                            const int span = label_w + badge_w + 3;
+                            if (me.x >= x && me.x < x + span)
+                            {
+                                active_tab_.store(static_cast<int>(i), std::memory_order_release);
+                                break;
+                            }
+                            x += span;
+                        }
                     }
                 }
             }
@@ -322,12 +349,15 @@ void TabbedDashboard::handle_input()
             int t = active_tab_.load(std::memory_order_acquire);
             active_tab_.store((t + 1) % static_cast<int>(panels_.size()),
                               std::memory_order_release);
+            // Fix #3: ask engine for fresh data after tab change
+            if (snap_fn_) { truetest::ui::dashboard_snapshot tmp; snap_fn_(tmp); }
         }
         else if (ch == KEY_BTAB || ch == KEY_LEFT)
         {
             int t = active_tab_.load(std::memory_order_acquire);
             int n = static_cast<int>(panels_.size());
             active_tab_.store((t - 1 + n) % n, std::memory_order_release);
+            if (snap_fn_) { truetest::ui::dashboard_snapshot tmp; snap_fn_(tmp); }
         }
         else if (ch == 'p' || ch == 'P')
         {
@@ -336,6 +366,8 @@ void TabbedDashboard::handle_input()
                 actions_.pause_toggle();
                 bool now_paused = actions_.pause_state ? actions_.pause_state() : false;
                 set_toast(now_paused ? "PAUSED — no new orders" : "resumed");
+                // Fix #3: operator action → want fresh data
+                if (snap_fn_) { truetest::ui::dashboard_snapshot tmp; snap_fn_(tmp); }
             }
             else set_toast("pause not wired");
         }
@@ -362,6 +394,8 @@ void TabbedDashboard::handle_input()
             const bool was = ui_frozen_.load(std::memory_order_acquire);
             ui_frozen_.store(!was, std::memory_order_release);
             set_toast(!was ? "UI frozen — engine still running" : "UI live");
+            // Fix #3: force fresh snapshot after unfreeze
+            if (snap_fn_) { truetest::ui::dashboard_snapshot tmp; snap_fn_(tmp); }
         }
         else if (ch == 'j' || ch == KEY_DOWN)
         {
@@ -397,17 +431,41 @@ void TabbedDashboard::handle_input()
             std::string buf;
             int h = 0, w = 0;
             getmaxyx(stdscr, h, w);
-            nodelay(stdscr, FALSE);
+            // Fix #5: RAII guard so we always restore nodelay + cursor even on early return / signal
+            struct PromptGuard {
+                ~PromptGuard() {
+                    nodelay(stdscr, TRUE);
+                    curs_set(0);
+                }
+            };
+            PromptGuard _guard;
+
+            // Fix #4: Make the filter prompt responsive to shutdown (no more stuck getch on exit)
+            nodelay(stdscr, TRUE);
             curs_set(1);
             for (;;)
             {
+                if (!running_.load(std::memory_order_acquire))
+                {
+                    buf.clear();
+                    break;   // shutdown requested — exit prompt cleanly
+                }
+
                 move(h - 1, 0); clrtoeol();
                 attron(COLOR_PAIR(4) | A_BOLD);
                 mvprintw(h - 1, 1, " /");
                 attroff(COLOR_PAIR(4) | A_BOLD);
                 mvaddstr(h - 1, 4, buf.c_str());
                 refresh();
+
                 int kc = getch();
+                if (kc == ERR)
+                {
+                    // no key — yield a bit so shutdown can be observed quickly
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    continue;
+                }
+
                 if (kc == 27) { buf.clear(); break; }     // Esc cancels
                 if (kc == '\n' || kc == KEY_ENTER) break; // accept
                 if (kc == KEY_BACKSPACE || kc == 127 || kc == 8)
@@ -418,8 +476,7 @@ void TabbedDashboard::handle_input()
                          buf.size() < 64)
                     buf.push_back(static_cast<char>(kc));
             }
-            nodelay(stdscr, TRUE);
-            curs_set(0);
+            nodelay(stdscr, TRUE);   // ensure we leave in the expected state for the guard
             const int active = active_tab_.load(std::memory_order_acquire);
             if (active >= 0 && active < static_cast<int>(panels_.size()))
                 panels_[active]->set_filter(buf);
@@ -618,6 +675,14 @@ void TabbedDashboard::draw_chrome(int width, int height, int active)
         const auto& name = tab_names_[i];
         const std::size_t count = tab_badges_.size() > i ? tab_badges_[i] : 0;
 
+        // Fix #1: stop drawing tabs if we would overflow the terminal
+        int needed = 4 + static_cast<int>(name.size()) + 2;
+        if (count > 0) needed += 4; // rough "[99]" estimate
+        if (x + needed > width - 2)
+            break;
+
+        int tab_start = x;
+
         if (is_active) attron(A_REVERSE | A_BOLD);
         mvprintw(0, x, " %zu·%s ", i + 1, name.c_str());
         if (is_active) attroff(A_REVERSE | A_BOLD);
@@ -638,6 +703,10 @@ void TabbedDashboard::draw_chrome(int width, int height, int active)
             attroff(COLOR_PAIR(badge_pair) | extra);
             x += static_cast<int>(std::strlen(b));
         }
+
+        // Record the rectangle for reliable hit testing (Fix #8)
+        last_tab_rects_.push_back({tab_start, x});
+
         x += 2;
     }
 
@@ -645,11 +714,11 @@ void TabbedDashboard::draw_chrome(int width, int height, int active)
     // Top separator at row 2.
     mvhline(2, 0, ACS_HLINE, width);
 
-    // Footer hint
+    // Footer hint (Fix #1 + #6)
     move(height - 1, 0); clrtoeol();
     attron(A_DIM);
-    mvprintw(height - 1, 1,
-             " 1-%zu tabs · Tab cycle · ? help · Space freeze · p pause · F flat · K kill · q quit ",
+    safe_mvprintw(height - 1, 1, width - 2,
+             " 1-%zu tabs · Tab/←→ · ? help · Space · p pause · F/K · q ",
              tab_names_.size());
     attroff(A_DIM);
 }
@@ -778,6 +847,22 @@ void TabbedDashboard::draw_status_bar(int width,
     Color dd_col = (dd <= -5.0) ? Color::Danger : (dd <= -1.0 ? Color::Warning : Color::Muted);
     put_field("dd:", buf, dd_col, true);
 
+    // Fix #3: proper staleness tracking + indicator
+    static auto last_good_snapshot = std::chrono::steady_clock::now();
+    if (snap)
+        last_good_snapshot = std::chrono::steady_clock::now();
+
+    auto snap_age = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - last_good_snapshot).count();
+
+    if (snap_age > 1500)
+    {
+        set_color_bold(Color::Warning);
+        mvaddstr(y, x, " stale");
+        unset_color_bold(Color::Warning);
+        x += 7;
+    }
+
     if (halted) {
         set_color_bold(Color::Danger);
         attron(A_REVERSE);
@@ -840,20 +925,22 @@ void TabbedDashboard::draw_status_bar(int width,
                       "%s%s%s", paused_lbl, clock_b, up_b);
     }
     const int rlen = static_cast<int>(std::strlen(right_buf));
-    const int rx = std::max(x + 2, width - rlen - 1);
+    // Use the new safe right-align helper (Fix #1)
+    const int rx = right_align(width, rlen, 1);
+    // Never let the right side overlap the left content
+    const int safe_rx = std::max(rx, x + 3);
+
     if (paused) {
         set_color_bold(Color::Warning);
         attron(A_REVERSE);
-        mvaddstr(y, rx, right_buf);
+        safe_mvaddstr(y, safe_rx, width - safe_rx - 1, right_buf);
         attroff(A_REVERSE);
         unset_color_bold(Color::Warning);
     } else {
         attron(A_DIM);
-        mvaddstr(y, rx, right_buf);
+        safe_mvaddstr(y, safe_rx, width - safe_rx - 1, right_buf);
         attroff(A_DIM);
     }
-
-    (void)width;  // current bar fits any reasonable terminal
 }
 
 void TabbedDashboard::draw_halt_banner(int width)
@@ -864,16 +951,14 @@ void TabbedDashboard::draw_halt_banner(int width)
 
     constexpr int kPairAlarm = 6;
 
-    // Rising edge: ring the bell once. ncurses beep() is a no-op on
-    // terminals that have it disabled — silent failure is fine.
+    // Rising edge: ring the bell once.
     if (!halt_bell_fired_.exchange(true, std::memory_order_acq_rel))
         ::beep();
 
     std::string reason = data_->shutdown_reason();
     if (reason.empty()) reason = "halt";
 
-    // Compose " ▶ HALT — <reason> " then pad/truncate to full width so
-    // the bg color fills the row edge-to-edge with no gaps.
+    // Full-width red alarm bar (Fix #2)
     std::string body = "  HALT - ";
     body += reason;
     if (static_cast<int>(body.size()) > width)
@@ -883,6 +968,20 @@ void TabbedDashboard::draw_halt_banner(int width)
     attron(COLOR_PAIR(kPairAlarm) | A_BOLD | A_BLINK);
     mvaddstr(0, 0, body.c_str());
     attroff(COLOR_PAIR(kPairAlarm) | A_BOLD | A_BLINK);
+
+    // Re-draw the active tab number in high contrast on the red bar
+    // so the operator still knows which tab they are looking at (Fix #2)
+    int active = active_tab_.load(std::memory_order_acquire);
+    if (active >= 0 && active < static_cast<int>(tab_names_.size()))
+    {
+        const auto& name = tab_names_[active];
+        char tab_label[64];
+        std::snprintf(tab_label, sizeof(tab_label), " %d·%s ", active + 1, name.c_str());
+
+        attron(COLOR_PAIR(kPairAlarm) | A_BOLD | A_REVERSE);
+        mvaddstr(0, 1, tab_label);
+        attroff(COLOR_PAIR(kPairAlarm) | A_BOLD | A_REVERSE);
+    }
 }
 
 std::uint64_t TabbedDashboard::compute_render_digest(
@@ -968,6 +1067,18 @@ void TabbedDashboard::render_loop()
         int h = 0, w = 0;
         getmaxyx(stdscr, h, w);
 
+        // Fix #6: Basic minimum viable terminal size guard
+        if (h < 8 || w < 40)
+        {
+            erase();
+            attron(A_BOLD | COLOR_PAIR(2));
+            mvprintw(0, 0, "Terminal too small (need at least 40x8). Resize to continue.");
+            attroff(A_BOLD | COLOR_PAIR(2));
+            refresh();
+            std::this_thread::sleep_for(tick_);
+            continue;
+        }
+
         // Resize / first frame: do a full erase. Otherwise let ncurses'
         // diff send only the cells that actually changed (each panel
         // overwrites with field-padded text, so old content is replaced
@@ -980,13 +1091,21 @@ void TabbedDashboard::render_loop()
             prev_h = h;
         }
 
+        // Fix #7: Reset all attributes at the start of every frame.
+        // This prevents ghost bold/reverse/dim/color from leaking across
+        // panels, overlays, or after early returns in draw().
+        attrset(A_NORMAL);
+        standend();
+
         int active = active_tab_.load(std::memory_order_acquire);
         const bool tab_switched = (active != prev_active);
         if (tab_switched && !resized)
         {
             // Switching tabs leaves stale rows from the previous panel —
             // wipe just the body region rather than the full screen.
-            for (int row = 3; row < h - 1; ++row)
+            // Fix #6: be more thorough on resize
+            int wipe_start = resized ? 0 : 3;
+            for (int row = wipe_start; row < h - 1; ++row)
             {
                 move(row, 0);
                 clrtoeol();

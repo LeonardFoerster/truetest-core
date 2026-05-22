@@ -116,23 +116,48 @@ void OrdersPanel::draw(int body_y0, int width, int height,
     }
     else
     {
-        std::size_t shown = 0;
+        std::vector<const dashboard_snapshot::open_order_row*> visible;
+        visible.reserve(snap->open_orders.size());
+
         for (const auto& o : snap->open_orders)
         {
-            if (y >= orders_section_end - 1 && shown < snap->open_orders.size())
+            if (filter_.empty() ||
+                o.symbol.find(filter_) != std::string::npos ||
+                std::string(o.status).find(filter_) != std::string::npos)
             {
-                if (snap->open_orders.size() - shown > 0)
+                visible.push_back(&o);
+            }
+        }
+
+        cursor_max_ = static_cast<int>(visible.size());
+        if (cursor_row_ >= cursor_max_ && cursor_max_ > 0)
+            cursor_row_ = cursor_max_ - 1;
+        if (cursor_row_ < 0)
+            cursor_row_ = 0;
+
+        std::size_t shown = 0;
+        for (std::size_t i = 0; i < visible.size(); ++i)
+        {
+            const auto& o = *visible[i];
+
+            if (y >= orders_section_end - 1 && shown < visible.size())
+            {
+                if (visible.size() - shown > 0)
                 {
                     attron(A_DIM);
-                    mvprintw(y, 4, "+ %zu more …",
-                             snap->open_orders.size() - shown);
+                    mvprintw(y, 4, "+ %zu more …", visible.size() - shown);
                     attroff(A_DIM);
                 }
                 break;
             }
             if (y >= orders_section_end) break;
-            mvprintw(y, 2,  "%-10llu",
-                     static_cast<unsigned long long>(o.order_id));
+
+            const bool selected = (static_cast<int>(i) == cursor_row_);
+            if (selected) attron(A_REVERSE);
+
+            char idbuf[32];
+            std::snprintf(idbuf, sizeof(idbuf), "%llu", static_cast<unsigned long long>(o.order_id));
+            safe_mvaddstr(y, 2, 12, idbuf);
             int spair = (o.side == 'B') ? kPairGreen
                        : (o.side == 'S') ? kPairRed : kPairWhite;
             attron(COLOR_PAIR(spair) | A_BOLD);
@@ -150,16 +175,25 @@ void OrdersPanel::draw(int body_y0, int width, int height,
             mvprintw(y, 66, "%-9s", o.status);
             attroff(COLOR_PAIR(statpair));
 
-            // Age color-grade: fresh=white, getting stale=yellow, very stale=red.
-            // Stale resting limits often mean dead-quote or wrong-side prices.
             int agepair = (o.age_seconds >= 120) ? kPairRed
                         : (o.age_seconds >= 30)  ? kPairYellow
                         : kPairWhite;
             attron(COLOR_PAIR(agepair));
             mvprintw(y, 76, "%6s",  fmt_age(o.age_seconds).c_str());
             attroff(COLOR_PAIR(agepair));
+
+            if (selected) attroff(A_REVERSE);
+
             ++y; ++shown;
         }
+    }
+
+    // Cursor hint
+    if (cursor_max_ > 0 && y < orders_section_end)
+    {
+        attron(A_DIM);
+        mvprintw(y, 4, "j/k: navigate (cursor on open orders)");
+        attroff(A_DIM);
     }
 
     // Fills section. Narrow: stacked below; wide: right half, full height.

@@ -86,6 +86,25 @@ void draw_bar(int y, int x, int width, double percentage, Color color);
 void draw_risk_level(int y, int x, const std::string& level, Color color);
 
 // ─────────────────────────────────────────────────────────────
+// Layout & Safe Drawing Helpers (for Fix #1 - responsive columns)
+// ─────────────────────────────────────────────────────────────
+
+// Returns how many columns are left after x, respecting right margin
+int remaining_width(int start_x, int total_width, int right_margin = 1);
+
+// Right-align a piece of content inside the given total width
+int right_align(int total_width, int content_len, int right_margin = 1);
+
+// Safe string output that will never write past (x + max_width - 1)
+void safe_mvaddstr(int y, int x, int max_width, const char* str);
+
+// Safe printf-style output with width limit (prevents overruns)
+void safe_mvprintw(int y, int x, int max_width, const char* fmt, ...);
+
+// Clamp an x coordinate so it stays inside [0, width-1]
+int clamp_x(int x, int width);
+
+// ─────────────────────────────────────────────────────────────
 // Risk Level Helpers (very important for futures)
 // ─────────────────────────────────────────────────────────────
 

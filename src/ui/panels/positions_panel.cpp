@@ -50,6 +50,12 @@ void PositionsPanel::draw(int body_y0, int width, int height,
         return;
     }
 
+    cursor_max_ = static_cast<int>(snap->positions.size());
+    if (cursor_row_ >= cursor_max_ && cursor_max_ > 0)
+        cursor_row_ = cursor_max_ - 1;
+    if (cursor_row_ < 0)
+        cursor_row_ = 0;
+
     int y = body_y0;
     int y_end = body_y0 + height;
 
@@ -105,7 +111,20 @@ void PositionsPanel::draw(int body_y0, int width, int height,
         ++y;
     }
 
-    if (snap->positions.empty() && y < positions_end)
+    std::vector<const dashboard_snapshot::position_row*> visible_pos;
+    for (const auto& p : snap->positions)
+    {
+        if (filter_.empty() || p.symbol.find(filter_) != std::string::npos)
+            visible_pos.push_back(&p);
+    }
+
+    cursor_max_ = static_cast<int>(visible_pos.size());
+    if (cursor_row_ >= cursor_max_ && cursor_max_ > 0)
+        cursor_row_ = cursor_max_ - 1;
+    if (cursor_row_ < 0)
+        cursor_row_ = 0;
+
+    if (visible_pos.empty() && y < positions_end)
     {
         attron(A_DIM);
         mvaddstr(y++, 4, "(no open positions)");
@@ -114,20 +133,25 @@ void PositionsPanel::draw(int body_y0, int width, int height,
     else
     {
         std::size_t shown = 0;
-        for (const auto& p : snap->positions)
+        for (std::size_t i = 0; i < visible_pos.size(); ++i)
         {
-            if (y >= positions_end - 1 && shown < snap->positions.size())
+            const auto& p = *visible_pos[i];
+
+            if (y >= positions_end - 1 && shown < visible_pos.size())
             {
-                if (snap->positions.size() - shown > 0)
+                if (visible_pos.size() - shown > 0)
                 {
                     attron(A_DIM);
-                    mvprintw(y, 4, "+ %zu more …",
-                             snap->positions.size() - shown);
+                    mvprintw(y, 4, "+ %zu more …", visible_pos.size() - shown);
                     attroff(A_DIM);
                 }
                 break;
             }
             if (y >= positions_end) break;
+
+            const bool selected = (static_cast<int>(i) == cursor_row_);
+            if (selected) attron(A_REVERSE);
+
             mvprintw(y, 2, "%-9.9s", p.symbol.c_str());
             int qpair = signed_pair(p.qty);
             attron(COLOR_PAIR(qpair));
@@ -167,6 +191,14 @@ void PositionsPanel::draw(int body_y0, int width, int height,
 
             ++y; ++shown;
         }
+    }
+
+    // Cursor hint (consistent style)
+    if (cursor_max_ > 0 && y < positions_end)
+    {
+        attron(A_DIM);
+        mvprintw(y, 4, "j/k: navigate (cursor on positions)");
+        attroff(A_DIM);
     }
 
     // Lots section. In wide mode it lives in the right half (x_offset);

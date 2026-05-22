@@ -107,7 +107,7 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     const int x_label = 2;
     const int x_value = 18;
     const int x_label2 = 38;
-    const int x_value2 = 54;
+    const int x_value2 = std::max(54, width / 2);
 
     // Decode atomics once.
     const auto state    = static_cast<connection_state>(s.state.load(std::memory_order_acquire));

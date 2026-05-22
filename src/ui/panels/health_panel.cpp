@@ -57,7 +57,9 @@ void HealthPanel::draw(int body_y0, int width, int height,
 
     int y = body_y0;
     const int y_end = body_y0 + height;
-    const int xL = 2, xLv = 22, xR = 50, xRv = 72;
+    const int xL = 2, xLv = 22;
+    const int xR = std::max(50, width / 2);
+    const int xRv = xR + 22;
     (void)width;
 
     // ── Provider state ──

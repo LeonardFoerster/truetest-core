@@ -148,6 +148,7 @@ private:
     truetest::ui::dashboard_snapshot      dashboard_view_;
     bool                                  dashboard_view_initialised_ = false;
     std::chrono::steady_clock::time_point dashboard_view_last_{};
+    bool                                  dashboard_view_force_ = false;  // set by request_dashboard_refresh (Fix #3)
 
     // Memory-view cache. /proc/self/* parsing was the dominant cost of
     // the snapshot path; refresh at ~1 Hz instead of every snapshot.
@@ -394,6 +395,11 @@ public:
     // snapshot exists yet (engine just constructed; first refresh hasn't
     // run). Mutex-protected; safe to call from any thread.
     bool snapshot_dashboard(truetest::ui::dashboard_snapshot& out) const;
+
+    // Hint from the TUI (or operator actions) that the dashboard view should
+    // be refreshed as soon as possible, bypassing the normal debounce.
+    // Safe to call from any thread. (Fix #3)
+    void request_dashboard_refresh();
 
     std::shared_ptr<EventRing> get_logging_ring() const { return logging_ring_; }
     std::shared_ptr<EventRing> get_risk_ring() const { return risk_ring_; }
