@@ -177,6 +177,9 @@ public:
                   << " rest=" << endpoints_.rest_host << ":" << endpoints_.rest_port
                   << "\n";
 
+        std::cerr << "  BinanceFuturesProvider: creating transport (stream=" << stream_type_
+                  << ", depth=" << (depth_stream_.empty() ? "none" : depth_stream_) << ")\n";
+
         std::shared_ptr<IDataTransport> live_transport;
         if (depth_stream_.empty())
         {
@@ -195,6 +198,8 @@ public:
                 streams, endpoints_.ws_host, endpoints_.ws_port);
             live_transport = binance_combined_transport_;
         }
+
+        std::cerr << "  BinanceFuturesProvider: transport created, calling open() on WebSocket...\n";
         apply_halt_cb_to_transports();
 
         std::string rest_host = rest_host_for_stream();

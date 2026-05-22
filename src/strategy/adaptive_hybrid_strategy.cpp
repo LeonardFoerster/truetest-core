@@ -256,6 +256,7 @@ void OnChainMonitor::start()
 {
     if (running_.exchange(true)) return;
     worker_ = std::thread([this]{ thread_main(); });
+    std::cerr << "[AdaptiveHybrid] OnChainMonitor worker thread launched.\n";
 }
 
 void OnChainMonitor::stop()
@@ -359,9 +360,13 @@ AdaptiveHybridStrategy::AdaptiveHybridStrategy(AdaptiveHybridConfig cfg)
     : cfg_(std::move(cfg))
       // rng_ default-constructed (seeded on first use if needed)
 {
+    std::cerr << "[AdaptiveHybrid] Strategy constructed. enable_onchain_mock="
+              << std::boolalpha << cfg_.enable_onchain_mock << "\n";
+
     if (cfg_.enable_onchain_mock) {
         onchain_monitor_ = std::make_unique<OnChainMonitor>(cfg_, onchain_ring_);
         onchain_monitor_->start();
+        std::cerr << "[AdaptiveHybrid] OnChainMonitor thread started (mock mode).\n";
     }
 }
 
@@ -372,6 +377,12 @@ AdaptiveHybridStrategy::~AdaptiveHybridStrategy()
 
 std::optional<order_event> AdaptiveHybridStrategy::on_l2_update(const l2_update_event& ev)
 {
+    static bool first = true;
+    if (first) {
+        std::cerr << "[AdaptiveHybrid] FIRST on_l2_update received for " << ev.get_symbol() << " — data path is alive!\n";
+        first = false;
+    }
+
     // === STEP 1-2: L2 arrives + update local microstructure (engine thread) ===
     auto& imb = imb_engines_[ev.get_symbol()];
     // (ImbalanceEngine ctor on first use — default cfg ok)
@@ -484,8 +495,25 @@ bool AdaptiveHybridStrategy::decide_and_validate(const std::string& sym, double 
     return true;
 }
 
-std::optional<order_event> AdaptiveHybridStrategy::on_market(const market_event& /*mkt*/) { return std::nullopt; }
-std::optional<order_event> AdaptiveHybridStrategy::on_tick(const tick_event& /*te*/) { return std::nullopt; }
+std::optional<order_event> AdaptiveHybridStrategy::on_market(const market_event& mkt)
+{
+    static bool first_market = true;
+    if (first_market) {
+        std::cerr << "[AdaptiveHybrid] FIRST on_market received for " << mkt.get_symbol() << " — bar data path is alive!\n";
+        first_market = false;
+    }
+    return std::nullopt;
+}
+
+std::optional<order_event> AdaptiveHybridStrategy::on_tick(const tick_event& te)
+{
+    static bool first_tick = true;
+    if (first_tick) {
+        std::cerr << "[AdaptiveHybrid] FIRST on_tick received for " << te.get_symbol() << " — trade data path is alive!\n";
+        first_tick = false;
+    }
+    return std::nullopt;
+}
 
 void AdaptiveHybridStrategy::on_fill(const fill_event& fill, std::uint64_t /*opener*/)
 {
