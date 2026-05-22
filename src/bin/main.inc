@@ -632,7 +632,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--spin-policy", o.spin_policy_str, "Worker spin policy: spin, yield, adaptive (default: adaptive)");
     app.add_option("--provider", o.provider_name, "Provider name: local, binance");
     app.add_option("--path", o.provider_path, "Data file path (for local provider)");
-    app.add_option("--strategy", o.strategy, "Strategy: mean-reversion, sma, ma-crossover");
+    app.add_option("--strategy", o.strategy, "Strategy: mean-reversion, sma, ma-crossover, breakout, coiled-spring");
     app.add_option("--format", o.format, "Data format: tick, bar");
     app.add_option("--sma-period", o.sma_period, "SMA indicator period")->default_val(20);
     app.add_option("--param", o.params, "Strategy parameter: key=value (repeatable)");
@@ -1164,6 +1164,10 @@ static int run_provider_mode(const cli_options& o)
         if (o.risk_fraction != 0.02) prov_strategy->set_param("risk_fraction", o.risk_fraction);
         if (o.sl_pct != 0.005) prov_strategy->set_param("sl_pct", o.sl_pct);
         if (o.tp_pct != 0.01) prov_strategy->set_param("tp_pct", o.tp_pct);
+    }
+    if (resolved == "breakout" || resolved == "coiled-spring") {
+        if (o.balance != 10000.0) prov_strategy->set_param("equity", o.balance);
+        if (o.risk_fraction != 0.02) prov_strategy->set_param("risk_fraction", o.risk_fraction);
     }
     apply_strategy_params(*prov_strategy, o.params);
 

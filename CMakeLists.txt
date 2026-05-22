@@ -75,6 +75,8 @@ set(ENGINE_CORE_SOURCES
     src/strategy/sma_strategy.cpp
     src/strategy/ma_crossover_strategy.cpp
     src/strategy/hedge_demo_strategy.cpp
+    src/strategy/breakout_strategy.cpp
+    src/strategy/coiled_spring_strategy.cpp
     src/strategy/sma.cpp
     src/market_maker/market_maker.cpp
     src/risk/risk_manager.cpp
