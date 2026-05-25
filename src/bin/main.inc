@@ -232,6 +232,9 @@ struct cli_options
     std::size_t mc_trials = 0;
     std::string mc_model;           // gbm, ou, etc.
 
+    // Phase 5: Experimental parallel MC trials (see warnings in controller)
+    bool mc_parallel = false;
+
     std::size_t sma_period = 20;
     std::vector<std::string> params;
     std::string mode;
@@ -661,6 +664,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_flag("--monte-carlo", o.monte_carlo, "Run Monte Carlo campaign (use with --mc-trials)");
     app.add_option("--mc-trials", o.mc_trials, "Number of independent Monte Carlo trials");
     app.add_option("--mc-model", o.mc_model, "Generator model for Monte Carlo (gbm, ou; default: gbm)");
+    app.add_flag("--mc-parallel", o.mc_parallel, "EXPERIMENTAL: Run MC trials in parallel (Phase 5). Strong warnings apply - see controller docs. Only safe with inline threading preset.");
     app.add_option("--strategy", o.strategy, "Strategy: mean-reversion, sma, ma-crossover, breakout, coiled-spring");
     app.add_option("--format", o.format, "Data format: tick, bar");
     app.add_option("--sma-period", o.sma_period, "SMA indicator period")->default_val(20);
@@ -1135,6 +1139,9 @@ static int run_monte_carlo_mode(const cli_options& o)
 
     // Apply some realism from top-level flags (best effort for Phase 3)
     mc_cfg.realistic_fills = false; // can be extended later
+
+    // Phase 5 parallel support
+    mc_cfg.parallel_trials = o.mc_parallel;
 
 #ifdef HAS_QUESTDB
     std::unique_ptr<truetest::questdb::QuestdbStore> questdb_store;

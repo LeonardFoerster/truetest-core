@@ -14,6 +14,9 @@
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 namespace truetest::simulation {
 
@@ -65,12 +68,17 @@ uint64_t MonteCarloController::derive_trial_seed(std::size_t trial_index) const 
 }
 
 TrialResult MonteCarloController::run_single_trial(std::size_t trial_index) {
+    uint64_t seed = derive_trial_seed(trial_index);
+    SyntheticPath path = generator_->generate(seed, config_.generator_config);
+    return run_single_trial_with_path(trial_index, std::move(path));
+}
+
+TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_index, SyntheticPath path) {
     TrialResult result;
     result.trial_id = trial_index;
     result.seed_used = derive_trial_seed(trial_index);
 
-    // 1. Generate path for this trial
-    SyntheticPath path = generator_->generate(result.seed_used, config_.generator_config);
+    // 1. (path already provided by caller / batch generation)
 
     // 2. Fresh data handler + load generated bars
     auto dh = std::make_shared<data_handler>();
@@ -116,7 +124,7 @@ TrialResult MonteCarloController::run_single_trial(std::size_t trial_index) {
     result.sharpe_ratio   = report.sharpe_ratio;
     result.total_trades   = report.total_trades;
 
-    // TODO: winning_trades extraction (AnalyticsReport has some win/loss data in sub-analytics)
+    // winning_trades can be extracted from sub-analytics in a future pass if needed.
 
     return result;
 }
@@ -126,16 +134,64 @@ McAggregate MonteCarloController::run() {
     aggregate.n_trials = config_.n_trials;
     aggregate.trials.reserve(config_.n_trials);
 
-    for (std::size_t i = 0; i < config_.n_trials; ++i) {
-        TrialResult tr = run_single_trial(i);
-        aggregate.trials.push_back(tr);
+    auto start = std::chrono::steady_clock::now();
 
-        // Running online stats (very cheap)
-        // (we'll compute proper quantiles at the end for simplicity in Phase 2)
+    // Performance optimization (Phase 5): generate all paths in one batch first.
+    // This is cache-friendly and allows the generator implementation to optimize
+    // (future SIMD / vectorized path generation, prefetch, etc.).
+    auto paths = generator_->generate_batch(config_.n_trials, config_.base_seed, config_.generator_config);
+
+    if (config_.parallel_trials && config_.n_trials > 1) {
+        // Experimental parallel execution (Phase 5)
+        std::cerr << "WARNING: Parallel MC trials enabled. This conflicts with engine core pinning, "
+                  << "thread presets, and some realism models. Use only with --thread-preset inline. "
+                  << "Result ordering and some timing statistics may not be fully deterministic.\n";
+
+        unsigned hw = std::thread::hardware_concurrency();
+        unsigned threads = config_.max_parallel_threads > 0 ? config_.max_parallel_threads : hw;
+        if (threads == 0) threads = 4; // fallback
+
+        std::mutex mtx;
+        std::vector<std::jthread> workers;
+
+        for (std::size_t i = 0; i < config_.n_trials; ++i) {
+            workers.emplace_back([this, i, &paths, &aggregate, &mtx]() {
+                TrialResult tr = run_single_trial_with_path(i, std::move(paths[i]));
+                std::lock_guard<std::mutex> lock(mtx);
+                aggregate.trials.push_back(std::move(tr));
+                if (tr.total_pnl > 0.0) {
+                    // Note: this is racy but acceptable for stats; final pass corrects it
+                }
+            });
+
+            // Simple throttle if we have more workers than threads
+            if (workers.size() >= threads) {
+                workers.front().join();
+                workers.erase(workers.begin());
+            }
+        }
+
+        // Wait for remaining
+        for (auto& w : workers) {
+            if (w.joinable()) w.join();
+        }
+
+    } else {
+        for (std::size_t i = 0; i < config_.n_trials; ++i) {
+            TrialResult tr = run_single_trial_with_path(i, std::move(paths[i]));
+            aggregate.trials.push_back(tr);
+        }
     }
 
-    // Compute aggregate statistics
+    auto end = std::chrono::steady_clock::now();
+    auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    // (future: store wall_time_ms in McAggregate or print in reporter)
+
+    // Compute aggregate statistics (always serial, after collection)
     if (!aggregate.trials.empty()) {
+        // Recompute positive count safely
+        aggregate.trials_with_positive_pnl = 0;
+
         std::vector<double> pnls;
         std::vector<double> sharpes;
         std::vector<double> maxdds;

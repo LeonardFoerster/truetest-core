@@ -112,9 +112,12 @@ SyntheticPath GBMGenerator::generate(uint64_t seed, const McGeneratorConfig& cfg
             const double bid = close - spread * 0.5;
             const double ask = close + spread * 0.5;
 
-            const double size = 5.0 + 3.0 * normal(rng) * cfg.depth_noise; // stylized depth
-            snap.bids.push_back({bid, std::max(0.1, size)});
-            snap.asks.push_back({ask, std::max(0.1, size)});
+            // Phase 5: slightly more realistic stylized depth (multiple levels + variation)
+            for (int lvl = 0; lvl < 3; ++lvl) {
+                double lvl_size = 3.0 + 4.0 * normal(rng) * cfg.depth_noise;
+                snap.bids.push_back({bid - lvl * 0.01, std::max(0.5, lvl_size)});
+                snap.asks.push_back({ask + lvl * 0.01, std::max(0.5, lvl_size)});
+            }
 
             path.l2_snapshots.push_back(std::move(snap));
         }

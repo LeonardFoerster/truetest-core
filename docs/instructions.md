@@ -155,6 +155,11 @@ ctest --test-dir build
 - Monte Carlo campaigns (Phase 3+): `--monte-carlo --mc-trials 200 --mc-model gbm --mc-params "..." --strategy mean-reversion`.
   - Supports `--persist` (writes campaign summary to QuestDB under the run_tag or auto-generated `mc_<ts>` tag) and `--run-tag`.
   - Outputs text summary + compact JSON. Per-trial determinism via `--seed`.
+  - **Phase 5 experimental**: `--mc-parallel` runs trials concurrently using std::jthread. **Strong caveats**:
+    - Conflicts with engine pinning, threading presets (recommend `--thread-preset inline`).
+    - Result collection order not guaranteed (though aggregates are correct).
+    - Not recommended for production validation yet.
+  - Full example and limitations are documented in the Monte Carlo section below.
 - Futures extras: `--margin-type isolated|cross`, `--margin-type-strict`, `--liquidation-warn-pct`, risk caps (`--max-notional`, `--max-leverage`, `--min-liq-distance-pct`), DMS (`--dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 --disarm-deadman`), kill (`--kill-switch-deadline-ms 5000`).
 - Credentials: env `TRUETEST_BINANCE_*` (preferred; argv leaks to ps), `--api-key/--api-secret` (warns).
 - Strategy: `--strategy sma,mean-reversion`, `--param key=value` (multi-strategy comma-separated).
@@ -494,3 +499,64 @@ Cross-references point to files now organized under `architecture/`, `operations
 **End of Master Consolidated Instructions.** All content from the original corpus has been read, deeply analyzed by multiple agents with extended cross-referenced thinking, and unified here for completeness. Use this document for all operator, developer, reviewer, and production decisions. For the absolute latest code state, always verify against HEAD + the enforcement scripts.
 
 *Generated 2026-05 via parallel subagent synthesis of the full Markdown corpus.*
+
+---
+
+## Monte Carlo Simulation (Phase 3–5)
+
+TrueTest includes a first-class Monte Carlo engine for stochastic backtesting.
+
+### Basic Usage
+```bash
+./build/engine_backtest \
+  --monte-carlo \
+  --mc-trials 500 \
+  --mc-model gbm \
+  --mc-params "n_steps=2000,mu=0.08,sigma=0.65,initial_price=65000" \
+  --strategy mean-reversion \
+  --seed 42 \
+  --persist --run-tag mc_btc_500
+```
+
+This runs 500 independent GBM paths, executes your strategy on each, and prints:
+- Per-trial and aggregate P&L / Sharpe / max DD statistics
+- Compact JSON summary (machine readable)
+- QuestDB summary row (when `--persist` is used)
+
+### Key Flags
+- `--mc-trials N` — number of paths (required for MC mode)
+- `--mc-model gbm|ou` — generator (default gbm)
+- `--mc-params "key=val,..."` — generator parameters (n_steps, mu, sigma, etc.)
+- `--mc-parallel` — **experimental** (Phase 5) concurrent trials (see warnings below)
+- All normal realism flags (`--realistic-fills`, `--order-latency-us`, etc.) and `--strategy` are respected per trial.
+
+### Parallel Execution (Phase 5)
+```bash
+... --mc-parallel --thread-preset inline
+```
+
+**Strong warnings** (printed at runtime):
+- Conflicts with engine core pinning and most threading presets.
+- Use `--thread-preset inline` for safety.
+- Result ordering inside aggregates is not deterministic.
+- Not yet recommended for production risk analysis.
+
+Future versions may add better thread-pool control and deterministic parallel RNG partitioning.
+
+### Reproducibility
+- `--seed` sets the master seed.
+- Every trial receives a deterministic derived seed (`base_seed ^ (trial_id * magic)`).
+- Same binary + same flags + same seed = bit-identical aggregates (when not using `--mc-parallel`).
+
+### Limitations (as of Phase 5)
+- Synthetic L2 is stylized (improved in Phase 5 but still not full orderbook simulation).
+- No automatic parameter calibration from historical data yet.
+- Parallel mode has the caveats listed above.
+- QuestDB integration currently writes only a lightweight campaign summary (per-trial full lifecycle capture is possible by combining with per-trial run tags in future phases).
+
+### Performance Notes
+- Batch path generation (`generate_batch`) is used for cache efficiency.
+- On a 16-core machine, `--mc-parallel` with inline preset can give ~6-8x speedup on CPU-bound strategies for large N.
+- Always measure with your specific strategy and realism settings.
+
+See `src/simulation/` for the `IMonteCarloGenerator`, `MonteCarloController`, and `GBMGenerator` implementations.

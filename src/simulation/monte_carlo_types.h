@@ -129,6 +129,13 @@ struct McRunConfig {
     double impact_k_bps = 0.0;
 
     bool keep_full_reports = false;   // if true, TrialResult can carry more data
+
+    // Phase 5: Experimental parallel execution.
+    // WARNING: Conflicts with engine core pinning and threading presets.
+    // Only safe with --thread-preset inline and no --no-pin overrides in some cases.
+    // Results collection is thread-safe but final order may not be deterministic.
+    bool parallel_trials = false;
+    unsigned max_parallel_threads = 0; // 0 = hardware_concurrency()
 };
 
 } // namespace truetest::simulation

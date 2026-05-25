@@ -31,6 +31,9 @@ public:
     /**
      * Execute all trials and return the aggregate result.
      * This is the main entry point for Phase 2.
+     *
+     * If McRunConfig::parallel_trials is true, uses std::jthread for
+     * concurrent execution (Phase 5 experimental feature).
      */
     McAggregate run();
 
@@ -45,6 +48,9 @@ private:
 
     // Internal helper that runs exactly one trial and returns its result.
     TrialResult run_single_trial(std::size_t trial_index);
+
+    // Phase 5 optimization: version that accepts a pre-generated path from batch generation.
+    TrialResult run_single_trial_with_path(std::size_t trial_index, SyntheticPath path);
 };
 
 } // namespace truetest::simulation
