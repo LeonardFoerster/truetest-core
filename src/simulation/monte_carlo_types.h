@@ -110,6 +110,9 @@ struct McAggregate {
     std::size_t trials_with_positive_pnl = 0;
     std::size_t trials_with_profit_factor_gt_1 = 0;
 
+    // Performance (Phase 5)
+    double wall_time_ms = 0.0;
+
     // Raw per-trial summaries (lightweight)
     std::vector<TrialResult> trials;
 };

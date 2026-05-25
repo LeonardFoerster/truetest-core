@@ -504,6 +504,7 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_size("mc_trials", o.mc_trials);
     get_str("mc_model", o.mc_model);
     get_str("mc_params", o.mc_params);
+    get_bool("mc_parallel", o.mc_parallel);
     get_str("strategy", o.strategy);
     get_str("format", o.format);
     get_size("sma_period", o.sma_period);
@@ -590,6 +591,7 @@ static void dump_config(const cli_options& o)
     j["mc_trials"] = o.mc_trials;
     j["mc_model"] = o.mc_model;
     j["mc_params"] = o.mc_params;
+    j["mc_parallel"] = o.mc_parallel;
     j["strategy"] = o.strategy.empty() ? "mean-reversion" : o.strategy;
     j["format"] = o.format;
     j["sma_period"] = o.sma_period;

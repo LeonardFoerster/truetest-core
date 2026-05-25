@@ -156,11 +156,18 @@ McAggregate MonteCarloController::run() {
 
         for (std::size_t i = 0; i < config_.n_trials; ++i) {
             workers.emplace_back([this, i, &paths, &aggregate, &mtx]() {
-                TrialResult tr = run_single_trial_with_path(i, std::move(paths[i]));
-                std::lock_guard<std::mutex> lock(mtx);
-                aggregate.trials.push_back(std::move(tr));
-                if (tr.total_pnl > 0.0) {
-                    // Note: this is racy but acceptable for stats; final pass corrects it
+                try {
+                    TrialResult tr = run_single_trial_with_path(i, std::move(paths[i]));
+                    std::lock_guard<std::mutex> lock(mtx);
+                    aggregate.trials.push_back(std::move(tr));
+                } catch (const std::exception& ex) {
+                    std::cerr << "WARNING: Trial " << i << " failed with exception: " << ex.what() << "\n";
+                    // Push a failed result so aggregates remain consistent
+                    TrialResult failed;
+                    failed.trial_id = i;
+                    failed.seed_used = derive_trial_seed(i);
+                    std::lock_guard<std::mutex> lock(mtx);
+                    aggregate.trials.push_back(std::move(failed));
                 }
             });
 
@@ -184,8 +191,7 @@ McAggregate MonteCarloController::run() {
     }
 
     auto end = std::chrono::steady_clock::now();
-    auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-    // (future: store wall_time_ms in McAggregate or print in reporter)
+    aggregate.wall_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
     // Compute aggregate statistics (always serial, after collection)
     if (!aggregate.trials.empty()) {
