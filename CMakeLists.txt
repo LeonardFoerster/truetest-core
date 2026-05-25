@@ -86,6 +86,13 @@ set(ENGINE_CORE_SOURCES
     src/providers/local/local_register.cpp
     src/ui/console_dashboard.cpp
     src/exits/exit_manager.cpp
+
+    # Monte Carlo / synthetic simulation (Phase 1+)
+    src/simulation/imonte_carlo_generator.cpp
+    src/simulation/generators/gbm_generator.cpp
+    src/providers/synthetic/synthetic_transport.cpp
+    src/providers/synthetic/synthetic_provider.cpp
+    src/providers/synthetic/synthetic_register.cpp
 )
 
 add_library(engine_core OBJECT ${ENGINE_CORE_SOURCES})
@@ -179,6 +186,7 @@ if(BUILD_TESTS)
         tests/test_bollinger.cpp
         tests/test_strategies.cpp
         tests/test_adaptive_hybrid.cpp
+        tests/test_monte_carlo_generators.cpp
         tests/test_ring_buffer.cpp
         tests/test_bar_aggregator.cpp
         tests/test_analytics.cpp

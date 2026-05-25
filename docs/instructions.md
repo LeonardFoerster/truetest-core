@@ -13,7 +13,7 @@
 
 TrueTest is a modular C++23 engine for reproducible backtesting, divergence-aware shadow trading, and gated live execution from a **single source tree**. Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) differ only by the compile-time `TT_TARGET` define in `src/core/tt_target.h`. Live-order paths are physically removed via dead-code elimination in non-live targets (`target_allows_live_orders()` is constexpr false).
 
-**Core non-negotiable invariants** (repeated across governance, architecture, user-manual, futures docs, killswitch timeline, [architecture/target-architecture.md](architecture/target-architecture.md), [architecture/MODEL.md](architecture/MODEL.md), CLAUDE.md, prod.md):
+**Core non-negotiable invariants** (repeated across governance, `prod.md`, user-manual, CLAUDE.md; detailed target architecture + MODEL.md planned under `docs/architecture/` in Doc Phase 2):
 
 1. **Compile-time live-order gate is absolute** — Only `engine_live` (and future keeper_live targets) can ever emit real orders/transactions. Never introduce runtime `allow_live_orders` checks or recompile-time bypasses.
 2. **Halt is terminal** (`halt_flag_` in engine/risk) — Write-once atomic true; only manual operator intervention + explicit process restart clears it. No auto-resume, no SIGUSR1, no cooldown, no "helpful" retry logic on safety paths.
@@ -60,68 +60,43 @@ From CLAUDE.md + [architecture/MODEL.md](architecture/MODEL.md) (full rationale)
 
 ---
 
-## 3. Production Readiness Playbook & Capital-Tier Phases (prod.md)
+## 3. Production Readiness Playbook & Capital-Tier Phases
 
-Strict rule: Moving tiers requires prior phase exit criteria + two-person sign-off on the 9-row Go-Live Gate table.
+**Full authoritative version**: see [`prod.md`](prod.md) (the central production contract).
 
-### Phase 0 — Safe Tiny-Size Mainnet Futures (Current Active)
-- **Exact command template** (conservative; must meet or exceed):
-  ```bash
-  ./build/engine_live \
-    --provider binance-futures \
-    --symbol BTCUSDT \
-    --stream trade --depth-stream depth20@100ms \
-    --live \
-    --api-key "${BINANCE_FUTURES_KEY}" --api-secret "${BINANCE_FUTURES_SECRET}" \
-    --persist --run-tag p0_$(date +%Y%m%d_%H%M) \
-    --reconcile-tolerance-bps 3 \
-    --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
-    --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \
-    --max-daily-loss 80 --risk-unwind 0.4
-  ```
-- **Why each flag mandatory**: depth for L2/queue models, persist for audit, DMS liveness, reconciler, three futures risk caps, daily loss + unwind.
-- **Exit criteria**: 15+ fully documented qualifying sessions across ≥3 volatility regimes (High/Med/Low via 7/14d BTC realized vol), zero unexplained drift > tolerance, **full artifacts** for every session (zstd .bin, QuestDB run_tag, signed one-page note from template, row in PROGRESS.md, post-halt grep review), two-person batch reviews every 5.
-- **Ritual** (futures-phase0-operator-sop.md + reports/phase0/*): Print/sign SOP, `new-session.sh`, math-captcha visible entire session, stay at terminal, one-way mode confirmed in UI + provider, DMS counter advancing in TUI, post-halt mandatory `grep -i "POSITION-SNAPSHOT|funding|drift"`, `post-session.sh`, volatility classifier, commit under reports/phase0/.
-- **Status** (2026-05): 0/15 qualifying; helpers/scripts exist; in active collection. Use `reports/phase0/PROGRESS.md` as single source of truth.
+`prod.md` contains:
+- Philosophy and the 9 core invariants
+- Exact Phase 0 command template + exit criteria + ritual
+- Phase 1 freeze rules and remaining work
+- Phases 2–6 roadmap
+- The 9-row Go-Live Gate table (all rows require two signatures + evidence)
 
-### Phase 1 — Deepdive Stabilization & Live-Safety Freeze
-- Planning artifacts created ([architecture/target-architecture.md](architecture/target-architecture.md), [architecture/migration.md](architecture/migration.md), todo.md, prerequisites.md).
-- LIVE-SAFETY blocks + enforcement script + CLAUDE update done.
-- Remaining: clean 8h mainnet `engine_shadow` (0 drops), two-person sign-off in `decisions/phase1-freeze-*.md`, prod.md/todo update.
-- **All future edits** to frozen surface require token + CCB + shadow run.
+### Quick Reference – Phase 0 Command Template (from prod.md)
+```bash
+./build/engine_live \
+  --provider binance-futures \
+  --symbol BTCUSDT \
+  --stream trade --depth-stream depth20@100ms \
+  --live \
+  --api-key "${BINANCE_FUTURES_KEY}" --api-secret "${BINANCE_FUTURES_SECRET}" \
+  --persist --run-tag p0_$(date +%Y%m%d_%H%M) \
+  --reconcile-tolerance-bps 3 \
+  --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
+  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \
+  --max-daily-loss 80 --risk-unwind 0.4
+```
 
-### Phase 2 — Risk Engine Completion (Highest Impact)
-- Funding as first-class (`funding_event` in event.h, portfolio::on_funding, QuestDB/analytics/risk/CBs, TUI).
-- Real tiered liquidation (`MaintenanceMarginTable` from `/fapi/v1/leverageBracket`, hot-patch setter into FuturesRiskCheck) — **implemented + build-fixed 2026-05**.
-- Position sizing % equity + volatility; circuit breakers (spread, funding rate).
-- Status: 2.1/2.2 complete; 2.3/2.4 pending.
-
-### Phases 3–6 (High-Level)
-- 3: DMS position flattening (`reduceOnly` MARKET on expiry) + external `tt_watchdog` binary.
-- 4: `--persist-strict` (hard-fail), mandatory binary log + xxhash integrity, richer checkpoints (full `lots_` map), crash-replay golden test.
-- 5: Prometheus + IAlertSink, encrypted credential store, runbooks.
-- 6: 60+ day continuous mainnet shadow divergence report, post-mortems for every halt/incident, CCB charter + decision log, signed exit review.
-
-**Final Go-Live Gate Table** (9 rows, all require two signatures + concrete evidence):
-1. All prior phases met.
-2. 60-day shadow report.
-3. Funding + tiered exercised 30d.
-4. DMS flatten tested.
-5. persist-strict + creds on 10 sessions.
-6. Prometheus alert drill.
-7. Runbooks walked.
-8. CCB size-increase approved.
-9. Independent safety review.
+See `prod.md` for the complete "why each flag" explanation, full exit criteria, ritual, and Go-Live Gate.
 
 ---
 
 ## 4. Prerequisites, Change Control, Task Tracking
 
-See prerequisites.md for the living Phase 1+ checklist (must be green before PRs touching frozen surface). Run `./scripts/check-live-safety-freeze.sh --check-head`, tick boxes, reference in PR.
+See [`prerequisites.md`](prerequisites.md) (living Phase 1+ checklist – must be green before any PR touching the frozen safety surface). Always run `./scripts/check-live-safety-freeze.sh --check-head` and include the result.
 
-todo.md is the phased task list (current Phase 1 items, future 2–6 bullets). Every frozen PR must reference relevant items. Update after phase completion.
+See [`todo.md`](todo.md) for the current phased task list. Every frozen-surface PR **must** reference the relevant item(s) here. Update `todo.md` after phase completion or when new work is identified.
 
-reports/phase0/ contains the evidence machinery (README for layout, PROGRESS.md tracker, PHASE0_COMPLETION_PLAN for campaign details, ops/ for batch reviews, templates/ for session notes).
+`reports/phase0/` (with `PROGRESS.md`, templates, and ops/ batch reviews) contains the evidence machinery. Use the scripts in `scripts/phase0/` to generate commands and post-session artifacts.
 
 ---
 
@@ -175,7 +150,8 @@ ctest --test-dir build
 
 **Core groups** (selected critical; full tables in original instructions §12):
 - Mode: `--mode backtest|shadow|live`, `--live` (required for real orders on mainnet + math captcha red banner; auto-skipped on --testnet).
-- Provider: `--provider local|binance|binance-futures`, `--symbol`, `--stream trade|kline_*|depth*`, `--depth-stream depth20@100ms` (for L2/queue), `--testnet`.
+- Provider: `--provider local|binance|binance-futures|synthetic`, `--symbol`, `--stream trade|kline_*|depth*`, `--depth-stream depth20@100ms` (for L2/queue), `--testnet`.
+  - New in Phase 1 (Monte Carlo work): `--provider synthetic` (or `montecarlo`) generates GBM paths on the fly. Use `--mc-params "mu=0.0,sigma=0.65,n_steps=2000,initial_price=65000"` for control. All realism flags (`--realistic-fills`, latency, queue models, impact) work unchanged. See the synthetic provider for stochastic backtesting.
 - Futures extras: `--margin-type isolated|cross`, `--margin-type-strict`, `--liquidation-warn-pct`, risk caps (`--max-notional`, `--max-leverage`, `--min-liq-distance-pct`), DMS (`--dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 --disarm-deadman`), kill (`--kill-switch-deadline-ms 5000`).
 - Credentials: env `TRUETEST_BINANCE_*` (preferred; argv leaks to ps), `--api-key/--api-secret` (warns).
 - Strategy: `--strategy sma,mean-reversion`, `--param key=value` (multi-strategy comma-separated).
@@ -204,7 +180,7 @@ ctest --test-dir build
 
 **Data validation + formats**: Strict schema checks; see instructions §19.
 
-**Realism models** ([architecture/realism.md](architecture/realism.md) — all default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
+**Realism models** (`docs/architecture/realism.md` planned — current summary: all default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
 - `--realistic-fills`: passive/resting prices, one fill_event per level walked.
 - Latency: two layers (`latency_model` strategy→eligible, `wire_latency_model` order→venue).
 - Impact: SquareRootImpactModel applied before aggression.
@@ -345,7 +321,7 @@ Acceptance commands and methodology in the doc. Ties to realism + demo-trading-w
 
 ## 15. Operator SOPs, Testnet Guides, Demo Workflows, Killswitch Timeline (full operational ladder)
 
-**Recommended 5-step pre-mainnet validation path** (repeated across futures-testnet.md, demo-trading-workflow.md, user-manual, futures-phase0-operator-sop.md):
+**Recommended 5-step pre-mainnet validation path** (described in `prod.md` + planned detailed guides in `docs/operations/` (futures-testnet.md, futures-phase0-operator-sop.md, demo-trading-workflow.md) — Doc Phases 1-2):
 1. Backtest + realism models on recorded real mainnet futures tape.
 2. Deterministic replay.
 3. Live mainnet shadow (`TradeTapeShadowAdapter` + ShadowTracker for sim vs exchange divergence).
@@ -428,7 +404,7 @@ Authoritative table:
 5. Two-person CCB + 4h/8h clean mainnet shadow before merge.
 6. Sign decisions/phase1-freeze-*.md.
 
-**Phase 0 Qualifying Session Ritual** (print/sign futures-phase0-operator-sop.md every time):
+**Phase 0 Qualifying Session Ritual** (print/sign the SOP — planned in `docs/operations/futures-phase0-operator-sop.md`; current details + template in `prod.md`):
 - Pre: new-session.sh, export keys, open math-captcha, confirm one-way in Binance UI, verify DMS counter advancing.
 - Command: use (or exceed) the conservative template above.
 - During: physical presence entire session; monitor TUI (DMS, risk, snapshots, health); math-captcha visible (mainnet).

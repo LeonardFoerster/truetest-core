@@ -215,6 +215,9 @@ struct cli_options
     std::string provider_path;
     std::string strategy;
     std::string format;
+
+    // Monte Carlo / synthetic provider (Phase 1+)
+    std::string mc_params;
     std::size_t sma_period = 20;
     std::vector<std::string> params;
     std::string mode;
@@ -630,8 +633,9 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--thread-preset", o.thread_preset_str, "Threading: inline, light, standard, full, extended");
     app.add_flag("--no-pin", o.no_pin, "Disable CPU affinity pinning");
     app.add_option("--spin-policy", o.spin_policy_str, "Worker spin policy: spin, yield, adaptive (default: adaptive)");
-    app.add_option("--provider", o.provider_name, "Provider name: local, binance");
+    app.add_option("--provider", o.provider_name, "Provider name: local, binance, synthetic");
     app.add_option("--path", o.provider_path, "Data file path (for local provider)");
+    app.add_option("--mc-params", o.mc_params, "Synthetic/Monte-Carlo params (e.g. \"mu=0.0,sigma=0.65,n_steps=5000\")");
     app.add_option("--strategy", o.strategy, "Strategy: mean-reversion, sma, ma-crossover, breakout, coiled-spring");
     app.add_option("--format", o.format, "Data format: tick, bar");
     app.add_option("--sma-period", o.sma_period, "SMA indicator period")->default_val(20);
@@ -1110,6 +1114,8 @@ static int run_provider_mode(const cli_options& o)
     if (!o.host.empty())        pcfg["host"] = o.host;
     if (!o.port.empty())        pcfg["port"] = o.port;
     if (o.testnet)              pcfg["testnet"] = "1";
+
+    if (!o.mc_params.empty())   pcfg["mc_params"] = o.mc_params;
     if (!o.margin_type.empty()) pcfg["margin_type"] = o.margin_type;
     if (o.liquidation_warn_pct >= 0.0)
         pcfg["liquidation_warn_pct"] = std::to_string(o.liquidation_warn_pct);
@@ -1141,6 +1147,8 @@ static int run_provider_mode(const cli_options& o)
             std::cerr << "    Example: --provider binance --symbol btcusdt --stream trade\n";
         else if (o.provider_name == "local")
             std::cerr << "    Example: --provider local --path market_data.csv\n";
+        else if (o.provider_name == "synthetic" || o.provider_name == "montecarlo")
+            std::cerr << "    Example: --provider synthetic --mc-params \"mu=0.0,sigma=0.65,n_steps=2000\"\n";
         else
         {
             std::cerr << "    Available providers:";
