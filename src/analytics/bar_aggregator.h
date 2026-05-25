@@ -59,6 +59,18 @@ public:
             emit_bar();
     }
 
+    // Phase B (MC object reuse): resets internal bar state so the aggregator
+    // can be reused across trials without leaking partial bars.
+    void reset()
+    {
+        bar_open_ = false;
+        bar_start_ = {};
+        symbol_.clear();
+        open_ = high_ = low_ = close_ = 0.0;
+        volume_ = 0;
+        last_partial_emit_ = {};
+    }
+
 private:
     void emit_bar()
     {

@@ -1628,6 +1628,59 @@ const Analytics* engine::get_exchange_analytics() const
     return &exchange_analytics_.value();
 }
 
+// See declaration in engine.h for documentation.
+void engine::reset_for_next_trial(uint64_t new_seed)
+{
+    // Reset main portfolio (cash, positions, lots)
+    portfolio_.reset();
+
+    // Reset analytics (very expensive to recreate)
+    // Use the configured initial balance when available (falls back to 10000 if not set yet)
+    double initial = (config_.initial_balance > 0.0) ? config_.initial_balance : 10000.0;
+    analytics_.reset(initial);
+
+    // Reset exit manager
+    exit_manager_.reset();
+
+    // Reset order tracker (important for isolation)
+    order_tracker_.reset();
+
+    // Reset risk manager
+    risk_manager_.reset();
+
+    // Update seed in config for any RNGs
+    config_.seed = new_seed;
+
+    // Reset some counters / state
+    last_mid_price_ = 0.0;
+    last_mark_symbol_.clear();
+
+    // Clear orderbook registry (L2 state from previous trial)
+    orderbook_registry_.clear();
+
+    // Reset market maker and adverse selection trackers
+    market_maker_.reset();
+    adverse_selection_.reset();
+
+    // Reset per-symbol caches that can leak state between trials
+    instrument_cache_.clear();
+    l2_seeded_symbols_.clear();
+
+    // Reset tick aggregator (prevents partial bar leakage between trials)
+    if (tick_aggregator_)
+    {
+        tick_aggregator_->reset();
+    }
+
+    // Clear UI/dashboard caches (harmless and cheap for headless MC runs)
+    open_orders_cache_.clear();
+    recent_fills_cache_.clear();
+
+    // Note: Rings, workers, event_logger_, shadow_tracker_, and dashboard timing
+    // are left mostly untouched in Phase B. Full reset of the worker infrastructure
+    // is complex and usually unnecessary for pure Monte Carlo backtesting.
+}
+
 bool engine::process_order(const std::shared_ptr<order_event>& o,
                            std::size_t& event_count,
                            bool& halt_requested)

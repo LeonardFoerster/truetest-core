@@ -555,8 +555,11 @@ Future versions may add better thread-pool control and deterministic parallel RN
 - QuestDB integration currently writes only a lightweight campaign summary (per-trial full lifecycle capture is possible by combining with per-trial run tags in future phases).
 
 ### Performance Notes
+- **Object reuse** (`--mc-reuse-objects`): Reuses `data_handler`, strategies, and many expensive engine-internal structures (`portfolio`, `Analytics`, `ExitManager`, `OrderTracker`, `RiskManager`, orderbooks, caches, etc.) between trials instead of full reconstruction. This significantly reduces per-trial overhead.
+  - Status: "Good enough" for performance gains (real speedups observed). Full bit-identical results across every internal detail are not yet guaranteed.
 - Batch path generation (`generate_batch`) is used for cache efficiency.
-- On a 16-core machine, `--mc-parallel` with inline preset can give ~6-8x speedup on CPU-bound strategies for large N.
-- Always measure with your specific strategy and realism settings.
+- **Parallel execution** (`--mc-parallel`): On a 16-core machine with `--thread-preset inline`, can deliver ~6-8x wall-time speedup on CPU-bound strategies for large N. Strong caveats apply (see Parallel Execution section).
+- Recommended combination for maximum throughput: `--mc-reuse-objects --mc-parallel --thread-preset inline`.
+- Always measure with your specific strategy and realism settings, as gains vary significantly with workload.
 
 See `src/simulation/` for the `IMonteCarloGenerator`, `MonteCarloController`, and `GBMGenerator` implementations.
