@@ -89,6 +89,8 @@ set(ENGINE_CORE_SOURCES
 
     # Monte Carlo / synthetic simulation (Phase 1+)
     src/simulation/imonte_carlo_generator.cpp
+    src/simulation/monte_carlo_controller.cpp
+    src/simulation/monte_carlo_reporter.cpp
     src/simulation/generators/gbm_generator.cpp
     src/providers/synthetic/synthetic_transport.cpp
     src/providers/synthetic/synthetic_provider.cpp
@@ -187,6 +189,7 @@ if(BUILD_TESTS)
         tests/test_strategies.cpp
         tests/test_adaptive_hybrid.cpp
         tests/test_monte_carlo_generators.cpp
+        tests/test_monte_carlo_controller.cpp
         tests/test_ring_buffer.cpp
         tests/test_bar_aggregator.cpp
         tests/test_analytics.cpp

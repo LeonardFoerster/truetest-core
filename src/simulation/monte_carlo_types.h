@@ -68,4 +68,67 @@ struct SyntheticPath {
     uint64_t seed_used = 0;   // The actual RNG seed that produced this path
 };
 
+// =============================================================================
+// Phase 2+: Multi-trial Monte Carlo structures
+// =============================================================================
+
+struct TrialResult {
+    uint64_t trial_id = 0;
+    uint64_t seed_used = 0;
+
+    double initial_equity = 0.0;
+    double final_equity = 0.0;
+    double total_pnl = 0.0;
+    double max_drawdown = 0.0;
+    double sharpe_ratio = 0.0;
+    std::size_t total_trades = 0;
+    std::size_t winning_trades = 0;
+
+    // Full analytics available for detailed reporting
+    // (populated when controller is configured to keep full reports)
+    // AnalyticsReport full_report;  // forward-declared or included by .cpp users
+};
+
+struct McAggregate {
+    std::size_t n_trials = 0;
+
+    // P&L statistics
+    double mean_pnl = 0.0;
+    double median_pnl = 0.0;
+    double p5_pnl = 0.0;     // 5th percentile
+    double p95_pnl = 0.0;
+
+    // Risk / performance
+    double mean_sharpe = 0.0;
+    double median_sharpe = 0.0;
+    double mean_max_dd = 0.0;
+    double worst_max_dd = 0.0;
+
+    double profit_factor_mean = 0.0;
+    double win_rate_mean = 0.0;
+
+    std::size_t trials_with_positive_pnl = 0;
+    std::size_t trials_with_profit_factor_gt_1 = 0;
+
+    // Raw per-trial summaries (lightweight)
+    std::vector<TrialResult> trials;
+};
+
+struct McRunConfig {
+    std::string generator_name = "gbm";
+    McGeneratorConfig generator_config;
+
+    std::size_t n_trials = 100;
+    uint64_t base_seed = 0;           // 0 = derive from time or fixed default
+
+    std::string strategy_name = "mean-reversion";
+
+    // Realism / engine settings to apply to every trial
+    bool realistic_fills = false;
+    double order_latency_us = 0.0;
+    double impact_k_bps = 0.0;
+
+    bool keep_full_reports = false;   // if true, TrialResult can carry more data
+};
+
 } // namespace truetest::simulation
