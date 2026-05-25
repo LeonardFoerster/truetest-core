@@ -80,14 +80,37 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
 
     // 1. (path already provided by caller / batch generation)
 
-    // 2. Fresh data handler + load generated bars
-    auto dh = std::make_shared<data_handler>();
+    // 2. Data handler (reuse or fresh)
+    std::shared_ptr<data_handler> dh;
+    if (config_.reuse_objects_between_trials)
+    {
+        if (!reusable_data_handler_)
+            reusable_data_handler_ = std::make_shared<data_handler>();
+        else
+            reusable_data_handler_->reset();
+        dh = reusable_data_handler_;
+    }
+    else
+    {
+        dh = std::make_shared<data_handler>();
+    }
     load_synthetic_path_into_handler(path, dh);
 
-    // 3. Fresh strategy instance
-    auto strategy = StrategyRegistry::instance().create(config_.strategy_name);
-    if (!strategy) {
-        strategy = StrategyRegistry::instance().create("mean-reversion"); // safe fallback
+    // 3. Strategy (reuse or fresh)
+    std::shared_ptr<IStrategy> strategy;
+    if (config_.reuse_objects_between_trials && reusable_strategy_)
+    {
+        reusable_strategy_->reset();   // if the strategy implements it (many do)
+        strategy = reusable_strategy_;
+    }
+    else
+    {
+        strategy = StrategyRegistry::instance().create(config_.strategy_name);
+        if (!strategy) {
+            strategy = StrategyRegistry::instance().create("mean-reversion");
+        }
+        if (config_.reuse_objects_between_trials)
+            reusable_strategy_ = strategy;
     }
 
     // 4. Build minimal engine config for this trial
@@ -103,8 +126,14 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
     // Latency / impact can be wired here in later phases using the existing model classes
     // when McRunConfig exposes more detailed realism knobs.
 
-    // 5. Construct and run a completely fresh engine
+    // 5. Construct engine (still fresh construction in Phase A)
     engine eng(dh, nullptr, strategy, std::move(ecfg));
+
+    // Phase A deepening: if reuse requested, reset the heavy objects the engine owns
+    if (config_.reuse_objects_between_trials)
+    {
+        eng.reset_internals_for_next_mc_trial(result.seed_used);
+    }
 
     // Run the backtest
     if (!path.bars.empty()) {

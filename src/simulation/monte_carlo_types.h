@@ -133,6 +133,10 @@ struct McRunConfig {
 
     bool keep_full_reports = false;   // if true, TrialResult can carry more data
 
+    // Phase A (MC object reuse): if true, reuse data_handler / portfolio / Analytics / ExitManager
+    // between trials instead of allocating fresh ones each time.
+    bool reuse_objects_between_trials = false;
+
     // Phase 5: Experimental parallel execution.
     // WARNING: Conflicts with engine core pinning and threading presets.
     // Only safe with --thread-preset inline and no --no-pin overrides in some cases.

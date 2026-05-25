@@ -166,3 +166,20 @@ void data_handler::load_from_csv(const std::filesystem::path& path)
         }
     }
 }
+
+// Phase A (MC reuse): clears all data so the handler can be reused for the next trial.
+void data_handler::reset()
+{
+    current_csv_row_index_ = 0;
+    validation_error_count_ = 0;
+
+    db_data_date.clear();
+    db_data_symbol.clear();
+    db_data_open_value.clear();
+    db_data_high_value.clear();
+    db_data_low_value.clear();
+    db_data_close_value.clear();
+    db_data_volume_value.clear();
+
+    tick_data.clear();
+}

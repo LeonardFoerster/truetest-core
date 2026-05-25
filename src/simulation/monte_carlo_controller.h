@@ -3,6 +3,12 @@
 #include "monte_carlo_types.h"
 #include "imonte_carlo_generator.h"
 
+#include "data/data_handler.h"
+#include "execution/portfolio.h"
+#include "analytics/analytics.h"
+#include "exits/exit_manager.h"
+#include "strategy/strategy_interface.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -51,6 +57,14 @@ private:
 
     // Phase 5 optimization: version that accepts a pre-generated path from batch generation.
     TrialResult run_single_trial_with_path(std::size_t trial_index, SyntheticPath path);
+
+private:
+    // Phase A (object reuse)
+    std::shared_ptr<data_handler> reusable_data_handler_;
+    std::shared_ptr<IStrategy>    reusable_strategy_;
+
+    // Note: portfolio / Analytics / ExitManager are currently owned by the engine.
+    // Reusing them is deferred past Phase A (would require engine changes).
 };
 
 } // namespace truetest::simulation

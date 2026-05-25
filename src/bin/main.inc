@@ -235,6 +235,9 @@ struct cli_options
     // Phase 5: Experimental parallel MC trials (see warnings in controller)
     bool mc_parallel = false;
 
+    // Phase A (MC object reuse): reuse data_handler + strategy (and prepared reset for others)
+    bool mc_reuse_objects = false;
+
     std::size_t sma_period = 20;
     std::vector<std::string> params;
     std::string mode;
@@ -505,6 +508,7 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_str("mc_model", o.mc_model);
     get_str("mc_params", o.mc_params);
     get_bool("mc_parallel", o.mc_parallel);
+    get_bool("mc_reuse_objects", o.mc_reuse_objects);
     get_str("strategy", o.strategy);
     get_str("format", o.format);
     get_size("sma_period", o.sma_period);
@@ -592,6 +596,7 @@ static void dump_config(const cli_options& o)
     j["mc_model"] = o.mc_model;
     j["mc_params"] = o.mc_params;
     j["mc_parallel"] = o.mc_parallel;
+    j["mc_reuse_objects"] = o.mc_reuse_objects;
     j["strategy"] = o.strategy.empty() ? "mean-reversion" : o.strategy;
     j["format"] = o.format;
     j["sma_period"] = o.sma_period;
@@ -667,6 +672,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--mc-trials", o.mc_trials, "Number of independent Monte Carlo trials");
     app.add_option("--mc-model", o.mc_model, "Generator model for Monte Carlo (gbm, ou; default: gbm)");
     app.add_flag("--mc-parallel", o.mc_parallel, "EXPERIMENTAL: Run MC trials in parallel (Phase 5). Strong warnings apply - see controller docs. Only safe with inline threading preset.");
+    app.add_flag("--mc-reuse-objects", o.mc_reuse_objects, "Phase A: Reuse data_handler/strategy (and reset other heavy objects) between MC trials instead of full reconstruction each time.");
     app.add_option("--strategy", o.strategy, "Strategy: mean-reversion, sma, ma-crossover, breakout, coiled-spring");
     app.add_option("--format", o.format, "Data format: tick, bar");
     app.add_option("--sma-period", o.sma_period, "SMA indicator period")->default_val(20);
@@ -1144,6 +1150,9 @@ static int run_monte_carlo_mode(const cli_options& o)
 
     // Phase 5 parallel support
     mc_cfg.parallel_trials = o.mc_parallel;
+
+    // Phase A object reuse
+    mc_cfg.reuse_objects_between_trials = o.mc_reuse_objects;
 
 #ifdef HAS_QUESTDB
     std::unique_ptr<truetest::questdb::QuestdbStore> questdb_store;

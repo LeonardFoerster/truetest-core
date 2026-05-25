@@ -62,4 +62,8 @@ class data_handler
 		bool has_bar_data() const { return !db_data_symbol.empty(); }
 
 		void sort_by_date();
+
+		// Phase A (MC object reuse): clears all loaded data and counters
+		// so the handler can be reused for the next trial.
+		void reset();
 };

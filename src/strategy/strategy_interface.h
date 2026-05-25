@@ -75,4 +75,9 @@ public:
     {
         return {};
     }
+
+    // Phase A (MC object reuse): strategies that hold internal state (e.g. indicators,
+    // adaptive parameters, RNGs) should override this to reset for the next trial.
+    // Default is a no-op so existing strategies continue to work unchanged.
+    virtual void reset() {}
 };
