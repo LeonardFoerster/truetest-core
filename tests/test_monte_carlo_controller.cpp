@@ -52,3 +52,35 @@ TEST(MonteCarloController, DeterministicWithSameSeed) {
         EXPECT_DOUBLE_EQ(agg1.trials[i].final_equity, agg2.trials[i].final_equity);
     }
 }
+
+// Phase A deepening: verify that object reuse produces (nearly) identical results
+TEST(MonteCarloController, ReuseObjectsProducesIdenticalResults) {
+    McRunConfig cfg;
+    cfg.n_trials = 5;
+    cfg.generator_config.n_steps = 150;
+    cfg.generator_config.sigma = 0.55;
+    cfg.strategy_name = "mean-reversion";
+    cfg.base_seed = 123;
+
+    // Reference run without reuse
+    McRunConfig cfg_fresh = cfg;
+    cfg_fresh.reuse_objects_between_trials = false;
+
+    MonteCarloController ctrl_fresh(cfg_fresh);
+    auto agg_fresh = ctrl_fresh.run();
+
+    // Run with reuse
+    McRunConfig cfg_reuse = cfg;
+    cfg_reuse.reuse_objects_between_trials = true;
+
+    MonteCarloController ctrl_reuse(cfg_reuse);
+    auto agg_reuse = ctrl_reuse.run();
+
+    EXPECT_EQ(agg_fresh.n_trials, agg_reuse.n_trials);
+    EXPECT_EQ(agg_fresh.trials.size(), agg_reuse.trials.size());
+
+    // Key aggregates should be identical (within floating point tolerance)
+    EXPECT_NEAR(agg_fresh.mean_pnl, agg_reuse.mean_pnl, 1e-6);
+    EXPECT_NEAR(agg_fresh.median_sharpe, agg_reuse.median_sharpe, 1e-6);
+    EXPECT_NEAR(agg_fresh.worst_max_dd, agg_reuse.worst_max_dd, 1e-6);
+}
