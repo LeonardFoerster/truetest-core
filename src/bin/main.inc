@@ -44,6 +44,10 @@
 #include "providers/provider_sink.h"
 #include "providers/local/csv_parser.h"
 #include "providers/local/file_transport.h"
+
+// Monte Carlo support (Phase 2+)
+#include "simulation/monte_carlo_controller.h"
+#include "simulation/monte_carlo_reporter.h"
 #include "ui/console_dashboard.h"
 #ifdef HAS_RICH_TUI
 #include "ui/dashboard_snapshot.h"
@@ -218,6 +222,12 @@ struct cli_options
 
     // Monte Carlo / synthetic provider (Phase 1+)
     std::string mc_params;
+
+    // Phase 3: Full Monte Carlo campaign mode
+    bool monte_carlo = false;
+    std::size_t mc_trials = 0;
+    std::string mc_model;           // gbm, ou, etc.
+
     std::size_t sma_period = 20;
     std::vector<std::string> params;
     std::string mode;
@@ -483,6 +493,10 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_bool("no_pin", o.no_pin);
     get_str("provider", o.provider_name);
     get_str("path", o.provider_path);
+    get_bool("monte_carlo", o.monte_carlo);
+    get_size("mc_trials", o.mc_trials);
+    get_str("mc_model", o.mc_model);
+    get_str("mc_params", o.mc_params);
     get_str("strategy", o.strategy);
     get_str("format", o.format);
     get_size("sma_period", o.sma_period);
@@ -565,6 +579,10 @@ static void dump_config(const cli_options& o)
     j["no_pin"] = o.no_pin;
     j["provider"] = o.provider_name;
     j["path"] = o.provider_path;
+    j["monte_carlo"] = o.monte_carlo;
+    j["mc_trials"] = o.mc_trials;
+    j["mc_model"] = o.mc_model;
+    j["mc_params"] = o.mc_params;
     j["strategy"] = o.strategy.empty() ? "mean-reversion" : o.strategy;
     j["format"] = o.format;
     j["sma_period"] = o.sma_period;
@@ -636,6 +654,9 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--provider", o.provider_name, "Provider name: local, binance, synthetic");
     app.add_option("--path", o.provider_path, "Data file path (for local provider)");
     app.add_option("--mc-params", o.mc_params, "Synthetic/Monte-Carlo params (e.g. \"mu=0.0,sigma=0.65,n_steps=5000\")");
+    app.add_flag("--monte-carlo", o.monte_carlo, "Run Monte Carlo campaign (use with --mc-trials)");
+    app.add_option("--mc-trials", o.mc_trials, "Number of independent Monte Carlo trials");
+    app.add_option("--mc-model", o.mc_model, "Generator model for Monte Carlo (gbm, ou; default: gbm)");
     app.add_option("--strategy", o.strategy, "Strategy: mean-reversion, sma, ma-crossover, breakout, coiled-spring");
     app.add_option("--format", o.format, "Data format: tick, bar");
     app.add_option("--sma-period", o.sma_period, "SMA indicator period")->default_val(20);
@@ -1070,6 +1091,64 @@ static int run_replay_mode(const cli_options& o)
     return 0;
 }
 
+// Monte Carlo campaign runner (Phase 3)
+static int run_monte_carlo_mode(const cli_options& o)
+{
+    std::cout << "\n=== Monte Carlo Campaign ===\n";
+
+    truetest::simulation::McRunConfig mc_cfg;
+    mc_cfg.n_trials = (o.mc_trials > 0) ? o.mc_trials : 50;
+    mc_cfg.generator_name = o.mc_model.empty() ? "gbm" : o.mc_model;
+
+    // Parse generator params
+    if (!o.mc_params.empty()) {
+        // Reuse the small parser logic by populating a temp provider_config style
+        // For simplicity we directly apply common keys here
+        // (in a real implementation we would share the parser)
+        std::istringstream iss(o.mc_params);
+        std::string token;
+        while (std::getline(iss, token, ',')) {
+            auto eq = token.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = token.substr(0, eq);
+            std::string val = token.substr(eq + 1);
+            if (key == "n_steps" || key == "n_bars") {
+                try { mc_cfg.generator_config.n_steps = std::stoll(val); } catch (...) {}
+            } else if (key == "mu") {
+                try { mc_cfg.generator_config.mu = std::stod(val); } catch (...) {}
+            } else if (key == "sigma") {
+                try { mc_cfg.generator_config.sigma = std::stod(val); } catch (...) {}
+            } else if (key == "initial_price") {
+                try { mc_cfg.generator_config.initial_price = std::stod(val); } catch (...) {}
+            }
+        }
+    }
+
+    if (!o.strategy.empty()) {
+        mc_cfg.strategy_name = o.strategy;
+    }
+    mc_cfg.base_seed = o.seed;
+
+    // Apply some realism from top-level flags (best effort for Phase 3)
+    mc_cfg.realistic_fills = false; // can be extended later
+
+    std::cout << "  Trials:   " << mc_cfg.n_trials << "\n";
+    std::cout << "  Model:    " << mc_cfg.generator_name << "\n";
+    std::cout << "  Strategy: " << mc_cfg.strategy_name << "\n\n";
+
+    truetest::simulation::MonteCarloController controller(mc_cfg);
+    auto results = controller.run();
+
+    std::cout << truetest::simulation::MonteCarloReporter::render_text_summary(results, mc_cfg);
+
+    // Also print compact JSON for scripting
+    std::cout << "\nJSON Summary:\n" << truetest::simulation::MonteCarloReporter::render_json(results, mc_cfg);
+
+    // TODO: integrate with --output, --persist, export_results style
+
+    return 0;
+}
+
 // Resolve exchange credentials. Environment variables win over CLI arguments;
 // argv-supplied secrets trigger a warning because they leak via `ps` and shell
 // history. Returns the resolved (key, secret) pair.
@@ -1137,6 +1216,11 @@ static int run_provider_mode(const cli_options& o)
         pcfg["dead_man_heartbeat_ms"] = std::to_string(o.dead_man_heartbeat_ms);
     if (o.dms_attempt_position_close)
         pcfg["dms_attempt_position_close"] = "true";
+
+    // === Monte Carlo mode (Phase 3) ===
+    if (o.monte_carlo || o.mc_trials > 0) {
+        return run_monte_carlo_mode(o);
+    }
 
     std::shared_ptr<IProvider> provider;
     try {
@@ -2045,6 +2129,7 @@ int main(int argc, char* argv[])
     if (opts.dump_config_flag) { dump_config(opts); return 0; }
     if (opts.dry_run) return run_dry_run(opts);
     if (!opts.replay_path.empty()) return run_replay_mode(opts);
+    if (opts.monte_carlo || opts.mc_trials > 0) return run_monte_carlo_mode(opts);
     if (!opts.provider_name.empty()) return run_provider_mode(opts);
     return run_tui_mode(opts);
 }
