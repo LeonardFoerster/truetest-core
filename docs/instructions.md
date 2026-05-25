@@ -151,7 +151,10 @@ ctest --test-dir build
 **Core groups** (selected critical; full tables in original instructions §12):
 - Mode: `--mode backtest|shadow|live`, `--live` (required for real orders on mainnet + math captcha red banner; auto-skipped on --testnet).
 - Provider: `--provider local|binance|binance-futures|synthetic`, `--symbol`, `--stream trade|kline_*|depth*`, `--depth-stream depth20@100ms` (for L2/queue), `--testnet`.
-  - New in Phase 1 (Monte Carlo work): `--provider synthetic` (or `montecarlo`) generates GBM paths on the fly. Use `--mc-params "mu=0.0,sigma=0.65,n_steps=2000,initial_price=65000"` for control. All realism flags (`--realistic-fills`, latency, queue models, impact) work unchanged. See the synthetic provider for stochastic backtesting.
+  - New in Phase 1 (Monte Carlo work): `--provider synthetic` (or `montecarlo`) generates GBM paths on the fly. Use `--mc-params "mu=0.0,sigma=0.65,n_steps=2000,initial_price=65000"` for control. All realism flags work unchanged.
+- Monte Carlo campaigns (Phase 3+): `--monte-carlo --mc-trials 200 --mc-model gbm --mc-params "..." --strategy mean-reversion`.
+  - Supports `--persist` (writes campaign summary to QuestDB under the run_tag or auto-generated `mc_<ts>` tag) and `--run-tag`.
+  - Outputs text summary + compact JSON. Per-trial determinism via `--seed`.
 - Futures extras: `--margin-type isolated|cross`, `--margin-type-strict`, `--liquidation-warn-pct`, risk caps (`--max-notional`, `--max-leverage`, `--min-liq-distance-pct`), DMS (`--dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 --disarm-deadman`), kill (`--kill-switch-deadline-ms 5000`).
 - Credentials: env `TRUETEST_BINANCE_*` (preferred; argv leaks to ps), `--api-key/--api-secret` (warns).
 - Strategy: `--strategy sma,mean-reversion`, `--param key=value` (multi-strategy comma-separated).

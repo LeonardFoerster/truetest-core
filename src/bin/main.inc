@@ -48,6 +48,10 @@
 // Monte Carlo support (Phase 2+)
 #include "simulation/monte_carlo_controller.h"
 #include "simulation/monte_carlo_reporter.h"
+
+#ifdef HAS_QUESTDB
+#include "data/questdb/store.h"
+#endif
 #include "ui/console_dashboard.h"
 #ifdef HAS_RICH_TUI
 #include "ui/dashboard_snapshot.h"
@@ -1132,6 +1136,34 @@ static int run_monte_carlo_mode(const cli_options& o)
     // Apply some realism from top-level flags (best effort for Phase 3)
     mc_cfg.realistic_fills = false; // can be extended later
 
+#ifdef HAS_QUESTDB
+    std::unique_ptr<truetest::questdb::QuestdbStore> questdb_store;
+    if (o.persist) {
+        truetest::questdb::StoreConfig sc;
+        sc.host = o.questdb_host.empty() ? "127.0.0.1" : o.questdb_host;
+        sc.ilp_port = o.questdb_ilp_port ? o.questdb_ilp_port : 9009;
+        sc.http_port = o.questdb_http_port ? o.questdb_http_port : 9000;
+
+        std::string base_tag = o.run_tag.empty()
+            ? "mc_" + std::to_string(static_cast<long long>(std::time(nullptr)))
+            : o.run_tag;
+        sc.run_tag = base_tag;
+        sc.mode = "backtest";
+        sc.binary = "engine_backtest";
+        sc.strategy = mc_cfg.strategy_name;
+        sc.initial_equity = 10000.0;
+        sc.notes = o.run_notes;
+
+        questdb_store = std::make_unique<truetest::questdb::QuestdbStore>(sc);
+        if (!questdb_store->begin()) {
+            std::cerr << "  ! QuestDB persistence failed to start (soft-fail, continuing without persist)\n";
+            questdb_store.reset();
+        } else {
+            std::cout << "  Persist:  QuestDB run_tag=" << sc.run_tag << "\n";
+        }
+    }
+#endif
+
     std::cout << "  Trials:   " << mc_cfg.n_trials << "\n";
     std::cout << "  Model:    " << mc_cfg.generator_name << "\n";
     std::cout << "  Strategy: " << mc_cfg.strategy_name << "\n\n";
@@ -1144,7 +1176,19 @@ static int run_monte_carlo_mode(const cli_options& o)
     // Also print compact JSON for scripting
     std::cout << "\nJSON Summary:\n" << truetest::simulation::MonteCarloReporter::render_json(results, mc_cfg);
 
-    // TODO: integrate with --output, --persist, export_results style
+#ifdef HAS_QUESTDB
+    if (questdb_store) {
+        // Record campaign summary (lightweight for Phase 4)
+        double final_equity = 10000.0 + (results.mean_pnl * results.n_trials); // rough
+        questdb_store->end(final_equity,
+                           results.n_trials,           // total orders (approx trials here)
+                           results.trials_with_positive_pnl,
+                           0);
+        questdb_store->flush();
+    }
+#endif
+
+    // TODO: integrate with --output, richer per-trial persist, export_results style
 
     return 0;
 }
