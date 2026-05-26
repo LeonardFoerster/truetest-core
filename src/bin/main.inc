@@ -1550,6 +1550,13 @@ static int run_provider_mode(const cli_options& o)
 
     auto dh = std::make_shared<data_handler>();
 
+    // Performance: for local CSV backtests on large files (1.7M+ rows is common
+    // for multi-year bar data) we pre-reserve the internal vectors. This is one
+    // of the cheapest and most effective wins. 2M is a safe default for 4+ years
+    // of 1-minute or tick-aggregated bars.
+    if (o.provider_name == "local" || o.provider_name.empty())
+        dh->reserve(2'000'000);
+
     bool is_tick = (o.format == "tick");
     bool is_streaming = transport->is_streaming();
 
@@ -2138,6 +2145,11 @@ static int run_tui_mode(const cli_options& o)
     std::cout << "  ============================================\n\n";
 
     auto dh = std::make_shared<data_handler>();
+
+    // Performance: same pre-reserve for the legacy TUI/API loading path when
+    // it goes through CSV data sources.
+    dh->reserve(2'000'000);
+
     if (!source->load_data(dh))
     {
         std::cerr << "  Failed to load data.\n";

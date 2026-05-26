@@ -29,6 +29,84 @@ void Analytics::reserve_hint(std::size_t expected_bars)
     benchmark_returns_.reserve(expected_bars);
 }
 
+// Phase A (MC object reuse): reset to initial constructed state.
+void Analytics::reset(double initial_cash)
+{
+    initial_cash_ = initial_cash;
+    cash_ = initial_cash;
+    position_qty_ = 0.0;
+    avg_entry_price_ = 0.0;
+    total_open_commission_ = 0.0;
+    entry_time_ = {};
+
+    equity_stride_ = 1;
+    equity_counter_ = 0;
+    bench_stride_ = 1;
+    bench_counter_ = 0;
+
+    equity_curve_.clear();
+    benchmark_curve_.clear();
+    strategy_returns_.clear();
+    benchmark_returns_.clear();
+
+    rolling_returns_.clear();
+    prev_equity_ = initial_cash;
+    peak_equity_ = initial_cash;
+
+    order_prices_.clear();
+    order_strategies_.clear();
+
+    trades_.clear();
+    trade_returns_.clear();
+
+    last_equity_ = 0.0;
+    realized_vol_1h_ = 0.0;
+    last_mid_price_ = 0.0;
+    current_spread_bps_ = 0.0;
+    current_funding_8h_rate_ = 0.0;
+
+    total_funding_pnl_ = 0.0;
+    total_slippage_ = 0.0;
+    total_slippage_signed_ = 0.0;
+    total_adverse_slippage_ = 0.0;
+    total_favorable_slippage_ = 0.0;
+    slippage_count_ = 0;
+    adverse_count_ = 0;
+    favorable_count_ = 0;
+    total_orders_ = 0;
+    total_fills_ = 0;
+
+    total_holding_ms_ = 0.0;
+    holding_count_ = 0;
+    market_events_total_ = 0;
+    market_events_in_position_ = 0;
+
+    first_price_ = 0.0;
+    first_price_set_ = false;
+    prev_bh_equity_ = initial_cash;
+
+    per_symbol_.clear();
+    per_strategy_.clear();
+
+    return_stats_.reset();
+    downside_stats_.reset();
+
+    peak_equity_ = initial_cash;
+    max_drawdown_ = 0.0;
+
+    win_count_ = 0;
+    total_win_ = 0.0;
+    total_loss_ = 0.0;
+    largest_winner_ = 0.0;
+    largest_loser_ = 0.0;
+
+    tick_to_trade_ns_.reset();
+    tick_to_trade_min_ns_ = 0;
+    tick_to_trade_max_ns_ = 0;
+
+    // Note: last_close_ is intentionally left; it will be overwritten on first market event.
+}
+
 void Analytics::record_equity_point(std::vector<equity_point>& curve,
                                     std::size_t& stride,
                                     std::size_t& counter,

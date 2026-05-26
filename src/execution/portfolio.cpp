@@ -217,3 +217,14 @@ void portfolio::print_summary() const
     std::cout << "Total Trades Executed: " << total_trades_ << std::endl;
     std::cout << "Open Lots: " << lots_.size() << std::endl;
 }
+
+// Phase A (MC object reuse): reset to initial constructed state.
+void portfolio::reset()
+{
+    cash_ = initial_balance_;
+    positions_.clear();
+    lots_.clear();
+    total_trades_ = 0;
+    total_fills_ = 0;
+    total_funding_pnl_ = 0.0;
+}

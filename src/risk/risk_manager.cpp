@@ -194,3 +194,13 @@ void RiskManager::on_fill(const fill_event& fill)
         daily_loss_ += fill.get_commission();
     }
 }
+
+// Phase A (MC object reuse)
+void RiskManager::reset()
+{
+    order_timestamps_.clear();
+    trade_timestamps_.clear();
+    daily_loss_ = 0.0;
+    daily_start_equity_ = 0.0;
+    daily_reset_tp_ = {};
+}

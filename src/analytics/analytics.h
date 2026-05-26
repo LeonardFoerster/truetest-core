@@ -185,6 +185,9 @@ public:
     double rolling_sharpe() const;
     double rolling_max_drawdown() const;
 
+    // Phase A (MC object reuse)
+    void reset(double initial_cash);
+
     // Cheap O(n) copy of the last n equity values for the live TUI's
     // sparkline strip — avoids snapshot()'s full report rebuild on every
     // render tick. Returns the most recent n samples (or fewer if the

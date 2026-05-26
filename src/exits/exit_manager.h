@@ -110,6 +110,10 @@ public:
     // are what cancel() forwards to. Both come back online together.
     void rehydrate(const IBracketAdapter::recovered_bracket& rb);
 
+    // Phase A (MC object reuse): clears all pending/armed brackets and
+    // venue state so the manager can be reused for the next trial.
+    void reset();
+
     // Read-only snapshot of armed brackets for the live TUI. Designed
     // to be called from the engine's snapshot path (main thread). Each
     // row carries the in-process intent + whether the venue has the

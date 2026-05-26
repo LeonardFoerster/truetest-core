@@ -88,6 +88,9 @@ public:
 
     void on_fill(const fill_event& fill);
 
+    // Phase A (MC object reuse)
+    void reset();
+
 private:
     risk_limits limits_;
 

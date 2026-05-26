@@ -15,47 +15,30 @@ This directory contains the full documentation set for the project. The document
 
 ---
 
-## Documentation Structure
+## Documentation Structure (Governance-First Pragmatic Approach)
 
-### Architecture & Design
-Located in [`architecture/`](architecture/):
+The full aspirational hierarchy (`architecture/`, `operations/`, `reference/`, `archive/`, etc.) is described in the original plan but is being populated in phases to avoid rot and respect solo-maintainer reality.
 
-- **target-architecture.md** — Long-term target design and invariants
-- **migration.md** — Chronological deepdive change log
-- **MODEL.md** — Detailed rationale for AI model selection (Opus vs Sonnet zones)
-- **performance.md** + **perf-baseline.md** — Performance methodology and locked baselines
-- **engine-optimization.md** — How to investigate and improve hot-path performance
-- **realism.md** — Current realism models (fills, latency, impact, queue position)
-- **strategy-validation.md** — Planned tooling for honest strategy evaluation
+**Root governance files (highest visibility – created in Doc Phase 0)**:
+- **`prod.md`** — The central production contract, phases, Go-Live Gate (9 rows), Phase 0 command template + ritual, and philosophy.
+- **`prerequisites.md`** — Living mandatory checklist before any edit to the Phase 1 frozen safety surface.
+- **`todo.md`** — Current active items; every frozen-surface PR must reference relevant entries.
+- **`reports/phase0/`** — Evidence tracker (`PROGRESS.md`), templates, batch reviews (not "docs" per se, but operational artifacts).
 
-### Operations & Futures Guides
-Located in [`operations/`](operations/):
+**Docs/ (current realized files)**:
+- `instructions.md` — Master how-to / CLI / build reference (pointers to `prod.md` for deep phase material). Now includes detailed Monte Carlo section (flags, object reuse, parallel caveats, synthetic provider, reporter).
+- `user-manual.md` — High-level architecture + operator overview. Now includes "Stochastic Backtesting (Monte Carlo)" subsection.
+- `production-readiness-gaps.md`, `AdaptiveHybridStrategy.md`, `Coiled_Spring...Guide.md`, this `README.md`.
 
-- **futures-phase0-operator-sop.md** — Mandatory printable checklist for every tiny-size mainnet futures session
-- **futures-testnet.md** — Full testnet validation guide + 5-scenario DMS playbook
-- **testnet.md** — Spot testnet guide (simpler counterpart)
-- **demo-trading-workflow.md** — Record real mainnet tape → deterministic replay → live shadow
-- **futures-order-lifecycle.md** — End-to-end view of what happens to an order on Binance USDT-M futures
-- **killswitch-lan-unplug-timeline.md** — Detailed postmortem of a total network partition failure case
+**Planned slim sub-structure (Doc Phases 1–3)**:
+- `docs/architecture/` (starting with `target-architecture.md`, `migration.md`, `MODEL.md`, `realism.md`)
+- `docs/operations/` (starting with `futures-phase0-operator-sop.md` and `futures-testnet.md`)
+- `docs/reference/` (deferred until real content is extracted)
 
-### Reference Material
-Located in [`reference/`](reference/):
+See the approved documentation plan (in the session plan file or `todo.md` #D- items) for the exact phased rollout and extraction strategy. The goal is 80/20 value with minimal duplication.
 
-- **db.md** — Complete QuestDB schema, ILP format, and integration details
-- **c-api.md** — Stable C embedding API + Python ctypes example
-- **licenses.md** — Third-party license inventory and rules
-
-### Production Governance (at repository root)
-
-These are intentionally kept at the root for maximum visibility:
-
-- **prod.md** — The central production contract and phase definitions
-- **prerequisites.md** — Checklist that must be green before touching frozen safety surface
-- **todo.md** — Current active phase tasks and future phase roadmap
-
-### Phase 0 Evidence (at repository root)
-
-- **`reports/phase0/`** — Live operational evidence for the 15 qualifying tiny-size sessions (PROGRESS.md is the single source of truth, signed notes, batch reviews, etc.)
+### Production Governance & Phase 0 Evidence
+See the root files listed above (`prod.md`, `prerequisites.md`, `todo.md`, `reports/phase0/`).
 
 ---
 
@@ -74,12 +57,13 @@ These are retained for audit and historical context but are no longer the active
 ## How to Navigate
 
 1. **I just want to build and run the engine** → Start with [instructions.md](instructions.md)
-2. **I'm preparing for live trading or Phase 0** → Read [prod.md](../prod.md) + [futures-phase0-operator-sop.md](operations/futures-phase0-operator-sop.md)
-3. **I'm reviewing a PR that touches safety** → Read [CLAUDE.md](../CLAUDE.md) + [MODEL.md](architecture/MODEL.md) + [prerequisites.md](../prerequisites.md)
-4. **I need the full technical picture** → [user-manual.md](user-manual.md) + [instructions.md](instructions.md) + relevant file in `architecture/`
+2. **I'm preparing for live trading or Phase 0** → Read [prod.md](../prod.md) (current ritual + command template) + the printable SOP (planned in `docs/operations/futures-phase0-operator-sop.md` — Doc Phase 1)
+3. **I'm reviewing a PR that touches safety** → Read [CLAUDE.md](../CLAUDE.md) + [prerequisites.md](../prerequisites.md) (MODEL.md and full architecture/ docs are planned for Doc Phase 2)
+4. **I need the full technical picture** → [user-manual.md](user-manual.md) + [instructions.md](instructions.md) + (target architecture / realism docs planned in `docs/architecture/`)
+5. **I want to understand the Monte Carlo / stochastic backtesting capability** (landed on `monte-carlo` branch) → Start with the Monte Carlo section in [instructions.md](instructions.md), the new "Stochastic Backtesting" subsection in [user-manual.md](user-manual.md), and the MC-* items in root [todo.md](../todo.md). Governance context in root [README.md](../README.md) and [prod.md](../prod.md).
 
 ---
 
-**Last updated**: 2026-05 (major reorganization + consolidation)
+**Last updated**: 2026 (Governance + master reference sync for `monte-carlo` branch Monte Carlo simulation work; governance-first pragmatic structure from prior doc plan preserved). The `monte-carlo` branch introduced a full Monte Carlo engine (`MonteCarloController`, GBM generator, synthetic provider, object reuse, experimental parallelism). Governance files (README, prod.md, todo.md, CLAUDE.md) and high-level docs (instructions.md, user-manual.md) were updated in this pass. Full aspirational subdirs (`architecture/`, `operations/`, etc.) remain deferred.
 
-All cross-references in the master `instructions.md` and scripts have been updated to reflect the new structure. If you find a broken link, please open an issue or PR.
+All cross-references in the master `instructions.md` and scripts have been updated (or explicitly marked as "planned for Doc Phase X – current details in prod.md / instructions.md"). If you find a broken link, please open an issue or PR. See `prod.md`, `CLAUDE.md`, and `todo.md` for the current state of the documentation roadmap.

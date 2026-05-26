@@ -29,6 +29,9 @@ public:
 
     std::vector<mm_order> compute_replenish(double current_price);
 
+    // Phase B (MC reuse)
+    void reset(unsigned rng_seed = 0);
+
 private:
     double compute_volatility() const;
 

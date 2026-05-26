@@ -21,6 +21,7 @@ TrueTest (hft-engine) is a modular, high-performance C++23 trading engine that i
 - Optional high-resolution persistence via QuestDB ILP + binary event logs (zstd compressed)
 - Lock-free multi-threaded worker architecture with CPU pinning and configurable spin policies
 - Rich ncurses tabbed TUI (shadow/live) and ANSI dashboard (backtest)
+- Monte Carlo simulation engine for stochastic backtesting, strategy robustness testing, and risk-distribution analysis (GBM paths, deterministic multi-trial campaigns, object reuse, experimental parallelism)
 
 # Architecture & Design
 
@@ -60,7 +61,7 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 
 **Main components**:
 - **Core engine** (`src/engine/`): Orchestrates the event loop, worker threads, and lifecycle.
-- **Providers** (`src/providers/`): Data + execution boundary. `local` for CSV/tick replay; `binance` and `binance-futures` for live streaming + REST execution.
+- **Providers** (`src/providers/`): Data + execution boundary. `local` for CSV/tick replay; `binance` and `binance-futures` for live streaming + REST execution; `synthetic` for on-demand GBM path generation (standalone or via Monte Carlo campaigns).
 - **Strategies** (`src/strategy/`): Pluggable via `REGISTER_STRATEGY` macro. Can emit `order_event` and `exit_intent` vectors for brackets.
 - **Execution layer** (`src/execution/`): `IExecutionAdapter`, `Portfolio`, `OrderTracker`, realistic models (`FeeModel`, `FillModel`, `LatencyModel`, `ImpactModel`, `QueuePositionModel`).
 - **Order book & matching** (`src/orderbook/`): `Orderbook` + `FillModel` for backtest realism.
@@ -104,6 +105,14 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 - Pre-trade venue risk caps (`--max-notional`, `--max-leverage`, liquidation distance)
 - Live-money math confirmation gate + red warning banner
 - Rate limiter and time sync
+
+**Stochastic Backtesting (Monte Carlo)**:
+- Synthetic GBM path generation via the `synthetic` provider (usable standalone with `--provider synthetic --mc-params "..."` or as part of full campaigns)
+- Full multi-trial campaigns with deterministic per-trial seeding via `--monte-carlo --mc-trials N --mc-model gbm --strategy ...`
+- Reuses the complete existing strategy, engine, realism models, analytics, ExitManager, and QuestDB surfaces for each trial
+- Performance features: object reuse between trials (`--mc-reuse-objects`) and experimental parallel execution (`--mc-parallel`, recommended only with `--thread-preset inline`)
+- Reporter produces per-trial + aggregate P&L, Sharpe, max drawdown, win rate, etc. (text + compact JSON)
+- Strong caveats: synthetic L2 is stylized (constant spread + noise), no automatic calibration from historical data, parallel mode has non-deterministic ordering and threading restrictions, QuestDB support is currently campaign-summary only
 
 **Risk Management**:
 - `RiskManager`: max position, daily loss, trade frequency, unrealized loss

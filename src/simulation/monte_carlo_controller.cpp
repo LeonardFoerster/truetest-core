@@ -100,7 +100,7 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
     std::shared_ptr<IStrategy> strategy;
     if (config_.reuse_objects_between_trials && reusable_strategy_)
     {
-        reusable_strategy_->reset();   // if the strategy implements it (many do)
+        reusable_strategy_->reset(result.seed_used);   // pass seed for RNG-based strategies
         strategy = reusable_strategy_;
     }
     else
@@ -129,10 +129,11 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
     // 5. Construct engine (still fresh construction in Phase A)
     engine eng(dh, nullptr, strategy, std::move(ecfg));
 
-    // Phase A deepening: if reuse requested, reset the heavy objects the engine owns
+    // If reuse requested, reset the heavy objects the engine owns so they can be
+    // reused for the next trial (good-enough reuse, not bit-identical in all cases).
     if (config_.reuse_objects_between_trials)
     {
-        eng.reset_internals_for_next_mc_trial(result.seed_used);
+        eng.reset_for_next_trial(result.seed_used);
     }
 
     // Run the backtest
@@ -221,6 +222,11 @@ McAggregate MonteCarloController::run() {
 
     auto end = std::chrono::steady_clock::now();
     aggregate.wall_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    if (config_.reuse_objects_between_trials) {
+        std::cout << "  [MC Reuse] Wall time with object reuse: " 
+                  << aggregate.wall_time_ms << " ms\n";
+    }
 
     // Compute aggregate statistics (always serial, after collection)
     if (!aggregate.trials.empty()) {

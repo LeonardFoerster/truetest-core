@@ -102,3 +102,14 @@ void MarketMaker::replenish(std::shared_ptr<orderbook> ob, double current_price)
         ob->add_order(ob_order);
     }
 }
+
+// Phase B (MC reuse)
+void MarketMaker::reset(unsigned rng_seed)
+{
+    if (rng_seed != 0)
+        gen_.seed(rng_seed);
+    else
+        gen_.seed(static_cast<unsigned>(std::chrono::system_clock::now().time_since_epoch().count()));
+
+    price_history_.clear();
+}

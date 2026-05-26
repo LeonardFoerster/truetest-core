@@ -387,6 +387,18 @@ public:
     void print_summary();
     const Analytics& get_analytics() const;
 
+    // Resets internal heavy objects (portfolio, analytics, exit_manager, order_tracker,
+    // risk_manager, market_maker, adverse_selection, orderbook_registry, etc.) so they can
+    // be reused for the next Monte Carlo trial without full reconstruction.
+    //
+    // This is intended primarily for MonteCarloController when reuse_objects_between_trials
+    // is enabled. It is NOT a general-purpose reset and does not restore the engine to a
+    // pristine post-construction state in all cases.
+    //
+    // Call this after engine construction (or between trials) when you want to reuse the
+    // engine instance across multiple independent backtests.
+    void reset_for_next_trial(uint64_t new_seed);
+
     // Only valid in shadow mode. Returns nullptr otherwise.
     const portfolio* get_exchange_portfolio() const;
     const Analytics* get_exchange_analytics() const;

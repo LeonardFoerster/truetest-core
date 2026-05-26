@@ -151,8 +151,8 @@ ctest --test-dir build
 **Core groups** (selected critical; full tables in original instructions §12):
 - Mode: `--mode backtest|shadow|live`, `--live` (required for real orders on mainnet + math captcha red banner; auto-skipped on --testnet).
 - Provider: `--provider local|binance|binance-futures|synthetic`, `--symbol`, `--stream trade|kline_*|depth*`, `--depth-stream depth20@100ms` (for L2/queue), `--testnet`.
-  - New in Phase 1 (Monte Carlo work): `--provider synthetic` (or `montecarlo`) generates GBM paths on the fly. Use `--mc-params "mu=0.0,sigma=0.65,n_steps=2000,initial_price=65000"` for control. All realism flags work unchanged.
-- Monte Carlo campaigns (Phase 3+): `--monte-carlo --mc-trials 200 --mc-model gbm --mc-params "..." --strategy mean-reversion`.
+  - `--provider synthetic` (or `montecarlo`) generates GBM paths on the fly. Use `--mc-params "mu=0.0,sigma=0.65,n_steps=2000,initial_price=65000"` for control. All realism flags work unchanged. Can be used standalone for single synthetic paths or together with `--monte-carlo` for full campaigns.
+- Monte Carlo campaigns: `--monte-carlo --mc-trials N --mc-model gbm --mc-params "..." --strategy mean-reversion`.
   - Supports `--persist` (writes campaign summary to QuestDB under the run_tag or auto-generated `mc_<ts>` tag) and `--run-tag`.
   - Outputs text summary + compact JSON. Per-trial determinism via `--seed`.
   - **Phase 5 experimental**: `--mc-parallel` runs trials concurrently using std::jthread. **Strong caveats**:
@@ -502,7 +502,9 @@ Cross-references point to files now organized under `architecture/`, `operations
 
 ---
 
-## Monte Carlo Simulation (Phase 3–5)
+## Monte Carlo Simulation
+
+**Current branch note**: Landed on the `monte-carlo` branch. Available in all three binaries (`engine_backtest`, `engine_shadow`, `engine_live`). This is a backtest / research / risk-distribution capability and does not affect live-order safety surfaces or Phase 0/1 capital gates.
 
 TrueTest includes a first-class Monte Carlo engine for stochastic backtesting.
 
@@ -548,18 +550,18 @@ Future versions may add better thread-pool control and deterministic parallel RN
 - Every trial receives a deterministic derived seed (`base_seed ^ (trial_id * magic)`).
 - Same binary + same flags + same seed = bit-identical aggregates (when not using `--mc-parallel`).
 
-### Limitations (as of Phase 5)
-- Synthetic L2 is stylized (improved in Phase 5 but still not full orderbook simulation).
+### Limitations (current)
+- Synthetic L2 is stylized (constant spread + noise; sufficient for basic queue/impact testing but not a full orderbook replay).
 - No automatic parameter calibration from historical data yet.
-- Parallel mode has the caveats listed above.
-- QuestDB integration currently writes only a lightweight campaign summary (per-trial full lifecycle capture is possible by combining with per-trial run tags in future phases).
+- Parallel mode (`--mc-parallel`) has strong caveats (see above); result ordering is non-deterministic.
+- QuestDB integration currently writes only a lightweight campaign summary row (per-trial full lifecycle capture is future work; combine with per-trial `--run-tag` for now).
 
 ### Performance Notes
 - **Object reuse** (`--mc-reuse-objects`): Reuses `data_handler`, strategies, and many expensive engine-internal structures (`portfolio`, `Analytics`, `ExitManager`, `OrderTracker`, `RiskManager`, orderbooks, caches, etc.) between trials instead of full reconstruction. This significantly reduces per-trial overhead.
-  - Status: "Good enough" for performance gains (real speedups observed). Full bit-identical results across every internal detail are not yet guaranteed.
+  - Status: Good enough for real speedups on most workloads. Full bit-identical results across every internal detail (especially engine-internal caches and order trackers) are not guaranteed.
 - Batch path generation (`generate_batch`) is used for cache efficiency.
-- **Parallel execution** (`--mc-parallel`): On a 16-core machine with `--thread-preset inline`, can deliver ~6-8x wall-time speedup on CPU-bound strategies for large N. Strong caveats apply (see Parallel Execution section).
+- **Parallel execution** (`--mc-parallel`): On a 16-core machine with `--thread-preset inline`, can deliver substantial wall-time speedup on CPU-bound strategies for large N. Strong caveats apply (see Parallel Execution section above).
 - Recommended combination for maximum throughput: `--mc-reuse-objects --mc-parallel --thread-preset inline`.
 - Always measure with your specific strategy and realism settings, as gains vary significantly with workload.
 
-See `src/simulation/` for the `IMonteCarloGenerator`, `MonteCarloController`, and `GBMGenerator` implementations.
+See `src/simulation/` (and `src/providers/synthetic/`) for the `IMonteCarloGenerator`, `MonteCarloController`, `GBMGenerator`, `SyntheticProvider`, and `MonteCarloReporter` implementations. Tests live in `tests/test_monte_carlo_*.cpp`.

@@ -80,6 +80,7 @@ set(ENGINE_CORE_SOURCES
     src/strategy/sma.cpp
     src/strategy/adaptive_hybrid_config.cpp
     src/strategy/adaptive_hybrid_strategy.cpp
+    src/strategy/structure_continuation_strategy.cpp
     src/market_maker/market_maker.cpp
     src/risk/risk_manager.cpp
     src/risk/maintenance_margin_table.cpp
@@ -185,6 +186,9 @@ if(BUILD_TESTS)
         tests/test_sma.cpp
         tests/test_ema.cpp
         tests/test_rsi.cpp
+        tests/test_stochastic.cpp
+        tests/test_swing_detector.cpp
+        tests/test_ema_regime.cpp
         tests/test_bollinger.cpp
         tests/test_strategies.cpp
         tests/test_adaptive_hybrid.cpp

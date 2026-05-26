@@ -403,4 +403,19 @@ void ExitManager::untrack_opener(std::uint64_t opener_order_id,
     }
 }
 
+// Phase A (MC object reuse)
+void ExitManager::reset()
+{
+    pending_.clear();
+    armed_.clear();
+    strategy_symbol_to_openers_.clear();
+
+    {
+        std::lock_guard<std::mutex> lk(venue_mu_);
+        handles_.clear();
+        exchange_to_leg_.clear();
+    }
+    // Note: bracket_adapter_ is intentionally not cleared — it is set once at startup.
+}
+
 }
