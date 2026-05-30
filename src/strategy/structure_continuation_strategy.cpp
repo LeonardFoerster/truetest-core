@@ -122,6 +122,12 @@ void structure_continuation_strategy::advance_continuation_fsm(
         {
             st.bars_since_sideways_exit++;
         }
+        else
+        {
+            // Re-entered sideways while waiting for first signal → reset orientation
+            st.orientation_bias = 0;
+            st.signals_since_orientation = 0;
+        }
 
         if (long_signal || short_signal)
         {
@@ -133,6 +139,15 @@ void structure_continuation_strategy::advance_continuation_fsm(
         break;
 
     case Phase::ORIENTATION_PENDING:
+        if (st.regime.is_sideways())
+        {
+            // Sideways returned while we were waiting for the second signal → reset
+            st.phase = Phase::AFTER_SIDEWAYS;
+            st.orientation_bias = 0;
+            st.signals_since_orientation = 0;
+            break;
+        }
+
         if (long_signal || short_signal)
         {
             st.signals_since_orientation++;
@@ -154,7 +169,18 @@ void structure_continuation_strategy::advance_continuation_fsm(
         break;
 
     case Phase::IN_TRADE:
+        break;
+
     case Phase::COOLDOWN:
+        st.bars_in_cooldown++;
+        // After a reasonable cooldown period, allow the strategy to start scanning again
+        if (st.bars_in_cooldown >= 8)
+        {
+            st.phase = Phase::NORMAL;
+            st.orientation_bias = 0;
+            st.signals_since_orientation = 0;
+            st.bars_in_cooldown = 0;
+        }
         break;
     }
 
@@ -315,8 +341,11 @@ void structure_continuation_strategy::set_position_open(const std::string& symbo
     if (!open)
     {
         st.open_lots = 0;
-        // Return to scanning after exit
+        // Return to COOLDOWN after a full close. Explicitly clear orientation state (A2 hardening)
         st.phase = SymbolState::ContinuationPhase::COOLDOWN;
+        st.orientation_bias = 0;
+        st.signals_since_orientation = 0;
+        st.bars_in_cooldown = 0;
     }
 }
 
@@ -336,7 +365,23 @@ void structure_continuation_strategy::on_fill(const fill_event& fill, std::uint6
     if (opener_order_id != 0)
     {
         st.last_opener_id = opener_order_id;
-        st.open_lots = 1; // simplified
+
+        // If this is a closer fill for our last opener, the position for that opener is now closed
+        if (opener_order_id == st.last_opener_id && fill.get_order_id() != opener_order_id)
+        {
+            // A closer fill arrived for our opener → position for this trade is closed
+            st.open_lots = 0;
+            // Explicitly clear orientation state on full close (A2 hardening)
+            st.orientation_bias = 0;
+            st.signals_since_orientation = 0;
+            st.phase = SymbolState::ContinuationPhase::COOLDOWN;
+            st.bars_in_cooldown = 0;
+        }
+        else if (opener_order_id == fill.get_order_id())
+        {
+            // Opener fill
+            st.open_lots = 1;
+        }
     }
 }
 
@@ -399,6 +444,7 @@ void structure_continuation_strategy::reset(uint64_t /*seed*/)
         st.orientation_bias = 0;
         st.bars_since_sideways_exit = 0;
         st.signals_since_orientation = 0;
+        st.bars_in_cooldown = 0;
         st.position_open = false;
         st.open_lots = 0;
         st.last_opener_id = 0;

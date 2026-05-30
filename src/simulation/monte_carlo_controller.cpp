@@ -152,9 +152,10 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
     result.total_pnl      = result.final_equity - result.initial_equity;
     result.max_drawdown   = report.max_drawdown;
     result.sharpe_ratio   = report.sharpe_ratio;
-    result.total_trades   = report.total_trades;
-
-    // winning_trades can be extracted from sub-analytics in a future pass if needed.
+    result.total_trades    = report.total_trades;
+    result.winning_trades  = report.winning_trades;
+    result.win_rate        = report.win_rate;
+    result.profit_factor   = report.profit_factor;
 
     return result;
 }
@@ -232,26 +233,36 @@ McAggregate MonteCarloController::run() {
     if (!aggregate.trials.empty()) {
         // Recompute positive count safely
         aggregate.trials_with_positive_pnl = 0;
+        aggregate.trials_with_profit_factor_gt_1 = 0;
 
         std::vector<double> pnls;
         std::vector<double> sharpes;
         std::vector<double> maxdds;
+        std::vector<double> win_rates;
+        std::vector<double> profit_factors;
         pnls.reserve(aggregate.trials.size());
         sharpes.reserve(aggregate.trials.size());
         maxdds.reserve(aggregate.trials.size());
+        win_rates.reserve(aggregate.trials.size());
+        profit_factors.reserve(aggregate.trials.size());
 
         for (const auto& t : aggregate.trials) {
             pnls.push_back(t.total_pnl);
             sharpes.push_back(t.sharpe_ratio);
             maxdds.push_back(t.max_drawdown);
+            win_rates.push_back(t.win_rate);
+            profit_factors.push_back(t.profit_factor);
 
             if (t.total_pnl > 0.0) ++aggregate.trials_with_positive_pnl;
+            if (t.profit_factor > 1.0) ++aggregate.trials_with_profit_factor_gt_1;
         }
 
         // Simple mean / median (Phase 2 — can upgrade to proper quantile later)
         std::sort(pnls.begin(), pnls.end());
         std::sort(sharpes.begin(), sharpes.end());
         std::sort(maxdds.begin(), maxdds.end());
+        std::sort(win_rates.begin(), win_rates.end());
+        std::sort(profit_factors.begin(), profit_factors.end());
 
         auto mean = [](const std::vector<double>& v) {
             if (v.empty()) return 0.0;
@@ -268,6 +279,12 @@ McAggregate MonteCarloController::run() {
 
         aggregate.mean_max_dd  = mean(maxdds);
         aggregate.worst_max_dd = *std::max_element(maxdds.begin(), maxdds.end());
+
+        aggregate.win_rate_mean   = mean(win_rates);
+        aggregate.median_win_rate = win_rates[win_rates.size() / 2];
+
+        aggregate.profit_factor_mean   = mean(profit_factors);
+        aggregate.median_profit_factor = profit_factors[profit_factors.size() / 2];
     }
 
     return aggregate;

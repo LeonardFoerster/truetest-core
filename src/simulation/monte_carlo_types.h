@@ -84,6 +84,9 @@ struct TrialResult {
     std::size_t total_trades = 0;
     std::size_t winning_trades = 0;
 
+    double win_rate = 0.0;       // 0-100 (matches AnalyticsReport convention)
+    double profit_factor = 0.0;
+
     // Full analytics available for detailed reporting
     // (populated when controller is configured to keep full reports)
     // AnalyticsReport full_report;  // forward-declared or included by .cpp users
@@ -105,7 +108,9 @@ struct McAggregate {
     double worst_max_dd = 0.0;
 
     double profit_factor_mean = 0.0;
+    double median_profit_factor = 0.0;
     double win_rate_mean = 0.0;
+    double median_win_rate = 0.0;
 
     std::size_t trials_with_positive_pnl = 0;
     std::size_t trials_with_profit_factor_gt_1 = 0;

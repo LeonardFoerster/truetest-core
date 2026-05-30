@@ -556,6 +556,7 @@ AnalyticsReport Analytics::snapshot() const
 
     if (!trade_returns_.empty())
     {
+        r.winning_trades = win_count_;
         r.win_rate = static_cast<double>(win_count_) / static_cast<double>(trade_returns_.size()) * 100.0;
         r.avg_win = (win_count_ > 0) ? total_win_ / static_cast<double>(win_count_) : 0.0;
         std::size_t losses = trade_returns_.size() - win_count_;

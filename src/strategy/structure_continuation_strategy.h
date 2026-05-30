@@ -94,6 +94,9 @@ private:
         int bars_since_sideways_exit = 0;
         int signals_since_orientation = 0;
 
+        // COOLDOWN decay support (A2 hardening)
+        int bars_in_cooldown = 0;
+
         // Position tracking (supplements engine portfolio)
         bool position_open = false;
         int  open_lots     = 0;

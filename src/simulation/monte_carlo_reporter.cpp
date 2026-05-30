@@ -21,6 +21,11 @@ std::string MonteCarloReporter::render_text_summary(const McAggregate& agg,
     oss << "Sharpe (mean / median): " << agg.mean_sharpe << " / " << agg.median_sharpe << "\n";
     oss << "Max DD (mean / worst):  " << agg.mean_max_dd << " / " << agg.worst_max_dd << "\n";
 
+    oss << "\n";
+    oss << "Win Rate (mean / median): " << agg.win_rate_mean << " / " << agg.median_win_rate << "\n";
+    oss << "Profit Factor (mean / median): " << agg.profit_factor_mean << " / " << agg.median_profit_factor << "\n";
+    oss << "Trials with PF > 1: " << agg.trials_with_profit_factor_gt_1 << " / " << agg.n_trials << "\n";
+
     oss << "Profitable trials: " << agg.trials_with_positive_pnl << " / " << agg.n_trials << "\n";
 
     return oss.str();
@@ -35,6 +40,11 @@ std::string MonteCarloReporter::render_json(const McAggregate& agg,
     oss << "  \"median_pnl\": " << agg.median_pnl << ",\n";
     oss << "  \"mean_sharpe\": " << agg.mean_sharpe << ",\n";
     oss << "  \"worst_max_dd\": " << agg.worst_max_dd << ",\n";
+    oss << "  \"win_rate_mean\": " << agg.win_rate_mean << ",\n";
+    oss << "  \"median_win_rate\": " << agg.median_win_rate << ",\n";
+    oss << "  \"profit_factor_mean\": " << agg.profit_factor_mean << ",\n";
+    oss << "  \"median_profit_factor\": " << agg.median_profit_factor << ",\n";
+    oss << "  \"trials_with_pf_gt_1\": " << agg.trials_with_profit_factor_gt_1 << ",\n";
     oss << "  \"profitable_trials\": " << agg.trials_with_positive_pnl << "\n";
     oss << "}\n";
     return oss.str();
