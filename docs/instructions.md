@@ -162,7 +162,7 @@ ctest --test-dir build
   - Full example and limitations are documented in the Monte Carlo section below.
 - Futures extras: `--margin-type isolated|cross`, `--margin-type-strict`, `--liquidation-warn-pct`, risk caps (`--max-notional`, `--max-leverage`, `--min-liq-distance-pct`), DMS (`--dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 --disarm-deadman`), kill (`--kill-switch-deadline-ms 5000`).
 - Credentials: env `TRUETEST_BINANCE_*` (preferred; argv leaks to ps), `--api-key/--api-secret` (warns).
-- Strategy: `--strategy sma,mean-reversion`, `--param key=value` (multi-strategy comma-separated).
+- Strategy: `--strategy sma,mean-reversion,structure-continuation,adaptive-hybrid`, `--param key=value` (multi-strategy comma-separated). Full list via `--help` or `StrategyRegistry`.
 - Risk/portfolio: `--initial-cash`, `--risk-fraction`, `--sl-atr`, `--tp-atr`, `--max-daily-loss`, `--max-trades-per-hour`, `--risk-unwind 0.4`, `--reconcile-tolerance-bps`.
 - Realism (backtest/shadow only; bypassed in live): `--realistic-fills`, `--order-latency-us N --order-latency-stddev-us M`, `--impact-k-bps`, `--bar-spread-bps`, `--queue-model l2-snapshot` (shadow + depth-stream), `--maker-queue-model uniform|front|back` (paper + depth-stream; uniform recommended default).
 - Threading: `--thread-preset inline|light|standard|full|extended` (auto from cores), `--spin-policy adaptive|spin|yield`, `--no-pin`, `--seed`.
@@ -203,7 +203,7 @@ ctest --test-dir build
 
 ## 8. Strategies, Exits, Brackets, Full Order Lifecycle (futures-order-lifecycle.md + exits/)
 
-Strategies self-register via `REGISTER_STRATEGY` (sma, mean-reversion, ma-crossover, hedge-demo + indicators sma/ema/rsi/bollinger). Multi-strategy support. Emit `order_event` + `exit_intent` vectors.
+Strategies self-register via `REGISTER_STRATEGY` (sma, mean-reversion, ma-crossover, breakout/coiled-spring, adaptive-hybrid, structure-continuation + indicators sma/ema/rsi/bollinger/ema_regime/stochastic/swing_detector). Multi-strategy support. Emit `order_event` + `exit_intent` vectors.
 
 **ExitManager + brackets**: Per-lot SL/TP/trailing; `IBracketAdapter` (OCO spot, separate reduceOnly STOPs + closePosition futures). Non-atomic on futures but with auto-cancel guarantee in adapter.
 
@@ -527,10 +527,10 @@ This runs 500 independent GBM paths, executes your strategy on each, and prints:
 
 ### Key Flags
 - `--mc-trials N` — number of paths (required for MC mode)
-- `--mc-model gbm|ou` — generator (default gbm)
+- `--mc-model gbm` — generator (only gbm implemented; ou listed for future)
 - `--mc-params "key=val,..."` — generator parameters (n_steps, mu, sigma, etc.)
 - `--mc-parallel` — **experimental** (Phase 5) concurrent trials (see warnings below)
-- All normal realism flags (`--realistic-fills`, `--order-latency-us`, etc.) and `--strategy` are respected per trial.
+- All normal realism flags (`--realistic-fills`, `--order-latency-us`, etc.) and `--strategy` (any registered strategy, including structure-continuation / adaptive-hybrid) are respected per trial.
 
 ### Parallel Execution (Phase 5)
 ```bash
@@ -559,6 +559,7 @@ Future versions may add better thread-pool control and deterministic parallel RN
 ### Performance Notes
 - **Object reuse** (`--mc-reuse-objects`): Reuses `data_handler`, strategies, and many expensive engine-internal structures (`portfolio`, `Analytics`, `ExitManager`, `OrderTracker`, `RiskManager`, orderbooks, caches, etc.) between trials instead of full reconstruction. This significantly reduces per-trial overhead.
   - Status: Good enough for real speedups on most workloads. Full bit-identical results across every internal detail (especially engine-internal caches and order trackers) are not guaranteed.
+- Win rate and profit factor (mean/median + % of trials with PF > 1) are now reported for every campaign (MC-02). Useful for stochastic robustness analysis.
 - Batch path generation (`generate_batch`) is used for cache efficiency.
 - **Parallel execution** (`--mc-parallel`): On a 16-core machine with `--thread-preset inline`, can deliver substantial wall-time speedup on CPU-bound strategies for large N. Strong caveats apply (see Parallel Execution section above).
 - Recommended combination for maximum throughput: `--mc-reuse-objects --mc-parallel --thread-preset inline`.

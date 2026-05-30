@@ -32,14 +32,14 @@
 | `--mc-params "..."`     | Synthetic/Monte-Carlo generator params (`mu=...,sigma=...,n_steps=...,initial_price=...`). |
 | `--monte-carlo`         | Run a Monte Carlo campaign (requires `--mc-trials`). |
 | `--mc-trials <N>`       | Number of independent trials. |
-| `--mc-model <name>`     | Generator: `gbm` (default) or `ou`. |
+| `--mc-model <name>`     | Generator: `gbm` (only gbm implemented today). |
 | `--mc-parallel`         | **Experimental** (Phase 5): run trials concurrently (strong caveats — use only with `--thread-preset inline`). |
 | `--mc-reuse-objects`    | Phase A: reuse `data_handler`/strategy/etc. between MC trials for speed (results not guaranteed bit-identical on caches). |
 
 ### Strategy
 | Flag                  | What it does |
 |-----------------------|--------------|
-| `--strategy <names>`  | Comma-separated list (e.g. `sma,mean-reversion`). First is primary. |
+| `--strategy <names>`  | Comma-separated list (e.g. `sma,mean-reversion,structure-continuation`). First is primary. Full set: mean-reversion, sma, ma-crossover, breakout, coiled-spring, adaptive-hybrid, structure-continuation. |
 | `--format <tick|bar>` | Input data format for local provider. |
 | `--sma-period <N>`    | SMA period (default 20). |
 | `--param key=val`     | Strategy parameter (repeatable). |

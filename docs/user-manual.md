@@ -123,7 +123,7 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 **Other advanced features**:
 - Exit intents / bracket management (SL/TP/trailing per entry, scale-outs)
 - Market maker worker and adverse selection tracker
-- Multi-strategy mode (`--strategy sma,mean-reversion`)
+- Multi-strategy mode (`--strategy sma,mean-reversion,structure-continuation`)
 - CPU pinning + configurable threading presets (inline/light/standard/full/extended)
 - Binary event log (zstd) + operational text logs with rotation
 - Rich tabbed TUI (shadow/live) with 10+ specialized panels
@@ -294,7 +294,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 
 - TUI requires a capable terminal (ncurses); backtest falls back to simpler ANSI dashboard.
 - Live trading currently limited to Binance spot and USDT-M futures (other venues require new providers).
-- Strategy library is small (SMA, mean-reversion, MA crossover, hedge demo, basic market maker). No built-in portfolio optimization or ML inference.
+- Strategy library (self-registering): SMA, mean-reversion, MA crossover, breakout/coiled-spring, adaptive-hybrid, structure-continuation (plus supporting indicators: EMA regime, stochastic, swing detector). No built-in portfolio optimization or ML inference.
 - Realism in backtest/shadow is only as good as the configured models and data quality; L2 replay for impact is powerful but data-intensive.
 - No native Windows GUI or installer; command-line + TUI only.
 - QuestDB is the only supported high-resolution persistence backend (soft-fail if unavailable).
