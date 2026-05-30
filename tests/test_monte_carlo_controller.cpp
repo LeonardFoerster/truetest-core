@@ -32,6 +32,21 @@ TEST(MonteCarloController, RunsMultipleTrials) {
     // Reporter should not crash
     std::string summary = MonteCarloReporter::render_text_summary(agg, cfg);
     EXPECT_FALSE(summary.empty());
+
+    // New MC-02 robustness metrics (Phase 2 fields now populated)
+    EXPECT_TRUE(std::isfinite(agg.win_rate_mean));
+    EXPECT_TRUE(std::isfinite(agg.profit_factor_mean));
+    EXPECT_TRUE(std::isfinite(agg.median_win_rate));
+    EXPECT_TRUE(std::isfinite(agg.median_profit_factor));
+    EXPECT_LE(agg.win_rate_mean, 100.0);
+    EXPECT_GE(agg.win_rate_mean, 0.0);
+    EXPECT_GE(agg.trials_with_profit_factor_gt_1, 0u);
+    EXPECT_LE(agg.trials_with_profit_factor_gt_1, agg.n_trials);
+
+    // Reporter output now contains the new sections
+    EXPECT_NE(summary.find("Win Rate"), std::string::npos);
+    EXPECT_NE(summary.find("Profit Factor"), std::string::npos);
+    EXPECT_NE(summary.find("PF > 1"), std::string::npos);
 }
 
 TEST(MonteCarloController, DeterministicWithSameSeed) {
@@ -84,6 +99,10 @@ TEST(MonteCarloController, ReuseObjectsProducesPlausibleResults) {
     EXPECT_TRUE(std::isfinite(agg_reuse.mean_pnl));
     EXPECT_TRUE(std::isfinite(agg_fresh.median_sharpe));
     EXPECT_TRUE(std::isfinite(agg_reuse.median_sharpe));
+
+    // MC-02 fields also finite under reuse
+    EXPECT_TRUE(std::isfinite(agg_reuse.win_rate_mean));
+    EXPECT_TRUE(std::isfinite(agg_reuse.profit_factor_mean));
 
     // Very loose bounds for this micro-benchmark.
     // Full bit-identical results are not yet guaranteed with reuse.
