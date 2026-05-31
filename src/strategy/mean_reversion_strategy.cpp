@@ -54,13 +54,7 @@ swing_detector& mean_reversion_strategy::get_swing(const std::string& symbol)
     return it->second;
 }
 
-void mean_reversion_strategy::reset(uint64_t /*seed*/)
-{
-    smas_.clear();
-    atrs_.clear();
-    swings_.clear();
-    pending_intent_.reset();
-}
+
 
 // Exits are owned by the engine's ExitManager via the bracket registered
 // at entry — there is intentionally no signal-based SELL here. A previous
@@ -84,7 +78,8 @@ std::optional<order_event> mean_reversion_strategy::on_market(const market_event
         if (qty <= 0.0) return std::nullopt;
 
         double entry = price;
-        pending_intent_ = create_exit_intent(mkt.get_symbol(), entry, qty, true);
+        auto intents = create_exit_intents(mkt.get_symbol(), entry, qty, true);
+        pending_intents_.insert(pending_intents_.end(), intents.begin(), intents.end());
         return order_event(mkt.get_timestamp(), mkt.get_symbol(),
                            order_type::market, order_side::buy, qty, entry);
     }
@@ -95,7 +90,8 @@ std::optional<order_event> mean_reversion_strategy::on_market(const market_event
         if (qty <= 0.0) return std::nullopt;
 
         double entry = price;
-        pending_intent_ = create_exit_intent(mkt.get_symbol(), entry, qty, false);
+        auto intents = create_exit_intents(mkt.get_symbol(), entry, qty, false);
+        pending_intents_.insert(pending_intents_.end(), intents.begin(), intents.end());
         return order_event(mkt.get_timestamp(), mkt.get_symbol(),
                            order_type::market, order_side::sell, qty, entry);
     }
@@ -119,7 +115,8 @@ std::optional<order_event> mean_reversion_strategy::on_tick(const tick_event& te
         if (qty <= 0.0) return std::nullopt;
 
         double entry = price;
-        pending_intent_ = create_exit_intent(te.get_symbol(), entry, qty, true);
+        auto intents = create_exit_intents(te.get_symbol(), entry, qty, true);
+        pending_intents_.insert(pending_intents_.end(), intents.begin(), intents.end());
         return order_event(te.get_timestamp(), te.get_symbol(),
                            order_type::market, order_side::buy, qty, entry);
     }
@@ -130,7 +127,8 @@ std::optional<order_event> mean_reversion_strategy::on_tick(const tick_event& te
         if (qty <= 0.0) return std::nullopt;
 
         double entry = price;
-        pending_intent_ = create_exit_intent(te.get_symbol(), entry, qty, false);
+        auto intents = create_exit_intents(te.get_symbol(), entry, qty, false);
+        pending_intents_.insert(pending_intents_.end(), intents.begin(), intents.end());
         return order_event(te.get_timestamp(), te.get_symbol(),
                            order_type::market, order_side::sell, qty, entry);
     }
@@ -138,11 +136,11 @@ std::optional<order_event> mean_reversion_strategy::on_tick(const tick_event& te
     return std::nullopt;
 }
 
-std::optional<truetest::exits::exit_intent>
-mean_reversion_strategy::take_pending_exit_intent()
+std::vector<truetest::exits::exit_intent>
+mean_reversion_strategy::take_pending_exit_intents()
 {
-    auto out = std::move(pending_intent_);
-    pending_intent_.reset();
+    auto out = std::move(pending_intents_);
+    pending_intents_.clear();
     return out;
 }
 
@@ -151,13 +149,7 @@ void mean_reversion_strategy::set_position_open(const std::string& /*symbol*/, b
     // Pyramiding enabled - no longer blocking on position state.
 }
 
-void mean_reversion_strategy::reset(uint64_t /*seed*/)
-{
-    smas_.clear();
-    atrs_.clear();
-    swings_.clear();
-    pending_intent_.reset();
-}
+
 
 std::vector<std::pair<std::string, double>>
 mean_reversion_strategy::get_indicator_values(const std::string& symbol) const
@@ -240,13 +232,100 @@ mean_reversion_strategy::create_exit_intent(const std::string& symbol,
     if (atr.ready() && atr.value() > 0.0)
     {
         return is_long
-            ? make_atr_long_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion")
-            : make_atr_short_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion");
+            ? truetest::exits::truetest::exits::make_atr_long_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion")
+            : truetest::exits::truetest::exits::make_atr_short_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion");
     }
 
     return is_long
-        ? make_long_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion")
-        : make_short_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion");
+        ? truetest::exits::make_long_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion")
+        : truetest::exits::make_short_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion");
+}
+
+// Phase 2: Returns one or more exit intents (scale-out support)
+std::vector<truetest::exits::exit_intent>
+mean_reversion_strategy::create_exit_intents(const std::string& symbol,
+                                             double entry,
+                                             double qty,
+                                             bool is_long)
+{
+    using namespace truetest::exits;
+
+    std::vector<exit_intent> result;
+
+    // Compute base SL/TP using existing Fib/ATR/legacy logic (single intent)
+    auto base = [this, &symbol, entry, qty, is_long]() -> std::optional<exit_intent> {
+        auto& atr  = get_atr(symbol);
+        auto& swing = get_swing(symbol);
+
+        if (use_fib_exits_ && swing.ready() && atr.ready())
+        {
+            auto opposing = is_long ? swing.last_confirmed_swing_high() : swing.last_confirmed_swing_low();
+
+            double impulse_high = is_long ? (opposing ? opposing->price : entry * 1.03) : entry;
+            double impulse_low  = is_long ? entry : (opposing ? opposing->price : entry * 0.97);
+
+            if (std::abs(impulse_high - impulse_low) < 0.001 * entry)
+            {
+                impulse_high = is_long ? entry * 1.02 : entry;
+                impulse_low  = is_long ? entry : entry * 0.98;
+            }
+
+            const double atrv = atr.value();
+
+            if (is_long)
+            {
+                double sl = suggest_long_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
+                double tp = suggest_fib_tp(impulse_high, impulse_low, atrv, fib_tp_extension_, atr_buffer_mult_tp_, true);
+
+                exit_intent ei;
+                ei.symbol = symbol; ei.close_side = order_side::sell; ei.qty = qty;
+                ei.stop_loss = sl; ei.take_profit = tp; ei.strategy_name = "mean-reversion";
+                return ei;
+            }
+            else
+            {
+                double sl = suggest_short_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
+                double tp = suggest_fib_tp(impulse_high, impulse_low, atrv, fib_tp_extension_, atr_buffer_mult_tp_, false);
+
+                exit_intent ei;
+                ei.symbol = symbol; ei.close_side = order_side::buy; ei.qty = qty;
+                ei.stop_loss = sl; ei.take_profit = tp; ei.strategy_name = "mean-reversion";
+                return ei;
+            }
+        }
+
+        if (atr.ready() && atr.value() > 0.0)
+        {
+            return is_long
+                ? truetest::exits::make_atr_long_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion")
+                : truetest::exits::make_atr_short_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion");
+        }
+
+        return is_long
+            ? truetest::exits::make_long_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion")
+            : truetest::exits::make_short_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion");
+    }();
+
+    if (!base) return result;
+
+    if (use_fib_exits_ && scale_out_ratio_ > 0.0 && scale_out_ratio_ < 1.0)
+    {
+        exit_intent first = *base;
+        first.qty_fraction = scale_out_ratio_;
+        result.push_back(std::move(first));
+
+        exit_intent runner = *base;
+        runner.qty_fraction = 1.0 - scale_out_ratio_;
+        runner.take_profit.reset();
+        runner.trailing_pct = std::clamp(trail_atr_mult_ * 0.01, 0.003, 0.05);
+        result.push_back(std::move(runner));
+    }
+    else
+    {
+        result.push_back(std::move(*base));
+    }
+
+    return result;
 }
 
 std::vector<param_def> mean_reversion_strategy::get_param_schema() const
@@ -266,6 +345,8 @@ std::vector<param_def> mean_reversion_strategy::get_param_schema() const
         {"atr_buffer_mult_sl", atr_buffer_mult_sl_, 0.0, 1.0, "ATR buffer SL"},
         {"atr_buffer_mult_tp", atr_buffer_mult_tp_, 0.0, 1.0, "ATR buffer TP"},
         {"use_fib_exits", use_fib_exits_ ? 1.0 : 0.0, 0.0, 1.0, "Enable Fib exits"},
+        {"scale_out_ratio", scale_out_ratio_, 0.0, 1.0, "Fraction at first TP"},
+        {"trail_atr_mult", trail_atr_mult_, 0.5, 5.0, "Trailing ATR mult for runner"},
     };
 }
 
@@ -285,5 +366,7 @@ void mean_reversion_strategy::set_param(const std::string& key, double value)
     else if (key == "atr_buffer_mult_sl") atr_buffer_mult_sl_ = value;
     else if (key == "atr_buffer_mult_tp") atr_buffer_mult_tp_ = value;
     else if (key == "use_fib_exits") use_fib_exits_ = (value > 0.5);
+    else if (key == "scale_out_ratio") scale_out_ratio_ = value;
+    else if (key == "trail_atr_mult") trail_atr_mult_ = value;
     else throw std::runtime_error("Unknown parameter: " + key);
 }

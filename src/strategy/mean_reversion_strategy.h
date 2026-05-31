@@ -23,7 +23,7 @@ public:
     std::optional<order_event> on_tick(const tick_event& te) override;
     void set_position_open(const std::string& symbol, bool open) override;
 
-    std::optional<truetest::exits::exit_intent> take_pending_exit_intent() override;
+    std::vector<truetest::exits::exit_intent> take_pending_exit_intents() override;
 
     void update_equity(double equity) { equity_ = equity; }
 
@@ -53,17 +53,24 @@ private:
     double atr_buffer_mult_tp_  = 0.10;
     bool   use_fib_exits_       = true;
 
+    // Phase 2: Scale-out + trailing
+    double scale_out_ratio_     = 0.5;   // fraction taken at first Fib TP (rest is runner)
+    double trail_atr_mult_      = 2.0;   // trailing stop distance in ATR for runner
+
     std::unordered_map<std::string, simple_moving_average> smas_;
     std::unordered_map<std::string, average_true_range>    atrs_;
     std::unordered_map<std::string, swing_detector>        swings_;
 
-    std::optional<truetest::exits::exit_intent> pending_intent_;
+    std::vector<truetest::exits::exit_intent> pending_intents_;
 
     simple_moving_average& get_sma(const std::string& symbol);
     average_true_range&    get_atr(const std::string& symbol);
     swing_detector&        get_swing(const std::string& symbol);
 
     double compute_quantity(double price) const;
+
+    std::vector<truetest::exits::exit_intent>
+    create_exit_intents(const std::string& symbol, double entry, double qty, bool is_long);
 
     void reset(uint64_t seed = 0) override;
 };
