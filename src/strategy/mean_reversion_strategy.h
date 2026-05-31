@@ -79,4 +79,9 @@ private:
     double compute_intended_sl(const std::string& symbol, double entry, bool is_long) const;
 
     void reset(uint64_t seed = 0) override;
+
+private:
+    // Internal flag used by the fib rewrite (derived from exit_style_ at runtime).
+    // Kept for compatibility with the parameter surface; logic prefers exit_style_.
+    bool use_fib_exits_ = false;
 };

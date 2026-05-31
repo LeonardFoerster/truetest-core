@@ -3018,7 +3018,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
                           << " | Round-trips: " << portfolio_.get_total_trades()
                           << std::flush;
                 last_report_time = now_report;
+#ifdef HAS_QUESTDB
                 maybe_questdb_tick();
+#endif
             }
         }
     });
@@ -3157,7 +3159,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
                           << " | Round-trips: " << portfolio_.get_total_trades()
                           << std::flush;
                 last_report_time = now_report;
+#ifdef HAS_QUESTDB
                 maybe_questdb_tick();
+#endif
             }
         }
     });
@@ -3359,7 +3363,9 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
                           << " | Round-trips: " << portfolio_.get_total_trades()
                           << std::flush;
                 last_report_time = now_report;
+#ifdef HAS_QUESTDB
                 maybe_questdb_tick();
+#endif
             }
         }
     });
@@ -3571,7 +3577,9 @@ void engine::run()
                               << std::flush;
                 }
                 last_report_time = now_report;
+#ifdef HAS_QUESTDB
                 maybe_questdb_tick();
+#endif
             }
         }
 
@@ -3793,7 +3801,9 @@ void engine::run_tick_data()
                               << std::flush;
                 }
                 last_report_time = now_report;
+#ifdef HAS_QUESTDB
                 maybe_questdb_tick();
+#endif
             }
         }
     }

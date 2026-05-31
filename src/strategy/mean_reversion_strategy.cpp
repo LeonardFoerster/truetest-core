@@ -193,85 +193,6 @@ mean_reversion_strategy::get_indicator_values(const std::string& symbol) const
     return vals;
 }
 
-std::optional<truetest::exits::exit_intent>
-mean_reversion_strategy::create_exit_intent(const std::string& symbol,
-                                            double entry,
-                                            double qty,
-                                            bool is_long)
-{
-    using namespace truetest::exits;
-
-    auto& atr = const_cast<mean_reversion_strategy*>(this)->get_atr(symbol);
-    auto& swing = const_cast<mean_reversion_strategy*>(this)->get_swing(symbol);
-
-    bool use_fib = (exit_style_ == "fib");
-    bool use_atr = (exit_style_ == "atr");
-
-    if (use_fib && swing.ready() && atr.ready())
-    {
-        auto opposing = is_long ? swing.last_confirmed_swing_high() : swing.last_confirmed_swing_low();
-
-        double impulse_high = is_long ? (opposing ? opposing->price : entry * 1.03) : entry;
-        double impulse_low  = is_long ? entry : (opposing ? opposing->price : entry * 0.97);
-
-        if (std::abs(impulse_high - impulse_low) < 0.001 * entry)
-        {
-            impulse_high = is_long ? entry * 1.02 : entry;
-            impulse_low  = is_long ? entry : entry * 0.98;
-        }
-
-        const double atrv = atr.value();
-
-        // Safety floor + Confluence
-        double min_dist = std::max(0.4 * atrv, 0.003 * entry);
-
-        if (is_long)
-        {
-            double sl = suggest_long_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
-            if (entry - sl < min_dist) sl = entry - min_dist;
-
-            double tp = suggest_fib_tp(impulse_high, impulse_low, atrv, fib_tp_extension_, atr_buffer_mult_tp_, true);
-            if (tp - entry < 1.8 * atrv) tp = entry + 1.8 * atrv;
-
-            exit_intent ei;
-            ei.symbol = symbol; ei.close_side = order_side::sell; ei.qty = qty;
-            ei.stop_loss = sl; ei.take_profit = tp; ei.strategy_name = "mean-reversion";
-            return ei;
-        }
-        else
-        {
-            double sl = suggest_short_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
-            if (sl - entry < min_dist) sl = entry + min_dist;
-
-            double tp = suggest_fib_tp(impulse_high, impulse_low, atrv, fib_tp_extension_, atr_buffer_mult_tp_, false);
-            if (entry - tp < 1.8 * atrv) tp = entry - 1.8 * atrv;
-
-            exit_intent ei;
-            ei.symbol = symbol; ei.close_side = order_side::buy; ei.qty = qty;
-            ei.stop_loss = sl; ei.take_profit = tp; ei.strategy_name = "mean-reversion";
-            return ei;
-        }
-    }
-
-    if (use_atr && atr.ready() && atr.value() > 0.0)
-    {
-        return is_long
-            ? make_atr_long_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion")
-            : make_atr_short_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion");
-    }
-
-    if (atr.ready() && atr.value() > 0.0)
-    {
-        return is_long
-            ? truetest::exits::make_atr_long_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion")
-            : truetest::exits::make_atr_short_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion");
-    }
-
-    return is_long
-        ? truetest::exits::make_long_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion")
-        : truetest::exits::make_short_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion");
-}
-
 // Phase 4 #1 + #2: Compute the intended stop loss price for sizing and quality decisions
 double mean_reversion_strategy::compute_intended_sl(const std::string& symbol, double entry, bool is_long) const
 {
@@ -309,13 +230,16 @@ double mean_reversion_strategy::compute_intended_sl(const std::string& symbol, d
 
         if (is_long)
         {
-            double sl = truetest::exits::suggest_long_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
+            // Simple structural / ATR-based SL (no external fib helpers available)
+            double sl = entry - (sl_atr_mult_ * atrv);
+            if (opposing) sl = std::min(sl, opposing->price - 0.2 * atrv);
             if (entry - sl < min_dist) sl = entry - min_dist;
             return sl;
         }
         else
         {
-            double sl = truetest::exits::suggest_short_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
+            double sl = entry + (sl_atr_mult_ * atrv);
+            if (opposing) sl = std::max(sl, opposing->price + 0.2 * atrv);
             if (sl - entry < min_dist) sl = entry + min_dist;
             return sl;
         }
@@ -357,12 +281,16 @@ mean_reversion_strategy::create_exit_intents(const std::string& symbol,
 
     std::vector<exit_intent> result;
 
-    // Compute base SL/TP using existing Fib/ATR/legacy logic (single intent)
+    // Compute base SL/TP. Only use stable exits API (make_long/make_short + direct struct fill).
+    // Advanced fib/ATR maker functions were part of an incomplete rewrite and are not available.
     auto base = [this, &symbol, entry, qty, is_long]() -> std::optional<exit_intent> {
-        auto& atr  = get_atr(symbol);
+        auto& atr   = get_atr(symbol);
         auto& swing = get_swing(symbol);
 
-        if (use_fib_exits_ && swing.ready() && atr.ready())
+        const bool want_fib = (exit_style_ == "fib");
+        const bool want_atr = (exit_style_ == "atr") || (exit_style_ == "fib"); // fib also benefits from ATR
+
+        if (want_fib && swing.ready() && atr.ready())
         {
             auto opposing = is_long ? swing.last_confirmed_swing_high() : swing.last_confirmed_swing_low();
 
@@ -376,36 +304,66 @@ mean_reversion_strategy::create_exit_intents(const std::string& symbol,
             }
 
             const double atrv = atr.value();
+            double min_dist   = std::max(0.4 * atrv, 0.003 * entry);
+
+            exit_intent ei;
+            ei.symbol        = symbol;
+            ei.close_side    = is_long ? order_side::sell : order_side::buy;
+            ei.qty           = qty;
+            ei.strategy_name = "mean-reversion";
 
             if (is_long)
             {
-                double sl = suggest_long_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
-                double tp = suggest_fib_tp(impulse_high, impulse_low, atrv, fib_tp_extension_, atr_buffer_mult_tp_, true);
+                double sl = entry - (sl_atr_mult_ * atrv);
+                if (opposing) sl = std::min(sl, opposing->price - 0.2 * atrv);
+                if (entry - sl < min_dist) sl = entry - min_dist;
 
-                exit_intent ei;
-                ei.symbol = symbol; ei.close_side = order_side::sell; ei.qty = qty;
-                ei.stop_loss = sl; ei.take_profit = tp; ei.strategy_name = "mean-reversion";
-                return ei;
+                // Simple structural TP using impulse extension + ATR floor
+                double tp = entry + (fib_tp_extension_ * std::abs(impulse_high - impulse_low));
+                if (tp - entry < 1.5 * atrv) tp = entry + 1.5 * atrv;
+
+                ei.stop_loss   = sl;
+                ei.take_profit = tp;
             }
             else
             {
-                double sl = suggest_short_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
-                double tp = suggest_fib_tp(impulse_high, impulse_low, atrv, fib_tp_extension_, atr_buffer_mult_tp_, false);
+                double sl = entry + (sl_atr_mult_ * atrv);
+                if (opposing) sl = std::max(sl, opposing->price + 0.2 * atrv);
+                if (sl - entry < min_dist) sl = entry + min_dist;
 
-                exit_intent ei;
-                ei.symbol = symbol; ei.close_side = order_side::buy; ei.qty = qty;
-                ei.stop_loss = sl; ei.take_profit = tp; ei.strategy_name = "mean-reversion";
-                return ei;
+                double tp = entry - (fib_tp_extension_ * std::abs(impulse_high - impulse_low));
+                if (entry - tp < 1.5 * atrv) tp = entry - 1.5 * atrv;
+
+                ei.stop_loss   = sl;
+                ei.take_profit = tp;
             }
+            return ei;
         }
 
         if (atr.ready() && atr.value() > 0.0)
         {
-            return is_long
-                ? truetest::exits::make_atr_long_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion")
-                : truetest::exits::make_atr_short_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion");
+            // ATR-based exits using the stable make_* helpers + direct fill for scale-outs later
+            exit_intent ei;
+            ei.symbol        = symbol;
+            ei.close_side    = is_long ? order_side::sell : order_side::buy;
+            ei.qty           = qty;
+            ei.strategy_name = "mean-reversion";
+
+            const double atrv = atr.value();
+            if (is_long)
+            {
+                ei.stop_loss   = entry - (sl_atr_mult_ * atrv);
+                ei.take_profit = entry + (tp_atr_mult_ * atrv);
+            }
+            else
+            {
+                ei.stop_loss   = entry + (sl_atr_mult_ * atrv);
+                ei.take_profit = entry - (tp_atr_mult_ * atrv);
+            }
+            return ei;
         }
 
+        // Safe legacy pct fallback (always available)
         return is_long
             ? truetest::exits::make_long_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion")
             : truetest::exits::make_short_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion");
@@ -491,4 +449,13 @@ void mean_reversion_strategy::set_param(const std::string& key, double value)
     else if (key == "scale_out_ratio") scale_out_ratio_ = value;
     else if (key == "trail_atr_mult") trail_atr_mult_ = value;
     else throw std::runtime_error("Unknown parameter: " + key);
+}
+
+void mean_reversion_strategy::reset(uint64_t /*seed*/)
+{
+    // Clear per-symbol indicator state so the next MC trial starts fresh.
+    smas_.clear();
+    atrs_.clear();
+    swings_.clear();
+    pending_intents_.clear();
 }
