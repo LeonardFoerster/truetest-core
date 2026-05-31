@@ -174,7 +174,7 @@ ctest --test-dir build
 
 **JSON config**: Full engine_config schema (mode, provider, strategy, risk, threading, persistence, realism, etc.). See instructions §13 for keys.
 
-**start.sh launcher** and many numbered examples in instructions §29–35 (backtest minimal → full futures live with DMS/persist/risk caps → sanitizers → PGO training → replay → QuestDB queries, etc.).
+The launcher scripts and many numbered examples in instructions §29–35 (backtest minimal → full futures live with DMS/persist/risk caps → sanitizers → PGO training → replay → QuestDB queries, etc.).
 
 ---
 

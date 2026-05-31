@@ -2,7 +2,7 @@
 """
 Phase 4: Lightweight QuestDB health check for long-running campaigns.
 
-Can be called from start.sh, operator SOPs, or cron.
+Can be called from operator SOPs, cron, or CI pipelines.
 
 Checks:
 - QuestDB is reachable (HTTP /exec ping)

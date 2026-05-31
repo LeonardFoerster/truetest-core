@@ -385,7 +385,7 @@ Add a generic event / decision log table for QuestDB on the `database` branch.
 - `scripts/questdb_campaign_summary.py` and `questdb_health_check.py` added ✓
 - Retention guidance, golden queries, and run_tag rules documented in `docs/db.md` ✓
 
-**Phase 4 is now substantially complete.** Remaining nice-to-haves are mostly operational integration (SOPs, start.sh wiring) rather than core functionality.
+**Phase 4 is now substantially complete.** Remaining nice-to-haves are mostly operational integration (SOPs and launcher wiring) rather than core functionality.
 
 ---
 
@@ -422,7 +422,7 @@ python scripts/questdb_verify_reconciliation.py --run-tag $RUN_TAG
 
 **Remaining for full Phase 5 closure:**
 - Perform actual 45+ minute soaks on real hardware against a live QuestDB with `--persist-strict --record`.
-- Integrate the verification commands into the official phase0 / operator SOP documents and `start.sh` flows.
+- Integrate the verification commands into the official phase0 / operator SOP documents and launcher flows.
 - Add automated count comparison (binary log parser + QuestDB) as a future enhancement.
 
 This phase is now actionable. The team has both the code changes (Phases 0-4) and the testing/soak tooling (Phase 5) needed for trustworthy long-running QuestDB persistence.
