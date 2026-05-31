@@ -184,7 +184,10 @@ mean_reversion_strategy::create_exit_intent(const std::string& symbol,
     auto& atr = const_cast<mean_reversion_strategy*>(this)->get_atr(symbol);
     auto& swing = const_cast<mean_reversion_strategy*>(this)->get_swing(symbol);
 
-    if (use_fib_exits_ && swing.ready() && atr.ready())
+    bool use_fib = (exit_style_ == "fib");
+    bool use_atr = (exit_style_ == "atr");
+
+    if (use_fib && swing.ready() && atr.ready())
     {
         auto opposing = is_long ? swing.last_confirmed_swing_high() : swing.last_confirmed_swing_low();
 
@@ -199,41 +202,49 @@ mean_reversion_strategy::create_exit_intent(const std::string& symbol,
 
         const double atrv = atr.value();
 
+        // Safety floor + Confluence
+        double min_dist = std::max(0.4 * atrv, 0.003 * entry);
+
         if (is_long)
         {
             double sl = suggest_long_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
+            if (entry - sl < min_dist) sl = entry - min_dist;
+
             double tp = suggest_fib_tp(impulse_high, impulse_low, atrv, fib_tp_extension_, atr_buffer_mult_tp_, true);
+            if (tp - entry < 1.8 * atrv) tp = entry + 1.8 * atrv;
 
             exit_intent ei;
-            ei.symbol = symbol;
-            ei.close_side = order_side::sell;
-            ei.qty = qty;
-            ei.stop_loss = sl;
-            ei.take_profit = tp;
-            ei.strategy_name = "mean-reversion";
+            ei.symbol = symbol; ei.close_side = order_side::sell; ei.qty = qty;
+            ei.stop_loss = sl; ei.take_profit = tp; ei.strategy_name = "mean-reversion";
             return ei;
         }
         else
         {
             double sl = suggest_short_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
+            if (sl - entry < min_dist) sl = entry + min_dist;
+
             double tp = suggest_fib_tp(impulse_high, impulse_low, atrv, fib_tp_extension_, atr_buffer_mult_tp_, false);
+            if (entry - tp < 1.8 * atrv) tp = entry - 1.8 * atrv;
 
             exit_intent ei;
-            ei.symbol = symbol;
-            ei.close_side = order_side::buy;
-            ei.qty = qty;
-            ei.stop_loss = sl;
-            ei.take_profit = tp;
-            ei.strategy_name = "mean-reversion";
+            ei.symbol = symbol; ei.close_side = order_side::buy; ei.qty = qty;
+            ei.stop_loss = sl; ei.take_profit = tp; ei.strategy_name = "mean-reversion";
             return ei;
         }
+    }
+
+    if (use_atr && atr.ready() && atr.value() > 0.0)
+    {
+        return is_long
+            ? make_atr_long_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion")
+            : make_atr_short_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion");
     }
 
     if (atr.ready() && atr.value() > 0.0)
     {
         return is_long
-            ? truetest::exits::truetest::exits::make_atr_long_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion")
-            : truetest::exits::truetest::exits::make_atr_short_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion");
+            ? truetest::exits::make_atr_long_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion")
+            : truetest::exits::make_atr_short_exit_intent(symbol, entry, qty, atr.value(), sl_atr_mult_, tp_atr_mult_, true, "mean-reversion");
     }
 
     return is_long
@@ -241,7 +252,21 @@ mean_reversion_strategy::create_exit_intent(const std::string& symbol,
         : truetest::exits::make_short_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion");
 }
 
-// Phase 2: Returns one or more exit intents (scale-out support)
+// Phase 3 Polish: Returns one or more exit intents.
+// Supports clean mode selection via exit_style_ ("pct", "atr", "fib").
+// In "fib" mode: structural impulse leg + Fib ratios + ATR safety floor + optional scale-out + trailing runner.
+/**
+ * Phase 3: Zentrale Exit-Erzeugung mit sauberer Modus-Auswahl.
+ *
+ * exit_style_:
+ *   "pct"  → klassische feste Prozent (sl_pct / tp_pct)
+ *   "atr"  → ATR-basierte Stops/Targets (sl_atr_mult / tp_atr_mult als R-Multiple)
+ *   "fib"  → Struktur-basiert mit Fibonacci (Swing + Fib-Ratios + ATR-Puffer + Safety-Floors)
+ *
+ * Im Fib-Modus werden bei aktivem scale_out_ratio_ automatisch zwei Intents erzeugt:
+ *   1. Partieller Close am Fib-TP
+ *   2. Runner mit Trailing-Stop
+ */
 std::vector<truetest::exits::exit_intent>
 mean_reversion_strategy::create_exit_intents(const std::string& symbol,
                                              double entry,
@@ -308,7 +333,9 @@ mean_reversion_strategy::create_exit_intents(const std::string& symbol,
 
     if (!base) return result;
 
-    if (use_fib_exits_ && scale_out_ratio_ > 0.0 && scale_out_ratio_ < 1.0)
+    bool do_scale = (exit_style_ == "fib" || exit_style_ == "atr") && scale_out_ratio_ > 0.0 && scale_out_ratio_ < 1.0;
+
+    if (do_scale)
     {
         exit_intent first = *base;
         first.qty_fraction = scale_out_ratio_;
@@ -344,7 +371,7 @@ std::vector<param_def> mean_reversion_strategy::get_param_schema() const
         {"fib_tp_extension", fib_tp_extension_, 1.0, 3.0, "Fib TP extension"},
         {"atr_buffer_mult_sl", atr_buffer_mult_sl_, 0.0, 1.0, "ATR buffer SL"},
         {"atr_buffer_mult_tp", atr_buffer_mult_tp_, 0.0, 1.0, "ATR buffer TP"},
-        {"use_fib_exits", use_fib_exits_ ? 1.0 : 0.0, 0.0, 1.0, "Enable Fib exits"},
+        {"exit_style", 0.0, 0.0, 0.0, "pct | atr | fib"},
         {"scale_out_ratio", scale_out_ratio_, 0.0, 1.0, "Fraction at first TP"},
         {"trail_atr_mult", trail_atr_mult_, 0.5, 5.0, "Trailing ATR mult for runner"},
     };
@@ -365,7 +392,11 @@ void mean_reversion_strategy::set_param(const std::string& key, double value)
     else if (key == "fib_tp_extension") fib_tp_extension_ = value;
     else if (key == "atr_buffer_mult_sl") atr_buffer_mult_sl_ = value;
     else if (key == "atr_buffer_mult_tp") atr_buffer_mult_tp_ = value;
-    else if (key == "use_fib_exits") use_fib_exits_ = (value > 0.5);
+    else if (key == "exit_style") {
+        if (value == 0.0) exit_style_ = "pct";
+        else if (value == 1.0) exit_style_ = "atr";
+        else exit_style_ = "fib";
+    }
     else if (key == "scale_out_ratio") scale_out_ratio_ = value;
     else if (key == "trail_atr_mult") trail_atr_mult_ = value;
     else throw std::runtime_error("Unknown parameter: " + key);

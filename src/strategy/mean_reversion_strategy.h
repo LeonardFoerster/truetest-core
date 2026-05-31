@@ -51,7 +51,7 @@ private:
     double fib_tp_extension_    = 1.618;
     double atr_buffer_mult_sl_  = 0.20;
     double atr_buffer_mult_tp_  = 0.10;
-    bool   use_fib_exits_       = true;
+    std::string exit_style_     = "fib"; // "pct" | "atr" | "fib"
 
     // Phase 2: Scale-out + trailing
     double scale_out_ratio_     = 0.5;   // fraction taken at first Fib TP (rest is runner)
