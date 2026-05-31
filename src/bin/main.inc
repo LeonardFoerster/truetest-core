@@ -347,6 +347,8 @@ struct cli_options
     std::string questdb_host = "127.0.0.1";
     std::uint16_t questdb_ilp_port = 9009;
     std::uint16_t questdb_http_port = 9000;
+    int questdb_flush_ms = 150;   // time-based ILP flush cadence (Phase 1)
+    bool questdb_strict = false;  // Phase 2: hard-fail on QuestDB problems + local fallback
 #endif
 };
 
@@ -578,6 +580,8 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_str("questdb_host", o.questdb_host);
     get_u16("questdb_ilp_port", o.questdb_ilp_port);
     get_u16("questdb_http_port", o.questdb_http_port);
+    get_int("questdb_flush_ms", o.questdb_flush_ms);
+    get_bool("questdb_strict", o.questdb_strict);
 #endif
 }
 
@@ -647,6 +651,8 @@ static void dump_config(const cli_options& o)
     j["questdb_host"] = o.questdb_host;
     j["questdb_ilp_port"] = o.questdb_ilp_port;
     j["questdb_http_port"] = o.questdb_http_port;
+    j["questdb_flush_ms"] = o.questdb_flush_ms;
+    j["questdb_strict"] = o.questdb_strict;
 #endif
     std::cout << j.dump(2) << "\n";
 }
@@ -905,6 +911,13 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--questdb-http-port", o.questdb_http_port,
                    "QuestDB HTTP/DDL port (default 9000)")
         ->default_val(9000);
+    app.add_option("--questdb-flush-ms", o.questdb_flush_ms,
+                   "QuestDB ILP time-based flush cadence in milliseconds (default 150). "
+                   "Lower values reduce risk of lost rows on quiet periods or crashes.")
+        ->default_val(150);
+    app.add_flag("--persist-strict", o.questdb_strict,
+                 "Phase 2: Make QuestDB persistence strict. Startup or persistent ILP failures "
+                 "will hard-fail the run (instead of soft-disabling). Enables local ILP fallback file.");
 #endif
 }
 
@@ -987,6 +1000,8 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--questdb-host")) opts.questdb_host = file_opts.questdb_host;
     if (!was_set("--questdb-ilp-port")) opts.questdb_ilp_port = file_opts.questdb_ilp_port;
     if (!was_set("--questdb-http-port")) opts.questdb_http_port = file_opts.questdb_http_port;
+    if (!was_set("--questdb-flush-ms")) opts.questdb_flush_ms = file_opts.questdb_flush_ms;
+    if (!was_set("--persist-strict")) opts.questdb_strict = file_opts.questdb_strict;
 #endif
 }
 
@@ -1043,6 +1058,9 @@ static int run_dry_run(const cli_options& o)
         std::cout << "    HTTP port:      " << o.questdb_http_port << "\n";
         std::cout << "    Run tag:        "
                   << (o.run_tag.empty() ? "(auto)" : o.run_tag) << "\n";
+        std::cout << "    Flush cadence:  " << o.questdb_flush_ms << " ms\n";
+        if (o.questdb_strict)
+            std::cout << "    Strict mode:    ENABLED (hard-fail + fallback on problems)\n";
         if (!o.run_notes.empty())
             std::cout << "    Run notes:      " << o.run_notes << "\n";
     }
@@ -1452,6 +1470,12 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.questdb_http_port = o.questdb_http_port;
     prov_cfg.run_tag = o.run_tag;
     prov_cfg.run_notes = o.run_notes;
+    prov_cfg.questdb_flush_cadence = std::chrono::milliseconds(o.questdb_flush_ms);
+    prov_cfg.questdb_strict = o.questdb_strict;
+    if (o.questdb_strict)
+    {
+        prov_cfg.persist_enabled = true; // strict implies persist
+    }
 #endif
 
     if (o.testnet)

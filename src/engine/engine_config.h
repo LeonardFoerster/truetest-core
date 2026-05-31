@@ -87,6 +87,12 @@ struct engine_config
     std::uint64_t log_max_bytes = 0;
     int log_max_files = 5;
 
+    // When false, suppresses the interactive progress bar ("\rProgress..."),
+    // final "Trades executed: ..." line, and "Event throughput" line.
+    // Useful for Monte Carlo batch runs and scripted/quiet operation.
+    // Default is true to preserve existing single-run behavior.
+    bool show_progress = true;
+
     std::shared_ptr<IProvider> provider;
 
 #ifdef HAS_QUESTDB
@@ -96,6 +102,20 @@ struct engine_config
     std::uint16_t questdb_http_port = 9000;
     std::string run_tag;     // empty → auto-generate
     std::string run_notes;   // optional free-form, goes to runs_meta
+
+    // How often to call QuestdbStore::tick() (time-based ILP flush) during long runs.
+    // Lower values reduce risk of buffer loss on quiet periods or crashes.
+    // Default 150ms is a good balance (cheap comparison + occasional actual flush).
+    std::chrono::milliseconds questdb_flush_cadence{150};
+
+    // Phase 2: When true, QuestDB unavailability at start or persistent write failures
+    // cause a hard failure (instead of soft-disabling persistence). Also enables
+    // local ILP fallback file writing on ILP failures.
+    bool questdb_strict = false;
+
+    // If non-empty and strict mode or fallback is triggered, raw ILP lines are
+    // appended here instead of being lost.
+    std::string questdb_fallback_path;
 #endif
 
     std::string checkpoint_path;

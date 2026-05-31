@@ -136,8 +136,16 @@ private:
     bool questdb_active_ = false;  // true only after successful begin()
     std::size_t questdb_total_rejections_ = 0;
 
+    // Last time we called tick() for time-based ILP flushing (Phase 1 hardening).
+    std::chrono::steady_clock::time_point last_questdb_flush_{};
+
     void questdb_begin();
     void questdb_end();
+
+    // Cheap periodic call (intended to be invoked from the 200ms reporting blocks).
+    // Does nothing if persist is not active. Calls QuestdbStore::tick() at most
+    // once per config_.questdb_flush_cadence.
+    void maybe_questdb_tick();
 #endif
 
     // Dashboard view: read from the rich (ncurses) TUI render thread.

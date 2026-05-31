@@ -1074,6 +1074,26 @@ void engine::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
             out.health.provider_state   = static_cast<int>(
                 config_.provider->lifecycle_state());
         }
+
+#ifdef HAS_QUESTDB
+        if (questdb_active_ && questdb_store_)
+        {
+            auto qh = questdb_store_->health();
+            out.health.questdb.active = true;
+            out.health.questdb.connected = qh.connected;
+            out.health.questdb.pending_lines = qh.pending_lines;
+            out.health.questdb.dropped_lines = qh.dropped_lines;
+            out.health.questdb.fallback_lines = qh.fallback_lines;
+            out.health.questdb.strict_mode = qh.strict_mode;
+
+            if (qh.last_flush.time_since_epoch().count() != 0)
+            {
+                auto age = std::chrono::steady_clock::now() - qh.last_flush;
+                out.health.questdb.last_flush_age_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(age).count();
+            }
+        }
+#endif
     }
 
     // Per-strategy attribution. analytics_.per_strategy_view() copies
@@ -1445,6 +1465,16 @@ void engine::questdb_begin()
         scfg.symbol = data_handler_->db_data_symbol.front();
     scfg.initial_equity = config_.initial_balance;
     scfg.notes = config_.run_notes;
+    scfg.strict = config_.questdb_strict;
+    scfg.ttl_days = 0; // Phase 4: can be extended to config if needed (default no TTL)
+
+    if (config_.questdb_strict && !config_.questdb_fallback_path.empty())
+        scfg.fallback_path = config_.questdb_fallback_path;
+    else if (config_.questdb_strict && !scfg.run_tag.empty())
+    {
+        // Auto-generate a sensible fallback filename next to the binary log if possible
+        scfg.fallback_path = scfg.run_tag + ".questdb_fallback.ilp";
+    }
 
     questdb_store_ = std::make_shared<truetest::questdb::QuestdbStore>(
         std::move(scfg));
@@ -1452,17 +1482,32 @@ void engine::questdb_begin()
     if (questdb_store_->begin())
     {
         questdb_active_ = true;
+        // Set to "now - cadence" so the very first maybe_questdb_tick() after activation
+        // will consider flushing promptly (improves reliability for short runs / early data).
+        last_questdb_flush_ = std::chrono::steady_clock::now() - config_.questdb_flush_cadence;
         std::cerr << "  QuestDB persistence ENABLED (run_tag="
                   << questdb_store_->run_tag() << ")\n";
     }
     else
     {
-        std::cerr << "  WARNING: QuestDB unreachable at "
-                  << config_.questdb_host << ":" << config_.questdb_http_port
-                  << " — continuing with persistence DISABLED for this session.\n"
-                  << "  Start the daemon with: questdb start\n"
-                  << "  Or re-run without --persist to suppress this warning.\n";
-        questdb_store_.reset();
+        if (config_.questdb_strict)
+        {
+            std::cerr << "\n  FATAL (strict mode): QuestDB unreachable at "
+                      << config_.questdb_host << ":" << config_.questdb_http_port << "\n"
+                      << "  --persist-strict requires a working QuestDB instance.\n"
+                      << "  Start QuestDB (e.g. `questdb start`) and retry, or remove --persist-strict.\n\n";
+            // Hard exit for strict mode
+            std::exit(1);
+        }
+        else
+        {
+            std::cerr << "  WARNING: QuestDB unreachable at "
+                      << config_.questdb_host << ":" << config_.questdb_http_port
+                      << " — continuing with persistence DISABLED for this session.\n"
+                      << "  Start the daemon with: questdb start\n"
+                      << "  Or re-run without --persist to suppress this warning.\n";
+            questdb_store_.reset();
+        }
     }
 }
 
@@ -1474,8 +1519,32 @@ void engine::questdb_end()
     questdb_store_->end(final_equity,
                         report.total_orders,
                         report.total_fills,
-                        questdb_total_rejections_);
+                        questdb_total_rejections_,
+                        // Phase 4: richer campaign summary for long runs
+                        report.max_drawdown,
+                        report.sharpe_ratio,
+                        report.sortino_ratio,
+                        report.profit_factor,
+                        report.win_rate,
+                        report.calmar_ratio,
+                        report.total_trades,
+                        report.winning_trades);
+    // Best-effort final flush of any remaining ILP buffer on clean shutdown.
+    // This improves data completeness for the final rows of a run.
+    questdb_store_->flush();
     questdb_active_ = false;
+}
+#endif
+
+#ifdef HAS_QUESTDB
+void engine::maybe_questdb_tick()
+{
+    if (!questdb_active_ || !questdb_store_) return;
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_questdb_flush_ >= config_.questdb_flush_cadence) {
+        questdb_store_->tick();
+        last_questdb_flush_ = now;
+    }
 }
 #endif
 
@@ -1742,6 +1811,15 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                 questdb_store_->record_rejection(*o,
                     (action == risk_action::halt) ? "risk_halt" : "risk_reject",
                     reason);
+                questdb_store_->record_event(
+                    "risk_decision",
+                    o->get_symbol(),
+                    o->get_strategy_name(),
+                    o->get_order_id(),
+                    (action == risk_action::halt) ? "halt" : "reject",
+                    reason,
+                    "{}"  // could be extended with more JSON context later
+                );
                 questdb_total_rejections_++;
             }
 #endif
@@ -1771,6 +1849,15 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         questdb_store_->record_order_submitted(*o, "pending");
         questdb_store_->record_status_transition(o->get_order_id(),
             order_status::pending, order_status::open);
+        questdb_store_->record_event(
+            "order_intent",
+            o->get_symbol(),
+            o->get_strategy_name(),
+            o->get_order_id(),
+            "info",
+            "order generated by strategy",
+            "{}"
+        );
     }
 #endif
 
@@ -2931,6 +3018,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
                           << " | Round-trips: " << portfolio_.get_total_trades()
                           << std::flush;
                 last_report_time = now_report;
+                maybe_questdb_tick();
             }
         }
     });
@@ -3069,6 +3157,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
                           << " | Round-trips: " << portfolio_.get_total_trades()
                           << std::flush;
                 last_report_time = now_report;
+                maybe_questdb_tick();
             }
         }
     });
@@ -3270,6 +3359,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
                           << " | Round-trips: " << portfolio_.get_total_trades()
                           << std::flush;
                 last_report_time = now_report;
+                maybe_questdb_tick();
             }
         }
     });
@@ -3329,7 +3419,9 @@ void engine::run()
     const auto n = data_handler_->db_data_symbol.size();
     analytics_.reserve_hint(n);
     const auto start = std::chrono::high_resolution_clock::now();
-    std::cout << "\rProgress: 0.000% | Trades executed: 0" << std::flush;
+    if (config_.show_progress) {
+        std::cout << "\rProgress: 0.000% | Trades executed: 0" << std::flush;
+    }
 
     std::size_t event_count = 0;
     auto last_report_time = std::chrono::steady_clock::now();
@@ -3473,10 +3565,13 @@ void engine::run()
             if ((i + 1) == n || now_report - last_report_time >= std::chrono::milliseconds(200))
             {
                 const double progress = ((i + 1) * 100.0) / static_cast<double>(n);
-                std::cout << "\rProgress: " << std::fixed << std::setprecision(3) << progress
-                          << "% | Trades executed: " << portfolio_.get_total_trades()
-                          << std::flush;
+                if (config_.show_progress) {
+                    std::cout << "\rProgress: " << std::fixed << std::setprecision(3) << progress
+                              << "% | Trades executed: " << portfolio_.get_total_trades()
+                              << std::flush;
+                }
                 last_report_time = now_report;
+                maybe_questdb_tick();
             }
         }
 
@@ -3502,12 +3597,14 @@ void engine::run()
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-    std::cout << std::endl;
-    std::cout << "Trades executed: " << portfolio_.get_total_trades()
-              << " in " << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
+    if (config_.show_progress) {
+        std::cout << std::endl;
+        std::cout << "Trades executed: " << portfolio_.get_total_trades()
+                  << " in " << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
 
-    double throughput = static_cast<double>(event_count) / (elapsed_ms / 1000.0);
-    std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
+        double throughput = static_cast<double>(event_count) / (elapsed_ms / 1000.0);
+        std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
+    }
 
     if (!config_.checkpoint_path.empty())
     {
@@ -3573,7 +3670,9 @@ void engine::run_tick_data()
     const auto n = ticks.size();
     const auto start = std::chrono::high_resolution_clock::now();
 
-    std::cout << "\rProgress: 0.000% | Trades executed: 0" << std::flush;
+    if (config_.show_progress) {
+        std::cout << "\rProgress: 0.000% | Trades executed: 0" << std::flush;
+    }
 
     std::size_t event_count = 0;
     bool halt_requested = false;
@@ -3688,10 +3787,13 @@ void engine::run_tick_data()
             if ((i + 1) == n || now_report - last_report_time >= std::chrono::milliseconds(200))
             {
                 const double progress = ((i + 1) * 100.0) / static_cast<double>(n);
-                std::cout << "\rProgress: " << std::fixed << std::setprecision(3) << progress
-                          << "% | Trades executed: " << portfolio_.get_total_trades()
-                          << std::flush;
+                if (config_.show_progress) {
+                    std::cout << "\rProgress: " << std::fixed << std::setprecision(3) << progress
+                              << "% | Trades executed: " << portfolio_.get_total_trades()
+                              << std::flush;
+                }
                 last_report_time = now_report;
+                maybe_questdb_tick();
             }
         }
     }
@@ -3708,12 +3810,14 @@ void engine::run_tick_data()
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-    std::cout << std::endl;
-    std::cout << "Trades executed: " << portfolio_.get_total_trades()
-              << " in " << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
+    if (config_.show_progress) {
+        std::cout << std::endl;
+        std::cout << "Trades executed: " << portfolio_.get_total_trades()
+                  << " in " << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
 
-    double throughput = static_cast<double>(event_count) / (elapsed_ms / 1000.0);
-    std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
+        double throughput = static_cast<double>(event_count) / (elapsed_ms / 1000.0);
+        std::cout << "Event throughput: " << throughput << " events/second" << std::endl;
+    }
 
     if (event_logger_) event_logger_->flush();
     stop_workers();
