@@ -9,6 +9,13 @@
 #include <iostream>
 #include <numeric>
 
+namespace {
+static const bool kAnalyticsPnlDebug = [] {
+    const char* v = std::getenv("TT_ANALYTICS_PNL_DEBUG");
+    return v && (*v == '1' || *v == 't' || *v == 'T');
+}();
+} // namespace
+
 Analytics::Analytics(double initial_cash, std::size_t rolling_window, double risk_free_rate,
                      std::size_t periods_per_year, std::size_t max_equity_points)
     : initial_cash_(initial_cash), cash_(initial_cash),
@@ -347,6 +354,18 @@ void Analytics::on_fill(const fill_event& f)
         double open_comm_share = total_open_commission_ * (close_qty / prev_abs);
         double pnl = gross - close_comm - open_comm_share;
 
+        if (kAnalyticsPnlDebug) {
+            std::fprintf(stderr,
+                "[ANALYTICS_PNL_CLOSE] sym=%s side=%s fill_px=%.8f filled_qty=%.6f comm=%.6f "
+                "pos_qty=%.6f avg_entry=%.8f open_comm_acc=%.6f "
+                "close_qty=%.6f gross=%.8f close_c=%.6f open_share=%.6f pnl=%.8f\n",
+                f.get_symbol().c_str(),
+                (f.get_side() == order_side::buy ? "BUY" : "SELL"),
+                fill_price, filled_qty, commission,
+                position_qty_, avg_entry_price_, total_open_commission_,
+                close_qty, gross, close_comm, open_comm_share, pnl);
+        }
+
         total_open_commission_ -= open_comm_share;
 
         cash_ += -side_sign * close_qty * fill_price - close_comm;
@@ -406,6 +425,15 @@ void Analytics::on_fill(const fill_event& f)
                          / (prev_abs + qty_left);
         position_qty_ += side_sign * qty_left;
         total_open_commission_ += open_comm;
+
+        if (kAnalyticsPnlDebug && prev_abs < 1e-12) {
+            std::fprintf(stderr,
+                "[ANALYTICS_PNL_OPEN] sym=%s side=%s fill_px=%.8f qty=%.6f comm=%.6f "
+                "avg_entry_set=%.8f open_comm_acc=%.6f\n",
+                f.get_symbol().c_str(),
+                (f.get_side() == order_side::buy ? "BUY" : "SELL"),
+                fill_price, qty_left, open_comm, avg_entry_price_, total_open_commission_);
+        }
 
         if (prev_abs < 1e-12)
             entry_time_ = f.get_timestamp();
