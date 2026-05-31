@@ -69,8 +69,14 @@ private:
 
     double compute_quantity(double price) const;
 
+    // Phase 4: True fixed-risk sizing
+    double compute_quantity_with_sl(double entry, double sl_price) const;
+
     std::vector<truetest::exits::exit_intent>
     create_exit_intents(const std::string& symbol, double entry, double qty, bool is_long);
+
+    // Phase 4 helpers
+    double compute_intended_sl(const std::string& symbol, double entry, bool is_long) const;
 
     void reset(uint64_t seed = 0) override;
 };

@@ -21,6 +21,14 @@ double mean_reversion_strategy::compute_quantity(double price) const
     return equity_ * risk_fraction_ / price;
 }
 
+// Phase 4 #1: True fixed-risk sizing based on actual stop distance
+double mean_reversion_strategy::compute_quantity_with_sl(double entry, double sl_price) const
+{
+    double risk_distance = std::abs(entry - sl_price);
+    if (risk_distance < 1e-8) risk_distance = 0.01 * entry; // safety floor
+    return (equity_ * risk_fraction_) / risk_distance;
+}
+
 simple_moving_average& mean_reversion_strategy::get_sma(const std::string& symbol)
 {
     auto it = smas_.find(symbol);
@@ -74,10 +82,13 @@ std::optional<order_event> mean_reversion_strategy::on_market(const market_event
 
     if (price < *sma_value)
     {
-        double qty = compute_quantity(price);
+        double entry = price;
+
+        // Phase 4 #1: Compute real SL first for correct risk-based sizing
+        double tentative_sl = compute_intended_sl(mkt.get_symbol(), entry, true);
+        double qty = compute_quantity_with_sl(entry, tentative_sl);
         if (qty <= 0.0) return std::nullopt;
 
-        double entry = price;
         auto intents = create_exit_intents(mkt.get_symbol(), entry, qty, true);
         pending_intents_.insert(pending_intents_.end(), intents.begin(), intents.end());
         return order_event(mkt.get_timestamp(), mkt.get_symbol(),
@@ -86,10 +97,12 @@ std::optional<order_event> mean_reversion_strategy::on_market(const market_event
 
     if (price > *sma_value)
     {
-        double qty = compute_quantity(price);
+        double entry = price;
+
+        double tentative_sl = compute_intended_sl(mkt.get_symbol(), entry, false);
+        double qty = compute_quantity_with_sl(entry, tentative_sl);
         if (qty <= 0.0) return std::nullopt;
 
-        double entry = price;
         auto intents = create_exit_intents(mkt.get_symbol(), entry, qty, false);
         pending_intents_.insert(pending_intents_.end(), intents.begin(), intents.end());
         return order_event(mkt.get_timestamp(), mkt.get_symbol(),
@@ -111,10 +124,12 @@ std::optional<order_event> mean_reversion_strategy::on_tick(const tick_event& te
 
     if (price < *sma_value)
     {
-        double qty = compute_quantity(price);
+        double entry = price;
+
+        double tentative_sl = compute_intended_sl(te.get_symbol(), entry, true);
+        double qty = compute_quantity_with_sl(entry, tentative_sl);
         if (qty <= 0.0) return std::nullopt;
 
-        double entry = price;
         auto intents = create_exit_intents(te.get_symbol(), entry, qty, true);
         pending_intents_.insert(pending_intents_.end(), intents.begin(), intents.end());
         return order_event(te.get_timestamp(), te.get_symbol(),
@@ -123,10 +138,12 @@ std::optional<order_event> mean_reversion_strategy::on_tick(const tick_event& te
 
     if (price > *sma_value)
     {
-        double qty = compute_quantity(price);
+        double entry = price;
+
+        double tentative_sl = compute_intended_sl(te.get_symbol(), entry, false);
+        double qty = compute_quantity_with_sl(entry, tentative_sl);
         if (qty <= 0.0) return std::nullopt;
 
-        double entry = price;
         auto intents = create_exit_intents(te.get_symbol(), entry, qty, false);
         pending_intents_.insert(pending_intents_.end(), intents.begin(), intents.end());
         return order_event(te.get_timestamp(), te.get_symbol(),
@@ -169,6 +186,9 @@ mean_reversion_strategy::get_indicator_values(const std::string& symbol) const
     {
         vals.emplace_back("swing_phase", static_cast<double>(static_cast<int>(swing_it->second.phase())));
     }
+
+    // Phase 4 #5 diagnostics could be added here (last computed impulse range, effective R:R, etc.)
+    // For a production version we would store the last computed values per symbol.
 
     return vals;
 }
@@ -250,6 +270,66 @@ mean_reversion_strategy::create_exit_intent(const std::string& symbol,
     return is_long
         ? truetest::exits::make_long_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion")
         : truetest::exits::make_short_exit_intent(symbol, entry, qty, sl_pct_, tp_pct_, "mean-reversion");
+}
+
+// Phase 4 #1 + #2: Compute the intended stop loss price for sizing and quality decisions
+double mean_reversion_strategy::compute_intended_sl(const std::string& symbol, double entry, bool is_long) const
+{
+    auto& atr   = const_cast<mean_reversion_strategy*>(this)->get_atr(symbol);
+    auto& swing = const_cast<mean_reversion_strategy*>(this)->get_swing(symbol);
+
+    const bool use_fib = (exit_style_ == "fib");
+    const bool use_atr = (exit_style_ == "atr");
+
+    if (use_fib && swing.ready() && atr.ready())
+    {
+        auto opposing = is_long ? swing.last_confirmed_swing_high() : swing.last_confirmed_swing_low();
+
+        double impulse_high = is_long ? (opposing ? opposing->price : entry * 1.03) : entry;
+        double impulse_low  = is_long ? entry : (opposing ? opposing->price : entry * 0.97);
+
+        double impulse_range = std::abs(impulse_high - impulse_low);
+
+        // Phase 4 #2: Quality filter - discard weak impulses
+        const double atrv = atr.value();
+        if (impulse_range < 1.2 * atrv)
+        {
+            // Fall back to simple ATR stop for weak structure
+            return is_long ? entry - (sl_atr_mult_ * atrv)
+                           : entry + (sl_atr_mult_ * atrv);
+        }
+
+        if (impulse_range < 0.001 * entry)
+        {
+            impulse_high = is_long ? entry * 1.02 : entry;
+            impulse_low  = is_long ? entry : entry * 0.98;
+        }
+
+        double min_dist = std::max(0.4 * atrv, 0.003 * entry);
+
+        if (is_long)
+        {
+            double sl = truetest::exits::suggest_long_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
+            if (entry - sl < min_dist) sl = entry - min_dist;
+            return sl;
+        }
+        else
+        {
+            double sl = truetest::exits::suggest_short_fib_sl(impulse_high, impulse_low, atrv, fib_sl_retracement_, atr_buffer_mult_sl_);
+            if (sl - entry < min_dist) sl = entry + min_dist;
+            return sl;
+        }
+    }
+
+    if ((use_atr || use_fib) && atr.ready() && atr.value() > 0.0)
+    {
+        return is_long ? entry - (sl_atr_mult_ * atr.value())
+                       : entry + (sl_atr_mult_ * atr.value());
+    }
+
+    // Legacy pct fallback
+    return is_long ? entry * (1.0 - sl_pct_)
+                   : entry * (1.0 + sl_pct_);
 }
 
 // Phase 3 Polish: Returns one or more exit intents.
@@ -344,7 +424,18 @@ mean_reversion_strategy::create_exit_intents(const std::string& symbol,
         exit_intent runner = *base;
         runner.qty_fraction = 1.0 - scale_out_ratio_;
         runner.take_profit.reset();
-        runner.trailing_pct = std::clamp(trail_atr_mult_ * 0.01, 0.003, 0.05);
+
+        // Phase 4 #3: Use ATR-based Chandelier-style trailing instead of fixed %
+        double atrv = get_atr(symbol).value();
+        if (atrv > 0.0)
+        {
+            double trail_pct = (trail_atr_mult_ * atrv) / entry;
+            runner.trailing_pct = std::clamp(trail_pct, 0.003, 0.08);
+        }
+        else
+        {
+            runner.trailing_pct = std::clamp(trail_atr_mult_ * 0.01, 0.003, 0.05);
+        }
         result.push_back(std::move(runner));
     }
     else
