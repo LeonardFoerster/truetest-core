@@ -197,6 +197,18 @@ ctest --test-dir build --output-on-failure
 - `TRUETEST_*` variables for some overrides
 - Credentials can be provided via CLI or environment (see `scripts/check-credentials.sh`)
 
+## QuestDB Persistence
+
+TrueTest supports optional high-resolution persistence to a QuestDB instance using the InfluxDB Line Protocol (ILP) for ingestion (default port 9009) and HTTP for schema/DDL operations (default port 9000). Build support is enabled via the CMake flag `-DENABLE_QUESTDB=ON`.
+
+At runtime, persistence is activated with `--persist --run-tag <name>` (optionally combined with `--persist-strict` for hard-fail semantics and automatic local ILP fallback file writing on outages). The engine performs time-based flushing (default ~150 ms cadence, configurable via `--questdb-flush-ms`) from the main reporting loops in addition to count-based batching. A minimal but effective health surface is exposed in the TUI (connected state, pending lines, fallback lines written, age since last successful flush).
+
+Per-run tables (e.g. `{run_tag}_orders`, `{run_tag}_fills`, `{run_tag}_events`, `{run_tag}_rejections`) are created automatically with `PARTITION BY DAY` and a designated timestamp column. A shared `runs_meta` table (now using WEEK partitioning) records campaign summaries, including rich analytics fields such as max drawdown, Sharpe, Sortino, profit factor, and win rate written on shutdown. A generic `_events` table (Phase 3) enables capture of strategy decisions, risk actions, and other logic beyond pure order lifecycle.
+
+QuestDB is explicitly a secondary, queryable analytics and observability store. The binary zstd-compressed event log (`--record`) is the authoritative, durable audit trail. In non-strict mode, QuestDB unavailability at startup causes graceful degradation (persistence is disabled for the session with a warning). In strict mode, startup or persistent write failures cause a hard exit.
+
+For operational details, golden queries, retention/TTL recommendations, soak testing with failure injection, and post-run reconciliation, see `docs/db.md` and `docs/questdb-multi-week-hardening-guide.md`.
+
 # Usage Examples
 
 **1. Simple backtest (local CSV, SMA strategy)**
