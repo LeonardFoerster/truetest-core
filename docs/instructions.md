@@ -273,9 +273,9 @@ Lock-free SPSC RingBuffer (64k slots) per worker preset. Presets: inline (single
 
 **Build**: `-DENABLE_QUESTDB=ON` (raw POSIX sockets; zero new runtime deps).
 
-**Runtime**: `--persist --run-tag myrun` (validated chars). Soft warning + continue (disabled) if daemon unreachable. Hard-fail (`--persist-strict`) is Phase 4 TODO.
+**Runtime**: `--persist --run-tag myrun` (validated chars). Supports `--questdb-flush-ms` (default 150) for time-based ILP flushing during long runs. Soft warning + continue (disabled) if daemon unreachable at start. Hard-fail (`--persist-strict`) is future work (see questdb-multi-week-hardening-guide.md).
 
-**Current as-built implementation** (db.md explicit): Direct calls to `QuestdbStore` (mutex-protected) from engine capture points; batched `IlpWriter` on own thread. Original ring + QuestDbWorker design was simplified and never built (historical text retained in db.md for audit).
+**Current as-built implementation** (db.md + questdb-multi-week-hardening-guide.md): Direct calls to `QuestdbStore` (mutex-protected) from engine capture points + periodic `maybe_questdb_tick()` from main run loops (200 ms reporting blocks) for time-based flushing. `IlpWriter` handles buffering + reconnect. See Phase 1 of the hardening guide for details.
 
 **Schema** (full DDL in db.md Appendix A):
 - `runs_meta` (two rows per run: sync + worker for dedup).

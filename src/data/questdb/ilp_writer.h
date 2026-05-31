@@ -86,6 +86,17 @@ public:
 
     std::size_t pending_lines() const { return buffer_count_; }
     std::size_t dropped_lines() const { return dropped_; }
+    std::size_t fallback_lines() const { return fallback_lines_; }
+
+    // Phase 2: Enable writing raw ILP lines to a local fallback file on persistent failures.
+    // The file is opened in append mode by the caller.
+    void enable_fallback(std::unique_ptr<std::ostream> fallback_sink);
+
+    bool is_connected() const { return tcp_ && tcp_->is_connected(); }
+
+    std::chrono::steady_clock::time_point last_successful_flush() const {
+        return last_flush_;
+    }
 
     // Time-based flush honour. Calls flush() if last flush was longer than
     // flush_every_ ago AND there is buffered content. Cheap to call often.
@@ -102,6 +113,9 @@ private:
     std::size_t dropped_ = 0;
     std::chrono::steady_clock::time_point last_flush_;
     int consecutive_failures_ = 0;
+
+    std::unique_ptr<std::ostream> fallback_sink_;  // Phase 2
+    std::size_t fallback_lines_ = 0;
 
     bool ensure_connected();
 };

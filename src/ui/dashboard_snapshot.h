@@ -115,6 +115,19 @@ struct dashboard_snapshot
         int    provider_state = 0;            // matches connection_state enum
 
         double rate_ev_per_sec = 0.0;          // EMA from ConsoleDashboard
+
+        // QuestDB persistence health (populated when --persist is active)
+        struct questdb_view
+        {
+            bool     active          = false;
+            bool     connected       = false;
+            std::size_t pending_lines = 0;
+            std::size_t dropped_lines = 0;
+            std::size_t fallback_lines = 0;
+            std::int64_t last_flush_age_ms = 0;   // ms since last successful flush
+            bool     strict_mode     = false;
+        };
+        questdb_view questdb;
     };
     health_view health;
 

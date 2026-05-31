@@ -4,6 +4,7 @@
 #include "http_client.h"
 #include "schema.h"
 
+#include <fstream>
 #include <iostream>
 #include <utility>
 
@@ -39,7 +40,20 @@ QuestdbStore::QuestdbStore(StoreConfig cfg)
     : cfg_(std::move(cfg))
     , ilp_(std::make_unique<IlpWriter>(cfg_.host, cfg_.ilp_port))
     , http_exec_(make_default_http_exec(cfg_.host, cfg_.http_port))
-{}
+{
+    if (!cfg_.fallback_path.empty())
+    {
+        fallback_file_ = std::make_unique<std::ofstream>(cfg_.fallback_path, std::ios::app);
+        if (fallback_file_->is_open())
+        {
+            ilp_->enable_fallback(std::move(fallback_file_));
+        }
+        else
+        {
+            std::cerr << "[questdb] WARNING: could not open fallback file " << cfg_.fallback_path << "\n";
+        }
+    }
+}
 
 QuestdbStore::QuestdbStore(StoreConfig cfg,
                            std::unique_ptr<IlpWriter> writer,
@@ -47,12 +61,26 @@ QuestdbStore::QuestdbStore(StoreConfig cfg,
     : cfg_(std::move(cfg))
     , ilp_(std::move(writer))
     , http_exec_(std::move(http_exec))
-{}
+{
+    if (!cfg_.fallback_path.empty())
+    {
+        fallback_file_ = std::make_unique<std::ofstream>(cfg_.fallback_path, std::ios::app);
+        if (fallback_file_->is_open())
+        {
+            ilp_->enable_fallback(std::move(fallback_file_));
+        }
+        else
+        {
+            std::cerr << "[questdb] WARNING: could not open fallback file " << cfg_.fallback_path << "\n";
+        }
+    }
+}
 
 QuestdbStore::~QuestdbStore()
 {
     std::lock_guard<std::mutex> lk(mu_);
     if (ilp_) ilp_->flush();
+    if (fallback_file_) fallback_file_->close();
 }
 
 std::string QuestdbStore::table_name(const char* suffix) const
@@ -118,8 +146,8 @@ bool QuestdbStore::begin()
 {
     started_at_ = std::chrono::system_clock::now();
 
-    // 1. DDLs (7 statements) via HTTP.
-    for (const auto& ddl : schema::all_ddls(cfg_.run_tag))
+    // 1. DDLs (with optional TTL from Phase 4) via HTTP.
+    for (const auto& ddl : schema::all_ddls(cfg_.run_tag, cfg_.ttl_days))
     {
         if (!http_exec_(ddl))
         {
@@ -155,7 +183,15 @@ bool QuestdbStore::begin()
 void QuestdbStore::end(double final_equity,
                        std::size_t total_orders,
                        std::size_t total_fills,
-                       std::size_t total_rejections)
+                       std::size_t total_rejections,
+                       double max_drawdown,
+                       double sharpe_ratio,
+                       double sortino_ratio,
+                       double profit_factor,
+                       double win_rate,
+                       double calmar_ratio,
+                       std::size_t total_trades,
+                       std::size_t winning_trades)
 {
     const auto now = std::chrono::system_clock::now();
     LineBuilder lb("runs_meta");
@@ -170,6 +206,17 @@ void QuestdbStore::end(double final_equity,
     lb.add_field_long("total_fills", static_cast<std::int64_t>(total_fills));
     lb.add_field_long("total_rejections",
                       static_cast<std::int64_t>(total_rejections));
+
+    // Phase 4: Richer long-run campaign summary
+    lb.add_field_double("max_drawdown", max_drawdown);
+    lb.add_field_double("sharpe_ratio", sharpe_ratio);
+    lb.add_field_double("sortino_ratio", sortino_ratio);
+    lb.add_field_double("profit_factor", profit_factor);
+    lb.add_field_double("win_rate", win_rate);
+    lb.add_field_double("calmar_ratio", calmar_ratio);
+    lb.add_field_long("total_trades", static_cast<std::int64_t>(total_trades));
+    lb.add_field_long("winning_trades", static_cast<std::int64_t>(winning_trades));
+
     std::lock_guard<std::mutex> lk(mu_);
     ilp_->enqueue(lb.finish(ns_from(now)));
     ilp_->flush();
@@ -270,6 +317,30 @@ void QuestdbStore::record_funding(const funding_event& fe, const std::string& /*
     ilp_->enqueue(lb.finish(ns_from(fe.get_timestamp())));
 }
 
+void QuestdbStore::record_event(const std::string& event_type,
+                                const std::string& symbol,
+                                const std::string& strategy_name,
+                                std::uint64_t order_id,
+                                const std::string& severity,
+                                const std::string& message,
+                                const std::string& details_json)
+{
+    LineBuilder lb(table_name("events"));
+    lb.add_tag("run_tag", cfg_.run_tag);
+    lb.add_tag("event_type", event_type.empty() ? "unknown" : event_type);
+    lb.add_tag("symbol", symbol.empty() ? "unknown" : symbol);
+    lb.add_tag("strategy_name", strategy_name.empty() ? "unknown" : strategy_name);
+    lb.add_tag("severity", severity.empty() ? "info" : severity);
+
+    lb.add_field_long("order_id", static_cast<std::int64_t>(order_id));
+    lb.add_field_str("message", message);
+    if (!details_json.empty())
+        lb.add_field_str("details", details_json);
+
+    std::lock_guard<std::mutex> lk(mu_);
+    ilp_->enqueue(lb.finish(now_ns()));
+}
+
 void QuestdbStore::record_cancellation(std::uint64_t order_id,
                                        const std::string& symbol,
                                        const std::string& strategy_name,
@@ -314,6 +385,22 @@ void QuestdbStore::flush()
 {
     std::lock_guard<std::mutex> lk(mu_);
     if (ilp_) ilp_->flush();
+}
+
+QuestdbStore::Health QuestdbStore::health() const
+{
+    std::lock_guard<std::mutex> lk(mu_);
+    Health h;
+    h.strict_mode = cfg_.strict;
+    if (ilp_)
+    {
+        h.connected      = ilp_->is_connected();
+        h.pending_lines  = ilp_->pending_lines();
+        h.dropped_lines  = ilp_->dropped_lines();
+        h.fallback_lines = ilp_->fallback_lines();
+        h.last_flush     = ilp_->last_successful_flush();
+    }
+    return h;
 }
 
 }
