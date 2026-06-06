@@ -1,10 +1,10 @@
 # TrueTest — Live Trading Production Readiness Gaps
 
-**Date**: May 2026  
+**Date**: May 2026 (snapshot; some items partially addressed since — see current status in root `todo.md` R-*/S-*/H-* + `prod.md` phases/Go-Live)  
 **Scope**: Binance USDT-M futures live trading (`--provider binance-futures --mode live`) on real mainnet with real capital.  
-**Purpose**: Honest gap analysis between current state and a production-grade, set-and-forget live trading system suitable for meaningful size.
+**Purpose**: Honest gap analysis between current state and a production-grade, set-and-forget live trading system suitable for meaningful size. **Current open items map directly to root `todo.md` (R-01..R-05, S-01..S-06, H-01..H-06, P0/P1 gates, arch risk). Read together with `prod.md` (per governance).**
 
-This document assumes the operator has already completed every prerequisite in `docs/futures-testnet.md` and the user manual (correct binary, one-way mode, conservative caps, dead-man's switch armed, tiny size, etc.).
+This document assumes the operator has already completed every prerequisite in `docs/futures-testnet.md` and the user manual (correct binary, one-way mode, conservative caps, dead-man's switch armed, tiny size, etc.). Planned `docs/operations/futures-testnet.md` — current details in prod.md / instructions.
 
 ---
 

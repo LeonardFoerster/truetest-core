@@ -112,7 +112,8 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 - Reuses the complete existing strategy, engine, realism models, analytics, ExitManager, and QuestDB surfaces for each trial
 - Performance features: object reuse between trials (`--mc-reuse-objects`) and experimental parallel execution (`--mc-parallel`, recommended only with `--thread-preset inline`)
 - Reporter produces per-trial + aggregate P&L, Sharpe, max drawdown, win rate, etc. (text + compact JSON)
-- Strong caveats: synthetic L2 is stylized (constant spread + noise), no automatic calibration from historical data, parallel mode has non-deterministic ordering and threading restrictions, QuestDB support is currently campaign-summary only
+- Strong caveats: synthetic L2 is stylized (constant spread + noise), no automatic calibration from historical data, parallel mode has non-deterministic ordering and threading restrictions, QuestDB support is currently campaign-summary only (full per-trial MC-06 future)
+- **Current MC items + status** (MC-01..MC-06, including "substantially complete" for reporter Step A, demo caveats on some strategies for MC-05, L2 fidelity, reuse/parallel limitations): see root `todo.md` MC section + `docs/instructions.md` (detailed MC flags/usage/caveats) + `prod.md` (MC disclaimer: research tool only; does not relax Phase 0/1 gates). Governance in root README + ENGINE_AI_SUMMARY.
 
 **Risk Management**:
 - `RiskManager`: max position, daily loss, trade frequency, unrealized loss

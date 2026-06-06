@@ -284,7 +284,9 @@ public:
                 double fill_price,
                 double commission = 0.0,
                 double remaining_qty = 0.0,
-                uint64_t fill_id = 0
+                uint64_t fill_id = 0,
+                const std::string& strategy_name = {},
+                uint64_t opener_order_id = 0
         )
                 : event(event_type::fill, timestamp)
                 , order_id_(order_id)
@@ -295,6 +297,8 @@ public:
                 , commission_(commission)
                 , remaining_qty_(remaining_qty)
                 , fill_id_(fill_id)
+                , strategy_name_(strategy_name)
+                , opener_order_id_(opener_order_id)
         {
         }
 
@@ -311,6 +315,15 @@ public:
         fill_source get_source() const { return source_; }
         void set_source(fill_source s) { source_ = s; }
 
+        // Per-lot / attribution (populated by engine at fill synthesis time for
+        // both simulated and exchange fills; mirrors order_event fields for
+        // clean propagation through rings to workers, QuestDB, shadow duals,
+        // ExitManager, etc.). Openers typically have opener_order_id_ == 0.
+        const std::string& get_strategy_name() const { return strategy_name_; }
+        void set_strategy_name(const std::string& name) { strategy_name_ = name; }
+
+        uint64_t get_opener_order_id() const { return opener_order_id_; }
+        void set_opener_order_id(uint64_t id) { opener_order_id_ = id; }
 
         double get_total_cost() const
         {
@@ -321,12 +334,18 @@ public:
         std::string to_string() const override
         {
                 std::string side_str = (side_ == order_side::buy) ? "BOUGHT" : "SOLD";
-                return "FillEvent[order_id=" + std::to_string(order_id_) +
+                std::string s = "FillEvent[order_id=" + std::to_string(order_id_) +
                         " fill_id=" + std::to_string(fill_id_) + " " + side_str + " " +
                         std::to_string(filled_quantity_) + " " + symbol_ +
                         " @ " + std::to_string(fill_price_) +
                         " remaining=" + std::to_string(remaining_qty_) +
-                        " commission=" + std::to_string(commission_) + "]";
+                        " commission=" + std::to_string(commission_);
+                if (!strategy_name_.empty())
+                        s += " strategy=" + strategy_name_;
+                if (opener_order_id_ != 0)
+                        s += " opener=" + std::to_string(opener_order_id_);
+                s += "]";
+                return s;
         }
 
 private:
@@ -339,6 +358,11 @@ private:
         double remaining_qty_ = 0.0;
         uint64_t fill_id_ = 0;
         fill_source source_ = fill_source::unknown;
+
+        // Per-lot attribution (enriched during deepdive refactor for consistent
+        // propagation; default empty/0 for legacy compatibility).
+        std::string strategy_name_;
+        uint64_t opener_order_id_ = 0;
 };
 
 

@@ -26,16 +26,21 @@ The full aspirational hierarchy (`architecture/`, `operations/`, `reference/`, `
 - **`reports/phase0/`** — Evidence tracker (`PROGRESS.md`), templates, batch reviews (not "docs" per se, but operational artifacts).
 
 **Docs/ (current realized files)**:
-- `instructions.md` — Master how-to / CLI / build reference (pointers to `prod.md` for deep phase material). Now includes detailed Monte Carlo section (flags, object reuse, parallel caveats, synthetic provider, reporter).
+- `instructions.md` — Master how-to / CLI / build reference (pointers to `prod.md` for deep phase material; MC section; checklists now point to root gov). Now includes detailed Monte Carlo section (flags, object reuse, parallel caveats, synthetic provider, reporter).
 - `user-manual.md` — High-level architecture + operator overview. Now includes "Stochastic Backtesting (Monte Carlo)" subsection.
-- `production-readiness-gaps.md`, `AdaptiveHybridStrategy.md`, `Coiled_Spring...Guide.md`, this `README.md`.
+- `production-readiness-gaps.md`, `AdaptiveHybridStrategy.md`, `db.md`, `flags.md`, questdb guides, this `README.md`.
 
-**Planned slim sub-structure (Doc Phases 1–3)**:
-- `docs/architecture/` (starting with `target-architecture.md`, `migration.md`, `MODEL.md`, `realism.md`)
-- `docs/operations/` (starting with `futures-phase0-operator-sop.md` and `futures-testnet.md`)
-- `docs/reference/` (deferred until real content is extracted)
+**Note on "info files"**: `AdaptiveHybridStrategy.md` (detailed spec for lower-priority strategy with demo caveats in code — see root `todo.md` A-*); `production-readiness-gaps.md` (May 2026 honest snapshot, still referenced; many items map to open R/S/H in todo). `questdb-multi-week-hardening-guide.md` moved to `docs/archive/` post-consolidation (historical; phases largely landed — see `db.md` for current).
 
-See the approved documentation plan (in the session plan file or `todo.md` #D- items) for the exact phased rollout and extraction strategy. The goal is 80/20 value with minimal duplication.
+**Planned slim sub-structure (Doc Phases 1–3; see root `todo.md` #D- items for current status)**:
+- `docs/architecture/` (starting with `target-architecture.md`, `migration.md`, `MODEL.md`, `realism.md` — D-03)
+- `docs/operations/` (starting with `futures-phase0-operator-sop.md` (P0-03 / D-02) and `futures-testnet.md`)
+- `docs/reference/` (deferred)
+- `docs/archive/` (for completed historical plans like the QuestDB hardening guide)
+
+**Explicit planned language required** (per CLAUDE "Documentation Maintenance Rules"): When a cross-ref is aspirational, it **must** say "Planned for Doc Phase X – current details live in prod.md / instructions.md §N (or root todo.md for tasks)". Full aspirational hierarchy described in original plan but populated in phases to avoid rot.
+
+See root `todo.md` (D-01..D-06 + this consolidation) + `docs/README.md` (nav) for the exact phased rollout, extraction strategy, and 2026 doc hygiene (purge of scattered action lists into single root todo.md; 80/20 value, minimal duplication). "Session plan file" references point to internal agent session plans (not committed).
 
 ### Production Governance & Phase 0 Evidence
 See the root files listed above (`prod.md`, `prerequisites.md`, `todo.md`, `reports/phase0/`).
@@ -44,26 +49,26 @@ See the root files listed above (`prod.md`, `prerequisites.md`, `todo.md`, `repo
 
 ## Historical & Archived Material
 
-Located in [`archive/`](archive/):
+Located in [`docs/archive/`](archive/) (or referenced from older notes in `docs/archive/`):
 
-- **realism-wiring.md** — Original implementation plan (tasks completed)
-- **grok.md** — Dual-portfolio shadow P&L implementation log
-- **drift-claude-analysis.md** + **drift-grok-analysis.md** — Two detailed plans for a future Solana/Drift liquidation keeper bot (highly overlapping)
+- **questdb-multi-week-hardening-guide.md** — Phased implementation log for QuestDB (v0.5; most phases 0-5 landed per code + `db.md` + scripts; moved here post-2026 consolidation as historical).
+- Older notes reference (but files/dirs do not exist in tree): `realism-wiring.md`, `grok.md`, drift-*.md (Solana/Drift keeper plans), under root `archive/` or `docs/archive/`.
 
-These are retained for audit and historical context but are no longer the active reference.
+These (when present) are retained for audit/historical context but are no longer the active reference. See root `todo.md` (D-05) + `docs/README.md` for archive population tasks.
 
 ---
 
 ## How to Navigate
 
 1. **I just want to build and run the engine** → Start with [instructions.md](instructions.md)
-2. **I'm preparing for live trading or Phase 0** → Read [prod.md](../prod.md) (current ritual + command template) + the printable SOP (planned in `docs/operations/futures-phase0-operator-sop.md` — Doc Phase 1)
-3. **I'm reviewing a PR that touches safety** → Read [CLAUDE.md](../CLAUDE.md) + [prerequisites.md](../prerequisites.md) (MODEL.md and full architecture/ docs are planned for Doc Phase 2)
-4. **I need the full technical picture** → [user-manual.md](user-manual.md) + [instructions.md](instructions.md) + (target architecture / realism docs planned in `docs/architecture/`)
-5. **I want to understand the Monte Carlo / stochastic backtesting capability** (landed on `monte-carlo` branch) → Start with the Monte Carlo section in [instructions.md](instructions.md), the new "Stochastic Backtesting" subsection in [user-manual.md](user-manual.md), and the MC-* items in root [todo.md](../todo.md). Governance context in root [README.md](../README.md) and [prod.md](../prod.md).
+2. **I'm preparing for live trading or Phase 0** → Read [prod.md](../prod.md) (current ritual + command template + full exit criteria) + `reports/phase0/` (evidence + templates) + root [todo.md](../todo.md) (P0-01..P0-04; 0/15 status). Printable SOP planned in `docs/operations/futures-phase0-operator-sop.md` — Doc Phase 1 (current details in prod.md + reports/phase0/).
+3. **I'm reviewing a PR that touches safety** → Read [CLAUDE.md](../CLAUDE.md) + [prerequisites.md](../prerequisites.md) (mandatory checklist) + root [todo.md](../todo.md) (P1-* + frozen files + process). MODEL.md / full architecture/ planned for Doc Phase 2 (D-03; current in CLAUDE + prod + instructions).
+4. **I need the full technical picture** → [user-manual.md](user-manual.md) + [instructions.md](instructions.md) + root governance (`prod.md`, `CLAUDE.md`, `todo.md`). Target architecture / realism docs planned in `docs/architecture/` (D-03).
+5. **I want to understand the Monte Carlo / stochastic backtesting capability** (landed on `monte-carlo` branch) → Start with the Monte Carlo section in [instructions.md](instructions.md), the "Stochastic Backtesting" subsection in [user-manual.md](user-manual.md), and the MC-* items in root [todo.md](../todo.md). Governance context in root [README.md](../README.md), [prod.md](../prod.md), and [ENGINE_AI_SUMMARY.md](../ENGINE_AI_SUMMARY.md). (MC is research/robustness tool; does not relax Phase 0/1 gates.)
+6. **I am an AI coding agent that needs a dense power + constraint summary** → Read the root [ENGINE_AI_SUMMARY.md](../ENGINE_AI_SUMMARY.md) first (then CLAUDE.md + prod.md + this nav). It is the canonical "grasp the engine's powers" briefing.
 
 ---
 
-**Last updated**: 2026 (Governance + master reference sync for `monte-carlo` branch Monte Carlo simulation work; governance-first pragmatic structure from prior doc plan preserved). The `monte-carlo` branch introduced a full Monte Carlo engine (`MonteCarloController`, GBM generator, synthetic provider, object reuse, experimental parallelism). Governance files (README, prod.md, todo.md, CLAUDE.md) and high-level docs (instructions.md, user-manual.md) were updated in this pass. Full aspirational subdirs (`architecture/`, `operations/`, etc.) remain deferred.
+**Last updated**: 2026 (multi-agent consolidation pass: root `todo.md` is now the single authoritative task list; scattered action items / duplicate phase/todo lists purged from docs/ files and replaced with pointers per CLAUDE extraction + maintenance rules; `questdb-multi-week-hardening-guide.md` moved to `docs/archive/` as historical; stale Coiled_Spring + non-existent dir refs cleaned with explicit "Planned..." language + links to root `todo.md` D-*; "9 vs 10 files" + planned SOP notes noted for follow-up; MC + Phase 0/1 status + gov sync preserved). The `monte-carlo` branch focus remains MC simulation (research/robustness; see MC-* in root todo) + Phase 0 (0/15, paused collection here). Governance files (root prod/prereq/todo/CLAUDE/ENGINE + reports/phase0/) + high-level docs (instructions, user-manual) + db/flags are the active set. Full aspirational subdirs remain deferred (D-03 etc.; see root todo + docs/README planned section).
 
-All cross-references in the master `instructions.md` and scripts have been updated (or explicitly marked as "planned for Doc Phase X – current details in prod.md / instructions.md"). If you find a broken link, please open an issue or PR. See `prod.md`, `CLAUDE.md`, and `todo.md` for the current state of the documentation roadmap.
+All cross-references in `instructions.md`, scripts, and docs/ have been (or are being) updated or explicitly marked as "Planned for Doc Phase X – current details live in prod.md / instructions.md §N (or root todo.md for tasks)". If you find a broken link or stale todo list, treat as doc bug per prod.md and fix / open issue with exact string. See root `prod.md`, `CLAUDE.md`, `prerequisites.md`, `todo.md`, and `ENGINE_AI_SUMMARY.md` for the current state of phases, tasks, rules, and roadmap. Root `todo.md` (this file after consolidation) is the living SoT for all current points.

@@ -2,6 +2,8 @@
 
 **Adaptive Hybrid HFT Strategy** for the TrueTest C++ Trading Engine.
 
+**Status note (2026, monte-carlo branch)**: Lower-priority / previous branch work (see root `todo.md` A-01..A-07). Focus has shifted to MC simulation (MC-05 exercises strategies including this one for robustness). Strategy is registered + L2 dispatch present (with `LIVE_SAFETY_CCB_APPROVED` comment in engine) + test + example JSON; usable for backtests/MC experiments. However, code contains multiple "compilable demo" / "simplified decision" / "real version" / "placeholder" / "v1" / always-on `enable_onchain_mock` caveats (see `src/strategy/adaptive_hybrid_strategy.cpp` + .h + config.h). On-chain is mock only; no `take_pending_exit_intents`; simplified RiskValidator/equity/L2 paths. Full hot-path polish deferred. See code comments + root `todo.md` A-* for exact items. Spec here remains useful reference.
+
 - **Primary Mode**: Predictive Order-Book Imbalance Market Making
 - **Trigger Mode**: Micro-Momentum Scalping on strong On-Chain Volume Spikes
 - **Defensive Mode**: Automatic reduction / pause of quoting on low liquidity, manipulation signals, or latency violations

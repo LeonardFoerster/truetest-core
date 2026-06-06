@@ -63,8 +63,10 @@ private:
     std::shared_ptr<data_handler> reusable_data_handler_;
     std::shared_ptr<IStrategy>    reusable_strategy_;
 
-    // Note: portfolio / Analytics / ExitManager are currently owned by the engine.
-    // Reusing them is deferred past Phase A (would require engine changes).
+    // Note: With Phase 4 deepdive reset hardening, portfolio/Analytics/ExitManager
+    // (and more) reuse is now supported via engine::reset_for_next_trial().
+    // Rings/workers left untouched per original design (see engine reset comments).
+    // Full bit-identical results not guaranteed across all internals.
 };
 
 } // namespace truetest::simulation

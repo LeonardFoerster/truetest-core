@@ -204,6 +204,13 @@ private:
     // there is no bridge — it just no-ops.
     void drain_venue_bracket_meta();
 
+    // Stamp per-lot attribution (opener_order_id + strategy_name) onto a
+    // fill_event if not already present. Uses order_meta_ lookup as fallback.
+    // Called from all fill processing paths (and adapters now set it at
+    // creation for paper/shadow fills). Part of Phase 1 deepdive per-lot
+    // consolidation.
+    void stamp_fill_attribution(fill_event& f);
+
     // Returns true if an exit fire caused the engine to halt.
     bool evaluate_exits(const std::string& symbol, double px,
                         std::chrono::system_clock::time_point ts,
@@ -395,9 +402,15 @@ public:
     void print_summary();
     const Analytics& get_analytics() const;
 
-    // Resets internal heavy objects (portfolio, analytics, exit_manager, order_tracker,
-    // risk_manager, market_maker, adverse_selection, orderbook_registry, etc.) so they can
-    // be reused for the next Monte Carlo trial without full reconstruction.
+    // Resets internal heavy objects (portfolio [incl. lots], analytics, exit_manager,
+    // order_tracker, risk_manager, market_maker, adverse_selection, orderbook_registry,
+    // shadow_tracker, order_meta_, instrument/l2 caches, tick aggregator, UI caches, etc.)
+    // so they can be reused for the next Monte Carlo trial without full reconstruction.
+    //
+    // Phase 4 hardening: now clears more for per-trial isolation (order_meta_,
+    // shadow_tracker). Rings, workers, event_logger_, and dashboard timing are left
+    // mostly untouched (workers repopulate via rings; full reset complex/unnecessary
+    // for MC). See implementation comments.
     //
     // This is intended primarily for MonteCarloController when reuse_objects_between_trials
     // is enabled. It is NOT a general-purpose reset and does not restore the engine to a

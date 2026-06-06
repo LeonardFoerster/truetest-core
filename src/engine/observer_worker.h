@@ -33,7 +33,10 @@ public:
         if (ev->get_type() == event_type::fill)
         {
             auto& fill = static_cast<const fill_event&>(*ev);
-            portfolio_.on_fill(fill);
+            // Use rich on_fill (opener + strategy carried on the fill_event after
+            // deepdive stamping in engine poll paths). Falls back gracefully for
+            // any legacy fills.
+            portfolio_.on_fill(fill, fill.get_opener_order_id(), fill.get_strategy_name());
 
             auto report = analytics_.generate_report();
             auto action = risk_manager_.check_post_fill(fill, portfolio_, report);

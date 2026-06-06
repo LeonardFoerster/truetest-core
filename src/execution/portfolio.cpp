@@ -11,7 +11,12 @@ portfolio::portfolio(double initial_balance)
 
 void portfolio::on_fill(const fill_event& fill)
 {
-    on_fill(fill, fill.get_order_id(), {});
+    // Legacy path (pre-deepdive per-lot consolidation). Delegates to rich
+    // version using the fill's own order_id as opener (correct for simple
+    // single-lot openers; for closers and multi-lot the caller should use the
+    // 3-arg overload with the true opener_order_id + strategy_name).
+    on_fill(fill, fill.get_opener_order_id() != 0 ? fill.get_opener_order_id() : fill.get_order_id(),
+            fill.get_strategy_name());
 }
 
 void portfolio::on_fill(const fill_event& fill,

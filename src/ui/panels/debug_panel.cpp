@@ -160,6 +160,25 @@ void DebugPanel::draw(int body_y0, int width, int height,
     kv(y, x_r_label + 18,   x_r_value + 16,   "exit_pending",  d.exit_pending);
     ++y;
 
+    // ── Queue modeling (Phase 2 deepdive) ──
+    if (y < y_end - 1) {
+        section(y++, 0, width, "Queue modeling");
+        if (y < y_end) {
+            label(y, x_l_label, "avg_pos_bps");
+            mvprintw(y, x_l_value, "%u (%u%%)", snap->queue.avg_bps, snap->queue.avg_bps / 100);
+            label(y, x_r_label, "submitted");
+            mvprintw(y, x_r_value, "%zu", snap->queue.submitted_with_queue);
+            ++y;
+        }
+        if (y < y_end) {
+            label(y, x_l_label, "filled_after");
+            mvprintw(y, x_l_value, "%zu", snap->queue.filled_after_drain);
+            label(y, x_r_label, "blocked_eos");
+            mvprintw(y, x_r_value, "%zu", snap->queue.blocked_at_eos);
+            ++y;
+        }
+    }
+
     // ── Last errors ──
     if (y < y_end - 1) section(y++, 0, width, "Last errors  (per subsystem)");
     if (y >= y_end) return;

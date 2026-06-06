@@ -288,6 +288,20 @@ struct dashboard_snapshot
     };
     l2_view l2;
 
+    // Queue position observability (populated during deepdive refactor from
+    // adapter avg_queue_position_bps() for paper (QueueAware) and shadow
+    // (TradeTape + L2 model)). 0 = all at front, 10000 = all at back.
+    // The detailed counts (submitted_with_queue etc.) come from TradeTapeShadowAdapter
+    // when --queue-model l2-snapshot is active in shadow mode.
+    struct queue_view
+    {
+        std::uint32_t avg_bps = 0;
+        std::size_t submitted_with_queue = 0; // orders that saw initial queue > 0
+        std::size_t filled_after_drain   = 0; // queue drained and fill was emitted
+        std::size_t blocked_at_eos       = 0; // still blocked by queue at end of run
+    };
+    queue_view queue;
+
     struct risk_view
     {
         bool   halted               = false;

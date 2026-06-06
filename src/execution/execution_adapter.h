@@ -56,6 +56,13 @@ public:
     // renders em-dash. QueueAwareBookAdapter overrides.
     virtual std::size_t   live_quote_count()         const { return 0; }
     virtual std::uint32_t avg_queue_position_bps()   const { return 0; }
+
+    // Rich queue modeling stats (primarily from TradeTapeShadowAdapter for
+    // shadow --queue-model l2-snapshot). Used for dashboard and divergence
+    // reporting. Default 0 for adapters that don't track.
+    virtual std::size_t queue_submitted_with_queue() const { return 0; }
+    virtual std::size_t queue_filled_after_drain()   const { return 0; }
+    virtual std::size_t queue_blocked_at_eos()       const { return 0; }
 };
 
 class LocalBookAdapter : public IExecutionAdapter

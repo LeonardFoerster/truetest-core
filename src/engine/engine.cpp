@@ -141,6 +141,8 @@ engine::engine(std::shared_ptr<data_handler> dh,
                                       msg.last_fill_qty, msg.last_fill_price,
                                       msg.commission, remaining, fill_id);
                         fe.set_source(fill_source::exchange);
+                        if (!strategy_name.empty()) fe.set_strategy_name(strategy_name);
+                        if (opener != 0) fe.set_opener_order_id(opener);
                         return ExecutionBridge::synth_result{
                             std::move(fe), opener, std::move(strategy_name)};
                     });
@@ -617,6 +619,36 @@ void engine::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
     }
     out.risk.exposure       = exposure;
     out.risk.exposure_limit = config_.risk.max_portfolio_exposure;
+
+    // Queue (maker paper + shadow L2 model). Mirrors the logic in
+    // write_adapter_diagnostics + print_summary but for the snapshot
+    // (TUI "debug" / future queue panel). Cheap; called at ~100ms debounce.
+    // Phase 2: now also wires the richer TradeTapeShadowAdapter stats
+    // (submitted_with_queue, filled_after_drain, blocked_at_eos) for
+    // divergence analysis and UI.
+    {
+        std::uint64_t qsum = 0;
+        std::uint32_t qn = 0;
+        std::size_t submitted = 0, filled = 0, blocked = 0;
+        auto collect = [&](IExecutionAdapter* a) {
+            if (!a) return;
+            const auto c = a->live_quote_count();
+            if (c == 0) return;
+            qsum += a->avg_queue_position_bps();
+            ++qn;
+            submitted += a->queue_submitted_with_queue();
+            filled    += a->queue_filled_after_drain();
+            blocked   += a->queue_blocked_at_eos();
+        };
+        for (auto& [_, ad] : execution_adapters_)
+            collect(ad.get());
+        if (config_.provider)
+            collect(config_.provider->get_execution_adapter().get());
+        out.queue.avg_bps = (qn > 0) ? static_cast<std::uint32_t>(qsum / qn) : 0u;
+        out.queue.submitted_with_queue = submitted;
+        out.queue.filled_after_drain   = filled;
+        out.queue.blocked_at_eos       = blocked;
+    }
 
     // Brackets — armed bracket intents from ExitManager. Each row is
     // matched to its symbol's mark from the positions table so the
@@ -1630,6 +1662,18 @@ void engine::print_summary()
             std::cout << "  Maker queue model:\n"
                       << "    Live passive limits: " << total_live << "\n"
                       << "    Avg queue position:  " << (avg_bps / 100) << "%\n";
+            // Phase 2 richer stats (mainly for shadow TradeTape)
+            auto pa = config_.provider ? config_.provider->get_execution_adapter() : nullptr;
+            if (pa) {
+                auto sub = pa->queue_submitted_with_queue();
+                auto fil = pa->queue_filled_after_drain();
+                auto blk = pa->queue_blocked_at_eos();
+                if (sub > 0 || fil > 0 || blk > 0) {
+                    std::cout << "    Queue detailed (shadow): submitted=" << sub
+                              << " filled_after_drain=" << fil
+                              << " blocked_at_eos=" << blk << "\n";
+                }
+            }
         }
     }
 
@@ -1745,15 +1789,66 @@ void engine::reset_for_next_trial(uint64_t new_seed)
     open_orders_cache_.clear();
     recent_fills_cache_.clear();
 
-    // Note: Rings, workers, event_logger_, shadow_tracker_, and dashboard timing
-    // are left mostly untouched in Phase B. Full reset of the worker infrastructure
-    // is complex and usually unnecessary for pure Monte Carlo backtesting.
+    // Phase 4 MC reuse hardening: clear order_meta_ for clean per-trial isolation
+    // (opener/strategy attribution must not leak between independent trials).
+    order_meta_.clear();
+
+    // Clear shadow_tracker for per-trial isolation (divergence tracking not
+    // relevant across MC trials; see MC controller comment).
+    if (shadow_tracker_) shadow_tracker_->reset();
+
+    // Note: Rings, workers, event_logger_, and dashboard timing are left mostly
+    // untouched (as before). Workers repopulate via ring events on next fills/orders.
+    // Full ring/worker reset is complex and usually unnecessary for MC reuse of
+    // the engine instance (Phase B). Core objects (portfolio, analytics, exit_manager,
+    // etc.) are now fully reset to enable broader reuse.
 }
 
 bool engine::process_order(const std::shared_ptr<order_event>& o,
                            std::size_t& event_count,
                            bool& halt_requested)
 {
+    // ========================================================================
+    // CANONICAL HOT-PATH ORDERING (Phase 3 deepdive cleanup)
+    // This documents the enforced sequence for order + fill processing.
+    // All run_* paths (bar/tick/stream/replay), evaluate_exits, unwind, etc.
+    // should follow this for consistent per-lot state, shadow divergence,
+    // publish to rings/workers, and cache updates.
+    //
+    // 1. Venue pre-trade risk (FuturesRiskCheck / risk_check_) — reject only.
+    // 2. RiskManager pre-order check (can halt).
+    // 3. route_order (assigns id, register_order_meta for opener/strategy,
+    //    instrument spec, stop pending, or submit).
+    // 4. adapter->submit_order (paper or live); also submit to shadow provider
+    //    adapter for dual tracking.
+    // 5. adapter->poll_fills → for each fill:
+    //      - stamp_fill_attribution (rich opener/strategy from meta or fe)
+    //      - order_tracker / cache status
+    //      - log + publish order status if needed
+    //      - portfolio_.on_fill (rich, with opener/strategy)  [core lot update]
+    //      - dispatch_fill_to_strategy
+    //      - adverse_selection_.on_fill
+    //      - exit_manager_.on_fill (rich)  [arm/cancel brackets per opener]
+    //      - risk_manager_.on_fill
+    //      - QuestDB record_fill (rich)
+    //      - notify_position_change_all (multi-lot aware)
+    //      - publish_event(fill) + analytics_.on_event
+    //      - shadow_tracker on_sim (if shadow)
+    //      - post_fill risk check (can halt + unwind)
+    // 6. Shadow dual: separate poll of provider's exchange_adapter fills →
+    //      shadow_tracker on_exchange + exchange_portfolio on_fill (rich)
+    //      + exchange_analytics
+    // 7. evaluate_exits (price or bar) — can emit closes that recurse via
+    //      route_order/process_order (keeps lot/opener discipline).
+    // 8. Cache updates for dashboard (open_orders, recent_fills) + rings
+    //      publish for workers (after core state for snapshot coherence).
+    //
+    // Invariants: order_meta_ registered before any fill can reference it.
+    // L2 updates reach queue models before trades (via apply_l2 before
+    // on_trade in adapters). No new allocs/JSON on hot path. Multi-lot uses
+    // opener_order_id discipline; single-lot may use bulk cancel in notify.
+    // ========================================================================
+
     {
         // Venue-specific pre-trade check (futures notional / leverage /
         // liquidation distance) runs first. Refusals here are pure
@@ -1881,8 +1976,14 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     std::vector<fill_event> fills;
     if (adapter->poll_fills(fills))
     {
+        DEBUG_STAGE(stage_timer_, fill_processing);
         for (auto& f : fills)
         {
+            stamp_fill_attribution(f);
+
+            const uint64_t opener = f.get_opener_order_id();
+            const std::string& strat = f.get_strategy_name();
+
             const auto new_status = f.is_partial()
                 ? order_status::partially_filled : order_status::filled;
             order_tracker_.set_status(f.get_order_id(), new_status);
@@ -1893,11 +1994,10 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                 erase_open_order(f.get_order_id());
             auto fill_ptr = fill_pool_.acquire(f);
             log_event(f);
-            portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
-                               lookup_strategy_name(f.get_order_id()));
+            portfolio_.on_fill(f, opener, strat);
             dispatch_fill_to_strategy(f);
             adverse_selection_.on_fill(f);
-            exit_manager_.on_fill(f, lookup_opener(f.get_order_id()));
+            exit_manager_.on_fill(f, opener);
             risk_manager_.on_fill(f);
 #ifdef HAS_QUESTDB
             if (questdb_active_ && questdb_store_)
@@ -1906,9 +2006,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                     (f.get_source() == fill_source::exchange)  ? "exchange"
                   : (f.get_source() == fill_source::simulated) ? "simulated"
                   :                                              "local";
-                questdb_store_->record_fill(f, lookup_opener(f.get_order_id()),
-                                            lookup_strategy_name(f.get_order_id()),
-                                            src);
+                questdb_store_->record_fill(f, opener, strat, src);
                 questdb_store_->record_status_transition(f.get_order_id(),
                     order_status::open, new_status);
             }
@@ -1946,13 +2044,17 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             {
                 for (auto& ef : exchange_fills)
                 {
+                    stamp_fill_attribution(ef);
+
+                    const uint64_t e_opener = ef.get_opener_order_id();
+                    const std::string& e_strat = ef.get_strategy_name();
+
                     if (shadow_tracker_)
                         shadow_tracker_->on_exchange_fill(ef);
 
                     if (exchange_portfolio_.has_value())
                     {
-                        exchange_portfolio_->on_fill(ef, lookup_opener(ef.get_order_id()),
-                                                   lookup_strategy_name(ef.get_order_id()));
+                        exchange_portfolio_->on_fill(ef, e_opener, e_strat);
                     }
                 }
             }
@@ -2091,6 +2193,11 @@ void engine::unwind_positions(std::size_t& event_count)
         {
             for (auto& f : fills)
             {
+                stamp_fill_attribution(f);
+
+                const uint64_t opener = f.get_opener_order_id();
+                const std::string& strat = f.get_strategy_name();
+
                 const auto new_status = f.is_partial()
                     ? order_status::partially_filled : order_status::filled;
                 order_tracker_.set_status(f.get_order_id(), new_status);
@@ -2101,11 +2208,10 @@ void engine::unwind_positions(std::size_t& event_count)
                     erase_open_order(f.get_order_id());
                 auto fill_ptr = fill_pool_.acquire(f);
                 log_event(f);
-                portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
-                               lookup_strategy_name(f.get_order_id()));
+                portfolio_.on_fill(f, opener, strat);
             dispatch_fill_to_strategy(f);
                 adverse_selection_.on_fill(f);
-                exit_manager_.on_fill(f, lookup_opener(f.get_order_id()));
+                exit_manager_.on_fill(f, opener);
                 risk_manager_.on_fill(f);
 #ifdef HAS_QUESTDB
                 if (questdb_active_ && questdb_store_)
@@ -2114,9 +2220,7 @@ void engine::unwind_positions(std::size_t& event_count)
                         (f.get_source() == fill_source::exchange)  ? "exchange"
                       : (f.get_source() == fill_source::simulated) ? "simulated"
                       :                                              "local";
-                    questdb_store_->record_fill(f, lookup_opener(f.get_order_id()),
-                                                lookup_strategy_name(f.get_order_id()),
-                                                src);
+                    questdb_store_->record_fill(f, opener, strat, src);
                     questdb_store_->record_status_transition(f.get_order_id(),
                         order_status::open, new_status, "risk_unwind");
                 }
@@ -2154,6 +2258,20 @@ void engine::apply_l2_snapshot(const std::string& symbol,
     ob->apply_l2_snapshot(ob_bids, ob_asks);
     refresh_top_of_book_atomics(*ob);
 
+    // Forward L2 to execution adapters so QueueAwareBookAdapter (paper) and
+    // TradeTapeShadowAdapter (shadow queue model) can maintain level aggregates
+    // / queue_ahead. Central place for all L2-driven paths (direct apply, replay,
+    // streaming). Duplicated in provider event dispatch for the live shadow_exec
+    // case; keep in sync.
+    std::vector<std::pair<double,double>> abids, aasks;
+    for (const auto& l : bids) abids.emplace_back(l.price, l.quantity);
+    for (const auto& l : asks) aasks.emplace_back(l.price, l.quantity);
+    for (auto& [_, ad] : execution_adapters_)
+        if (ad) ad->on_l2_snapshot(symbol, abids, aasks);
+    if (config_.provider)
+        if (auto pa = config_.provider->get_execution_adapter())
+            pa->on_l2_snapshot(symbol, abids, aasks);
+
     auto ev = std::make_shared<l2_snapshot_event>(
         std::chrono::system_clock::now(), symbol, bids, asks);
     log_event(*ev);
@@ -2169,6 +2287,14 @@ void engine::apply_l2_update(const std::string& symbol,
     ob->apply_l2_update(ob_side, Price::from_double(price),
                         static_cast<quantity>(new_qty));
     refresh_top_of_book_atomics(*ob);
+
+    // Forward L2 update to adapters for queue models (see apply_l2_snapshot).
+    const order_side os = (ts_side == tick_side::bid) ? order_side::buy : order_side::sell;
+    for (auto& [_, ad] : execution_adapters_)
+        if (ad) ad->on_l2_update(symbol, os, price, static_cast<double>(new_qty));
+    if (config_.provider)
+        if (auto pa = config_.provider->get_execution_adapter())
+            pa->on_l2_update(symbol, os, price, static_cast<double>(new_qty));
 
     auto ev = std::make_shared<l2_update_event>(
         std::chrono::system_clock::now(), symbol, ts_side, price, new_qty);
@@ -2296,6 +2422,9 @@ bool engine::route_order(order_event& order,
 
     order.set_order_id(OrderIdGenerator::next());
     order_tracker_.set_status(order.get_order_id(), order_status::pending);
+    // Canonical step: register_order_meta before any submit or potential fill.
+    // This populates opener/strategy so stamp_fill_attribution and rich
+    // on_fill paths have the data (critical for per-lot and multi-lot).
     register_order_meta(order);
 
     if (auto* spec = resolve_instrument_spec(order.get_symbol()))
@@ -2454,6 +2583,24 @@ const std::string& engine::lookup_strategy_name(std::uint64_t order_id) const
     return it != order_meta_.end() ? it->second.strategy_name : empty;
 }
 
+void engine::stamp_fill_attribution(fill_event& f)
+{
+    // Phase 1 deepdive: ensure every fill carries opener + strategy for
+    // consistent per-lot bookkeeping across portfolio, ExitManager, QuestDB,
+    // workers (via rings), shadow duals, analytics, and dashboard snapshot.
+    if (f.get_opener_order_id() == 0)
+    {
+        if (auto op = lookup_opener(f.get_order_id()); op != 0)
+            f.set_opener_order_id(op);
+    }
+    if (f.get_strategy_name().empty())
+    {
+        const auto& sn = lookup_strategy_name(f.get_order_id());
+        if (!sn.empty())
+            f.set_strategy_name(sn);
+    }
+}
+
 void engine::dispatch_fill_to_strategy(const fill_event& f)
 {
     const std::string& name = lookup_strategy_name(f.get_order_id());
@@ -2513,6 +2660,9 @@ bool engine::evaluate_exits(const std::string& symbol, double px,
                             std::size_t& event_count,
                             std::int64_t recv_ns)
 {
+    // See canonical sequence comment in process_order. Closes emitted here
+    // go through route_order (which registers meta) + process_order to
+    // maintain per-lot / opener discipline and full state propagation.
     auto closes = exit_manager_.on_price(symbol, px, ts);
     if (closes.empty()) return false;
     for (auto& close : closes)
@@ -2531,6 +2681,8 @@ bool engine::evaluate_exits(const std::string& symbol,
                             std::size_t& event_count,
                             std::int64_t recv_ns)
 {
+    // See canonical sequence comment in process_order. Bar fires go through
+    // route_order for consistent meta registration and full propagation.
     auto fires = exit_manager_.on_bar(symbol, low, high, close, ts);
     if (fires.empty()) return false;
     for (auto& c : fires)
@@ -2701,8 +2853,9 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
                     if (exchange_portfolio_.has_value())
                     {
-                        exchange_portfolio_->on_fill(f, lookup_opener(f.get_order_id()),
-                                                   lookup_strategy_name(f.get_order_id()));
+                        stamp_fill_attribution(f);
+                        exchange_portfolio_->on_fill(f, f.get_opener_order_id(),
+                                                   f.get_strategy_name());
                     }
                     if (exchange_analytics_.has_value())
                     {
@@ -2712,14 +2865,18 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                     }
                     continue;
                 }
+                stamp_fill_attribution(f);
+
+                const uint64_t opener = f.get_opener_order_id();
+                const std::string& strat = f.get_strategy_name();
+
                 cache_fill(f);
                 erase_open_order(f.get_order_id());
                 auto fill_ptr = fill_pool_.acquire(f);
-                portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
-                               lookup_strategy_name(f.get_order_id()));
+                portfolio_.on_fill(f, opener, strat);
             dispatch_fill_to_strategy(f);
                 adverse_selection_.on_fill(f);
-                exit_manager_.on_fill(f, lookup_opener(f.get_order_id()));
+                exit_manager_.on_fill(f, opener);
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
                 if (!config_.is_threaded())
@@ -2812,8 +2969,9 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 
                     if (exchange_portfolio_.has_value())
                     {
-                        exchange_portfolio_->on_fill(f, lookup_opener(f.get_order_id()),
-                                                   lookup_strategy_name(f.get_order_id()));
+                        stamp_fill_attribution(f);
+                        exchange_portfolio_->on_fill(f, f.get_opener_order_id(),
+                                                   f.get_strategy_name());
                     }
                     if (exchange_analytics_.has_value())
                     {
@@ -2823,14 +2981,18 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                     }
                     continue;
                 }
+                stamp_fill_attribution(f);
+
+                const uint64_t opener = f.get_opener_order_id();
+                const std::string& strat = f.get_strategy_name();
+
                 cache_fill(f);
                 erase_open_order(f.get_order_id());
                 auto fill_ptr = fill_pool_.acquire(f);
-                portfolio_.on_fill(f, lookup_opener(f.get_order_id()),
-                               lookup_strategy_name(f.get_order_id()));
+                portfolio_.on_fill(f, opener, strat);
             dispatch_fill_to_strategy(f);
                 adverse_selection_.on_fill(f);
-                exit_manager_.on_fill(f, lookup_opener(f.get_order_id()));
+                exit_manager_.on_fill(f, opener);
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
                 if (!config_.is_threaded())
@@ -3267,32 +3429,13 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
                 for (const auto& lvl : e.asks)
                     asks.push_back({lvl.price, lvl.quantity});
                 apply_l2_snapshot(e.symbol, bids, asks);
-
-                // Forward so queue-aware adapters can seed level aggregates.
-                std::vector<std::pair<double,double>> abids, aasks;
-                abids.reserve(e.bids.size());
-                aasks.reserve(e.asks.size());
-                for (const auto& lvl : e.bids)
-                    abids.emplace_back(lvl.price, lvl.quantity);
-                for (const auto& lvl : e.asks)
-                    aasks.emplace_back(lvl.price, lvl.quantity);
-                for (auto& [_, ad] : execution_adapters_)
-                    if (ad) ad->on_l2_snapshot(e.symbol, abids, aasks);
-                if (config_.provider)
-                    if (auto pa = config_.provider->get_execution_adapter())
-                        pa->on_l2_snapshot(e.symbol, abids, aasks);
+                // (forward to queue models now centralized inside apply_l2_snapshot)
             }
             else if constexpr (std::is_same_v<E, provider::l2_update>)
             {
                 tick_side ts = (e.side == 0) ? tick_side::bid : tick_side::ask;
                 apply_l2_update(e.symbol, ts, e.price, e.new_quantity);
-
-                const order_side os = (e.side == 0) ? order_side::buy : order_side::sell;
-                for (auto& [_, ad] : execution_adapters_)
-                    if (ad) ad->on_l2_update(e.symbol, os, e.price, e.new_quantity);
-                if (config_.provider)
-                    if (auto pa = config_.provider->get_execution_adapter())
-                        pa->on_l2_update(e.symbol, os, e.price, e.new_quantity);
+                // (forward to queue models now centralized inside apply_l2_update)
             }
         }, ev);
 

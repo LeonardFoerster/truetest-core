@@ -15,7 +15,11 @@ void ExitManager::register_pending(exit_intent intent)
 
 void ExitManager::on_fill(const fill_event& f)
 {
-    on_fill(f, f.get_order_id());
+    // Legacy path delegates; prefer callers to use the opener-aware overload
+    // (pass true opener so closers correctly cancel the matching armed intent
+    // instead of treating the closer id as a new opener).
+    uint64_t opener = (f.get_opener_order_id() != 0) ? f.get_opener_order_id() : f.get_order_id();
+    on_fill(f, opener);
 }
 
 void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
