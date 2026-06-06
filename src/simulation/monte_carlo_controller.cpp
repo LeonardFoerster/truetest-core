@@ -116,7 +116,7 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
     // 4. Build minimal engine config for this trial
     engine_config ecfg;
     ecfg.mode = engine_mode::backtest;
-    ecfg.initial_balance = 10000.0;   // TODO: make configurable in McRunConfig later
+    ecfg.initial_balance = config_.initial_balance;
     ecfg.seed = result.seed_used;     // important for any internal RNGs
 
     // Apply realism settings from McRunConfig (Phase 2 keeps this lightweight)

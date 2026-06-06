@@ -131,6 +131,9 @@ struct McRunConfig {
 
     std::string strategy_name = "mean-reversion";
 
+    // Initial equity for each trial (passed through to engine_config and reports)
+    double initial_balance = 10000.0;
+
     // Realism / engine settings to apply to every trial
     bool realistic_fills = false;
     double order_latency_us = 0.0;
