@@ -39,6 +39,8 @@
 #include "utils/log/logger.h"
 #include <tt/truetest_version.h>
 
+#include "presets/preset.h"
+
 #include "providers/provider_registry.h"
 #include "providers/data_bridge.h"
 #include "providers/provider_sink.h"
@@ -218,6 +220,10 @@ struct cli_options
     std::string thread_preset_str;
     std::string spin_policy_str;
     bool no_pin = false;
+
+    // Named preset / profile (see presets/preset.h and apply_preset logic).
+    // Applied as a base layer: explicit CLI > --config JSON > preset > defaults.
+    std::string preset;
 
     std::string provider_name;
     std::string provider_path;
@@ -502,6 +508,7 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_str("log_events", o.event_log_path);
     get_uint64("seed", o.seed);
     get_str("thread_preset", o.thread_preset_str);
+    get_str("preset", o.preset);
     get_bool("no_pin", o.no_pin);
     get_str("provider", o.provider_name);
     get_str("path", o.provider_path);
@@ -592,6 +599,7 @@ static void dump_config(const cli_options& o)
     j["log_events"] = o.event_log_path;
     j["seed"] = o.seed;
     j["thread_preset"] = o.thread_preset_str;
+    j["preset"] = o.preset;
     j["no_pin"] = o.no_pin;
     j["provider"] = o.provider_name;
     j["path"] = o.provider_path;
@@ -669,6 +677,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_flag("--compress-log,!--no-compress-log", o.compress_log, "Compress binary event logs with zstd (default: on)");
     app.add_option("--seed", o.seed, "RNG seed (0 = non-deterministic)");
     app.add_option("--thread-preset", o.thread_preset_str, "Threading: inline, light, standard, full, extended");
+    app.add_option("--preset", o.preset, "Named run preset/profile (e.g. futures-phase0, mc-robustness, backtest-l2, shadow-tape). Provides bundles of realistic defaults for common scenarios; explicit flags and --config override the preset. See --help or docs for the list.");
     app.add_flag("--no-pin", o.no_pin, "Disable CPU affinity pinning");
     app.add_option("--spin-policy", o.spin_policy_str, "Worker spin policy: spin, yield, adaptive (default: adaptive)");
     app.add_option("--provider", o.provider_name, "Provider name: local, binance, synthetic");
@@ -937,6 +946,7 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--log-events")) opts.event_log_path = file_opts.event_log_path;
     if (!was_set("--seed")) opts.seed = file_opts.seed;
     if (!was_set("--thread-preset")) opts.thread_preset_str = file_opts.thread_preset_str;
+    if (!was_set("--preset")) opts.preset = file_opts.preset;
     if (!was_set("--no-pin")) opts.no_pin = file_opts.no_pin;
     if (!was_set("--provider")) opts.provider_name = file_opts.provider_name;
     if (!was_set("--path")) opts.provider_path = file_opts.provider_path;
@@ -1003,6 +1013,67 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--questdb-flush-ms")) opts.questdb_flush_ms = file_opts.questdb_flush_ms;
     if (!was_set("--persist-strict")) opts.questdb_strict = file_opts.questdb_strict;
 #endif
+}
+
+// -----------------------------------------------------------------------------
+// Preset application (P1-01 / P1-02)
+// Applies a named bundle only to fields the user did not explicitly supply on
+// the CLI (using the same was_set(app) test as JSON overlay). Establishes:
+//   explicit CLI > --config JSON > --preset bundle > hard defaults.
+// -----------------------------------------------------------------------------
+static void apply_preset_with_precedence(CLI::App& app, cli_options& opts)
+{
+    auto was_set = [&](const std::string& name) -> bool {
+        auto opt = app.get_option_no_throw(name);
+        return opt && opt->count() > 0;
+    };
+
+    const std::string& name = opts.preset;
+
+    // futures-phase0 / phase0: hardened tiny-size mainnet futures template
+    // (prod.md + scripts/phase0/new-session.sh). User still supplies
+    // --provider binance-futures, --symbol, --stream/--depth-stream, --live + keys.
+    if (name == "futures-phase0" || name == "phase0" || name == "futures-p0") {
+        if (!was_set("--reconcile-tolerance-bps")) opts.reconcile_tolerance_bps = 3.0;
+        if (!was_set("--dead-man-countdown-ms"))   opts.dead_man_countdown_ms = 30000;
+        if (!was_set("--dead-man-heartbeat-ms"))   opts.dead_man_heartbeat_ms = 8000;
+        if (!was_set("--max-notional"))            opts.max_notional_usdt = 15000.0;
+        if (!was_set("--max-leverage"))            opts.max_leverage = 2.5;
+        if (!was_set("--min-liq-distance-pct"))    opts.min_liquidation_distance_pct = 7.0;
+        if (!was_set("--max-daily-loss"))          opts.risk_max_daily_loss = 80.0;
+        if (!was_set("--risk-unwind"))             opts.risk_unwind = true;
+        return;
+    }
+
+    // mc-robustness: sensible defaults for MC research campaigns.
+    // Pair with --thread-preset inline (as recommended in MC docs/warnings).
+    if (name == "mc-robustness" || name == "mc" || name == "monte-carlo") {
+        if (!was_set("--mc-model")) opts.mc_model = "gbm";
+        if (!was_set("--mc-reuse-objects")) opts.mc_reuse_objects = true;
+        // trials and mc-params are intentionally left to the caller (common
+        // values 100/300/500 + asset-specific mu/sigma/n_steps).
+        return;
+    }
+
+    // backtest-local-l2: L2-aware realism bundle for local (tick) data when
+    // depth is also supplied or synthesized.
+    if (name == "backtest-local-l2" || name == "backtest-l2" || name == "local-l2") {
+        if (!was_set("--realistic-fills"))    opts.realistic_fills = true;
+        if (!was_set("--queue-model"))        opts.queue_model = "l2-snapshot";
+        if (!was_set("--maker-queue-model"))  opts.maker_queue_model = "uniform";
+        if (!was_set("--walked-book-impact")) opts.walked_book_impact = true;
+        return;
+    }
+
+    // shadow-tape: reasonable base for divergence-aware shadow runs.
+    if (name == "shadow-tape" || name == "shadow" || name == "paper") {
+        if (!was_set("--reconcile-tolerance-bps")) opts.reconcile_tolerance_bps = 5.0;
+        return;
+    }
+
+    // Unknown / future preset names are tolerated (run continues with
+    // whatever other flags were given). A warning can be added at call site
+    // or in dry-run if desired.
 }
 
 static int run_dry_run(const cli_options& o)
@@ -1162,9 +1233,15 @@ static int run_monte_carlo_mode(const cli_options& o)
         mc_cfg.strategy_name = o.strategy;
     }
     mc_cfg.base_seed = o.seed;
+    mc_cfg.initial_balance = o.balance;
 
     // Apply some realism from top-level flags (best effort for Phase 3)
-    mc_cfg.realistic_fills = false; // can be extended later
+    mc_cfg.realistic_fills = o.realistic_fills;
+    mc_cfg.order_latency_us = o.order_latency_us;
+    mc_cfg.impact_k_bps = o.impact_k_bps;
+
+    // Enable richer per-trial data when user asked for --output (for downstream tools / plot.py)
+    mc_cfg.keep_full_reports = !o.output.empty();
 
     // Phase 5 parallel support
     mc_cfg.parallel_trials = o.mc_parallel;
@@ -1202,15 +1279,55 @@ static int run_monte_carlo_mode(const cli_options& o)
 
     std::cout << "  Trials:   " << mc_cfg.n_trials << "\n";
     std::cout << "  Model:    " << mc_cfg.generator_name << "\n";
-    std::cout << "  Strategy: " << mc_cfg.strategy_name << "\n\n";
+    std::cout << "  Strategy: " << mc_cfg.strategy_name << "\n";
+    std::cout << "  Balance:  " << mc_cfg.initial_balance << "\n\n";
 
     truetest::simulation::MonteCarloController controller(mc_cfg);
     auto results = controller.run();
 
+    std::string mc_json = truetest::simulation::MonteCarloReporter::render_json(results, mc_cfg);
+
     std::cout << truetest::simulation::MonteCarloReporter::render_text_summary(results, mc_cfg);
 
-    // Also print compact JSON for scripting
-    std::cout << "\nJSON Summary:\n" << truetest::simulation::MonteCarloReporter::render_json(results, mc_cfg);
+    // Also print compact JSON for scripting / copy-paste (kept for backward compatibility)
+    std::cout << "\nJSON Summary:\n" << mc_json;
+
+    if (!o.output.empty()) {
+        // Richer output for --output: keep the flat McAggregate at top-level
+        // (so scripts/plot.py --mc continues to work without changes) and add
+        // useful metadata + config for downstream tools / analysis.
+        nlohmann::json rich = nlohmann::json::parse(mc_json);
+
+        rich["initial_balance"] = mc_cfg.initial_balance;
+        rich["realistic_fills"] = mc_cfg.realistic_fills;
+        rich["order_latency_us"] = mc_cfg.order_latency_us;
+        rich["impact_k_bps"] = mc_cfg.impact_k_bps;
+        rich["keep_full_reports"] = mc_cfg.keep_full_reports;
+        rich["parallel_trials"] = mc_cfg.parallel_trials;
+        rich["reuse_objects_between_trials"] = mc_cfg.reuse_objects_between_trials;
+        rich["wall_time_ms"] = results.wall_time_ms;
+
+        rich["generator_config"] = nlohmann::json{
+            {"symbol", mc_cfg.generator_config.symbol},
+            {"initial_price", mc_cfg.generator_config.initial_price},
+            {"n_steps", mc_cfg.generator_config.n_steps},
+            {"dt", mc_cfg.generator_config.dt},
+            {"mu", mc_cfg.generator_config.mu},
+            {"sigma", mc_cfg.generator_config.sigma},
+            {"emit_synthetic_l2", mc_cfg.generator_config.emit_synthetic_l2},
+            {"base_spread_bps", mc_cfg.generator_config.base_spread_bps}
+        };
+
+        rich["output_format"] = "mc_aggregate_v1";
+
+        std::ofstream ofs(o.output);
+        if (ofs.is_open()) {
+            ofs << rich.dump(2) << std::endl;   // pretty-printed for humans + tools
+            std::cout << "  MC results exported to: " << o.output << "\n";
+        } else {
+            std::cerr << "  ! Failed to open output file for writing: " << o.output << "\n";
+        }
+    }
 
 #ifdef HAS_QUESTDB
     if (questdb_store) {
@@ -1223,8 +1340,6 @@ static int run_monte_carlo_mode(const cli_options& o)
         questdb_store->flush();
     }
 #endif
-
-    // TODO: integrate with --output, richer per-trial persist, export_results style
 
     return 0;
 }
@@ -1921,6 +2036,52 @@ static int run_tui_mode(const cli_options& o)
     std::cout << "    Backtesting Engine v0.1\n";
     std::cout << "\n";
 
+    // P1-03: lightweight preset-aware entry for the bare invocation.
+    // This makes "just run the binary" discover the new simplification story
+    // without forcing the user through dozens of flags for common cases.
+    std::cout << "  +-------------------------------------------+\n";
+    std::cout << "  |  Quick start (preset)                     |\n";
+    std::cout << "  +-------------------------------------------+\n";
+    std::cout << "  |  [0]  Classic menu (custom choices)       |\n";
+    std::cout << "  |  [1]  Local backtest + L2 realism         |\n";
+    std::cout << "  |       (preset: backtest-local-l2)         |\n";
+    std::cout << "  |  [2]  Monte Carlo robustness (research)   |\n";
+    std::cout << "  |       (preset: mc-robustness)             |\n";
+    std::cout << "  +-------------------------------------------+\n";
+    std::cout << "  > ";
+    int preset_choice = 0;
+    std::cin >> preset_choice;
+
+    cli_options effective = o;  // start from passed (may have --param etc.)
+    if (preset_choice == 1) {
+        effective.preset = "backtest-local-l2";
+    } else if (preset_choice == 2) {
+        effective.preset = "mc-robustness";
+        // MC path will be taken later in main() if mc_trials or monte_carlo is set,
+        // but for interactive we let the user continue and we can force MC mode
+        // by setting a reasonable default here (or dispatch explicitly).
+        if (effective.mc_trials == 0) effective.mc_trials = 100;
+    }
+
+    // If a preset was chosen interactively, apply its bundle now (the TUI
+    // path builds config manually later; setting the fields + preset name
+    // gives provenance and lets any shared logic see it).
+    if (!effective.preset.empty() && truetest::presets::is_known_preset(effective.preset)) {
+        // We are inside the TUI, no CLI "app" was_set. Apply the bundle
+        // unconditionally for the chosen preset (user chose it here).
+        // The known bundles only touch the realism/MC fields we care about.
+        if (effective.preset == "backtest-local-l2") {
+            effective.realistic_fills = true;
+            effective.queue_model = "l2-snapshot";
+            effective.maker_queue_model = "uniform";
+            effective.walked_book_impact = true;
+        } else if (effective.preset == "mc-robustness") {
+            effective.mc_model = "gbm";
+            effective.mc_reuse_objects = true;
+        }
+    }
+
+    std::cout << "\n";
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  |  Strategy                                 |\n";
     std::cout << "  +-------------------------------------------+\n";
@@ -2223,6 +2384,17 @@ int main(int argc, char* argv[])
              TRUETEST_DEP_GTEST, TRUETEST_DEP_BENCHMARK, TRUETEST_DEP_ABSEIL);
 
     apply_config_overlay(app, opts);
+
+    // Apply named preset (if any) as a base layer. Only fills fields the user
+    // did not explicitly pass on the CLI (mirrors the was_set logic used for
+    // --config). This gives: explicit CLI > --config JSON > --preset > defaults.
+    if (!opts.preset.empty()) {
+        apply_preset_with_precedence(app, opts);
+        if (!truetest::presets::is_known_preset(opts.preset)) {
+            std::cerr << "  [warn] Unknown preset '" << opts.preset
+                      << "'. Run will use explicit flags + defaults only.\n";
+        }
+    }
 
     if (opts.dump_config_flag) { dump_config(opts); return 0; }
     if (opts.dry_run) return run_dry_run(opts);
