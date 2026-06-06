@@ -13,7 +13,7 @@
 
 TrueTest is a modular C++23 engine for reproducible backtesting, divergence-aware shadow trading, and gated live execution from a **single source tree**. Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) differ only by the compile-time `TT_TARGET` define in `src/core/tt_target.h`. Live-order paths are physically removed via dead-code elimination in non-live targets (`target_allows_live_orders()` is constexpr false).
 
-**Core non-negotiable invariants** (repeated across governance, `prod.md`, user-manual, CLAUDE.md; detailed target architecture + MODEL.md planned under `docs/architecture/` in Doc Phase 2):
+**Core non-negotiable invariants** (repeated across governance, `prod.md`, user-manual, CLAUDE.md; detailed target architecture + MODEL.md + realism.md etc. planned under `docs/architecture/` — Doc Phase 2 / D-03; current authoritative in prod.md + CLAUDE + instructions + user-manual):
 
 1. **Compile-time live-order gate is absolute** — Only `engine_live` (and future keeper_live targets) can ever emit real orders/transactions. Never introduce runtime `allow_live_orders` checks or recompile-time bypasses.
 2. **Halt is terminal** (`halt_flag_` in engine/risk) — Write-once atomic true; only manual operator intervention + explicit process restart clears it. No auto-resume, no SIGUSR1, no cooldown, no "helpful" retry logic on safety paths.
@@ -166,6 +166,7 @@ ctest --test-dir build
 - Risk/portfolio: `--initial-cash`, `--risk-fraction`, `--sl-atr`, `--tp-atr`, `--max-daily-loss`, `--max-trades-per-hour`, `--risk-unwind 0.4`, `--reconcile-tolerance-bps`.
 - Realism (backtest/shadow only; bypassed in live): `--realistic-fills`, `--order-latency-us N --order-latency-stddev-us M`, `--impact-k-bps`, `--bar-spread-bps`, `--queue-model l2-snapshot` (shadow + depth-stream), `--maker-queue-model uniform|front|back` (paper + depth-stream; uniform recommended default).
 - Threading: `--thread-preset inline|light|standard|full|extended` (auto from cores), `--spin-policy adaptive|spin|yield`, `--no-pin`, `--seed`.
+- **Presets** (new, see P1 work): `--preset futures-phase0|mc-robustness|backtest-local-l2|shadow-tape` — named bundles that supply realistic groups of flags (DMS/risk caps for phase0, reuse+gbm for MC, L2 queue+realistic-fills for backtests, etc.). Explicit flags and `--config` always win. Use with scripts and in the interactive TUI quick-start menu.
 - Persistence: `--persist --run-tag myrun_YYYYMMDD_HHMM` (QuestDB), `--checkpoint path`.
 - Replay/Record: `--replay events.bin --replay-from/--to`, `--record`, `--replay-data`.
 - Output: `--output results.json`, `--status-format tui|ndjson|minimal`, `--log-events`, `--log-rotation`.
@@ -327,14 +328,13 @@ Acceptance commands and methodology in the doc. Ties to realism + demo-trading-w
 
 ---
 
-## 15. Operator SOPs, Testnet Guides, Demo Workflows, Killswitch Timeline (full operational ladder)
+## 15. Operator SOPs, Testnet Guides, Demo Workflows (see governance + reports/phase0/)
 
-**Recommended 5-step pre-mainnet validation path** (described in `prod.md` + planned detailed guides in `docs/operations/` (futures-testnet.md, futures-phase0-operator-sop.md, demo-trading-workflow.md) — Doc Phases 1-2):
-1. Backtest + realism models on recorded real mainnet futures tape.
-2. Deterministic replay.
-3. Live mainnet shadow (`TradeTapeShadowAdapter` + ShadowTracker for sim vs exchange divergence).
-4. Protocol/wire + safety validation on futures testnet (DMS playbook A–E, one-way, recon, refusals; **never calibrate realism here** — synthetic liquidity).
-5. Tiny-size Phase 0 mainnet under official SOP + full artifacts.
+See `prod.md` (Phase 0 command template + full ritual + "why each element" + Go-Live Gate) + root `todo.md` (P0-01..P0-04 + D-02; current 0/15 + "paused on monte-carlo branch" + MC does not relax gates) + `reports/phase0/` (operational evidence home) + `scripts/phase0/`.
+
+**Planned** (Doc Phases 1-2; current details live in prod.md / reports/phase0/ per CLAUDE rule): `docs/operations/futures-testnet.md`, `docs/operations/futures-phase0-operator-sop.md` (printable; P0-03), `docs/operations/demo-trading-workflow.md`, and related under `docs/operations/`. `docs/architecture/` files (target-architecture.md etc. — Doc Phase 2 / D-03) also planned; see `docs/README.md` for realized vs. aspirational map.
+
+Tiny-size Phase 0 mainnet under conservative caps + full artifacts + two-person batch sign-off is the current gate.
 
 **futures-testnet.md** (USDT-M): Account one-way mode, `--testnet`, math-captcha skipped, pre-trade caps + liquidation projection math, DMS details + 5-scenario playbook, refusal modes table, what engine does (recon, kill, brackets), gotchas (thin book, resets, partial brackets declined), integration smoke test.
 
@@ -352,16 +352,15 @@ Acceptance commands and methodology in the doc. Ties to realism + demo-trading-w
 
 ---
 
-## 16. Phase 0 Evidence Collection, Templates, PROGRESS (reports/phase0/*)
+## 16. Phase 0 Evidence Collection (reports/phase0/*)
 
-- **PROGRESS.md**: Master tracker table (#, Date, Run Tag, Symbol, Regime, Notional Cap, Daily Loss, Drift bps, Artifacts, Retro?, Reviewed, Notes). 0/15 qualifying. Update after every session. Batch review log every 5.
-- **PHASE0_COMPLETION_PLAN.md**: Detailed campaign (prep + 3 batches of 5 + buffer, per-session workflow with scripts/phase0/new-session.sh + post-session.sh + analyze-log.sh, volatility targeting, abort conditions, deliverables, sign-off).
-- **templates/phase0-session-note.md**: One-page signed note (redacted command, metrics, incident log, declaration checkboxes for safety wires/captcha/no unexplained drift/artifacts, signatures).
-- **ops/batch-review-template.md**: Per-batch package (summary table, regime coverage, evidence checklist per session, observations, volatility method, dual sign-off).
-- **ops/volatility-log.md**: Thresholds (High >60% or spike, Med 35-60, Low <35 via TradingView/Binance 7/14d BTC vol) + table + `./scripts/phase0/volatility-classifier.sh`.
-- **scripts/phase0/**: new-session, post-session, analyze-log, volatility-classifier, create-evidence-bundle, dry-run-phase0, etc.
+See `reports/phase0/README.md` (layout + 6-step ritual summary), `PROGRESS.md` (master tracker; 0/15 qualifying), `templates/phase0-session-note.md` (printable signed form), and `scripts/phase0/` (new-session.sh etc. that target dated subdirs under reports/phase0/).
 
-**Volatility regime labeling** required for every qualifying session. Retroactive credit rules defined.
+**Current P0 status & items**: See root `todo.md` (P0-01..P0-04; "paused on monte-carlo branch"; MC does not relax gates) + `prod.md` (full authoritative ritual + template + exit criteria).
+
+**Planned**: `docs/operations/futures-phase0-operator-sop.md` (printable SOP; Doc Phase 1; current details in prod.md + reports/phase0/). `PHASE0_COMPLETION_PLAN.md` and some ops/ templates referenced in older notes — current operational home is reports/phase0/ + scripts/phase0/.
+
+**Volatility regime labeling** + batch reviews every 5 with two signatures required (see reports/phase0/PROGRESS.md + todo P0-02).
 
 ---
 
@@ -412,26 +411,15 @@ Authoritative table:
 5. Two-person CCB + 4h/8h clean mainnet shadow before merge.
 6. Sign decisions/phase1-freeze-*.md.
 
-**Phase 0 Qualifying Session Ritual** (print/sign the SOP — planned in `docs/operations/futures-phase0-operator-sop.md`; current details + template in `prod.md`):
-- Pre: new-session.sh, export keys, open math-captcha, confirm one-way in Binance UI, verify DMS counter advancing.
-- Command: use (or exceed) the conservative template above.
-- During: physical presence entire session; monitor TUI (DMS, risk, snapshots, health); math-captcha visible (mainnet).
-- Post-halt: mandatory `grep -i "POSITION-SNAPSHOT|funding|drift" <event-log>` before resume.
-- Post: post-session.sh, human fills/signs note, append PROGRESS row, commit artifacts (zstd log, QuestDB, note), classify regime, batch review every 5.
+**Phase 0 Qualifying Session Ritual & Evidence** (see `prod.md` for the authoritative template + full ritual + "why each element"; see `reports/phase0/` (README + PROGRESS.md + templates/phase0-session-note.md) + `scripts/phase0/` (new-session.sh, post-session.sh, volatility-classifier.sh) for operational machinery. Current details live in prod.md + reports/phase0/; printable SOP planned for `docs/operations/futures-phase0-operator-sop.md` — Doc Phase 1).
 
-**Pre-Merge Safety (MODEL.md)**: Diff with Opus (or human), target gate not bypassed, halt terminal, scripts pass, no new anti-patterns, model noted.
+**Current P0 items & status**: See root `todo.md` (P0-01..P0-04; 0/15 qualifying; collection paused on monte-carlo branch; MC work does not relax gates).
 
-**Go-Live Gate**: All 9 rows two signatures + evidence.
+**Pre-Merge Safety & Phase 1 Freeze Procedure**: See `prerequisites.md` (full living checklist) + `CLAUDE.md` (model selection + token/CCB rules) + root `todo.md` (P1-01..P1-05 + frozen files list + process). Run `./scripts/check-live-safety-freeze.sh --check-head`; PR must contain `LIVE_SAFETY_CCB_APPROVED` + todo refs + "prod.md impact" note; 4h/8h clean mainnet shadow required before merge.
 
-**Perf Locking**: Reference 5+ median runs on workload → update perf-baseline.md + regression guard.
+**Go-Live Gate**: All 9 rows require two signatures + concrete evidence (see `prod.md` for the table; "No capital tier increase is permitted until...").
 
-**DMS Validation (testnet)**: Run 5 scenarios A–E with independent monitoring + recording.
-
-**Network Partition Drill**: Use `--dms-attempt-position-close` + independent machine + post-reconcile + exact timing log.
-
-**QuestDB Health**: Watch for soft warning; continue disabled is acceptable today.
-
-**Volatility + Batch Review**: Use scripts + templates; dual sign-off.
+**Other checklists** (DMS validation, network partition drill, QuestDB health, volatility + batch review, perf locking): See `prod.md`, `prerequisites.md`, root `todo.md` (S-*, H-*, P0-*, D-*), `scripts/`, and `reports/phase0/`. Long-form lives in governance docs per CLAUDE extraction rule.
 
 ---
 
@@ -486,13 +474,19 @@ Cross-references point to files now organized under `architecture/`, `operations
 
 ## 23. Document Maintenance & Evolution
 
-- Living documents — update after every phase completion, before capital tier increase, and after any material change to frozen surface.
-- Every PR touching core/risk/safety/live-provider must add migration.md entry and reference todo/prod impact.
-- This master instructions.md is now the single source; other .md files may be archived or point here.
-- Phase 0/1 artifacts (reports/phase0/, decisions/phase1-freeze-*.md) are permanent evidence.
-- Minor sync lags (e.g., "9 files" vs 10 in enforcement, gaps.md vs prod Phase 2 status, stale QuestDB worker text in instructions) are evolution artifacts — trust the most recent prod/CLAUDE + db.md reality + this master.
+See root governance (especially `CLAUDE.md` "Documentation Maintenance Rules", `prod.md`, `prerequisites.md`, and the new consolidated `todo.md`) for the authoritative process:
+- Root gov files + reports/phase0/ + CLAUDE are the single source of truth for phases, gates, checklists, tasks, AI/reviewer rules, and evidence.
+- Every frozen-surface PR must reference relevant `todo.md` items + run the check script + carry `LIVE_SAFETY_CCB_APPROVED`.
+- On phase exit (declared in `prod.md`): update `todo.md` (move/strike + follow-ups), prereq if evolved, last-updated notes.
+- Aspirational cross-refs *must* use explicit language: "Planned for Doc Phase X – current details live in prod.md / instructions.md §N".
+- Extraction rule (CLAUDE): long-form phases/ritual/gates in `prod.md` (or dedicated SOP); this file = pointers + quick templates + MC/CLI/safety how-to.
+- Anti-rot ritual before capital tier increase: "docs verified + links resolve + `todo.md` updated".
+- On MC/simulation landings: update MC section here + gov mentions (README, todo, prod, CLAUDE) in same PR.
+- If broken/stale cross-ref: treat as doc bug.
 
-**Related authoritative files**: Root governance ([CLAUDE.md](../CLAUDE.md), [prod.md](../prod.md), [prerequisites.md](../prerequisites.md), [todo.md](../todo.md)), plus the reorganized set under `docs/` (see [docs/README.md](README.md)). Historical material lives in `docs/archive/`. Phase 0 evidence is in `../reports/phase0/`.
+**Current realized layout**: See `docs/README.md`. Historical material under `docs/archive/` (e.g. questdb hardening log moved here post-consolidation). Phase 0 evidence strictly in `../reports/phase0/`.
+
+**This consolidation (2026)**: Scattered action lists / todo sections / duplicate P0/P1/MC/R/S/D details purged from docs/ files into single root `todo.md`. See root `todo.md` (D-06 + all current P0/MC/R/S/A/H items) for the full list of documentation hygiene tasks. Minor sync lags (9-vs-10 files, gaps status, planned SOP refs) noted and being cleaned.
 
 ---
 
