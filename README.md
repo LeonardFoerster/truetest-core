@@ -6,9 +6,9 @@ The build produces three binaries — `engine_backtest`, `engine_shadow`, `engin
 
 **Intended Use & Scope**: TrueTest is a private, personal research and retail tool for the author only. It is not, and will never be, an enterprise-ready, institutional, or production trading system. Monte Carlo simulation, high-fidelity backtesting, and shadow divergence analysis are the primary mature capabilities. The live execution paths (`engine_live`) exist with unusually strong compile-time (`TT_TARGET`) and runtime safety layers (reconciler, DMS, kill-switch, venue risk checks, terminal halt, user-data source of truth, etc.). Any use of live paths is experimental, tiny-size, fully attended by the operator, and done at the author's own risk. The Phase 0/1 rituals and Go-Live language in this repository describe the author's personal evidence-gathering hygiene and self-imposed discipline — they are **not** a formal production release process or claim of readiness for others.
 
-## Current Development Status (2026)
+## Current Development Status (2026, post-merge)
 
-Monte Carlo simulation capabilities were integrated from the `monte-carlo` feature branch (now part of mainline).
+Monte Carlo simulation capabilities were integrated from the `monte-carlo` feature branch (now part of mainline). The merge of the monte-carlo branch into master was completed successfully following the full gated process in MERGE_PLAN.md (all phases 0-8 passed).
 
 **Major new capability** (stochastic backtesting & risk analysis):
 - **Monte Carlo simulation engine** — full multi-trial campaigns with GBM (and future models) path generation, deterministic per-trial seeding, object reuse between trials for performance, and experimental parallel execution. Usable both as standalone synthetic paths (`--provider synthetic`) and as full campaigns (`--monte-carlo --mc-trials N`). Strong caveats apply: stylized synthetic L2, no automatic calibration from historical data, parallel mode has threading/pinning restrictions (recommended with `--thread-preset inline`). This is a research and strategy-robustness tool; it does not change the live-order safety surface or Phase 0/1 capital gates.
@@ -91,4 +91,4 @@ Large GoogleTest suite (`test_*`), golden-file regression for execution fidelity
 
 ---
 
-This README is deliberately concise. All operational detail, architecture decisions, current invariants, and the full development log live in `CLAUDE.md` and the `docs/` tree. The project follows a strict phase-gated approach to production readiness — consult `prod.md` before increasing live capital.
+This README is deliberately concise. All operational detail, architecture decisions, current invariants, and the full development log live in `CLAUDE.md` and the `docs/` tree. The project follows a strict phase-gated approach to production readiness (for the author's private use only) — consult `prod.md` before increasing live capital. The monte-carlo branch has been fully merged into master (post-merge, 2026).
