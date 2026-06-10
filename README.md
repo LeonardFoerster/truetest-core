@@ -40,7 +40,7 @@ The engine has excellent Binance spot + USDT-M futures support (signed REST, com
 | [`todo.md`](todo.md) + (planned: `docs/migration.md`, `docs/target-architecture.md`) | Deepdive task list + chronological architecture history (architecture/ files planned for Doc Phase 2). |
 | [`reports/phase0/PROGRESS.md`](reports/phase0/PROGRESS.md) | Live tracker of Phase 0 qualifying sessions. |
 | [`prerequisites.md`](prerequisites.md)                | Mandatory checklist before any new work touches the frozen safety surface. |
-| [`ENGINE_AI_SUMMARY.md`](ENGINE_AI_SUMMARY.md)        | Dense power + constraints briefing **for AI agents** (current state, MC capabilities, invariants, model-selection rules). Read first when acting as coding assistant. |
+| summary.md (root) + CLAUDE.md (for AI rules) + this MERGE_PLAN.md context | Dense power + constraints briefing **for AI agents** (current state, MC capabilities, invariants, model-selection rules; old ENGINE summary consolidated here in Phase 4). Read first when acting as coding assistant. |
 
 Additional deep-dive notes (realism.md, futures-order-lifecycle.md, etc.) are planned under `docs/architecture/` and `docs/operations/` — see the approved doc plan in `todo.md` (D- items) and `docs/README.md`. Current authoritative details live in `prod.md`, `CLAUDE.md`, and `instructions.md`.
 

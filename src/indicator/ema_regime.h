@@ -53,7 +53,7 @@ struct ema_regime_snapshot
  * Design:
  * - Observer style: you feed it the two EMA values (+ optional swing range / ATR) each bar.
  * - No ownership of the EMAs or SwingDetector.
- * - Fully reset-able for Monte Carlo object reuse.
+ * - Fully reset-able for Monte Carlo object reuse (landed with monte-carlo merge).
  * - Rich but cheap observability.
  */
 class ema_regime_detector

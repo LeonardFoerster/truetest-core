@@ -89,7 +89,7 @@ set(ENGINE_CORE_SOURCES
     src/ui/console_dashboard.cpp
     src/exits/exit_manager.cpp
 
-    # Monte Carlo / synthetic simulation (Phase 1+)
+    # Monte Carlo / synthetic simulation (integrated from monte-carlo branch)
     src/simulation/imonte_carlo_generator.cpp
     src/simulation/monte_carlo_controller.cpp
     src/simulation/monte_carlo_reporter.cpp

@@ -16,8 +16,9 @@ namespace truetest::simulation {
  * Generates stochastic price paths on demand and exposes them
  * through the standard IProvider + IDataTransport interface.
  *
- * In Phase 1 this provider only supports bar-mode backtesting via
+ * Supports bar-mode backtesting and full Monte Carlo campaigns via
  * a generated CSV-like in-memory transport (compatible with CsvBarParser).
+ * Landed with monte-carlo merge (integrated).
  *
  * Usage example:
  *   --provider synthetic --mc-model gbm --mc-params "mu=0.05,sigma=0.65,n_steps=8000"
