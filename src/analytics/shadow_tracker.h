@@ -133,6 +133,10 @@ public:
 
     const std::unordered_map<uint64_t, shadow_fill>& fills() const { return fills_; }
 
+    // Phase 4 MC reuse hardening: clear for per-trial isolation (shadow divergence
+    // tracking is not meaningful across independent MC trials).
+    void reset() { fills_.clear(); }
+
 private:
     std::unordered_map<uint64_t, shadow_fill> fills_;
 

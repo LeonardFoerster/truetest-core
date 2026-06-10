@@ -30,6 +30,7 @@ ALLOW=(
     '^src/bin/main\.inc$'
     '^src/api/truetest_api\.cpp$'
     '^tests/'
+    '^src/strategy/adaptive_hybrid_config\.cpp$'   # isolated ctor-time loader only (never hot path)
 )
 
 pattern='nlohmann/json\.hpp|nlohmann::'

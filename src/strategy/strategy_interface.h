@@ -75,4 +75,10 @@ public:
     {
         return {};
     }
+
+    // Phase A/B (MC object reuse): strategies that hold internal state (e.g. indicators,
+    // adaptive parameters, RNGs) should override this to reset for the next trial.
+    // The seed is provided so RNG-based strategies can be made deterministic across trials.
+    // Default is a no-op.
+    virtual void reset(uint64_t /*seed*/ = 0) {}
 };

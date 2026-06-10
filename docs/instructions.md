@@ -13,7 +13,7 @@
 
 TrueTest is a modular C++23 engine for reproducible backtesting, divergence-aware shadow trading, and gated live execution from a **single source tree**. Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) differ only by the compile-time `TT_TARGET` define in `src/core/tt_target.h`. Live-order paths are physically removed via dead-code elimination in non-live targets (`target_allows_live_orders()` is constexpr false).
 
-**Core non-negotiable invariants** (repeated across governance, architecture, user-manual, futures docs, killswitch timeline, [architecture/target-architecture.md](architecture/target-architecture.md), [architecture/MODEL.md](architecture/MODEL.md), CLAUDE.md, prod.md):
+**Core non-negotiable invariants** (repeated across governance, `prod.md`, user-manual, CLAUDE.md; detailed target architecture + MODEL.md + realism.md etc. planned under `docs/architecture/` — Doc Phase 2 / D-03; current authoritative in prod.md + CLAUDE + instructions + user-manual):
 
 1. **Compile-time live-order gate is absolute** — Only `engine_live` (and future keeper_live targets) can ever emit real orders/transactions. Never introduce runtime `allow_live_orders` checks or recompile-time bypasses.
 2. **Halt is terminal** (`halt_flag_` in engine/risk) — Write-once atomic true; only manual operator intervention + explicit process restart clears it. No auto-resume, no SIGUSR1, no cooldown, no "helpful" retry logic on safety paths.
@@ -24,7 +24,7 @@ TrueTest is a modular C++23 engine for reproducible backtesting, divergence-awar
 7. **DMS protects orders only** (`/fapi/v1/countdownCancelAll`) — Venue-side auto-cancel on heartbeat loss. Does **not** emit reduceOnly MARKET flattens (Phase 3 work). Kill-switch (orderly) does cancel-all + reduceOnly flatten with hard deadline.
 8. **Futures mandates** — One-way mode hard refusal in `BinanceFuturesProvider::open()`; `reduceOnly` + `closePosition=true` brackets (non-atomic, two POSTs with auto-cancel guarantee); pre-trade venue `FuturesRiskCheck` (notional/leverage/liq-distance + real tiered MMR from `/fapi/v1/leverageBracket`) consulted **before** `RiskManager` in hot path (`engine.cpp:1600-1628`).
 9. **Provider abstraction is the sole extension point** — `IProvider` + four safety hooks (`IReconciler`, `IKillSwitch`, `IRiskCheck`, `IBracketAdapter`) + transport/parser/executor. Core engine never contains `#ifdef HAS_*` or venue specifics.
-10. **Small capital first + evidence-based gates** — Every phase exit requires artifacts (binary logs, QuestDB run_tag, signed notes, shadow reports) + two-person sign-off before capital tier increase. "No capital tier increase is permitted until all nine rows [Go-Live Gate] have two signatures."
+10. **Small capital first + evidence-based gates** (personal use only) — When the author chooses to collect evidence toward personal live use, every phase exit requires artifacts (binary logs, QuestDB run_tag, signed notes, shadow reports) + two-person sign-off before any personal capital tier increase. "No personal capital tier increase is permitted until all nine rows [Go-Live Gate] have two signatures."
 
 **Additional strong primitives already present**: Layered risk (venue first), `WorkerWatchdog` (3× heartbeat), clock-skew/WAF/symbol existence/one-way probes at open, `ExecutionBridge` mutex audit, rate limiter, per-lot `Portfolio` + `ExitManager`, binary zstd event log + replay, QuestDB (soft-fail today), rich ncurses TUI, StageTimer/ring stats observability.
 
@@ -60,68 +60,43 @@ From CLAUDE.md + [architecture/MODEL.md](architecture/MODEL.md) (full rationale)
 
 ---
 
-## 3. Production Readiness Playbook & Capital-Tier Phases (prod.md)
+## 3. Production Readiness Playbook & Capital-Tier Phases
 
-Strict rule: Moving tiers requires prior phase exit criteria + two-person sign-off on the 9-row Go-Live Gate table.
+**Full authoritative version**: see [`prod.md`](prod.md) (the central production contract).
 
-### Phase 0 — Safe Tiny-Size Mainnet Futures (Current Active)
-- **Exact command template** (conservative; must meet or exceed):
-  ```bash
-  ./build/engine_live \
-    --provider binance-futures \
-    --symbol BTCUSDT \
-    --stream trade --depth-stream depth20@100ms \
-    --live \
-    --api-key "${BINANCE_FUTURES_KEY}" --api-secret "${BINANCE_FUTURES_SECRET}" \
-    --persist --run-tag p0_$(date +%Y%m%d_%H%M) \
-    --reconcile-tolerance-bps 3 \
-    --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
-    --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \
-    --max-daily-loss 80 --risk-unwind 0.4
-  ```
-- **Why each flag mandatory**: depth for L2/queue models, persist for audit, DMS liveness, reconciler, three futures risk caps, daily loss + unwind.
-- **Exit criteria**: 15+ fully documented qualifying sessions across ≥3 volatility regimes (High/Med/Low via 7/14d BTC realized vol), zero unexplained drift > tolerance, **full artifacts** for every session (zstd .bin, QuestDB run_tag, signed one-page note from template, row in PROGRESS.md, post-halt grep review), two-person batch reviews every 5.
-- **Ritual** (futures-phase0-operator-sop.md + reports/phase0/*): Print/sign SOP, `new-session.sh`, math-captcha visible entire session, stay at terminal, one-way mode confirmed in UI + provider, DMS counter advancing in TUI, post-halt mandatory `grep -i "POSITION-SNAPSHOT|funding|drift"`, `post-session.sh`, volatility classifier, commit under reports/phase0/.
-- **Status** (2026-05): 0/15 qualifying; helpers/scripts exist; in active collection. Use `reports/phase0/PROGRESS.md` as single source of truth.
+`prod.md` contains:
+- Philosophy and the 9 core invariants
+- Exact Phase 0 command template + exit criteria + ritual
+- Phase 1 freeze rules and remaining work
+- Phases 2–6 roadmap
+- The 9-row Go-Live Gate table (all rows require two signatures + evidence)
 
-### Phase 1 — Deepdive Stabilization & Live-Safety Freeze
-- Planning artifacts created ([architecture/target-architecture.md](architecture/target-architecture.md), [architecture/migration.md](architecture/migration.md), todo.md, prerequisites.md).
-- LIVE-SAFETY blocks + enforcement script + CLAUDE update done.
-- Remaining: clean 8h mainnet `engine_shadow` (0 drops), two-person sign-off in `decisions/phase1-freeze-*.md`, prod.md/todo update.
-- **All future edits** to frozen surface require token + CCB + shadow run.
+### Quick Reference – Phase 0 Command Template (from prod.md)
+```bash
+./build/engine_live \
+  --provider binance-futures \
+  --symbol BTCUSDT \
+  --stream trade --depth-stream depth20@100ms \
+  --live \
+  --api-key "${BINANCE_FUTURES_KEY}" --api-secret "${BINANCE_FUTURES_SECRET}" \
+  --persist --run-tag p0_$(date +%Y%m%d_%H%M) \
+  --reconcile-tolerance-bps 3 \
+  --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
+  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \
+  --max-daily-loss 80 --risk-unwind 0.4
+```
 
-### Phase 2 — Risk Engine Completion (Highest Impact)
-- Funding as first-class (`funding_event` in event.h, portfolio::on_funding, QuestDB/analytics/risk/CBs, TUI).
-- Real tiered liquidation (`MaintenanceMarginTable` from `/fapi/v1/leverageBracket`, hot-patch setter into FuturesRiskCheck) — **implemented + build-fixed 2026-05**.
-- Position sizing % equity + volatility; circuit breakers (spread, funding rate).
-- Status: 2.1/2.2 complete; 2.3/2.4 pending.
-
-### Phases 3–6 (High-Level)
-- 3: DMS position flattening (`reduceOnly` MARKET on expiry) + external `tt_watchdog` binary.
-- 4: `--persist-strict` (hard-fail), mandatory binary log + xxhash integrity, richer checkpoints (full `lots_` map), crash-replay golden test.
-- 5: Prometheus + IAlertSink, encrypted credential store, runbooks.
-- 6: 60+ day continuous mainnet shadow divergence report, post-mortems for every halt/incident, CCB charter + decision log, signed exit review.
-
-**Final Go-Live Gate Table** (9 rows, all require two signatures + concrete evidence):
-1. All prior phases met.
-2. 60-day shadow report.
-3. Funding + tiered exercised 30d.
-4. DMS flatten tested.
-5. persist-strict + creds on 10 sessions.
-6. Prometheus alert drill.
-7. Runbooks walked.
-8. CCB size-increase approved.
-9. Independent safety review.
+See `prod.md` for the complete "why each flag" explanation, full exit criteria, ritual, and Go-Live Gate.
 
 ---
 
 ## 4. Prerequisites, Change Control, Task Tracking
 
-See prerequisites.md for the living Phase 1+ checklist (must be green before PRs touching frozen surface). Run `./scripts/check-live-safety-freeze.sh --check-head`, tick boxes, reference in PR.
+See [`prerequisites.md`](prerequisites.md) (living Phase 1+ checklist – must be green before any PR touching the frozen safety surface). Always run `./scripts/check-live-safety-freeze.sh --check-head` and include the result.
 
-todo.md is the phased task list (current Phase 1 items, future 2–6 bullets). Every frozen PR must reference relevant items. Update after phase completion.
+See [`todo.md`](todo.md) for the current phased task list. Every frozen-surface PR **must** reference the relevant item(s) here. Update `todo.md` after phase completion or when new work is identified.
 
-reports/phase0/ contains the evidence machinery (README for layout, PROGRESS.md tracker, PHASE0_COMPLETION_PLAN for campaign details, ops/ for batch reviews, templates/ for session notes).
+`reports/phase0/` (with `PROGRESS.md`, templates, and ops/ batch reviews) contains the evidence machinery. Use the scripts in `scripts/phase0/` to generate commands and post-session artifacts.
 
 ---
 
@@ -175,13 +150,23 @@ ctest --test-dir build
 
 **Core groups** (selected critical; full tables in original instructions §12):
 - Mode: `--mode backtest|shadow|live`, `--live` (required for real orders on mainnet + math captcha red banner; auto-skipped on --testnet).
-- Provider: `--provider local|binance|binance-futures`, `--symbol`, `--stream trade|kline_*|depth*`, `--depth-stream depth20@100ms` (for L2/queue), `--testnet`.
+- Provider: `--provider local|binance|binance-futures|synthetic`, `--symbol`, `--stream trade|kline_*|depth*`, `--depth-stream depth20@100ms` (for L2/queue), `--testnet`.
+  - `--provider synthetic` (or `montecarlo`) generates GBM paths on the fly. Use `--mc-params "mu=0.0,sigma=0.65,n_steps=2000,initial_price=65000"` for control. All realism flags work unchanged. Can be used standalone for single synthetic paths or together with `--monte-carlo` for full campaigns.
+- Monte Carlo campaigns: `--monte-carlo --mc-trials N --mc-model gbm --mc-params "..." --strategy mean-reversion`.
+  - Supports `--persist` (writes campaign summary to QuestDB under the run_tag or auto-generated `mc_<ts>` tag) and `--run-tag`.
+  - Outputs text summary + compact JSON. Per-trial determinism via `--seed`.
+  - **Phase 5 experimental**: `--mc-parallel` runs trials concurrently using std::jthread. **Strong caveats**:
+    - Conflicts with engine pinning, threading presets (recommend `--thread-preset inline`).
+    - Result collection order not guaranteed (though aggregates are correct).
+    - Not recommended for production validation yet.
+  - Full example and limitations are documented in the Monte Carlo section below.
 - Futures extras: `--margin-type isolated|cross`, `--margin-type-strict`, `--liquidation-warn-pct`, risk caps (`--max-notional`, `--max-leverage`, `--min-liq-distance-pct`), DMS (`--dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 --disarm-deadman`), kill (`--kill-switch-deadline-ms 5000`).
 - Credentials: env `TRUETEST_BINANCE_*` (preferred; argv leaks to ps), `--api-key/--api-secret` (warns).
-- Strategy: `--strategy sma,mean-reversion`, `--param key=value` (multi-strategy comma-separated).
+- Strategy: `--strategy sma,mean-reversion,structure-continuation,adaptive-hybrid`, `--param key=value` (multi-strategy comma-separated). Full list via `--help` or `StrategyRegistry`.
 - Risk/portfolio: `--initial-cash`, `--risk-fraction`, `--sl-atr`, `--tp-atr`, `--max-daily-loss`, `--max-trades-per-hour`, `--risk-unwind 0.4`, `--reconcile-tolerance-bps`.
 - Realism (backtest/shadow only; bypassed in live): `--realistic-fills`, `--order-latency-us N --order-latency-stddev-us M`, `--impact-k-bps`, `--bar-spread-bps`, `--queue-model l2-snapshot` (shadow + depth-stream), `--maker-queue-model uniform|front|back` (paper + depth-stream; uniform recommended default).
 - Threading: `--thread-preset inline|light|standard|full|extended` (auto from cores), `--spin-policy adaptive|spin|yield`, `--no-pin`, `--seed`.
+- **Presets** (new, see P1 work): `--preset futures-phase0|mc-robustness|backtest-local-l2|shadow-tape` — named bundles that supply realistic groups of flags (DMS/risk caps for phase0, reuse+gbm for MC, L2 queue+realistic-fills for backtests, etc.). Explicit flags and `--config` always win. Use with scripts and in the interactive TUI quick-start menu.
 - Persistence: `--persist --run-tag myrun_YYYYMMDD_HHMM` (QuestDB), `--checkpoint path`.
 - Replay/Record: `--replay events.bin --replay-from/--to`, `--record`, `--replay-data`.
 - Output: `--output results.json`, `--status-format tui|ndjson|minimal`, `--log-events`, `--log-rotation`.
@@ -190,7 +175,7 @@ ctest --test-dir build
 
 **JSON config**: Full engine_config schema (mode, provider, strategy, risk, threading, persistence, realism, etc.). See instructions §13 for keys.
 
-**start.sh launcher** and many numbered examples in instructions §29–35 (backtest minimal → full futures live with DMS/persist/risk caps → sanitizers → PGO training → replay → QuestDB queries, etc.).
+The launcher scripts and many numbered examples in instructions §29–35 (backtest minimal → full futures live with DMS/persist/risk caps → sanitizers → PGO training → replay → QuestDB queries, etc.).
 
 ---
 
@@ -204,7 +189,7 @@ ctest --test-dir build
 
 **Data validation + formats**: Strict schema checks; see instructions §19.
 
-**Realism models** ([architecture/realism.md](architecture/realism.md) — all default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
+**Realism models** (`docs/architecture/realism.md` planned — current summary: all default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
 - `--realistic-fills`: passive/resting prices, one fill_event per level walked.
 - Latency: two layers (`latency_model` strategy→eligible, `wire_latency_model` order→venue).
 - Impact: SquareRootImpactModel applied before aggression.
@@ -219,7 +204,7 @@ ctest --test-dir build
 
 ## 8. Strategies, Exits, Brackets, Full Order Lifecycle (futures-order-lifecycle.md + exits/)
 
-Strategies self-register via `REGISTER_STRATEGY` (sma, mean-reversion, ma-crossover, hedge-demo + indicators sma/ema/rsi/bollinger). Multi-strategy support. Emit `order_event` + `exit_intent` vectors.
+Strategies self-register via `REGISTER_STRATEGY` (sma, mean-reversion, ma-crossover, breakout/coiled-spring, adaptive-hybrid, structure-continuation + indicators sma/ema/rsi/bollinger/ema_regime/stochastic/swing_detector). Multi-strategy support. Emit `order_event` + `exit_intent` vectors.
 
 **ExitManager + brackets**: Per-lot SL/TP/trailing; `IBracketAdapter` (OCO spot, separate reduceOnly STOPs + closePosition futures). Non-atomic on futures but with auto-cancel guarantee in adapter.
 
@@ -289,9 +274,9 @@ Lock-free SPSC RingBuffer (64k slots) per worker preset. Presets: inline (single
 
 **Build**: `-DENABLE_QUESTDB=ON` (raw POSIX sockets; zero new runtime deps).
 
-**Runtime**: `--persist --run-tag myrun` (validated chars). Soft warning + continue (disabled) if daemon unreachable. Hard-fail (`--persist-strict`) is Phase 4 TODO.
+**Runtime**: `--persist --run-tag myrun` (validated chars). Supports `--questdb-flush-ms` (default 150) for time-based ILP flushing during long runs. Soft warning + continue (disabled) if daemon unreachable at start. Hard-fail (`--persist-strict`) is future work (see questdb-multi-week-hardening-guide.md).
 
-**Current as-built implementation** (db.md explicit): Direct calls to `QuestdbStore` (mutex-protected) from engine capture points; batched `IlpWriter` on own thread. Original ring + QuestDbWorker design was simplified and never built (historical text retained in db.md for audit).
+**Current as-built implementation** (db.md + questdb-multi-week-hardening-guide.md): Direct calls to `QuestdbStore` (mutex-protected) from engine capture points + periodic `maybe_questdb_tick()` from main run loops (200 ms reporting blocks) for time-based flushing. `IlpWriter` handles buffering + reconnect. See Phase 1 of the hardening guide for details.
 
 **Schema** (full DDL in db.md Appendix A):
 - `runs_meta` (two rows per run: sync + worker for dedup).
@@ -343,14 +328,13 @@ Acceptance commands and methodology in the doc. Ties to realism + demo-trading-w
 
 ---
 
-## 15. Operator SOPs, Testnet Guides, Demo Workflows, Killswitch Timeline (full operational ladder)
+## 15. Operator SOPs, Testnet Guides, Demo Workflows (see governance + reports/phase0/)
 
-**Recommended 5-step pre-mainnet validation path** (repeated across futures-testnet.md, demo-trading-workflow.md, user-manual, futures-phase0-operator-sop.md):
-1. Backtest + realism models on recorded real mainnet futures tape.
-2. Deterministic replay.
-3. Live mainnet shadow (`TradeTapeShadowAdapter` + ShadowTracker for sim vs exchange divergence).
-4. Protocol/wire + safety validation on futures testnet (DMS playbook A–E, one-way, recon, refusals; **never calibrate realism here** — synthetic liquidity).
-5. Tiny-size Phase 0 mainnet under official SOP + full artifacts.
+See `prod.md` (Phase 0 command template + full ritual + "why each element" + Go-Live Gate) + root `todo.md` (P0-01..P0-04 + D-02; current 0/15; Phase 0 collection was paused during priority work on the monte-carlo branch — MC changes did not alter P0 gates or the live safety surface) + `reports/phase0/` (operational evidence home) + `scripts/phase0/`.
+
+**Planned** (Doc Phases 1-2; current details live in prod.md / reports/phase0/ per CLAUDE rule): `docs/operations/futures-testnet.md`, `docs/operations/futures-phase0-operator-sop.md` (printable; P0-03), `docs/operations/demo-trading-workflow.md`, and related under `docs/operations/`. `docs/architecture/` files (target-architecture.md etc. — Doc Phase 2 / D-03) also planned; see `docs/README.md` for realized vs. aspirational map.
+
+Tiny-size Phase 0 mainnet under conservative caps + full artifacts + two-person batch sign-off is the current gate.
 
 **futures-testnet.md** (USDT-M): Account one-way mode, `--testnet`, math-captcha skipped, pre-trade caps + liquidation projection math, DMS details + 5-scenario playbook, refusal modes table, what engine does (recon, kill, brackets), gotchas (thin book, resets, partial brackets declined), integration smoke test.
 
@@ -368,16 +352,15 @@ Acceptance commands and methodology in the doc. Ties to realism + demo-trading-w
 
 ---
 
-## 16. Phase 0 Evidence Collection, Templates, PROGRESS (reports/phase0/*)
+## 16. Phase 0 Evidence Collection (reports/phase0/*)
 
-- **PROGRESS.md**: Master tracker table (#, Date, Run Tag, Symbol, Regime, Notional Cap, Daily Loss, Drift bps, Artifacts, Retro?, Reviewed, Notes). 0/15 qualifying. Update after every session. Batch review log every 5.
-- **PHASE0_COMPLETION_PLAN.md**: Detailed campaign (prep + 3 batches of 5 + buffer, per-session workflow with scripts/phase0/new-session.sh + post-session.sh + analyze-log.sh, volatility targeting, abort conditions, deliverables, sign-off).
-- **templates/phase0-session-note.md**: One-page signed note (redacted command, metrics, incident log, declaration checkboxes for safety wires/captcha/no unexplained drift/artifacts, signatures).
-- **ops/batch-review-template.md**: Per-batch package (summary table, regime coverage, evidence checklist per session, observations, volatility method, dual sign-off).
-- **ops/volatility-log.md**: Thresholds (High >60% or spike, Med 35-60, Low <35 via TradingView/Binance 7/14d BTC vol) + table + `./scripts/phase0/volatility-classifier.sh`.
-- **scripts/phase0/**: new-session, post-session, analyze-log, volatility-classifier, create-evidence-bundle, dry-run-phase0, etc.
+See `reports/phase0/README.md` (layout + 6-step ritual summary), `PROGRESS.md` (master tracker; 0/15 qualifying), `templates/phase0-session-note.md` (printable signed form), and `scripts/phase0/` (new-session.sh etc. that target dated subdirs under reports/phase0/).
 
-**Volatility regime labeling** required for every qualifying session. Retroactive credit rules defined.
+**Current P0 status & items**: See root `todo.md` (P0-01..P0-04; Phase 0 collection was paused during priority work on the monte-carlo branch — MC changes did not alter P0 gates or the live safety surface) + `prod.md` (full authoritative ritual + template + exit criteria).
+
+**Planned**: `docs/operations/futures-phase0-operator-sop.md` (printable SOP; Doc Phase 1; current details in prod.md + reports/phase0/). `PHASE0_COMPLETION_PLAN.md` and some ops/ templates referenced in older notes — current operational home is reports/phase0/ + scripts/phase0/.
+
+**Volatility regime labeling** + batch reviews every 5 with two signatures required (see reports/phase0/PROGRESS.md + todo P0-02).
 
 ---
 
@@ -428,32 +411,21 @@ Authoritative table:
 5. Two-person CCB + 4h/8h clean mainnet shadow before merge.
 6. Sign decisions/phase1-freeze-*.md.
 
-**Phase 0 Qualifying Session Ritual** (print/sign futures-phase0-operator-sop.md every time):
-- Pre: new-session.sh, export keys, open math-captcha, confirm one-way in Binance UI, verify DMS counter advancing.
-- Command: use (or exceed) the conservative template above.
-- During: physical presence entire session; monitor TUI (DMS, risk, snapshots, health); math-captcha visible (mainnet).
-- Post-halt: mandatory `grep -i "POSITION-SNAPSHOT|funding|drift" <event-log>` before resume.
-- Post: post-session.sh, human fills/signs note, append PROGRESS row, commit artifacts (zstd log, QuestDB, note), classify regime, batch review every 5.
+**Phase 0 Qualifying Session Ritual & Evidence** (see `prod.md` for the authoritative template + full ritual + "why each element"; see `reports/phase0/` (README + PROGRESS.md + templates/phase0-session-note.md) + `scripts/phase0/` (new-session.sh, post-session.sh, volatility-classifier.sh) for operational machinery. Current details live in prod.md + reports/phase0/; printable SOP planned for `docs/operations/futures-phase0-operator-sop.md` — Doc Phase 1).
 
-**Pre-Merge Safety (MODEL.md)**: Diff with Opus (or human), target gate not bypassed, halt terminal, scripts pass, no new anti-patterns, model noted.
+**Current P0 items & status**: See root `todo.md` (P0-01..P0-04; 0/15 qualifying; Phase 0 collection was paused during priority work on the monte-carlo branch — MC changes did not alter P0 gates or the live safety surface).
 
-**Go-Live Gate**: All 9 rows two signatures + evidence.
+**Pre-Merge Safety & Phase 1 Freeze Procedure**: See `prerequisites.md` (full living checklist) + `CLAUDE.md` (model selection + token/CCB rules) + root `todo.md` (P1-01..P1-05 + frozen files list + process). Run `./scripts/check-live-safety-freeze.sh --check-head`; PR must contain `LIVE_SAFETY_CCB_APPROVED` + todo refs + "prod.md impact" note; 4h/8h clean mainnet shadow required before merge.
 
-**Perf Locking**: Reference 5+ median runs on workload → update perf-baseline.md + regression guard.
+**Go-Live Gate**: All 9 rows require two signatures + concrete evidence (see `prod.md` for the table; "No capital tier increase is permitted until...").
 
-**DMS Validation (testnet)**: Run 5 scenarios A–E with independent monitoring + recording.
-
-**Network Partition Drill**: Use `--dms-attempt-position-close` + independent machine + post-reconcile + exact timing log.
-
-**QuestDB Health**: Watch for soft warning; continue disabled is acceptable today.
-
-**Volatility + Batch Review**: Use scripts + templates; dual sign-off.
+**Other checklists** (DMS validation, network partition drill, QuestDB health, volatility + batch review, perf locking): See `prod.md`, `prerequisites.md`, root `todo.md` (S-*, H-*, P0-*, D-*), `scripts/`, and `reports/phase0/`. Long-form lives in governance docs per CLAUDE extraction rule.
 
 ---
 
 ## 21. Master List of Critical Warnings & Non-Negotiables (consolidated from all)
 
-- Never increase capital tier without prior phase exits + full Go-Live Gate sign-offs.
+- Never increase the author's personal capital tier without prior phase exits + full Go-Live Gate sign-offs (and only for the author's tiny attended personal experiments).
 - Never edit frozen safety surface without token + CCB + shadow run (script enforces).
 - Halt is terminal — any code suggesting resume/retry/cooldown on halt paths is rejected.
 - No JSON on hot path; no allocations where possible; SPSC discipline strict.
@@ -502,16 +474,89 @@ Cross-references point to files now organized under `architecture/`, `operations
 
 ## 23. Document Maintenance & Evolution
 
-- Living documents — update after every phase completion, before capital tier increase, and after any material change to frozen surface.
-- Every PR touching core/risk/safety/live-provider must add migration.md entry and reference todo/prod impact.
-- This master instructions.md is now the single source; other .md files may be archived or point here.
-- Phase 0/1 artifacts (reports/phase0/, decisions/phase1-freeze-*.md) are permanent evidence.
-- Minor sync lags (e.g., "9 files" vs 10 in enforcement, gaps.md vs prod Phase 2 status, stale QuestDB worker text in instructions) are evolution artifacts — trust the most recent prod/CLAUDE + db.md reality + this master.
+See root governance (especially `CLAUDE.md` "Documentation Maintenance Rules", `prod.md`, `prerequisites.md`, and the new consolidated `todo.md`) for the authoritative process:
+- Root gov files + reports/phase0/ + CLAUDE are the single source of truth for phases, gates, checklists, tasks, AI/reviewer rules, and evidence.
+- Every frozen-surface PR must reference relevant `todo.md` items + run the check script + carry `LIVE_SAFETY_CCB_APPROVED`.
+- On phase exit (declared in `prod.md`): update `todo.md` (move/strike + follow-ups), prereq if evolved, last-updated notes.
+- Aspirational cross-refs *must* use explicit language: "Planned for Doc Phase X – current details live in prod.md / instructions.md §N".
+- Extraction rule (CLAUDE): long-form phases/ritual/gates in `prod.md` (or dedicated SOP); this file = pointers + quick templates + MC/CLI/safety how-to.
+- Anti-rot ritual before any personal capital tier increase (when the author chooses to pursue it): "docs verified + links resolve + `todo.md` updated".
+- On MC/simulation landings: update MC section here + gov mentions (README, todo, prod, CLAUDE) in same PR.
+- If broken/stale cross-ref: treat as doc bug.
 
-**Related authoritative files**: Root governance ([CLAUDE.md](../CLAUDE.md), [prod.md](../prod.md), [prerequisites.md](../prerequisites.md), [todo.md](../todo.md)), plus the reorganized set under `docs/` (see [docs/README.md](README.md)). Historical material lives in `docs/archive/`. Phase 0 evidence is in `../reports/phase0/`.
+**Current realized layout**: See `docs/README.md`. Historical material under `docs/archive/` (e.g. questdb hardening log moved here post-consolidation). Phase 0 evidence strictly in `../reports/phase0/`.
+
+**This consolidation (2026)**: Scattered action lists / todo sections / duplicate P0/P1/MC/R/S/D details purged from docs/ files into single root `todo.md`. See root `todo.md` (D-06 + all current P0/MC/R/S/A/H items) for the full list of documentation hygiene tasks. Minor sync lags (9-vs-10 files, gaps status, planned SOP refs) noted and being cleaned.
 
 ---
 
-**End of Master Consolidated Instructions.** All content from the original corpus has been read, deeply analyzed by multiple agents with extended cross-referenced thinking, and unified here for completeness. Use this document for all operator, developer, reviewer, and production decisions. For the absolute latest code state, always verify against HEAD + the enforcement scripts.
+**End of Master Consolidated Instructions.** All content from the original corpus has been read, deeply analyzed by multiple agents with extended cross-referenced thinking, and unified here for completeness. Use this document for the author's personal research, development, private use decisions, and safety hygiene only. For the absolute latest code state, always verify against HEAD + the enforcement scripts.
 
 *Generated 2026-05 via parallel subagent synthesis of the full Markdown corpus.*
+
+---
+
+## Monte Carlo Simulation
+
+**Current branch note**: Introduced on the `monte-carlo` branch. Now available in mainline in all three binaries (`engine_backtest`, `engine_shadow`, `engine_live`). This is a backtest / research / risk-distribution capability and does not affect live-order safety surfaces or Phase 0/1 capital gates.
+
+TrueTest includes a first-class Monte Carlo engine for stochastic backtesting.
+
+### Basic Usage
+```bash
+./build/engine_backtest \
+  --monte-carlo \
+  --mc-trials 500 \
+  --mc-model gbm \
+  --mc-params "n_steps=2000,mu=0.08,sigma=0.65,initial_price=65000" \
+  --strategy mean-reversion \
+  --seed 42 \
+  --persist --run-tag mc_btc_500
+```
+
+This runs 500 independent GBM paths, executes your strategy on each, and prints:
+- Per-trial and aggregate P&L / Sharpe / max DD statistics
+- Compact JSON summary (machine readable)
+- QuestDB summary row (when `--persist` is used)
+
+### Key Flags
+- `--mc-trials N` — number of paths (required for MC mode)
+- `--mc-model gbm` — generator (only gbm implemented; ou listed for future)
+- `--mc-params "key=val,..."` — generator parameters (n_steps, mu, sigma, etc.)
+- `--mc-parallel` — **experimental** (Phase 5) concurrent trials (see warnings below)
+- All normal realism flags (`--realistic-fills`, `--order-latency-us`, etc.) and `--strategy` (any registered strategy, including structure-continuation / adaptive-hybrid) are respected per trial.
+
+### Parallel Execution (Phase 5)
+```bash
+... --mc-parallel --thread-preset inline
+```
+
+**Strong warnings** (printed at runtime):
+- Conflicts with engine core pinning and most threading presets.
+- Use `--thread-preset inline` for safety.
+- Result ordering inside aggregates is not deterministic.
+- Not yet recommended for production risk analysis.
+
+Future versions may add better thread-pool control and deterministic parallel RNG partitioning.
+
+### Reproducibility
+- `--seed` sets the master seed.
+- Every trial receives a deterministic derived seed (`base_seed ^ (trial_id * magic)`).
+- Same binary + same flags + same seed = bit-identical aggregates (when not using `--mc-parallel`).
+
+### Limitations (current)
+- Synthetic L2 is stylized (constant spread + noise; sufficient for basic queue/impact testing but not a full orderbook replay).
+- No automatic parameter calibration from historical data yet.
+- Parallel mode (`--mc-parallel`) has strong caveats (see above); result ordering is non-deterministic.
+- QuestDB integration currently writes only a lightweight campaign summary row (per-trial full lifecycle capture is future work; combine with per-trial `--run-tag` for now).
+
+### Performance Notes
+- **Object reuse** (`--mc-reuse-objects`): Reuses `data_handler`, strategies, and many expensive engine-internal structures (`portfolio`, `Analytics`, `ExitManager`, `OrderTracker`, `RiskManager`, orderbooks, caches, etc.) between trials instead of full reconstruction. This significantly reduces per-trial overhead.
+  - Status: Good enough for real speedups on most workloads. Full bit-identical results across every internal detail (especially engine-internal caches and order trackers) are not guaranteed.
+- Win rate and profit factor (mean/median + % of trials with PF > 1) are now reported for every campaign (MC-02). Useful for stochastic robustness analysis.
+- Batch path generation (`generate_batch`) is used for cache efficiency.
+- **Parallel execution** (`--mc-parallel`): On a 16-core machine with `--thread-preset inline`, can deliver substantial wall-time speedup on CPU-bound strategies for large N. Strong caveats apply (see Parallel Execution section above).
+- Recommended combination for maximum throughput: `--mc-reuse-objects --mc-parallel --thread-preset inline`.
+- Always measure with your specific strategy and realism settings, as gains vary significantly with workload.
+
+See `src/simulation/` (and `src/providers/synthetic/`) for the `IMonteCarloGenerator`, `MonteCarloController`, `GBMGenerator`, `SyntheticProvider`, and `MonteCarloReporter` implementations. Tests live in `tests/test_monte_carlo_*.cpp`.

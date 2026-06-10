@@ -105,6 +105,7 @@ struct AnalyticsReport
     double avg_holding_period_ms = 0.0;
 
     std::size_t total_trades = 0;
+    std::size_t winning_trades = 0;
     double win_rate = 0.0;
     double avg_win = 0.0;
     double avg_loss = 0.0;
@@ -185,6 +186,9 @@ public:
     double rolling_sharpe() const;
     double rolling_max_drawdown() const;
 
+    // Phase A (MC object reuse)
+    void reset(double initial_cash);
+
     // Cheap O(n) copy of the last n equity values for the live TUI's
     // sparkline strip — avoids snapshot()'s full report rebuild on every
     // render tick. Returns the most recent n samples (or fewer if the
@@ -234,6 +238,8 @@ public:
             : static_cast<double>(win_count_)
               / static_cast<double>(trade_returns_.size()) * 100.0;
     }
+
+    std::size_t winning_trades() const { return win_count_; }
 
 private:
     void on_market(const market_event& m);

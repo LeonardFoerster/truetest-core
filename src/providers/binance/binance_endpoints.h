@@ -43,8 +43,8 @@ inline endpoints spot_testnet()
 inline endpoints usdm_mainnet()
 {
     return {
-        "fstream.binance.com", "9443",
-        "fapi.binance.com",    "443",
+        "fstream.binancefuture.com", "443",
+        "fapi.binance.com",          "443",
         false,
         venue::usdm_futures
     };

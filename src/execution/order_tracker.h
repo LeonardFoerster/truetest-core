@@ -66,6 +66,9 @@ public:
         return count;
     }
 
+    // Phase A (MC object reuse)
+    void reset() { statuses_.clear(); }
+
 private:
     std::unordered_map<uint64_t, order_status> statuses_;
 };

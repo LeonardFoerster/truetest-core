@@ -10,7 +10,10 @@
 #include "risk/futures_risk_check.h"
 #include "exits/bracket_adapter.h"
 
+#include "core/event.h"
+
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -20,6 +23,12 @@
 #include <vector>
 
 class engine_config;
+
+using funding_event_factory = std::function<std::shared_ptr<funding_event>(
+    std::chrono::system_clock::time_point ts,
+    const std::string& symbol,
+    double cash_delta,
+    const std::string& reason)>;
 
 class IProvider
 {
@@ -109,4 +118,15 @@ public:
 	// Default is no-op. Wired by the engine after construction.
 	virtual void set_event_publisher(
 		std::function<void(std::shared_ptr<event>)> /*fn*/) {}
+
+	// Optional pooled funding_event factory wired by the engine (Phase 1).
+	// When set, futures providers use this instead of make_shared on the
+	// user-data path.
+	virtual void set_funding_event_factory(funding_event_factory fn)
+	{
+		funding_event_factory_ = std::move(fn);
+	}
+
+protected:
+	funding_event_factory funding_event_factory_;
 };

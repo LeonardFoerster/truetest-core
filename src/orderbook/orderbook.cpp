@@ -1,4 +1,5 @@
 #include "orderbook.h"
+#include "../types/control_block_pool.h"
 #include "../types/order_id.h"
 #include <stdexcept>
 #include <algorithm>
@@ -28,7 +29,36 @@ bool order::is_filled() const { return remaining_quantity == 0; }
 
 order_pointer order_modify::to_order_pointer(ob_order_type type) const
 {
+    // Cold path (modify/replay): heap fallback when no orderbook pool is wired.
     return std::make_shared<order>(type, get_order_id(), get_side(), get_price(), get_quantity());
+}
+
+void orderbook::configure_order_pool(ControlBlockPool* cb_pool,
+                                     std::size_t min_blocks,
+                                     bool forbid_runtime_grow)
+{
+    order_pool_.set_pool_name("orderbook_order_pool");
+    if (cb_pool)
+        order_pool_.set_control_block_pool(cb_pool);
+    order_pool_.ensure_min_blocks(std::max(min_blocks, std::size_t{1}));
+    order_pool_.set_forbid_runtime_grow(forbid_runtime_grow);
+    order_pool_ready_ = true;
+}
+
+void orderbook::ensure_order_pool_ready()
+{
+    if (order_pool_ready_)
+        return;
+    order_pool_.set_pool_name("orderbook_order_pool");
+    order_pool_.ensure_min_blocks(1);
+    order_pool_ready_ = true;
+}
+
+order_pointer orderbook::create_order(ob_order_type type, order_id id, side s,
+                                      Price price, quantity qty)
+{
+    ensure_order_pool_ready();
+    return order_pool_.acquire(type, id, s, price, qty);
 }
 
 order_id order_modify::get_order_id() const { return orderId_; }
@@ -326,8 +356,8 @@ bool orderbook::modify_order(order_id id, Price new_price, quantity new_qty)
 
     cancel_order(id);
 
-    auto new_order = std::make_shared<order>(existing_type, id, existing_side,
-                                              new_price, new_qty);
+    auto new_order = create_order(existing_type, id, existing_side,
+                                  new_price, new_qty);
 
     order_node* node = alloc_node();
     node->order = new_order;
@@ -370,16 +400,19 @@ void orderbook::clear()
     ask_levels_.clear();
 }
 
-void orderbook::apply_l2_snapshot(const std::vector<std::pair<Price, quantity>>& bids,
-                                   const std::vector<std::pair<Price, quantity>>& asks)
+void orderbook::apply_l2_snapshot(const std::pair<Price, quantity>* bids,
+                                   std::size_t bid_count,
+                                   const std::pair<Price, quantity>* asks,
+                                   std::size_t ask_count)
 {
     clear();
 
-    for (const auto& [p, q] : bids)
+    for (std::size_t i = 0; i < bid_count; ++i)
     {
+        const auto& [p, q] = bids[i];
         if (q == 0) continue;
-        auto o = std::make_shared<order>(ob_order_type::good_till_cancel,
-                                          OrderIdGenerator::next(), side::buy, p, q);
+        auto o = create_order(ob_order_type::good_till_cancel,
+                              OrderIdGenerator::next(), side::buy, p, q);
         order_node* n = alloc_node();
         n->order = o;
         auto& lvl = find_or_insert_level(bid_levels_, p, side::buy);
@@ -387,11 +420,12 @@ void orderbook::apply_l2_snapshot(const std::vector<std::pair<Price, quantity>>&
         order_map_[o->get_order_id()] = n;
     }
 
-    for (const auto& [p, q] : asks)
+    for (std::size_t i = 0; i < ask_count; ++i)
     {
+        const auto& [p, q] = asks[i];
         if (q == 0) continue;
-        auto o = std::make_shared<order>(ob_order_type::good_till_cancel,
-                                          OrderIdGenerator::next(), side::sell, p, q);
+        auto o = create_order(ob_order_type::good_till_cancel,
+                              OrderIdGenerator::next(), side::sell, p, q);
         order_node* n = alloc_node();
         n->order = o;
         auto& lvl = find_or_insert_level(ask_levels_, p, side::sell);
@@ -422,8 +456,8 @@ void orderbook::apply_l2_update(side side, Price price, quantity new_qty)
 
     if (new_qty > 0)
     {
-        auto o = std::make_shared<order>(ob_order_type::good_till_cancel,
-                                          OrderIdGenerator::next(), side, price, new_qty);
+        auto o = create_order(ob_order_type::good_till_cancel,
+                              OrderIdGenerator::next(), side, price, new_qty);
         order_node* n = alloc_node();
         n->order = o;
         auto& lvl = find_or_insert_level(levels, price, side);

@@ -2,6 +2,7 @@
 #include "strategy/sma_strategy.h"
 #include "strategy/mean_reversion_strategy.h"
 #include "strategy/ma_crossover_strategy.h"
+#include "strategy/breakout_strategy.h"
 
 static auto epoch_ms(int64_t ms)
 {
@@ -180,4 +181,28 @@ TEST(Strategy, OnL2UpdateDefault)
     sma_strategy s(3);
     l2_update_event e(epoch_ms(0), "X", tick_side::bid, 100.0, 50);
     EXPECT_EQ(s.on_l2_update(e), std::nullopt);
+}
+
+// --- Breakout Strategy (Coiled Spring) ---
+
+TEST(BreakoutStrategy, WarmupNoSignal)
+{
+    breakout_strategy s(10000.0, 0.005);
+    s.set_position_open("TEST", false);
+    // Need ~14 ATR + 20 vol bars
+    for (int i = 0; i < 25; ++i)
+    {
+        auto m = market_event(epoch_ms(i * 1000), "TEST", 100.0, 101.0, 99.0, 100.0, 1000);
+        EXPECT_EQ(s.on_market(m), std::nullopt);
+    }
+}
+
+TEST(BreakoutStrategy, ParamsSchemaHasBreakoutKeys)
+{
+    breakout_strategy s;
+    auto schema = s.get_param_schema();
+    bool has_equity = false;
+    for (const auto& p : schema) if (p.name == "equity") has_equity = true;
+    EXPECT_TRUE(has_equity);
+    EXPECT_TRUE(s.get_indicator_values("FOO").empty());
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../types/price.h"
+#include "../types/object_pool.h"
 
 #include <list>
 #include <vector>
@@ -9,6 +10,8 @@
 #include <cstdint>
 #include <string>
 #include <algorithm>
+
+class ControlBlockPool;
 
 class order;
 class order_modify;
@@ -154,6 +157,14 @@ struct price_level
 class orderbook
 {
 public:
+    // Phase 4: pooled order bodies + control blocks (wired from engine prewarm).
+    void configure_order_pool(ControlBlockPool* cb_pool,
+                              std::size_t min_blocks,
+                              bool forbid_runtime_grow);
+
+    order_pointer create_order(ob_order_type type, order_id id, side s,
+                               Price price, quantity qty);
+
     trades add_order(order_pointer order);
     void cancel_order(order_id order_id);
     trades match_order(order_modify order);
@@ -161,12 +172,24 @@ public:
     std::size_t size() const;
     orderbook_lvl_infos get_order_infos() const;
 
+    void apply_l2_snapshot(const std::pair<Price, quantity>* bids, std::size_t bid_count,
+                           const std::pair<Price, quantity>* asks, std::size_t ask_count);
+
     void apply_l2_snapshot(const std::vector<std::pair<Price, quantity>>& bids,
-                           const std::vector<std::pair<Price, quantity>>& asks);
+                           const std::vector<std::pair<Price, quantity>>& asks)
+    {
+        apply_l2_snapshot(bids.data(), bids.size(), asks.data(), asks.size());
+    }
     void apply_l2_update(side side, Price price, quantity new_qty);
     void clear();
 
+    ~orderbook() { clear(); }
+
 private:
+    ObjectPool<order> order_pool_;
+    bool order_pool_ready_ = false;
+
+    void ensure_order_pool_ready();
     static constexpr std::size_t NODE_BLOCK_SIZE = 4096;
     struct node_block { order_node nodes[NODE_BLOCK_SIZE]; };
     std::vector<std::unique_ptr<node_block>> node_blocks_;

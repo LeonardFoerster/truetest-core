@@ -9,6 +9,8 @@
 #include <utility>
 #include <unordered_map>
 #include <vector>
+#include <filesystem>
+#include <string_view>
 
 
 bool data_handler::load_into_queue(std::string date, std::string symbol, double o, double h, double l, double c, int64_t v)
@@ -137,27 +139,59 @@ void data_handler::load_from_csv(const std::filesystem::path& path)
             throw std::runtime_error("CSV missing required column: " + std::string(name));
     }
 
+    // Performance: rough pre-reserve based on file size heuristic.
+    // Combined with the fast field walking below and fast_stoll this makes
+    // the legacy path also usable for reasonably large files without instant pain.
+    const auto fsz = std::filesystem::file_size(path);
+    const size_t est_rows = (fsz > 0) ? (fsz / 60 + 1024) : 2'000'000;
+    reserve(est_rows);
+
     while (std::getline(file, line))
     {
         if (line.empty()) continue;
 
-        std::vector<std::string> tokens;
+        // Same lightweight field extraction as the fast CsvBarParser.
+        std::vector<std::string_view> fields;
+        fields.reserve(8);
+        std::string_view sv(line);
+        size_t pos = 0;
+        while (pos <= sv.size())
         {
-            std::stringstream ss(line);
-            std::string token;
-            while (std::getline(ss, token, ','))
-                tokens.emplace_back(std::move(token));
+            size_t next = sv.find(',', pos);
+            if (next == std::string_view::npos) next = sv.size();
+            fields.emplace_back(sv.substr(pos, next - pos));
+            if (next == sv.size()) break;
+            pos = next + 1;
         }
 
         try
         {
-            std::string date   = col_index.count("date")   ? tokens[col_index["date"]]   : "";
-            std::string symbol = col_index.count("symbol") ? tokens[col_index["symbol"]] : "";
-            double open        = std::stod(tokens[col_index["open"]]);
-            double high        = std::stod(tokens[col_index["high"]]);
-            double low         = std::stod(tokens[col_index["low"]]);
-            double close       = std::stod(tokens[col_index["close"]]);
-            int64_t volume     = col_index.count("volume") ? std::stoll(tokens[col_index["volume"]]) : 0;
+            auto get = [&](const char* name) -> std::string {
+                auto it = col_index.find(name);
+                if (it == col_index.end()) return {};
+                size_t idx = it->second;
+                return (idx < fields.size()) ? std::string(fields[idx]) : std::string{};
+            };
+
+            std::string date   = get("date");
+            std::string symbol = get("symbol");
+            std::string o_s    = get("open");
+            std::string h_s    = get("high");
+            std::string l_s    = get("low");
+            std::string c_s    = get("close");
+            std::string v_s    = get("volume");
+
+            double open    = o_s.empty() ? 0.0 : std::stod(o_s);
+            double high    = h_s.empty() ? 0.0 : std::stod(h_s);
+            double low     = l_s.empty() ? 0.0 : std::stod(l_s);
+            double close   = c_s.empty() ? 0.0 : std::stod(c_s);
+            int64_t volume = 0;
+            if (!v_s.empty())
+            {
+                // Legacy path: we accept a slightly slower stoll here.
+                // The hot path (CsvBarParser + DataBridge for --provider local) already uses fast_stoll.
+                try { volume = std::stoll(v_s); } catch (...) {}
+            }
 
             load_into_queue(date, symbol, open, high, low, close, volume);
         }
@@ -165,4 +199,36 @@ void data_handler::load_from_csv(const std::filesystem::path& path)
         {
         }
     }
+}
+
+// Phase A (MC reuse): clears all data so the handler can be reused for the next trial.
+void data_handler::reset()
+{
+    current_csv_row_index_ = 0;
+    validation_error_count_ = 0;
+
+    db_data_date.clear();
+    db_data_symbol.clear();
+    db_data_open_value.clear();
+    db_data_high_value.clear();
+    db_data_low_value.clear();
+    db_data_close_value.clear();
+    db_data_volume_value.clear();
+
+    tick_data.clear();
+}
+
+// Performance: pre-reserve to avoid repeated realloc + memmove when loading
+// large CSVs (1.7M+ rows over multiple years is common). This is one of the
+// biggest cheap wins for repeated backtests on multi-year bar data.
+void data_handler::reserve(std::size_t n)
+{
+    db_data_date.reserve(n);
+    db_data_symbol.reserve(n);
+    db_data_open_value.reserve(n);
+    db_data_high_value.reserve(n);
+    db_data_low_value.reserve(n);
+    db_data_close_value.reserve(n);
+    db_data_volume_value.reserve(n);
+    tick_data.reserve(n);
 }

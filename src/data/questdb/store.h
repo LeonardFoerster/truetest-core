@@ -29,6 +29,14 @@ struct StoreConfig
     double initial_equity = 0.0;
     std::string params_json;
     std::string notes;
+
+    // Phase 2 strict mode
+    bool strict = false;
+    std::string fallback_path;   // if non-empty, write raw ILP lines here on persistent failure
+
+    // Phase 4: Optional retention for per-run tables (e.g. 90 for 90 days)
+    // When > 0, DDLs will include "TTL <value> DAYS"
+    int ttl_days = 0;
 };
 
 class QuestdbStore
@@ -52,11 +60,21 @@ public:
     bool begin();
 
     // Finalise: flush pending ILP lines, append a second runs_meta row
-    // carrying ended_at + final equity + counters. Idempotent.
+    // carrying ended_at + final equity + counters + Phase 4 rich analytics.
+    // Idempotent.
     void end(double final_equity,
              std::size_t total_orders,
              std::size_t total_fills,
-             std::size_t total_rejections);
+             std::size_t total_rejections,
+             // Phase 4 richer campaign summary (optional, defaults to 0/NaN)
+             double max_drawdown = 0.0,
+             double sharpe_ratio = 0.0,
+             double sortino_ratio = 0.0,
+             double profit_factor = 0.0,
+             double win_rate = 0.0,
+             double calmar_ratio = 0.0,
+             std::size_t total_trades = 0,
+             std::size_t winning_trades = 0);
 
     // Capture points. virtual to enable mock subclasses in tests.
     virtual void record_order_submitted(const order_event& o,
@@ -85,16 +103,42 @@ public:
     // Phase 2: funding settlements (cash deltas)
     virtual void record_funding(const funding_event& fe, const std::string& run_tag);
 
+    // Phase 3: Generic richer logic/decision event capture
+    virtual void record_event(const std::string& event_type,
+                              const std::string& symbol,
+                              const std::string& strategy_name,
+                              std::uint64_t order_id,
+                              const std::string& severity,
+                              const std::string& message,
+                              const std::string& details_json = {});
+
     virtual void tick();   // honours time-based flush cadence
     virtual void flush();  // force-flush ILP buffer
 
     const std::string& run_tag() const { return cfg_.run_tag; }
+
+    // Minimal health snapshot for TUI / observability (Phase 0 + Phase 2).
+    struct Health
+    {
+        bool     connected = false;
+        std::size_t pending_lines = 0;
+        std::size_t dropped_lines = 0;
+        std::size_t fallback_lines = 0;
+        std::chrono::steady_clock::time_point last_flush{};
+        bool     strict_mode = false;
+    };
+
+    Health health() const;
 
 private:
     StoreConfig cfg_;
     std::unique_ptr<IlpWriter> ilp_;
     HttpExecFn http_exec_;
     std::chrono::system_clock::time_point started_at_{};
+
+    // Phase 2 fallback support
+    std::unique_ptr<std::ofstream> fallback_file_;
+    std::size_t fallback_lines_written_ = 0;
 
     // Serialises access to ilp_ across engine capture-point callers.
     mutable std::mutex mu_;

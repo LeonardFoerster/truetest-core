@@ -258,15 +258,15 @@ inline std::vector<uint8_t> serialise(const l2_snapshot_event& e)
 
     append_ts(e.get_timestamp());
     append_str(e.get_symbol());
-    append_u32(static_cast<uint32_t>(e.get_bids().size()));
-    for (const auto& lvl : e.get_bids()) {
-        append_f64(lvl.price);
-        append_i64(lvl.quantity);
+    append_u32(static_cast<uint32_t>(e.bid_count()));
+    for (std::size_t i = 0; i < e.bid_count(); ++i) {
+        append_f64(e.bid(i).price);
+        append_i64(e.bid(i).quantity);
     }
-    append_u32(static_cast<uint32_t>(e.get_asks().size()));
-    for (const auto& lvl : e.get_asks()) {
-        append_f64(lvl.price);
-        append_i64(lvl.quantity);
+    append_u32(static_cast<uint32_t>(e.ask_count()));
+    for (std::size_t i = 0; i < e.ask_count(); ++i) {
+        append_f64(e.ask(i).price);
+        append_i64(e.ask(i).quantity);
     }
     return buf;
 }
@@ -479,18 +479,29 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         auto ts = r.read_ts();
         auto symbol = r.read_str();
         uint32_t n_bids = r.read_u32();
-        std::vector<l2_level> bids(n_bids);
-        for (uint32_t i = 0; i < n_bids; ++i) {
+        std::array<l2_level, kL2SnapshotMaxLevels> bids{};
+        const std::size_t bid_n = std::min<std::size_t>(n_bids, kL2SnapshotMaxLevels);
+        for (std::size_t i = 0; i < bid_n; ++i) {
             bids[i].price = r.read_f64();
             bids[i].quantity = r.read_i64();
         }
+        for (uint32_t i = bid_n; i < n_bids; ++i) {
+            (void)r.read_f64();
+            (void)r.read_i64();
+        }
         uint32_t n_asks = r.read_u32();
-        std::vector<l2_level> asks(n_asks);
-        for (uint32_t i = 0; i < n_asks; ++i) {
+        std::array<l2_level, kL2SnapshotMaxLevels> asks{};
+        const std::size_t ask_n = std::min<std::size_t>(n_asks, kL2SnapshotMaxLevels);
+        for (std::size_t i = 0; i < ask_n; ++i) {
             asks[i].price = r.read_f64();
             asks[i].quantity = r.read_i64();
         }
-        return std::make_shared<l2_snapshot_event>(ts, symbol, std::move(bids), std::move(asks));
+        for (uint32_t i = ask_n; i < n_asks; ++i) {
+            (void)r.read_f64();
+            (void)r.read_i64();
+        }
+        return std::make_shared<l2_snapshot_event>(ts, symbol,
+            bids.data(), bid_n, asks.data(), ask_n);
     }
     case event_type::l2_update: {
         auto ts = r.read_ts();

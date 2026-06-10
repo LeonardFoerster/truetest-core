@@ -39,11 +39,21 @@
 #include "utils/log/logger.h"
 #include <tt/truetest_version.h>
 
+#include "presets/preset.h"
+
 #include "providers/provider_registry.h"
 #include "providers/data_bridge.h"
 #include "providers/provider_sink.h"
 #include "providers/local/csv_parser.h"
 #include "providers/local/file_transport.h"
+
+// Monte Carlo support (Phase 2+)
+#include "simulation/monte_carlo_controller.h"
+#include "simulation/monte_carlo_reporter.h"
+
+#ifdef HAS_QUESTDB
+#include "data/questdb/store.h"
+#endif
 #include "ui/console_dashboard.h"
 #ifdef HAS_RICH_TUI
 #include "ui/dashboard_snapshot.h"
@@ -211,10 +221,29 @@ struct cli_options
     std::string spin_policy_str;
     bool no_pin = false;
 
+    // Named preset / profile (see presets/preset.h and apply_preset logic).
+    // Applied as a base layer: explicit CLI > --config JSON > preset > defaults.
+    std::string preset;
+
     std::string provider_name;
     std::string provider_path;
     std::string strategy;
     std::string format;
+
+    // Monte Carlo / synthetic provider (Phase 1+)
+    std::string mc_params;
+
+    // Phase 3: Full Monte Carlo campaign mode
+    bool monte_carlo = false;
+    std::size_t mc_trials = 0;
+    std::string mc_model;           // gbm, ou, etc.
+
+    // Phase 5: Experimental parallel MC trials (see warnings in controller)
+    bool mc_parallel = false;
+
+    // Phase A (MC object reuse): reuse data_handler + strategy (and prepared reset for others)
+    bool mc_reuse_objects = false;
+
     std::size_t sma_period = 20;
     std::vector<std::string> params;
     std::string mode;
@@ -324,6 +353,8 @@ struct cli_options
     std::string questdb_host = "127.0.0.1";
     std::uint16_t questdb_ilp_port = 9009;
     std::uint16_t questdb_http_port = 9000;
+    int questdb_flush_ms = 150;   // time-based ILP flush cadence (Phase 1)
+    bool questdb_strict = false;  // Phase 2: hard-fail on QuestDB problems + local fallback
 #endif
 };
 
@@ -477,9 +508,16 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_str("log_events", o.event_log_path);
     get_uint64("seed", o.seed);
     get_str("thread_preset", o.thread_preset_str);
+    get_str("preset", o.preset);
     get_bool("no_pin", o.no_pin);
     get_str("provider", o.provider_name);
     get_str("path", o.provider_path);
+    get_bool("monte_carlo", o.monte_carlo);
+    get_size("mc_trials", o.mc_trials);
+    get_str("mc_model", o.mc_model);
+    get_str("mc_params", o.mc_params);
+    get_bool("mc_parallel", o.mc_parallel);
+    get_bool("mc_reuse_objects", o.mc_reuse_objects);
     get_str("strategy", o.strategy);
     get_str("format", o.format);
     get_size("sma_period", o.sma_period);
@@ -549,6 +587,8 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_str("questdb_host", o.questdb_host);
     get_u16("questdb_ilp_port", o.questdb_ilp_port);
     get_u16("questdb_http_port", o.questdb_http_port);
+    get_int("questdb_flush_ms", o.questdb_flush_ms);
+    get_bool("questdb_strict", o.questdb_strict);
 #endif
 }
 
@@ -559,9 +599,16 @@ static void dump_config(const cli_options& o)
     j["log_events"] = o.event_log_path;
     j["seed"] = o.seed;
     j["thread_preset"] = o.thread_preset_str;
+    j["preset"] = o.preset;
     j["no_pin"] = o.no_pin;
     j["provider"] = o.provider_name;
     j["path"] = o.provider_path;
+    j["monte_carlo"] = o.monte_carlo;
+    j["mc_trials"] = o.mc_trials;
+    j["mc_model"] = o.mc_model;
+    j["mc_params"] = o.mc_params;
+    j["mc_parallel"] = o.mc_parallel;
+    j["mc_reuse_objects"] = o.mc_reuse_objects;
     j["strategy"] = o.strategy.empty() ? "mean-reversion" : o.strategy;
     j["format"] = o.format;
     j["sma_period"] = o.sma_period;
@@ -612,6 +659,8 @@ static void dump_config(const cli_options& o)
     j["questdb_host"] = o.questdb_host;
     j["questdb_ilp_port"] = o.questdb_ilp_port;
     j["questdb_http_port"] = o.questdb_http_port;
+    j["questdb_flush_ms"] = o.questdb_flush_ms;
+    j["questdb_strict"] = o.questdb_strict;
 #endif
     std::cout << j.dump(2) << "\n";
 }
@@ -628,11 +677,18 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_flag("--compress-log,!--no-compress-log", o.compress_log, "Compress binary event logs with zstd (default: on)");
     app.add_option("--seed", o.seed, "RNG seed (0 = non-deterministic)");
     app.add_option("--thread-preset", o.thread_preset_str, "Threading: inline, light, standard, full, extended");
+    app.add_option("--preset", o.preset, "Named run preset/profile (e.g. futures-phase0, mc-robustness, backtest-l2, shadow-tape). Provides bundles of realistic defaults for common scenarios; explicit flags and --config override the preset. See --help or docs for the list.");
     app.add_flag("--no-pin", o.no_pin, "Disable CPU affinity pinning");
     app.add_option("--spin-policy", o.spin_policy_str, "Worker spin policy: spin, yield, adaptive (default: adaptive)");
-    app.add_option("--provider", o.provider_name, "Provider name: local, binance");
+    app.add_option("--provider", o.provider_name, "Provider name: local, binance, synthetic");
     app.add_option("--path", o.provider_path, "Data file path (for local provider)");
-    app.add_option("--strategy", o.strategy, "Strategy: mean-reversion, sma, ma-crossover");
+    app.add_option("--mc-params", o.mc_params, "Synthetic/Monte-Carlo params (e.g. \"mu=0.0,sigma=0.65,n_steps=5000\")");
+    app.add_flag("--monte-carlo", o.monte_carlo, "Run Monte Carlo campaign (use with --mc-trials)");
+    app.add_option("--mc-trials", o.mc_trials, "Number of independent Monte Carlo trials");
+    app.add_option("--mc-model", o.mc_model, "Generator model for Monte Carlo (gbm only; default: gbm)");
+    app.add_flag("--mc-parallel", o.mc_parallel, "EXPERIMENTAL: Run MC trials in parallel (Phase 5). Strong warnings apply - see controller docs. Only safe with inline threading preset.");
+    app.add_flag("--mc-reuse-objects", o.mc_reuse_objects, "Phase A: Reuse data_handler/strategy (and reset other heavy objects) between MC trials instead of full reconstruction each time.");
+    app.add_option("--strategy", o.strategy, "Strategy: mean-reversion, sma, ma-crossover, breakout, coiled-spring, adaptive-hybrid, structure-continuation");
     app.add_option("--format", o.format, "Data format: tick, bar");
     app.add_option("--sma-period", o.sma_period, "SMA indicator period")->default_val(20);
     app.add_option("--param", o.params, "Strategy parameter: key=value (repeatable)");
@@ -864,6 +920,13 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--questdb-http-port", o.questdb_http_port,
                    "QuestDB HTTP/DDL port (default 9000)")
         ->default_val(9000);
+    app.add_option("--questdb-flush-ms", o.questdb_flush_ms,
+                   "QuestDB ILP time-based flush cadence in milliseconds (default 150). "
+                   "Lower values reduce risk of lost rows on quiet periods or crashes.")
+        ->default_val(150);
+    app.add_flag("--persist-strict", o.questdb_strict,
+                 "Phase 2: Make QuestDB persistence strict. Startup or persistent ILP failures "
+                 "will hard-fail the run (instead of soft-disabling). Enables local ILP fallback file.");
 #endif
 }
 
@@ -883,6 +946,7 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--log-events")) opts.event_log_path = file_opts.event_log_path;
     if (!was_set("--seed")) opts.seed = file_opts.seed;
     if (!was_set("--thread-preset")) opts.thread_preset_str = file_opts.thread_preset_str;
+    if (!was_set("--preset")) opts.preset = file_opts.preset;
     if (!was_set("--no-pin")) opts.no_pin = file_opts.no_pin;
     if (!was_set("--provider")) opts.provider_name = file_opts.provider_name;
     if (!was_set("--path")) opts.provider_path = file_opts.provider_path;
@@ -946,7 +1010,70 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--questdb-host")) opts.questdb_host = file_opts.questdb_host;
     if (!was_set("--questdb-ilp-port")) opts.questdb_ilp_port = file_opts.questdb_ilp_port;
     if (!was_set("--questdb-http-port")) opts.questdb_http_port = file_opts.questdb_http_port;
+    if (!was_set("--questdb-flush-ms")) opts.questdb_flush_ms = file_opts.questdb_flush_ms;
+    if (!was_set("--persist-strict")) opts.questdb_strict = file_opts.questdb_strict;
 #endif
+}
+
+// -----------------------------------------------------------------------------
+// Preset application (P1-01 / P1-02)
+// Applies a named bundle only to fields the user did not explicitly supply on
+// the CLI (using the same was_set(app) test as JSON overlay). Establishes:
+//   explicit CLI > --config JSON > --preset bundle > hard defaults.
+// -----------------------------------------------------------------------------
+static void apply_preset_with_precedence(CLI::App& app, cli_options& opts)
+{
+    auto was_set = [&](const std::string& name) -> bool {
+        auto opt = app.get_option_no_throw(name);
+        return opt && opt->count() > 0;
+    };
+
+    const std::string& name = opts.preset;
+
+    // futures-phase0 / phase0: hardened tiny-size mainnet futures template
+    // (prod.md + scripts/phase0/new-session.sh). User still supplies
+    // --provider binance-futures, --symbol, --stream/--depth-stream, --live + keys.
+    if (name == "futures-phase0" || name == "phase0" || name == "futures-p0") {
+        if (!was_set("--reconcile-tolerance-bps")) opts.reconcile_tolerance_bps = 3.0;
+        if (!was_set("--dead-man-countdown-ms"))   opts.dead_man_countdown_ms = 30000;
+        if (!was_set("--dead-man-heartbeat-ms"))   opts.dead_man_heartbeat_ms = 8000;
+        if (!was_set("--max-notional"))            opts.max_notional_usdt = 15000.0;
+        if (!was_set("--max-leverage"))            opts.max_leverage = 2.5;
+        if (!was_set("--min-liq-distance-pct"))    opts.min_liquidation_distance_pct = 7.0;
+        if (!was_set("--max-daily-loss"))          opts.risk_max_daily_loss = 80.0;
+        if (!was_set("--risk-unwind"))             opts.risk_unwind = true;
+        return;
+    }
+
+    // mc-robustness: sensible defaults for MC research campaigns.
+    // Pair with --thread-preset inline (as recommended in MC docs/warnings).
+    if (name == "mc-robustness" || name == "mc" || name == "monte-carlo") {
+        if (!was_set("--mc-model")) opts.mc_model = "gbm";
+        if (!was_set("--mc-reuse-objects")) opts.mc_reuse_objects = true;
+        // trials and mc-params are intentionally left to the caller (common
+        // values 100/300/500 + asset-specific mu/sigma/n_steps).
+        return;
+    }
+
+    // backtest-local-l2: L2-aware realism bundle for local (tick) data when
+    // depth is also supplied or synthesized.
+    if (name == "backtest-local-l2" || name == "backtest-l2" || name == "local-l2") {
+        if (!was_set("--realistic-fills"))    opts.realistic_fills = true;
+        if (!was_set("--queue-model"))        opts.queue_model = "l2-snapshot";
+        if (!was_set("--maker-queue-model"))  opts.maker_queue_model = "uniform";
+        if (!was_set("--walked-book-impact")) opts.walked_book_impact = true;
+        return;
+    }
+
+    // shadow-tape: reasonable base for divergence-aware shadow runs.
+    if (name == "shadow-tape" || name == "shadow" || name == "paper") {
+        if (!was_set("--reconcile-tolerance-bps")) opts.reconcile_tolerance_bps = 5.0;
+        return;
+    }
+
+    // Unknown / future preset names are tolerated (run continues with
+    // whatever other flags were given). A warning can be added at call site
+    // or in dry-run if desired.
 }
 
 static int run_dry_run(const cli_options& o)
@@ -1002,6 +1129,9 @@ static int run_dry_run(const cli_options& o)
         std::cout << "    HTTP port:      " << o.questdb_http_port << "\n";
         std::cout << "    Run tag:        "
                   << (o.run_tag.empty() ? "(auto)" : o.run_tag) << "\n";
+        std::cout << "    Flush cadence:  " << o.questdb_flush_ms << " ms\n";
+        if (o.questdb_strict)
+            std::cout << "    Strict mode:    ENABLED (hard-fail + fallback on problems)\n";
         if (!o.run_notes.empty())
             std::cout << "    Run notes:      " << o.run_notes << "\n";
     }
@@ -1066,6 +1196,154 @@ static int run_replay_mode(const cli_options& o)
     return 0;
 }
 
+// Monte Carlo campaign runner (Phase 3)
+static int run_monte_carlo_mode(const cli_options& o)
+{
+    std::cout << "\n=== Monte Carlo Campaign ===\n";
+
+    truetest::simulation::McRunConfig mc_cfg;
+    mc_cfg.n_trials = (o.mc_trials > 0) ? o.mc_trials : 50;
+    mc_cfg.generator_name = o.mc_model.empty() ? "gbm" : o.mc_model;
+
+    // Parse generator params
+    if (!o.mc_params.empty()) {
+        // Reuse the small parser logic by populating a temp provider_config style
+        // For simplicity we directly apply common keys here
+        // (in a real implementation we would share the parser)
+        std::istringstream iss(o.mc_params);
+        std::string token;
+        while (std::getline(iss, token, ',')) {
+            auto eq = token.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = token.substr(0, eq);
+            std::string val = token.substr(eq + 1);
+            if (key == "n_steps" || key == "n_bars") {
+                try { mc_cfg.generator_config.n_steps = std::stoll(val); } catch (...) {}
+            } else if (key == "mu") {
+                try { mc_cfg.generator_config.mu = std::stod(val); } catch (...) {}
+            } else if (key == "sigma") {
+                try { mc_cfg.generator_config.sigma = std::stod(val); } catch (...) {}
+            } else if (key == "initial_price") {
+                try { mc_cfg.generator_config.initial_price = std::stod(val); } catch (...) {}
+            }
+        }
+    }
+
+    if (!o.strategy.empty()) {
+        mc_cfg.strategy_name = o.strategy;
+    }
+    mc_cfg.base_seed = o.seed;
+    mc_cfg.initial_balance = o.balance;
+
+    // Apply some realism from top-level flags (best effort for Phase 3)
+    mc_cfg.realistic_fills = o.realistic_fills;
+    mc_cfg.order_latency_us = o.order_latency_us;
+    mc_cfg.impact_k_bps = o.impact_k_bps;
+
+    // Enable richer per-trial data when user asked for --output (for downstream tools / plot.py)
+    mc_cfg.keep_full_reports = !o.output.empty();
+
+    // Phase 5 parallel support
+    mc_cfg.parallel_trials = o.mc_parallel;
+
+    // Phase A object reuse
+    mc_cfg.reuse_objects_between_trials = o.mc_reuse_objects;
+
+#ifdef HAS_QUESTDB
+    std::unique_ptr<truetest::questdb::QuestdbStore> questdb_store;
+    if (o.persist) {
+        truetest::questdb::StoreConfig sc;
+        sc.host = o.questdb_host.empty() ? "127.0.0.1" : o.questdb_host;
+        sc.ilp_port = o.questdb_ilp_port ? o.questdb_ilp_port : 9009;
+        sc.http_port = o.questdb_http_port ? o.questdb_http_port : 9000;
+
+        std::string base_tag = o.run_tag.empty()
+            ? "mc_" + std::to_string(static_cast<long long>(std::time(nullptr)))
+            : o.run_tag;
+        sc.run_tag = base_tag;
+        sc.mode = "backtest";
+        sc.binary = "engine_backtest";
+        sc.strategy = mc_cfg.strategy_name;
+        sc.initial_equity = 10000.0;
+        sc.notes = o.run_notes;
+
+        questdb_store = std::make_unique<truetest::questdb::QuestdbStore>(sc);
+        if (!questdb_store->begin()) {
+            std::cerr << "  ! QuestDB persistence failed to start (soft-fail, continuing without persist)\n";
+            questdb_store.reset();
+        } else {
+            std::cout << "  Persist:  QuestDB run_tag=" << sc.run_tag << "\n";
+        }
+    }
+#endif
+
+    std::cout << "  Trials:   " << mc_cfg.n_trials << "\n";
+    std::cout << "  Model:    " << mc_cfg.generator_name << "\n";
+    std::cout << "  Strategy: " << mc_cfg.strategy_name << "\n";
+    std::cout << "  Balance:  " << mc_cfg.initial_balance << "\n\n";
+
+    truetest::simulation::MonteCarloController controller(mc_cfg);
+    auto results = controller.run();
+
+    std::string mc_json = truetest::simulation::MonteCarloReporter::render_json(results, mc_cfg);
+
+    std::cout << truetest::simulation::MonteCarloReporter::render_text_summary(results, mc_cfg);
+
+    // Also print compact JSON for scripting / copy-paste (kept for backward compatibility)
+    std::cout << "\nJSON Summary:\n" << mc_json;
+
+    if (!o.output.empty()) {
+        // Richer output for --output: keep the flat McAggregate at top-level
+        // (so scripts/plot.py --mc continues to work without changes) and add
+        // useful metadata + config for downstream tools / analysis.
+        nlohmann::json rich = nlohmann::json::parse(mc_json);
+
+        rich["initial_balance"] = mc_cfg.initial_balance;
+        rich["realistic_fills"] = mc_cfg.realistic_fills;
+        rich["order_latency_us"] = mc_cfg.order_latency_us;
+        rich["impact_k_bps"] = mc_cfg.impact_k_bps;
+        rich["keep_full_reports"] = mc_cfg.keep_full_reports;
+        rich["parallel_trials"] = mc_cfg.parallel_trials;
+        rich["reuse_objects_between_trials"] = mc_cfg.reuse_objects_between_trials;
+        rich["wall_time_ms"] = results.wall_time_ms;
+
+        rich["generator_config"] = nlohmann::json{
+            {"symbol", mc_cfg.generator_config.symbol},
+            {"initial_price", mc_cfg.generator_config.initial_price},
+            {"n_steps", mc_cfg.generator_config.n_steps},
+            {"dt", mc_cfg.generator_config.dt},
+            {"mu", mc_cfg.generator_config.mu},
+            {"sigma", mc_cfg.generator_config.sigma},
+            {"emit_synthetic_l2", mc_cfg.generator_config.emit_synthetic_l2},
+            {"base_spread_bps", mc_cfg.generator_config.base_spread_bps}
+        };
+
+        rich["output_format"] = "mc_aggregate_v1";
+
+        std::ofstream ofs(o.output);
+        if (ofs.is_open()) {
+            ofs << rich.dump(2) << std::endl;   // pretty-printed for humans + tools
+            std::cout << "  MC results exported to: " << o.output << "\n";
+        } else {
+            std::cerr << "  ! Failed to open output file for writing: " << o.output << "\n";
+        }
+    }
+
+#ifdef HAS_QUESTDB
+    if (questdb_store) {
+        // Record campaign summary (lightweight for Phase 4)
+        double final_equity = 10000.0 + (results.mean_pnl * results.n_trials); // rough
+        questdb_store->end(final_equity,
+                           results.n_trials,           // total orders (approx trials here)
+                           results.trials_with_positive_pnl,
+                           0);
+        questdb_store->flush();
+    }
+#endif
+
+    return 0;
+}
+
 // Resolve exchange credentials. Environment variables win over CLI arguments;
 // argv-supplied secrets trigger a warning because they leak via `ps` and shell
 // history. Returns the resolved (key, secret) pair.
@@ -1110,6 +1388,8 @@ static int run_provider_mode(const cli_options& o)
     if (!o.host.empty())        pcfg["host"] = o.host;
     if (!o.port.empty())        pcfg["port"] = o.port;
     if (o.testnet)              pcfg["testnet"] = "1";
+
+    if (!o.mc_params.empty())   pcfg["mc_params"] = o.mc_params;
     if (!o.margin_type.empty()) pcfg["margin_type"] = o.margin_type;
     if (o.liquidation_warn_pct >= 0.0)
         pcfg["liquidation_warn_pct"] = std::to_string(o.liquidation_warn_pct);
@@ -1132,6 +1412,11 @@ static int run_provider_mode(const cli_options& o)
     if (o.dms_attempt_position_close)
         pcfg["dms_attempt_position_close"] = "true";
 
+    // === Monte Carlo mode (Phase 3) ===
+    if (o.monte_carlo || o.mc_trials > 0) {
+        return run_monte_carlo_mode(o);
+    }
+
     std::shared_ptr<IProvider> provider;
     try {
         provider = ProviderRegistry::instance().create(o.provider_name, pcfg);
@@ -1141,6 +1426,8 @@ static int run_provider_mode(const cli_options& o)
             std::cerr << "    Example: --provider binance --symbol btcusdt --stream trade\n";
         else if (o.provider_name == "local")
             std::cerr << "    Example: --provider local --path market_data.csv\n";
+        else if (o.provider_name == "synthetic" || o.provider_name == "montecarlo")
+            std::cerr << "    Example: --provider synthetic --mc-params \"mu=0.0,sigma=0.65,n_steps=2000\"\n";
         else
         {
             std::cerr << "    Available providers:";
@@ -1164,6 +1451,10 @@ static int run_provider_mode(const cli_options& o)
         if (o.risk_fraction != 0.02) prov_strategy->set_param("risk_fraction", o.risk_fraction);
         if (o.sl_pct != 0.005) prov_strategy->set_param("sl_pct", o.sl_pct);
         if (o.tp_pct != 0.01) prov_strategy->set_param("tp_pct", o.tp_pct);
+    }
+    if (resolved == "breakout" || resolved == "coiled-spring") {
+        if (o.balance != 10000.0) prov_strategy->set_param("equity", o.balance);
+        if (o.risk_fraction != 0.02) prov_strategy->set_param("risk_fraction", o.risk_fraction);
     }
     apply_strategy_params(*prov_strategy, o.params);
 
@@ -1294,6 +1585,12 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.questdb_http_port = o.questdb_http_port;
     prov_cfg.run_tag = o.run_tag;
     prov_cfg.run_notes = o.run_notes;
+    prov_cfg.questdb_flush_cadence = std::chrono::milliseconds(o.questdb_flush_ms);
+    prov_cfg.questdb_strict = o.questdb_strict;
+    if (o.questdb_strict)
+    {
+        prov_cfg.persist_enabled = true; // strict implies persist
+    }
 #endif
 
     if (o.testnet)
@@ -1391,6 +1688,13 @@ static int run_provider_mode(const cli_options& o)
 #endif
 
     auto dh = std::make_shared<data_handler>();
+
+    // Performance: for local CSV backtests on large files (1.7M+ rows is common
+    // for multi-year bar data) we pre-reserve the internal vectors. This is one
+    // of the cheapest and most effective wins. 2M is a safe default for 4+ years
+    // of 1-minute or tick-aggregated bars.
+    if (o.provider_name == "local" || o.provider_name.empty())
+        dh->reserve(2'000'000);
 
     bool is_tick = (o.format == "tick");
     bool is_streaming = transport->is_streaming();
@@ -1732,6 +2036,52 @@ static int run_tui_mode(const cli_options& o)
     std::cout << "    Backtesting Engine v0.1\n";
     std::cout << "\n";
 
+    // P1-03: lightweight preset-aware entry for the bare invocation.
+    // This makes "just run the binary" discover the new simplification story
+    // without forcing the user through dozens of flags for common cases.
+    std::cout << "  +-------------------------------------------+\n";
+    std::cout << "  |  Quick start (preset)                     |\n";
+    std::cout << "  +-------------------------------------------+\n";
+    std::cout << "  |  [0]  Classic menu (custom choices)       |\n";
+    std::cout << "  |  [1]  Local backtest + L2 realism         |\n";
+    std::cout << "  |       (preset: backtest-local-l2)         |\n";
+    std::cout << "  |  [2]  Monte Carlo robustness (research)   |\n";
+    std::cout << "  |       (preset: mc-robustness)             |\n";
+    std::cout << "  +-------------------------------------------+\n";
+    std::cout << "  > ";
+    int preset_choice = 0;
+    std::cin >> preset_choice;
+
+    cli_options effective = o;  // start from passed (may have --param etc.)
+    if (preset_choice == 1) {
+        effective.preset = "backtest-local-l2";
+    } else if (preset_choice == 2) {
+        effective.preset = "mc-robustness";
+        // MC path will be taken later in main() if mc_trials or monte_carlo is set,
+        // but for interactive we let the user continue and we can force MC mode
+        // by setting a reasonable default here (or dispatch explicitly).
+        if (effective.mc_trials == 0) effective.mc_trials = 100;
+    }
+
+    // If a preset was chosen interactively, apply its bundle now (the TUI
+    // path builds config manually later; setting the fields + preset name
+    // gives provenance and lets any shared logic see it).
+    if (!effective.preset.empty() && truetest::presets::is_known_preset(effective.preset)) {
+        // We are inside the TUI, no CLI "app" was_set. Apply the bundle
+        // unconditionally for the chosen preset (user chose it here).
+        // The known bundles only touch the realism/MC fields we care about.
+        if (effective.preset == "backtest-local-l2") {
+            effective.realistic_fills = true;
+            effective.queue_model = "l2-snapshot";
+            effective.maker_queue_model = "uniform";
+            effective.walked_book_impact = true;
+        } else if (effective.preset == "mc-robustness") {
+            effective.mc_model = "gbm";
+            effective.mc_reuse_objects = true;
+        }
+    }
+
+    std::cout << "\n";
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  |  Strategy                                 |\n";
     std::cout << "  +-------------------------------------------+\n";
@@ -1980,6 +2330,11 @@ static int run_tui_mode(const cli_options& o)
     std::cout << "  ============================================\n\n";
 
     auto dh = std::make_shared<data_handler>();
+
+    // Performance: same pre-reserve for the legacy TUI/API loading path when
+    // it goes through CSV data sources.
+    dh->reserve(2'000'000);
+
     if (!source->load_data(dh))
     {
         std::cerr << "  Failed to load data.\n";
@@ -2030,9 +2385,21 @@ int main(int argc, char* argv[])
 
     apply_config_overlay(app, opts);
 
+    // Apply named preset (if any) as a base layer. Only fills fields the user
+    // did not explicitly pass on the CLI (mirrors the was_set logic used for
+    // --config). This gives: explicit CLI > --config JSON > --preset > defaults.
+    if (!opts.preset.empty()) {
+        apply_preset_with_precedence(app, opts);
+        if (!truetest::presets::is_known_preset(opts.preset)) {
+            std::cerr << "  [warn] Unknown preset '" << opts.preset
+                      << "'. Run will use explicit flags + defaults only.\n";
+        }
+    }
+
     if (opts.dump_config_flag) { dump_config(opts); return 0; }
     if (opts.dry_run) return run_dry_run(opts);
     if (!opts.replay_path.empty()) return run_replay_mode(opts);
+    if (opts.monte_carlo || opts.mc_trials > 0) return run_monte_carlo_mode(opts);
     if (!opts.provider_name.empty()) return run_provider_mode(opts);
     return run_tui_mode(opts);
 }

@@ -4,11 +4,12 @@
 
 For AI coding assistants working in this repo: this codebase has two
 tiers of edits with different model requirements. **Full rationale,
-file list, and pre-merge checklist live in `docs/MODEL.md`.**
+file list, and pre-merge checklist live in `docs/MODEL.md`** (planned for Doc Phase 2 / deferred; current rules are in this file + `prod.md`). See `docs/README.md` for the current realized documentation structure.
 
 **Default — Sonnet 4.6** is sufficient for: new strategies, indicators,
 tests, CLI flags, docs, single-file refactors, provider-stack additions
-that follow existing patterns.
+that follow existing patterns, and work in `src/simulation/` + `src/providers/synthetic/`
+(Monte Carlo path generation and campaign controller).
 
 **Switch to Opus 4.7 (`/model opus`) before editing any of:**
 - `src/engine/engine.{h,cpp}`, `src/engine/engine_config.h`
@@ -29,6 +30,13 @@ no auto-retry on safety paths) that Sonnet has a measurable tendency
 to break by adding "helpful" fallback/retry logic. When in doubt:
 upgrade to Opus, then downgrade after the edit.
 
+**Monte Carlo / simulation layer note**: `src/simulation/` and the synthetic provider
+are generally safe for Sonnet-level work. Cross-file invariants to respect:
+deterministic per-trial seeding, no hidden shared state between trials,
+`MonteCarloReporter` should remain allocation-light for large N, and
+`--mc-parallel` must not be treated as a general-purpose threading primitive
+(it conflicts with engine core pinning in most presets).
+
 **Phase 1 Live-Safety Freeze (see `prod.md` Phase 1)**:
 The files that carry the `LIVE-SAFETY SURFACE — Phase 1 freeze` comment
 block (tt_target.h, engine.cpp + the full list in prod.md) are now under
@@ -40,6 +48,18 @@ an additional mechanical gate:
 Even Opus-level changes must still carry the token and go through the
 CCB process. The initial freeze marking PR itself was the last
 unrestricted change to this surface.
+
+## Documentation Maintenance Rules (added with prod.md / prerequisites.md / todo.md)
+
+- The three root governance files (`prod.md`, `prerequisites.md`, `todo.md`) + `reports/phase0/` are the single source of truth for phases, checklists, and task tracking. Keep them authoritative and up to date.
+- Every PR touching the frozen safety surface (or the *description* of that surface in docs) must reference the relevant items in `todo.md` and run `./scripts/check-live-safety-freeze.sh`.
+- On every phase exit declared in `prod.md`, also update `todo.md` (move/complete items), `prerequisites.md` if the checklist evolved, and the "Last updated" note in the affected docs.
+- When a cross-reference is still aspirational (e.g. `docs/operations/futures-phase0-operator-sop.md` before Doc Phase 1), it must say so explicitly: "Planned for Doc Phase X – current details live in prod.md / instructions.md §N".
+- Extraction rule: long-form phase/ritual/gate content lives in `prod.md` (or the dedicated SOP). `instructions.md` contains pointers + quick command templates, not duplicates.
+- Anti-rot ritual: before increasing any capital tier, the exit review must include "docs verified + links resolve + `todo.md` updated".
+- When new work lands in `src/simulation/` (Monte Carlo), the MC section in `docs/instructions.md` and any governance mentions (README, todo.md, prod.md) must be updated in the same PR or immediate follow-up.
+
+See the approved documentation plan (session plan file) and `docs/README.md` for the phased rollout of the slimmed structure.
 
 ## What this is
 
@@ -68,10 +88,12 @@ hft-engine/
 ├── .github/workflows/ci.yml            # CI pipeline
 ├── market_data.csv                     # sample OHLCV data
 ├── docs/
-│   ├── instructions.md                 # build + run + every CLI flag
-│   ├── testnet.md                      # Binance spot testnet operator guide
-│   ├── db.md                           # QuestDB integration spec + DDL
-│   ├── c-api.md, performance.md, perf-baseline.md, realism.md, licenses.md
+│   ├── instructions.md                 # build + run + every CLI flag (master reference)
+│   ├── user-manual.md                  # high-level architecture + operator overview
+│   ├── (many sub-items listed below are aspirational / deferred; see docs/README.md for current realized state)
+│   ├── testnet.md                      # Binance spot testnet operator guide (planned)
+│   ├── db.md                           # QuestDB integration spec + DDL (planned)
+│   ├── c-api.md, performance.md, perf-baseline.md, realism.md, licenses.md (planned / partial)
 ├── tests/                              # GoogleTest cases (incl. test_questdb_*,
 │                                       #   test_binance_testnet_live)
 └── src/
@@ -414,7 +436,7 @@ Live WS recording + replay: `BinanceRecorder` captures a live stream to file;
 `BinanceReplayTransport` replays it as a transport — useful for deterministic
 testing against real exchange data.
 
-Operator guide for testnet: `docs/testnet.md`.
+Operator guide for testnet: `docs/testnet.md` (planned / deferred; current details in `docs/instructions.md` and `prod.md`).
 
 ### Binance Futures USDT-M (ENABLE_BINANCE=ON)
 Sibling provider registered as `binance-futures`. Same compile-time gate
@@ -486,7 +508,7 @@ every other `closePosition=true` order on the symbol. Partial-fraction
 intents (`qty_fraction != 1.0`) are declined; engine-side ExitManager
 remains the only enforcer for those.
 
-Operator guide: `docs/futures-testnet.md`.
+Operator guide: `docs/futures-testnet.md` (planned / deferred; current details in `docs/instructions.md`, `prod.md`, and `prerequisites.md`).
 
 ## Not yet implemented
 
@@ -494,7 +516,7 @@ Operator guide: `docs/futures-testnet.md`.
 - **Generic ExchangeAdapter** — Binance (spot + futures) is the only live venue family today.
 - **QuestDB hard-fail** — daemon unreachable currently downgrades to a
   warning; "refuse to start when `--persist` is set but QuestDB is down"
-  is documented in `docs/db.md` as a follow-up.
+  is documented in `docs/db.md` as a follow-up (deferred; current soft-fail behavior described in `docs/instructions.md` QuestDB section).
 - **COIN-M (inverse) futures** — separate stack (`dapi.binance.com`,
   `dstream.binance.com`, settles in base asset). Will land as a sibling
   provider, not a flag on `binance-futures`.

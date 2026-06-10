@@ -1,10 +1,12 @@
 # TrueTest — Live Trading Production Readiness Gaps
 
-**Date**: May 2026  
+**Date**: May 2026 (snapshot; some items partially addressed since — see current status in root `todo.md` R-*/S-*/H-* + `prod.md` phases/Go-Live)  
 **Scope**: Binance USDT-M futures live trading (`--provider binance-futures --mode live`) on real mainnet with real capital.  
-**Purpose**: Honest gap analysis between current state and a production-grade, set-and-forget live trading system suitable for meaningful size.
+**Purpose**: Honest gap analysis between current state and a production-grade, set-and-forget live trading system suitable for meaningful size. **Current open items map directly to root `todo.md` (R-01..R-05, S-01..S-06, H-01..H-06, P0/P1 gates, arch risk). Read together with `prod.md` (per governance).**
 
-This document assumes the operator has already completed every prerequisite in `docs/futures-testnet.md` and the user manual (correct binary, one-way mode, conservative caps, dead-man's switch armed, tiny size, etc.).
+This document assumes the operator has already completed every prerequisite in `docs/futures-testnet.md` and the user manual (correct binary, one-way mode, conservative caps, dead-man's switch armed, tiny size, etc.). Planned `docs/operations/futures-testnet.md` — current details in prod.md / instructions.
+
+**Intended Use & Scope**: TrueTest is a private, personal research and retail tool for the author only. It is not, and will never be, an enterprise-ready, institutional, or production trading system. Monte Carlo simulation, high-fidelity backtesting, and shadow divergence analysis are the primary mature capabilities. The live execution paths (`engine_live`) exist with unusually strong compile-time (`TT_TARGET`) and runtime safety layers (reconciler, DMS, kill-switch, venue risk checks, terminal halt, user-data source of truth, etc.). Any use of live paths is experimental, tiny-size, fully attended by the operator, and done at the author's own risk. The Phase 0/1 rituals and Go-Live language in this repository describe the author's personal evidence-gathering hygiene and self-imposed discipline — they are **not** a formal production release process or claim of readiness for others.
 
 ---
 
@@ -12,10 +14,10 @@ This document assumes the operator has already completed every prerequisite in `
 
 The engine has **unusually strong safety scaffolding** for a system of its age and origin — particularly around the dead-man's switch, kill switch, reconciler, pre-trade venue caps, and compile-time live-order gating.
 
-However, it is **not yet production-ready** for real-money live trading at scale. The project is in the middle of a major architectural refactor ("deepdive"), several important risk features remain partial or planned, and real-world mainnet live trading history is still limited.
+However, it is **not yet ready for the author's private attended live use at scale**. The project is in the middle of a major architectural refactor ("deepdive"), several important risk features remain partial or planned, and real-world mainnet live trading history is still limited.
 
-**Current maturity**: Late alpha / advanced prototype with excellent safety bones.  
-**Recommended use**: Tiny-size mainnet validation runs only. Not suitable for significant capital or unattended operation.
+**Current maturity**: Late alpha / advanced prototype with excellent safety bones for the author's personal research.  
+**Recommended use**: Tiny-size mainnet validation runs only, fully attended by the author. Not suitable for significant capital or unattended operation. When the author chooses to collect evidence toward personal live use, the Phase 0/1 gates apply.
 
 ---
 
@@ -27,7 +29,7 @@ However, it is **not yet production-ready** for real-money live trading at scale
 |-----|---------------|------------|---------------------|-----------------------|
 | Ongoing "deepdive" + per-lot refactor | Active multi-step changes (queue awareness, per-lot bookkeeping, latency modeling) still landing on `testnet` branch | **High** | `src/engine/`, `src/execution/`, `src/risk/`, threading, order tracker | Complete the full refactor phase, pass CI + manual shadow validation on mainnet before considering larger size |
 | Cross-file safety invariants under change | Many live-critical paths (halt_flag_, reconciler, DMS heartbeat, kill switch) are explicitly flagged as high-risk for model edits | High | `tt_target.h`, `engine.cpp`, `risk_worker.h`, all `*kill_switch*`, `*dead_mans_switch*`, `*reconciler*` files | Freeze these areas until refactor stabilizes; require Opus-level review on any changes |
-| Master branch frozen pending refactor | Root README states master is intentionally held back until phases are green | Medium | Entire project | Finish current phase and produce documented "green" mainnet shadow + small live run |
+| Master branch includes MC work (integrated) | Freeze process and 10-file LIVE-SAFETY SURFACE rules remain for any safety-surface changes, regardless of branch | Medium | Entire project | The merge process itself requires clean docs + verification; safety freeze enforcement (script + CCB) is unchanged |
 
 ### 2. Risk Management Completeness
 
@@ -121,24 +123,24 @@ However, it is **not yet production-ready** for real-money live trading at scale
 | Question | Answer |
 |----------|--------|
 | Does the engine have better safety architecture than most retail tools? | Yes — significantly better in several areas (DMS, compile-time gating, reconciler, user-data source of truth). |
-| Is it currently safe to run meaningful real capital live? | **No.** |
-| Is it safe for tiny-size "prove the system" mainnet runs with an experienced operator watching closely? | Marginally acceptable, with eyes wide open. |
+| Is it currently safe to run meaningful real capital live? | **No** — and this tool will never be positioned for that. It exists only for the author's private, tiny-size, fully attended personal experiments. |
+| Is it safe for tiny-size "prove the system" mainnet runs with an experienced operator (the author) watching closely? | Marginally acceptable for the author's personal use, with eyes wide open and all safety nets armed. |
 | What is the single biggest blocker right now? | The combination of an **ongoing deep architectural refactor** + **incomplete position-based risk management** + **DMS not protecting positions**. |
 
 ---
 
 **Recommendation**
 
-Do **not** treat this engine as production-ready yet.
+Do **not** treat this engine as ready for the author's private attended use at any meaningful scale yet.
 
-Use the next 3–6 months for:
+When the author chooses to collect evidence toward personal live use, use the next 3–6 months for:
 - Completing the refactor
 - Hardening the risk surface
 - Accumulating real mainnet shadow + tiny live data
 - Building the missing operational tooling (alerting, credential management, runbooks)
 
-Only after those items are demonstrably closed should you consider increasing position size beyond "proof of concept" levels.
+Only after those items are demonstrably closed (with full artifacts and two-person sign-off) should the author consider increasing personal position size beyond "proof of concept" tiny-size attended levels.
 
 ---
 
-*This document should be updated after every major refactor phase and before any increase in live capital allocation.*
+*This document should be updated after every major refactor phase and before any increase in the author's personal live capital allocation (for the author's private attended use only).*

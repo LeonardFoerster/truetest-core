@@ -4,6 +4,9 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <array>
+#include <cstdint>
+#include <algorithm>
 
 #ifdef HAS_DEBUG
 #include "debug/copy_tracker.h"
@@ -284,7 +287,9 @@ public:
                 double fill_price,
                 double commission = 0.0,
                 double remaining_qty = 0.0,
-                uint64_t fill_id = 0
+                uint64_t fill_id = 0,
+                const std::string& strategy_name = {},
+                uint64_t opener_order_id = 0
         )
                 : event(event_type::fill, timestamp)
                 , order_id_(order_id)
@@ -295,6 +300,8 @@ public:
                 , commission_(commission)
                 , remaining_qty_(remaining_qty)
                 , fill_id_(fill_id)
+                , strategy_name_(strategy_name)
+                , opener_order_id_(opener_order_id)
         {
         }
 
@@ -311,6 +318,15 @@ public:
         fill_source get_source() const { return source_; }
         void set_source(fill_source s) { source_ = s; }
 
+        // Per-lot / attribution (populated by engine at fill synthesis time for
+        // both simulated and exchange fills; mirrors order_event fields for
+        // clean propagation through rings to workers, QuestDB, shadow duals,
+        // ExitManager, etc.). Openers typically have opener_order_id_ == 0.
+        const std::string& get_strategy_name() const { return strategy_name_; }
+        void set_strategy_name(const std::string& name) { strategy_name_ = name; }
+
+        uint64_t get_opener_order_id() const { return opener_order_id_; }
+        void set_opener_order_id(uint64_t id) { opener_order_id_ = id; }
 
         double get_total_cost() const
         {
@@ -321,12 +337,18 @@ public:
         std::string to_string() const override
         {
                 std::string side_str = (side_ == order_side::buy) ? "BOUGHT" : "SOLD";
-                return "FillEvent[order_id=" + std::to_string(order_id_) +
+                std::string s = "FillEvent[order_id=" + std::to_string(order_id_) +
                         " fill_id=" + std::to_string(fill_id_) + " " + side_str + " " +
                         std::to_string(filled_quantity_) + " " + symbol_ +
                         " @ " + std::to_string(fill_price_) +
                         " remaining=" + std::to_string(remaining_qty_) +
-                        " commission=" + std::to_string(commission_) + "]";
+                        " commission=" + std::to_string(commission_);
+                if (!strategy_name_.empty())
+                        s += " strategy=" + strategy_name_;
+                if (opener_order_id_ != 0)
+                        s += " opener=" + std::to_string(opener_order_id_);
+                s += "]";
+                return s;
         }
 
 private:
@@ -339,6 +361,11 @@ private:
         double remaining_qty_ = 0.0;
         uint64_t fill_id_ = 0;
         fill_source source_ = fill_source::unknown;
+
+        // Per-lot attribution (enriched during deepdive refactor for consistent
+        // propagation; default empty/0 for legacy compatibility).
+        std::string strategy_name_;
+        uint64_t opener_order_id_ = 0;
 };
 
 
@@ -400,36 +427,52 @@ struct l2_level
         int64_t quantity;
 };
 
+// Binance depth20 and engine L2 paths cap at 20 levels per side (Phase 4).
+inline constexpr std::size_t kL2SnapshotMaxLevels = 20;
+
 class l2_snapshot_event : public event
 {
 public:
         l2_snapshot_event(
                 std::chrono::system_clock::time_point timestamp,
                 const std::string& symbol,
-                std::vector<l2_level> bids,
-                std::vector<l2_level> asks
+                const l2_level* bids,
+                std::size_t bid_count,
+                const l2_level* asks,
+                std::size_t ask_count
         )
                 : event(event_type::l2_snapshot, timestamp)
                 , symbol_(symbol)
-                , bids_(std::move(bids))
-                , asks_(std::move(asks))
-        { }
+        {
+                bid_count_ = static_cast<std::uint8_t>(
+                    std::min(bid_count, kL2SnapshotMaxLevels));
+                ask_count_ = static_cast<std::uint8_t>(
+                    std::min(ask_count, kL2SnapshotMaxLevels));
+                if (bids && bid_count_ > 0)
+                    std::copy_n(bids, bid_count_, bids_.begin());
+                if (asks && ask_count_ > 0)
+                    std::copy_n(asks, ask_count_, asks_.begin());
+        }
 
         const std::string& get_symbol() const { return symbol_; }
-        const std::vector<l2_level>& get_bids() const { return bids_; }
-        const std::vector<l2_level>& get_asks() const { return asks_; }
+        std::size_t bid_count() const { return bid_count_; }
+        std::size_t ask_count() const { return ask_count_; }
+        const l2_level& bid(std::size_t i) const { return bids_[i]; }
+        const l2_level& ask(std::size_t i) const { return asks_[i]; }
 
         std::string to_string() const override
         {
                 return "L2SnapshotEvent[" + symbol_ +
-                        " bids=" + std::to_string(bids_.size()) +
-                        " asks=" + std::to_string(asks_.size()) + "]";
+                        " bids=" + std::to_string(bid_count_) +
+                        " asks=" + std::to_string(ask_count_) + "]";
         }
 
 private:
         std::string symbol_;
-        std::vector<l2_level> bids_;
-        std::vector<l2_level> asks_;
+        std::array<l2_level, kL2SnapshotMaxLevels> bids_{};
+        std::array<l2_level, kL2SnapshotMaxLevels> asks_{};
+        std::uint8_t bid_count_ = 0;
+        std::uint8_t ask_count_ = 0;
 };
 
 

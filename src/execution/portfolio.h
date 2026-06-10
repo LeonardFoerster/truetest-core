@@ -85,6 +85,10 @@ public:
         positions_ = std::move(positions);
     }
 
+    // Phase A (MC object reuse): resets the portfolio to its initial state
+    // (cash = initial_balance, no positions, no lots, counters zeroed).
+    void reset();
+
 private:
     double initial_balance_ = 10000.0;
     double cash_ = 10000.0;

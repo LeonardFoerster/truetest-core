@@ -191,6 +191,58 @@ void HealthPanel::draw(int body_y0, int width, int height,
 
     if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
 
+    // ── QuestDB (when --persist is active) ──
+    if (snap->health.questdb.active && y < y_end)
+    {
+        label(y, xL, "QuestDB");
+        const char* conn = snap->health.questdb.connected ? "connected" : "disconnected";
+        int p = snap->health.questdb.connected ? kPairGreen : kPairRed;
+        attron(COLOR_PAIR(p));
+        mvaddstr(y, xLv, conn);
+        attroff(COLOR_PAIR(p));
+
+        if (snap->health.questdb.strict_mode)
+        {
+            attron(COLOR_PAIR(kPairYellow) | A_BOLD);
+            mvaddstr(y, xLv + 12, "STRICT");
+            attroff(COLOR_PAIR(kPairYellow) | A_BOLD);
+        }
+        ++y;
+
+        if (y < y_end)
+        {
+            label(y, xL, "pending");
+            mvprintw(y, xLv, "%zu", snap->health.questdb.pending_lines);
+            label(y, xR, "dropped");
+            int dp = (snap->health.questdb.dropped_lines > 0) ? kPairRed : kPairWhite;
+            attron(COLOR_PAIR(dp));
+            mvprintw(y, xRv, "%zu", snap->health.questdb.dropped_lines);
+            attroff(COLOR_PAIR(dp));
+            ++y;
+        }
+
+        if (y < y_end && snap->health.questdb.fallback_lines > 0)
+        {
+            label(y, xL, "fallback");
+            attron(COLOR_PAIR(kPairYellow));
+            mvprintw(y, xLv, "%zu lines", snap->health.questdb.fallback_lines);
+            attroff(COLOR_PAIR(kPairYellow));
+            ++y;
+        }
+
+        if (y < y_end && snap->health.questdb.last_flush_age_ms >= 0)
+        {
+            label(y, xL, "last flush");
+            char age[32];
+            std::snprintf(age, sizeof(age), "%lld ms ago",
+                          (long long)snap->health.questdb.last_flush_age_ms);
+            mvaddstr(y, xLv, age);
+            ++y;
+        }
+    }
+
+    if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
+
     // ── Footer hint about Health gaps ──
     if (y < y_end)
     {

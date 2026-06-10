@@ -20,8 +20,18 @@ std::string runs_meta_ddl()
     total_orders     LONG,
     total_fills      LONG,
     total_rejections LONG,
-    notes            STRING
-) TIMESTAMP(started_at) PARTITION BY MONTH)";
+    notes            STRING,
+
+    -- Phase 4: Richer campaign summary for long-running analysis
+    max_drawdown     DOUBLE,
+    sharpe_ratio     DOUBLE,
+    sortino_ratio    DOUBLE,
+    profit_factor    DOUBLE,
+    win_rate         DOUBLE,
+    calmar_ratio     DOUBLE,
+    total_trades     LONG,
+    winning_trades   LONG
+) TIMESTAMP(started_at) PARTITION BY WEEK)";
 }
 
 namespace {
@@ -130,27 +140,52 @@ std::string funding_ddl(const std::string& p)
         ") TIMESTAMP(ts) PARTITION BY DAY";
 }
 
+std::string events_ddl(const std::string& p)
+{
+    // Phase 3: Generic event/decision log for richer logic capture
+    // (strategy decisions, risk reasons with context, snapshots, etc.)
+    return "CREATE TABLE IF NOT EXISTS " + p + "_events (\n"
+        "    ts               TIMESTAMP,\n"
+        "    run_tag          SYMBOL CAPACITY 10000,\n"
+        "    event_type       SYMBOL CAPACITY 32,\n"
+        "    symbol           SYMBOL CAPACITY 1024,\n"
+        "    strategy_name    SYMBOL CAPACITY 64,\n"
+        "    order_id         LONG,\n"
+        "    severity         SYMBOL CAPACITY 8,\n"
+        "    message          STRING,\n"
+        "    details          STRING\n"
+        ") TIMESTAMP(ts) PARTITION BY DAY";
+}
+
+// Phase 4 helper: appends TTL clause if ttl_days > 0
+std::string with_ttl(const std::string& ddl, int ttl_days)
+{
+    if (ttl_days <= 0) return ddl;
+    return ddl + " TTL " + std::to_string(ttl_days) + " DAYS";
+}
+
 }  // end anonymous namespace
 
-std::vector<std::string> per_run_ddls(const std::string& run_tag)
+std::vector<std::string> per_run_ddls(const std::string& run_tag, int ttl_days)
 {
     return {
-        orders_ddl(run_tag),
-        order_status_ddl(run_tag),
-        fills_ddl(run_tag),
-        funding_ddl(run_tag),   // Phase 2: funding settlements
-        rejections_ddl(run_tag),
-        cancellations_ddl(run_tag),
-        amendments_ddl(run_tag),
+        with_ttl(orders_ddl(run_tag), ttl_days),
+        with_ttl(order_status_ddl(run_tag), ttl_days),
+        with_ttl(fills_ddl(run_tag), ttl_days),
+        with_ttl(funding_ddl(run_tag), ttl_days),   // Phase 2: funding settlements
+        with_ttl(events_ddl(run_tag), ttl_days),    // Phase 3: richer logic + decision capture
+        with_ttl(rejections_ddl(run_tag), ttl_days),
+        with_ttl(cancellations_ddl(run_tag), ttl_days),
+        with_ttl(amendments_ddl(run_tag), ttl_days),
     };
 }
 
-std::vector<std::string> all_ddls(const std::string& run_tag)
+std::vector<std::string> all_ddls(const std::string& run_tag, int ttl_days)
 {
     std::vector<std::string> out;
-    out.reserve(7);
+    out.reserve(8);
     out.push_back(runs_meta_ddl());
-    for (auto& d : per_run_ddls(run_tag)) out.push_back(std::move(d));
+    for (auto& d : per_run_ddls(run_tag, ttl_days)) out.push_back(std::move(d));
     return out;
 }
 

@@ -68,6 +68,9 @@ public:
 
     ~BinanceRestClient()
     {
+        // Cleanly close any persistent connection
+        close_connection_locked();
+
         SSL_SESSION* sess = cached_session_.exchange(
             nullptr, std::memory_order_acq_rel);
         if (sess) SSL_SESSION_free(sess);
@@ -282,6 +285,15 @@ private:
     long long sync_interval_ms_ = 5 * 60 * 1000;
     std::atomic<bool> sync_failed_logged_{false};
 
+    // === Persistent HTTP connection state for Keep-Alive ===
+    // Replaces the previous "new ioc + stream per request" pattern.
+    // All access to the stream / connection state is protected by connection_mu_.
+    std::optional<net::io_context>          persistent_ioc_;
+    std::optional<beast::ssl_stream<tcp::socket>> persistent_stream_;
+    bool                                    connected_ = false;
+    tcp::resolver::results_type             cached_resolver_results_;
+    std::mutex                              connection_mu_;
+
     static long long steady_now_ms()
     {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -383,43 +395,16 @@ private:
 
         try
         {
-            net::io_context ioc;
-            tcp::resolver resolver(ioc);
-            auto results = resolver.resolve(host_, port_);
+            // Establish (or reuse) a persistent TLS connection.
+            // All connection state is managed in ensure_connected() under lock.
+            ensure_connected();
 
-            beast::ssl_stream<tcp::socket> stream(ioc, ctx_);
+            auto& stream = *persistent_stream_;
 
-            if (!SSL_set_tlsext_host_name(stream.native_handle(), host_.c_str()))
-                throw std::runtime_error("SNI setup failed");
-
-            // Apply the most recent resumable session, if any. OpenSSL
-            // transparently falls back to a full handshake if rejected.
-            // Refcount: SSL_set_session up_refs internally, so our cached
-            // ref stays valid for the next call.
-            if (SSL_SESSION* sess = cached_session_.load(std::memory_order_acquire))
-                SSL_set_session(stream.native_handle(), sess);
-
-            auto& lowest = beast::get_lowest_layer(stream);
-            net::connect(lowest, results);
-
-            // Optional per-call socket timeout. Applied after connect so
-            // TLS handshake + HTTP read/write are bounded but the connect
-            // itself relies on the kernel's TCP error path. The kill-switch
-            // sets this aggressively at shutdown so a dead network can't
-            // wedge cancel/flatten beyond the wall-clock budget.
-            const long long pct_ms =
-                per_call_timeout_ms_.load(std::memory_order_acquire);
-            if (pct_ms > 0)
-            {
-                struct timeval tv{};
-                tv.tv_sec  = pct_ms / 1000;
-                tv.tv_usec = (pct_ms % 1000) * 1000;
-                const int fd = lowest.native_handle();
-                ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-                ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-            }
-
-            stream.handshake(ssl::stream_base::client);
+            // Timeouts were applied inside ensure_connected() at connect time.
+            // The kill-switch path still works because set_per_call_timeout()
+            // stores the value and the next reconnect (or first connect) will
+            // pick it up via apply_socket_timeouts_locked().
 
             http::request<http::string_body> req{method, target, 11};
             req.set(http::field::host, host_);
@@ -453,8 +438,7 @@ private:
                     static_cast<long long>(binance::server_time_ms()));
             }
 
-            beast::error_code ec;
-            stream.shutdown(ec);
+            // No shutdown() — the connection is kept alive for the next request.
 
             if (r.status == 429)
             {
@@ -490,9 +474,95 @@ private:
         }
         catch (const std::exception& e)
         {
+            // Any error during the request (including inside ensure_connected)
+            // means we drop the possibly half-open connection so the next
+            // caller gets a fresh one.
+            {
+                std::lock_guard<std::mutex> lk(connection_mu_);
+                close_connection_locked();
+            }
+
             std::cerr << "BinanceRestClient: request failed: " << e.what() << "\n";
             return {0, "", 0};
         }
+    }
+
+    // =====================================================================
+    // Persistent connection (Keep-Alive) implementation
+    // =====================================================================
+
+    void close_connection_locked()
+    {
+        connected_ = false;
+
+        if (persistent_stream_)
+        {
+            beast::error_code ec;
+            // Close the underlying TCP socket; this also terminates TLS
+            auto& lowest = beast::get_lowest_layer(*persistent_stream_);
+            lowest.close(ec);
+        }
+
+        persistent_stream_.reset();
+        persistent_ioc_.reset();
+        // We intentionally keep cached_resolver_results_ — it is still valid.
+    }
+
+    void apply_socket_timeouts_locked(tcp::socket& sock)
+    {
+        const long long pct_ms = per_call_timeout_ms_.load(std::memory_order_acquire);
+        if (pct_ms > 0)
+        {
+            struct timeval tv{};
+            tv.tv_sec  = pct_ms / 1000;
+            tv.tv_usec = (pct_ms % 1000) * 1000;
+
+            const int fd = sock.native_handle();
+            ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        }
+    }
+
+    void ensure_connected()
+    {
+        std::lock_guard<std::mutex> lk(connection_mu_);
+
+        if (connected_ && persistent_stream_ && persistent_ioc_)
+        {
+            auto& lowest = beast::get_lowest_layer(*persistent_stream_);
+            if (lowest.is_open())
+            {
+                return;   // Happy path: warm connection
+            }
+        }
+
+        // (Re)establish connection
+        close_connection_locked();
+
+        persistent_ioc_.emplace();
+        persistent_stream_.emplace(*persistent_ioc_, ctx_);
+
+        auto& stream = *persistent_stream_;
+        auto& lowest = beast::get_lowest_layer(stream);
+
+        if (!SSL_set_tlsext_host_name(stream.native_handle(), host_.c_str()))
+            throw std::runtime_error("SNI setup failed");
+
+        if (SSL_SESSION* sess = cached_session_.load(std::memory_order_acquire))
+            SSL_set_session(stream.native_handle(), sess);
+
+        tcp::resolver resolver(*persistent_ioc_);
+        if (cached_resolver_results_.empty())
+        {
+            cached_resolver_results_ = resolver.resolve(host_, port_);
+        }
+        net::connect(lowest, cached_resolver_results_);
+
+        apply_socket_timeouts_locked(lowest);
+
+        stream.handshake(ssl::stream_base::client);
+
+        connected_ = true;
     }
 };
 

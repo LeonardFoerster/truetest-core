@@ -15,7 +15,11 @@ void ExitManager::register_pending(exit_intent intent)
 
 void ExitManager::on_fill(const fill_event& f)
 {
-    on_fill(f, f.get_order_id());
+    // Legacy path delegates; prefer callers to use the opener-aware overload
+    // (pass true opener so closers correctly cancel the matching armed intent
+    // instead of treating the closer id as a new opener).
+    uint64_t opener = (f.get_opener_order_id() != 0) ? f.get_opener_order_id() : f.get_order_id();
+    on_fill(f, opener);
 }
 
 void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
@@ -401,6 +405,21 @@ void ExitManager::untrack_opener(std::uint64_t opener_order_id,
         else
             ++it;
     }
+}
+
+// Phase A (MC object reuse)
+void ExitManager::reset()
+{
+    pending_.clear();
+    armed_.clear();
+    strategy_symbol_to_openers_.clear();
+
+    {
+        std::lock_guard<std::mutex> lk(venue_mu_);
+        handles_.clear();
+        exchange_to_leg_.clear();
+    }
+    // Note: bracket_adapter_ is intentionally not cleared — it is set once at startup.
 }
 
 }

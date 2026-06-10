@@ -52,6 +52,8 @@ public:
         if (latency_model_)
             arrival_ts += latency_model_->get_order_latency();
         oo.submit_ts     = arrival_ts;
+        oo.strategy_name = o.get_strategy_name();
+        oo.opener_order_id = o.get_opener_order_id();
         if (queue_model_ && o.get_order_type() == order_type::limit)
         {
             oo.queue_ahead   = queue_model_->queue_ahead(
@@ -207,6 +209,8 @@ public:
             fill_event fe(trade_ts, oo.symbol, oo.engine_id, oo.side,
                           fill_qty, fill_price,
                           commission, rem, ++next_fill_id_);
+            if (!oo.strategy_name.empty()) fe.set_strategy_name(oo.strategy_name);
+            if (oo.opener_order_id != 0) fe.set_opener_order_id(oo.opener_order_id);
             fe.set_source(fill_source::exchange);
             pending_fills_.push_back(std::move(fe));
 
@@ -254,6 +258,11 @@ public:
         return s;
     }
 
+    // IExecutionAdapter overrides for Phase 2 queue stats exposure.
+    std::size_t queue_submitted_with_queue() const override { return get_queue_stats().submitted_with_queue; }
+    std::size_t queue_filled_after_drain()   const override { return get_queue_stats().filled_after_drain; }
+    std::size_t queue_blocked_at_eos()       const override { return get_queue_stats().blocked_at_eos; }
+
 private:
     struct open_order
     {
@@ -271,6 +280,9 @@ private:
         double       queue_consumed = 0.0;
         bool         counted_drain  = false;
         std::chrono::system_clock::time_point submit_ts;
+        // Per-lot attribution (Phase 1 deepdive consolidation).
+        std::string   strategy_name;
+        std::uint64_t opener_order_id = 0;
     };
 
     queue_stats stats_;

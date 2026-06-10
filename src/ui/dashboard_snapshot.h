@@ -115,6 +115,19 @@ struct dashboard_snapshot
         int    provider_state = 0;            // matches connection_state enum
 
         double rate_ev_per_sec = 0.0;          // EMA from ConsoleDashboard
+
+        // QuestDB persistence health (populated when --persist is active)
+        struct questdb_view
+        {
+            bool     active          = false;
+            bool     connected       = false;
+            std::size_t pending_lines = 0;
+            std::size_t dropped_lines = 0;
+            std::size_t fallback_lines = 0;
+            std::int64_t last_flush_age_ms = 0;   // ms since last successful flush
+            bool     strict_mode     = false;
+        };
+        questdb_view questdb;
     };
     health_view health;
 
@@ -135,6 +148,8 @@ struct dashboard_snapshot
         std::size_t  blocks = 0;        // ObjectPool::block_count()
         std::size_t  block_size = 0;    // slots per block
         std::size_t  capacity = 0;      // blocks * block_size
+        std::size_t  in_use = 0;        // live shared_ptrs not yet returned
+        std::size_t  grow_count = 0;    // runtime grow() calls (0 = no hot-path growth)
     };
     struct subsys_error
     {
@@ -209,6 +224,7 @@ struct dashboard_snapshot
         std::uint64_t bytes = 0;
         std::size_t   in_use = 0;
         std::size_t   capacity_slots = 0;  // blocks * BlockSize
+        std::size_t   grow_count = 0;
     };
     struct mem_ring_row
     {
@@ -274,6 +290,20 @@ struct dashboard_snapshot
         double       cum_ask_size = 0.0;
     };
     l2_view l2;
+
+    // Queue position observability (populated during deepdive refactor from
+    // adapter avg_queue_position_bps() for paper (QueueAware) and shadow
+    // (TradeTape + L2 model)). 0 = all at front, 10000 = all at back.
+    // The detailed counts (submitted_with_queue etc.) come from TradeTapeShadowAdapter
+    // when --queue-model l2-snapshot is active in shadow mode.
+    struct queue_view
+    {
+        std::uint32_t avg_bps = 0;
+        std::size_t submitted_with_queue = 0; // orders that saw initial queue > 0
+        std::size_t filled_after_drain   = 0; // queue drained and fill was emitted
+        std::size_t blocked_at_eos       = 0; // still blocked by queue at end of run
+    };
+    queue_view queue;
 
     struct risk_view
     {

@@ -183,6 +183,13 @@ bool IlpWriter::flush()
     if (!ensure_connected())
     {
         consecutive_failures_++;
+        if (fallback_sink_ && !buffer_.empty())
+        {
+            (*fallback_sink_) << buffer_;
+            fallback_lines_ += buffer_count_;
+            buffer_.clear();
+            buffer_count_ = 0;
+        }
         return false;
     }
 
@@ -191,6 +198,14 @@ bool IlpWriter::flush()
         // Drop the connection so the next flush reconnects.
         tcp_->close();
         consecutive_failures_++;
+
+        if (fallback_sink_ && !buffer_.empty())
+        {
+            (*fallback_sink_) << buffer_;
+            fallback_lines_ += buffer_count_;
+            buffer_.clear();
+            buffer_count_ = 0;
+        }
         return false;
     }
 
@@ -199,6 +214,12 @@ bool IlpWriter::flush()
     consecutive_failures_ = 0;
     last_flush_ = std::chrono::steady_clock::now();
     return true;
+}
+
+void IlpWriter::enable_fallback(std::unique_ptr<std::ostream> fallback_sink)
+{
+    fallback_sink_ = std::move(fallback_sink);
+    fallback_lines_ = 0;
 }
 
 void IlpWriter::maybe_time_flush()

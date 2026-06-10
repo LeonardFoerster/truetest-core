@@ -9,6 +9,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 using truetest::questdb::IIlpTransport;
@@ -324,6 +325,91 @@ TEST(QuestdbStore, RecordFundingProducesFundingRow)
     EXPECT_TRUE(contains(line, "reason=FUNDING_FEE"));
     EXPECT_TRUE(contains(line, "cash_delta=12.345"));
     EXPECT_TRUE(contains(line, "qty_change=0"));
+}
+
+TEST(QuestdbStore, RecordEventProducesEventsRow)
+{
+    Fixture f;
+    ASSERT_TRUE(f.store->begin());
+    f.transport->lines.clear();
+
+    f.store->record_event(
+        "risk_decision",
+        "BTCUSDT",
+        "sma",
+        12345,
+        "reject",
+        "position limit exceeded",
+        R"({"limit": 10, "current": 12})"
+    );
+
+    ASSERT_EQ(f.transport->lines.size(), 1u);
+    const auto& line = f.transport->lines[0];
+    EXPECT_TRUE(starts_with(line, "tt_test_events,"));
+    EXPECT_TRUE(contains(line, "event_type=risk_decision"));
+    EXPECT_TRUE(contains(line, "symbol=BTCUSDT"));
+    EXPECT_TRUE(contains(line, "order_id=12345i"));
+    EXPECT_TRUE(contains(line, "severity=reject"));
+    EXPECT_TRUE(contains(line, "message=\"position limit exceeded\""));
+    EXPECT_TRUE(contains(line, "details=\"{\\\"limit\\\": 10, \\\"current\\\": 12}\""));
+}
+
+TEST(QuestdbStore, TimeBasedFlushFiresViaTick)
+{
+    // This test verifies the Phase 1 time-based flushing path:
+    // When line count threshold is high, tick() should still cause a flush
+    // once the time threshold is reached.
+
+    StoreConfig cfg{};
+    cfg.run_tag = "tt_time_flush";
+    cfg.mode = "shadow";
+    cfg.binary = "engine_shadow";
+    cfg.strategy = "test";
+    cfg.symbol = "ETHUSDT";
+    cfg.initial_equity = 50000.0;
+
+    auto transport = std::make_unique<RecordingTransport>();
+    RecordingTransport* raw_transport = transport.get();
+
+    // High line threshold (1000), short time threshold (5ms)
+    auto writer = std::make_unique<IlpWriter>(
+        cfg.host, cfg.ilp_port, std::move(transport),
+        /*flush_every_n_lines=*/1000,
+        /*flush_every=*/std::chrono::milliseconds(5));
+
+    std::vector<std::string> ddls;
+    auto store = std::make_unique<QuestdbStore>(
+        cfg,
+        std::move(writer),
+        [&ddls](const std::string& sql) {
+            ddls.push_back(sql);
+            return true;
+        });
+
+    ASSERT_TRUE(store->begin());
+    raw_transport->lines.clear();  // clear the initial runs_meta row from begin
+
+    // Enqueue one record — far below the 1000 line threshold
+    auto o = make_order(999);
+    store->record_order_submitted(*o, "pending");
+
+    // Should still be zero because we haven't hit line count and haven't called tick() yet
+    EXPECT_EQ(raw_transport->lines.size(), 0u);
+
+    // Give the clock enough time past the 5ms threshold and call tick().
+    // This exercises the time-based flush path (Phase 1) even when far below
+    // the line count threshold.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    store->tick();
+
+    // Now we expect the enqueued line to have been flushed via the time path
+    EXPECT_GE(raw_transport->lines.size(), 1u);
+    if (!raw_transport->lines.empty())
+    {
+        const auto& line = raw_transport->lines.back();
+        EXPECT_TRUE(starts_with(line, "tt_time_flush_orders,"));
+        EXPECT_TRUE(contains(line, "order_id=999i"));
+    }
 }
 
 #endif // HAS_QUESTDB

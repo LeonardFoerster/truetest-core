@@ -10,7 +10,7 @@ This document serves as the primary operator-facing manual and technical overvie
 
 TrueTest (hft-engine) is a modular, high-performance C++23 trading engine that implements backtesting, shadow (paper) trading, and live execution from a single shared codebase. The engine produces three specialized binaries (`engine_backtest`, `engine_shadow`, `engine_live`) via a compile-time `TT_TARGET` gate that completely removes the ability to place real orders from non-live builds.
 
-**Core value proposition**: A production-grade, auditable foundation for algorithmic trading that reuses the exact same hot path, risk engine, analytics, and order lifecycle for reproducible backtests, divergence-aware shadow runs, and real-money execution. Designed for serious retail and semi-professional quant traders who need C++ performance, realistic microstructure modeling, and institutional-grade safety nets without building infrastructure from scratch.
+**Core value proposition**: A production-grade, auditable foundation for algorithmic trading that reuses the exact same hot path, risk engine, analytics, and order lifecycle for reproducible backtests, divergence-aware shadow runs, and real-money execution. Designed for serious retail and semi-professional quant traders who need C++ performance, realistic microstructure modeling, and strong personal-use safety scaffolding without building infrastructure from scratch.
 
 **Key technical highlights**:
 - C++23, zero-allocation hot path using `ObjectPool` and lock-free SPSC `RingBuffer` (64k slots)
@@ -21,6 +21,7 @@ TrueTest (hft-engine) is a modular, high-performance C++23 trading engine that i
 - Optional high-resolution persistence via QuestDB ILP + binary event logs (zstd compressed)
 - Lock-free multi-threaded worker architecture with CPU pinning and configurable spin policies
 - Rich ncurses tabbed TUI (shadow/live) and ANSI dashboard (backtest)
+- Monte Carlo simulation engine for stochastic backtesting, strategy robustness testing, and risk-distribution analysis (GBM paths, deterministic multi-trial campaigns, object reuse, experimental parallelism)
 
 # Architecture & Design
 
@@ -60,7 +61,7 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 
 **Main components**:
 - **Core engine** (`src/engine/`): Orchestrates the event loop, worker threads, and lifecycle.
-- **Providers** (`src/providers/`): Data + execution boundary. `local` for CSV/tick replay; `binance` and `binance-futures` for live streaming + REST execution.
+- **Providers** (`src/providers/`): Data + execution boundary. `local` for CSV/tick replay; `binance` and `binance-futures` for live streaming + REST execution; `synthetic` for on-demand GBM path generation (standalone or via Monte Carlo campaigns).
 - **Strategies** (`src/strategy/`): Pluggable via `REGISTER_STRATEGY` macro. Can emit `order_event` and `exit_intent` vectors for brackets.
 - **Execution layer** (`src/execution/`): `IExecutionAdapter`, `Portfolio`, `OrderTracker`, realistic models (`FeeModel`, `FillModel`, `LatencyModel`, `ImpactModel`, `QueuePositionModel`).
 - **Order book & matching** (`src/orderbook/`): `Orderbook` + `FillModel` for backtest realism.
@@ -105,6 +106,17 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 - Live-money math confirmation gate + red warning banner
 - Rate limiter and time sync
 
+**Intended Use & Scope**: TrueTest is a private, personal research and retail tool for the author only. It is not, and will never be, an enterprise-ready, institutional, or production trading system. Monte Carlo simulation, high-fidelity backtesting, and shadow divergence analysis are the primary mature capabilities. The live execution paths (`engine_live`) exist with unusually strong compile-time (`TT_TARGET`) and runtime safety layers (reconciler, DMS, kill-switch, venue risk checks, terminal halt, user-data source of truth, etc.). Any use of live paths is experimental, tiny-size, fully attended by the operator, and done at the author's own risk. The Phase 0/1 rituals and Go-Live language in this repository describe the author's personal evidence-gathering hygiene and self-imposed discipline — they are **not** a formal production release process or claim of readiness for others.
+
+**Stochastic Backtesting (Monte Carlo)**:
+- Synthetic GBM path generation via the `synthetic` provider (usable standalone with `--provider synthetic --mc-params "..."` or as part of full campaigns)
+- Full multi-trial campaigns with deterministic per-trial seeding via `--monte-carlo --mc-trials N --mc-model gbm --strategy ...`
+- Reuses the complete existing strategy, engine, realism models, analytics, ExitManager, and QuestDB surfaces for each trial
+- Performance features: object reuse between trials (`--mc-reuse-objects`) and experimental parallel execution (`--mc-parallel`, recommended only with `--thread-preset inline`)
+- Reporter produces per-trial + aggregate P&L, Sharpe, max drawdown, win rate, etc. (text + compact JSON)
+- Strong caveats: synthetic L2 is stylized (constant spread + noise), no automatic calibration from historical data, parallel mode has non-deterministic ordering and threading restrictions, QuestDB support is currently campaign-summary only (full per-trial MC-06 future)
+- **Current MC items + status** (MC-01..MC-06, including "substantially complete" for reporter Step A, demo caveats on some strategies for MC-05, L2 fidelity, reuse/parallel limitations): see root `todo.md` MC section + `docs/instructions.md` (detailed MC flags/usage/caveats) + `prod.md` (MC disclaimer: research tool only; does not relax Phase 0/1 gates). Governance in root README + summary.md (root) + CLAUDE.md (for AI rules) + this MERGE_PLAN.md context.
+
 **Risk Management**:
 - `RiskManager`: max position, daily loss, trade frequency, unrealized loss
 - Venue-specific `IRiskCheck` (futures liquidation distance, notional caps)
@@ -114,7 +126,7 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 **Other advanced features**:
 - Exit intents / bracket management (SL/TP/trailing per entry, scale-outs)
 - Market maker worker and adverse selection tracker
-- Multi-strategy mode (`--strategy sma,mean-reversion`)
+- Multi-strategy mode (`--strategy sma,mean-reversion,structure-continuation`)
 - CPU pinning + configurable threading presets (inline/light/standard/full/extended)
 - Binary event log (zstd) + operational text logs with rotation
 - Rich tabbed TUI (shadow/live) with 10+ specialized panels
@@ -187,6 +199,18 @@ ctest --test-dir build --output-on-failure
 **Environment**:
 - `TRUETEST_*` variables for some overrides
 - Credentials can be provided via CLI or environment (see `scripts/check-credentials.sh`)
+
+## QuestDB Persistence
+
+TrueTest supports optional high-resolution persistence to a QuestDB instance using the InfluxDB Line Protocol (ILP) for ingestion (default port 9009) and HTTP for schema/DDL operations (default port 9000). Build support is enabled via the CMake flag `-DENABLE_QUESTDB=ON`.
+
+At runtime, persistence is activated with `--persist --run-tag <name>` (optionally combined with `--persist-strict` for hard-fail semantics and automatic local ILP fallback file writing on outages). The engine performs time-based flushing (default ~150 ms cadence, configurable via `--questdb-flush-ms`) from the main reporting loops in addition to count-based batching. A minimal but effective health surface is exposed in the TUI (connected state, pending lines, fallback lines written, age since last successful flush).
+
+Per-run tables (e.g. `{run_tag}_orders`, `{run_tag}_fills`, `{run_tag}_events`, `{run_tag}_rejections`) are created automatically with `PARTITION BY DAY` and a designated timestamp column. A shared `runs_meta` table (now using WEEK partitioning) records campaign summaries, including rich analytics fields such as max drawdown, Sharpe, Sortino, profit factor, and win rate written on shutdown. A generic `_events` table (Phase 3) enables capture of strategy decisions, risk actions, and other logic beyond pure order lifecycle.
+
+QuestDB is explicitly a secondary, queryable analytics and observability store. The binary zstd-compressed event log (`--record`) is the authoritative, durable audit trail. In non-strict mode, QuestDB unavailability at startup causes graceful degradation (persistence is disabled for the session with a warning). In strict mode, startup or persistent write failures cause a hard exit.
+
+For operational details, golden queries, retention/TTL recommendations, soak testing with failure injection, and post-run reconciliation, see `docs/db.md` and `docs/questdb-multi-week-hardening-guide.md`.
 
 # Usage Examples
 
@@ -285,7 +309,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 
 - TUI requires a capable terminal (ncurses); backtest falls back to simpler ANSI dashboard.
 - Live trading currently limited to Binance spot and USDT-M futures (other venues require new providers).
-- Strategy library is small (SMA, mean-reversion, MA crossover, hedge demo, basic market maker). No built-in portfolio optimization or ML inference.
+- Strategy library (self-registering): SMA, mean-reversion, MA crossover, breakout/coiled-spring, adaptive-hybrid, structure-continuation (plus supporting indicators: EMA regime, stochastic, swing detector). No built-in portfolio optimization or ML inference.
 - Realism in backtest/shadow is only as good as the configured models and data quality; L2 replay for impact is powerful but data-intensive.
 - No native Windows GUI or installer; command-line + TUI only.
 - QuestDB is the only supported high-resolution persistence backend (soft-fail if unavailable).

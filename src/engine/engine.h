@@ -37,7 +37,9 @@ namespace truetest::ui { struct streaming_stats; }
 #include "core/event.h"
 #include "core/event_log.h"
 #include "types/order_id.h"
+#include "types/control_block_pool.h"
 #include "types/object_pool.h"
+#include "types/pool_exhausted.h"
 #include "exits/exit_manager.h"
 
 #include "debug/stage_timer.h"
@@ -116,10 +118,35 @@ private:
     std::unique_ptr<BarAggregator> tick_aggregator_;
     std::chrono::milliseconds tick_bar_interval_{60000};
 
-    ObjectPool<market_event> market_pool_;
-    ObjectPool<order_event>  order_pool_;
-    ObjectPool<fill_event>   fill_pool_;
-    ObjectPool<tick_event>   tick_pool_;
+    ObjectPool<market_event>      market_pool_;
+    ObjectPool<order_event>       order_pool_;
+    ObjectPool<fill_event>        fill_pool_;
+    ObjectPool<tick_event>        tick_pool_;
+    ObjectPool<l2_update_event>   l2_update_pool_;
+    ObjectPool<l2_snapshot_event> l2_snapshot_pool_;
+    ObjectPool<rejection_event>   rejection_pool_;
+    ObjectPool<cancel_event>      cancel_pool_;
+    ObjectPool<amend_event>       amend_pool_;
+    ObjectPool<funding_event>     funding_pool_;
+    ControlBlockPool              control_block_pool_;
+
+    void prewarm_object_pools();
+    // Phase 3: reclaim worker-thread pool releases before hot-path acquire.
+    void drain_object_pool_returns() noexcept;
+
+    template<typename T, std::size_t BlockSize, typename... Args>
+    std::shared_ptr<T> acquire_pooled(ObjectPool<T, BlockSize>& pool, Args&&... args)
+    {
+        try
+        {
+            return pool.acquire(std::forward<Args>(args)...);
+        }
+        catch (const pool_exhausted& e)
+        {
+            trigger_halt(e.what());
+            throw;
+        }
+    }
 
     std::shared_ptr<EventRing> logging_ring_;
     std::shared_ptr<EventRing> risk_ring_;
@@ -136,8 +163,16 @@ private:
     bool questdb_active_ = false;  // true only after successful begin()
     std::size_t questdb_total_rejections_ = 0;
 
+    // Last time we called tick() for time-based ILP flushing (Phase 1 hardening).
+    std::chrono::steady_clock::time_point last_questdb_flush_{};
+
     void questdb_begin();
     void questdb_end();
+
+    // Cheap periodic call (intended to be invoked from the 200ms reporting blocks).
+    // Does nothing if persist is not active. Calls QuestdbStore::tick() at most
+    // once per config_.questdb_flush_cadence.
+    void maybe_questdb_tick();
 #endif
 
     // Dashboard view: read from the rich (ncurses) TUI render thread.
@@ -195,6 +230,13 @@ private:
     // installed on the provider's ExecutionBridge. Safe to call when
     // there is no bridge — it just no-ops.
     void drain_venue_bracket_meta();
+
+    // Stamp per-lot attribution (opener_order_id + strategy_name) onto a
+    // fill_event if not already present. Uses order_meta_ lookup as fallback.
+    // Called from all fill processing paths (and adapters now set it at
+    // creation for paper/shadow fills). Part of Phase 1 deepdive per-lot
+    // consolidation.
+    void stamp_fill_attribution(fill_event& f);
 
     // Returns true if an exit fire caused the engine to halt.
     bool evaluate_exits(const std::string& symbol, double px,
@@ -386,6 +428,24 @@ public:
                          tick_side side, double price, int64_t new_qty);
     void print_summary();
     const Analytics& get_analytics() const;
+
+    // Resets internal heavy objects (portfolio [incl. lots], analytics, exit_manager,
+    // order_tracker, risk_manager, market_maker, adverse_selection, orderbook_registry,
+    // shadow_tracker, order_meta_, instrument/l2 caches, tick aggregator, UI caches, etc.)
+    // so they can be reused for the next Monte Carlo trial without full reconstruction.
+    //
+    // Phase 4 hardening: now clears more for per-trial isolation (order_meta_,
+    // shadow_tracker). Rings, workers, event_logger_, and dashboard timing are left
+    // mostly untouched (workers repopulate via rings; full reset complex/unnecessary
+    // for MC). See implementation comments.
+    //
+    // This is intended primarily for MonteCarloController when reuse_objects_between_trials
+    // is enabled. It is NOT a general-purpose reset and does not restore the engine to a
+    // pristine post-construction state in all cases.
+    //
+    // Call this after engine construction (or between trials) when you want to reuse the
+    // engine instance across multiple independent backtests.
+    void reset_for_next_trial(uint64_t new_seed);
 
     // Only valid in shadow mode. Returns nullptr otherwise.
     const portfolio* get_exchange_portfolio() const;

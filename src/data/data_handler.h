@@ -62,4 +62,13 @@ class data_handler
 		bool has_bar_data() const { return !db_data_symbol.empty(); }
 
 		void sort_by_date();
+
+		// Phase A (MC object reuse): clears all loaded data and counters
+		// so the handler can be reused for the next trial.
+		void reset();
+
+		// Performance: pre-reserve all internal vectors for large CSVs
+		// (e.g. 1.7M+ rows over multiple years). Call once before loading.
+		// Eliminates repeated realloc + memmove during emplace_back.
+		void reserve(std::size_t n);
 };

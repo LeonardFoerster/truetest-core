@@ -19,10 +19,10 @@ void MarketMaker::add_orders(std::shared_ptr<orderbook> ob, double current_price
         double buy_price = current_price * (1 - spread);
         double sell_price = current_price * (1 + spread);
 
-        auto buy_order = std::make_shared<order>(
+        auto buy_order = ob->create_order(
             ob_order_type::good_till_cancel, OrderIdGenerator::next(), side::buy,
             Price::from_double(buy_price), static_cast<quantity>(100 * 1e8));
-        auto sell_order = std::make_shared<order>(
+        auto sell_order = ob->create_order(
             ob_order_type::good_till_cancel, OrderIdGenerator::next(), side::sell,
             Price::from_double(sell_price), static_cast<quantity>(100 * 1e8));
 
@@ -96,9 +96,20 @@ void MarketMaker::replenish(std::shared_ptr<orderbook> ob, double current_price)
     {
         Price p = Price::from_double(mo.price);
         auto ob_side = (mo.side == order_side::buy) ? side::buy : side::sell;
-        auto ob_order = std::make_shared<order>(
+        auto ob_order = ob->create_order(
             ob_order_type::good_till_cancel, OrderIdGenerator::next(),
             ob_side, p, static_cast<quantity>(std::round(mo.quantity * 1e8)));
         ob->add_order(ob_order);
     }
+}
+
+// Phase B (MC reuse)
+void MarketMaker::reset(unsigned rng_seed)
+{
+    if (rng_seed != 0)
+        gen_.seed(rng_seed);
+    else
+        gen_.seed(static_cast<unsigned>(std::chrono::system_clock::now().time_since_epoch().count()));
+
+    price_history_.clear();
 }

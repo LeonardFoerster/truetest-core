@@ -7,13 +7,33 @@
 #include <unordered_map>
 #include <vector>
 #include <string>
+#include <string_view>
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
+#include <charconv>
 
 #ifdef HAS_DEBUG
 #include "debug/copy_tracker.h"
 #endif
+
+// Performance helpers for large CSVs (1.7M+ rows common for multi-year bar data).
+// Goal: reduce the dominant cost when backtesting 4+ years of bars.
+// - std::from_chars for integers (volume, timestamps, qty) – zero-alloc, fast.
+// - Lightweight string_view field walking instead of vector<string> + stringstream per row.
+// - Caller is expected to call data_handler::reserve() before loading.
+namespace tt::csv {
+
+inline std::int64_t fast_stoll(std::string_view sv)
+{
+    std::int64_t v = 0;
+    auto [p, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), v);
+    if (ec != std::errc{})
+        throw std::invalid_argument("fast_stoll failed");
+    return v;
+}
+
+} // namespace tt::csv
 
 
 struct bar_record
@@ -64,22 +84,62 @@ public:
 	{
 		if (line.empty()) return std::nullopt;
 
-		std::vector<std::string> tokens;
-		std::stringstream ss(line);
-		std::string token;
-		while (std::getline(ss, token, ','))
-			tokens.emplace_back(std::move(token));
-
+		// Performance: avoid per-line vector<string> + stringstream churn for
+		// every row (this was one of the biggest costs at 1.7M+ rows).
+		// We walk the line once with find and only materialise the fields we need.
 		try
 		{
 			bar_record rec;
-			rec.date   = col_index_.count("date")   ? tokens.at(col_index_["date"])   : "";
-			rec.symbol = col_index_.count("symbol") ? tokens.at(col_index_["symbol"]) : "";
-			rec.open   = std::stod(tokens.at(col_index_["open"]));
-			rec.high   = std::stod(tokens.at(col_index_["high"]));
-			rec.low    = std::stod(tokens.at(col_index_["low"]));
-			rec.close  = std::stod(tokens.at(col_index_["close"]));
-			rec.volume = col_index_.count("volume") ? std::stoll(tokens.at(col_index_["volume"])) : 0;
+			std::string_view sv(line);
+
+			// Very lightweight field walker – enough for typical OHLCV CSVs.
+			// Keeps the existing column-index logic for flexibility.
+			std::vector<std::string_view> fields;
+			fields.reserve(8);
+			size_t pos = 0;
+			while (pos <= sv.size())
+			{
+				size_t next = sv.find(',', pos);
+				if (next == std::string_view::npos) next = sv.size();
+				fields.emplace_back(sv.substr(pos, next - pos));
+				if (next == sv.size()) break;
+				pos = next + 1;
+			}
+
+			auto get_field = [&](const char* name) -> std::string_view {
+				auto it = col_index_.find(name);
+				if (it == col_index_.end()) return {};
+				size_t idx = it->second;
+				return (idx < fields.size()) ? fields[idx] : std::string_view{};
+			};
+
+			auto date_sv   = get_field("date");
+			auto sym_sv    = get_field("symbol");
+			auto open_sv   = get_field("open");
+			auto high_sv   = get_field("high");
+			auto low_sv    = get_field("low");
+			auto close_sv  = get_field("close");
+			auto vol_sv    = get_field("volume");
+
+			rec.date   = std::string(date_sv);
+			rec.symbol = std::string(sym_sv);
+
+			// Fast path for integers, stod kept for doubles for portability.
+			rec.open   = open_sv.empty()  ? 0.0 : std::stod(std::string(open_sv));
+			rec.high   = high_sv.empty()  ? 0.0 : std::stod(std::string(high_sv));
+			rec.low    = low_sv.empty()   ? 0.0 : std::stod(std::string(low_sv));
+			rec.close  = close_sv.empty() ? 0.0 : std::stod(std::string(close_sv));
+
+			if (!vol_sv.empty())
+			{
+				try { rec.volume = tt::csv::fast_stoll(vol_sv); }
+				catch (...) { rec.volume = 0; }
+			}
+			else
+			{
+				rec.volume = 0;
+			}
+
 			return rec;
 		}
 		catch (const std::exception&)
@@ -103,25 +163,42 @@ public:
 
 		try
 		{
-			std::istringstream ss(line);
-			std::string token;
+			// Same performance improvements as CsvBarParser:
+			// reduce per-line allocations and use fast integer parsing.
+			std::string_view sv(line);
 
-			if (!std::getline(ss, token, ',')) return std::nullopt;
-			int64_t ts_ms = std::stoll(token);
+			std::vector<std::string_view> fields;
+			fields.reserve(6);
+			size_t pos = 0;
+			while (pos <= sv.size())
+			{
+				size_t next = sv.find(',', pos);
+				if (next == std::string_view::npos) next = sv.size();
+				fields.emplace_back(sv.substr(pos, next - pos));
+				if (next == sv.size()) break;
+				pos = next + 1;
+			}
 
-			std::string symbol;
-			if (!std::getline(ss, symbol, ',')) return std::nullopt;
+			if (fields.size() < 4) return std::nullopt;
 
-			if (!std::getline(ss, token, ',')) return std::nullopt;
-			double price = std::stod(token);
+			int64_t ts_ms = 0;
+			try { ts_ms = tt::csv::fast_stoll(fields[0]); }
+			catch (...) { return std::nullopt; }
 
-			if (!std::getline(ss, token, ',')) return std::nullopt;
-			int64_t qty = std::stoll(token);
+			std::string symbol(fields[1]);
+
+			double price = 0.0;
+			try { price = std::stod(std::string(fields[2])); }
+			catch (...) { return std::nullopt; }
+
+			int64_t qty = 0;
+			try { qty = tt::csv::fast_stoll(fields[3]); }
+			catch (...) { return std::nullopt; }
 
 			data_tick_side side = data_tick_side::unknown;
-			if (std::getline(ss, token, ',') && !token.empty())
+			if (fields.size() >= 5 && !fields[4].empty())
 			{
-				char c = token[0];
+				char c = fields[4][0];
 				if (c == 'B' || c == 'b') side = data_tick_side::bid;
 				else if (c == 'A' || c == 'a') side = data_tick_side::ask;
 			}
@@ -131,7 +208,7 @@ public:
 
 			tick_record rec;
 			rec.timestamp = timestamp;
-			rec.symbol = symbol;
+			rec.symbol = std::move(symbol);
 			rec.price = price;
 			rec.quantity = qty;
 			rec.side = side;

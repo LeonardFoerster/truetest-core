@@ -57,6 +57,8 @@ public:
         auto it = levels_.find(key);
         po.size_ahead = (it != levels_.end()) ? it->second.aggregate_size : 0.0;
         po.submit_ts = o.get_earliest_eligible_ts();
+        po.strategy_name = o.get_strategy_name();
+        po.opener_order_id = o.get_opener_order_id();
         orders_[po.order_id] = std::move(po);
     }
 
@@ -186,6 +188,8 @@ public:
 
                 fill_event f(trade_ts, po.symbol, po.order_id,
                              po.side, fill_qty, trade_price, commission);
+                if (!po.strategy_name.empty()) f.set_strategy_name(po.strategy_name);
+                if (po.opener_order_id != 0) f.set_opener_order_id(po.opener_order_id);
                 pending_fills_.push_back(std::move(f));
 
                 po.qty_remaining -= fill_qty;
@@ -242,6 +246,9 @@ private:
         double        qty_remaining{0.0};
         double        size_ahead{0.0};
         std::chrono::system_clock::time_point submit_ts{};
+        // Per-lot attribution captured at submit time (Phase 1 deepdive).
+        std::string   strategy_name;
+        std::uint64_t opener_order_id = 0;
     };
     struct level_state
     {

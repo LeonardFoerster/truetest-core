@@ -75,13 +75,28 @@ set(ENGINE_CORE_SOURCES
     src/strategy/sma_strategy.cpp
     src/strategy/ma_crossover_strategy.cpp
     src/strategy/hedge_demo_strategy.cpp
+    src/strategy/breakout_strategy.cpp
+    src/strategy/larry_connor_strategy.cpp
+    src/strategy/coiled_spring_strategy.cpp
     src/strategy/sma.cpp
+    src/strategy/adaptive_hybrid_config.cpp
+    src/strategy/adaptive_hybrid_strategy.cpp
+    src/strategy/structure_continuation_strategy.cpp
     src/market_maker/market_maker.cpp
     src/risk/risk_manager.cpp
     src/risk/maintenance_margin_table.cpp
     src/providers/local/local_register.cpp
     src/ui/console_dashboard.cpp
     src/exits/exit_manager.cpp
+
+    # Monte Carlo / synthetic simulation (integrated from monte-carlo branch)
+    src/simulation/imonte_carlo_generator.cpp
+    src/simulation/monte_carlo_controller.cpp
+    src/simulation/monte_carlo_reporter.cpp
+    src/simulation/generators/gbm_generator.cpp
+    src/providers/synthetic/synthetic_transport.cpp
+    src/providers/synthetic/synthetic_provider.cpp
+    src/providers/synthetic/synthetic_register.cpp
 )
 
 add_library(engine_core OBJECT ${ENGINE_CORE_SOURCES})
@@ -172,8 +187,14 @@ if(BUILD_TESTS)
         tests/test_sma.cpp
         tests/test_ema.cpp
         tests/test_rsi.cpp
+        tests/test_stochastic.cpp
+        tests/test_swing_detector.cpp
+        tests/test_ema_regime.cpp
         tests/test_bollinger.cpp
         tests/test_strategies.cpp
+        tests/test_adaptive_hybrid.cpp
+        tests/test_monte_carlo_generators.cpp
+        tests/test_monte_carlo_controller.cpp
         tests/test_ring_buffer.cpp
         tests/test_bar_aggregator.cpp
         tests/test_analytics.cpp
@@ -209,6 +230,14 @@ if(BUILD_TESTS)
         tests/test_orderbook_registry.cpp
         tests/test_order_types.cpp
         tests/test_object_pool.cpp
+        tests/helpers/alloc_counter.cpp
+        tests/test_hotpath_allocs.cpp
+        tests/test_hotpath_alloc_matrix.cpp
+        tests/test_hotpath_pool_prewarm.cpp
+        tests/test_control_block_pool.cpp
+        tests/test_symbol_table.cpp
+        tests/test_orderbook_order_pool.cpp
+        tests/test_deferred_return_queue.cpp
         tests/test_risk_manager.cpp
         tests/test_event_log.cpp
         tests/test_thread_preset.cpp

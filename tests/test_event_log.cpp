@@ -184,7 +184,9 @@ TEST(EventLog, RoundTrip_L2SnapshotEvent)
         EventLogger logger(tf.path);
         std::vector<l2_level> bids = {{100.5, 200}, {100.0, 300}};
         std::vector<l2_level> asks = {{101.0, 150}, {101.5, 250}};
-        l2_snapshot_event snap(ts, "DOGE", bids, asks);
+        l2_snapshot_event snap(ts, "DOGE",
+                               bids.data(), bids.size(),
+                               asks.data(), asks.size());
         logger.log(snap);
         logger.flush();
     }
@@ -196,13 +198,13 @@ TEST(EventLog, RoundTrip_L2SnapshotEvent)
 
     auto& snap = static_cast<l2_snapshot_event&>(*ev);
     EXPECT_EQ(snap.get_symbol(), "DOGE");
-    ASSERT_EQ(snap.get_bids().size(), 2u);
-    EXPECT_DOUBLE_EQ(snap.get_bids()[0].price, 100.5);
-    EXPECT_EQ(snap.get_bids()[0].quantity, 200);
-    EXPECT_DOUBLE_EQ(snap.get_bids()[1].price, 100.0);
-    ASSERT_EQ(snap.get_asks().size(), 2u);
-    EXPECT_DOUBLE_EQ(snap.get_asks()[0].price, 101.0);
-    EXPECT_EQ(snap.get_asks()[0].quantity, 150);
+    ASSERT_EQ(snap.bid_count(), 2u);
+    EXPECT_DOUBLE_EQ(snap.bid(0).price, 100.5);
+    EXPECT_EQ(snap.bid(0).quantity, 200);
+    EXPECT_DOUBLE_EQ(snap.bid(1).price, 100.0);
+    ASSERT_EQ(snap.ask_count(), 2u);
+    EXPECT_DOUBLE_EQ(snap.ask(0).price, 101.0);
+    EXPECT_EQ(snap.ask(0).quantity, 150);
 }
 
 TEST(EventLog, RoundTrip_L2UpdateEvent)

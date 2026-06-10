@@ -9,6 +9,13 @@
 #include <iostream>
 #include <numeric>
 
+namespace {
+static const bool kAnalyticsPnlDebug = [] {
+    const char* v = std::getenv("TT_ANALYTICS_PNL_DEBUG");
+    return v && (*v == '1' || *v == 't' || *v == 'T');
+}();
+} // namespace
+
 Analytics::Analytics(double initial_cash, std::size_t rolling_window, double risk_free_rate,
                      std::size_t periods_per_year, std::size_t max_equity_points)
     : initial_cash_(initial_cash), cash_(initial_cash),
@@ -27,6 +34,84 @@ void Analytics::reserve_hint(std::size_t expected_bars)
     benchmark_curve_.reserve(curve_cap);
     strategy_returns_.reserve(expected_bars);
     benchmark_returns_.reserve(expected_bars);
+}
+
+// Phase A (MC object reuse): reset to initial constructed state.
+void Analytics::reset(double initial_cash)
+{
+    initial_cash_ = initial_cash;
+    cash_ = initial_cash;
+    position_qty_ = 0.0;
+    avg_entry_price_ = 0.0;
+    total_open_commission_ = 0.0;
+    entry_time_ = {};
+
+    equity_stride_ = 1;
+    equity_counter_ = 0;
+    bench_stride_ = 1;
+    bench_counter_ = 0;
+
+    equity_curve_.clear();
+    benchmark_curve_.clear();
+    strategy_returns_.clear();
+    benchmark_returns_.clear();
+
+    rolling_returns_.clear();
+    prev_equity_ = initial_cash;
+    peak_equity_ = initial_cash;
+
+    order_prices_.clear();
+    order_strategies_.clear();
+
+    trades_.clear();
+    trade_returns_.clear();
+
+    last_equity_ = 0.0;
+    realized_vol_1h_ = 0.0;
+    last_mid_price_ = 0.0;
+    current_spread_bps_ = 0.0;
+    current_funding_8h_rate_ = 0.0;
+
+    total_funding_pnl_ = 0.0;
+    total_slippage_ = 0.0;
+    total_slippage_signed_ = 0.0;
+    total_adverse_slippage_ = 0.0;
+    total_favorable_slippage_ = 0.0;
+    slippage_count_ = 0;
+    adverse_count_ = 0;
+    favorable_count_ = 0;
+    total_orders_ = 0;
+    total_fills_ = 0;
+
+    total_holding_ms_ = 0.0;
+    holding_count_ = 0;
+    market_events_total_ = 0;
+    market_events_in_position_ = 0;
+
+    first_price_ = 0.0;
+    first_price_set_ = false;
+    prev_bh_equity_ = initial_cash;
+
+    per_symbol_.clear();
+    per_strategy_.clear();
+
+    return_stats_.reset();
+    downside_stats_.reset();
+
+    peak_equity_ = initial_cash;
+    max_drawdown_ = 0.0;
+
+    win_count_ = 0;
+    total_win_ = 0.0;
+    total_loss_ = 0.0;
+    largest_winner_ = 0.0;
+    largest_loser_ = 0.0;
+
+    tick_to_trade_ns_.reset();
+    tick_to_trade_min_ns_ = 0;
+    tick_to_trade_max_ns_ = 0;
+
+    // Note: last_close_ is intentionally left; it will be overwritten on first market event.
 }
 
 void Analytics::record_equity_point(std::vector<equity_point>& curve,
@@ -269,6 +354,18 @@ void Analytics::on_fill(const fill_event& f)
         double open_comm_share = total_open_commission_ * (close_qty / prev_abs);
         double pnl = gross - close_comm - open_comm_share;
 
+        if (kAnalyticsPnlDebug) {
+            std::fprintf(stderr,
+                "[ANALYTICS_PNL_CLOSE] sym=%s side=%s fill_px=%.8f filled_qty=%.6f comm=%.6f "
+                "pos_qty=%.6f avg_entry=%.8f open_comm_acc=%.6f "
+                "close_qty=%.6f gross=%.8f close_c=%.6f open_share=%.6f pnl=%.8f\n",
+                f.get_symbol().c_str(),
+                (f.get_side() == order_side::buy ? "BUY" : "SELL"),
+                fill_price, filled_qty, commission,
+                position_qty_, avg_entry_price_, total_open_commission_,
+                close_qty, gross, close_comm, open_comm_share, pnl);
+        }
+
         total_open_commission_ -= open_comm_share;
 
         cash_ += -side_sign * close_qty * fill_price - close_comm;
@@ -329,6 +426,15 @@ void Analytics::on_fill(const fill_event& f)
         position_qty_ += side_sign * qty_left;
         total_open_commission_ += open_comm;
 
+        if (kAnalyticsPnlDebug && prev_abs < 1e-12) {
+            std::fprintf(stderr,
+                "[ANALYTICS_PNL_OPEN] sym=%s side=%s fill_px=%.8f qty=%.6f comm=%.6f "
+                "avg_entry_set=%.8f open_comm_acc=%.6f\n",
+                f.get_symbol().c_str(),
+                (f.get_side() == order_side::buy ? "BUY" : "SELL"),
+                fill_price, qty_left, open_comm, avg_entry_price_, total_open_commission_);
+        }
+
         if (prev_abs < 1e-12)
             entry_time_ = f.get_timestamp();
 
@@ -340,12 +446,9 @@ void Analytics::on_fill(const fill_event& f)
 
 void Analytics::on_l2_snapshot(const l2_snapshot_event& ev)
 {
-    const auto& bids = ev.get_bids();
-    const auto& asks = ev.get_asks();
-
-    if (!bids.empty() && !asks.empty()) {
-        double best_bid = bids.front().price;
-        double best_ask = asks.front().price;
+    if (ev.bid_count() > 0 && ev.ask_count() > 0) {
+        double best_bid = ev.bid(0).price;
+        double best_ask = ev.ask(0).price;
         if (best_ask > best_bid && best_bid > 0) {
             double mid = (best_ask + best_bid) / 2.0;
             current_spread_bps_ = ((best_ask - best_bid) / mid) * 10000.0;
@@ -478,6 +581,7 @@ AnalyticsReport Analytics::snapshot() const
 
     if (!trade_returns_.empty())
     {
+        r.winning_trades = win_count_;
         r.win_rate = static_cast<double>(win_count_) / static_cast<double>(trade_returns_.size()) * 100.0;
         r.avg_win = (win_count_ > 0) ? total_win_ / static_cast<double>(win_count_) : 0.0;
         std::size_t losses = trade_returns_.size() - win_count_;

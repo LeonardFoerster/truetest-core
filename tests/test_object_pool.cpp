@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "types/object_pool.h"
+#include "types/pool_exhausted.h"
 
 #include <set>
 #include <thread>
@@ -49,9 +50,11 @@ TEST(ObjectPool, ExhaustionTriggersNewBlock)
 
     EXPECT_EQ(pool.block_count(), 1u);
 
-    // 5th acquire should trigger a new block
+    // 5th acquire should trigger a new block (runtime grow, not ctor)
+    EXPECT_EQ(pool.grow_count(), 0u);
     held.push_back(pool.acquire(4, 0.0));
     EXPECT_EQ(pool.block_count(), 2u);
+    EXPECT_EQ(pool.grow_count(), 1u);
 
     // Verify all are distinct and valid
     std::set<Widget*> ptrs;
@@ -98,32 +101,76 @@ TEST(ObjectPool, MultipleAcquiresDistinct)
     EXPECT_EQ(w3->x, 3);
 }
 
+// Phase 3: engine thread acquires; worker threads only release via deferred queue.
+TEST(ObjectPool, DeferredReturnWorkerRelease)
+{
+    ObjectPool<Widget, 64> pool;
+    constexpr int total = 256;
+    std::vector<std::shared_ptr<Widget>> held;
+    held.reserve(total);
+    for (int i = 0; i < total; ++i)
+        held.push_back(pool.acquire(i, static_cast<double>(i)));
+
+    constexpr int threads = 4;
+    std::vector<std::thread> workers;
+    for (int t = 0; t < threads; ++t)
+    {
+        workers.emplace_back([&, t]() {
+            const int chunk = total / threads;
+            const int begin = t * chunk;
+            const int end = (t == threads - 1) ? total : begin + chunk;
+            for (int i = begin; i < end; ++i)
+                held[static_cast<std::size_t>(i)].reset();
+        });
+    }
+    for (auto& th : workers)
+        th.join();
+
+    EXPECT_GT(pool.deferred_pending(), 0u);
+    pool.drain_deferred_returns();
+    EXPECT_EQ(pool.deferred_pending(), 0u);
+
+    auto w = pool.acquire(999, 1.5);
+    EXPECT_EQ(w->x, 999);
+}
+
 TEST(ObjectPool, ThreadSafety)
 {
     ObjectPool<Widget, 64> pool;
-    constexpr int threads = 4;
-    constexpr int ops_per_thread = 10000;
+    constexpr int worker_threads = 4;
+    constexpr int ops_per_thread = 2500;
+    constexpr int total = worker_threads * ops_per_thread;
 
-    std::atomic<int> total_acquired{0};
+    std::vector<std::shared_ptr<Widget>> batch;
+    batch.reserve(total);
+    for (int i = 0; i < total; ++i)
+        batch.push_back(pool.acquire(i, static_cast<double>(i)));
 
-    auto worker = [&]() {
-        for (int i = 0; i < ops_per_thread; ++i)
-        {
-            auto w = pool.acquire(i, static_cast<double>(i));
-            EXPECT_EQ(w->x, i);
-            total_acquired.fetch_add(1, std::memory_order_relaxed);
-            // shared_ptr goes out of scope, releasing back to pool
-        }
-    };
-
+    std::atomic<int> released{0};
     std::vector<std::thread> workers;
-    for (int t = 0; t < threads; ++t)
-        workers.emplace_back(worker);
+    for (int t = 0; t < worker_threads; ++t)
+    {
+        workers.emplace_back([&, t]() {
+            const int begin = t * ops_per_thread;
+            const int end = begin + ops_per_thread;
+            for (int i = begin; i < end; ++i)
+            {
+                batch[static_cast<std::size_t>(i)].reset();
+                released.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (auto& th : workers)
+        th.join();
 
-    for (auto& t : workers)
-        t.join();
+    pool.drain_deferred_returns();
+    EXPECT_EQ(released.load(), total);
 
-    EXPECT_EQ(total_acquired.load(), threads * ops_per_thread);
+    for (int i = 0; i < total; ++i)
+    {
+        auto w = pool.acquire(i, static_cast<double>(i) + 0.5);
+        EXPECT_EQ(w->x, i);
+    }
 }
 
 TEST(ObjectPool, SharedPtrKeepsAlive)
@@ -146,6 +193,30 @@ struct StringWidget
     int value;
     StringWidget(const std::string& n, int v) : name(n), value(v) {}
 };
+
+TEST(ObjectPool, ForbidRuntimeGrowThrowsWithoutGrowing)
+{
+    ObjectPool<Widget, 4> pool;
+    pool.set_forbid_runtime_grow(true);
+
+    std::vector<std::shared_ptr<Widget>> held;
+    for (int i = 0; i < 4; ++i)
+        held.push_back(pool.acquire(i, 0.0));
+
+    EXPECT_EQ(pool.grow_count(), 0u);
+    EXPECT_THROW((void)pool.acquire(99, 0.0), pool_exhausted);
+    EXPECT_EQ(pool.block_count(), 1u);
+}
+
+TEST(ObjectPool, EnsureMinBlocksPreallocates)
+{
+    ObjectPool<Widget, 8> pool;
+    EXPECT_EQ(pool.block_count(), 1u);
+    pool.ensure_min_blocks(3);
+    EXPECT_EQ(pool.block_count(), 3u);
+    EXPECT_EQ(pool.capacity_slots(), 24u);
+    EXPECT_EQ(pool.grow_count(), 0u);
+}
 
 TEST(ObjectPool, NonTrivialType)
 {

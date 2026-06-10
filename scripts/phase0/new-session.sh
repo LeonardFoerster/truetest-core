@@ -14,7 +14,7 @@
 #   3. A short pre-filled SOP checklist header you can print/sign
 #
 # This is the single source of truth for the Phase 0 command template
-# (see prod.md and docs/futures-phase0-operator-sop.md).
+# (see prod.md for the current ritual + command template; printable SOP planned in docs/operations/futures-phase0-operator-sop.md).
 
 set -euo pipefail
 
@@ -47,17 +47,14 @@ export BINANCE_FUTURES_KEY=...
 export BINANCE_FUTURES_SECRET=...
 
 ./build/engine_live \\
+  --preset futures-phase0 \\
   --provider binance-futures \\
   --symbol ${SYMBOL} \\
   --stream trade \\
   --depth-stream depth20@100ms \\
   --live \\
   --api-key "\${BINANCE_FUTURES_KEY}" --api-secret "\${BINANCE_FUTURES_SECRET}" \\
-  --persist --run-tag ${RUN_TAG} \\
-  --reconcile-tolerance-bps 3 \\
-  --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \\
-  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \\
-  --max-daily-loss 80 --risk-unwind
+  --persist --run-tag ${RUN_TAG}
 EOF
 )
 
@@ -101,7 +98,7 @@ Operator: _______________________________   Reviewer (opt): ________________
 [ ] Math-captcha terminal window is open and will stay visible
 [ ] QuestDB is reachable (or soft-fail is accepted and noted)
 [ ] Printed SOP + this header is on the desk
-[ ] DMS + risk caps + daily loss limit set exactly as above
+[ ] --preset futures-phase0 (or equivalent DMS/risk caps/reconcile/risk-unwind) in use
 
 I have read and will follow the full Phase 0 Operator SOP for this session.
 
@@ -112,6 +109,6 @@ EOP
 echo "=================================================================="
 echo "Next steps:"
 echo "  1. Copy the command above"
-echo "  2. Print/sign the SOP checklist (docs/futures-phase0-operator-sop.md)"
+echo "  2. Print/sign the SOP checklist (planned in docs/operations/futures-phase0-operator-sop.md; current details in prod.md)"
 echo "  3. After the run, run:  ./scripts/phase0/post-session.sh ${RUN_TAG}"
 echo "=================================================================="
