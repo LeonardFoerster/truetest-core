@@ -27,7 +27,7 @@ However, it is **not yet production-ready** for real-money live trading at scale
 |-----|---------------|------------|---------------------|-----------------------|
 | Ongoing "deepdive" + per-lot refactor | Active multi-step changes (queue awareness, per-lot bookkeeping, latency modeling) still landing on `testnet` branch | **High** | `src/engine/`, `src/execution/`, `src/risk/`, threading, order tracker | Complete the full refactor phase, pass CI + manual shadow validation on mainnet before considering larger size |
 | Cross-file safety invariants under change | Many live-critical paths (halt_flag_, reconciler, DMS heartbeat, kill switch) are explicitly flagged as high-risk for model edits | High | `tt_target.h`, `engine.cpp`, `risk_worker.h`, all `*kill_switch*`, `*dead_mans_switch*`, `*reconciler*` files | Freeze these areas until refactor stabilizes; require Opus-level review on any changes |
-| Master branch frozen pending refactor | Root README states master is intentionally held back until phases are green | Medium | Entire project | Finish current phase and produce documented "green" mainnet shadow + small live run |
+| Master branch includes MC work (integrated) | Freeze process and 10-file LIVE-SAFETY SURFACE rules remain for any safety-surface changes, regardless of branch | Medium | Entire project | The merge process itself requires clean docs + verification; safety freeze enforcement (script + CCB) is unchanged |
 
 ### 2. Risk Management Completeness
 

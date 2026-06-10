@@ -330,7 +330,7 @@ Acceptance commands and methodology in the doc. Ties to realism + demo-trading-w
 
 ## 15. Operator SOPs, Testnet Guides, Demo Workflows (see governance + reports/phase0/)
 
-See `prod.md` (Phase 0 command template + full ritual + "why each element" + Go-Live Gate) + root `todo.md` (P0-01..P0-04 + D-02; current 0/15 + "paused on monte-carlo branch" + MC does not relax gates) + `reports/phase0/` (operational evidence home) + `scripts/phase0/`.
+See `prod.md` (Phase 0 command template + full ritual + "why each element" + Go-Live Gate) + root `todo.md` (P0-01..P0-04 + D-02; current 0/15; Phase 0 collection was paused during priority work on the monte-carlo branch — MC changes did not alter P0 gates or the live safety surface) + `reports/phase0/` (operational evidence home) + `scripts/phase0/`.
 
 **Planned** (Doc Phases 1-2; current details live in prod.md / reports/phase0/ per CLAUDE rule): `docs/operations/futures-testnet.md`, `docs/operations/futures-phase0-operator-sop.md` (printable; P0-03), `docs/operations/demo-trading-workflow.md`, and related under `docs/operations/`. `docs/architecture/` files (target-architecture.md etc. — Doc Phase 2 / D-03) also planned; see `docs/README.md` for realized vs. aspirational map.
 
@@ -356,7 +356,7 @@ Tiny-size Phase 0 mainnet under conservative caps + full artifacts + two-person 
 
 See `reports/phase0/README.md` (layout + 6-step ritual summary), `PROGRESS.md` (master tracker; 0/15 qualifying), `templates/phase0-session-note.md` (printable signed form), and `scripts/phase0/` (new-session.sh etc. that target dated subdirs under reports/phase0/).
 
-**Current P0 status & items**: See root `todo.md` (P0-01..P0-04; "paused on monte-carlo branch"; MC does not relax gates) + `prod.md` (full authoritative ritual + template + exit criteria).
+**Current P0 status & items**: See root `todo.md` (P0-01..P0-04; Phase 0 collection was paused during priority work on the monte-carlo branch — MC changes did not alter P0 gates or the live safety surface) + `prod.md` (full authoritative ritual + template + exit criteria).
 
 **Planned**: `docs/operations/futures-phase0-operator-sop.md` (printable SOP; Doc Phase 1; current details in prod.md + reports/phase0/). `PHASE0_COMPLETION_PLAN.md` and some ops/ templates referenced in older notes — current operational home is reports/phase0/ + scripts/phase0/.
 
@@ -413,7 +413,7 @@ Authoritative table:
 
 **Phase 0 Qualifying Session Ritual & Evidence** (see `prod.md` for the authoritative template + full ritual + "why each element"; see `reports/phase0/` (README + PROGRESS.md + templates/phase0-session-note.md) + `scripts/phase0/` (new-session.sh, post-session.sh, volatility-classifier.sh) for operational machinery. Current details live in prod.md + reports/phase0/; printable SOP planned for `docs/operations/futures-phase0-operator-sop.md` — Doc Phase 1).
 
-**Current P0 items & status**: See root `todo.md` (P0-01..P0-04; 0/15 qualifying; collection paused on monte-carlo branch; MC work does not relax gates).
+**Current P0 items & status**: See root `todo.md` (P0-01..P0-04; 0/15 qualifying; Phase 0 collection was paused during priority work on the monte-carlo branch — MC changes did not alter P0 gates or the live safety surface).
 
 **Pre-Merge Safety & Phase 1 Freeze Procedure**: See `prerequisites.md` (full living checklist) + `CLAUDE.md` (model selection + token/CCB rules) + root `todo.md` (P1-01..P1-05 + frozen files list + process). Run `./scripts/check-live-safety-freeze.sh --check-head`; PR must contain `LIVE_SAFETY_CCB_APPROVED` + todo refs + "prod.md impact" note; 4h/8h clean mainnet shadow required before merge.
 
@@ -498,7 +498,7 @@ See root governance (especially `CLAUDE.md` "Documentation Maintenance Rules", `
 
 ## Monte Carlo Simulation
 
-**Current branch note**: Landed on the `monte-carlo` branch. Available in all three binaries (`engine_backtest`, `engine_shadow`, `engine_live`). This is a backtest / research / risk-distribution capability and does not affect live-order safety surfaces or Phase 0/1 capital gates.
+**Current branch note**: Introduced on the `monte-carlo` branch. Now available in mainline in all three binaries (`engine_backtest`, `engine_shadow`, `engine_live`). This is a backtest / research / risk-distribution capability and does not affect live-order safety surfaces or Phase 0/1 capital gates.
 
 TrueTest includes a first-class Monte Carlo engine for stochastic backtesting.
 

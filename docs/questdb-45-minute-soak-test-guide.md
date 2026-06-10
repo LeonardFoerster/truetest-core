@@ -22,7 +22,7 @@ pip3 install requests
 ```bash
 git clone <your-repo-url> truetest-core
 cd truetest-core
-git checkout monte-carlo          # or the branch containing the hardened QuestDB work
+git checkout monte-carlo          # (historical example from before merge; current mainline includes the work)
 ```
 
 ## 2. Build the Engine with QuestDB Support

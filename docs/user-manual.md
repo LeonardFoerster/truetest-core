@@ -106,6 +106,8 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 - Live-money math confirmation gate + red warning banner
 - Rate limiter and time sync
 
+**Intended Use & Scope**: TrueTest is a private, personal research and retail tool for the author only. It is not, and will never be, an enterprise-ready, institutional, or production trading system. Monte Carlo simulation, high-fidelity backtesting, and shadow divergence analysis are the primary mature capabilities. The live execution paths (`engine_live`) exist with unusually strong compile-time (`TT_TARGET`) and runtime safety layers (reconciler, DMS, kill-switch, venue risk checks, terminal halt, user-data source of truth, etc.). Any use of live paths is experimental, tiny-size, fully attended by the operator, and done at the author's own risk. The Phase 0/1 rituals and Go-Live language in this repository describe the author's personal evidence-gathering hygiene and self-imposed discipline — they are **not** a formal production release process or claim of readiness for others.
+
 **Stochastic Backtesting (Monte Carlo)**:
 - Synthetic GBM path generation via the `synthetic` provider (usable standalone with `--provider synthetic --mc-params "..."` or as part of full campaigns)
 - Full multi-trial campaigns with deterministic per-trial seeding via `--monte-carlo --mc-trials N --mc-model gbm --strategy ...`
@@ -113,7 +115,7 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 - Performance features: object reuse between trials (`--mc-reuse-objects`) and experimental parallel execution (`--mc-parallel`, recommended only with `--thread-preset inline`)
 - Reporter produces per-trial + aggregate P&L, Sharpe, max drawdown, win rate, etc. (text + compact JSON)
 - Strong caveats: synthetic L2 is stylized (constant spread + noise), no automatic calibration from historical data, parallel mode has non-deterministic ordering and threading restrictions, QuestDB support is currently campaign-summary only (full per-trial MC-06 future)
-- **Current MC items + status** (MC-01..MC-06, including "substantially complete" for reporter Step A, demo caveats on some strategies for MC-05, L2 fidelity, reuse/parallel limitations): see root `todo.md` MC section + `docs/instructions.md` (detailed MC flags/usage/caveats) + `prod.md` (MC disclaimer: research tool only; does not relax Phase 0/1 gates). Governance in root README + ENGINE_AI_SUMMARY.
+- **Current MC items + status** (MC-01..MC-06, including "substantially complete" for reporter Step A, demo caveats on some strategies for MC-05, L2 fidelity, reuse/parallel limitations): see root `todo.md` MC section + `docs/instructions.md` (detailed MC flags/usage/caveats) + `prod.md` (MC disclaimer: research tool only; does not relax Phase 0/1 gates). Governance in root README + this MERGE_PLAN.md context (ENGINE_AI_SUMMARY.md reference cleaned in Phase 4).
 
 **Risk Management**:
 - `RiskManager`: max position, daily loss, trade frequency, unrealized loss
