@@ -10,7 +10,7 @@ This document serves as the primary operator-facing manual and technical overvie
 
 TrueTest (hft-engine) is a modular, high-performance C++23 trading engine that implements backtesting, shadow (paper) trading, and live execution from a single shared codebase. The engine produces three specialized binaries (`engine_backtest`, `engine_shadow`, `engine_live`) via a compile-time `TT_TARGET` gate that completely removes the ability to place real orders from non-live builds.
 
-**Core value proposition**: A production-grade, auditable foundation for algorithmic trading that reuses the exact same hot path, risk engine, analytics, and order lifecycle for reproducible backtests, divergence-aware shadow runs, and real-money execution. Designed for serious retail and semi-professional quant traders who need C++ performance, realistic microstructure modeling, and institutional-grade safety nets without building infrastructure from scratch.
+**Core value proposition**: A production-grade, auditable foundation for algorithmic trading that reuses the exact same hot path, risk engine, analytics, and order lifecycle for reproducible backtests, divergence-aware shadow runs, and real-money execution. Designed for serious retail and semi-professional quant traders who need C++ performance, realistic microstructure modeling, and strong personal-use safety scaffolding without building infrastructure from scratch.
 
 **Key technical highlights**:
 - C++23, zero-allocation hot path using `ObjectPool` and lock-free SPSC `RingBuffer` (64k slots)

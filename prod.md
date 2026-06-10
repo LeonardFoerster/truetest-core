@@ -37,7 +37,7 @@ See also:
 
 ## Capital-Tier Phases & Exit Criteria
 
-**Strict rule**: Moving to a higher capital tier requires all prior phase exit criteria + two-person sign-off on the 9-row Go-Live Gate table below.
+**Strict rule** (for the author only): Moving to a higher personal capital tier requires all prior phase exit criteria + two-person sign-off on the 9-row Go-Live Gate table below. The author will never treat this as a path to external or institutional use.
 
 ### Phase 0 — Safe Tiny-Size Mainnet Futures (Current Active Phase)
 
@@ -118,7 +118,9 @@ Status notes live in `production-readiness-gaps.md` and `todo.md`.
 
 ## Final Go-Live Gate Table (9 Rows)
 
-**No capital tier increase is permitted until all nine rows have two signatures + concrete evidence.**
+**For Private Retail Use Only**: These gates, phases, and rituals describe the author's personal evidence-gathering discipline and self-imposed limits for tiny, fully attended personal experiments only. They are not a formal release process or claim of readiness for any other use or capital.
+
+**No increase in the author's personal live capital tier is permitted until all nine rows have two signatures + concrete evidence.**
 
 1. All prior phases met.
 2. 60-day shadow report (published or internally audited).
@@ -136,7 +138,7 @@ Status notes live in `production-readiness-gaps.md` and `todo.md`.
 
 - **Preparing a Phase 0 session** → Read the Phase 0 section + the operator SOP + run `new-session.sh`.
 - **Reviewing a PR that touches safety** → Read the Phase 1 freeze rules + `prerequisites.md` + run the check script.
-- **Considering any increase in live size** → Read the entire Go-Live Gate table + the most recent `reports/phase0/PROGRESS.md` + `production-readiness-gaps.md`.
+- **Considering any increase in the author's personal live capital** → Read the entire Go-Live Gate table + the most recent `reports/phase0/PROGRESS.md` + `production-readiness-gaps.md`. When the author chooses to collect evidence toward personal live use...
 - **Updating after a phase exit** → Edit this file (mark the phase complete, record sign-offs, update the roadmap), update `todo.md`, and reference the PR in the migration log.
 
 **If you find a broken or stale cross-reference**, treat it as a documentation bug and either fix it or open an issue with the exact string that needs updating.

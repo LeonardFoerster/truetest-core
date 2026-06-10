@@ -24,7 +24,7 @@ TrueTest is a modular C++23 engine for reproducible backtesting, divergence-awar
 7. **DMS protects orders only** (`/fapi/v1/countdownCancelAll`) — Venue-side auto-cancel on heartbeat loss. Does **not** emit reduceOnly MARKET flattens (Phase 3 work). Kill-switch (orderly) does cancel-all + reduceOnly flatten with hard deadline.
 8. **Futures mandates** — One-way mode hard refusal in `BinanceFuturesProvider::open()`; `reduceOnly` + `closePosition=true` brackets (non-atomic, two POSTs with auto-cancel guarantee); pre-trade venue `FuturesRiskCheck` (notional/leverage/liq-distance + real tiered MMR from `/fapi/v1/leverageBracket`) consulted **before** `RiskManager` in hot path (`engine.cpp:1600-1628`).
 9. **Provider abstraction is the sole extension point** — `IProvider` + four safety hooks (`IReconciler`, `IKillSwitch`, `IRiskCheck`, `IBracketAdapter`) + transport/parser/executor. Core engine never contains `#ifdef HAS_*` or venue specifics.
-10. **Small capital first + evidence-based gates** — Every phase exit requires artifacts (binary logs, QuestDB run_tag, signed notes, shadow reports) + two-person sign-off before capital tier increase. "No capital tier increase is permitted until all nine rows [Go-Live Gate] have two signatures."
+10. **Small capital first + evidence-based gates** (personal use only) — When the author chooses to collect evidence toward personal live use, every phase exit requires artifacts (binary logs, QuestDB run_tag, signed notes, shadow reports) + two-person sign-off before any personal capital tier increase. "No personal capital tier increase is permitted until all nine rows [Go-Live Gate] have two signatures."
 
 **Additional strong primitives already present**: Layered risk (venue first), `WorkerWatchdog` (3× heartbeat), clock-skew/WAF/symbol existence/one-way probes at open, `ExecutionBridge` mutex audit, rate limiter, per-lot `Portfolio` + `ExitManager`, binary zstd event log + replay, QuestDB (soft-fail today), rich ncurses TUI, StageTimer/ring stats observability.
 
@@ -425,7 +425,7 @@ Authoritative table:
 
 ## 21. Master List of Critical Warnings & Non-Negotiables (consolidated from all)
 
-- Never increase capital tier without prior phase exits + full Go-Live Gate sign-offs.
+- Never increase the author's personal capital tier without prior phase exits + full Go-Live Gate sign-offs (and only for the author's tiny attended personal experiments).
 - Never edit frozen safety surface without token + CCB + shadow run (script enforces).
 - Halt is terminal — any code suggesting resume/retry/cooldown on halt paths is rejected.
 - No JSON on hot path; no allocations where possible; SPSC discipline strict.
@@ -480,7 +480,7 @@ See root governance (especially `CLAUDE.md` "Documentation Maintenance Rules", `
 - On phase exit (declared in `prod.md`): update `todo.md` (move/strike + follow-ups), prereq if evolved, last-updated notes.
 - Aspirational cross-refs *must* use explicit language: "Planned for Doc Phase X – current details live in prod.md / instructions.md §N".
 - Extraction rule (CLAUDE): long-form phases/ritual/gates in `prod.md` (or dedicated SOP); this file = pointers + quick templates + MC/CLI/safety how-to.
-- Anti-rot ritual before capital tier increase: "docs verified + links resolve + `todo.md` updated".
+- Anti-rot ritual before any personal capital tier increase (when the author chooses to pursue it): "docs verified + links resolve + `todo.md` updated".
 - On MC/simulation landings: update MC section here + gov mentions (README, todo, prod, CLAUDE) in same PR.
 - If broken/stale cross-ref: treat as doc bug.
 
@@ -490,7 +490,7 @@ See root governance (especially `CLAUDE.md` "Documentation Maintenance Rules", `
 
 ---
 
-**End of Master Consolidated Instructions.** All content from the original corpus has been read, deeply analyzed by multiple agents with extended cross-referenced thinking, and unified here for completeness. Use this document for all operator, developer, reviewer, and production decisions. For the absolute latest code state, always verify against HEAD + the enforcement scripts.
+**End of Master Consolidated Instructions.** All content from the original corpus has been read, deeply analyzed by multiple agents with extended cross-referenced thinking, and unified here for completeness. Use this document for the author's personal research, development, private use decisions, and safety hygiene only. For the absolute latest code state, always verify against HEAD + the enforcement scripts.
 
 *Generated 2026-05 via parallel subagent synthesis of the full Markdown corpus.*
 
