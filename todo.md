@@ -1,8 +1,10 @@
 # TrueTest Task List & Roadmap (todo.md)
 
 **Status**: Living – the single source of record for current-phase work items. Every PR that touches the frozen safety surface (or describes it) **must** reference the relevant item(s) here.  
-**Post-merge note (Phase 5)**: Monte Carlo integration complete. All "active on monte-carlo" / "paused on monte-carlo" / "current branch focus" language removed from live docs (except legitimate feature names like --monte-carlo, "Monte Carlo" in capability descriptions, and historical notes in this plan / archive/). Private retail scope ("Intended Use & Scope" + "never be enterprise") established across root docs. ENGINE_AI_SUMMARY.md refs consolidated. MC-01/MC-02 marked landed. Safety freeze untouched by MC work.  
-**Last update: 2026 (Phase 5 audit complete; pre-merge verification ready; all gates clean; frozen surface untouched).  
+**Post-merge note (Phase 5)**: Monte Carlo integration complete. All "active on monte-carlo" / "paused on monte-carlo" / "current branch focus" language removed from live docs (except legitimate feature names like --monte-carlo, "Monte Carlo" in capability descriptions, and historical notes in this plan / archive/). Private retail scope ("Intended Use & Scope" + "never be enterprise") established across root docs. ENGINE_AI_SUMMARY.md refs consolidated. MC-01/MC-02 marked landed. Safety freeze untouched by MC work.
+
+**Completed (Phase 8)**: Monte Carlo to master merge — all phases completed successfully. Master is the new baseline. Private retail character clearly stated. All technical safety docs remain intact. See MERGE_PLAN.md for full record.  
+**Last update: 2026 (post-merge; Monte Carlo to master merge — all phases completed successfully).  
 **How to reference**: "Addresses todo.md #P0-03 (Phase 0 evidence scaffolding)" or "Closes #A-07".
 
 Items are grouped by theme and roughly prioritized within each group. Completed items are moved to the bottom or struck through after the phase they belong to is declared done in `prod.md`.

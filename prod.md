@@ -1,7 +1,7 @@
 # TrueTest Production Readiness Playbook (prod.md)
 
 **Status**: Authoritative – the central production contract and capital-tier governance document.  
-**Last major update**: 2026 (Monte Carlo simulation integrated from the monte-carlo branch + merge prep documentation sync)  
+**Last major update**: 2026 (post-merge; Monte Carlo to master merge — all phases completed successfully)  
 **Owners**: Core maintainers + Phase 0/1 operators (every phase exit must update this file).
 
 This document defines the exact phase definitions, capital-tier gates, Go-Live checklist, Phase 0 operator ritual, and "why we are careful" philosophy. It is the single source of truth that reviewers, CCB members, and future operators consult before any increase in live capital.
