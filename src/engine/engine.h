@@ -37,7 +37,9 @@ namespace truetest::ui { struct streaming_stats; }
 #include "core/event.h"
 #include "core/event_log.h"
 #include "types/order_id.h"
+#include "types/control_block_pool.h"
 #include "types/object_pool.h"
+#include "types/pool_exhausted.h"
 #include "exits/exit_manager.h"
 
 #include "debug/stage_timer.h"
@@ -116,10 +118,35 @@ private:
     std::unique_ptr<BarAggregator> tick_aggregator_;
     std::chrono::milliseconds tick_bar_interval_{60000};
 
-    ObjectPool<market_event> market_pool_;
-    ObjectPool<order_event>  order_pool_;
-    ObjectPool<fill_event>   fill_pool_;
-    ObjectPool<tick_event>   tick_pool_;
+    ObjectPool<market_event>      market_pool_;
+    ObjectPool<order_event>       order_pool_;
+    ObjectPool<fill_event>        fill_pool_;
+    ObjectPool<tick_event>        tick_pool_;
+    ObjectPool<l2_update_event>   l2_update_pool_;
+    ObjectPool<l2_snapshot_event> l2_snapshot_pool_;
+    ObjectPool<rejection_event>   rejection_pool_;
+    ObjectPool<cancel_event>      cancel_pool_;
+    ObjectPool<amend_event>       amend_pool_;
+    ObjectPool<funding_event>     funding_pool_;
+    ControlBlockPool              control_block_pool_;
+
+    void prewarm_object_pools();
+    // Phase 3: reclaim worker-thread pool releases before hot-path acquire.
+    void drain_object_pool_returns() noexcept;
+
+    template<typename T, std::size_t BlockSize, typename... Args>
+    std::shared_ptr<T> acquire_pooled(ObjectPool<T, BlockSize>& pool, Args&&... args)
+    {
+        try
+        {
+            return pool.acquire(std::forward<Args>(args)...);
+        }
+        catch (const pool_exhausted& e)
+        {
+            trigger_halt(e.what());
+            throw;
+        }
+    }
 
     std::shared_ptr<EventRing> logging_ring_;
     std::shared_ptr<EventRing> risk_ring_;

@@ -418,8 +418,13 @@ public:
                         {
                             if (b.asset == "USDT" && b.balance_change != 0.0)
                             {
-                                auto fe = std::make_shared<funding_event>(
-                                    s.ts, sym, 0.0, b.balance_change, "FUNDING_FEE");
+                                std::shared_ptr<funding_event> fe;
+                                if (funding_event_factory_)
+                                    fe = funding_event_factory_(
+                                        s.ts, sym, b.balance_change, "FUNDING_FEE");
+                                else
+                                    fe = std::make_shared<funding_event>(
+                                        s.ts, sym, 0.0, b.balance_change, "FUNDING_FEE");
 
                                 if (event_publisher_)
                                     event_publisher_(fe);

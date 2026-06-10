@@ -446,12 +446,9 @@ void Analytics::on_fill(const fill_event& f)
 
 void Analytics::on_l2_snapshot(const l2_snapshot_event& ev)
 {
-    const auto& bids = ev.get_bids();
-    const auto& asks = ev.get_asks();
-
-    if (!bids.empty() && !asks.empty()) {
-        double best_bid = bids.front().price;
-        double best_ask = asks.front().price;
+    if (ev.bid_count() > 0 && ev.ask_count() > 0) {
+        double best_bid = ev.bid(0).price;
+        double best_ask = ev.ask(0).price;
         if (best_ask > best_bid && best_bid > 0) {
             double mid = (best_ask + best_bid) / 2.0;
             current_spread_bps_ = ((best_ask - best_bid) / mid) * 10000.0;

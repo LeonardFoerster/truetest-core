@@ -129,15 +129,23 @@ void DebugPanel::draw(int body_y0, int width, int height,
     if (y < y_end - 1) section(y++, 0, width, "Object pools  (blocks × block-size = capacity)");
     if (y >= y_end) return;
     attron(A_DIM);
-    mvprintw(y, x_l_label, "%-14s %10s %10s %14s",
-             "name", "blocks", "blk-size", "capacity");
+    mvprintw(y, x_l_label, "%-14s %6s %6s %8s %6s %5s",
+             "name", "blocks", "in-use", "capacity", "grow", "fill%");
     attroff(A_DIM);
     ++y;
     for (const auto& p : d.pools)
     {
         if (y >= y_end) break;
-        mvprintw(y, x_l_label, "%-14s %10zu %10zu %14zu",
-                 p.name, p.blocks, p.block_size, p.capacity);
+        const unsigned fill_pct = (p.capacity > 0)
+            ? static_cast<unsigned>((p.in_use * 100) / p.capacity)
+            : 0u;
+        const int grow_pair = (p.grow_count > 0) ? kPairRed : kPairWhite;
+        mvprintw(y, x_l_label, "%-14s %6zu %6zu %8zu",
+                 p.name, p.blocks, p.in_use, p.capacity);
+        attron(COLOR_PAIR(grow_pair));
+        mvprintw(y, x_l_label + 38, "%6zu", p.grow_count);
+        attroff(COLOR_PAIR(grow_pair));
+        mvprintw(y, x_l_label + 46, "%5u%%", fill_pct);
         ++y;
     }
 
@@ -449,10 +457,10 @@ void DebugPanel::draw(int body_y0, int width, int height,
                 mvaddch(y, bar_x + 1 + bar_w, ']');
                 char d2[96];
                 std::snprintf(d2, sizeof(d2),
-                              "%5zu / %-7zu  %-10s (%zu × %zu B)",
+                              "%5zu / %-7zu  %-10s (%zu blk grow=%zu)",
                               p.in_use, p.capacity_slots,
                               fmt_mb(p.bytes).c_str(),
-                              p.blocks, p.slot_size);
+                              p.blocks, p.grow_count);
                 mvaddstr(y, bar_x + bar_w + 4, d2);
                 ++y;
             }

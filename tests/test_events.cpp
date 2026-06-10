@@ -87,13 +87,15 @@ TEST(L2SnapshotEvent, Construction)
 {
     std::vector<l2_level> bids = {{100.0, 10}, {99.0, 20}, {98.0, 30}};
     std::vector<l2_level> asks = {{101.0, 15}, {102.0, 25}};
-    l2_snapshot_event e(now(), "ETH", bids, asks);
+    l2_snapshot_event e(now(), "ETH",
+                        bids.data(), bids.size(),
+                        asks.data(), asks.size());
 
     EXPECT_EQ(e.get_type(), event_type::l2_snapshot);
-    EXPECT_EQ(e.get_bids().size(), 3u);
-    EXPECT_EQ(e.get_asks().size(), 2u);
-    EXPECT_DOUBLE_EQ(e.get_bids()[0].price, 100.0);
-    EXPECT_EQ(e.get_asks()[1].quantity, 25);
+    EXPECT_EQ(e.bid_count(), 3u);
+    EXPECT_EQ(e.ask_count(), 2u);
+    EXPECT_DOUBLE_EQ(e.bid(0).price, 100.0);
+    EXPECT_EQ(e.ask(1).quantity, 25);
 }
 
 TEST(L2UpdateEvent, Construction)

@@ -30,6 +30,29 @@ enum class engine_mode { backtest, shadow, live };
 // main.inc forces halt_on_drop when mode ∈ {shadow, live}.
 enum class ring_drop_policy { allow, halt_on_drop };
 
+// Phase 1 hot-path: pre-reserve object-pool blocks at engine startup so
+// runtime grow() never hits the heap on the event loop. When
+// forbid_runtime_grow is true, exhaustion triggers pool_exhausted → halt.
+struct pool_prewarm_settings
+{
+    std::size_t market_blocks = 1;
+    std::size_t tick_blocks = 1;
+    std::size_t order_blocks = 2;
+    std::size_t fill_blocks = 1;
+    std::size_t l2_update_blocks = 2;
+    std::size_t l2_snapshot_blocks = 1;
+    std::size_t rejection_blocks = 1;
+    std::size_t cancel_blocks = 1;
+    std::size_t amend_blocks = 1;
+    std::size_t funding_blocks = 1;
+    // Phase 4: synthetic/MM orderbook depth (~20 orders/bar/tick accumulation).
+    // 18 blocks ≈ 73k slots (covers tick-3600 idle @ ~20 replenishes/tick).
+    std::size_t orderbook_order_blocks = 18;
+    // 0 = auto (sum of all event-pool capacity slots after prewarm).
+    std::size_t control_block_slots = 0;
+    bool forbid_runtime_grow = true;
+};
+
 struct engine_config
 {
     engine_mode mode = engine_mode::backtest;
@@ -184,6 +207,8 @@ struct engine_config
     unsigned max_consecutive_worker_errors = 5;
 
     ring_drop_policy drop_policy = ring_drop_policy::allow;
+
+    pool_prewarm_settings pool_prewarm{};
 
     std::shared_ptr<truetest::ui::ConsoleDashboard> dashboard;
 

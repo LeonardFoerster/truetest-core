@@ -76,6 +76,7 @@ set(ENGINE_CORE_SOURCES
     src/strategy/ma_crossover_strategy.cpp
     src/strategy/hedge_demo_strategy.cpp
     src/strategy/breakout_strategy.cpp
+    src/strategy/larry_connor_strategy.cpp
     src/strategy/coiled_spring_strategy.cpp
     src/strategy/sma.cpp
     src/strategy/adaptive_hybrid_config.cpp
@@ -229,6 +230,14 @@ if(BUILD_TESTS)
         tests/test_orderbook_registry.cpp
         tests/test_order_types.cpp
         tests/test_object_pool.cpp
+        tests/helpers/alloc_counter.cpp
+        tests/test_hotpath_allocs.cpp
+        tests/test_hotpath_alloc_matrix.cpp
+        tests/test_hotpath_pool_prewarm.cpp
+        tests/test_control_block_pool.cpp
+        tests/test_symbol_table.cpp
+        tests/test_orderbook_order_pool.cpp
+        tests/test_deferred_return_queue.cpp
         tests/test_risk_manager.cpp
         tests/test_event_log.cpp
         tests/test_thread_preset.cpp

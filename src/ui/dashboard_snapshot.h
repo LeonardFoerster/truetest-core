@@ -148,6 +148,8 @@ struct dashboard_snapshot
         std::size_t  blocks = 0;        // ObjectPool::block_count()
         std::size_t  block_size = 0;    // slots per block
         std::size_t  capacity = 0;      // blocks * block_size
+        std::size_t  in_use = 0;        // live shared_ptrs not yet returned
+        std::size_t  grow_count = 0;    // runtime grow() calls (0 = no hot-path growth)
     };
     struct subsys_error
     {
@@ -222,6 +224,7 @@ struct dashboard_snapshot
         std::uint64_t bytes = 0;
         std::size_t   in_use = 0;
         std::size_t   capacity_slots = 0;  // blocks * BlockSize
+        std::size_t   grow_count = 0;
     };
     struct mem_ring_row
     {

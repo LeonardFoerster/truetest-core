@@ -82,6 +82,15 @@ engine::engine(std::shared_ptr<data_handler> dh,
         config_.provider->set_event_publisher(
             [this](std::shared_ptr<event> ev) { publish_event(ev); });
 
+        config_.provider->set_funding_event_factory(
+            [this](std::chrono::system_clock::time_point ts,
+                   const std::string& symbol,
+                   double cash_delta,
+                   const std::string& reason) {
+                return acquire_pooled(funding_pool_, ts, symbol, 0.0,
+                                      cash_delta, reason);
+            });
+
         // Register any liveness sources the provider exposes. Only
         // create the watchdog if there's something to watch — engine
         // shouldn't pay for a poll thread it doesn't need.
@@ -198,6 +207,85 @@ engine::engine(std::shared_ptr<data_handler> dh,
             }
         }
     }
+
+    prewarm_object_pools();
+}
+
+void engine::prewarm_object_pools()
+{
+    const auto& pw = config_.pool_prewarm;
+
+    auto setup = [&](const char* name, std::size_t min_blocks, auto& pool) {
+        pool.set_pool_name(name);
+        pool.ensure_min_blocks(min_blocks);
+        pool.set_forbid_runtime_grow(pw.forbid_runtime_grow);
+    };
+
+    setup("market_pool",      pw.market_blocks,      market_pool_);
+    setup("tick_pool",        pw.tick_blocks,        tick_pool_);
+    setup("order_pool",       pw.order_blocks,       order_pool_);
+    setup("fill_pool",        pw.fill_blocks,        fill_pool_);
+    setup("l2_update_pool",   pw.l2_update_blocks,   l2_update_pool_);
+    setup("l2_snapshot_pool", pw.l2_snapshot_blocks, l2_snapshot_pool_);
+    setup("rejection_pool",   pw.rejection_blocks,   rejection_pool_);
+    setup("cancel_pool",      pw.cancel_blocks,      cancel_pool_);
+    setup("amend_pool",       pw.amend_blocks,       amend_pool_);
+    setup("funding_pool",     pw.funding_blocks,     funding_pool_);
+
+    std::size_t total_event_slots =
+        market_pool_.capacity_slots() + tick_pool_.capacity_slots()
+        + order_pool_.capacity_slots() + fill_pool_.capacity_slots()
+        + l2_update_pool_.capacity_slots() + l2_snapshot_pool_.capacity_slots()
+        + rejection_pool_.capacity_slots() + cancel_pool_.capacity_slots()
+        + amend_pool_.capacity_slots() + funding_pool_.capacity_slots()
+        ;
+
+    std::size_t cb_slots = pw.control_block_slots;
+    if (cb_slots == 0)
+        cb_slots = total_event_slots;
+
+    const std::size_t cb_blocks =
+        (cb_slots + ControlBlockPool::slots_per_block() - 1)
+        / ControlBlockPool::slots_per_block();
+
+    control_block_pool_.set_pool_name("control_block_pool");
+    control_block_pool_.ensure_min_blocks(std::max(cb_blocks, std::size_t{1}));
+    control_block_pool_.set_forbid_runtime_grow(pw.forbid_runtime_grow);
+
+    auto wire_cb = [&](auto& pool) {
+        pool.set_control_block_pool(&control_block_pool_);
+    };
+    wire_cb(market_pool_);
+    wire_cb(tick_pool_);
+    wire_cb(order_pool_);
+    wire_cb(fill_pool_);
+    wire_cb(l2_update_pool_);
+    wire_cb(l2_snapshot_pool_);
+    wire_cb(rejection_pool_);
+    wire_cb(cancel_pool_);
+    wire_cb(amend_pool_);
+    wire_cb(funding_pool_);
+
+    // Orderbook orders: pool bodies only; CBs stay on heap (lambda deleter
+    // + order type exceed the 64-byte CB slot on some libstdc++ builds).
+    orderbook_registry_.set_order_pool_config(nullptr,
+                                              pw.orderbook_order_blocks,
+                                              pw.forbid_runtime_grow);
+}
+
+void engine::drain_object_pool_returns() noexcept
+{
+    market_pool_.drain_deferred_returns();
+    order_pool_.drain_deferred_returns();
+    fill_pool_.drain_deferred_returns();
+    tick_pool_.drain_deferred_returns();
+    l2_update_pool_.drain_deferred_returns();
+    l2_snapshot_pool_.drain_deferred_returns();
+    rejection_pool_.drain_deferred_returns();
+    cancel_pool_.drain_deferred_returns();
+    amend_pool_.drain_deferred_returns();
+    funding_pool_.drain_deferred_returns();
+    control_block_pool_.drain_deferred_returns();
 }
 
 void engine::write_checkpoint_if_due(std::size_t event_count)
@@ -874,7 +962,8 @@ void engine::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
             // per pool. Cached anyway since stale-check already gates us.
             constexpr std::size_t kPoolBlock = 4096;
             auto add_pool = [&](const char* name, std::size_t blocks,
-                                std::size_t slot, std::size_t in_use) {
+                                std::size_t slot, std::size_t in_use,
+                                std::size_t grows) {
                 using snap_t = truetest::ui::dashboard_snapshot;
                 snap_t::mem_pool_row r;
                 r.name           = name;
@@ -883,13 +972,33 @@ void engine::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
                 r.bytes          = static_cast<std::uint64_t>(blocks) * kPoolBlock * slot;
                 r.in_use         = in_use;
                 r.capacity_slots = blocks * kPoolBlock;
+                r.grow_count     = grows;
                 m.pool_bytes_total += r.bytes;
                 m.pools.push_back(r);
             };
-            add_pool("market_pool", market_pool_.block_count(), sizeof(market_event), market_pool_.in_use());
-            add_pool("order_pool",  order_pool_.block_count(),  sizeof(order_event),  order_pool_.in_use());
-            add_pool("fill_pool",   fill_pool_.block_count(),   sizeof(fill_event),   fill_pool_.in_use());
-            add_pool("tick_pool",   tick_pool_.block_count(),   sizeof(tick_event),   tick_pool_.in_use());
+            add_pool("market_pool",      market_pool_.block_count(),
+                     sizeof(market_event), market_pool_.in_use(), market_pool_.grow_count());
+            add_pool("order_pool",       order_pool_.block_count(),
+                     sizeof(order_event),  order_pool_.in_use(),  order_pool_.grow_count());
+            add_pool("fill_pool",        fill_pool_.block_count(),
+                     sizeof(fill_event),   fill_pool_.in_use(),   fill_pool_.grow_count());
+            add_pool("tick_pool",        tick_pool_.block_count(),
+                     sizeof(tick_event),   tick_pool_.in_use(),   tick_pool_.grow_count());
+            add_pool("l2_update_pool",   l2_update_pool_.block_count(),
+                     sizeof(l2_update_event), l2_update_pool_.in_use(), l2_update_pool_.grow_count());
+            add_pool("l2_snapshot_pool", l2_snapshot_pool_.block_count(),
+                     sizeof(l2_snapshot_event), l2_snapshot_pool_.in_use(), l2_snapshot_pool_.grow_count());
+            add_pool("rejection_pool",   rejection_pool_.block_count(),
+                     sizeof(rejection_event), rejection_pool_.in_use(), rejection_pool_.grow_count());
+            add_pool("cancel_pool",      cancel_pool_.block_count(),
+                     sizeof(cancel_event), cancel_pool_.in_use(), cancel_pool_.grow_count());
+            add_pool("amend_pool",       amend_pool_.block_count(),
+                     sizeof(amend_event), amend_pool_.in_use(), amend_pool_.grow_count());
+            add_pool("funding_pool",     funding_pool_.block_count(),
+                     sizeof(funding_event), funding_pool_.in_use(), funding_pool_.grow_count());
+            add_pool("control_block_pool", control_block_pool_.block_count(),
+                     ControlBlockPool::slot_size(), control_block_pool_.in_use(),
+                     control_block_pool_.grow_count());
 
             // Rings: capacity is constexpr; this is essentially free.
             auto add_ring = [&](const char* name, const auto& ring) {
@@ -1005,22 +1114,41 @@ void engine::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
             d.rings.push_back(r);
         }
 
-        // Pools — only block_count() is exposed (no in-use tracking yet).
-        // We report blocks * BlockSize as capacity; in-use shown as "—".
         constexpr std::size_t kPoolBlock = 4096;
-        auto add_pool = [&](const char* name, std::size_t blocks) {
+        auto add_pool = [&](const char* name, std::size_t blocks,
+                            std::size_t in_use, std::size_t grows) {
             using snap_t = truetest::ui::dashboard_snapshot;
             snap_t::pool_stat p;
             p.name = name;
             p.blocks = blocks;
             p.block_size = kPoolBlock;
             p.capacity = blocks * kPoolBlock;
+            p.in_use = in_use;
+            p.grow_count = grows;
             d.pools.push_back(p);
         };
-        add_pool("market_pool", market_pool_.block_count());
-        add_pool("order_pool",  order_pool_.block_count());
-        add_pool("fill_pool",   fill_pool_.block_count());
-        add_pool("tick_pool",   tick_pool_.block_count());
+        add_pool("market_pool",      market_pool_.block_count(),
+                 market_pool_.in_use(), market_pool_.grow_count());
+        add_pool("order_pool",       order_pool_.block_count(),
+                 order_pool_.in_use(), order_pool_.grow_count());
+        add_pool("fill_pool",        fill_pool_.block_count(),
+                 fill_pool_.in_use(), fill_pool_.grow_count());
+        add_pool("tick_pool",        tick_pool_.block_count(),
+                 tick_pool_.in_use(), tick_pool_.grow_count());
+        add_pool("l2_update_pool",   l2_update_pool_.block_count(),
+                 l2_update_pool_.in_use(), l2_update_pool_.grow_count());
+        add_pool("l2_snapshot_pool", l2_snapshot_pool_.block_count(),
+                 l2_snapshot_pool_.in_use(), l2_snapshot_pool_.grow_count());
+        add_pool("rejection_pool",   rejection_pool_.block_count(),
+                 rejection_pool_.in_use(), rejection_pool_.grow_count());
+        add_pool("cancel_pool",      cancel_pool_.block_count(),
+                 cancel_pool_.in_use(), cancel_pool_.grow_count());
+        add_pool("amend_pool",       amend_pool_.block_count(),
+                 amend_pool_.in_use(), amend_pool_.grow_count());
+        add_pool("funding_pool",     funding_pool_.block_count(),
+                 funding_pool_.in_use(), funding_pool_.grow_count());
+        add_pool("control_block_pool", control_block_pool_.block_count(),
+                 control_block_pool_.in_use(), control_block_pool_.grow_count());
 
         // Engine state.
         d.next_order_id = OrderIdGenerator::next();
@@ -1862,9 +1990,9 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             {
                 const std::string reason_str =
                     "venue risk check refused: " + vd.reason;
-                auto rej = std::make_shared<rejection_event>(
+                auto rej = acquire_pooled(rejection_pool_,
                     o->get_timestamp(), o->get_symbol(),
-                    o->get_order_id(), reason_str.c_str());
+                    o->get_order_id(), reason_str);
                 log_event(*rej);
                 publish_event(rej);
 #ifdef HAS_QUESTDB
@@ -1894,7 +2022,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                 ? "risk limit breached - engine halted"
                 : "order rejected by risk manager";
 
-            auto rej = std::make_shared<rejection_event>(
+            auto rej = acquire_pooled(rejection_pool_,
                 o->get_timestamp(), o->get_symbol(), o->get_order_id(), reason);
             log_event(*rej);
             publish_event(rej);
@@ -1992,7 +2120,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                 update_open_order_status(f.get_order_id(), "partial");
             else
                 erase_open_order(f.get_order_id());
-            auto fill_ptr = fill_pool_.acquire(f);
+            auto fill_ptr = acquire_pooled(fill_pool_,f);
             log_event(f);
             portfolio_.on_fill(f, opener, strat);
             dispatch_fill_to_strategy(f);
@@ -2088,7 +2216,7 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
     {
         order_tracker_.set_status(order_id, order_status::cancelled);
         erase_open_order(order_id);
-        auto cancel_ev = std::make_shared<cancel_event>(
+        auto cancel_ev = acquire_pooled(cancel_pool_,
             std::chrono::system_clock::now(), symbol, order_id, reason);
         log_event(*cancel_ev);
         publish_event(cancel_ev);
@@ -2118,7 +2246,7 @@ bool engine::modify_order(const std::string& symbol, uint64_t order_id,
     if (modified)
     {
         const auto now = std::chrono::system_clock::now();
-        auto amend_ev = std::make_shared<amend_event>(
+        auto amend_ev = acquire_pooled(amend_pool_,
             now, symbol, order_id, new_price, new_qty);
         log_event(*amend_ev);
         publish_event(amend_ev);
@@ -2158,7 +2286,7 @@ void engine::unwind_positions(std::size_t& event_count)
         const double close_qty = std::abs(qty);
 
         auto now = std::chrono::system_clock::now();
-        auto close_order = order_pool_.acquire(order_event(
+        auto close_order = acquire_pooled(order_pool_,order_event(
             now, symbol, order_type::market, close_side,
             close_qty, last_mid_price_));
         close_order->set_order_id(OrderIdGenerator::next());
@@ -2206,7 +2334,7 @@ void engine::unwind_positions(std::size_t& event_count)
                     update_open_order_status(f.get_order_id(), "partial");
                 else
                     erase_open_order(f.get_order_id());
-                auto fill_ptr = fill_pool_.acquire(f);
+                auto fill_ptr = acquire_pooled(fill_pool_,f);
                 log_event(f);
                 portfolio_.on_fill(f, opener, strat);
             dispatch_fill_to_strategy(f);
@@ -2239,23 +2367,36 @@ void engine::apply_l2_snapshot(const std::string& symbol,
                                const std::vector<l2_level>& bids,
                                const std::vector<l2_level>& asks)
 {
+    drain_object_pool_returns();
+
     // Tag L2-driven so MarketMaker::replenish stops seeding paper depth.
     l2_seeded_symbols_.insert(symbol);
     auto ob = orderbook_registry_.get_or_create(symbol);
 
-    std::vector<std::pair<Price, quantity>> ob_bids;
-    ob_bids.reserve(bids.size());
-    for (const auto& lvl : bids)
-        ob_bids.emplace_back(Price::from_double(lvl.price),
-                             static_cast<quantity>(lvl.quantity));
+    const std::size_t n_bids =
+        std::min(bids.size(), kL2SnapshotMaxLevels);
+    const std::size_t n_asks =
+        std::min(asks.size(), kL2SnapshotMaxLevels);
 
-    std::vector<std::pair<Price, quantity>> ob_asks;
-    ob_asks.reserve(asks.size());
-    for (const auto& lvl : asks)
-        ob_asks.emplace_back(Price::from_double(lvl.price),
-                             static_cast<quantity>(lvl.quantity));
+    std::array<std::pair<Price, quantity>, kL2SnapshotMaxLevels> ob_bids{};
+    std::array<std::pair<Price, quantity>, kL2SnapshotMaxLevels> ob_asks{};
+    std::array<std::pair<double, double>, kL2SnapshotMaxLevels> abids{};
+    std::array<std::pair<double, double>, kL2SnapshotMaxLevels> aasks{};
 
-    ob->apply_l2_snapshot(ob_bids, ob_asks);
+    for (std::size_t i = 0; i < n_bids; ++i)
+    {
+        ob_bids[i] = {Price::from_double(bids[i].price),
+                      static_cast<quantity>(bids[i].quantity)};
+        abids[i] = {bids[i].price, static_cast<double>(bids[i].quantity)};
+    }
+    for (std::size_t i = 0; i < n_asks; ++i)
+    {
+        ob_asks[i] = {Price::from_double(asks[i].price),
+                      static_cast<quantity>(asks[i].quantity)};
+        aasks[i] = {asks[i].price, static_cast<double>(asks[i].quantity)};
+    }
+
+    ob->apply_l2_snapshot(ob_bids.data(), n_bids, ob_asks.data(), n_asks);
     refresh_top_of_book_atomics(*ob);
 
     // Forward L2 to execution adapters so QueueAwareBookAdapter (paper) and
@@ -2263,17 +2404,19 @@ void engine::apply_l2_snapshot(const std::string& symbol,
     // / queue_ahead. Central place for all L2-driven paths (direct apply, replay,
     // streaming). Duplicated in provider event dispatch for the live shadow_exec
     // case; keep in sync.
-    std::vector<std::pair<double,double>> abids, aasks;
-    for (const auto& l : bids) abids.emplace_back(l.price, l.quantity);
-    for (const auto& l : asks) aasks.emplace_back(l.price, l.quantity);
+    std::vector<std::pair<double, double>> abid_vec(abids.begin(),
+                                                    abids.begin() + n_bids);
+    std::vector<std::pair<double, double>> aask_vec(aasks.begin(),
+                                                    aasks.begin() + n_asks);
     for (auto& [_, ad] : execution_adapters_)
-        if (ad) ad->on_l2_snapshot(symbol, abids, aasks);
+        if (ad) ad->on_l2_snapshot(symbol, abid_vec, aask_vec);
     if (config_.provider)
         if (auto pa = config_.provider->get_execution_adapter())
-            pa->on_l2_snapshot(symbol, abids, aasks);
+            pa->on_l2_snapshot(symbol, abid_vec, aask_vec);
 
-    auto ev = std::make_shared<l2_snapshot_event>(
-        std::chrono::system_clock::now(), symbol, bids, asks);
+    auto ev = acquire_pooled(l2_snapshot_pool_,
+        std::chrono::system_clock::now(), symbol,
+        bids.data(), n_bids, asks.data(), n_asks);
     log_event(*ev);
     publish_event(ev);
 }
@@ -2281,6 +2424,8 @@ void engine::apply_l2_snapshot(const std::string& symbol,
 void engine::apply_l2_update(const std::string& symbol,
                              tick_side ts_side, double price, int64_t new_qty)
 {
+    drain_object_pool_returns();
+
     auto ob = orderbook_registry_.get_or_create(symbol);
 
     side ob_side = (ts_side == tick_side::bid) ? side::buy : side::sell;
@@ -2296,7 +2441,7 @@ void engine::apply_l2_update(const std::string& symbol,
         if (auto pa = config_.provider->get_execution_adapter())
             pa->on_l2_update(symbol, os, price, static_cast<double>(new_qty));
 
-    auto ev = std::make_shared<l2_update_event>(
+    auto ev = acquire_pooled(l2_update_pool_,
         std::chrono::system_clock::now(), symbol, ts_side, price, new_qty);
     log_event(*ev);
     publish_event(ev);
@@ -2432,7 +2577,7 @@ bool engine::route_order(order_event& order,
         if (!apply_instrument_spec(order, *spec))
         {
             const char* reason = "order rejected by venue filter (min_qty/min_notional)";
-            auto rej = std::make_shared<rejection_event>(
+            auto rej = acquire_pooled(rejection_pool_,
                 order.get_timestamp(), order.get_symbol(),
                 order.get_order_id(), reason);
             log_event(*rej);
@@ -2455,7 +2600,7 @@ bool engine::route_order(order_event& order,
     if (order.get_order_type() == order_type::stop ||
         order.get_order_type() == order_type::stop_limit)
     {
-        pending_stops_.push_back(order_pool_.acquire(order));
+        pending_stops_.push_back(acquire_pooled(order_pool_,order));
         return true;
     }
 
@@ -2463,19 +2608,19 @@ bool engine::route_order(order_event& order,
     {
         auto latency = config_.latency_model->get_order_latency();
         order.set_earliest_eligible_ts(sim_time + latency);
-        pending_orders_.push({order_pool_.acquire(order), order_seq_++});
+        pending_orders_.push({acquire_pooled(order_pool_,order), order_seq_++});
         return true;
     }
 
     if (config_.execution_bar_delay > 0)
     {
         order.set_earliest_eligible_ts(sim_time + std::chrono::nanoseconds(1));
-        pending_orders_.push({order_pool_.acquire(order), order_seq_++});
+        pending_orders_.push({acquire_pooled(order_pool_,order), order_seq_++});
         return true;
     }
 
     order.set_earliest_eligible_ts(sim_time);
-    auto order_ptr = order_pool_.acquire(order);
+    auto order_ptr = acquire_pooled(order_pool_,order);
     if (order.get_tif() == time_in_force::day)
         day_order_ids_.push_back({order.get_symbol(), order.get_order_id()});
     return process_order(order_ptr, event_count, halt_requested);
@@ -2500,7 +2645,7 @@ void engine::check_pending_stops(double high, double low,
         {
             if (stop->get_order_type() == order_type::stop)
             {
-                auto market_order = order_pool_.acquire(
+                auto market_order = acquire_pooled(order_pool_,
                     sim_time, stop->get_symbol(), order_type::market,
                     stop->get_side(), stop->get_quantity(), stop->get_stop_price(),
                     time_in_force::ioc);
@@ -2512,7 +2657,7 @@ void engine::check_pending_stops(double high, double low,
             }
             else
             {
-                auto limit_order = order_pool_.acquire(
+                auto limit_order = acquire_pooled(order_pool_,
                     sim_time, stop->get_symbol(), order_type::limit,
                     stop->get_side(), stop->get_quantity(), stop->get_price(),
                     stop->get_tif());
@@ -2777,6 +2922,8 @@ void engine::write_adapter_diagnostics(truetest::ui::streaming_stats& st)
 void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                                 const std::chrono::system_clock::time_point& timestamp)
 {
+    drain_object_pool_returns();
+
     // Operator-requested flatten: drain on the next event so the timestamp
     // we close at is from the live stream rather than wall-clock-now.
     if (flatten_request_.exchange(false, std::memory_order_acq_rel))
@@ -2860,7 +3007,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                     if (exchange_analytics_.has_value())
                     {
                         // Feed to second analytics for equity curve / metrics
-                        auto fill_ptr = fill_pool_.acquire(f);
+                        auto fill_ptr = acquire_pooled(fill_pool_,f);
                         exchange_analytics_->on_event(fill_ptr);
                     }
                     continue;
@@ -2872,7 +3019,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
                 cache_fill(f);
                 erase_open_order(f.get_order_id());
-                auto fill_ptr = fill_pool_.acquire(f);
+                auto fill_ptr = acquire_pooled(fill_pool_,f);
                 portfolio_.on_fill(f, opener, strat);
             dispatch_fill_to_strategy(f);
                 adverse_selection_.on_fill(f);
@@ -2886,7 +3033,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         }
     }
 
-    auto mkt_ptr = market_pool_.acquire(mkt);
+    auto mkt_ptr = acquire_pooled(market_pool_,mkt);
     auto order_opt = strategy_->on_market(mkt);
     if (order_opt) order_opt->set_recv_ns(mkt.get_recv_ns());
     log_event(mkt);
@@ -2914,6 +3061,8 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
 void engine::process_single_tick(const tick_record& rec, std::size_t& event_count)
 {
+    drain_object_pool_returns();
+
     if (flatten_request_.exchange(false, std::memory_order_acq_rel))
         unwind_positions(event_count);
 
@@ -2976,7 +3125,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                     if (exchange_analytics_.has_value())
                     {
                         // Feed to second analytics for equity curve / metrics
-                        auto fill_ptr = fill_pool_.acquire(f);
+                        auto fill_ptr = acquire_pooled(fill_pool_,f);
                         exchange_analytics_->on_event(fill_ptr);
                     }
                     continue;
@@ -2988,7 +3137,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 
                 cache_fill(f);
                 erase_open_order(f.get_order_id());
-                auto fill_ptr = fill_pool_.acquire(f);
+                auto fill_ptr = acquire_pooled(fill_pool_,f);
                 portfolio_.on_fill(f, opener, strat);
             dispatch_fill_to_strategy(f);
                 adverse_selection_.on_fill(f);
@@ -3024,7 +3173,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     }
     if (halt) return;
 
-    auto tick_ptr = tick_pool_.acquire(te);
+    auto tick_ptr = acquire_pooled(tick_pool_,te);
     log_event(te);
     {
         DEBUG_STAGE(stage_timer_, ring_publish);
@@ -3669,7 +3818,7 @@ void engine::run()
                     auto& mm_order = static_cast<order_event&>(*mm_ev);
                     auto mm_ob = orderbook_registry_.get_or_create(mm_order.get_symbol());
                     auto mm_side = (mm_order.get_side() == order_side::buy) ? side::buy : side::sell;
-                    auto mm_ob_order = std::make_shared<order>(
+                    auto mm_ob_order = mm_ob->create_order(
                         ob_order_type::good_till_cancel, mm_order.get_order_id(),
                         mm_side, Price::from_double(mm_order.get_price()),
                         static_cast<quantity>(std::round(mm_order.get_quantity() * 1e8)));
@@ -3678,7 +3827,7 @@ void engine::run()
             }
         }
 
-        auto mkt_ptr = market_pool_.acquire(mkt);
+        auto mkt_ptr = acquire_pooled(market_pool_,mkt);
         std::optional<order_event> order_opt;
         {
             DEBUG_STAGE(stage_timer_, strategy);
@@ -3833,7 +3982,7 @@ void engine::run_tick_data()
     {
         int64_t bar_recv_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        auto bar_ptr = market_pool_.acquire(bar);
+        auto bar_ptr = acquire_pooled(market_pool_,bar);
         bar_ptr->set_recv_ns(bar_recv_ns);
         auto order_opt = strategy_->on_market(bar);
         publish_event(bar_ptr);
@@ -3900,7 +4049,7 @@ void engine::run_tick_data()
         te.set_recv_ns(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
 
-        auto tick_ptr = tick_pool_.acquire(te);
+        auto tick_ptr = acquire_pooled(tick_pool_,te);
         log_event(te);
         {
             DEBUG_STAGE(stage_timer_, ring_publish);

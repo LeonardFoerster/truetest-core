@@ -4,6 +4,9 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <array>
+#include <cstdint>
+#include <algorithm>
 
 #ifdef HAS_DEBUG
 #include "debug/copy_tracker.h"
@@ -424,36 +427,52 @@ struct l2_level
         int64_t quantity;
 };
 
+// Binance depth20 and engine L2 paths cap at 20 levels per side (Phase 4).
+inline constexpr std::size_t kL2SnapshotMaxLevels = 20;
+
 class l2_snapshot_event : public event
 {
 public:
         l2_snapshot_event(
                 std::chrono::system_clock::time_point timestamp,
                 const std::string& symbol,
-                std::vector<l2_level> bids,
-                std::vector<l2_level> asks
+                const l2_level* bids,
+                std::size_t bid_count,
+                const l2_level* asks,
+                std::size_t ask_count
         )
                 : event(event_type::l2_snapshot, timestamp)
                 , symbol_(symbol)
-                , bids_(std::move(bids))
-                , asks_(std::move(asks))
-        { }
+        {
+                bid_count_ = static_cast<std::uint8_t>(
+                    std::min(bid_count, kL2SnapshotMaxLevels));
+                ask_count_ = static_cast<std::uint8_t>(
+                    std::min(ask_count, kL2SnapshotMaxLevels));
+                if (bids && bid_count_ > 0)
+                    std::copy_n(bids, bid_count_, bids_.begin());
+                if (asks && ask_count_ > 0)
+                    std::copy_n(asks, ask_count_, asks_.begin());
+        }
 
         const std::string& get_symbol() const { return symbol_; }
-        const std::vector<l2_level>& get_bids() const { return bids_; }
-        const std::vector<l2_level>& get_asks() const { return asks_; }
+        std::size_t bid_count() const { return bid_count_; }
+        std::size_t ask_count() const { return ask_count_; }
+        const l2_level& bid(std::size_t i) const { return bids_[i]; }
+        const l2_level& ask(std::size_t i) const { return asks_[i]; }
 
         std::string to_string() const override
         {
                 return "L2SnapshotEvent[" + symbol_ +
-                        " bids=" + std::to_string(bids_.size()) +
-                        " asks=" + std::to_string(asks_.size()) + "]";
+                        " bids=" + std::to_string(bid_count_) +
+                        " asks=" + std::to_string(ask_count_) + "]";
         }
 
 private:
         std::string symbol_;
-        std::vector<l2_level> bids_;
-        std::vector<l2_level> asks_;
+        std::array<l2_level, kL2SnapshotMaxLevels> bids_{};
+        std::array<l2_level, kL2SnapshotMaxLevels> asks_{};
+        std::uint8_t bid_count_ = 0;
+        std::uint8_t ask_count_ = 0;
 };
 
 
