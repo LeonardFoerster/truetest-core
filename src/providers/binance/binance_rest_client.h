@@ -24,9 +24,6 @@
 #include <stdexcept>
 #include <thread>
 
-#include <sys/socket.h>
-#include <sys/time.h>
-
 namespace beast = boost::beast;
 namespace http = beast::http;
 namespace net = boost::asio;
@@ -164,13 +161,14 @@ public:
     void set_weight_cap(int cap) { weight_cap_ = cap; }
     void set_soft_threshold_pct(int pct) { soft_threshold_pct_ = pct; }
 
-    // Per-call socket timeout. When > 0, applied via SO_RCVTIMEO and
-    // SO_SNDTIMEO on each new connection right after net::connect, so
-    // individual TLS-handshake / HTTP read+write syscalls return with
-    // an error instead of blocking. Zero (default) preserves the
-    // legacy "no timeout — kernel TCP retransmit limits dominate"
-    // behaviour. Engine wires this from the kill-switch path so
-    // shutdown can't get wedged on a still-down LAN.
+    // Per-call I/O timeout. When > 0, the write+read of each request is run
+    // as async ops on the connection's io_context and bounded with
+    // run_for(t); on expiry the connection is dropped and the call returns a
+    // failure. Zero (default) preserves the legacy "no timeout — kernel TCP
+    // retransmit limits dominate" behaviour. Engine wires this from the
+    // kill-switch path so shutdown can't get wedged on a still-down LAN.
+    // (SO_RCVTIMEO/SO_SNDTIMEO are deliberately NOT used: Asio polls with an
+    // infinite timeout on EAGAIN, so kernel socket timeouts never fire here.)
     void set_per_call_timeout(std::chrono::milliseconds t)
     {
         per_call_timeout_ms_.store(static_cast<long long>(t.count()),
@@ -392,98 +390,189 @@ private:
             }
         }
 
-        try
+        response r{0, "", 0};
+        long long rate_limit_sleep_ms = 0;
+        bool should_retry_after_429 = false;
+
         {
-            // Establish (or reuse) a persistent TLS connection.
-            // All connection state is managed in ensure_connected() under lock.
-            ensure_connected();
+            // Hold connection_mu_ across the whole transaction (connect + I/O)
+            // so concurrent callers can't interleave on the shared persistent
+            // stream. ensure_connected_locked() and close_connection_locked()
+            // both assume this lock is held. The 429 / throttle backoffs run
+            // *after* the lock is released so a sleep never blocks another
+            // caller (e.g. the kill-switch on shutdown).
+            std::lock_guard<std::mutex> lk(connection_mu_);
 
-            auto& stream = *persistent_stream_;
-
-            // Timeouts were applied inside ensure_connected() at connect time.
-            // The kill-switch path still works because set_per_call_timeout()
-            // stores the value and the next reconnect (or first connect) will
-            // pick it up via apply_socket_timeouts_locked().
-
-            http::request<http::string_body> req{method, target, 11};
-            req.set(http::field::host, host_);
-            req.set(http::field::user_agent, "TrueTest/1.0");
-            req.set("X-MBX-APIKEY", api_key_);
-
-            if (!body.empty())
+            // A reused keep-alive connection can be closed server-side while
+            // idle; locally it still looks open, so the first write after the
+            // gap fails. We retry exactly once, but ONLY when the failure
+            // happened before the request reached the wire (write not yet
+            // complete) — the venue saw nothing, so replaying a non-idempotent
+            // POST is safe. A post-write failure is never replayed.
+            for (int attempt = 0; attempt < 2; ++attempt)
             {
-                req.set(http::field::content_type, "application/x-www-form-urlencoded");
-                req.body() = body;
-                req.prepare_payload();
-            }
-
-            http::write(stream, req);
-
-            beast::flat_buffer buffer;
-            http::response<http::string_body> res;
-            http::read(stream, buffer, res);
-
-            response r;
-            r.status = static_cast<int>(res.result_int());
-            r.body = res.body();
-
-            auto weight_it = res.find("X-MBX-USED-WEIGHT-1M");
-            if (weight_it != res.end())
-            {
-                try { r.used_weight = std::stoi(std::string(weight_it->value())); }
-                catch (...) {}
-                last_used_weight_.store(r.used_weight);
-                window_anchor_ms_.store(
-                    static_cast<long long>(binance::server_time_ms()));
-            }
-
-            // No shutdown() — the connection is kept alive for the next request.
-
-            if (r.status == 429)
-            {
-                long long sleep_ms = 2000;
-                auto retry_after = res.find("Retry-After");
-                if (retry_after != res.end())
+                bool request_sent = false;
+                try
                 {
-                    try
-                    {
-                        long long sec = std::stoll(
-                            std::string(retry_after->value()));
-                        if (sec > 0) sleep_ms = std::min<long long>(sec * 1000,
-                                                                    60'000);
-                    }
-                    catch (...) {}
-                }
-                std::cerr << "BinanceRestClient: rate limited (429). "
-                          << "Weight used: " << r.used_weight
-                          << ", sleeping " << sleep_ms << " ms\n";
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(sleep_ms));
-                if (retry_on_429)
-                    return execute_with_retry(method, target, body, false);
-                return r;
-            }
-            else if (r.status >= 400)
-            {
-                std::cerr << "BinanceRestClient: HTTP " << r.status
-                          << " - " << r.body << "\n";
-            }
+                    ensure_connected_locked();
 
+                    auto& stream = *persistent_stream_;
+                    auto& ioc = *persistent_ioc_;
+
+                    http::request<http::string_body> req{method, target, 11};
+                    req.set(http::field::host, host_);
+                    req.set(http::field::user_agent, "TrueTest/1.0");
+                    req.set("X-MBX-APIKEY", api_key_);
+
+                    if (!body.empty())
+                    {
+                        req.set(http::field::content_type, "application/x-www-form-urlencoded");
+                        req.body() = body;
+                        req.prepare_payload();
+                    }
+
+                    // Bounded async transaction. SO_RCVTIMEO/SO_SNDTIMEO do NOT
+                    // bound Asio synchronous I/O: Asio drives the socket in
+                    // non-blocking mode and, on EAGAIN, polls with an infinite
+                    // timeout, so the kernel socket timeout never fires. To give
+                    // the kill-switch a real wall-clock bound we issue the
+                    // write+read as async ops on the connection's own io_context
+                    // and cap them with run_for(per_call_timeout). A timeout of
+                    // 0 (the default, non-kill-switch path) runs unbounded.
+                    beast::flat_buffer buffer;
+                    http::response<http::string_body> res;
+                    beast::error_code op_ec;
+                    bool write_done = false;
+                    bool io_done = false;
+
+                    http::async_write(stream, req,
+                        [&](beast::error_code ec, std::size_t)
+                        {
+                            if (ec) { op_ec = ec; io_done = true; return; }
+                            write_done = true;
+                            http::async_read(stream, buffer, res,
+                                [&](beast::error_code ec2, std::size_t)
+                                {
+                                    op_ec = ec2;
+                                    io_done = true;
+                                });
+                        });
+
+                    ioc.restart();
+                    const long long timeout_ms =
+                        per_call_timeout_ms_.load(std::memory_order_acquire);
+                    if (timeout_ms > 0)
+                        ioc.run_for(std::chrono::milliseconds(timeout_ms));
+                    else
+                        ioc.run();
+
+                    // write_done tells the retry below whether the request
+                    // reached the wire.
+                    request_sent = write_done;
+
+                    if (!io_done || op_ec)
+                    {
+                        // Deadline elapsed mid-transaction (!io_done) or an
+                        // async op errored. Drop the connection; on a timeout
+                        // the still-pending handlers are discarded (never
+                        // invoked) when the io_context is destroyed inside
+                        // close_connection_locked(), so the stack locals they
+                        // captured by reference are never touched afterwards.
+                        close_connection_locked();
+
+                        if (!request_sent && attempt == 0)
+                        {
+                            std::cerr << "BinanceRestClient: connection failed before "
+                                         "request was sent ("
+                                      << (op_ec ? op_ec.message()
+                                                : std::string("deadline elapsed"))
+                                      << "), reconnecting and retrying once\n";
+                            continue;
+                        }
+
+                        if (io_done)
+                            std::cerr << "BinanceRestClient: request failed: "
+                                      << op_ec.message() << "\n";
+                        else
+                            std::cerr << "BinanceRestClient: request timed out after "
+                                      << timeout_ms << " ms\n";
+                        r = {0, "", 0};
+                        break;
+                    }
+
+                    r.status = static_cast<int>(res.result_int());
+                    r.body = res.body();
+
+                    auto weight_it = res.find("X-MBX-USED-WEIGHT-1M");
+                    if (weight_it != res.end())
+                    {
+                        try { r.used_weight = std::stoi(std::string(weight_it->value())); }
+                        catch (...) {}
+                        last_used_weight_.store(r.used_weight);
+                        window_anchor_ms_.store(
+                            static_cast<long long>(binance::server_time_ms()));
+                    }
+
+                    // No shutdown() — the connection is kept alive for the next request.
+
+                    if (r.status == 429)
+                    {
+                        rate_limit_sleep_ms = 2000;
+                        auto retry_after = res.find("Retry-After");
+                        if (retry_after != res.end())
+                        {
+                            try
+                            {
+                                long long sec = std::stoll(
+                                    std::string(retry_after->value()));
+                                if (sec > 0) rate_limit_sleep_ms = std::min<long long>(sec * 1000,
+                                                                                        60'000);
+                            }
+                            catch (...) {}
+                        }
+                        should_retry_after_429 = retry_on_429;
+                    }
+                    else if (r.status >= 400)
+                    {
+                        std::cerr << "BinanceRestClient: HTTP " << r.status
+                                  << " - " << r.body << "\n";
+                    }
+
+                    break;  // transaction completed (success or HTTP error)
+                }
+                catch (const std::exception& e)
+                {
+                    // ensure_connected_locked() failed (connect / handshake);
+                    // nothing was sent. Drop the connection and retry once.
+                    close_connection_locked();
+
+                    if (!request_sent && attempt == 0)
+                    {
+                        std::cerr << "BinanceRestClient: connect failed ("
+                                  << e.what() << "), reconnecting and retrying once\n";
+                        continue;
+                    }
+
+                    std::cerr << "BinanceRestClient: request failed: " << e.what() << "\n";
+                    r = {0, "", 0};
+                    break;
+                }
+            }
+        }  // connection_mu_ released — 429 / throttle sleeps must not block other callers
+
+        if (rate_limit_sleep_ms > 0)
+        {
+            std::cerr << "BinanceRestClient: rate limited (429). "
+                      << "Weight used: " << r.used_weight
+                      << ", sleeping " << rate_limit_sleep_ms << " ms\n";
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(rate_limit_sleep_ms));
+            if (should_retry_after_429)
+                return execute_with_retry(method, target, body, false);
             return r;
         }
-        catch (const std::exception& e)
-        {
-            // Any error during the request (including inside ensure_connected)
-            // means we drop the possibly half-open connection so the next
-            // caller gets a fresh one.
-            {
-                std::lock_guard<std::mutex> lk(connection_mu_);
-                close_connection_locked();
-            }
 
-            std::cerr << "BinanceRestClient: request failed: " << e.what() << "\n";
-            return {0, "", 0};
-        }
+        return r;
     }
 
     // =====================================================================
@@ -506,25 +595,9 @@ private:
         persistent_ioc_.reset();
     }
 
-    void apply_socket_timeouts_locked(tcp::socket& sock)
+    // Caller must hold connection_mu_.
+    void ensure_connected_locked()
     {
-        const long long pct_ms = per_call_timeout_ms_.load(std::memory_order_acquire);
-        if (pct_ms > 0)
-        {
-            struct timeval tv{};
-            tv.tv_sec  = pct_ms / 1000;
-            tv.tv_usec = (pct_ms % 1000) * 1000;
-
-            const int fd = sock.native_handle();
-            ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-        }
-    }
-
-    void ensure_connected()
-    {
-        std::lock_guard<std::mutex> lk(connection_mu_);
-
         if (connected_ && persistent_stream_ && persistent_ioc_)
         {
             auto& lowest = beast::get_lowest_layer(*persistent_stream_);
@@ -557,8 +630,6 @@ private:
         tcp::resolver resolver(*persistent_ioc_);
         auto resolver_results = resolver.resolve(host_, port_);
         net::connect(lowest, resolver_results);
-
-        apply_socket_timeouts_locked(lowest);
 
         stream.handshake(ssl::stream_base::client);
 
