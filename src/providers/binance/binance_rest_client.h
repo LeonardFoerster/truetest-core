@@ -291,7 +291,6 @@ private:
     std::optional<net::io_context>          persistent_ioc_;
     std::optional<beast::ssl_stream<tcp::socket>> persistent_stream_;
     bool                                    connected_ = false;
-    tcp::resolver::results_type             cached_resolver_results_;
     std::mutex                              connection_mu_;
 
     static long long steady_now_ms()
@@ -505,7 +504,6 @@ private:
 
         persistent_stream_.reset();
         persistent_ioc_.reset();
-        // We intentionally keep cached_resolver_results_ — it is still valid.
     }
 
     void apply_socket_timeouts_locked(tcp::socket& sock)
@@ -551,12 +549,14 @@ private:
         if (SSL_SESSION* sess = cached_session_.load(std::memory_order_acquire))
             SSL_set_session(stream.native_handle(), sess);
 
+        // Re-resolve on every (re)connect. api.binance.com is a rotating
+        // GSLB/round-robin record; caching the result for the whole process
+        // lifetime would pin a long-running live session to start-of-process
+        // IPs and keep failing once the venue shifts them. This is the cold
+        // path (reconnect only), so the extra lookup is negligible.
         tcp::resolver resolver(*persistent_ioc_);
-        if (cached_resolver_results_.empty())
-        {
-            cached_resolver_results_ = resolver.resolve(host_, port_);
-        }
-        net::connect(lowest, cached_resolver_results_);
+        auto resolver_results = resolver.resolve(host_, port_);
+        net::connect(lowest, resolver_results);
 
         apply_socket_timeouts_locked(lowest);
 
