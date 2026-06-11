@@ -11,7 +11,7 @@
 namespace truetest::exits {
 
 // Opaque handle returned by an adapter so the engine can later cancel
-// or modify a venue-resting bracket. Plain-old-data — no ownership.
+// or modify a venue-resting bracket. Plain-old-data - no ownership.
 struct bracket_handles
 {
     // Per-leg exchange order ids (e.g. Binance orderId for the SL and
@@ -26,7 +26,7 @@ struct bracket_handles
 
     // Symbol the brackets were placed against (uppercase). Required by
     // venues that scope cancel by symbol+orderId (Binance futures
-    // /fapi/v1/order DELETE) — without this, the adapter would have to
+    // /fapi/v1/order DELETE) - without this, the adapter would have to
     // stash a single symbol on construction, which doesn't generalize
     // to multi-symbol providers. Empty when handles haven't been
     // populated by place() / list_open() yet.
@@ -53,7 +53,7 @@ struct bracket_caps
 // (current behavior, used by backtest and shadow).
 // Defense-in-depth contract: the in-process armed intent in ExitManager
 // stays armed even after place() succeeds. Both paths watching the same
-// price stream is intentional — if the venue lags or the WS gaps, the
+// price stream is intentional - if the venue lags or the WS gaps, the
 // engine still fires. The duplicate close arrives at a flat lot and is
 // rejected harmlessly by the portfolio.
 class IBracketAdapter
@@ -64,7 +64,7 @@ public:
     virtual bracket_caps capabilities() const = 0;
 
     // Called once after the opener fills. Returns handles describing
-    // what was placed; empty handles means "could not place — engine
+    // what was placed; empty handles means "could not place - engine
     // remains the sole enforcer" (logged as a warning; not fatal).
     // opener_fill_price is provided so adapters that need a price
     // anchor (rounding to tick size, sanity bounds) have it without
@@ -74,14 +74,14 @@ public:
                                   const exit_intent& intent,
                                   double opener_fill_price) = 0;
 
-    // Cancel the venue-resting bracket. Idempotent — called on every
+    // Cancel the venue-resting bracket. Idempotent - called on every
     // teardown path (price-trigger fire, signal-close cancel, manual
     // cancel, lot net-flat). Adapters must tolerate "already gone".
     virtual void cancel(std::uint64_t opener_order_id,
                         const bracket_handles& handles) = 0;
 
     // Optional: trailing-stop adjustment or strategy-driven SL move.
-    // Default no-op — adapters whose caps.trailing_stop is false ignore
+    // Default no-op - adapters whose caps.trailing_stop is false ignore
     // this safely; ExitManager keeps its in-process trail running.
     virtual void modify(std::uint64_t /*opener_order_id*/,
                         const bracket_handles& /*handles*/,
@@ -92,7 +92,7 @@ public:
     // from a previous run. Called once at startup AFTER the regular
     // reconciler so the venue's view of orders is trusted. Returns
     // empty if the adapter doesn't model restart recovery (default).
-    // strategy_name is best-effort — venues like Binance OCO don't
+    // strategy_name is best-effort - venues like Binance OCO don't
     // round-trip it through the listClientOrderId, so adapters that
     // can't recover it return "" and the engine carries on without
     // per-strategy attribution for these brackets.

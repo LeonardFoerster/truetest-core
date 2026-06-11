@@ -53,27 +53,27 @@ public:
 
 	virtual std::shared_ptr<IExecutionAdapter> get_execution_adapter() = 0;
 
-	// nullopt → engine falls back to user overrides or skips checks.
+	// nullopt -> engine falls back to user overrides or skips checks.
 	virtual std::optional<instrument_spec>
 	get_instrument(const std::string& /*symbol*/) const { return std::nullopt; }
 
-	// nullptr → engine installs Noop* safety shims; venue providers override.
+	// nullptr -> engine installs Noop* safety shims; venue providers override.
 	virtual std::shared_ptr<IReconciler> get_reconciler() { return nullptr; }
 	virtual std::shared_ptr<IKillSwitch> get_kill_switch() { return nullptr; }
 
-	// nullptr → engine skips the venue-specific pre-trade check (the
+	// nullptr -> engine skips the venue-specific pre-trade check (the
 	// venue-agnostic RiskManager always runs). Futures providers
 	// override to enforce notional / leverage / liquidation-distance
 	// caps. See risk/futures_risk_check.h.
 	virtual std::shared_ptr<IRiskCheck> get_risk_check() { return nullptr; }
 
-	// nullptr → ExitManager runs engine-side eval only (current behavior,
+	// nullptr -> ExitManager runs engine-side eval only (current behavior,
 	// always used by backtest/shadow). Live providers override to push
 	// brackets to the venue as resting orders. See exits/bracket_adapter.h.
 	virtual std::shared_ptr<truetest::exits::IBracketAdapter>
 	get_bracket_adapter() { return nullptr; }
 
-	// True → provider emits a unified bar/tick/l2 variant stream. False
+	// True -> provider emits a unified bar/tick/l2 variant stream. False
 	// falls back to the specialized bar_record/tick_record bridges.
 	virtual bool supports_event_stream() const { return false; }
 
@@ -82,9 +82,9 @@ public:
 
 	// Long-lived threads owned by the provider can advertise themselves
 	// here so the engine's WorkerWatchdog halts the engine if any of
-	// them goes silent. Empty default → no liveness monitoring (engine
+	// them goes silent. Empty default -> no liveness monitoring (engine
 	// won't even create a watchdog). The atomic must outlive both this
-	// provider and the engine — the same lifetime constraint Worker's
+	// provider and the engine - the same lifetime constraint Worker's
 	// failure_flag follows.
 	struct liveness_source
 	{
@@ -97,7 +97,7 @@ public:
 	// Engine wires this in live mode so a fatal transport disconnect (WS
 	// idle timeout, listenKey HTTP failure beyond retry budget) routes
 	// straight into engine::trigger_halt instead of the transport's
-	// reconnect loop. Default no-op — backtest/shadow paths keep their
+	// reconnect loop. Default no-op - backtest/shadow paths keep their
 	// reconnect behavior. The reason string is short ("market-data WS
 	// lost") and is published to the dashboard banner verbatim.
 	virtual void set_halt_callback(

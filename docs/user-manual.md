@@ -1,6 +1,6 @@
 # TrueTest User Manual
 
-**TrueTest (hft-engine)** — A high-performance, modular C++23 trading engine supporting backtesting, shadow (paper) trading, and live execution from a single source tree.
+**TrueTest (hft-engine)** - A high-performance, modular C++23 trading engine supporting backtesting, shadow (paper) trading, and live execution from a single source tree.
 
 This document serves as the primary operator-facing manual and technical overview. It covers architecture, installation, configuration, usage, risk management, safety features, performance characteristics, and commercial readiness recommendations.
 
@@ -39,8 +39,8 @@ Market Data
 │  • ObjectPool allocation                                     │
 │  • Strategy dispatch (on_market / on_tick / on_l2)           │
 │  • Pre-trade RiskManager + venue IRiskCheck                  │
-│  • ExecutionBridge → IExecutionAdapter                       │
-│  • Fill path → Portfolio + ExitManager + Analytics           │
+│  • ExecutionBridge -> IExecutionAdapter                       │
+│  • Fill path -> Portfolio + ExitManager + Analytics           │
 │  • Post-fill risk + shadow divergence tracking               │
 └──────────┬──────────────────────────────────────────────────┘
            │ event_pointer (lock-free)
@@ -70,9 +70,9 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 - **Safety systems** (Binance futures): `BinanceFuturesReconciler`, `DeadMansSwitch`, `KillSwitch`, user-data WebSocket as source of truth.
 
 **Data flow**:
-1. Data source emits raw events → parser produces `market_event` / `tick_event` / `l2_update_event`.
+1. Data source emits raw events -> parser produces `market_event` / `tick_event` / `l2_update_event`.
 2. Engine dispatches to primary + additional strategies.
-3. Strategy returns `order_event` → RiskManager + venue `IRiskCheck` (pre-trade) → `IExecutionAdapter`.
+3. Strategy returns `order_event` -> RiskManager + venue `IRiskCheck` (pre-trade) -> `IExecutionAdapter`.
 4. Adapter produces `fill_event` (synthetic in backtest/shadow, real via REST+user-data WS in live).
 5. Fill updates `Portfolio`, triggers `ExitManager` bracket placement, updates `Analytics`, posts to rings.
 6. Workers consume rings asynchronously (logging, risk stats, TUI, market making).
@@ -219,7 +219,7 @@ Expected output: ANSI dashboard showing equity curve, trade count, win rate, fin
     --thread-preset standard
 ```
 
-Records raw tape while running live shadow fills via trade tape. Compares simulated vs real microstructure. Safe — no orders sent.
+Records raw tape while running live shadow fills via trade tape. Compares simulated vs real microstructure. Safe - no orders sent.
 
 **3. Live trading session (futures, with full safety)**
 
@@ -240,7 +240,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
     --risk-unwind
 ```
 
-**Critical**: Only `engine_live` binary can submit real orders. Operator must correctly solve a random math problem after seeing a prominent red "LIVE TRADING — REAL MONEY" warning. All other binaries hard-reject live order paths at compile time.
+**Critical**: Only `engine_live` binary can submit real orders. Operator must correctly solve a random math problem after seeing a prominent red "LIVE TRADING - REAL MONEY" warning. All other binaries hard-reject live order paths at compile time.
 
 # Performance & Benchmarks
 
@@ -252,7 +252,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - StageTimer (ENABLE_DEBUG) provides per-stage microsecond breakdown for profiling.
 - Binary event logging with zstd compression adds minimal overhead when enabled.
 
-**Typical throughput**: Capable of handling full-depth Binance streams (trade + 20-level depth @ 100ms) plus strategy + risk + analytics on a modern 8–16 core CPU with <1 ms median event-to-worker latency (subject to measurement).
+**Typical throughput**: Capable of handling full-depth Binance streams (trade + 20-level depth @ 100ms) plus strategy + risk + analytics on a modern 8-16 core CPU with <1 ms median event-to-worker latency (subject to measurement).
 
 **Further optimization opportunities** (non-exhaustive):
 - Integrate mimalloc/jemalloc for general allocations outside hot path.
@@ -298,7 +298,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 **Documentation & UX**:
 - Complete a single `USER_MANUAL.md` + PDF version covering every CLI flag, model, and futures checklist.
 - Add interactive TUI help and `--help` examples for common workflows.
-- Video walkthroughs of record → replay → shadow → live progression.
+- Video walkthroughs of record -> replay -> shadow -> live progression.
 
 **Product & Distribution**:
 - Provide pre-built binaries or easy installers (AppImage, .deb, Homebrew, Docker images) for major platforms.
@@ -320,7 +320,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 
 # Unique Selling Points for Gumroad
 
-- **True single-binary reuse**: The exact same engine binary (modulo compile-time gate) powers backtest → shadow → live with bit-level behavioral parity where possible.
+- **True single-binary reuse**: The exact same engine binary (modulo compile-time gate) powers backtest -> shadow -> live with bit-level behavioral parity where possible.
 - **Institutional safety without the price tag**: Dead-man's switch, kill switch, position reconciler, and user-data WS source-of-truth are production features rarely found in retail tools.
 - **C++23 performance edge**: Lock-free rings, object pools, zero hot-path allocations, and optional native tuning deliver microsecond-class event handling that Python/JavaScript engines cannot match.
 - **Realistic microstructure modeling**: Queue position, walked-book impact, latency stacking, and trade-tape shadow fills let you see realistic slippage before risking capital.
@@ -331,23 +331,23 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 # Full File Index
 
 **Root & Build**:
-- `CMakeLists.txt` — Main build script producing three TT_TARGET binaries + optional shared library.
-- `cmake/CompilerFlags.cmake`, `Dependencies.cmake` — Centralized C++23 flags, sanitizers, and optional backend wiring.
-- `vcpkg.json` — Dependency manifest for optional features (Binance, live data).
-- `README.md`, `onboarding.md`, `CLAUDE.md` — High-level and authoritative internal documentation.
+- `CMakeLists.txt` - Main build script producing three TT_TARGET binaries + optional shared library.
+- `cmake/CompilerFlags.cmake`, `Dependencies.cmake` - Centralized C++23 flags, sanitizers, and optional backend wiring.
+- `vcpkg.json` - Dependency manifest for optional features (Binance, live data).
+- `README.md`, `onboarding.md`, `CLAUDE.md` - High-level and authoritative internal documentation.
 
 **Core Engine** (`src/engine/`, `src/core/`):
-- `engine.{h,cpp}`, `engine_config.h` — Central orchestrator, worker management, mode handling (10 files total in engine/).
-- `tt_target.h` — Compile-time target definition and `target_allows_live_orders()` gate.
+- `engine.{h,cpp}`, `engine_config.h` - Central orchestrator, worker management, mode handling (10 files total in engine/).
+- `tt_target.h` - Compile-time target definition and `target_allows_live_orders()` gate.
 - Event, logging, and worker headers (`event.h`, `event_log.h`, `logging_worker.h`, etc.).
 
 **Providers** (`src/providers/`):
-- `provider.h`, `provider_registry.h`, `data_bridge.h` — Core interfaces and registration.
-- `local/` (4 files) — CSV/tick file transport + parser for backtesting and replay.
-- `binance/` (32 files) — Complete spot + USDT-M futures implementation: parsers, transports, executors, order encoders, bracket adapter, dead-man's switch, kill switch, reconciler, safety checks, user-data handling, time sync, REST client, hybrid executor.
+- `provider.h`, `provider_registry.h`, `data_bridge.h` - Core interfaces and registration.
+- `local/` (4 files) - CSV/tick file transport + parser for backtesting and replay.
+- `binance/` (32 files) - Complete spot + USDT-M futures implementation: parsers, transports, executors, order encoders, bracket adapter, dead-man's switch, kill switch, reconciler, safety checks, user-data handling, time sync, REST client, hybrid executor.
 
 **Strategies & Indicators** (`src/strategy/`, `src/indicator/`):
-- `strategy_interface.h`, `strategy_registry.h`, `strategy_factory.h` — Extension points and registration.
+- `strategy_interface.h`, `strategy_registry.h`, `strategy_factory.h` - Extension points and registration.
 - Concrete strategies: `sma_strategy`, `mean_reversion_strategy`, `ma_crossover_strategy`, `hedge_demo_strategy`, `market_maker` (13 files total).
 - Indicators: `sma.h`, `ema.h`, `rsi.h`, `bollinger.h`.
 
@@ -371,13 +371,13 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - `object_pool.h`, `order_id.h`, `price.h`, `aliases.h`.
 
 **API & Tools**:
-- `src/api/truetest_api.{h,cpp}` — Minimal C API for embedding.
-- `tools/python/` — Early Python bindings (incomplete).
-- `benchmarks/bench_main.cpp` — Performance micro-benchmarks.
+- `src/api/truetest_api.{h,cpp}` - Minimal C API for embedding.
+- `tools/python/` - Early Python bindings (incomplete).
+- `benchmarks/bench_main.cpp` - Performance micro-benchmarks.
 - `tests/` (~40 test files + fixtures + golden): Comprehensive unit, integration, golden regression, and live testnet tests.
 
 **Documentation** (`docs/`):
-- `demo-trading-workflow.md`, `futures-order-lifecycle.md`, `futures-testnet.md`, `realism.md`, `performance.md`, `strategy-validation.md`, `testnet.md`, `licenses.md`, and others — detailed operational and design guidance.
+- `demo-trading-workflow.md`, `futures-order-lifecycle.md`, `futures-testnet.md`, `realism.md`, `performance.md`, `strategy-validation.md`, `testnet.md`, `licenses.md`, and others - detailed operational and design guidance.
 
 ---
 

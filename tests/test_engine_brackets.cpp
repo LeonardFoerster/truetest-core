@@ -2,7 +2,7 @@
 //   1. SL declared at entry actually fires on a bar wick (not just close).
 //   2. When a strategy closes via signal in on_market without setting
 //      opener_order_id, the leftover armed bracket is swept on the
-//      net-flat transition — preventing phantom closes later.
+//      net-flat transition - preventing phantom closes later.
 
 #include <gtest/gtest.h>
 
@@ -142,7 +142,7 @@ TEST(EngineBrackets, SlFiresOnIntraBarWickEvenWhenCloseRecovers)
         {100, 100.5,  99.5, 100},
         {100, 100.5,  99.5, 100},
         {100, 100.5,  99.5, 100},   // entry on bar 3 close=100, SL=99
-        {100, 100.5,  98.0, 100},   // wick to 98 — must trigger SL
+        {100, 100.5,  98.0, 100},   // wick to 98 - must trigger SL
         {100, 100.5,  99.5, 100},
         {100, 100.5,  99.5, 100},
     });
@@ -159,7 +159,7 @@ TEST(EngineBrackets, SlFiresOnIntraBarWickEvenWhenCloseRecovers)
 
     // Expect BUY (entry) + SELL (SL closer).
     ASSERT_GE(strat->fills_seen, 2)
-        << "SL did not fire — bar low=98 should have crossed SL=99";
+        << "SL did not fire - bar low=98 should have crossed SL=99";
     EXPECT_EQ(strat->fill_sides[0], order_side::buy);
     EXPECT_EQ(strat->fill_sides[1], order_side::sell);
 }
@@ -195,5 +195,5 @@ TEST(EngineBrackets, NetFlatSweepCancelsLeftoverBracket)
     // Exactly two fills: BUY (entry) + SELL (signal close).
     // A third SELL would mean a phantom bracket fired on bar 7.
     EXPECT_EQ(strat->fills_seen, 2)
-        << "Phantom bracket fire — net-flat sweep did not cancel the leftover intent";
+        << "Phantom bracket fire - net-flat sweep did not cancel the leftover intent";
 }

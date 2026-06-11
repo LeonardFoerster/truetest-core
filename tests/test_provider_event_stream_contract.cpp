@@ -1,7 +1,7 @@
 // Pins the IProvider unified-event-stream contract:
-//  - default (no depth opt-in)      → supports_event_stream()=false, parser=null
-//  - after set_depth_stream(...)    → supports_event_stream()=true,  parser!=null
-//  - local provider (no override)   → stays on specialized bridge path
+//  - default (no depth opt-in)      -> supports_event_stream()=false, parser=null
+//  - after set_depth_stream(...)    -> supports_event_stream()=true,  parser!=null
+//  - local provider (no override)   -> stays on specialized bridge path
 
 #include <gtest/gtest.h>
 

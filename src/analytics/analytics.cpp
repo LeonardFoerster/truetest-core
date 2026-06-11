@@ -20,7 +20,7 @@ Analytics::Analytics(double initial_cash, std::size_t rolling_window, double ris
 void Analytics::reserve_hint(std::size_t expected_bars)
 {
     // Cap equity curves at the decimation ceiling; returns vectors take
-    // the raw hint — they're doubles, 8 bytes each, so even 10M entries
+    // the raw hint - they're doubles, 8 bytes each, so even 10M entries
     // is 80 MB, acceptable for backtests at that scale.
     const std::size_t curve_cap = std::min(expected_bars, max_equity_points_);
     equity_curve_.reserve(curve_cap);
@@ -83,7 +83,7 @@ void Analytics::on_event(const event_pointer& ev)
 
 void Analytics::on_funding(const funding_event& fe)
 {
-    // Phase 2.1 — funding cash deltas adjust our internal cash and equity curve.
+    // Phase 2.1 - funding cash deltas adjust our internal cash and equity curve.
     // This makes funding visible in reports, TUI sparkline, and risk_view().
     cash_ += fe.get_cash_delta();
     total_funding_pnl_ += fe.get_cash_delta();
@@ -105,7 +105,7 @@ void Analytics::on_market(const market_event& m)
 {
     last_close_ = m.get_close();
 
-    // Phase 2.3 — track mid and simple realized vol (EWMA of log returns)
+    // Phase 2.3 - track mid and simple realized vol (EWMA of log returns)
     double mid = m.get_close();  // for bar data we use close as proxy for mid
     if (last_mid_price_ > 0.0 && mid > 0.0) {
         double ret = std::log(mid / last_mid_price_);
@@ -181,7 +181,7 @@ void Analytics::on_tick(const tick_event& t)
 {
     last_close_ = t.get_price();
 
-    // Phase 2.3 — update vol from tick mid (price)
+    // Phase 2.3 - update vol from tick mid (price)
     double mid = t.get_price();
     if (last_mid_price_ > 0.0 && mid > 0.0) {
         double ret = std::log(mid / last_mid_price_);
@@ -378,7 +378,7 @@ std::vector<double> Analytics::drawdown_tail(std::size_t n) const
 
     // Walk from the start so the running peak we report reflects the
     // full history, matching how max_drawdown_pct() is computed
-    // elsewhere. Cheap — we only emit n values into out.
+    // elsewhere. Cheap - we only emit n values into out.
     const std::size_t take = std::min(n, equity_curve_.size());
     out.reserve(take);
     const std::size_t emit_start = equity_curve_.size() - take;

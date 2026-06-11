@@ -102,7 +102,7 @@ TEST(FuturesRiskCheck, NotionalCapAddsToExistingLong)
     c.max_notional_usdt = 1000.0;
     FuturesRiskCheck check(c);
 
-    // Existing 0.02 BTC long → 600 USDT notional. Adding another 0.02
+    // Existing 0.02 BTC long -> 600 USDT notional. Adding another 0.02
     // makes 1200 > 1000 cap. Refuse.
     auto p = with_state(100.0, 0.02);
     auto o = make_order("BTCUSDT", order_side::buy, 0.02);
@@ -118,7 +118,7 @@ TEST(FuturesRiskCheck, ClosingExistingLongAllowed)
     FuturesRiskCheck check(c);
 
     // Existing 0.02 BTC long, SELL 0.02 closes to flat. post_notional = 0
-    // — under any cap. Closing should always pass the notional check.
+    // - under any cap. Closing should always pass the notional check.
     auto p = with_state(100.0, 0.02);
     auto o = make_order("BTCUSDT", order_side::sell, 0.02);
 
@@ -132,7 +132,7 @@ TEST(FuturesRiskCheck, FlippingFromLongToLargerShortRefused)
     c.max_notional_usdt = 1000.0;
     FuturesRiskCheck check(c);
 
-    // Existing 0.01 BTC long. SELL 0.05 → post_qty = -0.04 → notional
+    // Existing 0.01 BTC long. SELL 0.05 -> post_qty = -0.04 -> notional
     // 1200 > 1000 cap. Magnitude check works on either sign.
     auto p = with_state(100.0, 0.01);
     auto o = make_order("BTCUSDT", order_side::sell, 0.05);
@@ -161,7 +161,7 @@ TEST(FuturesRiskCheck, LeverageCapRejects)
     c.max_leverage = 5.0;
     FuturesRiskCheck check(c);
 
-    // cash=100, post_notional = 0.05 BTC * 30000 = 1500 → leverage 15x
+    // cash=100, post_notional = 0.05 BTC * 30000 = 1500 -> leverage 15x
     // > 5x cap.
     auto p = with_state(100.0, 0.0);
     auto o = make_order("BTCUSDT", order_side::buy, 0.05);
@@ -177,7 +177,7 @@ TEST(FuturesRiskCheck, LeverageCapAllowsUnder)
     c.max_leverage = 5.0;
     FuturesRiskCheck check(c);
 
-    // cash=100, post_notional = 0.01 BTC * 30000 = 300 → leverage 3x.
+    // cash=100, post_notional = 0.01 BTC * 30000 = 300 -> leverage 3x.
     auto p = with_state(100.0, 0.0);
     auto o = make_order("BTCUSDT", order_side::buy, 0.01);
 
@@ -194,7 +194,7 @@ TEST(FuturesRiskCheck, LeverageCapZeroCashSkipsCheck)
     auto p = with_state(/*cash=*/0.0, 0.0);
     auto o = make_order("BTCUSDT", order_side::buy, 0.01);
 
-    // No margin base → can't compute leverage; skip cleanly rather
+    // No margin base -> can't compute leverage; skip cleanly rather
     // than divide by zero or refuse on a moot calculation.
     auto d = check.evaluate(o, p, 30000.0);
     EXPECT_TRUE(d.allow);
@@ -207,8 +207,8 @@ TEST(FuturesRiskCheck, LiquidationDistanceRejectsHighLeverage)
     c.maintenance_margin_pct       = 0.005; // 0.5%
     FuturesRiskCheck check(c);
 
-    // cash=100, post_notional=3000 → margin_ratio = 100/3000 = 0.033
-    // distance = 0.033 - 0.005 = 0.028 = 2.8% < 5% → refuse.
+    // cash=100, post_notional=3000 -> margin_ratio = 100/3000 = 0.033
+    // distance = 0.033 - 0.005 = 0.028 = 2.8% < 5% -> refuse.
     auto p = with_state(100.0, 0.0);
     auto o = make_order("BTCUSDT", order_side::buy, 0.1);
 
@@ -224,8 +224,8 @@ TEST(FuturesRiskCheck, LiquidationDistanceAllowsLowLeverage)
     c.maintenance_margin_pct       = 0.005;
     FuturesRiskCheck check(c);
 
-    // cash=100, post_notional=300 → margin_ratio = 100/300 = 0.333
-    // distance = 0.328 = 32.8% >> 5% → allow.
+    // cash=100, post_notional=300 -> margin_ratio = 100/300 = 0.333
+    // distance = 0.328 = 32.8% >> 5% -> allow.
     auto p = with_state(100.0, 0.0);
     auto o = make_order("BTCUSDT", order_side::buy, 0.01);
 
@@ -240,7 +240,7 @@ TEST(FuturesRiskCheck, FlatPostQtySkipsLiquidationCheck)
     FuturesRiskCheck check(c);
 
     auto p = with_state(100.0, 0.02);
-    // SELL exactly the existing long → post_qty = 0 → no exposure.
+    // SELL exactly the existing long -> post_qty = 0 -> no exposure.
     auto o = make_order("BTCUSDT", order_side::sell, 0.02);
 
     auto d = check.evaluate(o, p, 30000.0);
@@ -255,8 +255,8 @@ TEST(FuturesRiskCheck, MultipleCapsFirstRejectionWins)
     c.min_liquidation_distance_pct = 0.10;
     FuturesRiskCheck check(c);
 
-    // post_notional = 1500 > 1000 → notional cap fires first.
-    // (Implementation evaluates notional → leverage → liquidation,
+    // post_notional = 1500 > 1000 -> notional cap fires first.
+    // (Implementation evaluates notional -> leverage -> liquidation,
     // and returns on first refusal.)
     auto p = with_state(100.0, 0.0);
     auto o = make_order("BTCUSDT", order_side::buy, 0.05);

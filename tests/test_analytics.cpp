@@ -36,7 +36,7 @@ TEST(Analytics, EquityTail_ReturnsLastNValuesInOrder)
     }
     auto tail = a.equity_tail(3);
     ASSERT_EQ(tail.size(), 3u);
-    // Equity is constant (no positions) → 100000 across the tail.
+    // Equity is constant (no positions) -> 100000 across the tail.
     for (double v : tail) EXPECT_DOUBLE_EQ(v, 100000.0);
 
     // Asking for more than available returns all of it.
@@ -57,10 +57,10 @@ TEST(Analytics, DrawdownTail_ZeroAtPeakPositiveBelowPeak)
                   order_side::buy, 100.0, 100.0, 0.0);
     a.on_event(fill);
 
-    // Price rises to 110 → equity peak at ~101000.
+    // Price rises to 110 -> equity peak at ~101000.
     auto m2 = std::make_shared<market_event>(epoch_ms(2), "X", 110, 110, 110, 110.0);
     a.on_event(m2);
-    // Then drops to 105 → drawdown vs peak.
+    // Then drops to 105 -> drawdown vs peak.
     auto m3 = std::make_shared<market_event>(epoch_ms(3), "X", 105, 105, 105, 105.0);
     a.on_event(m3);
 
@@ -281,7 +281,7 @@ TEST(Analytics, RunningDrawdown_MatchesPostHoc)
 {
     Analytics a(50000.0);
 
-    // Simulate equity curve: 50000 → 55000 → 52000 → 58000 → 51000
+    // Simulate equity curve: 50000 -> 55000 -> 52000 -> 58000 -> 51000
     // Max drawdown should be (58000 - 51000) / 58000
     auto mkt1 = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
     a.on_event(mkt1);
@@ -376,7 +376,7 @@ TEST(Analytics, ShortRoundTrip_ProfitsWhenPriceFalls)
     auto sf = std::make_shared<fill_event>(epoch_ms(1), "X", 1, order_side::sell, 10, 100.0, 0.0);
     a.on_event(sf);
 
-    // Buy 10 @ 80 to close short → profit 10 * (100 - 80) = 200
+    // Buy 10 @ 80 to close short -> profit 10 * (100 - 80) = 200
     auto bo = std::make_shared<order_event>(epoch_ms(2), "X", order_type::limit, order_side::buy, 10, 80.0);
     bo->set_order_id(2);
     a.on_event(bo);
@@ -396,7 +396,7 @@ TEST(Analytics, Pyramiding_WeightedAverageEntry)
     auto mkt = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
     a.on_event(mkt);
 
-    // Buy 10 @ 100, then buy 10 @ 120 → avg entry = 110 on 20 units
+    // Buy 10 @ 100, then buy 10 @ 120 -> avg entry = 110 on 20 units
     auto bo1 = std::make_shared<order_event>(epoch_ms(1), "X", order_type::limit, order_side::buy, 10, 100.0);
     bo1->set_order_id(1);
     a.on_event(bo1);
@@ -409,7 +409,7 @@ TEST(Analytics, Pyramiding_WeightedAverageEntry)
     auto bf2 = std::make_shared<fill_event>(epoch_ms(2), "X", 2, order_side::buy, 10, 120.0, 0.0);
     a.on_event(bf2);
 
-    // Sell 20 @ 130 → pnl = 20 * (130 - 110) = 400
+    // Sell 20 @ 130 -> pnl = 20 * (130 - 110) = 400
     auto so = std::make_shared<order_event>(epoch_ms(3), "X", order_type::limit, order_side::sell, 20, 130.0);
     so->set_order_id(3);
     a.on_event(so);
@@ -428,14 +428,14 @@ TEST(Analytics, Flipping_LongToShortInOneFill)
     auto mkt = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
     a.on_event(mkt);
 
-    // Buy 10 @ 100 → long 10
+    // Buy 10 @ 100 -> long 10
     auto bo = std::make_shared<order_event>(epoch_ms(1), "X", order_type::limit, order_side::buy, 10, 100.0);
     bo->set_order_id(1);
     a.on_event(bo);
     auto bf = std::make_shared<fill_event>(epoch_ms(1), "X", 1, order_side::buy, 10, 100.0, 0.0);
     a.on_event(bf);
 
-    // Sell 15 @ 120 → closes 10 (pnl = 10 * 20 = 200), opens short 5 @ 120
+    // Sell 15 @ 120 -> closes 10 (pnl = 10 * 20 = 200), opens short 5 @ 120
     auto so = std::make_shared<order_event>(epoch_ms(2), "X", order_type::limit, order_side::sell, 15, 120.0);
     so->set_order_id(2);
     a.on_event(so);
@@ -448,7 +448,7 @@ TEST(Analytics, Flipping_LongToShortInOneFill)
     ASSERT_EQ(r.trade_returns.size(), 1u);
     EXPECT_NEAR(r.trade_returns[0], 200.0, 1e-9);
 
-    // Buy 5 @ 100 → closes short (pnl = 5 * (120 - 100) = 100)
+    // Buy 5 @ 100 -> closes short (pnl = 5 * (120 - 100) = 100)
     auto bo2 = std::make_shared<order_event>(epoch_ms(3), "X", order_type::limit, order_side::buy, 5, 100.0);
     bo2->set_order_id(3);
     a.on_event(bo2);

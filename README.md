@@ -2,23 +2,23 @@
 
 A modular, high-performance C++23 trading engine designed for reproducible backtesting, divergence-aware shadow trading, and gated live execution from a single source tree.
 
-The build produces three binaries — `engine_backtest`, `engine_shadow`, `engine_live` — that differ only by the compile-time `TT_TARGET` define. Live order submission is physically impossible in the non-live binaries thanks to dead-code elimination.
+The build produces three binaries - `engine_backtest`, `engine_shadow`, `engine_live` - that differ only by the compile-time `TT_TARGET` define. Live order submission is physically impossible in the non-live binaries thanks to dead-code elimination.
 
 ## Current Development Status (May 2026)
 
 Development is active on the `testnet` branch.
 
 **Recent major advancements** (deepdive stabilization & realism pass):
-- **Queue-position awareness** (6-step implementation) — realistic orderbook queue modeling, latency, impact, and walked-book fill simulation for high-fidelity shadow vs. reality divergence tracking.
+- **Queue-position awareness** (6-step implementation) - realistic orderbook queue modeling, latency, impact, and walked-book fill simulation for high-fidelity shadow vs. reality divergence tracking.
 - Modernized **rich ncurses TUI** with tabbed panels, risk dashboards, and live updates (multiple UI passes).
-- **Dead Man’s Switch** hardening — now attempts position flattening (`reduceOnly` MARKET) on heartbeat loss, plus related safety optimizations.
-- **Tiered maintenance-margin risk** (Phase 2.2) — `MaintenanceMarginTable` + `FuturesRiskCheck` using real `/fapi/v1/leverageBracket` data; funding events wired toward P&L and risk.
+- **Dead Man's Switch** hardening - now attempts position flattening (`reduceOnly` MARKET) on heartbeat loss, plus related safety optimizations.
+- **Tiered maintenance-margin risk** (Phase 2.2) - `MaintenanceMarginTable` + `FuturesRiskCheck` using real `/fapi/v1/leverageBracket` data; funding events wired toward P&L and risk.
 - Extensive **realism wiring**, per-lot bookkeeping, hybrid executor, ExitManager, and orderbook fidelity improvements.
 - UI cleanup, comment stripping, and documentation synchronization across CLAUDE.md / instructions.md.
 
 **Production-readiness gating** (see [`prod.md`](prod.md)):
-- **Phase 0 — Safe Tiny-Size Mainnet Futures**: In active execution. Collecting 15+ qualifying sessions across volatility regimes with zero unexplained drift. Full artifacts (binary log + QuestDB + notes) required. Tracker and SOP live in [`reports/phase0/`](reports/phase0/) and [`docs/futures-phase0-operator-sop.md`](docs/futures-phase0-operator-sop.md).
-- **Phase 1 — Live-Safety Freeze**: Planning artifacts created, `LIVE-SAFETY SURFACE` markers applied to the 9 critical files (tt_target.h, engine core, all kill-/dead-man’s/reconciler/risk surfaces), enforcement script (`scripts/check-live-safety-freeze.sh`) wired into CI + pre-commit, CLAUDE.md policy updated. Awaiting final clean 8-hour mainnet `engine_shadow` run + two-person sign-off.
+- **Phase 0 - Safe Tiny-Size Mainnet Futures**: In active execution. Collecting 15+ qualifying sessions across volatility regimes with zero unexplained drift. Full artifacts (binary log + QuestDB + notes) required. Tracker and SOP live in [`reports/phase0/`](reports/phase0/) and [`docs/futures-phase0-operator-sop.md`](docs/futures-phase0-operator-sop.md).
+- **Phase 1 - Live-Safety Freeze**: Planning artifacts created, `LIVE-SAFETY SURFACE` markers applied to the 9 critical files (tt_target.h, engine core, all kill-/dead-man's/reconciler/risk surfaces), enforcement script (`scripts/check-live-safety-freeze.sh`) wired into CI + pre-commit, CLAUDE.md policy updated. Awaiting final clean 8-hour mainnet `engine_shadow` run + two-person sign-off.
 - Strong institutional-grade safety primitives already in place: compile-time live-order gating, IReconciler + clock-skew checks, layered DMS + kill-switch, venue-specific `IRiskCheck`, terminal `halt_flag_`, user-data WebSocket as source-of-truth, WorkerWatchdog.
 - **Current recommendation**: Tiny-size validation and research only. Not suitable for meaningful capital or unattended operation until Phase 0/1 exit criteria are satisfied. Full gap analysis in [`docs/production-readiness-gaps.md`](docs/production-readiness-gaps.md).
 
@@ -42,7 +42,7 @@ Additional deep-dive notes live under [`docs/`](docs/) (realism.md, futures-orde
 ## Quick Build & Run
 
 ```bash
-# Default — CSV backtesting only, zero external runtime dependencies
+# Default - CSV backtesting only, zero external runtime dependencies
 cmake -B build
 cmake --build build
 
@@ -85,4 +85,4 @@ Large GoogleTest suite (`test_*`), golden-file regression for execution fidelity
 
 ---
 
-This README is deliberately concise. All operational detail, architecture decisions, current invariants, and the full development log live in `CLAUDE.md` and the `docs/` tree. The project follows a strict phase-gated approach to production readiness — consult `prod.md` before increasing live capital.
+This README is deliberately concise. All operational detail, architecture decisions, current invariants, and the full development log live in `CLAUDE.md` and the `docs/` tree. The project follows a strict phase-gated approach to production readiness - consult `prod.md` before increasing live capital.

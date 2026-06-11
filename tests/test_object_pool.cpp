@@ -154,7 +154,7 @@ TEST(ObjectPool, NonTrivialType)
     EXPECT_EQ(w->name, "hello");
     EXPECT_EQ(w->value, 42);
 
-    // Release and reacquire — string destructor must have been called
+    // Release and reacquire - string destructor must have been called
     w.reset();
     auto w2 = pool.acquire("world", 99);
     EXPECT_EQ(w2->name, "world");

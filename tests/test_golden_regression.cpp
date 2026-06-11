@@ -133,7 +133,7 @@ TEST(GoldenRegression, SmaBasic)
 
     const auto golden_path = golden_dir() / "sma_basic_expected.json";
 
-    // Two consecutive runs should be identical — a prerequisite for any
+    // Two consecutive runs should be identical - a prerequisite for any
     // meaningful golden comparison.
     auto first  = run_sma_basic();
     auto second = run_sma_basic();

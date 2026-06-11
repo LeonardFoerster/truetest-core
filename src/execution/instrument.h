@@ -4,7 +4,7 @@
 #include <string>
 
 // Venue-specific trading rules for a single instrument.
-// Fields left at 0 are treated as "unset" — the corresponding filter is skipped.
+// Fields left at 0 are treated as "unset" - the corresponding filter is skipped.
 struct instrument_spec
 {
     std::string symbol;

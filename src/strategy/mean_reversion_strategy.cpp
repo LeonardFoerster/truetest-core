@@ -32,7 +32,7 @@ double mean_reversion_strategy::compute_quantity(double price) const
 }
 
 // Exits are owned by the engine's ExitManager via the bracket registered
-// at entry — there is intentionally no signal-based SELL here. A previous
+// at entry - there is intentionally no signal-based SELL here. A previous
 // version closed when price crossed back above the SMA, but that always
 // fired before TP and competed with SL, leaving the bracket effectively
 // dead. SL and TP now behave as independent triggers per entry.

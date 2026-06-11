@@ -7,7 +7,7 @@
 namespace {
 
 // Minimal executionReport-shaped payload. Binance's real format uses many more
-// fields — the parser only needs these.
+// fields - the parser only needs these.
 std::string report(const std::string& x, const std::string& X,
                    const std::string& l = "0.0",
                    const std::string& L = "0.0",

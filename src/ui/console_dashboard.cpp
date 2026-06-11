@@ -49,7 +49,7 @@ std::string fmt_u64(std::uint64_t v)
 
 std::string fmt_price_fp8(std::int64_t fp, int decimals = 2)
 {
-    if (fp < 0) return "—";
+    if (fp < 0) return "-";
     std::uint64_t whole = static_cast<std::uint64_t>(fp) / 100000000ULL;
     std::uint64_t frac  = static_cast<std::uint64_t>(fp) % 100000000ULL;
     std::uint64_t div = 100000000ULL;
@@ -81,7 +81,7 @@ std::string fmt_pnl_fp4(std::int64_t fp4)
 // samples==0 renders as em-dash so "0.00 bps" isn't confused with "no data yet".
 std::string fmt_toxicity_bps_fp2(std::int32_t fp2, std::uint32_t samples)
 {
-    if (samples == 0) return "—";
+    if (samples == 0) return "-";
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%+.2f bps",
                   static_cast<double>(fp2) / 100.0);
@@ -116,7 +116,7 @@ std::string fmt_duration(std::chrono::seconds s)
 }
 
 // Counts bytes and treats UTF-8 continuations + ANSI CSI sequences as zero
-// columns. Inputs are controlled — no CJK/combining chars — so this is exact.
+// columns. Inputs are controlled - no CJK/combining chars - so this is exact.
 int visible_width_utf8(std::string_view s)
 {
     int w = 0;
@@ -147,7 +147,7 @@ std::string pad_right(const std::string& s, int target_cols)
 }
 
 // Trailing clear-to-eol wipes leftovers from a previously-longer value. No
-// newline — the diff loop decides whether to emit '\n' or a cursor-down.
+// newline - the diff loop decides whether to emit '\n' or a cursor-down.
 std::string row(const std::string& content_with_ansi, bool color_on)
 {
     std::string padded = pad_right(content_with_ansi, content_width);
@@ -665,7 +665,7 @@ void ConsoleDashboard::render_tui(std::string& buf)
         if (color) c += ansi::fg_cyan;
         c += "Last   ";
         if (color) c += ansi::reset;
-        c += last_px < 0 ? "—" : fmt_price_fp8(last_px);
+        c += last_px < 0 ? "-" : fmt_price_fp8(last_px);
         c = pad_right(c, 22);
         if (color) c += ansi::fg_cyan;
         c += "Spread ";
@@ -682,7 +682,7 @@ void ConsoleDashboard::render_tui(std::string& buf)
         }
         else
         {
-            c += "—";
+            c += "-";
         }
         c = pad_right(c, 48);
         if (color) c += ansi::fg_cyan;
@@ -697,7 +697,7 @@ void ConsoleDashboard::render_tui(std::string& buf)
         }
         else
         {
-            c += "—";
+            c += "-";
         }
         rows.push_back(row(c, color));
     }
@@ -825,13 +825,13 @@ void ConsoleDashboard::render_tui(std::string& buf)
         }
         else
         {
-            c += "—";
+            c += "-";
         }
         rows.push_back(row(c, color));
     }
 
     // Queue pos: 0 = all at front, 10000 = all at back. Populated by
-    // QueueAwareBookAdapter; other adapters return 0 → dashes.
+    // QueueAwareBookAdapter; other adapters return 0 -> dashes.
     {
         std::string c;
         if (color) c += ansi::fg_cyan;
@@ -845,7 +845,7 @@ void ConsoleDashboard::render_tui(std::string& buf)
         }
         else
         {
-            c += "—";
+            c += "-";
         }
         c = pad_right(c, 34);
         if (color) c += ansi::fg_cyan;
@@ -859,7 +859,7 @@ void ConsoleDashboard::render_tui(std::string& buf)
         }
         else
         {
-            c += "—";
+            c += "-";
         }
         rows.push_back(row(c, color));
     }
@@ -994,7 +994,7 @@ void ConsoleDashboard::render_tui(std::string& buf)
     }
 
     // Steady state: hop to the top of the box and per-row diff. Unchanged
-    // rows only emit ESC[B+CR — zero bytes of content, no flicker.
+    // rows only emit ESC[B+CR - zero bytes of content, no flicker.
     char up[16];
     std::snprintf(up, sizeof(up), "\x1b[%dA", last_row_count_);
     buf += up;

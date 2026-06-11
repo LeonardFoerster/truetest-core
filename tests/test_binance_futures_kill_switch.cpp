@@ -9,7 +9,7 @@
 
 namespace {
 
-// RAII helper to silence stderr — the kill switch logs deliberately
+// RAII helper to silence stderr - the kill switch logs deliberately
 // noisy diagnostics on the failure paths we exercise here.
 struct SilenceStderr {
     std::ostringstream sink;

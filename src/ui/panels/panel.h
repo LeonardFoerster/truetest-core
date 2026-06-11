@@ -34,7 +34,7 @@ public:
         return std::chrono::milliseconds(100);
     }
 
-    // Per-panel selection state — drives j/k cursor + Enter drill-in.
+    // Per-panel selection state - drives j/k cursor + Enter drill-in.
     // Default false: panel doesn't own a row cursor. Panels that opt
     // in (Brackets, Orders, Positions) set the cursor row externally
     // via set_cursor_row and read it back in draw().

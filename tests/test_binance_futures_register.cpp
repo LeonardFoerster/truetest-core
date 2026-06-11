@@ -55,7 +55,7 @@ TEST(BinanceFuturesRegister, TestnetFlagSelectsTestnetEndpoints)
 }
 
 // `stream.binancefuture.com` carries no "testnet" substring but is the
-// futures testnet WS host — looks_like_testnet_host() must catch it on
+// futures testnet WS host - looks_like_testnet_host() must catch it on
 // the `binancefuture` token alone.
 TEST(BinanceFuturesRegister, BinancefutureHostInferredAsTestnet)
 {

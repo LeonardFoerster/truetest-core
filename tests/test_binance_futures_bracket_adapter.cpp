@@ -261,7 +261,7 @@ TEST(BinanceFuturesBracketAdapter, CancelTolerates2011And2013)
     truetest::exits::bracket_handles h;
     h.sl_exchange_id = "111";
     h.tp_exchange_id = "222";
-    // No exception, no throw — adapter swallows the two well-known
+    // No exception, no throw - adapter swallows the two well-known
     // already-cancelled codes.
     a.cancel(1, h);
     EXPECT_EQ(del->log.size(), 2u);
@@ -274,7 +274,7 @@ TEST(BinanceFuturesBracketAdapter, ListOpenRecoversByPrefix)
     auto get  = std::make_shared<fake_caller>();
 
     // Two pairs of brackets: opener=10 (SL+TP) and opener=11 (SL only).
-    // One unrelated order from another tool — must be ignored.
+    // One unrelated order from another tool - must be ignored.
     get->responses = {{200, R"([
         {"clientOrderId":"tt-fb-sl-10","symbol":"BTCUSDT","side":"SELL",
          "stopPrice":"95.5","origQty":"0","orderId":1001},

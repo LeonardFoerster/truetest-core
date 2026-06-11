@@ -17,7 +17,7 @@
 #include <utility>
 
 // Cancel all open orders, then market-sell base-asset balance queried
-// from the exchange (not local state — local may be exactly what's wrong).
+// from the exchange (not local state - local may be exactly what's wrong).
 class BinanceKillSwitch : public IKillSwitch
 {
 public:
@@ -92,13 +92,13 @@ public:
 
         if (ex_base_free < 1e-12)
         {
-            // Locked inventory after cancel_all means a stuck order —
+            // Locked inventory after cancel_all means a stuck order -
             // operator must intervene. Report failure so the warning fires.
             if (ex_base_locked > 1e-12)
             {
                 std::cerr << "BinanceKillSwitch: "
                           << ex_base_locked << " " << base_asset_
-                          << " still locked after cancel_all — manual "
+                          << " still locked after cancel_all - manual "
                              "intervention required\n";
                 return false;
             }
@@ -111,7 +111,7 @@ public:
             return false;
         }
 
-        // clientOrderId → idempotent against transport retries.
+        // clientOrderId -> idempotent against transport retries.
         std::string params = "symbol=" + symbol_
             + "&side=SELL&type=MARKET&quantity="
             + format_qty(ex_base_free);

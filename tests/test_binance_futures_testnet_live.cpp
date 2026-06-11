@@ -1,19 +1,19 @@
 // Opt-in integration tests against the Binance USDT-M futures testnet.
 // Skipped unless TRUETEST_FUTURES_TESTNET_KEY and
-// TRUETEST_FUTURES_TESTNET_SECRET are set. Different keys from spot —
+// TRUETEST_FUTURES_TESTNET_SECRET are set. Different keys from spot -
 // futures testnet has a separate signup at testnet.binancefuture.com.
 // What it covers, across four TEST blocks:
-//   - Place + cancel — symbol probe, position-mode probe, place a
+//   - Place + cancel - symbol probe, position-mode probe, place a
 //     LIMIT BUY at half mark so it can't fill, cancel by clientOrderId.
-//   - listenKey lifecycle — POST + PUT + DELETE round-trip on
+//   - listenKey lifecycle - POST + PUT + DELETE round-trip on
 //     /fapi/v1/listenKey.
-//   - Bracket adapter round-trip — place SL+TP far from market,
+//   - Bracket adapter round-trip - place SL+TP far from market,
 //     list_open recovers the pair, cancel + list_open shows it gone.
-//   - Reconciler round-trip — build a reconciler against the live
+//   - Reconciler round-trip - build a reconciler against the live
 //     account, call reconcile() with an empty portfolio at very high
 //     tolerance, assert it doesn't throw or hang.
 // User-data WebSocket events (ORDER_TRADE_UPDATE, ACCOUNT_UPDATE) are
-// async and out of scope here — covered by unit-level parser tests.
+// async and out of scope here - covered by unit-level parser tests.
 // The point of this file is to assert our wire format matches what
 // the real venue accepts.
 
@@ -63,7 +63,7 @@ std::shared_ptr<BinanceRestClient> setup_or_skip(const char* test_name)
         key, sec, ep.rest_host, ep.rest_port, "/fapi/v1/time");
     if (!cli->resync_clock_now())
     {
-        ADD_FAILURE() << "clock resync failed — futures testnet "
+        ADD_FAILURE() << "clock resync failed - futures testnet "
                          "unreachable or DNS broken";
         return nullptr;
     }
@@ -145,7 +145,7 @@ TEST(BinanceFuturesTestnetLive, ListenKeyLifecycle)
     auto key = binance::extract_string(post.body, "listenKey");
     ASSERT_FALSE(key.empty()) << "listenKey field missing: " << post.body;
 
-    // PUT is the keepalive — extends the key's TTL without rotating it.
+    // PUT is the keepalive - extends the key's TTL without rotating it.
     // The user-data transport's keepalive worker hits this every 30 min.
     auto put = cli->put_unsigned("/fapi/v1/listenKey",
                                   "listenKey=" + key);
@@ -154,7 +154,7 @@ TEST(BinanceFuturesTestnetLive, ListenKeyLifecycle)
                                << ": " << put.body;
 
     // DELETE closes the user-data stream. Signed del works even though
-    // the endpoint accepts unsigned — Binance ignores extra params.
+    // the endpoint accepts unsigned - Binance ignores extra params.
     auto del = cli->del("/fapi/v1/listenKey",
                         "listenKey=" + key);
     EXPECT_GE(del.status, 200);
@@ -176,7 +176,7 @@ TEST(BinanceFuturesTestnetLive, BracketAdapterRoundTrip)
 
     auto adapter = make_binance_futures_bracket_adapter(cli);
 
-    // Synthetic opener — uniqueness avoids collision with a previous
+    // Synthetic opener - uniqueness avoids collision with a previous
     // run's orphans on the same testnet account.
     const std::uint64_t opener = unique_id();
 
@@ -192,7 +192,7 @@ TEST(BinanceFuturesTestnetLive, BracketAdapterRoundTrip)
 
     auto handles = adapter->place(opener, intent, mark);
     ASSERT_TRUE(handles.sl_exchange_id.has_value())
-        << "SL leg did not place — bracket adapter regression";
+        << "SL leg did not place - bracket adapter regression";
     ASSERT_TRUE(handles.tp_exchange_id.has_value())
         << "TP leg did not place after SL succeeded";
     EXPECT_EQ(handles.symbol, "BTCUSDT");
@@ -237,7 +237,7 @@ TEST(BinanceFuturesTestnetLive, DeadMansSwitchRoundTrip)
     if (!cli) return;
 
     // Tight intervals so the test finishes in ~1s. Production defaults
-    // would be (30000, 10000) — far too slow for CI but the wire
+    // would be (30000, 10000) - far too slow for CI but the wire
     // contract is the same shape.
     constexpr int64_t countdown_ms = 5000;
     constexpr int64_t heartbeat_ms = 200;
@@ -246,10 +246,10 @@ TEST(BinanceFuturesTestnetLive, DeadMansSwitchRoundTrip)
         cli, "BTCUSDT", countdown_ms, heartbeat_ms);
 
     // start() arms the server-side timer. Real failure here means the
-    // testnet rejected our signed POST or returned a 4xx — which is
+    // testnet rejected our signed POST or returned a 4xx - which is
     // the exact regression this test exists to catch.
     ASSERT_TRUE(dms->start())
-        << "DMS arm failed against the live testnet — auth, signing, or "
+        << "DMS arm failed against the live testnet - auth, signing, or "
            "wire format regressed";
 
     const int64_t initial_beat =
@@ -257,19 +257,19 @@ TEST(BinanceFuturesTestnetLive, DeadMansSwitchRoundTrip)
     EXPECT_GT(initial_beat, 0);
 
     // Wait long enough for at least 2-3 heartbeat cycles. The liveness
-    // atomic must advance — that's the channel the watchdog reads.
+    // atomic must advance - that's the channel the watchdog reads.
     std::this_thread::sleep_for(std::chrono::milliseconds(700));
 
     const int64_t later_beat =
         dms->liveness_ts().load(std::memory_order_acquire);
     EXPECT_GT(later_beat, initial_beat)
         << "heartbeat thread did not refresh the timer against the "
-           "live testnet — investigate before defaulting DMS on";
+           "live testnet - investigate before defaulting DMS on";
 
     // Disarm explicitly. Verifies the countdownTime=0 path is accepted.
     dms->stop();
     EXPECT_TRUE(dms->disarm())
-        << "DMS disarm POST failed — operator-driven shutdown would leak "
+        << "DMS disarm POST failed - operator-driven shutdown would leak "
            "an active server-side timer into the next session";
 }
 
@@ -288,7 +288,7 @@ TEST(BinanceFuturesTestnetLive, ReconcilerRoundTrip)
     // separately via BinanceFuturesReconciler::extract_*.
     auto note = r.reconcile(p, /*tolerance_bps=*/1e9);
 
-    // Either empty (no drift detected even at 1e9 bps — unlikely unless
+    // Either empty (no drift detected even at 1e9 bps - unlikely unless
     // the account is also empty) or a non-empty drift note. Both are
     // sane outcomes for this test; we only fail on REST errors which
     // surface as "BinanceFuturesReconciler: /fapi/v2/... failed (HTTP …)".
@@ -298,7 +298,7 @@ TEST(BinanceFuturesTestnetLive, ReconcilerRoundTrip)
             << "REST call inside reconcile() failed: " << note;
     }
     SUCCEED() << "reconcile result: "
-              << (note.empty() ? std::string{"(empty — no drift)"} : note);
+              << (note.empty() ? std::string{"(empty - no drift)"} : note);
 }
 
 #endif // HAS_BINANCE

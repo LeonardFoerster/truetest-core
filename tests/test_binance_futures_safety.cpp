@@ -49,7 +49,7 @@ TEST(BinanceFuturesSafety, EmptyArrayProducesNoAdvisories)
 TEST(BinanceFuturesSafety, ZeroPositionAmtSkipsRow)
 {
     // Even with a "wrong" margin type and a close liquidation price,
-    // a flat position is irrelevant — skip silently.
+    // a flat position is irrelevant - skip silently.
     auto body = array_of({
         row("BTCUSDT", "0.0", "30000", "29900", "cross"),
     });
@@ -95,7 +95,7 @@ TEST(BinanceFuturesSafety, EmptyExpectedMarginTypeDisablesCheck)
 
 TEST(BinanceFuturesSafety, LongCloseToLiquidationFlagged)
 {
-    // Long 0.5 BTC, mark 30000, liq 28800 → distance = 4% < 5% threshold.
+    // Long 0.5 BTC, mark 30000, liq 28800 -> distance = 4% < 5% threshold.
     auto body = array_of({
         row("BTCUSDT", "0.5", "30000", "28800", "isolated"),
     });
@@ -107,7 +107,7 @@ TEST(BinanceFuturesSafety, LongCloseToLiquidationFlagged)
 
 TEST(BinanceFuturesSafety, LongFarFromLiquidationSilent)
 {
-    // Long 0.5 BTC, mark 30000, liq 25000 → distance ~16.7% >> 5%.
+    // Long 0.5 BTC, mark 30000, liq 25000 -> distance ~16.7% >> 5%.
     auto body = array_of({
         row("BTCUSDT", "0.5", "30000", "25000", "isolated"),
     });
@@ -117,7 +117,7 @@ TEST(BinanceFuturesSafety, LongFarFromLiquidationSilent)
 
 TEST(BinanceFuturesSafety, ShortCloseToLiquidationFlagged)
 {
-    // Short -0.5 BTC, mark 30000, liq 31200 → distance = 4% < 5%.
+    // Short -0.5 BTC, mark 30000, liq 31200 -> distance = 4% < 5%.
     auto body = array_of({
         row("BTCUSDT", "-0.5", "30000", "31200", "isolated"),
     });
@@ -129,7 +129,7 @@ TEST(BinanceFuturesSafety, ShortCloseToLiquidationFlagged)
 TEST(BinanceFuturesSafety, ZeroLiquidationPriceTolerated)
 {
     // Unfunded testnet account: liquidationPrice=0 means "not computed".
-    // Silent — flagging would train operators to ignore advisories.
+    // Silent - flagging would train operators to ignore advisories.
     auto body = array_of({
         row("BTCUSDT", "0.5", "30000", "0", "isolated"),
     });
@@ -139,7 +139,7 @@ TEST(BinanceFuturesSafety, ZeroLiquidationPriceTolerated)
 
 TEST(BinanceFuturesSafety, ZeroMarkPriceTolerated)
 {
-    // Same idea: missing/zero mark price → skip the liquidation check.
+    // Same idea: missing/zero mark price -> skip the liquidation check.
     auto body = array_of({
         row("BTCUSDT", "0.5", "0", "27000", "isolated"),
     });
@@ -149,7 +149,7 @@ TEST(BinanceFuturesSafety, ZeroMarkPriceTolerated)
 
 TEST(BinanceFuturesSafety, LiquidationPctZeroDisablesCheck)
 {
-    // Mark right next to liquidation, but threshold disabled → silent.
+    // Mark right next to liquidation, but threshold disabled -> silent.
     auto body = array_of({
         row("BTCUSDT", "0.5", "30000", "29999", "isolated"),
     });
@@ -187,7 +187,7 @@ TEST(BinanceFuturesSafety, FirstStrictRefusalOnMarginMismatch)
 TEST(BinanceFuturesSafety, FirstStrictRefusalIgnoresLiquidationAdvisories)
 {
     // Strict mode escalates margin-mode only. Liquidation advisories
-    // remain warnings — the operator can't unilaterally reduce
+    // remain warnings - the operator can't unilaterally reduce
     // distance-to-liquidation by typing a flag, so refusing on it
     // would trap them in a useless gate.
     std::vector<binance::futures::advisory> advisories;

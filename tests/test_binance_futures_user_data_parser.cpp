@@ -6,7 +6,7 @@
 
 namespace {
 
-// Minimal ORDER_TRADE_UPDATE payload — wrapper carries event time `E`,
+// Minimal ORDER_TRADE_UPDATE payload - wrapper carries event time `E`,
 // inner `o:{...}` carries everything else. Real futures payloads have
 // many more fields; the parser only needs these.
 std::string update(const std::string& x, const std::string& X,
@@ -27,7 +27,7 @@ std::string update(const std::string& x, const std::string& X,
     j +=     R"("s":"BTCUSDT",)";
     j +=     R"("c":")" + c + R"(",)";
     j +=     R"("S":")" + S + R"(",)";
-    j +=     R"("o":"LIMIT",)";  // inner order TYPE — must not collide with wrapper "o"
+    j +=     R"("o":"LIMIT",)";  // inner order TYPE - must not collide with wrapper "o"
     j +=     R"("x":")" + x + R"(",)";
     j +=     R"("X":")" + X + R"(",)";
     j +=     R"("r":")" + r + R"(",)";
@@ -49,7 +49,7 @@ TEST(BinanceFuturesUserDataParser, RejectsNonOrderTradeUpdates)
     BinanceFuturesUserDataParser p;
     parsed_exec out;
 
-    // ACCOUNT_UPDATE must NOT be picked up by parse() — it goes through
+    // ACCOUNT_UPDATE must NOT be picked up by parse() - it goes through
     // parse_position_snapshot() instead. This is the contract that lets
     // ExecutionBridge route the two event kinds to different consumers.
     std::string acct = R"({"e":"ACCOUNT_UPDATE","E":1})";

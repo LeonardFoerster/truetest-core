@@ -15,7 +15,7 @@
 //     its own independent SL/TP bracket. On a spot venue the two legs
 //     net at the portfolio level, but lot/attribution state keeps them
 //     distinct; exits fire per-lot.
-//   - Does NOT use the legacy set_position_open boolean — tracks its own
+//   - Does NOT use the legacy set_position_open boolean - tracks its own
 //     open lot count per (symbol, side) via on_fill.
 class hedge_demo_strategy : public IStrategy
 {

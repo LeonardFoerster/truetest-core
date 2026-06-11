@@ -41,7 +41,7 @@ void DebugPanel::draw(int body_y0, int width, int height,
 
     if (!snap)
     {
-        mvaddstr(body_y0, 2, "(no snapshot yet — engine warming up)");
+        mvaddstr(body_y0, 2, "(no snapshot yet - engine warming up)");
         return;
     }
     const auto& d = snap->debug;
@@ -102,7 +102,7 @@ void DebugPanel::draw(int body_y0, int width, int height,
         {
             attron(A_DIM);
             mvprintw(y, x_l_label, "%-12s %10s %10s %10s %10s",
-                     r.name, "—", "—", "—", "—");
+                     r.name, "-", "-", "-", "-");
             attroff(A_DIM);
         }
         else
@@ -169,7 +169,7 @@ void DebugPanel::draw(int body_y0, int width, int height,
         label(y, x_l_label, e.name);
         if (e.msg.empty()) {
             attron(A_DIM);
-            mvaddstr(y, x_l_value, "—");
+            mvaddstr(y, x_l_value, "-");
             attroff(A_DIM);
         } else {
             attron(COLOR_PAIR(kPairRed));
@@ -193,7 +193,7 @@ void DebugPanel::draw(int body_y0, int width, int height,
         else if (d.stages.empty())
         {
             attron(A_DIM);
-            mvaddstr(y++, x_l_label, "(no stage records yet — fire some events first)");
+            mvaddstr(y++, x_l_label, "(no stage records yet - fire some events first)");
             attroff(A_DIM);
         }
         else

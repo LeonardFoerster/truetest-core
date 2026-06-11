@@ -60,7 +60,7 @@ risk_action RiskManager::check_order(const order_event& order,
         if (current_notional + order_notional > limits_.max_position_value)
             return risk_action::reject;
 
-        // Phase 2.3 — max position as % of equity
+        // Phase 2.3 - max position as % of equity
         if (limits_.max_position_pct_of_equity > 0.0 && snap.equity > 0.0) {
             double max_notional = snap.equity * limits_.max_position_pct_of_equity;
             if (current_notional + order_notional > max_notional)
@@ -78,7 +78,7 @@ risk_action RiskManager::check_order(const order_event& order,
         if (total_exposure + order_notional > limits_.max_portfolio_exposure)
             return risk_action::reject;
 
-        // Phase 2.3 — portfolio-wide % of equity
+        // Phase 2.3 - portfolio-wide % of equity
         if (limits_.max_position_pct_of_equity > 0.0 && snap.equity > 0.0) {
             double max_portfolio_notional = snap.equity * limits_.max_position_pct_of_equity;
             if (total_exposure + order_notional > max_portfolio_notional)
@@ -86,7 +86,7 @@ risk_action RiskManager::check_order(const order_event& order,
         }
     }
 
-    // Phase 2.4 — spread circuit breaker (populated in Analytics from L2 snapshots when --depth-stream is active)
+    // Phase 2.4 - spread circuit breaker (populated in Analytics from L2 snapshots when --depth-stream is active)
     if (limits_.max_spread_bps > 0.0 && snap.current_spread_bps > limits_.max_spread_bps) {
         // Severe breaches (e.g. > 2x limit) escalate to halt to stop trading in obviously broken books
         if (snap.current_spread_bps > limits_.max_spread_bps * 2.0) {
@@ -148,7 +148,7 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
     return risk_action::pass;
 }
 
-// Legacy overloads — collapse the heavy AnalyticsReport to the thin
+// Legacy overloads - collapse the heavy AnalyticsReport to the thin
 // risk_snapshot and dispatch into the real path so logic lives in one
 // place.
 risk_action RiskManager::check_order(const order_event& order,

@@ -6,7 +6,7 @@
 
 TEST(BinanceRestRateLimit, BelowThresholdZeroDelay)
 {
-    // 50% weight use at mid-window → no throttle.
+    // 50% weight use at mid-window -> no throttle.
     long long d = BinanceRestClient::throttle_delay_ms(
         /*used=*/3000,
         /*anchor=*/1'000'000,
@@ -18,7 +18,7 @@ TEST(BinanceRestRateLimit, BelowThresholdZeroDelay)
 
 TEST(BinanceRestRateLimit, AtThresholdMidWindowDelays)
 {
-    // 90% weight used, 20s into the 60s window → expect ~40s remaining.
+    // 90% weight used, 20s into the 60s window -> expect ~40s remaining.
     long long d = BinanceRestClient::throttle_delay_ms(
         /*used=*/5400,
         /*anchor=*/1'000'000,
@@ -32,7 +32,7 @@ TEST(BinanceRestRateLimit, AtThresholdMidWindowDelays)
 
 TEST(BinanceRestRateLimit, AboveThresholdStaleWindowZero)
 {
-    // Anchor is older than 60s — window rolled, no throttle.
+    // Anchor is older than 60s - window rolled, no throttle.
     long long d = BinanceRestClient::throttle_delay_ms(
         /*used=*/6000,
         /*anchor=*/1'000'000,
@@ -66,7 +66,7 @@ TEST(BinanceRestRateLimit, PctZeroNoThrottle)
 
 TEST(BinanceRestRateLimit, NegativeDeltaTreatedAsRolled)
 {
-    // Clock went backwards (or uninitialised anchor in future) → no throttle.
+    // Clock went backwards (or uninitialised anchor in future) -> no throttle.
     long long d = BinanceRestClient::throttle_delay_ms(
         /*used=*/6000,
         /*anchor=*/2'000'000,

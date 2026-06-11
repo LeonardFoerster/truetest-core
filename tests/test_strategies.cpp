@@ -29,7 +29,7 @@ TEST(SmaStrategy, BuySignal)
     s.on_market(make_mkt(0, 100.0));
     s.on_market(make_mkt(1, 100.0));
     s.on_market(make_mkt(2, 100.0)); // SMA = 100
-    // Now close > SMA → buy
+    // Now close > SMA -> buy
     auto order = s.on_market(make_mkt(3, 110.0)); // SMA ≈ 103.3, close=110 > SMA
     ASSERT_TRUE(order.has_value());
     EXPECT_EQ(order->get_side(), order_side::buy);
@@ -42,7 +42,7 @@ TEST(SmaStrategy, SellSignal)
     s.on_market(make_mkt(1, 100.0));
     s.on_market(make_mkt(2, 100.0));
     s.set_position_open("TEST", true);
-    // close < SMA → sell
+    // close < SMA -> sell
     auto order = s.on_market(make_mkt(3, 90.0)); // SMA ≈ 96.7, close=90 < SMA
     ASSERT_TRUE(order.has_value());
     EXPECT_EQ(order->get_side(), order_side::sell);
@@ -69,7 +69,7 @@ TEST(MeanRevStrategy, BuySignal)
     s.on_market(make_mkt(0, 100.0));
     s.on_market(make_mkt(1, 100.0));
     s.on_market(make_mkt(2, 100.0));
-    // close < SMA → buy (opposite of SMA)
+    // close < SMA -> buy (opposite of SMA)
     auto order = s.on_market(make_mkt(3, 90.0)); // SMA ≈ 96.7, close=90 < SMA
     ASSERT_TRUE(order.has_value());
     EXPECT_EQ(order->get_side(), order_side::buy);
@@ -91,7 +91,7 @@ TEST(MeanRevStrategy, NoSignalSellWhenAboveSma)
 
 TEST(MeanRevStrategy, NoReentryWhilePositionOpen)
 {
-    // Even if close < SMA, no second entry while a position is open —
+    // Even if close < SMA, no second entry while a position is open -
     // the active bracket owns the lifecycle of the existing lot.
     mean_reversion_strategy s(3);
     s.on_market(make_mkt(0, 100.0));
@@ -120,15 +120,15 @@ TEST(MACrossoverStrategy, BuyOnCrossover)
     // fast=2, slow=3
     ma_crossover_strategy s(2, 3);
     s.set_position_open("TEST", false);
-    // Prices: 100, 90, 80 → slow ready, fast ready. fast=(90+80)/2=85, slow=(100+90+80)/3=90
+    // Prices: 100, 90, 80 -> slow ready, fast ready. fast=(90+80)/2=85, slow=(100+90+80)/3=90
     s.on_market(make_mkt(0, 100.0));
     s.on_market(make_mkt(1, 90.0));
     s.on_market(make_mkt(2, 80.0));
-    // Both ready, fast(85) < slow(90). First bar with both ready → sets prev_fast_above=false, no signal.
+    // Both ready, fast(85) < slow(90). First bar with both ready -> sets prev_fast_above=false, no signal.
 
     // Now spike: fast crosses above slow
     auto order = s.on_market(make_mkt(3, 120.0));
-    // fast = (80+120)/2 = 100, slow = (90+80+120)/3 = 96.67, fast > slow, was below → golden cross
+    // fast = (80+120)/2 = 100, slow = (90+80+120)/3 = 96.67, fast > slow, was below -> golden cross
     ASSERT_TRUE(order.has_value());
     EXPECT_EQ(order->get_side(), order_side::buy);
 }
@@ -142,11 +142,11 @@ TEST(MACrossoverStrategy, DeathCross)
     s.on_market(make_mkt(0, 80.0));
     s.on_market(make_mkt(1, 90.0));
     s.on_market(make_mkt(2, 100.0));
-    // fast=(90+100)/2=95, slow=(80+90+100)/3=90. fast>slow → sets prev=true
+    // fast=(90+100)/2=95, slow=(80+90+100)/3=90. fast>slow -> sets prev=true
 
     // Drop: fast crosses below slow
     auto order = s.on_market(make_mkt(3, 70.0));
-    // fast=(100+70)/2=85, slow=(90+100+70)/3=86.67, fast<slow, was above → death cross
+    // fast=(100+70)/2=85, slow=(90+100+70)/3=86.67, fast<slow, was above -> death cross
     ASSERT_TRUE(order.has_value());
     EXPECT_EQ(order->get_side(), order_side::sell);
 }

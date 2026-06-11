@@ -79,7 +79,7 @@ public:
     BinanceRestClient& operator=(BinanceRestClient&&) = delete;
 
     // Test-only seam: trust one additional CA/cert (PEM) so tests can point
-    // the client at a local TLS server. This is strictly ADDITIVE — it can
+    // the client at a local TLS server. This is strictly ADDITIVE - it can
     // only extend the trust set for a specific certificate; it never relaxes
     // verify_peer or touches the production trust roots. Not used in any
     // non-test code path.
@@ -175,7 +175,7 @@ public:
     // Per-call I/O timeout. When > 0, the write+read of each request is run
     // as async ops on the connection's io_context and bounded with
     // run_for(t); on expiry the connection is dropped and the call returns a
-    // failure. Zero (default) preserves the legacy "no timeout — kernel TCP
+    // failure. Zero (default) preserves the legacy "no timeout - kernel TCP
     // retransmit limits dominate" behaviour. Engine wires this from the
     // kill-switch path so shutdown can't get wedged on a still-down LAN.
     // (SO_RCVTIMEO/SO_SNDTIMEO are deliberately NOT used: Asio polls with an
@@ -187,7 +187,7 @@ public:
     }
 
     // Signed requests stamp timestamp = local + clock_offset, learned from
-    // /api/v3/time. Without this, drift past recvWindow (5s) → -1021 on
+    // /api/v3/time. Without this, drift past recvWindow (5s) -> -1021 on
     // every call. Refreshed lazily and reactively on -1021.
     void set_sync_interval_ms(long long ms) { sync_interval_ms_ = ms; }
 
@@ -218,7 +218,7 @@ public:
         return true;
     }
 
-    // last_sync_ms_ <= 0 = never synced → always due. Pure for tests.
+    // last_sync_ms_ <= 0 = never synced -> always due. Pure for tests.
     static bool resync_due(long long now_steady_ms,
                            long long last_sync_steady_ms,
                            long long interval_ms)
@@ -260,7 +260,7 @@ private:
 
     // OpenSSL hands us a session with refcount already bumped for us; we
     // either store it (return 1, keeping the ref) or decline (return 0 and
-    // OpenSSL frees). Multiple tickets can arrive on TLS 1.3 — keep only
+    // OpenSSL frees). Multiple tickets can arrive on TLS 1.3 - keep only
     // the most recent and free any predecessor.
     static int on_new_session(SSL* ssl, SSL_SESSION* session)
     {
@@ -317,9 +317,9 @@ private:
     }
 
     // Retries once on -1021 by rebuilding the signed query (new ts+sig)
-    // after a resync — must live above execute_with_retry for that reason.
+    // after a resync - must live above execute_with_retry for that reason.
     // Builds the signed query into a thread-local scratch buffer to avoid
-    // 4–6 string allocations per order. Reuses a keyed HMAC_CTX (signer_)
+    // 4-6 string allocations per order. Reuses a keyed HMAC_CTX (signer_)
     // so we don't pay the per-call key-schedule setup. Hex encoding is
     // hand-rolled (vs ostringstream in binance::sign_query).
     response do_signed_request(http::verb method,
@@ -410,7 +410,7 @@ private:
             // so concurrent callers can't interleave on the shared persistent
             // stream. ensure_connected_locked() and close_connection_locked()
             // both assume this lock is held. The 429 / throttle backoffs run
-            // *after* the lock is released so a sleep never blocks another
+            // after the lock is released so a sleep never blocks another
             // caller (e.g. the kill-switch on shutdown).
             std::lock_guard<std::mutex> lk(connection_mu_);
 
@@ -418,7 +418,7 @@ private:
             // idle; locally it still looks open, so the first write after the
             // gap fails. We retry exactly once, but ONLY when the failure
             // happened before the request reached the wire (write not yet
-            // complete) — the venue saw nothing, so replaying a non-idempotent
+            // complete) - the venue saw nothing, so replaying a non-idempotent
             // POST is safe. A post-write failure is never replayed.
             for (int attempt = 0; attempt < 2; ++attempt)
             {
@@ -524,7 +524,7 @@ private:
                             static_cast<long long>(binance::server_time_ms()));
                     }
 
-                    // No shutdown() — the connection is kept alive for the next request.
+                    // No shutdown() - the connection is kept alive for the next request.
 
                     if (r.status == 429)
                     {
@@ -569,7 +569,7 @@ private:
                     break;
                 }
             }
-        }  // connection_mu_ released — 429 / throttle sleeps must not block other callers
+        }  // connection_mu_ released - 429 / throttle sleeps must not block other callers
 
         if (rate_limit_sleep_ms > 0)
         {

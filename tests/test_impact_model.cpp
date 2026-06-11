@@ -58,8 +58,8 @@ TEST(SquareRootImpactModel, ZeroQtyIsNoop)
 
 TEST(SquareRootImpactModel, KnownValue)
 {
-    // k=50 bps, adv=10000, qty=100 → sqrt(100/10000)=0.1 → impact=5 bps.
-    // Buy at reference 200 → 200 * (1 + 5e-4) = 200.1.
+    // k=50 bps, adv=10000, qty=100 -> sqrt(100/10000)=0.1 -> impact=5 bps.
+    // Buy at reference 200 -> 200 * (1 + 5e-4) = 200.1.
     SquareRootImpactModel m(50.0, 10000.0);
     EXPECT_NEAR(m.effective_price(order_side::buy,  100.0, 200.0), 200.1, 1e-9);
     EXPECT_NEAR(m.effective_price(order_side::sell, 100.0, 200.0), 199.9, 1e-9);
@@ -120,7 +120,7 @@ TEST(LocalBookAdapterImpact, MarketOrderWithImpact_PaysWorsePrice)
 
 TEST(LocalBookAdapterImpact, MarketOrderWithZeroImpactModel_SameAsNoModel)
 {
-    // ZeroImpactModel is a pass-through — an adapter configured with it
+    // ZeroImpactModel is a pass-through - an adapter configured with it
     // must produce exactly the no-impact price (back-compat guarantee).
     const double baseline = fill_price_for_market_buy(nullptr);
     auto impact = std::make_shared<ZeroImpactModel>();

@@ -1,7 +1,7 @@
 // Covers the three frame shapes the combined parser must handle:
 //  - raw single-stream JSON with an "e" event type  (existing path)
 //  - combined-stream envelope {"stream":...,"data":{...}}  (existing path)
-//  - partial-book depth frames — no "e", no "s", symbol derived from the
+//  - partial-book depth frames - no "e", no "s", symbol derived from the
 //    stream name  (new path added by depth integration)
 
 #include <gtest/gtest.h>
@@ -68,7 +68,7 @@ TEST(BinanceCombinedParser, CombinedEnvelope_KlineFrame_ProducesBar)
 
 TEST(BinanceCombinedParser, PartialBookDepth_ProducesL2Snapshot)
 {
-    // @depth20@100ms format has no "e" event-type and no "s" symbol —
+    // @depth20@100ms format has no "e" event-type and no "s" symbol -
     // the parser must recognize it by the stream name and extract the
     // symbol from there.
     auto p = make_parser();

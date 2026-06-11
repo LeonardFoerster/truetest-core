@@ -35,7 +35,7 @@ TEST(AdverseSelection, HorizonNotElapsed_FillStaysPending)
 {
     AdverseSelectionTracker t({10s, 1024});
     t.on_fill(make_fill(1000, "X", order_side::buy, 100.0));
-    // Mark at t=5s, horizon ends at t=11s → not yet elapsed.
+    // Mark at t=5s, horizon ends at t=11s -> not yet elapsed.
     t.on_mark("X", 110.0, epoch_ms(5000));
     EXPECT_EQ(t.sample_count(), 0u);
     EXPECT_EQ(t.pending_count(), 1u);
@@ -45,7 +45,7 @@ TEST(AdverseSelection, BuyFill_MarketMovesUp_PositiveMarkout)
 {
     AdverseSelectionTracker t({10s, 1024});
     t.on_fill(make_fill(1000, "X", order_side::buy, 100.0));
-    // Horizon ends at t=11s; mark at t=15s with price 101 → +100 bps.
+    // Horizon ends at t=11s; mark at t=15s with price 101 -> +100 bps.
     t.on_mark("X", 101.0, epoch_ms(15000));
     EXPECT_EQ(t.sample_count(), 1u);
     EXPECT_EQ(t.pending_count(), 0u);
@@ -63,7 +63,7 @@ TEST(AdverseSelection, BuyFill_MarketMovesDown_NegativeMarkout)
 TEST(AdverseSelection, SellFill_SignFlipsCorrectly)
 {
     AdverseSelectionTracker t({10s, 1024});
-    // Sold at 100; market dropped to 99 — good for the seller, positive mark.
+    // Sold at 100; market dropped to 99 - good for the seller, positive mark.
     t.on_fill(make_fill(1000, "X", order_side::sell, 100.0));
     t.on_mark("X", 99.0, epoch_ms(15000));
     EXPECT_NEAR(t.mean_bps(), +100.0, 1e-6);
@@ -79,7 +79,7 @@ TEST(AdverseSelection, MultipleFills_WelfordAverage)
     t.on_mark("X", 102.0, epoch_ms(20'000));
     EXPECT_EQ(t.sample_count(), 3u);
     EXPECT_NEAR(t.mean_bps(), 200.0, 1e-6);
-    EXPECT_NEAR(t.stdev_bps(), 0.0, 1e-6);   // all three identical → sd = 0
+    EXPECT_NEAR(t.stdev_bps(), 0.0, 1e-6);   // all three identical -> sd = 0
 }
 
 TEST(AdverseSelection, MixedSymbols_OnlyMatchingOneDrained)
@@ -94,7 +94,7 @@ TEST(AdverseSelection, MixedSymbols_OnlyMatchingOneDrained)
     EXPECT_EQ(t.sample_count(), 2u);
     EXPECT_EQ(t.pending_count(), 1u);        // the B fill
 
-    // Mark B — now drain it.
+    // Mark B - now drain it.
     t.on_mark("B", 202.0, epoch_ms(20'000));
     EXPECT_EQ(t.sample_count(), 3u);
     EXPECT_EQ(t.pending_count(), 0u);
@@ -123,7 +123,7 @@ TEST(AdverseSelection, ZeroOrNegativeMid_Skipped)
     EXPECT_EQ(t.sample_count(), 0u);
     EXPECT_EQ(t.pending_count(), 1u);
 
-    t.on_mark("X", 101.0, epoch_ms(20'000));   // valid → drained
+    t.on_mark("X", 101.0, epoch_ms(20'000));   // valid -> drained
     EXPECT_EQ(t.sample_count(), 1u);
 }
 
@@ -132,7 +132,7 @@ TEST(AdverseSelection, StdevNonZeroForDivergentMarkouts)
     AdverseSelectionTracker t({10s, 1024});
     t.on_fill(make_fill(1000, "X", order_side::buy, 100.0));
     t.on_fill(make_fill(1001, "X", order_side::buy, 100.0));
-    // Drain both at same mark but at different prices — need two passes.
+    // Drain both at same mark but at different prices - need two passes.
     t.on_mark("X", 101.0, epoch_ms(20'000));   // +100 bps for both
     // Welford stdev of [100, 100] with sample stdev = 0
     EXPECT_NEAR(t.stdev_bps(), 0.0, 1e-6);

@@ -19,7 +19,7 @@ TEST(RSI, FirstValue)
     rsi.update(102.0); // +1
     auto val = rsi.update(103.0); // +1, all gains, no losses
     ASSERT_TRUE(val.has_value());
-    EXPECT_DOUBLE_EQ(*val, 100.0); // all gains → RSI = 100
+    EXPECT_DOUBLE_EQ(*val, 100.0); // all gains -> RSI = 100
 }
 
 TEST(RSI, AllLosses)
@@ -30,7 +30,7 @@ TEST(RSI, AllLosses)
     rsi.update(98.0);
     auto val = rsi.update(97.0);
     ASSERT_TRUE(val.has_value());
-    EXPECT_DOUBLE_EQ(*val, 0.0); // all losses → RSI = 0
+    EXPECT_DOUBLE_EQ(*val, 0.0); // all losses -> RSI = 0
 }
 
 TEST(RSI, MixedMovement)
@@ -51,7 +51,7 @@ TEST(RSI, ConstantPrice)
     relative_strength_index rsi(3);
     for (int i = 0; i < 5; ++i)
         rsi.update(50.0);
-    // All changes are 0 → avg_gain=0, avg_loss=0 → RSI=100 (no loss)
+    // All changes are 0 -> avg_gain=0, avg_loss=0 -> RSI=100 (no loss)
     ASSERT_TRUE(rsi.ready());
     EXPECT_DOUBLE_EQ(rsi.value(), 100.0);
 }

@@ -63,7 +63,7 @@ public:
             if (is_testnet_ && looks_like_reset(ex_quote_total, local_cash))
             {
                 std::fprintf(stderr,
-                    "  [TESTNET-RESET] venue cash=%.8f %s, local=%.8f %s — "
+                    "  [TESTNET-RESET] venue cash=%.8f %s, local=%.8f %s - "
                     "treating as account reset, drift check skipped.\n",
                     ex_quote_total, quote_asset_.c_str(),
                     local_cash, quote_asset_.c_str());
@@ -95,7 +95,7 @@ public:
                 if (is_testnet_ && looks_like_reset(ex_base_total, it->second.qty))
                 {
                     std::fprintf(stderr,
-                        "  [TESTNET-RESET] venue %s=%.8f, local=%.8f — "
+                        "  [TESTNET-RESET] venue %s=%.8f, local=%.8f - "
                         "treating as account reset, position drift skipped.\n",
                         base_asset_.c_str(), ex_base_total, it->second.qty);
                     return {};

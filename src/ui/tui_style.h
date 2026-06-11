@@ -62,7 +62,7 @@ void label(int y, int x, const char* text);
 
 } // namespace truetest::ui
 
-// Legacy raw color pair constants — declared at GLOBAL scope
+// Legacy raw color pair constants - declared at GLOBAL scope
 // (before the truetest::ui namespace) so every panel can see
 // kPairGreen etc. directly.
 constexpr int kPairGreen  = 1;

@@ -8,7 +8,7 @@
 #include <vector>
 
 // Server-side state snapshot pushed via the user-data WebSocket without
-// being tied to one of our own orders — futures `ACCOUNT_UPDATE` is the
+// being tied to one of our own orders - futures `ACCOUNT_UPDATE` is the
 // canonical example (liquidations, funding settlements, ADL closeouts,
 // margin-mode flips). Distinct from `parsed_exec`: those describe an
 // order's lifecycle, these describe what the venue currently believes
@@ -91,7 +91,7 @@ public:
 
     // Optional: parse server-pushed position/balance snapshots not tied
     // to a specific order (e.g. futures ACCOUNT_UPDATE). Default returns
-    // false — spot's user-data parser doesn't surface snapshots through
+    // false - spot's user-data parser doesn't surface snapshots through
     // this channel. Callers should invoke this only after `parse()`
     // declines, since one event can be relevant to one path or the
     // other but not both.

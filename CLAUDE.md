@@ -6,7 +6,7 @@ For AI coding assistants working in this repo: this codebase has two
 tiers of edits with different model requirements. **Full rationale,
 file list, and pre-merge checklist live in `docs/MODEL.md`.**
 
-**Default — Sonnet 4.6** is sufficient for: new strategies, indicators,
+**Default - Sonnet 4.6** is sufficient for: new strategies, indicators,
 tests, CLI flags, docs, single-file refactors, provider-stack additions
 that follow existing patterns.
 
@@ -43,15 +43,15 @@ unrestricted change to this surface.
 
 ## What this is
 
-TrueTest — a modular C++23 engine that starts as a backtesting platform but is
+TrueTest - a modular C++23 engine that starts as a backtesting platform but is
 designed to be reused as the foundation for different deployments: pure backtesting,
 Binance spot execution (mainnet + testnet), Polymarket AMM, MetaTrader EA, or
 anything else that processes market data through a strategy and orderbook pipeline.
 Each deployment attaches different "blocks" (storage backends, execution targets,
 data feeds) to the same core.
 
-The build produces three binaries from the same source tree —
-`engine_backtest`, `engine_shadow`, `engine_live` — differing only in a
+The build produces three binaries from the same source tree -
+`engine_backtest`, `engine_shadow`, `engine_live` - differing only in a
 compile-time `TT_TARGET` define. Live-order paths are gated at compile time,
 so only `engine_live` can ever place real orders (the others hard-reject
 `--mode=live`).
@@ -108,7 +108,7 @@ hft-engine/
     │   ├── data_handler.h              # in-memory OHLCV column vectors
     │   ├── data_loader.cpp             # load_from_csv + load_into_queue impl
     │   └── questdb/                    # (#ifdef HAS_QUESTDB) order-lifecycle capture
-    │       ├── store.h/.cpp            # QuestdbStore — DDL + per-event capture API
+    │       ├── store.h/.cpp            # QuestdbStore - DDL + per-event capture API
     │       ├── ilp_writer.h/.cpp       # ILP TCP writer (port 9009)
     │       ├── http_client.h/.cpp      # HTTP /exec client for DDL (port 9000)
     │       ├── tcp_client.h/.cpp       # raw POSIX socket helpers
@@ -215,7 +215,7 @@ hft-engine/
 ## Build
 
 ```bash
-# Default — CSV data only, no external runtime deps
+# Default - CSV data only, no external runtime deps
 cmake -B build
 cmake --build build
 
@@ -235,17 +235,17 @@ cmake -B build \
   -DBUILD_TESTS=ON            # GoogleTest suite + CLI integration tests
 cmake --build build
 
-# Run — three binaries, same source tree, distinct TT_TARGET at compile time
+# Run - three binaries, same source tree, distinct TT_TARGET at compile time
 ./build/engine_backtest                                   # interactive setup TUI
 ./build/engine_backtest --provider local --path market_data.csv --strategy sma
 ./build/engine_shadow   --provider binance --symbol btcusdt --stream trade
 ./build/engine_backtest --replay event_log.bin
 
-# Live (mainnet) — math-captcha confirmation prompt before any order
+# Live (mainnet) - math-captcha confirmation prompt before any order
 ./build/engine_live --provider binance --symbol btcusdt --stream kline_1m \
   --live --api-key KEY --api-secret SECRET
 
-# Live (testnet) — same code path, captcha skipped
+# Live (testnet) - same code path, captcha skipped
 ./build/engine_live --provider binance --symbol btcusdt --stream kline_1m \
   --testnet --live --api-key KEY --api-secret SECRET \
   --persist --run-tag testnet_smoke
@@ -262,9 +262,9 @@ in its `TT_TARGET` define. `--mode=live` is rejected by any binary whose
 ### Provider system (transport + parser + executor)
 All external data/execution flows through the `IProvider` interface. Providers
 self-register via `REGISTER_PROVIDER()` macro at static init. Each provider owns:
-- `IDataTransport` — where data comes from (file, WebSocket, pipe)
-- `IDataParser<T>` — how to parse it (CSV, JSON, binary)
-- `IExecutionAdapter` — how to submit orders (local orderbook, exchange API)
+- `IDataTransport` - where data comes from (file, WebSocket, pipe)
+- `IDataParser<T>` - how to parse it (CSV, JSON, binary)
+- `IExecutionAdapter` - how to submit orders (local orderbook, exchange API)
 
 `IProvider` also exposes `configure(engine_config&)`, `on_mid_price(sym, px)`,
 `get_reconciler()`, `get_kill_switch()`, and `lifecycle_state()` so
@@ -294,7 +294,7 @@ All `record_*` calls go directly to `QuestdbStore` and are serialized behind
 one `std::mutex` inside the store. Writes are handed to a batched `IlpWriter`
 (its own background flush thread). Schema: one shared `runs_meta` table +
 six (plus funding) per-run tables prefixed with `--run-tag`. Wire:
-ILP/TCP (port 9009) for ingest, HTTP /exec (port 9000) for DDL — raw POSIX
+ILP/TCP (port 9009) for ingest, HTTP /exec (port 9000) for DDL - raw POSIX
 sockets, no client library. **Soft-fail** on unreachable daemon: warning to
 stderr, persistence disabled, run continues. Spec in `docs/db.md`.
 
@@ -314,7 +314,7 @@ before `run()` in `main.inc`. Streaming mode (`run_streaming()`) receives record
 via `DataBridge` callback. Replay mode (`run_replay()`) reads a binary event log.
 
 ### Event-driven pipeline
-`market_event → IStrategy → order_event → orderbook / provider_adapter → fill_event → portfolio`
+`market_event -> IStrategy -> order_event -> orderbook / provider_adapter -> fill_event -> portfolio`
 Hot-path events use pre-allocated object pools to avoid heap pressure.
 
 ### Multithreaded worker architecture
@@ -342,17 +342,17 @@ resume-after-crash workflows. Orthogonal to QuestDB persistence.
 
 ### Status displays (no web UI)
 Two TUIs ship in the tree, both opt-in via `--status-format`:
-- **`ConsoleDashboard`** (`src/ui/console_dashboard.{h,cpp}`) — plain or
+- **`ConsoleDashboard`** (`src/ui/console_dashboard.{h,cpp}`) - plain or
   ANSI-coloured status; default on `engine_backtest`.
 - **Rich tabbed ncurses TUI** (`src/ui/tabbed_dashboard.{h,cpp}` +
-  `src/ui/panels/`) — wired into `engine_shadow` and `engine_live` via
+  `src/ui/panels/`) - wired into `engine_shadow` and `engine_live` via
   `tt_wire_rich_tui()` in `CMakeLists.txt`. Tabs: positions, lots,
   brackets, fills, debug. Operator hotkeys: pause/resume, flatten,
   kill-switch (live only). Pulls structured snapshots from
   `engine::snapshot_dashboard()` and reuses the same atomics + recent-event
   ring as `ConsoleDashboard`.
 
-`--status-format off|plain|tui|ndjson|auto` (default `auto`: tty → tui).
+`--status-format off|plain|tui|ndjson|auto` (default `auto`: tty -> tui).
 The previous Boost.Beast WebSocket dashboard + React SPA are gone; structured
 machine-readable output now goes through `--status-format ndjson`.
 
@@ -362,7 +362,7 @@ machine-readable output now goes through `--status-format ndjson`.
 `tt_destroy`) intended for Python (ctypes/cffi) or Node.js (ffi-napi) host
 processes. Built as `libtruetest.so` when `-DBUILD_SHARED_LIB=ON`. The C
 API is not currently wired through the QuestDB capture path or the rich
-TUI — it produces analytics + results JSON only.
+TUI - it produces analytics + results JSON only.
 
 ## Implemented providers
 
@@ -372,7 +372,7 @@ File-based CSV provider. Supports bar (OHLCV) and tick formats. Batch mode only.
 ### Binance (ENABLE_BINANCE=ON)
 Live WebSocket streaming from Binance spot market. Supports `trade`, `kline_*`,
 combined, and depth (L2) streams. Parser is pure C++ (no JSON library on the
-hot path — only nlohmann/json is linked, and only for static config files).
+hot path - only nlohmann/json is linked, and only for static config files).
 Historical-bar backfill via REST, injected into the live stream through
 `PrependTransport`.
 
@@ -393,12 +393,12 @@ Execution modes:
   confirmation (skipped on `--testnet`).
 
 Live-mode safety hooks (`engine.cpp` queries them via the provider):
-- `BinanceReconciler` — `/api/v3/account` drift check at startup; refuses
+- `BinanceReconciler` - `/api/v3/account` drift check at startup; refuses
   to start if cash or position drifts past `--reconcile-tolerance-bps`.
   Testnet downgrades the venue-zero / local-non-zero case to a
   `[TESTNET-RESET]` warning so the monthly testnet wipe doesn't block
   startup.
-- `BinanceKillSwitch` — `cancel_all_and_flatten()` on shutdown:
+- `BinanceKillSwitch` - `cancel_all_and_flatten()` on shutdown:
   `DELETE /api/v3/openOrders`, `GET /api/v3/account`, `MARKET SELL` the
   free base balance within `--kill-switch-deadline-ms`.
 - `BinanceProvider::open()` (live only) refusal gates: clock-skew check,
@@ -411,14 +411,14 @@ exchange-side OCO orders so SL/TP survive a process crash. Currently uses
 separately.
 
 Live WS recording + replay: `BinanceRecorder` captures a live stream to file;
-`BinanceReplayTransport` replays it as a transport — useful for deterministic
+`BinanceReplayTransport` replays it as a transport - useful for deterministic
 testing against real exchange data.
 
 Operator guide for testnet: `docs/testnet.md`.
 
 ### Binance Futures USDT-M (ENABLE_BINANCE=ON)
 Sibling provider registered as `binance-futures`. Same compile-time gate
-as spot — the live order path lives in `engine_live` only. Different
+as spot - the live order path lives in `engine_live` only. Different
 endpoint stack (`fapi.binance.com` / `fstream.binance.com` for mainnet,
 `testnet.binancefuture.com` / `stream.binancefuture.com` for testnet)
 and different keys (separate email-signup at testnet.binancefuture.com,
@@ -429,21 +429,21 @@ Endpoints chosen at registration time: `--testnet` selects
 the registry into testnet mode automatically (the testnet WS host
 `stream.binancefuture.com` carries no `testnet` token).
 
-Execution modes mirror spot — paper / hybrid / live — but with
+Execution modes mirror spot - paper / hybrid / live - but with
 futures-specific wire format (`/fapi/v1/order`, `STOP_MARKET`/`STOP`
 mapping, no `timeInForce` for `MARKET` or `STOP_MARKET`, no
 `positionSide` emitted in one-way mode).
 
 Live-mode safety hooks (futures-specific implementations):
-- `BinanceFuturesReconciler` — reads `availableBalance` from
+- `BinanceFuturesReconciler` - reads `availableBalance` from
   `/fapi/v2/account` and signed `positionAmt` from
   `/fapi/v2/positionRisk?symbol=...`. **No spot-style testnet-reset
-  shortcut** — futures testnet does not wipe on the same cadence as
+  shortcut** - futures testnet does not wipe on the same cadence as
   spot, and the spot heuristic would mask real drift.
-- `BinanceFuturesKillSwitch` — `DELETE /fapi/v1/allOpenOrders`, then
+- `BinanceFuturesKillSwitch` - `DELETE /fapi/v1/allOpenOrders`, then
   reads positionRisk and submits a `reduceOnly=true MARKET` on the
   opposite side sized to `|positionAmt|`. **Closes positions; does
-  not sweep balances** — there's no "free base" on a derivatives book
+  not sweep balances** - there's no "free base" on a derivatives book
   to sell.
 - `BinanceFuturesProvider::open()` refusal gates: clock-skew check
   via `/fapi/v1/time`, `/fapi/v1/exchangeInfo` symbol probe,
@@ -455,7 +455,7 @@ Live-mode safety hooks (futures-specific implementations):
   (`--liquidation-warn-pct`, default 5%). Tolerate
   `liquidationPrice == 0` / `markPrice == 0` (unfunded testnet
   accounts, just-opened positions).
-- `BinanceFuturesDeadMansSwitch` — server-side `POST
+- `BinanceFuturesDeadMansSwitch` - server-side `POST
   /fapi/v1/countdownCancelAll` with a heartbeat thread. Bounds
   catastrophic-shutdown order exposure (SIGKILL / OOM / kernel
   panic / network gone) from "indefinite" to "≤ countdown_ms after
@@ -465,11 +465,11 @@ Live-mode safety hooks (futures-specific implementations):
   by `WorkerWatchdog` (`src/threading/worker_watchdog.h`); if the
   heartbeat hangs for `3 × heartbeat_ms`, the watchdog fires
   `halt_flag_` so the orderly kill-switch runs before the venue
-  countdown cancels orders mid-quote. Cancels orders only — does
+  countdown cancels orders mid-quote. Cancels orders only - does
   NOT flatten positions; the kill-switch's flatten step is the
   other half of the safety net.
 - Pre-trade venue risk check (`FuturesRiskCheck`,
-  `src/risk/futures_risk_check.h`) — notional / leverage /
+  `src/risk/futures_risk_check.h`) - notional / leverage /
   projected-liquidation-distance caps applied per outgoing order
   before `RiskManager::check_order`. Refusals emit
   `rejection_event` with reason `venue_risk_reject` and the engine
@@ -480,7 +480,7 @@ Bracket adapter: `BinanceFuturesBracketAdapter` places SL+TP as two
 separate conditional orders (`STOP_MARKET` + `TAKE_PROFIT_MARKET`),
 both with `closePosition=true reduceOnly=true`. Placement is two
 non-atomic POSTs (no OCO endpoint on futures); cancel-other-when-fires
-is provided exchange-side by `closePosition=true` semantics — when one
+is provided exchange-side by `closePosition=true` semantics - when one
 leg triggers and brings the position to zero, Binance auto-cancels
 every other `closePosition=true` order on the symbol. Partial-fraction
 intents (`qty_fraction != 1.0`) are declined; engine-side ExitManager
@@ -490,18 +490,18 @@ Operator guide: `docs/futures-testnet.md`.
 
 ## Not yet implemented
 
-- **Risk resume** — `halt_flag_` stops the engine but there's no resume channel.
-- **Generic ExchangeAdapter** — Binance (spot + futures) is the only live venue family today.
-- **QuestDB hard-fail** — daemon unreachable currently downgrades to a
+- **Risk resume** - `halt_flag_` stops the engine but there's no resume channel.
+- **Generic ExchangeAdapter** - Binance (spot + futures) is the only live venue family today.
+- **QuestDB hard-fail** - daemon unreachable currently downgrades to a
   warning; "refuse to start when `--persist` is set but QuestDB is down"
   is documented in `docs/db.md` as a follow-up.
-- **COIN-M (inverse) futures** — separate stack (`dapi.binance.com`,
+- **COIN-M (inverse) futures** - separate stack (`dapi.binance.com`,
   `dstream.binance.com`, settles in base asset). Will land as a sibling
   provider, not a flag on `binance-futures`.
-- **Hedge mode** — futures provider refuses if the account is in hedge
+- **Hedge mode** - futures provider refuses if the account is in hedge
   mode. Adding support means `positionSide=LONG/SHORT` plumbed through
   the encoder and a second per-symbol position bucket in lot bookkeeping.
-- **Position-based pre-trade risk** — existing `RiskManager` is
+- **Position-based pre-trade risk** - existing `RiskManager` is
   balance-based (cash). Futures notional / leverage / liquidation-distance
   caps are tracked as a backlog item; needs to land before the futures
   live path is used against real money.
@@ -510,7 +510,7 @@ Operator guide: `docs/futures-testnet.md`.
 
 - **JSON library: `nlohmann/json` (config-time only).** Used in two files
   (`src/bin/main.inc` CLI config, `src/api/truetest_api.cpp` C API config +
-  result serialization). Zero hot-path usage — verified by grep across
+  result serialization). Zero hot-path usage - verified by grep across
   `core/`, `engine/`, `execution/`, `strategy/`, and `providers/binance/`.
   CI script `scripts/check-hotpath-json.sh` enforces this.
 - **Persistence: QuestDB (opt-in via `ENABLE_QUESTDB=ON` + `--persist`).**

@@ -139,7 +139,7 @@ void TabbedDashboard::start()
     nodelay(stdscr, TRUE);
     curs_set(0);
 
-    // Enable mouse — clicks on the tab bar switch tabs. Disabled by
+    // Enable mouse - clicks on the tab bar switch tabs. Disabled by
     // setting an empty mask. ALL_MOUSE_EVENTS covers presses, releases,
     // and scroll wheel; we react only to button-down on the header row.
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
@@ -147,7 +147,7 @@ void TabbedDashboard::start()
     // single-click latency is minimal.
     mouseinterval(0);
 
-    // Terminal-side hints — tiny per-frame savings that compound over
+    // Terminal-side hints - tiny per-frame savings that compound over
     // 10 Hz × N hours. leaveok stops ncurses from emitting a cursor-move
     // escape on every refresh; clearok(false) suppresses any forced
     // full-screen redraw; intrflush stops Ctrl-C from flushing the
@@ -159,7 +159,7 @@ void TabbedDashboard::start()
     {
         start_color();
         use_default_colors();
-        // Theme palette — pair ids 1..5 are referenced everywhere.
+        // Theme palette - pair ids 1..5 are referenced everywhere.
         // dark (default): bright fg on transparent (-1) bg.
         // light: same fg colors but bg=COLOR_WHITE for readability on
         // light terminals; ncurses swaps interpretations.
@@ -228,7 +228,7 @@ void TabbedDashboard::stop()
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         if (thread_.joinable())
-            thread_.detach();   // last resort — don't hang the caller
+            thread_.detach();   // last resort - don't hang the caller
     }
 
     // Fix #4: Always attempt to restore the terminal, even in bad cases
@@ -365,8 +365,8 @@ void TabbedDashboard::handle_input()
             {
                 actions_.pause_toggle();
                 bool now_paused = actions_.pause_state ? actions_.pause_state() : false;
-                set_toast(now_paused ? "PAUSED — no new orders" : "resumed");
-                // Fix #3: operator action → want fresh data
+                set_toast(now_paused ? "PAUSED - no new orders" : "resumed");
+                // Fix #3: operator action -> want fresh data
                 if (snap_fn_) { truetest::ui::dashboard_snapshot tmp; snap_fn_(tmp); }
             }
             else set_toast("pause not wired");
@@ -393,7 +393,7 @@ void TabbedDashboard::handle_input()
         {
             const bool was = ui_frozen_.load(std::memory_order_acquire);
             ui_frozen_.store(!was, std::memory_order_release);
-            set_toast(!was ? "UI frozen — engine still running" : "UI live");
+            set_toast(!was ? "UI frozen - engine still running" : "UI live");
             // Fix #3: force fresh snapshot after unfreeze
             if (snap_fn_) { truetest::ui::dashboard_snapshot tmp; snap_fn_(tmp); }
         }
@@ -427,7 +427,7 @@ void TabbedDashboard::handle_input()
             // bottom of the screen, capture chars until Enter/Esc.
             // Keeps the panel rendered behind so the user sees what
             // they're filtering. Uses synchronous getch (we already
-            // own the input loop — no nested loops).
+            // own the input loop - no nested loops).
             std::string buf;
             int h = 0, w = 0;
             getmaxyx(stdscr, h, w);
@@ -448,7 +448,7 @@ void TabbedDashboard::handle_input()
                 if (!running_.load(std::memory_order_acquire))
                 {
                     buf.clear();
-                    break;   // shutdown requested — exit prompt cleanly
+                    break;   // shutdown requested - exit prompt cleanly
                 }
 
                 move(h - 1, 0); clrtoeol();
@@ -461,7 +461,7 @@ void TabbedDashboard::handle_input()
                 int kc = getch();
                 if (kc == ERR)
                 {
-                    // no key — yield a bit so shutdown can be observed quickly
+                    // no key - yield a bit so shutdown can be observed quickly
                     std::this_thread::sleep_for(std::chrono::milliseconds(20));
                     continue;
                 }
@@ -548,7 +548,7 @@ void TabbedDashboard::draw_help_overlay(int width, int height)
         // Operator actions
         {{"p",      "pause/resume strategy emission"},
          {"F",      "flatten all open positions (confirm)"},
-         {"K",      "kill switch — cancel-all + halt (confirm)"},
+         {"K",      "kill switch - cancel-all + halt (confirm)"},
          {"Space",  "freeze UI updates (engine continues)"},
          {nullptr,nullptr}, {nullptr,nullptr}, {nullptr,nullptr}, {nullptr,nullptr}},
         // UI / display
@@ -710,7 +710,7 @@ void TabbedDashboard::draw_chrome(int width, int height, int active)
         x += 2;
     }
 
-    // Status bar at row 1 — drawn by render_loop after this returns.
+    // Status bar at row 1 - drawn by render_loop after this returns.
     // Top separator at row 2.
     mvhline(2, 0, ACS_HLINE, width);
 
@@ -785,7 +785,7 @@ void TabbedDashboard::draw_status_bar(int width,
     int y = 1;
     move(y, 0); clrtoeol();
 
-    // Pause background — subtle but clear visual signal across the whole bar
+    // Pause background - subtle but clear visual signal across the whole bar
     const bool paused = actions_.pause_state && actions_.pause_state();
     if (paused)
     {
@@ -837,12 +837,12 @@ void TabbedDashboard::draw_status_bar(int width,
     std::snprintf(buf, sizeof(buf), "%.2f", eq);
     put_field("eq:", buf, Color::Neutral);
 
-    // Total PnL — one of the most important numbers on screen
+    // Total PnL - one of the most important numbers on screen
     std::snprintf(buf, sizeof(buf), "%+.2f", pnl + unrl);
     Color pnl_col = (pnl + unrl) > 0 ? Color::Positive : ((pnl + unrl) < 0 ? Color::Negative : Color::Neutral);
     put_field("pnl:", buf, pnl_col, true);
 
-    // Drawdown — critical risk metric
+    // Drawdown - critical risk metric
     std::snprintf(buf, sizeof(buf), "%.2f%%", dd);
     Color dd_col = (dd <= -5.0) ? Color::Danger : (dd <= -1.0 ? Color::Warning : Color::Muted);
     put_field("dd:", buf, dd_col, true);
@@ -1017,7 +1017,7 @@ std::uint64_t TabbedDashboard::compute_render_digest(
 
     if (snap)
     {
-        // Sizes only — cheap, and a row count change always implies a
+        // Sizes only - cheap, and a row count change always implies a
         // visible diff. Doesn't catch "same row count but different
         // values"; the status-bar atomics above usually move when that
         // happens (any fill bumps fills_total, etc).
@@ -1082,7 +1082,7 @@ void TabbedDashboard::render_loop()
         // Resize / first frame: do a full erase. Otherwise let ncurses'
         // diff send only the cells that actually changed (each panel
         // overwrites with field-padded text, so old content is replaced
-        // in place — no ghost pixels survive).
+        // in place - no ghost pixels survive).
         const bool resized = (w != prev_w || h != prev_h);
         if (resized)
         {
@@ -1101,7 +1101,7 @@ void TabbedDashboard::render_loop()
         const bool tab_switched = (active != prev_active);
         if (tab_switched && !resized)
         {
-            // Switching tabs leaves stale rows from the previous panel —
+            // Switching tabs leaves stale rows from the previous panel -
             // wipe just the body region rather than the full screen.
             // Fix #6: be more thorough on resize
             int wipe_start = resized ? 0 : 3;
@@ -1119,7 +1119,7 @@ void TabbedDashboard::render_loop()
         // ── Frame-skip via state digest ─────────────────────────────
         // Skip render if nothing visible changed AND no overlay is up
         // AND it's been < 1 s since the last paint (sanity bound). The
-        // digest is conservative — covers status-bar atomics + active
+        // digest is conservative - covers status-bar atomics + active
         // tab + a few snapshot scalars whose change implies *something*
         // worth re-rendering.
         const auto now = std::chrono::steady_clock::now();
@@ -1137,7 +1137,7 @@ void TabbedDashboard::render_loop()
 
         // Per-panel min interval: even if the digest changed, throttle
         // slow-moving panels (Health, Debug). Doesn't affect status-bar
-        // refresh — that's drawn before the panel and stays at tick rate.
+        // refresh - that's drawn before the panel and stays at tick rate.
         bool below_panel_interval = false;
         if (active >= 0 && active < static_cast<int>(panels_.size()))
         {
@@ -1153,7 +1153,7 @@ void TabbedDashboard::render_loop()
             continue;
         }
 
-        // Tab badges — counts shown next to each tab name. Tabs that
+        // Tab badges - counts shown next to each tab name. Tabs that
         // don't have a meaningful count (Overview, Health, Debug, L2)
         // stay 0. Updated each render frame from the snapshot.
         tab_badges_.assign(panels_.size(), 0);

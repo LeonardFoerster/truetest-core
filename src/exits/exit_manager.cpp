@@ -7,7 +7,7 @@ namespace truetest::exits {
 
 void ExitManager::register_pending(exit_intent intent)
 {
-    if (intent.opener_order_id == 0) return;  // cannot key — drop silently
+    if (intent.opener_order_id == 0) return;  // cannot key - drop silently
     strategy_symbol_key ssk{intent.strategy_name, intent.symbol};
     strategy_symbol_to_openers_.emplace(ssk, intent.opener_order_id);
     pending_.emplace(intent.opener_order_id, std::move(intent));
@@ -27,7 +27,7 @@ void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
         return;
     }
 
-    // Opener fill: promote pending → armed.
+    // Opener fill: promote pending -> armed.
     auto range = pending_.equal_range(f.get_order_id());
     if (range.first == range.second) return;
 
@@ -55,9 +55,9 @@ void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
     pending_.erase(range.first, range.second);
 
     // Defense-in-depth: hand the venue adapter a copy so it can place
-    // resting orders. Empty handles → engine-side eval is the only path
+    // resting orders. Empty handles -> engine-side eval is the only path
     // (already armed above; nothing else to do). For multi-intent openers
-    // (TP1/TP2/SL scale-outs) we currently delegate the first one only —
+    // (TP1/TP2/SL scale-outs) we currently delegate the first one only -
     // adapters that don't model partial brackets natively must short-circuit.
     if (bracket_adapter_ && !to_place.empty())
     {
@@ -193,7 +193,7 @@ std::vector<order_event> ExitManager::on_bar(
         double fire_px = 0.0;
         bool fired = false;
 
-        // SL takes precedence when both extremes cross in one bar — we can't
+        // SL takes precedence when both extremes cross in one bar - we can't
         // know intra-bar order so the worst case wins.
         if (ai.intent.stop_loss &&
             ((is_long  && adverse <= *ai.intent.stop_loss) ||
@@ -382,7 +382,7 @@ void ExitManager::release_venue_bracket(std::uint64_t opener_order_id)
         if (handles.sl_exchange_id) exchange_to_leg_.erase(*handles.sl_exchange_id);
         if (handles.tp_exchange_id) exchange_to_leg_.erase(*handles.tp_exchange_id);
     }
-    // Adapter call OUTSIDE the mutex — adapters do REST I/O and we don't
+    // Adapter call OUTSIDE the mutex - adapters do REST I/O and we don't
     // want WS-thread lookups blocked behind a network round-trip.
     if (bracket_adapter_)
         bracket_adapter_->cancel(opener_order_id, handles);

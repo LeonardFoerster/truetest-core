@@ -5,7 +5,7 @@ static auto now() { return std::chrono::system_clock::now(); }
 
 // qty_scale=1.0 keeps order_event::quantity 1:1 with book quantity so the
 // test arithmetic is readable. Default qty_scale=1e8 would map qty=1.0 to
-// 1e8 book units — fine in production, noisy in tests.
+// 1e8 book units - fine in production, noisy in tests.
 static constexpr double TEST_QTY_SCALE = 1.0;
 
 namespace
@@ -73,11 +73,11 @@ TEST(RealisticFills, MarketBuyRecordsAtRestingAskPrice)
 }
 
 // Walking two levels emits two fill_events at their respective resting
-// prices — one per matched level head.
+// prices - one per matched level head.
 TEST(RealisticFills, MarketBuyWalksMultipleLevels)
 {
     auto ob = std::make_shared<orderbook>();
-    // Whole-number book quantities — qty_scale=1.0 + std::round() in
+    // Whole-number book quantities - qty_scale=1.0 + std::round() in
     // submit_order rounds order_event::quantity to integer book units.
     seed_ask(ob, 100.0, 1, 1001);
     seed_ask(ob, 101.0, 2, 1002);
@@ -112,7 +112,7 @@ TEST(BarSpread, AppliesHalfSpreadToMarketBuy)
     auto ob = std::make_shared<orderbook>();
     // Seeded out at the spread the bar-spread shift will reach. The point
     // of bar_spread is to model a calibrated spread the MM seed didn't
-    // include — we seed at +5bps to receive the shifted aggressor.
+    // include - we seed at +5bps to receive the shifted aggressor.
     seed_ask(ob, 100.05, 10, 1001);
 
     LocalBookAdapter adapter(
@@ -130,12 +130,12 @@ TEST(BarSpread, AppliesHalfSpreadToMarketBuy)
     ASSERT_TRUE(adapter.poll_fills(fills));
     ASSERT_EQ(fills.size(), 1u);
     // Legacy pricing records aggressor's book_price = ref * aggression
-    // where ref = mid * (1 + 5bps) = 100.05 → book_price ≈ 110.055.
+    // where ref = mid * (1 + 5bps) = 100.05 -> book_price ≈ 110.055.
     const double expected = 100.0 * (1.0 + 5e-4) * 1.1;
     EXPECT_NEAR(fills[0].get_fill_price(), expected, 0.01);
 }
 
-// --bar-spread-bps suppressed when realistic_fills is on — the resting
+// --bar-spread-bps suppressed when realistic_fills is on - the resting
 // walk already incorporates the seeded book's spread.
 TEST(BarSpread, SuppressedUnderRealisticFills)
 {
@@ -157,10 +157,10 @@ TEST(BarSpread, SuppressedUnderRealisticFills)
     ASSERT_TRUE(adapter.poll_fills(fills));
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_NEAR(fills[0].get_fill_price(), 100.05, 1e-6)
-        << "Resting price only — bar-spread shift suppressed";
+        << "Resting price only - bar-spread shift suppressed";
 }
 
-// --bar-spread-bps suppressed when symbol carries real L2 depth — the
+// --bar-spread-bps suppressed when symbol carries real L2 depth - the
 // real seeded book's spread is already correct.
 TEST(BarSpread, SuppressedWhenL2Seeded)
 {

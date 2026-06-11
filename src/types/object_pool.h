@@ -37,7 +37,7 @@ class ObjectPool
 
     // Live in-use count for the dashboard's "fill" bar. Bumped on
     // acquire, decremented in the shared_ptr deleter. Relaxed ordering
-    // — observers only need eventual consistency, and pop/push already
+    // - observers only need eventual consistency, and pop/push already
     // serialize through the mutex.
     std::atomic<std::size_t> in_use_atomic_{0};
 
@@ -106,7 +106,7 @@ public:
     }
 
     // Lock-free read of the current block count. Safe to call from any
-    // thread; consistency is "eventually correct" — a grow on another
+    // thread; consistency is "eventually correct" - a grow on another
     // thread may have happened between the load here and downstream use.
     // For dashboard snapshots that's strictly fine (the cache is rebuilt
     // every 1s anyway). Callers needing strict consistency should use

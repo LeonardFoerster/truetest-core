@@ -34,7 +34,7 @@ void StrategyPanel::draw(int body_y0, int width, int height,
 
     if (!snap)
     {
-        mvaddstr(body_y0, 2, "(no snapshot yet — engine warming up)");
+        mvaddstr(body_y0, 2, "(no snapshot yet - engine warming up)");
         return;
     }
 
@@ -68,13 +68,13 @@ void StrategyPanel::draw(int body_y0, int width, int height,
     if (snap->strategies.empty())
     {
         attron(A_DIM);
-        mvaddstr(y++, 4, "(no per-strategy attribution yet — first fill establishes a row)");
+        mvaddstr(y++, 4, "(no per-strategy attribution yet - first fill establishes a row)");
         attroff(A_DIM);
     }
     else
     {
         // Sort by absolute PnL descending so the biggest movers float
-        // to the top — easier to spot regressions in a multi-strategy run.
+        // to the top - easier to spot regressions in a multi-strategy run.
         auto rows = snap->strategies;
         std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
             return std::abs(a.pnl) > std::abs(b.pnl);
@@ -85,9 +85,9 @@ void StrategyPanel::draw(int body_y0, int width, int height,
             if (y >= y_end) break;
 
             mvprintw(y, 2, "%-18.18s",
-                     s.name.empty() ? "—" : s.name.c_str());
+                     s.name.empty() ? "-" : s.name.c_str());
 
-            // PnL — color-graded by sign + magnitude.
+            // PnL - color-graded by sign + magnitude.
             int p = signed_pair(s.pnl);
             attron(COLOR_PAIR(p) | (std::abs(s.pnl) > 100.0 ? A_BOLD : 0));
             mvprintw(y, 21, "%+12.4f", s.pnl);
@@ -96,14 +96,14 @@ void StrategyPanel::draw(int body_y0, int width, int height,
             mvprintw(y, 34, "%8zu", s.trade_count);
             mvprintw(y, 43, "%8zu", s.win_count);
 
-            // WinRate — green ≥55, white ≥45, yellow below.
+            // WinRate - green ≥55, white ≥45, yellow below.
             int wpair = (s.win_rate >= 55.0) ? kPairGreen
                       : (s.win_rate >= 45.0) ? kPairWhite : kPairYellow;
             attron(COLOR_PAIR(wpair));
             mvprintw(y, 52, "%7.1f%%", s.win_rate);
             attroff(COLOR_PAIR(wpair));
 
-            // Profit factor — green > 1.5, white 1.0–1.5, red < 1.
+            // Profit factor - green > 1.5, white 1.0-1.5, red < 1.
             int pfpair = (s.profit_factor >= 1.5) ? kPairGreen
                        : (s.profit_factor >= 1.0) ? kPairWhite : kPairRed;
             attron(COLOR_PAIR(pfpair));
@@ -120,7 +120,7 @@ void StrategyPanel::draw(int body_y0, int width, int height,
             mvprintw(y, 83, "%12.4f", s.total_loss);
             attroff(COLOR_PAIR(kPairRed));
 
-            // Lots/Brackets — bold cyan when active; dim when zero.
+            // Lots/Brackets - bold cyan when active; dim when zero.
             if (s.open_lots > 0) {
                 attron(COLOR_PAIR(kPairCyan) | A_BOLD);
                 mvprintw(y, 96, "%6zu", s.open_lots);

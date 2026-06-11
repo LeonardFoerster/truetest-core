@@ -1,4 +1,4 @@
-# TrueTest / hft-engine — Master Consolidated Instructions
+# TrueTest / hft-engine - Master Consolidated Instructions
 
 **Status**: Single authoritative reference. Produced via multi-agent exhaustive extended-thinking analysis of every Markdown file in the repository. This document lives alongside a reorganized documentation set (see [docs/README.md](README.md) for the current structure). It supersedes the scattered prior documents while preserving all key substance.
 
@@ -15,16 +15,16 @@ TrueTest is a modular C++23 engine for reproducible backtesting, divergence-awar
 
 **Core non-negotiable invariants** (repeated across governance, architecture, user-manual, futures docs, killswitch timeline, [architecture/target-architecture.md](architecture/target-architecture.md), [architecture/MODEL.md](architecture/MODEL.md), CLAUDE.md, prod.md):
 
-1. **Compile-time live-order gate is absolute** — Only `engine_live` (and future keeper_live targets) can ever emit real orders/transactions. Never introduce runtime `allow_live_orders` checks or recompile-time bypasses.
-2. **Halt is terminal** (`halt_flag_` in engine/risk) — Write-once atomic true; only manual operator intervention + explicit process restart clears it. No auto-resume, no SIGUSR1, no cooldown, no "helpful" retry logic on safety paths.
-3. **Safety paths are loud and non-retrying** — Kill-switch, DMS, reconciler, WorkerWatchdog failures escalate to operator with clear diagnostics. No silent backoff/retry on safety surfaces.
-4. **Hot-path discipline** (enforced by `scripts/check-hotpath-json.sh` + layer-deps) — Zero `nlohmann::json` on hot path; zero (or object-pool) allocations on event loop; lock-free SPSC RingBuffer (65536 slots, exactly one producer/consumer); no second writer on any ring.
-5. **Reconciler refusal is default** — Blocks startup on position/order drift > tolerance (configurable `--reconcile-tolerance-bps`). Only documented soft-warn exception: spot testnet monthly account resets (futures has none).
-6. **User-data WebSocket is source of truth** (Binance futures/spot) — `ORDER_TRADE_UPDATE` + `ACCOUNT_UPDATE` after initial REST ack. Position snapshots from REST are advisory only until reconciled.
-7. **DMS protects orders only** (`/fapi/v1/countdownCancelAll`) — Venue-side auto-cancel on heartbeat loss. Does **not** emit reduceOnly MARKET flattens (Phase 3 work). Kill-switch (orderly) does cancel-all + reduceOnly flatten with hard deadline.
-8. **Futures mandates** — One-way mode hard refusal in `BinanceFuturesProvider::open()`; `reduceOnly` + `closePosition=true` brackets (non-atomic, two POSTs with auto-cancel guarantee); pre-trade venue `FuturesRiskCheck` (notional/leverage/liq-distance + real tiered MMR from `/fapi/v1/leverageBracket`) consulted **before** `RiskManager` in hot path (`engine.cpp:1600-1628`).
-9. **Provider abstraction is the sole extension point** — `IProvider` + four safety hooks (`IReconciler`, `IKillSwitch`, `IRiskCheck`, `IBracketAdapter`) + transport/parser/executor. Core engine never contains `#ifdef HAS_*` or venue specifics.
-10. **Small capital first + evidence-based gates** — Every phase exit requires artifacts (binary logs, QuestDB run_tag, signed notes, shadow reports) + two-person sign-off before capital tier increase. "No capital tier increase is permitted until all nine rows [Go-Live Gate] have two signatures."
+1. **Compile-time live-order gate is absolute** - Only `engine_live` (and future keeper_live targets) can ever emit real orders/transactions. Never introduce runtime `allow_live_orders` checks or recompile-time bypasses.
+2. **Halt is terminal** (`halt_flag_` in engine/risk) - Write-once atomic true; only manual operator intervention + explicit process restart clears it. No auto-resume, no SIGUSR1, no cooldown, no "helpful" retry logic on safety paths.
+3. **Safety paths are loud and non-retrying** - Kill-switch, DMS, reconciler, WorkerWatchdog failures escalate to operator with clear diagnostics. No silent backoff/retry on safety surfaces.
+4. **Hot-path discipline** (enforced by `scripts/check-hotpath-json.sh` + layer-deps) - Zero `nlohmann::json` on hot path; zero (or object-pool) allocations on event loop; lock-free SPSC RingBuffer (65536 slots, exactly one producer/consumer); no second writer on any ring.
+5. **Reconciler refusal is default** - Blocks startup on position/order drift > tolerance (configurable `--reconcile-tolerance-bps`). Only documented soft-warn exception: spot testnet monthly account resets (futures has none).
+6. **User-data WebSocket is source of truth** (Binance futures/spot) - `ORDER_TRADE_UPDATE` + `ACCOUNT_UPDATE` after initial REST ack. Position snapshots from REST are advisory only until reconciled.
+7. **DMS protects orders only** (`/fapi/v1/countdownCancelAll`) - Venue-side auto-cancel on heartbeat loss. Does **not** emit reduceOnly MARKET flattens (Phase 3 work). Kill-switch (orderly) does cancel-all + reduceOnly flatten with hard deadline.
+8. **Futures mandates** - One-way mode hard refusal in `BinanceFuturesProvider::open()`; `reduceOnly` + `closePosition=true` brackets (non-atomic, two POSTs with auto-cancel guarantee); pre-trade venue `FuturesRiskCheck` (notional/leverage/liq-distance + real tiered MMR from `/fapi/v1/leverageBracket`) consulted **before** `RiskManager` in hot path (`engine.cpp:1600-1628`).
+9. **Provider abstraction is the sole extension point** - `IProvider` + four safety hooks (`IReconciler`, `IKillSwitch`, `IRiskCheck`, `IBracketAdapter`) + transport/parser/executor. Core engine never contains `#ifdef HAS_*` or venue specifics.
+10. **Small capital first + evidence-based gates** - Every phase exit requires artifacts (binary logs, QuestDB run_tag, signed notes, shadow reports) + two-person sign-off before capital tier increase. "No capital tier increase is permitted until all nine rows [Go-Live Gate] have two signatures."
 
 **Additional strong primitives already present**: Layered risk (venue first), `WorkerWatchdog` (3× heartbeat), clock-skew/WAF/symbol existence/one-way probes at open, `ExecutionBridge` mutex audit, rate limiter, per-lot `Portfolio` + `ExitManager`, binary zstd event log + replay, QuestDB (soft-fail today), rich ncurses TUI, StageTimer/ring stats observability.
 
@@ -64,7 +64,7 @@ From CLAUDE.md + [architecture/MODEL.md](architecture/MODEL.md) (full rationale)
 
 Strict rule: Moving tiers requires prior phase exit criteria + two-person sign-off on the 9-row Go-Live Gate table.
 
-### Phase 0 — Safe Tiny-Size Mainnet Futures (Current Active)
+### Phase 0 - Safe Tiny-Size Mainnet Futures (Current Active)
 - **Exact command template** (conservative; must meet or exceed):
   ```bash
   ./build/engine_live \
@@ -84,19 +84,19 @@ Strict rule: Moving tiers requires prior phase exit criteria + two-person sign-o
 - **Ritual** (futures-phase0-operator-sop.md + reports/phase0/*): Print/sign SOP, `new-session.sh`, math-captcha visible entire session, stay at terminal, one-way mode confirmed in UI + provider, DMS counter advancing in TUI, post-halt mandatory `grep -i "POSITION-SNAPSHOT|funding|drift"`, `post-session.sh`, volatility classifier, commit under reports/phase0/.
 - **Status** (2026-05): 0/15 qualifying; helpers/scripts exist; in active collection. Use `reports/phase0/PROGRESS.md` as single source of truth.
 
-### Phase 1 — Deepdive Stabilization & Live-Safety Freeze
+### Phase 1 - Deepdive Stabilization & Live-Safety Freeze
 - Planning artifacts created ([architecture/target-architecture.md](architecture/target-architecture.md), [architecture/migration.md](architecture/migration.md), todo.md, prerequisites.md).
 - LIVE-SAFETY blocks + enforcement script + CLAUDE update done.
 - Remaining: clean 8h mainnet `engine_shadow` (0 drops), two-person sign-off in `decisions/phase1-freeze-*.md`, prod.md/todo update.
 - **All future edits** to frozen surface require token + CCB + shadow run.
 
-### Phase 2 — Risk Engine Completion (Highest Impact)
+### Phase 2 - Risk Engine Completion (Highest Impact)
 - Funding as first-class (`funding_event` in event.h, portfolio::on_funding, QuestDB/analytics/risk/CBs, TUI).
-- Real tiered liquidation (`MaintenanceMarginTable` from `/fapi/v1/leverageBracket`, hot-patch setter into FuturesRiskCheck) — **implemented + build-fixed 2026-05**.
+- Real tiered liquidation (`MaintenanceMarginTable` from `/fapi/v1/leverageBracket`, hot-patch setter into FuturesRiskCheck) - **implemented + build-fixed 2026-05**.
 - Position sizing % equity + volatility; circuit breakers (spread, funding rate).
 - Status: 2.1/2.2 complete; 2.3/2.4 pending.
 
-### Phases 3–6 (High-Level)
+### Phases 3-6 (High-Level)
 - 3: DMS position flattening (`reduceOnly` MARKET on expiry) + external `tt_watchdog` binary.
 - 4: `--persist-strict` (hard-fail), mandatory binary log + xxhash integrity, richer checkpoints (full `lots_` map), crash-replay golden test.
 - 5: Prometheus + IAlertSink, encrypted credential store, runbooks.
@@ -119,7 +119,7 @@ Strict rule: Moving tiers requires prior phase exit criteria + two-person sign-o
 
 See prerequisites.md for the living Phase 1+ checklist (must be green before PRs touching frozen surface). Run `./scripts/check-live-safety-freeze.sh --check-head`, tick boxes, reference in PR.
 
-todo.md is the phased task list (current Phase 1 items, future 2–6 bullets). Every frozen PR must reference relevant items. Update after phase completion.
+todo.md is the phased task list (current Phase 1 items, future 2-6 bullets). Every frozen PR must reference relevant items. Update after phase completion.
 
 reports/phase0/ contains the evidence machinery (README for layout, PROGRESS.md tracker, PHASE0_COMPLETION_PLAN for campaign details, ops/ for batch reviews, templates/ for session notes).
 
@@ -164,8 +164,8 @@ ctest --test-dir build
 **Performance build/instrumentation** ([architecture/engine-optimization.md](architecture/engine-optimization.md) + [architecture/performance.md](architecture/performance.md) + [architecture/perf-baseline.md](architecture/perf-baseline.md)):
 - Reference workload: 50k-bar synthetic CSV, SMA, inline preset (baseline ~36.67s wall, 1.4k ev/s on Ryzen 9 5900X; 5+ median runs).
 - Instrumentation: StageTimer (9 stages: market_create, strategy, orderbook, fill, ring_publish, risk_check, mm_replenish, ...), ring_stats (drops/HWM critical, 0 drops required in prod), memory/copy trackers.
-- Investigation: reproduce → read StageTimer/ring/copy → microbench → lock with baseline update in [architecture/perf-baseline.md](architecture/perf-baseline.md) + regression guard.
-- Historical wins (locked): mimalloc (tails −29%), PGO (layout/tails −47–97% on cheap stages), absl::flat_hash_map (maps), deque→ring + prealloc scratch (mm_replenish), etc. Dominant remaining cost: mm_replenish + market_create alloc volume (~1M make_shared<order> per 50k bars).
+- Investigation: reproduce -> read StageTimer/ring/copy -> microbench -> lock with baseline update in [architecture/perf-baseline.md](architecture/perf-baseline.md) + regression guard.
+- Historical wins (locked): mimalloc (tails -29%), PGO (layout/tails -47-97% on cheap stages), absl::flat_hash_map (maps), deque->ring + prealloc scratch (mm_replenish), etc. Dominant remaining cost: mm_replenish + market_create alloc volume (~1M make_shared<order> per 50k bars).
 
 ---
 
@@ -190,7 +190,7 @@ ctest --test-dir build
 
 **JSON config**: Full engine_config schema (mode, provider, strategy, risk, threading, persistence, realism, etc.). See instructions §13 for keys.
 
-**start.sh launcher** and many numbered examples in instructions §29–35 (backtest minimal → full futures live with DMS/persist/risk caps → sanitizers → PGO training → replay → QuestDB queries, etc.).
+**start.sh launcher** and many numbered examples in instructions §29-35 (backtest minimal -> full futures live with DMS/persist/risk caps -> sanitizers -> PGO training -> replay -> QuestDB queries, etc.).
 
 ---
 
@@ -204,9 +204,9 @@ ctest --test-dir build
 
 **Data validation + formats**: Strict schema checks; see instructions §19.
 
-**Realism models** ([architecture/realism.md](architecture/realism.md) — all default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
+**Realism models** ([architecture/realism.md](architecture/realism.md) - all default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
 - `--realistic-fills`: passive/resting prices, one fill_event per level walked.
-- Latency: two layers (`latency_model` strategy→eligible, `wire_latency_model` order→venue).
+- Latency: two layers (`latency_model` strategy->eligible, `wire_latency_model` order->venue).
 - Impact: SquareRootImpactModel applied before aggression.
 - Bar-spread: full bid-ask on bar-mode market orders (suppressed on L2 symbols).
 - Queue: `--queue-model l2-snapshot` (shadow L2SnapshotQueueModel for adverse-selection honesty), `--maker-queue-model uniform|front|back` (QueueAwareBookAdapter + IQueueModel for paper/backtest maker fills; tracks size_ahead; real prints consume front; L2 shrinkage = cancels per model).
@@ -230,7 +230,7 @@ Strategies self-register via `REGISTER_STRATEGY` (sma, mean-reversion, ma-crosso
 4. Encode/sign (no hot-path JSON).
 5. REST POST /fapi/v1/order (or batch).
 6. User-data WS (ORDER_TRADE_UPDATE + ACCOUNT_UPDATE) as truth.
-7. Fill → Portfolio (per-lot) + ExitManager brackets + Analytics + QuestDB + rings.
+7. Fill -> Portfolio (per-lot) + ExitManager brackets + Analytics + QuestDB + rings.
 8. Bracket handling (two POSTs).
 9. Shutdown/kill-switch (cancel-all + reduceOnly MARKET, hard deadline).
 10. DMS (independent heartbeat + venue countdownCancelAll).
@@ -242,25 +242,25 @@ Strategies self-register via `REGISTER_STRATEGY` (sma, mean-reversion, ma-crosso
 ## 9. Risk Management, DMS, Kill-Switch, Reconciler, WorkerWatchdog (detailed in futures-testnet.md, killswitch timeline, prod, user-manual)
 
 **Layered**:
-- Venue `IRiskCheck` / `FuturesRiskCheck` (notional, leverage, liq-distance, real tiered MMR) — hot path, before RiskManager.
-- RiskManager (balance, daily loss, % equity/vol sizing, spread/funding CBs → halt).
+- Venue `IRiskCheck` / `FuturesRiskCheck` (notional, leverage, liq-distance, real tiered MMR) - hot path, before RiskManager.
+- RiskManager (balance, daily loss, % equity/vol sizing, spread/funding CBs -> halt).
 - Startup IReconciler (position/order vs /positionRisk + availableBalance; refusal default).
 - Shutdown IKillSwitch (cancel-all + reduceOnly flatten, deadline).
 - DMS (countdownCancelAll heartbeat; protects orders only; WorkerWatchdog monitors; 3× heartbeat internal).
 - Halt propagation to all workers + ring policy `halt_on_drop` on safety rings.
 
-**Futures testnet DMS validation playbook** (futures-testnet.md — 5 scenarios A–E with tables, conservative caps command, aliases `bf-orders`/`bf-position`, pass/fail, recording):
+**Futures testnet DMS validation playbook** (futures-testnet.md - 5 scenarios A-E with tables, conservative caps command, aliases `bf-orders`/`bf-position`, pass/fail, recording):
 - A: Clean SIGINT.
 - B: SIGKILL.
 - C: OOM simulation.
 - D: Network unplug (physical or iptables).
 - E: SIGSTOP (foot-gun demo showing DMS still fires).
 
-**Killswitch LAN-unplug timeline** (killswitch-lan-unplug-timeline.md — canonical catastrophic disconnect analysis):
-- Blocking `net::connect()` in REST client (tcp_syn_retries=6 → 60–90s hang) is a known foot-gun.
-- WS keepalive/Beast timeout → fatal → halt.
+**Killswitch LAN-unplug timeline** (killswitch-lan-unplug-timeline.md - canonical catastrophic disconnect analysis):
+- Blocking `net::connect()` in REST client (tcp_syn_retries=6 -> 60-90s hang) is a known foot-gun.
+- WS keepalive/Beast timeout -> fatal -> halt.
 - DMS venue timer still fires and cancels orders (~30s).
-- Kill-switch and DMS flatten require the lost network → wedge.
+- Kill-switch and DMS flatten require the lost network -> wedge.
 - Implications: unplug validates DMS + halt story, not flatten (use `--dms-attempt-position-close` + independent machine for drill). Phase 3 external watchdog + non-blocking connect needed.
 
 **Refusal modes table** (clock skew, hedge, symbol not found, permissions, reconciler drift, etc.) in futures-testnet.md.
@@ -327,7 +327,7 @@ Full `provider::event` variant + market/tick/l2/order/fill/funding. OrderTracker
 
 **[architecture/migration.md](architecture/migration.md)**: Chronological audit trail. Every core PR adds entry (date | desc | files | PR). Groups by phase. Records Phase 0 SOP, Phase 1 freeze artifacts/blocks/script, Phase 2.2 tiered MMR + funding wiring.
 
-**[architecture/perf-baseline.md](architecture/perf-baseline.md) + [architecture/performance.md](architecture/performance.md)**: Detailed numerical anchor (36.67s baseline, StageTimer breakdown, memory, rings), append-only changelog of every locked optimization (with before/after, verification, reproduction steps), recommended order for remaining items (symbol interning largest, lock-free dashboard, shared_ptr audit, etc.). "0–2% wall = noise"; treat as regression targets.
+**[architecture/perf-baseline.md](architecture/perf-baseline.md) + [architecture/performance.md](architecture/performance.md)**: Detailed numerical anchor (36.67s baseline, StageTimer breakdown, memory, rings), append-only changelog of every locked optimization (with before/after, verification, reproduction steps), recommended order for remaining items (symbol interning largest, lock-free dashboard, shared_ptr audit, etc.). "0-2% wall = noise"; treat as regression targets.
 
 ---
 
@@ -349,7 +349,7 @@ Acceptance commands and methodology in the doc. Ties to realism + demo-trading-w
 1. Backtest + realism models on recorded real mainnet futures tape.
 2. Deterministic replay.
 3. Live mainnet shadow (`TradeTapeShadowAdapter` + ShadowTracker for sim vs exchange divergence).
-4. Protocol/wire + safety validation on futures testnet (DMS playbook A–E, one-way, recon, refusals; **never calibrate realism here** — synthetic liquidity).
+4. Protocol/wire + safety validation on futures testnet (DMS playbook A-E, one-way, recon, refusals; **never calibrate realism here** - synthetic liquidity).
 5. Tiny-size Phase 0 mainnet under official SOP + full artifacts.
 
 **futures-testnet.md** (USDT-M): Account one-way mode, `--testnet`, math-captcha skipped, pre-trade caps + liquidation projection math, DMS details + 5-scenario playbook, refusal modes table, what engine does (recon, kill, brackets), gotchas (thin book, resets, partial brackets declined), integration smoke test.
@@ -396,7 +396,7 @@ Stable surface (opaque handle, JSON config same as engine_config):
 
 Authoritative table:
 - Always: CLI11 (BSD), zstd (BSD chosen over GPL), nlohmann/json (MIT).
-- Conditional: Boost (BSL for BINANCE/LIVE_DATA), OpenSSL (Apache for BINANCE), Abseil (Apache for DEBUG — never engine_live), GTest/Benchmark (tests only).
+- Conditional: Boost (BSL for BINANCE/LIVE_DATA), OpenSSL (Apache for BINANCE), Abseil (Apache for DEBUG - never engine_live), GTest/Benchmark (tests only).
 - QuestDB: zero new deps (raw POSIX).
 - Rules: No vendored trees, copyleft forbidden (dual-license election documented), update table + pins in same PR, engine_live column, hot-path JSON CI gate.
 
@@ -404,15 +404,15 @@ Authoritative table:
 
 ## 19. Future Directions & Upcoming (upcoming/*.md + prod phases + target)
 
-**Drift Protocol Liquidation Keeper Bot** (claude_drift.md + grokd_drift.md — two detailed overlapping plans, May 2026):
+**Drift Protocol Liquidation Keeper Bot** (claude_drift.md + grokd_drift.md - two detailed overlapping plans, May 2026):
 - Non-speculative infrastructure play (inventory risk on unwind acknowledged; small capital limits scope).
 - Engine reuse ~25-30% (IProvider + 4 safety hooks, rings, WorkerWatchdog, DMS/Kill/Reconciler patterns, event log/replay, QuestDB/TUI/config, Boost.Beast/OpenSSL). Do not reuse orderbook/strategies/Binance specifics.
 - Recommended: Hybrid C++ engine + Rust FFI (`drift-rs`) for decode/margin/tx build (Solana not natural in C++).
-- 7-phase plan (both docs): Phase 0 skeleton (ENABLE_DRIFT + keeper_sim/keeper_live targets + run_keeper() + FFI stub), 1 (multi-RPC + simulateTransaction mandatory), 2 (UserMap + exact margin health via FFI — hardest), 3 (profitability sim post-unwind), 4 (tx build v0+ALT + Jito + unwind queue), 5 (capital caps + adapted safety + external supervisor mandatory vs SIGSTOP), 6 (systemd + alerting), 7 (replay/shadow → tiny rollout with 70-80% shadow success gate).
+- 7-phase plan (both docs): Phase 0 skeleton (ENABLE_DRIFT + keeper_sim/keeper_live targets + run_keeper() + FFI stub), 1 (multi-RPC + simulateTransaction mandatory), 2 (UserMap + exact margin health via FFI - hardest), 3 (profitability sim post-unwind), 4 (tx build v0+ALT + Jito + unwind queue), 5 (capital caps + adapted safety + external supervisor mandatory vs SIGSTOP), 6 (systemd + alerting), 7 (replay/shadow -> tiny rollout with 70-80% shadow success gate).
 - Cross-cutting: simulation gate non-negotiable, resubscribe-on-reconnect, dedicated RPCs, external supervisor, exact on-chain math.
 - Bottom line: Shadow run (economic model) is make-or-break before any capital.
 
-**prod.md Phases 3–6** (DMS flatten + external watchdog; persist-strict + richer checkpoints + mandatory log; Prometheus/alerts/creds; 60d report + post-mortems + CCB charter).
+**prod.md Phases 3-6** (DMS flatten + external watchdog; persist-strict + richer checkpoints + mandatory log; Prometheus/alerts/creds; 60d report + post-mortems + CCB charter).
 
 **Other deferred** (target-architecture): hedge mode, COIN-M, generic multi-venue cross-margin, keeper mode (`run_keeper()`), Prometheus.
 
@@ -439,9 +439,9 @@ Authoritative table:
 
 **Go-Live Gate**: All 9 rows two signatures + evidence.
 
-**Perf Locking**: Reference 5+ median runs on workload → update perf-baseline.md + regression guard.
+**Perf Locking**: Reference 5+ median runs on workload -> update perf-baseline.md + regression guard.
 
-**DMS Validation (testnet)**: Run 5 scenarios A–E with independent monitoring + recording.
+**DMS Validation (testnet)**: Run 5 scenarios A-E with independent monitoring + recording.
 
 **Network Partition Drill**: Use `--dms-attempt-position-close` + independent machine + post-reconcile + exact timing log.
 
@@ -455,13 +455,13 @@ Authoritative table:
 
 - Never increase capital tier without prior phase exits + full Go-Live Gate sign-offs.
 - Never edit frozen safety surface without token + CCB + shadow run (script enforces).
-- Halt is terminal — any code suggesting resume/retry/cooldown on halt paths is rejected.
+- Halt is terminal - any code suggesting resume/retry/cooldown on halt paths is rejected.
 - No JSON on hot path; no allocations where possible; SPSC discipline strict.
-- DMS **does not close positions** (orders only) — operator/external watchdog must handle flatten.
+- DMS **does not close positions** (orders only) - operator/external watchdog must handle flatten.
 - SIGSTOP/SIGKILL/suspension defeats in-process kill-switch; DMS still fires (venue timer) but positions remain.
-- Blocking TCP connect in REST client causes long hangs on network loss — engine appears hung; kill-switch/DMS flatten require the lost network.
+- Blocking TCP connect in REST client causes long hangs on network loss - engine appears hung; kill-switch/DMS flatten require the lost network.
 - One-way mode is **hard refusal** on futures; hedge mode prevents start.
-- Reconciler refusal default — do not force; investigate.
+- Reconciler refusal default - do not force; investigate.
 - Math-captcha window must remain visible and attended entire mainnet live Phase 0+ session.
 - Stay at terminal; do not leave machine unattended with live orders.
 - Testnet: never calibrate realism/slippage/impact (synthetic liquidity, fictional funding, thin books, resets). Use only for wire/protocol/DMS validation.
@@ -471,8 +471,8 @@ Authoritative table:
 - Funding ignored in P&L/risk today (mitigated in partial Phase 2).
 - Brackets non-atomic on futures.
 - Realism models + queue/impact/latency **bypassed in live**; only honest for backtest/shadow divergence measurement.
-- Ring drops on safety rings → halt_on_drop.
-- Agent cannot trade — human only for live capital decisions.
+- Ring drops on safety rings -> halt_on_drop.
+- Agent cannot trade - human only for live capital decisions.
 - When in doubt: flatten + review logs.
 - Sonnet on Opus-zone safety files risks shipping subtle invariant violations.
 - External `tt_watchdog` + non-blocking connect + richer checkpoints not yet present (Phase 3/4 gaps).
@@ -488,7 +488,7 @@ Authoritative table:
 - `src/risk/` (risk_manager, futures_risk_check ~154-176 approx, maintenance_margin_table).
 - `src/execution/` (portfolio (lots_, on_funding), execution_adapter (LocalBookAdapter, QueueAware), latency/impact/queue_model/queue_position_model, trade_tape_shadow_adapter, live_safety, order_tracker, fee_model, etc.).
 - `src/orderbook/`, `src/exits/` (ExitManager, bracket_adapter), `src/strategy/` (registry), `src/analytics/` (shadow_tracker, adverse_selection, on_funding).
-- `src/data/questdb/` (store, ilp_writer, schema, http/tcp_client, run_tag — current direct mutex impl).
+- `src/data/questdb/` (store, ilp_writer, schema, http/tcp_client, run_tag - current direct mutex impl).
 - `src/threading/` (ring_buffer, worker_watchdog, thread_preset, worker).
 - `src/debug/` (stage_timer, ring_stats, memory_info, copy_tracker).
 - `src/core/event.h` (funding_event), `src/bin/main.inc` (CLI wiring, defaults DMS 30s/10s, kill 5s).
@@ -502,11 +502,11 @@ Cross-references point to files now organized under `architecture/`, `operations
 
 ## 23. Document Maintenance & Evolution
 
-- Living documents — update after every phase completion, before capital tier increase, and after any material change to frozen surface.
+- Living documents - update after every phase completion, before capital tier increase, and after any material change to frozen surface.
 - Every PR touching core/risk/safety/live-provider must add migration.md entry and reference todo/prod impact.
 - This master instructions.md is now the single source; other .md files may be archived or point here.
 - Phase 0/1 artifacts (reports/phase0/, decisions/phase1-freeze-*.md) are permanent evidence.
-- Minor sync lags (e.g., "9 files" vs 10 in enforcement, gaps.md vs prod Phase 2 status, stale QuestDB worker text in instructions) are evolution artifacts — trust the most recent prod/CLAUDE + db.md reality + this master.
+- Minor sync lags (e.g., "9 files" vs 10 in enforcement, gaps.md vs prod Phase 2 status, stale QuestDB worker text in instructions) are evolution artifacts - trust the most recent prod/CLAUDE + db.md reality + this master.
 
 **Related authoritative files**: Root governance ([CLAUDE.md](../CLAUDE.md), [prod.md](../prod.md), [prerequisites.md](../prerequisites.md), [todo.md](../todo.md)), plus the reorganized set under `docs/` (see [docs/README.md](README.md)). Historical material lives in `docs/archive/`. Phase 0 evidence is in `../reports/phase0/`.
 

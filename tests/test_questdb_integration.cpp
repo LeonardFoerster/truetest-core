@@ -62,7 +62,7 @@ TEST(QuestdbIntegration, EndToEndStoreRoundTrip)
 {
     const char* host_env = std::getenv("QUESTDB_TEST_HOST");
     if (!host_env || std::strlen(host_env) == 0)
-        GTEST_SKIP() << "QUESTDB_TEST_HOST not set — skipping live test.";
+        GTEST_SKIP() << "QUESTDB_TEST_HOST not set - skipping live test.";
 
     const std::string host = host_env;
     const std::uint16_t http_port = 9000;
@@ -85,7 +85,7 @@ TEST(QuestdbIntegration, EndToEndStoreRoundTrip)
 
     tq::QuestdbStore store(std::move(cfg));
     ASSERT_TRUE(store.begin())
-        << "begin() failed — is QuestDB running on " << host
+        << "begin() failed - is QuestDB running on " << host
         << ":" << http_port << "?";
 
     // 2. Emit one of each capture event.
@@ -118,7 +118,7 @@ TEST(QuestdbIntegration, EndToEndStoreRoundTrip)
               /*total_fills=*/1,
               /*total_rejections=*/1);
 
-    // QuestDB ILP commit is asynchronous — give it a moment to flush to
+    // QuestDB ILP commit is asynchronous - give it a moment to flush to
     // the WAL before we query.
     std::this_thread::sleep_for(std::chrono::milliseconds(800));
 

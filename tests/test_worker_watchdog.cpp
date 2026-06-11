@@ -38,7 +38,7 @@ TEST(WorkerWatchdog, IsHungZeroDeadlineMeansDisabled)
 
 TEST(WorkerWatchdog, IsHungWithinDeadlineIsAlive)
 {
-    // 50ms gap, 100ms deadline → still alive.
+    // 50ms gap, 100ms deadline -> still alive.
     EXPECT_FALSE(WorkerWatchdog::is_hung(/*now=*/1000, /*last=*/950, /*deadline=*/100));
 }
 
@@ -58,7 +58,7 @@ TEST(WorkerWatchdog, IsHungPastDeadlineFires)
 
 // --- Threaded behaviour -----------------------------------------------------
 // All threaded tests use small intervals (poll 20ms, deadline 80ms) so
-// they finish in well under a second. Tighten further only carefully —
+// they finish in well under a second. Tighten further only carefully -
 // scheduling jitter on heavily-loaded CI can produce flakes below ~10ms.
 
 TEST(WorkerWatchdog, NotStartedDoesNothing)
@@ -190,7 +190,7 @@ TEST(WorkerWatchdog, StopJoinsClenly)
     wd.register_source("idle", &last, 80);
 
     wd.start();
-    // Don't trigger — just let the watchdog run idle for a bit.
+    // Don't trigger - just let the watchdog run idle for a bit.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     wd.stop();
     // If stop() returns at all, the thread joined. Anything else

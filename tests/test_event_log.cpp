@@ -414,7 +414,7 @@ TEST(EventLog, Replay_ProducesIdenticalAnalytics)
         engine eng(dh, nullptr, strat, std::move(cfg));
         eng.run();
 
-        // The engine ran — get some basic output to compare
+        // The engine ran - get some basic output to compare
         // We can't easily extract PnL from the engine, so we just verify
         // the replay completes without error and processes events
         original_pnl = 1.0; // sentinel to verify we got here

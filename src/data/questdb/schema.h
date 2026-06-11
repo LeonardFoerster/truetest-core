@@ -12,7 +12,7 @@ std::string runs_meta_ddl();
 // Six per-run DDL statements, prefixed with run_tag.
 std::vector<std::string> per_run_ddls(const std::string& run_tag);
 
-// Convenience — all 7 statements in the order they should be issued.
+// Convenience - all 7 statements in the order they should be issued.
 std::vector<std::string> all_ddls(const std::string& run_tag);
 
 inline constexpr const char* kTableOrders        = "orders";

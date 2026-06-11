@@ -184,7 +184,7 @@ public:
             auto check = binance::verify_clock_skew(*rest_);
             if (!check.ok)
             {
-                std::cerr << "BinanceProvider: refusing to go live — "
+                std::cerr << "BinanceProvider: refusing to go live - "
                           << check.note << "\n";
                 state_ = lifecycle::error;
                 return false;
@@ -198,7 +198,7 @@ public:
                     "/api/v3/exchangeInfo", "symbol=" + upper(symbol_));
                 if (info.status < 200 || info.status >= 300)
                 {
-                    std::cerr << "BinanceProvider: refusing to go live — "
+                    std::cerr << "BinanceProvider: refusing to go live - "
                                  "symbol '" << upper(symbol_)
                               << "' not found on "
                               << (endpoints_.is_testnet ? "testnet " : "")
@@ -209,7 +209,7 @@ public:
                 }
             }
 
-            // Limiter tracks Binance spot's 50/10s order-rate rule —
+            // Limiter tracks Binance spot's 50/10s order-rate rule -
             // NOT covered by the REST client's weight throttle.
             minter_ = std::make_shared<ClientOrderIdMinter>("tt", seed_);
             if (endpoints_.is_testnet)
@@ -217,7 +217,7 @@ public:
                 auto kw = ClientOrderIdMinter::sql_keyword_in(minter_->prefix());
                 if (!kw.empty())
                 {
-                    std::cerr << "BinanceProvider: refusing to go live on testnet — "
+                    std::cerr << "BinanceProvider: refusing to go live on testnet - "
                                  "client_order_id prefix '" << minter_->prefix()
                               << "' contains '" << kw << "', which the spot-testnet "
                                  "WAF rejects.\n";
@@ -317,7 +317,7 @@ public:
     }
 
     // Engine wires this in live mode so a fatal WS loss flips the engine
-    // straight into shutdown. Idempotent — apply_halt_cb_to_transports()
+    // straight into shutdown. Idempotent - apply_halt_cb_to_transports()
     // pushes the callback to whichever transports exist at the moment,
     // and open() repeats the propagation as transports come up.
     void set_halt_callback(
@@ -327,7 +327,7 @@ public:
         apply_halt_cb_to_transports();
     }
 
-    // Only with depth — otherwise the single-stream parser is cheaper.
+    // Only with depth - otherwise the single-stream parser is cheaper.
     bool supports_event_stream() const override
     {
         return !depth_stream_.empty();
@@ -411,8 +411,8 @@ private:
 
     struct asset_pair { std::string base; std::string quote; };
 
-    // "BTCUSDT" → {BTC, USDT} via the documented quote suffixes. Unknown
-    // → 3-char quote fallback; operator can override via cfg.reconciler.
+    // "BTCUSDT" -> {BTC, USDT} via the documented quote suffixes. Unknown
+    // -> 3-char quote fallback; operator can override via cfg.reconciler.
     static asset_pair split_symbol(const std::string& sym)
     {
         std::string u = upper(sym);

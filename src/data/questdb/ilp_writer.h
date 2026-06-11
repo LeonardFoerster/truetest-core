@@ -75,7 +75,7 @@ public:
     bool connect();
 
     // Append a pre-built line (must end with '\n'). Flushes the buffer if
-    // the threshold is reached. Safe to call after a connection drop —
+    // the threshold is reached. Safe to call after a connection drop -
     // the buffer accumulates and a reconnect is attempted on the next
     // flush.
     void enqueue(std::string line);

@@ -1,7 +1,7 @@
 // Walked-book impact: when L2 depth is real, market orders price against
 // the actual VWAP they'd consume rather than mid + parametric impact.
 // Phase 4 of the realism plan. Composes with --realistic-fills (no
-// effect there — the resting walk already prices fills) and only
+// effect there - the resting walk already prices fills) and only
 // activates when l2_seeded_ is set.
 
 #include <gtest/gtest.h>
@@ -54,8 +54,8 @@ TEST(WalkedBookImpact, MarketBuyUsesVWAPOfWalkedAsks)
     std::vector<fill_event> fills;
     ASSERT_TRUE(adapter.poll_fills(fills));
     // Without realistic_fills, the recorded fill price is the aggressor's
-    // book_price = vwap × aggression. (100 + 2×101)/3 = 100.667 → wait,
-    // qty is 2 not 3: take 1 @ 100, 1 @ 101 → vwap = (100 + 101)/2 = 100.5.
+    // book_price = vwap × aggression. (100 + 2×101)/3 = 100.667 -> wait,
+    // qty is 2 not 3: take 1 @ 100, 1 @ 101 -> vwap = (100 + 101)/2 = 100.5.
     const double expected = 100.5 * 1.1;
     // Two fills at the same book_price (matching engine emits one per
     // matched level, both at the aggressor's submitted price under
@@ -91,7 +91,7 @@ TEST(WalkedBookImpact, MarketSellUsesVWAPOfWalkedBids)
     EXPECT_NEAR(fills.back().get_fill_price(), expected, 0.05);
 }
 
-// Insufficient depth → walked returns 0 → falls back to mid + impact_model.
+// Insufficient depth -> walked returns 0 -> falls back to mid + impact_model.
 // Without an impact model the mid + aggression baseline applies, NOT
 // walked-VWAP of the partial book (that would understate the sweep).
 TEST(WalkedBookImpact, InsufficientDepthFallsBackToMid)
@@ -119,7 +119,7 @@ TEST(WalkedBookImpact, InsufficientDepthFallsBackToMid)
 }
 
 // Walked-book suppresses the parametric impact model when both are
-// configured — they'd double-count slippage on the same depth.
+// configured - they'd double-count slippage on the same depth.
 TEST(WalkedBookImpact, SuppressesSquareRootWhenBothActive)
 {
     auto ob = std::make_shared<orderbook>();
@@ -145,11 +145,11 @@ TEST(WalkedBookImpact, SuppressesSquareRootWhenBothActive)
     // Walked VWAP for qty=1 at ask 100×10 is exactly 100. Aggression
     // gives 110. SquareRoot would have added k·sqrt(qty/adv) = 100·
     // sqrt(1/1000) ≈ 3.16 bps to the ref before aggression, producing
-    // ~110.348. Suppressed → 110.0.
+    // ~110.348. Suppressed -> 110.0.
     EXPECT_NEAR(fills[0].get_fill_price(), 110.0, 0.05);
 }
 
-// No L2 seeded → flag has no effect → falls back to mid + impact_model.
+// No L2 seeded -> flag has no effect -> falls back to mid + impact_model.
 // Guards against the flag silently changing non-shadow behaviour.
 TEST(WalkedBookImpact, NoL2NoEffect)
 {
@@ -161,7 +161,7 @@ TEST(WalkedBookImpact, NoL2NoEffect)
         nullptr, nullptr, false, 0.0,
         /*walked_book_impact=*/true);
     adapter.set_mid_price(100.0);
-    // Note: no set_l2_seeded(true) — symbol is not L2-seeded.
+    // Note: no set_l2_seeded(true) - symbol is not L2-seeded.
 
     order_event o(now(), "TEST", order_type::market, order_side::buy, /*qty=*/1.0);
     o.set_order_id(1);
@@ -170,11 +170,11 @@ TEST(WalkedBookImpact, NoL2NoEffect)
 
     std::vector<fill_event> fills;
     ASSERT_TRUE(adapter.poll_fills(fills));
-    // Legacy mid × aggression — flag inactive without L2.
+    // Legacy mid × aggression - flag inactive without L2.
     EXPECT_NEAR(fills[0].get_fill_price(), 110.0, 0.05);
 }
 
-// Walked-book off → byte-identity to step-1-baseline behaviour with
+// Walked-book off -> byte-identity to step-1-baseline behaviour with
 // realistic_fills also off. The flag must default to no-op for back-
 // compat with existing backtests.
 TEST(WalkedBookImpact, DefaultOffPreservesLegacy)

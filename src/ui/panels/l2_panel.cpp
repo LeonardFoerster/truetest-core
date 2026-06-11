@@ -47,7 +47,7 @@ void L2Panel::draw(int body_y0, int width, int height,
 
     if (!snap)
     {
-        mvaddstr(body_y0, 2, "(no snapshot yet — engine warming up)");
+        mvaddstr(body_y0, 2, "(no snapshot yet - engine warming up)");
         return;
     }
     const auto& v = snap->l2;
@@ -100,7 +100,7 @@ void L2Panel::draw(int body_y0, int width, int height,
         return;
     }
 
-    // Source caveat: synthetic depth is paper-only — make sure no one
+    // Source caveat: synthetic depth is paper-only - make sure no one
     // mistakes it for the real venue book.
     if (v.source == dashboard_snapshot::l2_source::synthetic && y < y_end)
     {
@@ -131,9 +131,9 @@ void L2Panel::draw(int body_y0, int width, int height,
     const int bar_x   = label_w;
     const int bar_w   = std::max(8, remaining_width(bar_x, width, 2));
 
-    // Bars built into a single buffer + emitted via mvaddstr — one
+    // Bars built into a single buffer + emitted via mvaddstr - one
     // ncurses call per bar instead of `filled` mvaddch calls. With
-    // 20 levels × ~30-cell bars that's 600 → 20 calls per render.
+    // 20 levels × ~30-cell bars that's 600 -> 20 calls per render.
     char bar_buf[256];
     auto draw_bar = [&](int yy, double size, int color_pair) {
         // Always clear the bar region first to prevent ghost characters
@@ -152,14 +152,14 @@ void L2Panel::draw(int body_y0, int width, int height,
         attroff(COLOR_PAIR(color_pair));
     };
 
-    // Reserve vertical: ~half for asks (rendered top-down high → low),
-    // mid-line, ~half for bids (rendered top-down high → low).
+    // Reserve vertical: ~half for asks (rendered top-down high -> low),
+    // mid-line, ~half for bids (rendered top-down high -> low).
     const int rows_avail = (y_end - y) - 4;        // leave 4 for mid + footer
     const int per_side   = std::max(1, rows_avail / 2);
     const int n_asks     = std::min<int>(per_side, static_cast<int>(v.asks.size()));
     const int n_bids     = std::min<int>(per_side, static_cast<int>(v.bids.size()));
 
-    // ── Asks: render reversed (worst → best) so the best ask sits
+    // ── Asks: render reversed (worst -> best) so the best ask sits
     // immediately above the mid-line, matching trader intuition.
     for (int i = n_asks - 1; i >= 0; --i)
     {

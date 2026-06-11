@@ -15,18 +15,11 @@
 #include <thread>
 #include <utility>
 
-// Regression test for the keep-alive I/O-timeout fix.
-//
-// The kill-switch arms an aggressive per-call timeout right before it fires
-// cancel/flatten at shutdown. With persistent Keep-Alive the kill-switch
-// reuses a *warm* connection, so the timeout must actually bound the I/O on
-// that warm connection — otherwise a still-down LAN could wedge cancel/flatten
-// past the kill-switch deadline. (SO_RCVTIMEO/SO_SNDTIMEO do not achieve this
-// under Asio synchronous I/O, which is why the client uses async run_for.)
-//
-// This test establishes a warm TLS connection against a local server, then
-// arms a 200 ms timeout and issues a second request to a server that stalls
-// for 2 s. The request must abort at ~200 ms.
+// The kill-switch timeout must bound I/O on an already-open keep-alive
+// connection, not just on connect. SO_RCVTIMEO/SO_SNDTIMEO don't do that
+// under Asio sync I/O, hence the client's async run_for.
+// Setup: warm TLS connection to a local server, 200 ms timeout armed,
+// second request against a server that stalls 2 s -> must abort at ~200 ms.
 
 namespace {
 

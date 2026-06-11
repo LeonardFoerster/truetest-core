@@ -49,7 +49,7 @@ TEST(RiskManager, MaxPositionValue_Reject)
     port.on_fill(fill);
     // Now position: 40 shares at 100 = $4000 notional
 
-    // Try to buy 20 more at 100 = $2000 additional → total $6000 > $5000 limit
+    // Try to buy 20 more at 100 = $2000 additional -> total $6000 > $5000 limit
     order_event ord(epoch_ms(1), "AAPL", order_type::limit, order_side::buy, 20, 100.0);
     auto snap = make_snap(0.0, 1, 1);
 
@@ -65,7 +65,7 @@ TEST(RiskManager, DrawdownExceeded_Halt)
     portfolio port;
 
     order_event ord(epoch_ms(0), "AAPL", order_type::limit, order_side::buy, 10, 100.0);
-    // Snap shows 15% drawdown (in percent) → 0.15 >= 0.10 limit
+    // Snap shows 15% drawdown (in percent) -> 0.15 >= 0.10 limit
     auto snap = make_snap(15.0, 0, 0);
 
     EXPECT_EQ(rm.check_order(ord, port, snap), risk_action::halt);
@@ -107,7 +107,7 @@ TEST(RiskManager, MaxOpenOrders_Reject)
     portfolio port;
 
     order_event ord(epoch_ms(0), "AAPL", order_type::limit, order_side::buy, 10, 100.0);
-    // 10 orders sent, 5 filled → 5 open = at limit
+    // 10 orders sent, 5 filled -> 5 open = at limit
     auto snap = make_snap(0.0, 10, 5);
 
     EXPECT_EQ(rm.check_order(ord, port, snap), risk_action::reject);

@@ -14,7 +14,7 @@ auto t0() { return std::chrono::system_clock::time_point(std::chrono::millisecon
 }
 
 // -----------------------------------------------------------------------
-// LocalBookAdapter with cancel latency — the central scenario: a paper
+// LocalBookAdapter with cancel latency - the central scenario: a paper
 // maker posts a limit, decides to cancel, and the exchange book crosses
 // during the in-flight cancel window.
 // -----------------------------------------------------------------------
@@ -41,7 +41,7 @@ TEST(LocalBookAdapterCancelRace, CancelInflight_TradeCrosses_Fills)
     EXPECT_TRUE(adapter.cancel_order(42));
 
     // T=80ms: a counterparty sell crosses our 100 price. Cancel still
-    // in-flight — the order is still on the book and must fill.
+    // in-flight - the order is still on the book and must fill.
     adapter.advance_time(t0() + 80ms);
     order_event counter(t0() + 80ms, "X", order_type::limit,
                         order_side::sell, 10, 100.0);
@@ -51,7 +51,7 @@ TEST(LocalBookAdapterCancelRace, CancelInflight_TradeCrosses_Fills)
 
     // LocalBookAdapter only emits fill_events for the submitting order.
     // The proof that our resting order 42 was still on the book is that
-    // the counter-sell (order 99) matched and got a fill — if our in-flight
+    // the counter-sell (order 99) matched and got a fill - if our in-flight
     // cancel had been applied immediately, there'd be no liquidity at 100
     // and the counter-sell would rest instead of filling.
     std::vector<fill_event> fills;
@@ -62,7 +62,7 @@ TEST(LocalBookAdapterCancelRace, CancelInflight_TradeCrosses_Fills)
         if (f.get_order_id() == 99) { counter_filled = true; break; }
     }
     EXPECT_TRUE(counter_filled)
-        << "Counter-sell didn't match — resting buy was removed before the "
+        << "Counter-sell didn't match - resting buy was removed before the "
            "cancel window elapsed, which is the bug this test guards against.";
 }
 
@@ -85,7 +85,7 @@ TEST(LocalBookAdapterCancelRace, CancelAfterWindow_TradeDoesNotFill)
     adapter.advance_time(t0() + 50ms);
     adapter.cancel_order(42);
 
-    // T=200ms: advance past the eligibility → cancel drained; order gone.
+    // T=200ms: advance past the eligibility -> cancel drained; order gone.
     adapter.advance_time(t0() + 200ms);
 
     // Counterparty sell at our price arrives AFTER cancel completed.
@@ -101,13 +101,13 @@ TEST(LocalBookAdapterCancelRace, CancelAfterWindow_TradeDoesNotFill)
     for (const auto& f : fills)
     {
         EXPECT_NE(f.get_order_id(), 42u)
-            << "Cancel had elapsed — our order must NOT have filled.";
+            << "Cancel had elapsed - our order must NOT have filled.";
     }
 }
 
 TEST(LocalBookAdapterCancelRace, ZeroLatency_CancelIsImmediate)
 {
-    // ZeroLatencyModel → cancel_latency = 0 → current behavior.
+    // ZeroLatencyModel -> cancel_latency = 0 -> current behavior.
     auto ob = std::make_shared<orderbook>();
     auto lat = std::make_shared<ZeroLatencyModel>();
     LocalBookAdapter adapter(ob, nullptr, nullptr, 42, 1.1, 1e8, lat);
@@ -119,7 +119,7 @@ TEST(LocalBookAdapterCancelRace, ZeroLatency_CancelIsImmediate)
     adapter.advance_time(t0());
 
     adapter.cancel_order(42);
-    adapter.advance_time(t0());  // same instant → eligible immediately.
+    adapter.advance_time(t0());  // same instant -> eligible immediately.
 
     // Now a counterparty cross arrives. Order should be gone.
     order_event counter(t0() + 1ms, "X", order_type::limit,
@@ -138,7 +138,7 @@ TEST(LocalBookAdapterCancelRace, ZeroLatency_CancelIsImmediate)
 TEST(LocalBookAdapterCancelRace, NoLatencyModel_CancelIsImmediate_BackCompat)
 {
     // Without any latency model attached, existing behavior must be
-    // preserved — cancel removes the order instantly.
+    // preserved - cancel removes the order instantly.
     auto ob = std::make_shared<orderbook>();
     LocalBookAdapter adapter(ob, nullptr, nullptr);   // no latency model
 

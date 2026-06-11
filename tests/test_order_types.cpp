@@ -77,7 +77,7 @@ TEST(OrderTypes, IOC_PartialFill)
                                         Price::from_double(100.0), 5);
     ob.add_order(ask);
 
-    // IOC buy for 10 — should fill 5, cancel remaining 5
+    // IOC buy for 10 - should fill 5, cancel remaining 5
     auto ioc_buy = std::make_shared<order>(ob_order_type::immediate_or_cancel, 2, side::buy,
                                             Price::from_double(100.0), 10);
     auto result = ob.add_order(ioc_buy);
@@ -107,7 +107,7 @@ TEST(OrderTypes, IOC_FullFill)
 TEST(OrderTypes, IOC_NoMatch)
 {
     orderbook ob;
-    // No liquidity on ask side — IOC buy should get nothing
+    // No liquidity on ask side - IOC buy should get nothing
     auto ioc_buy = std::make_shared<order>(ob_order_type::immediate_or_cancel, 1, side::buy,
                                             Price::from_double(100.0), 10);
     auto result = ob.add_order(ioc_buy);
@@ -125,7 +125,7 @@ TEST(OrderTypes, FOK_AllOrNothing)
                                         Price::from_double(100.0), 5);
     ob.add_order(ask);
 
-    // FOK buy for 10 — can't fully fill, should reject entirely
+    // FOK buy for 10 - can't fully fill, should reject entirely
     auto fok_buy = std::make_shared<order>(ob_order_type::fill_or_kill, 2, side::buy,
                                             Price::from_double(100.0), 10);
     auto result = ob.add_order(fok_buy);
@@ -181,7 +181,7 @@ static std::shared_ptr<data_handler> make_bar_data_prices(const std::vector<doub
 TEST(OrderTypes, StopBuy_Triggers)
 {
     SilenceCout_OT quiet;
-    // Prices: 100, 100, 105, 110 — stop buy at 104 should trigger on bar 3 (high >= 104)
+    // Prices: 100, 100, 105, 110 - stop buy at 104 should trigger on bar 3 (high >= 104)
     auto dh = make_bar_data_prices({100.0, 100.0, 105.0, 110.0});
     auto strat = std::make_shared<StopStrategy>(order_type::stop, order_side::buy, 104.0);
 
@@ -198,7 +198,7 @@ TEST(OrderTypes, StopBuy_Triggers)
 TEST(OrderTypes, StopSell_Triggers)
 {
     SilenceCout_OT quiet;
-    // Prices: 100, 100, 95, 90 — stop sell at 96 should trigger on bar 3 (low <= 96)
+    // Prices: 100, 100, 95, 90 - stop sell at 96 should trigger on bar 3 (low <= 96)
     auto dh = make_bar_data_prices({100.0, 100.0, 95.0, 90.0});
 
     // Strategy that buys on bar 1, then places stop sell
@@ -247,7 +247,7 @@ TEST(OrderTypes, StopSell_Triggers)
 TEST(OrderTypes, StopLimit_ConvertsToLimit)
 {
     SilenceCout_OT quiet;
-    // Prices: 100, 100, 105, 110 — stop-limit buy: trigger=104, limit=106
+    // Prices: 100, 100, 105, 110 - stop-limit buy: trigger=104, limit=106
     auto dh = make_bar_data_prices({100.0, 100.0, 105.0, 110.0});
     auto strat = std::make_shared<StopStrategy>(order_type::stop_limit, order_side::buy, 104.0, 106.0);
 
@@ -263,7 +263,7 @@ TEST(OrderTypes, StopLimit_ConvertsToLimit)
 TEST(OrderTypes, Stop_NoTrigger)
 {
     SilenceCout_OT quiet;
-    // Prices: 100, 100, 101, 102 — stop buy at 110 should never trigger
+    // Prices: 100, 100, 101, 102 - stop buy at 110 should never trigger
     auto dh = make_bar_data_prices({100.0, 100.0, 101.0, 102.0});
     auto strat = std::make_shared<StopStrategy>(order_type::stop, order_side::buy, 110.0);
 
@@ -292,7 +292,7 @@ TEST(OrderTypes, DayOrder_CancelledAtSessionEnd)
             call_count_++;
             if (call_count_ == 1)
             {
-                // Place a day limit buy far below market — won't fill
+                // Place a day limit buy far below market - won't fill
                 return order_event(mkt.get_timestamp(), mkt.get_symbol(),
                                    order_type::limit, order_side::buy, 10, 50.0,
                                    time_in_force::day);
@@ -332,7 +332,7 @@ TEST(OrderTypes, GTC_PersistsAcrossBars)
                                         Price::from_double(95.0), 10);
     ob.add_order(gtc);
 
-    // Simulate several bars — GTC should still be on book
+    // Simulate several bars - GTC should still be on book
     EXPECT_EQ(ob.size(), 1u);
 
     // Eventually a matching ask arrives
@@ -370,6 +370,6 @@ TEST(OrderTypes, Adapter_IOC_PartialFill)
     EXPECT_EQ(fills.size(), 1u);
     EXPECT_DOUBLE_EQ(fills[0].get_filled_quantity(), 5.0);  // partial fill
 
-    // IOC remainder cancelled — nothing left on book from the buy side
+    // IOC remainder cancelled - nothing left on book from the buy side
     EXPECT_EQ(ob->size(), 0u);
 }

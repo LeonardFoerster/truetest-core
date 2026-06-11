@@ -6,7 +6,7 @@
 TEST(FrontCancelModel, CancelsFullyAheadAdvanceQueue)
 {
     FrontCancelModel m;
-    // 10 units ahead, a cancel of 4 all came from the front → 6 ahead now.
+    // 10 units ahead, a cancel of 4 all came from the front -> 6 ahead now.
     EXPECT_DOUBLE_EQ(m.update_on_cancels(10.0, 100.0, 4.0), 6.0);
 }
 
@@ -42,7 +42,7 @@ TEST(BackCancelModel, ZeroAheadStaysZero)
 TEST(UniformCancelModel, ProportionalToQueueShare)
 {
     UniformCancelModel m;
-    // Ahead = 25 of a 100-unit level → our share is 0.25.
+    // Ahead = 25 of a 100-unit level -> our share is 0.25.
     // A 20-unit cancel takes 0.25 × 20 = 5 from ahead of us.
     EXPECT_DOUBLE_EQ(m.update_on_cancels(25.0, 100.0, 20.0), 25.0 - 5.0);
 }
@@ -50,7 +50,7 @@ TEST(UniformCancelModel, ProportionalToQueueShare)
 TEST(UniformCancelModel, FullShareAtBack)
 {
     UniformCancelModel m;
-    // Fully at the back (size_ahead == total_size) → all cancels hit us.
+    // Fully at the back (size_ahead == total_size) -> all cancels hit us.
     EXPECT_DOUBLE_EQ(m.update_on_cancels(100.0, 100.0, 10.0), 90.0);
 }
 
@@ -64,7 +64,7 @@ TEST(UniformCancelModel, ZeroTotalSizeIsNoop)
 TEST(UniformCancelModel, ClampsAtZero)
 {
     UniformCancelModel m;
-    // Contrived: size_ahead 5 of total 10, 100 cancels → 5 - 50 → clamp to 0.
+    // Contrived: size_ahead 5 of total 10, 100 cancels -> 5 - 50 -> clamp to 0.
     EXPECT_DOUBLE_EQ(m.update_on_cancels(5.0, 10.0, 100.0), 0.0);
 }
 

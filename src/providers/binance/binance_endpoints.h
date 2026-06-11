@@ -52,7 +52,7 @@ inline endpoints usdm_mainnet()
 
 // USDT-M futures testnet uses the dedicated `binancefuture.com` domain
 // (not `*.testnet.binance.vision`). The WS host is `stream.binancefuture.com`
-// — note the absence of any "testnet" substring in it; the REST host
+// - note the absence of any "testnet" substring in it; the REST host
 // `testnet.binancefuture.com` does carry it.
 inline endpoints usdm_testnet()
 {

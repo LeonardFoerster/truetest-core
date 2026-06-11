@@ -8,7 +8,7 @@
 //   - cancels the order
 // Quantity is tuned to clear the testnet's 10 USDT MIN_NOTIONAL filter
 // (0.001 BTC * 0.5 * mark = ~30 USDT). Placement and cancel are the
-// only paths verified — user-data executionReport is async and out of
+// only paths verified - user-data executionReport is async and out of
 // scope for this smoke test.
 
 #include <gtest/gtest.h>
@@ -52,7 +52,7 @@ TEST(BinanceTestnetLive, PlaceAndCancelLimitOrder)
     BinanceRestClient cli(key, sec, ep.rest_host, ep.rest_port);
 
     ASSERT_TRUE(cli.resync_clock_now())
-        << "clock resync failed — testnet unreachable or DNS broken";
+        << "clock resync failed - testnet unreachable or DNS broken";
 
     auto info = cli.get_unsigned("/api/v3/exchangeInfo", "symbol=BTCUSDT");
     ASSERT_GE(info.status, 200);

@@ -2,7 +2,7 @@
 //   1. Reconciler failure blocks engine construction.
 //   2. Noop default passes (engine constructs).
 //   3. Kill-switch fires during stop_workers when mode == live.
-// None of these touch the network — they use in-memory mocks.
+// None of these touch the network - they use in-memory mocks.
 
 #include <gtest/gtest.h>
 #include "engine/engine.h"
@@ -68,7 +68,7 @@ TEST(LiveSafety, NoopReconciler_AllowsConstruction)
 
     engine_config cfg;
     cfg.mode = engine_mode::live;
-    // No reconciler set → engine installs NoopReconciler internally.
+    // No reconciler set -> engine installs NoopReconciler internally.
     EXPECT_NO_THROW(engine eng(dh, ob, strat, std::move(cfg)));
 }
 

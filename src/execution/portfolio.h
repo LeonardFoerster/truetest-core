@@ -16,7 +16,7 @@ struct position
 
 // Per-entry bookkeeping that lives alongside the netted `position` map.
 // Strategies get independent attribution for each entry (including a long
-// and a short on the same symbol — the venue still sees the netted balance,
+// and a short on the same symbol - the venue still sees the netted balance,
 // but the lot table keeps each leg's entry price, SL/TP origin, and owning
 // strategy distinct for analytics and exit matching.
 struct lot

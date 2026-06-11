@@ -23,7 +23,7 @@
 // the trade tape consumes the front of each level, and fires a fill once
 // a trade overflows size_ahead. Cancel attribution on L2 shrinkage beyond
 // observed trade volume is delegated to a pluggable IQueueModel.
-// Requires a trade tape (no trades → no fills, by design). Without L2,
+// Requires a trade tape (no trades -> no fills, by design). Without L2,
 // every order starts at the front (over-optimistic).
 // V1 limitations: trade side ignored (correct when at top-of-book, approx
 // otherwise); market orders rejected; modify = cancel + submit.
@@ -52,7 +52,7 @@ public:
         po.qty_remaining = o.get_quantity();
 
         // Join back of queue: size_ahead = current aggregate depth.
-        // Unknown level → front (optimistic "no L2 data" degradation).
+        // Unknown level -> front (optimistic "no L2 data" degradation).
         const auto key = make_key(po.symbol, po.side, po.price);
         auto it = levels_.find(key);
         po.size_ahead = (it != levels_.end()) ? it->second.aggregate_size : 0.0;
@@ -104,7 +104,7 @@ public:
     }
 
     // Levels tracked locally but missing from the snapshot are not
-    // zeroed here — the next update stream reconciles them.
+    // zeroed here - the next update stream reconciles them.
     void on_l2_snapshot(const std::string& symbol,
                         const std::vector<std::pair<double, double>>& bids,
                         const std::vector<std::pair<double, double>>& asks) override
@@ -147,7 +147,7 @@ public:
                 }
             }
         }
-        // delta > 0: additions join the back → size_ahead unchanged.
+        // delta > 0: additions join the back -> size_ahead unchanged.
         lv.aggregate_size       = new_size;
         lv.trades_since_update  = 0.0;
     }
@@ -201,7 +201,7 @@ public:
         }
 
         // Record trade volume for (old - new - trades = cancels) inference.
-        // Do NOT decrement aggregate_size — venue already did. Mark both
+        // Do NOT decrement aggregate_size - venue already did. Mark both
         // sides in V1; mismatched side's accumulator drains on its next L2.
         auto mark = [&](order_side s) {
             const auto key = make_key(symbol, s, trade_price);

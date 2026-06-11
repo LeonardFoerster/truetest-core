@@ -116,7 +116,7 @@ void portfolio::apply_lot_fill(const fill_event& fill, std::uint64_t opener_orde
         }
         else
         {
-            // Partial fills on the same opener — roll into weighted avg.
+            // Partial fills on the same opener - roll into weighted avg.
             auto& l = it->second;
             double new_filled = l.entry_filled_qty + fill.get_filled_quantity();
             if (new_filled > 0.0)
@@ -130,7 +130,7 @@ void portfolio::apply_lot_fill(const fill_event& fill, std::uint64_t opener_orde
     }
 
     // Closer: reduce the referenced lot. A closer with no matching lot is a
-    // stale reference — portfolio state is authoritative, so drop silently.
+    // stale reference - portfolio state is authoritative, so drop silently.
     if (it == lots_.end()) return;
     auto& l = it->second;
     l.qty_open -= fill.get_filled_quantity();

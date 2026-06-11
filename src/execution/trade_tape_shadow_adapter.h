@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-// Shadow-mode adapter. Matches open orders against the live trade tape —
+// Shadow-mode adapter. Matches open orders against the live trade tape -
 // when a real trade prints at a price crossing our limit, synthesize a
 // fill at the trade price. ShadowTracker compares these against the sim
 // fills to surface real slippage and fill-rate divergence.
@@ -24,7 +24,7 @@
 // Pre-submit trades (ts < submit_ts) ignored. No queue modeling
 // (optimistic). Not thread-safe.
 // Optional ILatencyModel represents wire + exchange-ingest delay ON TOP of
-// the engine-side latency already applied — so submit_ts is
+// the engine-side latency already applied - so submit_ts is
 // earliest_eligible_ts + wire_latency, and trades printing during that
 // window are correctly missed on the shadow side.
 class TradeTapeShadowAdapter : public IExecutionAdapter
@@ -188,7 +188,7 @@ public:
             }
 
             const double fill_qty = std::min(oo.qty_remaining, remaining_tape_qty);
-            // Fill at the trade price — the level the rest of the market
+            // Fill at the trade price - the level the rest of the market
             // got. Using the limit would put BUY @100 worse than a @99 tape.
             const double fill_price = trade_price;
 
@@ -197,7 +197,7 @@ public:
 
             const double rem = std::max(0.0, oo.qty_remaining);
 
-            // Tape-crossing fills are always takers — TieredFeeModel needs
+            // Tape-crossing fills are always takers - TieredFeeModel needs
             // is_taker=true or shadow P&L ignores taker fees entirely.
             double commission = 0.0;
             if (fee_model_)
@@ -243,7 +243,7 @@ public:
     };
     // Caller-side: difference (submitted_with_queue - filled_after_drain
     // - blocked_at_eos) is "queue drained but session ended before our
-    // turn touched the tape" — typically the same as blocked_at_eos for
+    // turn touched the tape" - typically the same as blocked_at_eos for
     // short sessions, divergent on long ones.
     queue_stats get_queue_stats() const
     {
@@ -264,7 +264,7 @@ private:
         double       limit_price    = 0.0;
         double       qty_remaining  = 0.0;
         // L2-snapshot queue position. Default 0 means "no queue model
-        // configured" or "we improve the BBO" — both fall through to
+        // configured" or "we improve the BBO" - both fall through to
         // the legacy fill-on-cross behaviour.
         double       queue_ahead    = 0.0;
         double       initial_queue  = 0.0;
