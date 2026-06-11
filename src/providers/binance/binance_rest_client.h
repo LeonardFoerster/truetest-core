@@ -78,6 +78,17 @@ public:
     BinanceRestClient(BinanceRestClient&&) = delete;
     BinanceRestClient& operator=(BinanceRestClient&&) = delete;
 
+    // Test-only seam: trust one additional CA/cert (PEM) so tests can point
+    // the client at a local TLS server. This is strictly ADDITIVE — it can
+    // only extend the trust set for a specific certificate; it never relaxes
+    // verify_peer or touches the production trust roots. Not used in any
+    // non-test code path.
+    void add_trusted_ca_for_testing(const std::string& ca_pem)
+    {
+        ctx_.add_certificate_authority(
+            net::buffer(ca_pem.data(), ca_pem.size()));
+    }
+
     struct response
     {
         int status;

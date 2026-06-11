@@ -223,6 +223,7 @@ if(BUILD_TESTS)
         tests/test_binance_user_data_transport.cpp
         tests/test_binance_rest_client_time.cpp
         tests/test_binance_rest_client_rate_limit.cpp
+        tests/test_binance_rest_client_keepalive_timeout.cpp
         tests/test_binance_user_data_transport_keepalive.cpp
         tests/test_binance_user_data_transport_reconnect.cpp
         tests/test_binance_endpoints.cpp
