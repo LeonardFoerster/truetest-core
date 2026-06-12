@@ -40,18 +40,27 @@ void portfolio::apply_netted_fill(const fill_event& fill)
 {
     auto& pos = positions_[fill.get_symbol()];
     double fill_qty = fill.get_filled_quantity();
+    const double total_qty = fill_qty;
+    const double price = fill.get_fill_price();
+    // Prorate commission between the closing and opening legs of a flip so
+    // it is charged exactly once per fill (pure closes/opens get the full fee).
+    auto comm_for = [&](double q) {
+        return total_qty > 1e-12 ? fill.get_commission() * (q / total_qty) : 0.0;
+    };
 
     if (fill.get_side() == order_side::buy)
     {
         if (pos.qty < 0.0)
         {
             double close_qty = std::min(fill_qty, -pos.qty);
-            double avg_entry = pos.cost_basis / pos.qty;
-            double cost_of_closed = avg_entry * close_qty;
+            // Release the closed fraction of the basis proportionally; this
+            // preserves the per-unit entry of the remainder and is sign-safe
+            // for shorts (whose cost_basis is negative).
+            double frac_closed = close_qty / -pos.qty;
 
-            cash_ -= close_qty * fill.get_fill_price() + fill.get_commission();
+            cash_ -= close_qty * price + comm_for(close_qty);
             pos.qty += close_qty;
-            pos.cost_basis -= cost_of_closed;
+            pos.cost_basis *= (1.0 - frac_closed);
 
             if (std::abs(pos.qty) < 1e-12)
             {
@@ -66,20 +75,19 @@ void portfolio::apply_netted_fill(const fill_event& fill)
         }
 
         pos.qty += fill_qty;
-        pos.cost_basis += fill_qty * fill.get_fill_price() + fill.get_commission();
-        cash_ -= fill_qty * fill.get_fill_price() + fill.get_commission();
+        pos.cost_basis += fill_qty * price + comm_for(fill_qty);
+        cash_ -= fill_qty * price + comm_for(fill_qty);
     }
     else
     {
         if (pos.qty > 0.0)
         {
             double close_qty = std::min(fill_qty, pos.qty);
-            double avg_entry = (pos.qty > 0.0) ? pos.cost_basis / pos.qty : 0.0;
-            double cost_of_closed = avg_entry * close_qty;
+            double frac_closed = close_qty / pos.qty;
 
-            cash_ += close_qty * fill.get_fill_price() - fill.get_commission();
+            cash_ += close_qty * price - comm_for(close_qty);
             pos.qty -= close_qty;
-            pos.cost_basis -= cost_of_closed;
+            pos.cost_basis *= (1.0 - frac_closed);
 
             if (pos.qty < 1e-12)
             {
@@ -94,8 +102,8 @@ void portfolio::apply_netted_fill(const fill_event& fill)
         }
 
         pos.qty -= fill_qty;
-        pos.cost_basis -= fill_qty * fill.get_fill_price() - fill.get_commission();
-        cash_ += fill_qty * fill.get_fill_price() - fill.get_commission();
+        pos.cost_basis -= fill_qty * price - comm_for(fill_qty);
+        cash_ += fill_qty * price - comm_for(fill_qty);
     }
 }
 

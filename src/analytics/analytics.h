@@ -253,10 +253,34 @@ private:
 
     double initial_cash_;
     double cash_;
-    double position_qty_ = 0.0;
-    double avg_entry_price_ = 0.0;
-    double total_open_commission_ = 0.0;
-    std::chrono::system_clock::time_point entry_time_;
+
+    // Per-symbol open-position state. A single global position would net
+    // unrelated instruments against each other and mark them at the wrong
+    // price in multi-symbol runs.
+    struct open_position
+    {
+        double qty = 0.0;
+        double avg_entry = 0.0;
+        double open_commission = 0.0;
+        double last_price = 0.0;   // last seen close/tick/fill price for this symbol
+        std::chrono::system_clock::time_point entry_time{};
+    };
+    std::unordered_map<std::string, open_position> open_positions_;
+
+    // Sum of qty * last_price across symbols (mark-to-market value).
+    double position_value() const
+    {
+        double v = 0.0;
+        for (const auto& [_, p] : open_positions_)
+            if (std::abs(p.qty) > 1e-12) v += p.qty * p.last_price;
+        return v;
+    }
+    bool any_position_open() const
+    {
+        for (const auto& [_, p] : open_positions_)
+            if (std::abs(p.qty) > 1e-12) return true;
+        return false;
+    }
 
     std::size_t rolling_window_;
     double risk_free_rate_;
@@ -326,7 +350,11 @@ private:
 
     welford_state return_stats_;
 
-    welford_state downside_stats_;
+    // Sum over ALL return periods of min(r - MAR, 0)^2; downside deviation
+    // for Sortino is sqrt(downside_sq_sum_ / return_stats_.n). (A Welford
+    // stddev over only the negative returns ignores the loss level and uses
+    // the wrong observation count.)
+    double downside_sq_sum_ = 0.0;
 
     double peak_equity_ = 0.0;
     double max_drawdown_ = 0.0;

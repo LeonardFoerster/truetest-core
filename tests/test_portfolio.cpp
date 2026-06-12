@@ -146,6 +146,48 @@ TEST(Portfolio, MultiSymbol_BothClosed)
     EXPECT_EQ(p.get_total_trades(), 2u);
 }
 
+TEST(Portfolio, ShortPartialCover_CostBasisScalesProportionally)
+{
+    portfolio p;
+    double initial_cash = p.get_cash();
+
+    // Open short 10 @ 100 → cost_basis = -1000
+    fill_event sell(now(), "AAPL", 1, order_side::sell, 10, 100.0, 0.0);
+    p.on_fill(sell);
+
+    // Cover 5 @ 90 → remaining short 5 keeps per-unit entry of 100
+    fill_event buy(now(), "AAPL", 2, order_side::buy, 5, 90.0, 0.0);
+    p.on_fill(buy);
+
+    const auto& pos = p.get_positions().at("AAPL");
+    EXPECT_NEAR(pos.qty, -5.0, 1e-12);
+    EXPECT_NEAR(pos.cost_basis, -500.0, 1e-9);
+    // Realized so far: 5 * (100 - 90) = 50; cash = initial + 1000 - 450
+    EXPECT_NEAR(p.get_cash(), initial_cash + 550.0, 1e-9);
+    // Equity at 90: unrealized 5 * (100 - 90) = 50 on top
+    EXPECT_NEAR(p.get_equity(90.0), initial_cash + 100.0, 1e-9);
+}
+
+TEST(Portfolio, FlipLongToShort_CommissionChargedOnce)
+{
+    portfolio p;
+    double initial_cash = p.get_cash();
+
+    fill_event buy(now(), "AAPL", 1, order_side::buy, 10, 100.0, 0.0);
+    p.on_fill(buy);
+
+    // Sell 15 @ 100 with 15 commission: 10 close (comm 10) + 5 open (comm 5).
+    fill_event flip(now(), "AAPL", 2, order_side::sell, 15, 100.0, 15.0);
+    p.on_fill(flip);
+
+    const auto& pos = p.get_positions().at("AAPL");
+    EXPECT_NEAR(pos.qty, -5.0, 1e-12);
+    // cash = initial - 1000 + (1000 - 10) + (500 - 5)
+    EXPECT_NEAR(p.get_cash(), initial_cash + 485.0, 1e-9);
+    // Short basis: -(5 * 100) + prorated open commission
+    EXPECT_NEAR(pos.cost_basis, -495.0, 1e-9);
+}
+
 TEST(Portfolio, MultiSymbol_CashTracking)
 {
     portfolio p;
