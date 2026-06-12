@@ -172,19 +172,25 @@ struct engine_config
     unsigned fill_rng_seed = 42;
     double spread_step_factor = 0.0001;
 
-    // Opt into passive-side fill pricing. Default off for byte-identical
-    // backtest output. When on, market and marketable-limit orders record
-    // each fill at the resting counterparty's price (one fill_event per
-    // walked level) instead of the aggressor's marked-up book price.
-    // Auto-suppresses bar_spread_bps to avoid double-counting the seeded
-    // book's spread. Ignored in engine_mode::live.
+    // Synthetic MarketMaker calibration for bar-mode backtests. The seeded
+    // book is the sole source of spread cost for taker fills, so tune
+    // these to the target market. Mirrors mm_calibration (kept as scalars
+    // so this header stays free of market_maker.h).
+    int mm_levels_per_side = 10;
+    int mm_base_depth = 100;
+    double mm_base_spread_pct = 0.002;
+    double mm_vol_spread_mult = 5.0;
+
+    // Deprecated, ignored: passive-side fill pricing is always on. Fills
+    // record the resting counterparty's price, one fill_event per walked
+    // level; the aggressor's marked-up book price is only a crossing
+    // limit. Field removed together with the frozen engine.cpp callsite
+    // in the CCB phase.
     bool realistic_fills = false;
 
-    // Calibrated full bid-ask charged to bar-mode market orders. The
-    // reference price is shifted by ±(bar_spread_bps/2)/1e4 × mid before
-    // impact and aggression. Suppressed for symbols carrying real L2
-    // depth, and suppressed under realistic_fills (the seeded MM spread
-    // already drives the fill price). Ignored in engine_mode::live.
+    // Deprecated, ignored: the recorded fill price always comes from the
+    // resting book, so a parametric bar-spread shift no longer applies.
+    // Calibrate mm_base_spread_pct instead. Removed in the CCB phase.
     double bar_spread_bps = 0.0;
 
     // Shadow-mode queue-position estimate. Null → NoQueueModel default

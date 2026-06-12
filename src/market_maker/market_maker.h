@@ -17,11 +17,26 @@ struct mm_order
     double quantity;
 };
 
+// Calibration for the synthetic book seeded in bar-mode backtests. The
+// seeded spread/depth is the sole source of spread cost for taker fills,
+// so these should be tuned to the target market's typical book. Level i
+// rests at mid × (1 ± i × (base_spread_pct + vol × vol_spread_mult)),
+// depth = base_depth × i.
+struct mm_calibration
+{
+    int levels_per_side = 10;
+    int base_depth = 100;
+    double base_spread_pct = 0.002;
+    double vol_spread_mult = 5.0;
+};
+
 class MarketMaker
 {
 public:
     MarketMaker();
     explicit MarketMaker(unsigned rng_seed);
+
+    void set_calibration(const mm_calibration& c);
 
     void add_orders(std::shared_ptr<orderbook> ob, double current_price, int num_orders = 10);
 

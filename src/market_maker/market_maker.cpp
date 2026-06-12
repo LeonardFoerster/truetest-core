@@ -11,6 +11,15 @@ MarketMaker::MarketMaker(unsigned rng_seed)
     : gen_(rng_seed)
     , dis_(0.0, 0.005) {}
 
+// Calibration survives reset(): it is configuration, not per-trial state.
+void MarketMaker::set_calibration(const mm_calibration& c)
+{
+    levels_per_side_ = c.levels_per_side;
+    base_depth_ = c.base_depth;
+    base_spread_pct_ = c.base_spread_pct;
+    vol_spread_mult_ = c.vol_spread_mult;
+}
+
 void MarketMaker::add_orders(std::shared_ptr<orderbook> ob, double current_price, int num_orders)
 {
     for (int i = 0; i < num_orders; ++i)

@@ -220,6 +220,63 @@ TEST(CLI, ImpactKBpsRequiresAdv)
     EXPECT_NE(out.find("requires --impact-adv"), std::string::npos);
 }
 
+TEST(DumpConfig, ReflectsFillModel)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--dump-config --fill-prob 0.9 --fill-fade 0.05 --fill-decay 12", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("\"fill_prob\": 0.9"), std::string::npos);
+    EXPECT_NE(out.find("\"fill_fade\": 0.05"), std::string::npos);
+    EXPECT_NE(out.find("\"fill_decay\": 12.0"), std::string::npos);
+}
+
+TEST(DumpConfig, ReflectsMmCalibration)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--dump-config --mm-levels 5 --mm-base-depth 50 "
+        "--mm-spread-pct 0.001 --mm-vol-mult 2", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("\"mm_levels\": 5"), std::string::npos);
+    EXPECT_NE(out.find("\"mm_base_depth\": 50"), std::string::npos);
+    EXPECT_NE(out.find("\"mm_spread_pct\": 0.001"), std::string::npos);
+    EXPECT_NE(out.find("\"mm_vol_mult\": 2.0"), std::string::npos);
+}
+
+// --fill-fade without --fill-prob is a silent no-op model — hard-fail.
+TEST(CLI, FillFadeRequiresFillProb)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--provider local --path market_data.csv "
+        "--strategy sma --mode backtest --fill-fade 0.1", out);
+    EXPECT_NE(rc, 0);
+    EXPECT_NE(out.find("requires --fill-prob"), std::string::npos);
+}
+
+// Deprecated fill-pricing flags stay accepted (scripts keep running) but
+// must announce that they no longer do anything.
+TEST(CLI, RealisticFillsDeprecationWarning)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--provider local --path market_data.csv --strategy sma "
+        "--mode backtest --realistic-fills --status-format off", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("deprecated"), std::string::npos);
+}
+
+TEST(CLI, BarSpreadBpsDeprecationWarning)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--provider local --path market_data.csv --strategy sma "
+        "--mode backtest --bar-spread-bps 10 --status-format off", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("no longer affects recorded fill prices"), std::string::npos);
+}
+
 // ─── B3: --dry-run ─────────────────────────────────────────────────────────
 
 TEST(DryRun, ValidConfigExitsZero)
