@@ -327,11 +327,26 @@ TEST(ExitManager, OnBar_LongSlFiresOnLowEvenWhenCloseRecovers)
     m.register_pending(make_long_intent("s", "X", 1, /*sl=*/95.0, /*tp=*/110.0));
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
 
-    auto r = m.on_bar("X", /*low=*/94.0, /*high=*/101.0, /*close=*/100.0, t0);
+    auto r = m.on_bar("X", /*open=*/100.0, /*low=*/94.0, /*high=*/101.0,
+                      /*close=*/100.0, t0);
     ASSERT_FALSE(r.empty());
     EXPECT_EQ(r[0].get_side(), order_side::sell);
-    EXPECT_DOUBLE_EQ(r[0].get_price(), 94.0);  // fired at observed extreme
+    EXPECT_DOUBLE_EQ(r[0].get_price(), 95.0);  // anchored at the SL level
     EXPECT_EQ(m.armed_count(), 0u);
+}
+
+TEST(ExitManager, OnBar_LongSlGapThroughFiresAtOpen)
+{
+    // Bar opens below the SL: the stop couldn't fill at its level — it
+    // fills at the (worse) open.
+    ExitManager m;
+    m.register_pending(make_long_intent("s", "X", 1, /*sl=*/95.0, /*tp=*/110.0));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
+
+    auto r = m.on_bar("X", /*open=*/92.0, /*low=*/91.0, /*high=*/96.0,
+                      /*close=*/93.0, t0);
+    ASSERT_FALSE(r.empty());
+    EXPECT_DOUBLE_EQ(r[0].get_price(), 92.0);  // gap-through → open
 }
 
 TEST(ExitManager, OnBar_LongTpFiresOnHighEvenWhenCloseDoesntReach)
@@ -340,9 +355,10 @@ TEST(ExitManager, OnBar_LongTpFiresOnHighEvenWhenCloseDoesntReach)
     m.register_pending(make_long_intent("s", "X", 1, 95.0, 110.0));
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
 
-    auto r = m.on_bar("X", 99.0, 112.0, 105.0, t0);
+    auto r = m.on_bar("X", /*open=*/100.0, 99.0, 112.0, 105.0, t0);
     ASSERT_FALSE(r.empty());
-    EXPECT_DOUBLE_EQ(r[0].get_price(), 112.0);
+    // A TP is a resting limit: it fills at the TP level, not the extreme.
+    EXPECT_DOUBLE_EQ(r[0].get_price(), 110.0);
 }
 
 TEST(ExitManager, OnBar_BothTouchedSlWinsForLong)
@@ -352,9 +368,9 @@ TEST(ExitManager, OnBar_BothTouchedSlWinsForLong)
     m.register_pending(make_long_intent("s", "X", 1, 95.0, 110.0));
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
 
-    auto r = m.on_bar("X", 94.0, 111.0, 100.0, t0);
+    auto r = m.on_bar("X", /*open=*/100.0, 94.0, 111.0, 100.0, t0);
     ASSERT_FALSE(r.empty());
-    EXPECT_DOUBLE_EQ(r[0].get_price(), 94.0);  // SL not TP
+    EXPECT_DOUBLE_EQ(r[0].get_price(), 95.0);  // SL level, not TP
 }
 
 TEST(ExitManager, OnBar_ShortSlFiresOnHigh)
@@ -372,10 +388,11 @@ TEST(ExitManager, OnBar_ShortSlFiresOnHigh)
     m.register_pending(std::move(ei));
     m.on_fill(make_opener_fill(1, "X", order_side::sell, 1.0, 100.0));
 
-    auto r = m.on_bar("X", /*low=*/96.0, /*high=*/106.0, /*close=*/100.0, t0);
+    auto r = m.on_bar("X", /*open=*/100.0, /*low=*/96.0, /*high=*/106.0,
+                      /*close=*/100.0, t0);
     ASSERT_FALSE(r.empty());
     EXPECT_EQ(r[0].get_side(), order_side::buy);
-    EXPECT_DOUBLE_EQ(r[0].get_price(), 106.0);
+    EXPECT_DOUBLE_EQ(r[0].get_price(), 105.0);  // anchored at the SL level
 }
 
 TEST(ExitManager, OnBar_NoTriggerLeavesIntentArmed)
@@ -384,8 +401,49 @@ TEST(ExitManager, OnBar_NoTriggerLeavesIntentArmed)
     m.register_pending(make_long_intent("s", "X", 1, 95.0, 110.0));
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
 
-    EXPECT_TRUE(m.on_bar("X", 96.0, 109.0, 100.0, t0).empty());
+    EXPECT_TRUE(m.on_bar("X", /*open=*/100.0, 96.0, 109.0, 100.0, t0).empty());
     EXPECT_EQ(m.armed_count(), 1u);
+}
+
+TEST(ExitManager, OnBar_TrailingStopUsesPreBarLevel)
+{
+    // The trail must be tested at its level from PREVIOUS bars. Raising it
+    // with this bar's high and then testing this bar's low would assume the
+    // high printed first (intra-bar look-ahead).
+    ExitManager m;
+    auto i = make_long_intent("s", "X", 1, std::nullopt, std::nullopt);
+    i.trailing_pct = 0.05;  // 5% trail
+    m.register_pending(std::move(i));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
+
+    // Bar 1: high 120 → trail becomes 114 for NEXT bars; low 110 must be
+    // tested against the (not yet existing) pre-bar trail → no fire.
+    EXPECT_TRUE(m.on_bar("X", 100.0, 110.0, 120.0, 118.0, t0).empty());
+    EXPECT_EQ(m.armed_count(), 1u);
+
+    // Bar 2: low 113 crosses the 114 trail from bar 1 → fires at 114.
+    auto r = m.on_bar("X", 118.0, 113.0, 119.0, 116.0, t0);
+    ASSERT_FALSE(r.empty());
+    EXPECT_DOUBLE_EQ(r[0].get_price(), 114.0);
+}
+
+TEST(ExitManager, PartialOpenerFills_GrowArmedQtyAndVwapEntry)
+{
+    // The book can emit one fill per walked level for a single opener.
+    // The armed bracket must cover the full position, not just the first
+    // partial — and the entry reference rolls to the VWAP.
+    ExitManager m;
+    m.register_pending(make_long_intent("s", "X", 1, 95.0, 110.0, /*qty=*/0.0));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 4.0, 100.0));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 6.0, 101.0));
+    EXPECT_EQ(m.armed_count(), 1u);
+
+    auto r = m.on_bar("X", 100.0, 94.0, 101.0, 100.0, t0);
+    ASSERT_FALSE(r.empty());
+    EXPECT_DOUBLE_EQ(r[0].get_quantity(), 10.0);  // 4 + 6, not 4
+
+    auto snap = m.snapshot_armed();
+    EXPECT_TRUE(snap.empty());  // fired and erased
 }
 
 // ---- Bracket adapter integration ---------------------------------------

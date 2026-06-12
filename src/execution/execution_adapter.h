@@ -339,6 +339,61 @@ public:
         }
     }
 
+    // Bar-mode traversal fills: a resting limit whose level lies inside the
+    // bar's [low, high] range was traded through intrabar even when the MM
+    // re-quote anchors (open/close/stop refs) never crossed it — without
+    // this, a buy limit at 99 misses a bar with low 98 / close 101 entirely.
+    // Fills the full remaining quantity at the order's own limit price
+    // (maker) and removes it from the book. Returns true if anything filled.
+    bool sweep_resting_range(const std::string& symbol,
+                             double low, double high,
+                             std::chrono::system_clock::time_point ts)
+    {
+        if (resting_.empty() || !(low > 0.0) || !(high > 0.0))
+            return false;
+        if (low > high) std::swap(low, high);
+
+        bool any = false;
+        for (auto it = resting_.begin(); it != resting_.end(); )
+        {
+            auto& ri = it->second;
+            if (ri.symbol != symbol) { ++it; continue; }
+            // Skip orders with a cancel in flight — "too slow to pull"
+            // is modeled at the crossing paths, but a traversal fill
+            // during the cancel window would be generous, not adverse.
+            if (pending_cancels_.count(it->first)) { ++it; continue; }
+
+            const double px = ri.book_order->get_price().to_double();
+            const bool traversed = (ri.side == order_side::buy)
+                ? (low <= px) : (high >= px);
+            if (!traversed) { ++it; continue; }
+
+            const double fill_qty =
+                static_cast<double>(ri.book_order->get_remaining_quantity())
+                / qty_scale_;
+            if (fill_qty <= 0.0)
+            {
+                it = resting_.erase(it);
+                continue;
+            }
+
+            double commission = 0.0;
+            if (fee_model_)
+                commission = fee_model_->compute_commission(
+                    ri.side, fill_qty, px, /*is_taker=*/false);
+
+            pending_fills_.emplace_back(
+                ts, ri.symbol, it->first, ri.side,
+                fill_qty, px, commission,
+                /*remaining=*/0.0, next_fill_id_++);
+            any = true;
+
+            ob_->cancel_order(it->first);
+            it = resting_.erase(it);
+        }
+        return any;
+    }
+
 private:
     std::shared_ptr<orderbook> ob_;
     std::shared_ptr<IFeeModel> fee_model_;

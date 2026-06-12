@@ -2623,7 +2623,8 @@ bool engine::apply_instrument_spec(order_event& o, const instrument_spec& spec) 
 
 bool engine::route_order(order_event& order,
                          const std::chrono::system_clock::time_point& sim_time,
-                         std::size_t& event_count, bool& halt_requested)
+                         std::size_t& event_count, bool& halt_requested,
+                         bool anchor_immediate)
 {
     // Operator-pause gate: intercept here so every strategy call site is
     // covered by one branch. Strategies still run (so analytics + lots
@@ -2673,6 +2674,38 @@ bool engine::route_order(order_event& order,
     {
         pending_stops_.push_back(acquire_pooled(order_pool_,order));
         return true;
+    }
+
+    if (anchor_immediate)
+    {
+        // Bracket fire: fill where it triggered. Re-center the synthetic
+        // book at the anchored fire price (SL/TP level or gap open) within
+        // the trigger bar and execute immediately — deferring through
+        // execution_bar_delay would discard the fire price and fill at
+        // wherever the next bar happens to open. Same convention as the
+        // native stop path in check_pending_stops.
+        const double ref = order.get_price();
+        const double bar_mid = last_mid_price_;
+        if (ref > 0.0 && ref != bar_mid)
+        {
+            auto ob = orderbook_registry_.get_or_create(order.get_symbol());
+            if (!mm_worker_ &&
+                !l2_seeded_symbols_.count(order.get_symbol()))
+            {
+                auto mm_trades = market_maker_.replenish(
+                    ob, ref, /*update_history=*/false);
+                deliver_mm_book_trades(order.get_symbol(), mm_trades,
+                                       sim_time, event_count, halt_requested);
+            }
+            last_mid_price_ = ref;
+        }
+        order.set_earliest_eligible_ts(sim_time);
+        auto order_ptr = acquire_pooled(order_pool_,order);
+        if (order.get_tif() == time_in_force::day)
+            day_order_ids_.push_back({order.get_symbol(), order.get_order_id()});
+        const bool ok = process_order(order_ptr, event_count, halt_requested);
+        last_mid_price_ = bar_mid;
+        return ok;
     }
 
     if (config_.latency_model)
@@ -2919,30 +2952,46 @@ bool engine::evaluate_exits(const std::string& symbol, double px,
     {
         close.set_recv_ns(recv_ns);
         bool halt = false;
-        route_order(close, ts, event_count, halt);
+        route_order(close, ts, event_count, halt, /*anchor_immediate=*/true);
         if (halt) return true;
     }
     return false;
 }
 
 bool engine::evaluate_exits(const std::string& symbol,
-                            double low, double high, double close,
+                            double open, double low, double high, double close,
                             std::chrono::system_clock::time_point ts,
                             std::size_t& event_count,
                             std::int64_t recv_ns)
 {
     // See canonical sequence comment in process_order. Bar fires go through
-    // route_order for consistent meta registration and full propagation.
-    auto fires = exit_manager_.on_bar(symbol, low, high, close, ts);
+    // route_order for consistent meta registration and full propagation,
+    // anchored at the fire price computed within the trigger bar.
+    auto fires = exit_manager_.on_bar(symbol, open, low, high, close, ts);
     if (fires.empty()) return false;
     for (auto& c : fires)
     {
         c.set_recv_ns(recv_ns);
         bool halt = false;
-        route_order(c, ts, event_count, halt);
+        route_order(c, ts, event_count, halt, /*anchor_immediate=*/true);
         if (halt) return true;
     }
     return false;
+}
+
+void engine::sweep_resting_limits(const std::string& symbol,
+                                  double low, double high,
+                                  const std::chrono::system_clock::time_point& ts,
+                                  std::size_t& event_count, bool& halt_requested)
+{
+    auto it = execution_adapters_.find(symbol);
+    if (it == execution_adapters_.end() || !it->second)
+        return;
+    auto* local = dynamic_cast<LocalBookAdapter*>(it->second.get());
+    if (!local)
+        return;
+    if (local->sweep_resting_range(symbol, low, high, ts))
+        process_adapter_fills(it->second, event_count, halt_requested);
 }
 
 void engine::dispatch_extras_on_market(const market_event& mkt,
@@ -2956,7 +3005,7 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
         if (!s) continue;
 
         if (evaluate_exits(mkt.get_symbol(),
-                           mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                           mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
                            ts, event_count, mkt.get_recv_ns()))
             return;
 
@@ -3098,6 +3147,8 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         bool halt = false;
         check_pending_stops(mkt.get_open(), mkt.get_high(), mkt.get_low(),
                             timestamp, event_count, halt);
+        sweep_resting_limits(mkt.get_symbol(), mkt.get_low(), mkt.get_high(),
+                             timestamp, event_count, halt);
     }
 
     auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
@@ -3184,7 +3235,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     event_count++;
 
     if (evaluate_exits(mkt.get_symbol(),
-                       mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                       mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
                        timestamp, event_count, mkt.get_recv_ns()))
         return;
 
@@ -3965,6 +4016,8 @@ void engine::run()
             DEBUG_STAGE(stage_timer_, stop_check);
             check_pending_stops(mkt.get_open(), mkt.get_high(), mkt.get_low(), sim_time, event_count, halt_requested);
         }
+        sweep_resting_limits(symbol, mkt.get_low(), mkt.get_high(),
+                             sim_time, event_count, halt_requested);
 
         {
             DEBUG_STAGE(stage_timer_, mm_replenish);
@@ -4017,7 +4070,7 @@ void engine::run()
         event_count++;
 
         if (evaluate_exits(symbol,
-                           mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                           mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
                            sim_time, event_count, mkt.get_recv_ns()))
             break;
 
@@ -4166,7 +4219,7 @@ void engine::run_tick_data()
             analytics_.on_mark(bar.get_symbol(), bar.get_close());
 
         if (evaluate_exits(bar.get_symbol(),
-                           bar.get_low(), bar.get_high(), bar.get_close(),
+                           bar.get_open(), bar.get_low(), bar.get_high(), bar.get_close(),
                            bar.get_timestamp(), event_count, bar_recv_ns))
             return;
 
@@ -4402,6 +4455,9 @@ void engine::run_replay(const std::string& log_path,
             check_pending_stops(mkt.get_open(), mkt.get_high(), mkt.get_low(), sim_time,
                                 event_count, halt_requested);
             if (halt_requested) break;
+            sweep_resting_limits(mkt.get_symbol(), mkt.get_low(), mkt.get_high(),
+                                 sim_time, event_count, halt_requested);
+            if (halt_requested) break;
 
             auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
             if (!l2_seeded_symbols_.count(mkt.get_symbol()))
@@ -4419,7 +4475,7 @@ void engine::run_replay(const std::string& log_path,
                 analytics_.on_mark(mkt.get_symbol(), mkt.get_close());
 
             if (evaluate_exits(mkt.get_symbol(),
-                               mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                               mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
                                sim_time, event_count, mkt.get_recv_ns()))
                 break;
 

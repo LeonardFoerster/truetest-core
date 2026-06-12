@@ -185,3 +185,27 @@ TEST(StopFillPricing, StopLimitAnchoredAtTrigger)
     EXPECT_NEAR(px, 104.0 * 1.002, 1e-3)
         << "stop-limit fills against the trigger-anchored book";
 }
+
+// A resting buy limit must fill when the bar's range trades through its
+// level (intrabar traversal), at its own limit price — previously it only
+// filled when an MM re-quote anchor (open/close/stop ref) crossed it, so
+// a wick through the level was silently missed.
+TEST(StopFillPricing, RestingLimitFillsOnIntrabarTraversal)
+{
+    SilenceCout quiet;
+    auto dh = make_bars({{100, 101, 99, 100},    // limit buy 95 placed here
+                         {100, 101, 99, 100},    // submitted, rests (low 99 > 95)
+                         {100, 101, 94, 100},    // wick to 94 traverses 95
+                         {100, 101, 99, 100}});
+    auto strat = std::make_shared<StopPlacer>(
+        order_type::limit, order_side::buy, /*stop_price=*/0.0,
+        /*limit_price=*/95.0);
+
+    engine eng(dh, nullptr, strat, make_cfg());
+    eng.run();
+
+    const double px = first_fill_price(eng);
+    ASSERT_GT(px, 0.0) << "traversed resting limit must fill";
+    EXPECT_NEAR(px, 95.0, 1e-9)
+        << "resting limit fills at its own limit price on traversal";
+}

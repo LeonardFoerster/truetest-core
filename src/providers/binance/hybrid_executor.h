@@ -44,11 +44,13 @@ public:
         }
         else
         {
-            book_adapter_ = std::make_unique<LocalBookAdapter>(
+            auto local = std::make_unique<LocalBookAdapter>(
                 book_,
                 fee_model ? std::move(fee_model) : std::make_shared<ZeroFeeModel>(),
                 fill_model ? std::move(fill_model)
                            : std::make_shared<RealisticFillModel>(0.05, 0.8, 5.0));
+            local_book_adapter_ = local.get();
+            book_adapter_ = std::move(local);
         }
     }
 
@@ -154,19 +156,37 @@ public:
     {
         if (!(mid > 0.0) || !book_) return;
 
-        book_->clear();
+        // Re-seed only our own synthetic quotes. clear() would also destroy
+        // any strategy limit order resting in the shared book — leaving it
+        // tracked as open but unable to ever fill.
+        for (auto id : quote_ids_)
+            book_->cancel_order(id);
+        quote_ids_.clear();
+
+        trades crossed;
         double spread_step = mid * spread_step_factor_;
         for (int i = 1; i <= 10; ++i) {
             double bid_px = mid - i * spread_step;
             double ask_px = mid + i * spread_step;
             quantity qty = static_cast<quantity>(qty_scale_);
-            book_->add_order(std::make_shared<order>(
-                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
+            const auto bid_id = OrderIdGenerator::next();
+            auto t1 = book_->add_order(std::make_shared<order>(
+                ob_order_type::good_till_cancel, bid_id,
                 side::buy, Price::from_double(bid_px), qty));
-            book_->add_order(std::make_shared<order>(
-                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
+            quote_ids_.push_back(bid_id);
+            crossed.insert(crossed.end(), t1.begin(), t1.end());
+            const auto ask_id = OrderIdGenerator::next();
+            auto t2 = book_->add_order(std::make_shared<order>(
+                ob_order_type::good_till_cancel, ask_id,
                 side::sell, Price::from_double(ask_px), qty));
+            quote_ids_.push_back(ask_id);
+            crossed.insert(crossed.end(), t2.begin(), t2.end());
         }
+
+        // Quotes that crossed a resting strategy limit are real maker fills
+        // for it — surface them instead of dropping the trade list.
+        if (local_book_adapter_ && !crossed.empty())
+            local_book_adapter_->on_book_trades(crossed, now_proxy_);
 
         book_adapter_->set_mid_price(mid);
         paper_->set_last_price(mid);
@@ -181,6 +201,11 @@ private:
     std::shared_ptr<BinanceExecutor> paper_;
     std::shared_ptr<orderbook> book_;
     std::unique_ptr<IExecutionAdapter> book_adapter_;
+    // Non-owning view of book_adapter_ when it is a LocalBookAdapter —
+    // needed to route re-seed crossings to its resting-order tracking.
+    LocalBookAdapter* local_book_adapter_ = nullptr;
+    // Our own synthetic quote ids, so re-seeding cancels only these.
+    std::vector<uint64_t> quote_ids_;
     double qty_scale_ = 1e8;
     double spread_step_factor_ = 0.0001;
 

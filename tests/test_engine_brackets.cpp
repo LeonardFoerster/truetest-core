@@ -197,3 +197,41 @@ TEST(EngineBrackets, NetFlatSweepCancelsLeftoverBracket)
     EXPECT_EQ(strat->fills_seen, 2)
         << "Phantom bracket fire — net-flat sweep did not cancel the leftover intent";
 }
+
+// The SL closer must fill anchored at the SL level (book re-centered at
+// 99 → bid 99 × 0.998), not against the next bar's open-centered book
+// (≈ 100 × 0.998) — the pre-anchoring behavior deferred the fire through
+// execution_bar_delay and discarded the fire price.
+TEST(EngineBrackets, SlCloserFillsAnchoredAtSlLevelNotNextOpen)
+{
+    SilenceCout quiet;
+    auto dh = make_data({
+        {100, 100.5,  99.5, 100},
+        {100, 100.5,  99.5, 100},
+        {100, 100.5,  99.5, 100},   // entry signal on bar 3 (close=100, SL=99)
+        {100, 100.5,  99.5, 100},   // entry fills on bar 4 open; bracket arms
+        {100, 100.5,  98.0, 100},   // wick to 98 — SL 99 fires, anchored
+        {100, 100.5,  99.5, 100},
+    });
+    auto strat = std::make_shared<BracketEntryStrategy>();
+
+    engine_config cfg;
+    cfg.seed = 1;
+    // One deterministic level per side at ref × (1 ± 0.002).
+    cfg.mm_levels_per_side  = 1;
+    cfg.mm_base_spread_pct  = 0.002;
+    cfg.mm_vol_spread_mult  = 0.0;
+
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.set_primary_strategy_name("bracket");
+    eng.run();
+
+    auto report = eng.get_analytics().generate_report();
+    double sell_px = 0.0;
+    for (const auto& t : report.trades)
+        if (t.side == order_side::sell) { sell_px = t.fill_price; break; }
+
+    ASSERT_GT(sell_px, 0.0) << "SL closer must fill";
+    EXPECT_NEAR(sell_px, 99.0 * 0.998, 1e-3)
+        << "SL closer anchored at the SL level, not the next bar's open";
+}
