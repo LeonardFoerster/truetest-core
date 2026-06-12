@@ -91,13 +91,11 @@ TEST(EngineLookahead, Default_OrderFillsAtNextBarOpen)
     EXPECT_GT(t.timestamp, trigger_ts)
         << "order emitted on bar 3 must not fill within bar 3 under default bar-delay";
 
-    // INTERIM (until the CCB engine change re-seeds the book at the bar
-    // open before the pending drain): fills record resting book prices,
-    // and the synthetic book is still centered at bar 3's close when the
-    // drain runs, so the fill lands near ~100 despite bar 4 opening at
-    // 200. The CCB phase restores: EXPECT_GT(t.fill_price, 150.0).
-    EXPECT_LT(t.fill_price, 150.0)
-        << "interim: drain executes against the prev-close seeded book";
+    // Fill price must reflect bar 4's open (~200), not bar 3's close
+    // (~100): the engine re-seeds the synthetic book at the open before
+    // draining pending orders, and fills record resting book prices.
+    EXPECT_GT(t.fill_price, 150.0)
+        << "fill price should track bar 4's open (~200), not bar 3's close (~100)";
 }
 
 TEST(EngineLookahead, Disabled_OrderFillsSameBar)

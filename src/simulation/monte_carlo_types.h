@@ -135,7 +135,6 @@ struct McRunConfig {
     double initial_balance = 10000.0;
 
     // Realism / engine settings to apply to every trial
-    bool realistic_fills = false;
     double order_latency_us = 0.0;
     double impact_k_bps = 0.0;
 

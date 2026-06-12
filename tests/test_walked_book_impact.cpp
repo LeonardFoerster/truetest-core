@@ -45,7 +45,6 @@ TEST(WalkedBookImpact, MarketBuyVWAPExtendsCrossingLimit)
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, /*aggression=*/1.1, TEST_QTY_SCALE,
         nullptr, nullptr,
-        /*realistic_fills(deprecated)=*/false, /*bar_spread_bps=*/0.0,
         /*walked_book_impact=*/true);
     adapter.set_mid_price(100.0);
     adapter.set_l2_seeded(true);
@@ -76,7 +75,7 @@ TEST(WalkedBookImpact, MarketSellVWAPExtendsCrossingLimit)
 
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, 1.1, TEST_QTY_SCALE,
-        nullptr, nullptr, /*realistic_fills(deprecated)=*/false, 0.0,
+        nullptr, nullptr,
         /*walked_book_impact=*/true);
     adapter.set_mid_price(99.0);
     adapter.set_l2_seeded(true);
@@ -108,7 +107,7 @@ TEST(WalkedBookImpact, InsufficientDepthFallsBackToMid)
 
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, 1.1, TEST_QTY_SCALE,
-        nullptr, nullptr, false, 0.0,
+        nullptr, nullptr,
         /*walked_book_impact=*/true);
     adapter.set_mid_price(100.0);
     adapter.set_l2_seeded(true);
@@ -143,7 +142,7 @@ TEST(WalkedBookImpact, SuppressesSquareRootWhenBothActive)
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, 1.1, TEST_QTY_SCALE,
         nullptr, sqrt_impact,
-        false, 0.0, /*walked_book_impact=*/true);
+        /*walked_book_impact=*/true);
     adapter.set_mid_price(100.0);
     adapter.set_l2_seeded(true);
 
@@ -170,7 +169,7 @@ TEST(WalkedBookImpact, NoL2NoEffect)
 
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, 1.1, TEST_QTY_SCALE,
-        nullptr, nullptr, false, 0.0,
+        nullptr, nullptr,
         /*walked_book_impact=*/true);
     adapter.set_mid_price(100.0);
     // Note: no set_l2_seeded(true) — symbol is not L2-seeded.
@@ -197,7 +196,7 @@ TEST(WalkedBookImpact, DefaultOffUsesMidReference)
 
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, 1.1, TEST_QTY_SCALE,
-        nullptr, nullptr, false, 0.0,
+        nullptr, nullptr,
         /*walked_book_impact=*/false);
     adapter.set_mid_price(100.0);
     adapter.set_l2_seeded(true);  // L2 present, flag off
@@ -226,7 +225,6 @@ TEST(WalkedBookImpact, FillsRecordRestingPricesPerLevel)
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, 1.1, TEST_QTY_SCALE,
         nullptr, nullptr,
-        /*realistic_fills(deprecated)=*/true, 0.0,
         /*walked_book_impact=*/true);
     adapter.set_mid_price(100.5);
     adapter.set_l2_seeded(true);

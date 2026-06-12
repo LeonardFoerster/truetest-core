@@ -266,9 +266,25 @@ private:
                      const std::chrono::system_clock::time_point& sim_time,
                      std::size_t& event_count, bool& halt_requested);
 
-    void check_pending_stops(double high, double low,
+    // Stops trigger on the bar's high/low and fill anchored at the stop
+    // price (or the open when the bar gaps through). Tick callers pass
+    // open == high == low == tick price.
+    void check_pending_stops(double open, double high, double low,
                              const std::chrono::system_clock::time_point& sim_time,
                              std::size_t& event_count, bool& halt_requested);
+
+    // Canonical fill pipeline for one adapter's pending fills (poll +
+    // portfolio/analytics/exits/risk + publish). Returns false on a
+    // post-fill risk halt.
+    bool process_adapter_fills(const std::shared_ptr<IExecutionAdapter>& adapter,
+                               std::size_t& event_count, bool& halt_requested);
+
+    // Routes MarketMaker quote-update crossings to the symbol's
+    // LocalBookAdapter so resting strategy limits fill when the seeded
+    // book moves through their level.
+    void deliver_mm_book_trades(const std::string& symbol, const trades& trs,
+                                const std::chrono::system_clock::time_point& ts,
+                                std::size_t& event_count, bool& halt_requested);
 
     void dispatch_extras_on_market(const market_event& mkt,
                                    const std::chrono::system_clock::time_point& ts,

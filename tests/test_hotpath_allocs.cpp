@@ -64,7 +64,11 @@ TEST(HotpathAllocs, SmaGolden_30Bars_PostWarmupUpperBound)
     maybe_print_baseline("SmaGolden_30Bars", delta);
 
     // Baseline Phase 4: count≈2026 bytes≈6.08M (orderbook bodies pooled; CB heap).
-    EXPECT_LE(delta.count, 2200u);
+    // Re-baselined ≈2643 with the resting-fill mechanism: MM quote-pull
+    // bookkeeping (one-time) plus this scenario now producing 16 fills
+    // instead of 3 (each fill walks the full event pipeline). The
+    // 1000-bar test confirms steady-state per-bar cost stays flat.
+    EXPECT_LE(delta.count, 3000u);
     EXPECT_LE(delta.bytes, 6500000u);
     EXPECT_EQ(read_pool_grows(eng).total(), 0u);
 }

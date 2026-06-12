@@ -29,8 +29,7 @@ TEST(RealisticFills, DeprecatedLegacyFlagStillFillsAtRestingPrice)
     LocalBookAdapter adapter(
         ob, /*fee=*/nullptr, /*fill_model=*/nullptr,
         /*rng_seed=*/42, /*aggression=*/1.1, /*qty_scale=*/TEST_QTY_SCALE,
-        /*latency=*/nullptr, /*impact=*/nullptr,
-        /*realistic_fills=*/false, /*bar_spread_bps=*/0.0);
+        /*latency=*/nullptr, /*impact=*/nullptr);
     adapter.set_mid_price(100.0);
 
     order_event o(now(), "TEST", order_type::market, order_side::buy, /*qty=*/3.0);
@@ -55,8 +54,7 @@ TEST(RealisticFills, MarketBuyRecordsAtRestingAskPrice)
 
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, /*aggression=*/1.1, TEST_QTY_SCALE,
-        nullptr, nullptr,
-        /*realistic_fills=*/true, /*bar_spread_bps=*/0.0);
+        nullptr, nullptr);
     adapter.set_mid_price(100.0);
 
     order_event o(now(), "TEST", order_type::market, order_side::buy, /*qty=*/3.0);
@@ -85,8 +83,7 @@ TEST(RealisticFills, MarketBuyWalksMultipleLevels)
 
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, /*aggression=*/1.1, TEST_QTY_SCALE,
-        nullptr, nullptr,
-        /*realistic_fills=*/true, /*bar_spread_bps=*/0.0);
+        nullptr, nullptr);
     adapter.set_mid_price(100.5);
 
     order_event o(now(), "TEST", order_type::market, order_side::buy, /*qty=*/3.0);
@@ -115,8 +112,7 @@ TEST(BarSpread, InertOnRecordedFillPrice)
 
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, /*aggression=*/1.1, TEST_QTY_SCALE,
-        nullptr, nullptr,
-        /*realistic_fills=*/false, /*bar_spread_bps=*/10.0);  // 10bps full
+        nullptr, nullptr);  // (bar-spread shift no longer exists)
     adapter.set_mid_price(100.0);
 
     order_event o(now(), "TEST", order_type::market, order_side::buy, /*qty=*/1.0);
@@ -139,8 +135,7 @@ TEST(BarSpread, InertWhenL2Seeded)
 
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, /*aggression=*/1.1, TEST_QTY_SCALE,
-        nullptr, nullptr,
-        /*realistic_fills=*/false, /*bar_spread_bps=*/10.0);
+        nullptr, nullptr);
     adapter.set_mid_price(100.0);
     adapter.set_l2_seeded(true);
 
@@ -166,7 +161,7 @@ TEST(RealisticFills, MarketSellRecordsAtRestingBidPrice)
 
     LocalBookAdapter adapter(
         ob, nullptr, nullptr, 42, /*aggression=*/1.1, TEST_QTY_SCALE,
-        nullptr, nullptr, /*realistic_fills=*/true, 0.0);
+        nullptr, nullptr);
     adapter.set_mid_price(99.0);
 
     order_event o(now(), "TEST", order_type::market, order_side::sell, /*qty=*/2.0);

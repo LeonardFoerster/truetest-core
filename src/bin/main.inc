@@ -330,7 +330,8 @@ struct cli_options
     int mm_levels = 10;
     int mm_base_depth = 100;
     double mm_spread_pct = 0.002;
-    double mm_vol_mult = 5.0;
+    double mm_vol_mult = 0.25;
+    double mm_max_spread_pct = 0.05;
     std::string queue_model = "none";
     std::string maker_queue_model = "none";
     std::vector<std::string> instrument_specs;
@@ -591,6 +592,7 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_int("mm_base_depth", o.mm_base_depth);
     get_double("mm_spread_pct", o.mm_spread_pct);
     get_double("mm_vol_mult", o.mm_vol_mult);
+    get_double("mm_max_spread_pct", o.mm_max_spread_pct);
     get_str("queue_model", o.queue_model);
     get_str("maker_queue_model", o.maker_queue_model);
     get_str("output", o.output);
@@ -661,6 +663,7 @@ static void dump_config(const cli_options& o)
     j["mm_base_depth"] = o.mm_base_depth;
     j["mm_spread_pct"] = o.mm_spread_pct;
     j["mm_vol_mult"] = o.mm_vol_mult;
+    j["mm_max_spread_pct"] = o.mm_max_spread_pct;
     j["queue_model"] = o.queue_model;
     j["maker_queue_model"] = o.maker_queue_model;
     j["risk"] = {
@@ -907,8 +910,15 @@ static void register_cli_options(CLI::App& app, cli_options& o)
         ->default_val(0.002);
     app.add_option("--mm-vol-mult", o.mm_vol_mult,
                    "Synthetic MarketMaker book: multiplier widening the seeded spread "
-                   "with realized volatility over the trailing window.")
-        ->default_val(5.0);
+                   "with realized volatility over the trailing window. Real spreads run "
+                   "at a few percent OF bar vol; values > 1 inflate the book until "
+                   "nothing fills.")
+        ->default_val(0.25);
+    app.add_option("--mm-max-spread-pct", o.mm_max_spread_pct,
+                   "Cap on the vol-widened per-level half-spread (fraction). Prevents "
+                   "one large bar return (gap) from widening the seeded book beyond "
+                   "every crossing limit.")
+        ->default_val(0.05);
     app.add_flag("--walked-book-impact", o.walked_book_impact,
                  "On L2-seeded symbols, price market orders against the actual VWAP of "
                  "the levels they'd walk instead of mid + --impact-k-bps. Walked depth is "
@@ -1049,6 +1059,8 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--mm-base-depth")) opts.mm_base_depth = file_opts.mm_base_depth;
     if (!was_set("--mm-spread-pct")) opts.mm_spread_pct = file_opts.mm_spread_pct;
     if (!was_set("--mm-vol-mult")) opts.mm_vol_mult = file_opts.mm_vol_mult;
+    if (!was_set("--mm-max-spread-pct"))
+        opts.mm_max_spread_pct = file_opts.mm_max_spread_pct;
     if (!was_set("--queue-model")) opts.queue_model = file_opts.queue_model;
     if (!was_set("--maker-queue-model")) opts.maker_queue_model = file_opts.maker_queue_model;
     if (!was_set("--output")) opts.output = file_opts.output;
@@ -1161,15 +1173,17 @@ static int apply_sim_realism(engine_config& cfg, const cli_options& o, bool is_l
         }
     }
 
-    if (o.mm_levels <= 0 || o.mm_base_depth <= 0 || !(o.mm_spread_pct > 0.0)) {
-        std::cerr << "[error] --mm-levels, --mm-base-depth and --mm-spread-pct "
-                     "must be > 0\n";
+    if (o.mm_levels <= 0 || o.mm_base_depth <= 0 || !(o.mm_spread_pct > 0.0) ||
+        !(o.mm_max_spread_pct > 0.0)) {
+        std::cerr << "[error] --mm-levels, --mm-base-depth, --mm-spread-pct and "
+                     "--mm-max-spread-pct must be > 0\n";
         return 1;
     }
     cfg.mm_levels_per_side = o.mm_levels;
     cfg.mm_base_depth = o.mm_base_depth;
     cfg.mm_base_spread_pct = o.mm_spread_pct;
     cfg.mm_vol_spread_mult = o.mm_vol_mult;
+    cfg.mm_max_half_spread_pct = o.mm_max_spread_pct;
     return 0;
 }
 
@@ -1332,8 +1346,8 @@ static int run_monte_carlo_mode(const cli_options& o)
     mc_cfg.base_seed = o.seed;
     mc_cfg.initial_balance = o.balance;
 
-    // Apply some realism from top-level flags (best effort for Phase 3)
-    mc_cfg.realistic_fills = o.realistic_fills;
+    // Apply some realism from top-level flags (best effort for Phase 3).
+    // Passive-side fill pricing is always on; no flag to forward.
     mc_cfg.order_latency_us = o.order_latency_us;
     mc_cfg.impact_k_bps = o.impact_k_bps;
 
@@ -1396,7 +1410,6 @@ static int run_monte_carlo_mode(const cli_options& o)
         nlohmann::json rich = nlohmann::json::parse(mc_json);
 
         rich["initial_balance"] = mc_cfg.initial_balance;
-        rich["realistic_fills"] = mc_cfg.realistic_fills;
         rich["order_latency_us"] = mc_cfg.order_latency_us;
         rich["impact_k_bps"] = mc_cfg.impact_k_bps;
         rich["keep_full_reports"] = mc_cfg.keep_full_reports;
@@ -2170,7 +2183,7 @@ static int run_tui_mode(const cli_options& o)
         // unconditionally for the chosen preset (user chose it here).
         // The known bundles only touch the realism/MC fields we care about.
         if (effective.preset == "backtest-local-l2") {
-            effective.realistic_fills = true;
+            // (passive-side fill pricing is always on; no flag needed)
             effective.queue_model = "l2-snapshot";
             effective.maker_queue_model = "uniform";
             effective.walked_book_impact = true;

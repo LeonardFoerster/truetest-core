@@ -229,6 +229,7 @@ if(BUILD_TESTS)
         tests/test_price.cpp
         tests/test_orderbook_registry.cpp
         tests/test_order_types.cpp
+        tests/test_stop_fill_pricing.cpp
         tests/test_object_pool.cpp
         tests/helpers/alloc_counter.cpp
         tests/test_hotpath_allocs.cpp

@@ -179,19 +179,14 @@ struct engine_config
     int mm_levels_per_side = 10;
     int mm_base_depth = 100;
     double mm_base_spread_pct = 0.002;
-    double mm_vol_spread_mult = 5.0;
+    double mm_vol_spread_mult = 0.25;
+    double mm_max_half_spread_pct = 0.05;
 
-    // Deprecated, ignored: passive-side fill pricing is always on. Fills
-    // record the resting counterparty's price, one fill_event per walked
-    // level; the aggressor's marked-up book price is only a crossing
-    // limit. Field removed together with the frozen engine.cpp callsite
-    // in the CCB phase.
-    bool realistic_fills = false;
-
-    // Deprecated, ignored: the recorded fill price always comes from the
-    // resting book, so a parametric bar-spread shift no longer applies.
-    // Calibrate mm_base_spread_pct instead. Removed in the CCB phase.
-    double bar_spread_bps = 0.0;
+    // Note: fills always record the resting counterparty's price, one
+    // fill_event per walked level (passive-side pricing). The aggressor's
+    // marked-up book price (mid × market_aggression) is only a crossing
+    // limit. Spread cost on the synthetic-book path comes from the mm_*
+    // calibration above.
 
     // Shadow-mode queue-position estimate. Null → NoQueueModel default
     // (legacy fill-on-cross). When set, TradeTapeShadowAdapter holds

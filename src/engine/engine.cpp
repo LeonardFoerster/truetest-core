@@ -50,6 +50,12 @@ engine::engine(std::shared_ptr<data_handler> dh,
       market_maker_(config_.seed != 0 ? MarketMaker(static_cast<unsigned>(config_.seed + 1))
                                       : MarketMaker())
 {
+    market_maker_.set_calibration({config_.mm_levels_per_side,
+                                   config_.mm_base_depth,
+                                   config_.mm_base_spread_pct,
+                                   config_.mm_vol_spread_mult,
+                                   config_.mm_max_half_spread_pct});
+
     if (ob)
         orderbook_registry_ = OrderbookRegistry();
 
@@ -378,7 +384,6 @@ std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol
                 config_.seed != 0 ? static_cast<unsigned>(config_.seed + 2) : config_.fill_rng_seed,
                 config_.market_aggression, config_.qty_scale,
                 config_.latency_model, config_.impact_model,
-                config_.realistic_fills, config_.bar_spread_bps,
                 config_.walked_book_impact);
             if (config_.debug_fills)
                 local->set_debug_fills(true, config_.debug_fills_budget);
@@ -1463,7 +1468,12 @@ void engine::start_workers()
             config_.periods_per_year, config_.max_equity_points);
         mm_worker_ = std::make_unique<MarketMakerWorker>(
             config_.seed != 0 ? static_cast<unsigned>(config_.seed + 3) : 42u,
-            *mm_order_ring_);
+            *mm_order_ring_,
+            mm_calibration{config_.mm_levels_per_side,
+                           config_.mm_base_depth,
+                           config_.mm_base_spread_pct,
+                           config_.mm_vol_spread_mult,
+                           config_.mm_max_half_spread_pct});
         wire_failure(*logging_worker_);
         wire_failure(*risk_worker_);
         wire_failure(*stats_worker_);
@@ -2101,66 +2111,8 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             exchange_adapter->submit_order(*o);
     }
 
-    std::vector<fill_event> fills;
-    if (adapter->poll_fills(fills))
-    {
-        DEBUG_STAGE(stage_timer_, fill_processing);
-        for (auto& f : fills)
-        {
-            stamp_fill_attribution(f);
-
-            const uint64_t opener = f.get_opener_order_id();
-            const std::string& strat = f.get_strategy_name();
-
-            const auto new_status = f.is_partial()
-                ? order_status::partially_filled : order_status::filled;
-            order_tracker_.set_status(f.get_order_id(), new_status);
-            cache_fill(f);
-            if (f.is_partial())
-                update_open_order_status(f.get_order_id(), "partial");
-            else
-                erase_open_order(f.get_order_id());
-            auto fill_ptr = acquire_pooled(fill_pool_,f);
-            log_event(f);
-            portfolio_.on_fill(f, opener, strat);
-            dispatch_fill_to_strategy(f);
-            adverse_selection_.on_fill(f);
-            exit_manager_.on_fill(f, opener);
-            risk_manager_.on_fill(f);
-#ifdef HAS_QUESTDB
-            if (questdb_active_ && questdb_store_)
-            {
-                const char* src =
-                    (f.get_source() == fill_source::exchange)  ? "exchange"
-                  : (f.get_source() == fill_source::simulated) ? "simulated"
-                  :                                              "local";
-                questdb_store_->record_fill(f, opener, strat, src);
-                questdb_store_->record_status_transition(f.get_order_id(),
-                    order_status::open, new_status);
-            }
-#endif
-            notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
-            publish_event(fill_ptr);
-            analytics_.on_event(fill_ptr);
-
-            if (config_.mode == engine_mode::shadow && shadow_tracker_)
-                shadow_tracker_->on_simulated_fill(f);
-
-            event_count++;
-
-            {
-                auto post_snap = analytics_.risk_view();
-                auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
-                if (post_action == risk_action::halt)
-                {
-                    if (config_.risk_unwind)
-                        unwind_positions(event_count);
-                    halt_requested = true;
-                    return false;
-                }
-            }
-        }
-    }
+    if (!process_adapter_fills(adapter, event_count, halt_requested))
+        return false;
 
     if (config_.mode == engine_mode::shadow && config_.provider)
     {
@@ -2191,6 +2143,90 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 
     event_count++;
     return true;
+}
+
+bool engine::process_adapter_fills(const std::shared_ptr<IExecutionAdapter>& adapter,
+                                   std::size_t& event_count, bool& halt_requested)
+{
+    std::vector<fill_event> fills;
+    if (!adapter->poll_fills(fills))
+        return true;
+
+    DEBUG_STAGE(stage_timer_, fill_processing);
+    for (auto& f : fills)
+    {
+        stamp_fill_attribution(f);
+
+        const uint64_t opener = f.get_opener_order_id();
+        const std::string& strat = f.get_strategy_name();
+
+        const auto new_status = f.is_partial()
+            ? order_status::partially_filled : order_status::filled;
+        order_tracker_.set_status(f.get_order_id(), new_status);
+        cache_fill(f);
+        if (f.is_partial())
+            update_open_order_status(f.get_order_id(), "partial");
+        else
+            erase_open_order(f.get_order_id());
+        auto fill_ptr = acquire_pooled(fill_pool_,f);
+        log_event(f);
+        portfolio_.on_fill(f, opener, strat);
+        dispatch_fill_to_strategy(f);
+        adverse_selection_.on_fill(f);
+        exit_manager_.on_fill(f, opener);
+        risk_manager_.on_fill(f);
+#ifdef HAS_QUESTDB
+        if (questdb_active_ && questdb_store_)
+        {
+            const char* src =
+                (f.get_source() == fill_source::exchange)  ? "exchange"
+              : (f.get_source() == fill_source::simulated) ? "simulated"
+              :                                              "local";
+            questdb_store_->record_fill(f, opener, strat, src);
+            questdb_store_->record_status_transition(f.get_order_id(),
+                order_status::open, new_status);
+        }
+#endif
+        notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+        publish_event(fill_ptr);
+        analytics_.on_event(fill_ptr);
+
+        if (config_.mode == engine_mode::shadow && shadow_tracker_)
+            shadow_tracker_->on_simulated_fill(f);
+
+        event_count++;
+
+        {
+            auto post_snap = analytics_.risk_view();
+            auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
+            if (post_action == risk_action::halt)
+            {
+                if (config_.risk_unwind)
+                    unwind_positions(event_count);
+                halt_requested = true;
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void engine::deliver_mm_book_trades(const std::string& symbol, const trades& trs,
+                                    const std::chrono::system_clock::time_point& ts,
+                                    std::size_t& event_count, bool& halt_requested)
+{
+    if (trs.empty())
+        return;
+    // Only adapters that already exist can hold resting strategy orders;
+    // don't create one just to deliver MM-vs-MM crossings.
+    auto it = execution_adapters_.find(symbol);
+    if (it == execution_adapters_.end() || !it->second)
+        return;
+    auto* local = dynamic_cast<LocalBookAdapter*>(it->second.get());
+    if (!local)
+        return;
+    local->on_book_trades(trs, ts);
+    process_adapter_fills(it->second, event_count, halt_requested);
 }
 
 bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
@@ -2626,10 +2662,16 @@ bool engine::route_order(order_event& order,
     return process_order(order_ptr, event_count, halt_requested);
 }
 
-void engine::check_pending_stops(double high, double low,
+void engine::check_pending_stops(double open, double high, double low,
                                  const std::chrono::system_clock::time_point& sim_time,
                                  std::size_t& event_count, bool& halt_requested)
 {
+    // last_mid_price_ is the bar close when this runs in the bar loops;
+    // restored after each anchored fill so subsequent processing keeps
+    // the close reference. Tick callers pass open == high == low ==
+    // last_mid_price_, making the anchor a no-op there.
+    const double bar_mid = last_mid_price_;
+
     auto it = pending_stops_.begin();
     while (it != pending_stops_.end() && !halt_requested)
     {
@@ -2643,6 +2685,33 @@ void engine::check_pending_stops(double high, double low,
 
         if (triggered)
         {
+            // Fill reference: the stop price, or the bar open when the
+            // bar gapped through the stop. Never the close — that is
+            // intra-bar look-ahead and deviates from the convention of
+            // filling where the stop was hit.
+            const double ref = (stop->get_side() == order_side::buy)
+                ? ((open >= stop->get_stop_price()) ? open : stop->get_stop_price())
+                : ((open <= stop->get_stop_price()) ? open : stop->get_stop_price());
+
+            last_mid_price_ = ref;
+            if (ref != bar_mid)
+            {
+                // Re-center the synthetic book at the trigger so the
+                // converted order walks depth priced around ref, not
+                // around the previous close. Skipped for real L2 depth
+                // and under the threaded MM preset (the worker owns the
+                // book there).
+                auto ob = orderbook_registry_.get_or_create(stop->get_symbol());
+                if (!preset_has_mm_worker(config_.threading) &&
+                    !l2_seeded_symbols_.count(stop->get_symbol()))
+                {
+                    auto mm_trades = market_maker_.replenish(
+                        ob, ref, /*update_history=*/false);
+                    deliver_mm_book_trades(stop->get_symbol(), mm_trades,
+                                           sim_time, event_count, halt_requested);
+                }
+            }
+
             if (stop->get_order_type() == order_type::stop)
             {
                 auto market_order = acquire_pooled(order_pool_,
@@ -2667,6 +2736,7 @@ void engine::check_pending_stops(double high, double low,
                     day_order_ids_.push_back({limit_order->get_symbol(), limit_order->get_order_id()});
                 process_order(limit_order, event_count, halt_requested);
             }
+            last_mid_price_ = bar_mid;
             it = pending_stops_.erase(it);
         }
         else
@@ -2954,6 +3024,24 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     last_mid_price_ = mkt.get_open();
     last_mark_symbol_ = mkt.get_symbol();
 
+    // Re-center the synthetic book at the open before draining pending
+    // orders: next-bar-open fills must walk depth priced at the open,
+    // not at the previous close (visible on gap bars).
+    if (!pending_orders_.empty() &&
+        pending_orders_.top().order->get_earliest_eligible_ts() <= timestamp)
+    {
+        auto ob_open = orderbook_registry_.get_or_create(mkt.get_symbol());
+        if (!preset_has_mm_worker(config_.threading) &&
+            !l2_seeded_symbols_.count(mkt.get_symbol()))
+        {
+            auto mm_trades = market_maker_.replenish(
+                ob_open, last_mid_price_, /*update_history=*/false);
+            bool halt = false;
+            deliver_mm_book_trades(mkt.get_symbol(), mm_trades,
+                                   timestamp, event_count, halt);
+        }
+    }
+
     while (!pending_orders_.empty() &&
            pending_orders_.top().order->get_earliest_eligible_ts() <= timestamp)
     {
@@ -2968,10 +3056,24 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     last_mid_price_ = mkt.get_close();
     last_mark_symbol_ = mkt.get_symbol();
 
+    {
+        // Stops were previously never evaluated in streaming bar mode —
+        // they silently never triggered. Local halt mirrors the pending
+        // drain above; risk halts propagate via halt_flag_.
+        bool halt = false;
+        check_pending_stops(mkt.get_open(), mkt.get_high(), mkt.get_low(),
+                            timestamp, event_count, halt);
+    }
+
     auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
     if (!preset_has_mm_worker(config_.threading) &&
         !l2_seeded_symbols_.count(mkt.get_symbol()))
-        market_maker_.replenish(ob, last_mid_price_);
+    {
+        auto mm_trades = market_maker_.replenish(ob, last_mid_price_);
+        bool halt = false;
+        deliver_mm_book_trades(mkt.get_symbol(), mm_trades,
+                               timestamp, event_count, halt);
+    }
 
     if (config_.provider && config_.provider->has_execution())
     {
@@ -3089,7 +3191,12 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         DEBUG_STAGE(stage_timer_, mm_replenish);
         auto ob = orderbook_registry_.get_or_create(rec.symbol);
         if (!l2_seeded_symbols_.count(rec.symbol))
-            market_maker_.replenish(ob, last_mid_price_);
+        {
+            auto mm_trades = market_maker_.replenish(ob, last_mid_price_);
+            bool halt = false;
+            deliver_mm_book_trades(rec.symbol, mm_trades,
+                                   rec.timestamp, event_count, halt);
+        }
     }
 
     if (config_.provider && config_.provider->has_execution())
@@ -3169,7 +3276,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 
     {
         DEBUG_STAGE(stage_timer_, stop_check);
-        check_pending_stops(rec.price, rec.price, rec.timestamp, event_count, halt);
+        check_pending_stops(rec.price, rec.price, rec.price, rec.timestamp, event_count, halt);
     }
     if (halt) return;
 
@@ -3781,6 +3888,22 @@ void engine::run()
 
         {
             DEBUG_STAGE(stage_timer_, pending_drain);
+            // Re-center the synthetic book at the open before draining:
+            // next-bar-open fills must walk depth priced at the open, not
+            // at the previous close (visible on gap bars).
+            if (!pending_orders_.empty() &&
+                pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time)
+            {
+                auto ob_open = orderbook_registry_.get_or_create(symbol);
+                if (!preset_has_mm_worker(config_.threading) &&
+                    !l2_seeded_symbols_.count(symbol))
+                {
+                    auto mm_trades = market_maker_.replenish(
+                        ob_open, last_mid_price_, /*update_history=*/false);
+                    deliver_mm_book_trades(symbol, mm_trades, sim_time,
+                                           event_count, halt_requested);
+                }
+            }
             while (!pending_orders_.empty() &&
                    pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time)
             {
@@ -3797,7 +3920,7 @@ void engine::run()
 
         {
             DEBUG_STAGE(stage_timer_, stop_check);
-            check_pending_stops(mkt.get_high(), mkt.get_low(), sim_time, event_count, halt_requested);
+            check_pending_stops(mkt.get_open(), mkt.get_high(), mkt.get_low(), sim_time, event_count, halt_requested);
         }
 
         {
@@ -3805,7 +3928,11 @@ void engine::run()
             auto ob = orderbook_registry_.get_or_create(symbol);
             if (!preset_has_mm_worker(config_.threading) &&
                 !l2_seeded_symbols_.count(symbol))
-                market_maker_.replenish(ob, last_mid_price_);
+            {
+                auto mm_trades = market_maker_.replenish(ob, last_mid_price_);
+                deliver_mm_book_trades(symbol, mm_trades, sim_time,
+                                       event_count, halt_requested);
+            }
         }
 
         if (mm_order_ring_)
@@ -3822,7 +3949,9 @@ void engine::run()
                         ob_order_type::good_till_cancel, mm_order.get_order_id(),
                         mm_side, Price::from_double(mm_order.get_price()),
                         static_cast<quantity>(std::round(mm_order.get_quantity() * 1e8)));
-                    mm_ob->add_order(mm_ob_order);
+                    auto mm_trades = mm_ob->add_order(mm_ob_order);
+                    deliver_mm_book_trades(mm_order.get_symbol(), mm_trades,
+                                           sim_time, event_count, halt_requested);
                 }
             }
         }
@@ -4018,7 +4147,11 @@ void engine::run_tick_data()
             DEBUG_STAGE(stage_timer_, mm_replenish);
             auto ob = orderbook_registry_.get_or_create(tick.symbol);
             if (!l2_seeded_symbols_.count(tick.symbol))
-                market_maker_.replenish(ob, last_mid_price_);
+            {
+                auto mm_trades = market_maker_.replenish(ob, last_mid_price_);
+                deliver_mm_book_trades(tick.symbol, mm_trades, tick.timestamp,
+                                       event_count, halt_requested);
+            }
         }
 
         {
@@ -4037,7 +4170,7 @@ void engine::run_tick_data()
 
         {
             DEBUG_STAGE(stage_timer_, stop_check);
-            check_pending_stops(tick.price, tick.price, tick.timestamp, event_count, halt_requested);
+            check_pending_stops(tick.price, tick.price, tick.price, tick.timestamp, event_count, halt_requested);
         }
         if (halt_requested) break;
 
@@ -4190,6 +4323,20 @@ void engine::run_replay(const std::string& log_path,
 
             last_mid_price_ = mkt.get_open();
 
+            // Re-center the synthetic book at the open before draining
+            // (next-bar-open fills walk open-priced depth; see bar loop).
+            if (!pending_orders_.empty() &&
+                pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time)
+            {
+                auto ob_open = orderbook_registry_.get_or_create(mkt.get_symbol());
+                if (!l2_seeded_symbols_.count(mkt.get_symbol()))
+                {
+                    auto mm_trades = market_maker_.replenish(
+                        ob_open, last_mid_price_, /*update_history=*/false);
+                    deliver_mm_book_trades(mkt.get_symbol(), mm_trades, sim_time,
+                                           event_count, halt_requested);
+                }
+            }
             while (!pending_orders_.empty() &&
                    pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time)
             {
@@ -4203,13 +4350,17 @@ void engine::run_replay(const std::string& log_path,
 
             last_mid_price_ = mkt.get_close();
 
-            check_pending_stops(mkt.get_high(), mkt.get_low(), sim_time,
+            check_pending_stops(mkt.get_open(), mkt.get_high(), mkt.get_low(), sim_time,
                                 event_count, halt_requested);
             if (halt_requested) break;
 
             auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
             if (!l2_seeded_symbols_.count(mkt.get_symbol()))
-                market_maker_.replenish(ob, last_mid_price_);
+            {
+                auto mm_trades = market_maker_.replenish(ob, last_mid_price_);
+                deliver_mm_book_trades(mkt.get_symbol(), mm_trades, sim_time,
+                                       event_count, halt_requested);
+            }
 
             auto order_opt = strategy_->on_market(mkt);
             publish_event(ev);
@@ -4250,7 +4401,7 @@ void engine::run_replay(const std::string& log_path,
             }
             if (halt_requested) break;
 
-            check_pending_stops(te.get_price(), te.get_price(), sim_time,
+            check_pending_stops(te.get_price(), te.get_price(), te.get_price(), sim_time,
                                 event_count, halt_requested);
             if (halt_requested) break;
 
