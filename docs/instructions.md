@@ -164,9 +164,9 @@ ctest --test-dir build
 - Credentials: env `TRUETEST_BINANCE_*` (preferred; argv leaks to ps), `--api-key/--api-secret` (warns).
 - Strategy: `--strategy sma,mean-reversion,structure-continuation,adaptive-hybrid`, `--param key=value` (multi-strategy comma-separated). Full list via `--help` or `StrategyRegistry`.
 - Risk/portfolio: `--initial-cash`, `--risk-fraction`, `--sl-atr`, `--tp-atr`, `--max-daily-loss`, `--max-trades-per-hour`, `--risk-unwind 0.4`, `--reconcile-tolerance-bps`.
-- Realism (backtest/shadow only; bypassed in live): `--realistic-fills`, `--order-latency-us N --order-latency-stddev-us M`, `--impact-k-bps`, `--bar-spread-bps`, `--queue-model l2-snapshot` (shadow + depth-stream), `--maker-queue-model uniform|front|back` (paper + depth-stream; uniform recommended default).
+- Realism (backtest/shadow only; bypassed in live): `--order-latency-us N --order-latency-stddev-us M`, `--impact-k-bps --impact-adv`, `--walked-book-impact`, `--fill-prob/--fill-fade/--fill-decay` (probabilistic limit-fill model, default off), `--mm-levels/--mm-base-depth/--mm-spread-pct/--mm-vol-mult/--mm-max-spread-pct` (synthetic-book calibration — the seeded book is the sole source of spread cost), `--queue-model l2-snapshot` (shadow + depth-stream), `--maker-queue-model uniform|front|back` (paper + depth-stream; uniform recommended default). Deprecated warn-noops: `--realistic-fills` (passive-side fill pricing is always on), `--bar-spread-bps` (calibrate `--mm-spread-pct` instead).
 - Threading: `--thread-preset inline|light|standard|full|extended` (auto from cores), `--spin-policy adaptive|spin|yield`, `--no-pin`, `--seed`.
-- **Presets** (new, see P1 work): `--preset futures-phase0|mc-robustness|backtest-local-l2|shadow-tape` — named bundles that supply realistic groups of flags (DMS/risk caps for phase0, reuse+gbm for MC, L2 queue+realistic-fills for backtests, etc.). Explicit flags and `--config` always win. Use with scripts and in the interactive TUI quick-start menu.
+- **Presets** (new, see P1 work): `--preset futures-phase0|mc-robustness|backtest-local-l2|shadow-tape` — named bundles that supply realistic groups of flags (DMS/risk caps for phase0, reuse+gbm for MC, L2 queue models + walked-book impact for backtests, etc.). Explicit flags and `--config` always win. Use with scripts and in the interactive TUI quick-start menu.
 - Persistence: `--persist --run-tag myrun_YYYYMMDD_HHMM` (QuestDB), `--checkpoint path`.
 - Replay/Record: `--replay events.bin --replay-from/--to`, `--record`, `--replay-data`.
 - Output: `--output results.json`, `--status-format tui|ndjson|minimal`, `--log-events`, `--log-rotation`.
@@ -189,11 +189,14 @@ The launcher scripts and many numbered examples in instructions §29–35 (backt
 
 **Data validation + formats**: Strict schema checks; see instructions §19.
 
-**Realism models** (`docs/architecture/realism.md` planned — current summary: all default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
-- `--realistic-fills`: passive/resting prices, one fill_event per level walked.
-- Latency: two layers (`latency_model` strategy→eligible, `wire_latency_model` order→venue).
-- Impact: SquareRootImpactModel applied before aggression.
-- Bar-spread: full bid-ask on bar-mode market orders (suppressed on L2 symbols).
+**Realism models** (`docs/architecture/realism.md` planned — current summary: opt-in models default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
+- **Fill pricing (always on, no flag)**: every fill records the resting counterparty's price, one fill_event per level walked. `market_aggression` (default 1.1) is purely a crossing guarantee — never a recorded price. The deprecated `--realistic-fills` / `--bar-spread-bps` are accepted as warn-noops.
+- **Synthetic book calibration** (`--mm-levels` 10, `--mm-base-depth` 100, `--mm-spread-pct` 0.002, `--mm-vol-mult` 0.25, `--mm-max-spread-pct` 0.05): in bar mode the MarketMaker's seeded ladder is the sole source of spread cost for taker fills — calibrate it to the target market. Level i rests at mid × (1 ± i × min(spread_pct + vol × vol_mult, max_spread_pct)), depth = base_depth × i. The MM pulls and re-places its quotes each bar (no stale depth accumulation); resting strategy limits fill as maker orders when a quote update crosses their level.
+- **Stop fills**: stops trigger on bar high/low and fill anchored at the stop price — or at the bar **open** when the bar gaps through the stop — never at the close (that would be intra-bar look-ahead). Pending strategy orders drain against a book re-centered at the bar open (next-bar-open convention holds on gap bars).
+- **Intra-bar ambiguity**: OHLC bars carry no path. ExitManager resolves SL-vs-TP worst-case (SL first when both extremes cross in one bar). Tick data / recorded-WS replay are the escape hatch for path-sensitive strategies.
+- **Probabilistic limit fills** (`--fill-prob`, `--fill-fade`, `--fill-decay`; default off): RealisticFillModel gates each limit submit with probability prob × exp(−decay × distance-from-mid); fade shaves every fill's quantity. Models adverse selection on top of the book mechanics.
+- Latency: two layers (`latency_model` strategy→eligible, `wire_latency_model` order→venue). **No sub-bar latency by default** — bar-granularity delay (`--exec-bar-delay 1`) is the honest default; expect shadow-vs-backtest divergence on latency-sensitive strategies until `--order-latency-us`/`--wire-latency-us` are calibrated (REST submit round-trips ~10–50 ms are a reasonable starting point for Binance spot).
+- Impact: SquareRootImpactModel raises the market-order reference before aggression — observable through which depth the crossing limit reaches (recorded prices always come from resting levels). `--walked-book-impact` uses the real L2 walked VWAP as reference instead, when depth is present.
 - Queue: `--queue-model l2-snapshot` (shadow L2SnapshotQueueModel for adverse-selection honesty), `--maker-queue-model uniform|front|back` (QueueAwareBookAdapter + IQueueModel for paper/backtest maker fills; tracks size_ahead; real prints consume front; L2 shrinkage = cancels per model).
 
 **Orderbook**: price-time priority matching; FillModel for partials; walked-book impact when L2 present.
@@ -524,7 +527,7 @@ This runs 500 independent GBM paths, executes your strategy on each, and prints:
 - `--mc-model gbm` — generator (only gbm implemented; ou listed for future)
 - `--mc-params "key=val,..."` — generator parameters (n_steps, mu, sigma, etc.)
 - `--mc-parallel` — **experimental** (Phase 5) concurrent trials (see warnings below)
-- All normal realism flags (`--realistic-fills`, `--order-latency-us`, etc.) and `--strategy` (any registered strategy, including structure-continuation / adaptive-hybrid) are respected per trial.
+- All normal realism flags (`--order-latency-us`, `--impact-k-bps`, `--mm-*`, etc.) and `--strategy` (any registered strategy, including structure-continuation / adaptive-hybrid) are respected per trial.
 
 ### Parallel Execution (Phase 5)
 ```bash
