@@ -76,6 +76,9 @@ public:
                      double qty_scale = 1e8,
                      std::shared_ptr<ILatencyModel> latency_model = nullptr,
                      std::shared_ptr<IImpactModel>  impact_model  = nullptr,
+                     // Deprecated, ignored: passive-side fill pricing is
+                     // always on. Parameters retained until the frozen
+                     // engine.cpp callsite is updated (CCB phase).
                      bool realistic_fills = false,
                      double bar_spread_bps = 0.0,
                      bool walked_book_impact = false)
@@ -93,8 +96,8 @@ public:
         , walked_book_impact_(walked_book_impact) {}
 
     void set_mid_price(double price) { mid_price_ = price; }
-    // Symbol carries real L2 depth — bar_spread shift is suppressed
-    // because the seeded book's spread already prices the fill correctly.
+    // Symbol carries real L2 depth — enables the walked-book VWAP
+    // reference for market orders (walked_book_impact).
     void set_l2_seeded(bool seeded) { l2_seeded_ = seeded; }
 
     void set_debug_fills(bool enabled, int budget = 20)
@@ -150,15 +153,6 @@ public:
 
             if (!walked_used)
             {
-                // Bar-spread shift: lift mid to the BBO before impact. Skipped
-                // when realistic_fills is on (resting walk already incorporates
-                // the seeded spread) and when symbol carries real L2 depth.
-                if (bar_spread_bps_ > 0.0 && !realistic_fills_ && !l2_seeded_)
-                {
-                    const double half = bar_spread_bps_ * 0.5 * 1e-4;
-                    ref_price *= (o.get_side() == order_side::buy) ? (1.0 + half) : (1.0 - half);
-                }
-
                 // Impact BEFORE aggression so aggression still guarantees an
                 // immediate cross. ZeroImpactModel (default) is a pass-through.
                 if (impact_model_)
@@ -200,13 +194,11 @@ public:
 
             if (our_trade_info.orderId_ == o.get_order_id())
             {
-                // Legacy: fill at the aggressor's submitted book price
-                // (mid × aggression for market, our limit otherwise).
-                // Realistic: fill at the resting counterparty's price —
-                // honest passive-side pricing, one event per walked level.
-                double fill_price = realistic_fills_
-                    ? counter_trade.price_.to_double()
-                    : our_trade_info.price_.to_double();
+                // Fill at the resting counterparty's price — honest
+                // passive-side pricing, one event per walked level. The
+                // aggressor's book price (mid × aggression for market) is
+                // only a crossing limit, never a recorded fill price.
+                double fill_price = counter_trade.price_.to_double();
                 double fill_qty = static_cast<double>(our_trade_info.quantity_) / qty_scale_;
 
                 if (fade_rate > 0.0)
