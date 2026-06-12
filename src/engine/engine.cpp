@@ -438,6 +438,27 @@ void engine::publish_event(const event_pointer& ev)
         if (!ring) return;
         if (!ring->try_push(ev))
         {
+            if (config_.drop_policy == ring_drop_policy::block)
+            {
+                // Deterministic backpressure: never lose an event — wait for
+                // the worker to drain the ring. Bail out (and count a drop)
+                // only when blocking can no longer terminate: a worker died
+                // or the engine is halting.
+                for (;;)
+                {
+                    if (worker_failed_.load(std::memory_order_acquire) ||
+                        halt_flag_.load(std::memory_order_acquire))
+                        break;
+                    std::this_thread::yield();
+                    if (ring->try_push(ev))
+                    {
+#ifdef HAS_DEBUG
+                        diag.on_push(ring->occupancy());
+#endif
+                        return;
+                    }
+                }
+            }
             ++drops;
 #ifdef HAS_DEBUG
             diag.on_drop();
@@ -1456,8 +1477,18 @@ void engine::start_workers()
         logging_ring_ = std::make_shared<EventRing>();
         risk_ring_ = std::make_shared<EventRing>();
         stats_ring_ = std::make_shared<EventRing>();
-        mm_ring_ = std::make_shared<EventRing>();
-        mm_order_ring_ = std::make_shared<MMRing>();
+
+        // Backtest determinism: the async MM worker replenishes the book on
+        // its own schedule, so the book state at any bar — and therefore
+        // fill prices — would depend on thread scheduling. Backtests use
+        // the inline replenish path instead (same as the other presets);
+        // the async worker stays available for shadow/live.
+        const bool async_mm = (config_.mode != engine_mode::backtest);
+        if (async_mm)
+        {
+            mm_ring_ = std::make_shared<EventRing>();
+            mm_order_ring_ = std::make_shared<MMRing>();
+        }
 
         logging_worker_ = make_logging_worker();
         risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_,
@@ -1466,18 +1497,19 @@ void engine::start_workers()
         stats_worker_ = std::make_unique<StatsWorker>(config_.initial_balance, 1000,
             config_.rolling_window, config_.risk_free_rate,
             config_.periods_per_year, config_.max_equity_points);
-        mm_worker_ = std::make_unique<MarketMakerWorker>(
-            config_.seed != 0 ? static_cast<unsigned>(config_.seed + 3) : 42u,
-            *mm_order_ring_,
-            mm_calibration{config_.mm_levels_per_side,
-                           config_.mm_base_depth,
-                           config_.mm_base_spread_pct,
-                           config_.mm_vol_spread_mult,
-                           config_.mm_max_half_spread_pct});
+        if (async_mm)
+            mm_worker_ = std::make_unique<MarketMakerWorker>(
+                config_.seed != 0 ? static_cast<unsigned>(config_.seed + 3) : 42u,
+                *mm_order_ring_,
+                mm_calibration{config_.mm_levels_per_side,
+                               config_.mm_base_depth,
+                               config_.mm_base_spread_pct,
+                               config_.mm_vol_spread_mult,
+                               config_.mm_max_half_spread_pct});
         wire_failure(*logging_worker_);
         wire_failure(*risk_worker_);
         wire_failure(*stats_worker_);
-        wire_failure(*mm_worker_);
+        if (mm_worker_) wire_failure(*mm_worker_);
 
         worker_threads_.emplace_back([this]() {
             logging_worker_->run(*logging_ring_);
@@ -1494,10 +1526,13 @@ void engine::start_workers()
         });
         pin_to_core(worker_threads_.back(), find_core(core_role::stats));
 
-        worker_threads_.emplace_back([this]() {
-            mm_worker_->run(*mm_ring_);
-        });
-        pin_to_core(worker_threads_.back(), find_core(core_role::market_maker));
+        if (mm_worker_)
+        {
+            worker_threads_.emplace_back([this]() {
+                mm_worker_->run(*mm_ring_);
+            });
+            pin_to_core(worker_threads_.back(), find_core(core_role::market_maker));
+        }
         break;
     }
     }
@@ -2702,7 +2737,7 @@ void engine::check_pending_stops(double open, double high, double low,
                 // and under the threaded MM preset (the worker owns the
                 // book there).
                 auto ob = orderbook_registry_.get_or_create(stop->get_symbol());
-                if (!preset_has_mm_worker(config_.threading) &&
+                if (!mm_worker_ &&
                     !l2_seeded_symbols_.count(stop->get_symbol()))
                 {
                     auto mm_trades = market_maker_.replenish(
@@ -3031,7 +3066,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         pending_orders_.top().order->get_earliest_eligible_ts() <= timestamp)
     {
         auto ob_open = orderbook_registry_.get_or_create(mkt.get_symbol());
-        if (!preset_has_mm_worker(config_.threading) &&
+        if (!mm_worker_ &&
             !l2_seeded_symbols_.count(mkt.get_symbol()))
         {
             auto mm_trades = market_maker_.replenish(
@@ -3066,7 +3101,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     }
 
     auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
-    if (!preset_has_mm_worker(config_.threading) &&
+    if (!mm_worker_ &&
         !l2_seeded_symbols_.count(mkt.get_symbol()))
     {
         auto mm_trades = market_maker_.replenish(ob, last_mid_price_);
@@ -3128,8 +3163,10 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                 exit_manager_.on_fill(f, opener);
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
-                if (!config_.is_threaded())
-                    analytics_.on_event(fill_ptr);
+                // Engine-local analytics always sees fills (cheap, rare) so
+                // risk_view() cash/positions stay correct in threaded presets
+                // — same contract as the batch path in process_order().
+                analytics_.on_event(fill_ptr);
                 event_count++;
             }
         }
@@ -3142,6 +3179,8 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     publish_event(mkt_ptr);
     if (!config_.is_threaded())
         analytics_.on_event(mkt_ptr);
+    else
+        analytics_.on_mark(mkt.get_symbol(), mkt.get_close());
     event_count++;
 
     if (evaluate_exits(mkt.get_symbol(),
@@ -3251,8 +3290,10 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                 exit_manager_.on_fill(f, opener);
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
-                if (!config_.is_threaded())
-                    analytics_.on_event(fill_ptr);
+                // Engine-local analytics always sees fills (cheap, rare) so
+                // risk_view() cash/positions stay correct in threaded presets
+                // — same contract as the batch path in process_order().
+                analytics_.on_event(fill_ptr);
                 event_count++;
             }
         }
@@ -3288,6 +3329,8 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     }
     if (!config_.is_threaded())
         analytics_.on_event(tick_ptr);
+    else
+        analytics_.on_mark(rec.symbol, rec.price);
     event_count++;
 
     if (evaluate_exits(rec.symbol, rec.price, rec.timestamp,
@@ -3895,7 +3938,7 @@ void engine::run()
                 pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time)
             {
                 auto ob_open = orderbook_registry_.get_or_create(symbol);
-                if (!preset_has_mm_worker(config_.threading) &&
+                if (!mm_worker_ &&
                     !l2_seeded_symbols_.count(symbol))
                 {
                     auto mm_trades = market_maker_.replenish(
@@ -3926,7 +3969,7 @@ void engine::run()
         {
             DEBUG_STAGE(stage_timer_, mm_replenish);
             auto ob = orderbook_registry_.get_or_create(symbol);
-            if (!preset_has_mm_worker(config_.threading) &&
+            if (!mm_worker_ &&
                 !l2_seeded_symbols_.count(symbol))
             {
                 auto mm_trades = market_maker_.replenish(ob, last_mid_price_);
@@ -3969,6 +4012,8 @@ void engine::run()
         }
         if (!config_.is_threaded())
             analytics_.on_event(mkt_ptr);
+        else
+            analytics_.on_mark(symbol, mkt.get_close());
         event_count++;
 
         if (evaluate_exits(symbol,
@@ -4117,6 +4162,8 @@ void engine::run_tick_data()
         publish_event(bar_ptr);
         if (!config_.is_threaded())
             analytics_.on_event(bar_ptr);
+        else
+            analytics_.on_mark(bar.get_symbol(), bar.get_close());
 
         if (evaluate_exits(bar.get_symbol(),
                            bar.get_low(), bar.get_high(), bar.get_close(),
@@ -4190,6 +4237,8 @@ void engine::run_tick_data()
         }
         if (!config_.is_threaded())
             analytics_.on_event(tick_ptr);
+        else
+            analytics_.on_mark(tick.symbol, tick.price);
         event_count++;
 
         if (evaluate_exits(tick.symbol, tick.price, tick.timestamp,
@@ -4366,6 +4415,8 @@ void engine::run_replay(const std::string& log_path,
             publish_event(ev);
             if (!config_.is_threaded())
                 analytics_.on_event(ev);
+            else
+                analytics_.on_mark(mkt.get_symbol(), mkt.get_close());
 
             if (evaluate_exits(mkt.get_symbol(),
                                mkt.get_low(), mkt.get_high(), mkt.get_close(),
@@ -4408,6 +4459,8 @@ void engine::run_replay(const std::string& log_path,
             publish_event(ev);
             if (!config_.is_threaded())
                 analytics_.on_event(ev);
+            else
+                analytics_.on_mark(te.get_symbol(), te.get_price());
 
             if (evaluate_exits(te.get_symbol(), te.get_price(), sim_time,
                                event_count, te.get_recv_ns()))

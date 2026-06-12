@@ -110,3 +110,49 @@ TEST(ThreadingCorrectness, AllPresetsComplete)
             << "Failed for preset: " << preset_to_string(preset);
     }
 }
+
+// With ring_drop_policy::block (backtest default) and the synchronous
+// risk-view mark, a threaded preset must report exactly the same results
+// as inline mode — comparing strategies on a multicore box must never
+// compare scheduling noise.
+TEST(ThreadingCorrectness, ThreadedPresetsMatchInlineResults)
+{
+    auto run_report = [](thread_preset preset) {
+        SilenceCout quiet;
+        auto dh = make_test_data(200);
+        auto ob = std::make_shared<orderbook>();
+        auto strat = std::make_shared<CorrectnessStrategy>();
+
+        MarketMaker mm(42);
+        mm.add_orders(ob, 100.0, 10);
+
+        engine_config cfg;
+        cfg.threading = preset;
+        cfg.seed = 42;
+        cfg.disable_pinning = true;
+
+        engine eng(dh, ob, strat, std::move(cfg));
+        eng.run();
+        return eng.get_analytics().generate_report();
+    };
+
+    const auto base = run_report(thread_preset::inline_mode);
+
+    for (auto preset : {thread_preset::light, thread_preset::standard,
+                        thread_preset::full, thread_preset::extended})
+    {
+        const auto r = run_report(preset);
+        EXPECT_DOUBLE_EQ(r.final_equity, base.final_equity)
+            << preset_to_string(preset);
+        EXPECT_EQ(r.total_fills, base.total_fills) << preset_to_string(preset);
+        EXPECT_EQ(r.total_trades, base.total_trades) << preset_to_string(preset);
+        EXPECT_DOUBLE_EQ(r.sharpe_ratio, base.sharpe_ratio)
+            << preset_to_string(preset);
+        EXPECT_DOUBLE_EQ(r.sortino_ratio, base.sortino_ratio)
+            << preset_to_string(preset);
+        EXPECT_DOUBLE_EQ(r.max_drawdown, base.max_drawdown)
+            << preset_to_string(preset);
+        EXPECT_EQ(r.equity_curve.size(), base.equity_curve.size())
+            << preset_to_string(preset);
+    }
+}

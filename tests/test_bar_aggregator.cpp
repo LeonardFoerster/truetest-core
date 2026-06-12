@@ -6,13 +6,29 @@ static auto epoch_ms(int64_t ms)
     return std::chrono::system_clock::time_point(std::chrono::milliseconds(ms));
 }
 
-TEST(BarAggregator, SingleTick_EmitsPartial)
+TEST(BarAggregator, SingleTick_DoesNotEmitPartial)
 {
     int count = 0;
     BarAggregator agg(std::chrono::milliseconds(100), [&](const market_event&) { count++; });
     agg.on_tick("X", 100.0, 10, epoch_ms(0));
-    // Partial bar emitted immediately for live UI update
+    // No partial emission — a bar is only emitted once its interval completes
+    // (or via flush). Partial emissions would double-feed strategies/indicators.
+    EXPECT_EQ(count, 0);
+}
+
+TEST(BarAggregator, NoEmissionsWithinInterval_Deterministic)
+{
+    int count = 0;
+    BarAggregator agg(std::chrono::milliseconds(1000), [&](const market_event&) { count++; });
+    // Many ticks inside one interval: exactly zero emissions until rollover,
+    // independent of wall-clock time / host speed.
+    for (int i = 0; i < 100; ++i)
+        agg.on_tick("X", 100.0 + i, 1, epoch_ms(i));
+    EXPECT_EQ(count, 0);
+    agg.on_tick("X", 50.0, 1, epoch_ms(1000)); // rollover → exactly one bar
     EXPECT_EQ(count, 1);
+    agg.flush();                               // final partial
+    EXPECT_EQ(count, 2);
 }
 
 TEST(BarAggregator, IntervalComplete_EmitsBar)
@@ -81,10 +97,9 @@ TEST(BarAggregator, Flush_EmitsPartialBar)
     int count = 0;
     BarAggregator agg(std::chrono::milliseconds(10000), [&](const market_event&) { count++; });
     agg.on_tick("X", 1.0, 1, epoch_ms(0));
-    // on_tick already emitted a partial, flush emits final
-    int before_flush = count;
+    EXPECT_EQ(count, 0); // nothing emitted while the bar is still open
     agg.flush();
-    EXPECT_GT(count, before_flush);
+    EXPECT_EQ(count, 1); // flush emits the final partial bar
 }
 
 TEST(BarAggregator, Flush_NothingOpen)
@@ -113,6 +128,8 @@ TEST(BarAggregator, MultipleBarEmissions)
     agg.on_tick("X", 1.0, 1, epoch_ms(203));
     // Bar 4: t=305 triggers bar 3 completion, starts new bar
     agg.on_tick("X", 1.0, 1, epoch_ms(305));
+    // The last open bar is only emitted on flush.
+    agg.flush();
 
     // 4 distinct bar start times
     EXPECT_EQ(bar_opens.size(), 4u);
@@ -125,6 +142,6 @@ TEST(BarAggregator, Symbol_Propagation)
         sym = bar.get_symbol();
     });
     agg.on_tick("BTC", 1.0, 1, epoch_ms(0));
-    // Partial emit sets symbol immediately
+    agg.flush();
     EXPECT_EQ(sym, "BTC");
 }

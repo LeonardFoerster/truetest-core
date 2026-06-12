@@ -147,6 +147,24 @@ public:
     void on_event(const event_pointer& ev) override;
     void on_funding(const funding_event& fe);   // Phase 2.1
 
+    // Lightweight synchronous mark-to-market for the engine's hot path when
+    // full analytics runs on a worker thread: keeps risk_view()'s equity and
+    // drawdown current (and identical to inline mode) without the per-event
+    // heavy work (equity curve, return stats, benchmark) the worker does.
+    void on_mark(const std::string& symbol, double price)
+    {
+        open_positions_[symbol].last_price = price;
+        last_close_ = price;
+        const double equity = cash_ + position_value();
+        last_equity_ = equity;
+        if (equity > peak_equity_) peak_equity_ = equity;
+        if (peak_equity_ > 0.0)
+        {
+            const double dd = (peak_equity_ - equity) / peak_equity_;
+            if (dd > max_drawdown_) max_drawdown_ = dd;
+        }
+    }
+
     // Phase 2.4 — allow external update of the current 8h funding rate
     // (called from provider when better funding rate data is available)
     void set_current_funding_rate_8h(double rate) { current_funding_8h_rate_ = rate; }

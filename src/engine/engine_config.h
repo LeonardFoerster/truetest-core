@@ -25,10 +25,15 @@ namespace truetest::ui { class ConsoleDashboard; }
 
 enum class engine_mode { backtest, shadow, live };
 
+// block (default, backtest): the event loop applies backpressure — it
+// spins until the worker drains the ring, so no event is ever lost and
+// threaded-preset results are deterministic and identical to inline.
 // halt_on_drop: a drop from risk/observer/risk_stats (rings that feed
 // halt+shadow) sets halt_flag_. Non-safety rings still drop silently.
-// main.inc forces halt_on_drop when mode ∈ {shadow, live}.
-enum class ring_drop_policy { allow, halt_on_drop };
+// main.inc forces halt_on_drop when mode ∈ {shadow, live} (blocking the
+// hot path against a live feed is worse than halting).
+// allow: legacy lossy behavior — drops are counted but otherwise ignored.
+enum class ring_drop_policy { allow, halt_on_drop, block };
 
 // Phase 1 hot-path: pre-reserve object-pool blocks at engine startup so
 // runtime grow() never hits the heap on the event loop. When
@@ -207,7 +212,9 @@ struct engine_config
 
     unsigned max_consecutive_worker_errors = 5;
 
-    ring_drop_policy drop_policy = ring_drop_policy::allow;
+    // Default block: backtests must not silently lose events to full rings
+    // (lossy stats made reported metrics depend on scheduling/preset).
+    ring_drop_policy drop_policy = ring_drop_policy::block;
 
     pool_prewarm_settings pool_prewarm{};
 

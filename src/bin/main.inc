@@ -1737,7 +1737,9 @@ static int run_provider_mode(const cli_options& o)
 
     // Ring-buffer drops silently corrupt the shadow portfolio / halt path
     // — unacceptable when real money or real dry-run validation is on the
-    // line. Backtest keeps the lenient default (allow).
+    // line. Backtest keeps the default (block: deterministic backpressure,
+    // no event loss); blocking the hot path against a live feed is worse
+    // than halting, so shadow/live escalate drops instead.
     if (prov_cfg.mode != engine_mode::backtest)
         prov_cfg.drop_policy = ring_drop_policy::halt_on_drop;
 
