@@ -16,6 +16,7 @@ Monte Carlo simulation capabilities were integrated from the `monte-carlo` featu
 **Recent major advancements** (deepdive stabilization & realism pass):
 - **Queue-position awareness** (6-step implementation) — realistic orderbook queue modeling, latency, impact, and walked-book fill simulation for high-fidelity shadow vs. reality divergence tracking.
 - Modernized **rich ncurses TUI** with tabbed panels, risk dashboards, and live updates (multiple UI passes).
+- **Opt-in web UI** (`-DENABLE_WEB=ON` + `--web`) — a read-only browser cockpit + backtest-review SPA served by an embedded civetweb HTTP/WS server, reading the same `snapshot_dashboard()` seam as the TUI (off the hot path, no order routes). See [`docs/web-ui.md`](docs/web-ui.md).
 - **Dead Man’s Switch** hardening — now attempts position flattening (`reduceOnly` MARKET) on heartbeat loss, plus related safety optimizations.
 - **Tiered maintenance-margin risk** (Phase 2.2) — `MaintenanceMarginTable` + `FuturesRiskCheck` using real `/fapi/v1/leverageBracket` data; funding events wired toward P&L and risk.
 - Extensive **realism wiring**, per-lot bookkeeping, hybrid executor, ExitManager, and orderbook fidelity improvements.
@@ -60,6 +61,7 @@ Optional backends (enable at configure time):
 cmake -B build \
   -DENABLE_BINANCE=ON \     # Binance spot + futures (REST + WS)
   -DENABLE_QUESTDB=ON \     # High-resolution persistence + ILP
+  -DENABLE_WEB=ON \         # Embedded web UI server (civetweb; --web) — docs/web-ui.md
   -DENABLE_LIVE_DATA=ON \   # Generic WebSocket data source
   -DENABLE_DEBUG=ON \       # Instrumentation & stage timers
   -DENABLE_NATIVE_OPT=ON    # -march=native for Release builds

@@ -186,6 +186,14 @@ hft-engine/
     │   ├── tabbed_dashboard.h/.cpp     # rich ncurses TUI (engine_shadow / engine_live)
     │   ├── dashboard_snapshot.h        # snapshot DTO populated by engine
     │   └── panels/                     # positions, lots, brackets, fills, debug
+    ├── web/                            # (#ifdef HAS_WEB) opt-in browser UI server
+    │   ├── web_server.h/.cpp           # civetweb HTTP+WS server (read-only, own thread)
+    │   ├── web_config.h                # bind/port/token/assets/poll config
+    │   ├── snapshot_json.h/.cpp        # dashboard_snapshot → SnapshotFrame JSON
+    │   ├── report_json.h/.cpp          # AnalyticsReport → ResultsReport JSON
+    │   ├── json_emit.h                 # hand-rolled JSON writer (no nlohmann)
+    │   ├── tools/dump_fixtures.cpp     # emits engine-shaped JSON fixtures
+    │   └── frontend/                   # React + Vite + TS SPA (built → src/web/assets/)
     ├── providers/
     │   ├── provider.h                  # IProvider (lifecycle, configure, on_mid_price)
     │   ├── provider_registry.h         # factory registry + REGISTER_PROVIDER macro
@@ -246,6 +254,7 @@ cmake -B build \
   -DENABLE_BINANCE=ON \       # Binance live streaming + REST execution + testnet
                               #   (Boost.Beast + OpenSSL)
   -DENABLE_QUESTDB=ON \       # QuestDB persistence (raw POSIX sockets, no extra deps)
+  -DENABLE_WEB=ON \           # Embedded web UI server (civetweb; --web) — see docs/web-ui.md
   -DENABLE_LIVE_DATA=ON \     # Generic WebSocket data source
   -DENABLE_DEBUG=ON \         # Performance instrumentation (Abseil)
   -DENABLE_TSAN=ON \          # ThreadSanitizer (mutually exclusive with ASAN/UBSAN)
@@ -362,7 +371,7 @@ state every N events (default 10k). Setting `resume_checkpoint_path` at
 construction pre-populates the portfolio from the referenced file, enabling
 resume-after-crash workflows. Orthogonal to QuestDB persistence.
 
-### Status displays (no web UI)
+### Status displays (TUIs + opt-in web UI)
 Two TUIs ship in the tree, both opt-in via `--status-format`:
 - **`ConsoleDashboard`** (`src/ui/console_dashboard.{h,cpp}`) — plain or
   ANSI-coloured status; default on `engine_backtest`.
@@ -375,8 +384,20 @@ Two TUIs ship in the tree, both opt-in via `--status-format`:
   ring as `ConsoleDashboard`.
 
 `--status-format off|plain|tui|ndjson|auto` (default `auto`: tty → tui).
-The previous Boost.Beast WebSocket dashboard + React SPA are gone; structured
-machine-readable output now goes through `--status-format ndjson`.
+Structured machine-readable output goes through `--status-format ndjson`.
+
+**Opt-in web UI** (`-DENABLE_WEB=ON` + `--web`, `HAS_WEB`): a browser cockpit +
+backtest-review SPA served by an embedded **civetweb** HTTP+WS server (`src/web/`),
+on its own thread. It is a third read-only consumer of the same
+`engine::snapshot_dashboard()` / `get_analytics()` seam the TUI uses — zero
+hot-path work, no contact with the frozen live-safety surface, **no order/flatten/
+kill routes on any target** (read-only by construction). WS `/stream` pushes
+`SnapshotFrame` JSON; REST `/api/snapshot` + `/api/results`. Hand-rolled JSON
+(`src/web/json_emit.h`), no nlohmann. React+Vite+TS frontend under
+`src/web/frontend/` (plain CSS, not Tailwind). This is a new, deliberately
+decoupled design — distinct from the old Boost.Beast WebSocket UI + React SPA
+that were removed (whose hot-path coupling this layout avoids). Full guide:
+`docs/web-ui.md`.
 
 ### C API for embedding
 `src/api/truetest_api.h` exposes an opaque handle + JSON-config surface
@@ -540,8 +561,13 @@ Operator guide: `docs/futures-testnet.md` (planned / deferred; current details i
   client (raw POSIX sockets, no libpq or libpqxx). `--persist` is opt-in
   per session; default off.
 - **Status display: ncurses tabbed TUI** for `engine_shadow` /
-  `engine_live`; the previous Boost.Beast WebSocket UI + React SPA were
-  removed. Headless / pipe-friendly output via `--status-format ndjson`.
+  `engine_live`; headless / pipe-friendly output via `--status-format ndjson`.
+- **Web UI: embedded civetweb HTTP+WS server (opt-in via `ENABLE_WEB=ON` +
+  `--web`).** Read-only browser cockpit + backtest review (`src/web/`), React+
+  Vite+TS frontend (`src/web/frontend/`, plain CSS). Third consumer of the
+  `snapshot_dashboard()` seam — off the hot path, no control routes. This is a
+  fresh, decoupled design; the older Boost.Beast WebSocket UI + React SPA that
+  were removed are unrelated to it. Spec: `docs/web-ui.md`.
 - **Live venue: Binance (mainnet + spot testnet).** New venues will be
   sibling providers under `src/providers/`; the core does not need to
   change to add one.
