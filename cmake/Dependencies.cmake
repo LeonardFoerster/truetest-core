@@ -127,6 +127,37 @@ function(tt_wire_optional_backends target)
         target_compile_definitions(${target} PUBLIC HAS_QUESTDB)
     endif()
 
+    # Embedded web UI server (civetweb — small C HTTP+WS server, no Boost).
+    # Off the hot path: the snapshot/report serializers may use whatever they
+    # like and the WS server runs on its own thread, polling the same
+    # snapshot_dashboard() seam the ncurses TUI uses.
+    if(ENABLE_WEB)
+        if(NOT TARGET civetweb-c-library)
+            FetchContent_Declare(
+                civetweb
+                GIT_REPOSITORY https://github.com/civetweb/civetweb.git
+                GIT_TAG        v1.16
+            )
+            set(CIVETWEB_ENABLE_WEBSOCKETS        ON  CACHE BOOL "" FORCE)
+            set(CIVETWEB_ENABLE_SSL               OFF CACHE BOOL "" FORCE)  # localhost; TLS via reverse proxy
+            set(CIVETWEB_ENABLE_CXX               OFF CACHE BOOL "" FORCE)  # we use the C API directly
+            set(CIVETWEB_BUILD_TESTING            OFF CACHE BOOL "" FORCE)
+            set(CIVETWEB_ENABLE_SERVER_EXECUTABLE OFF CACHE BOOL "" FORCE)
+            set(CIVETWEB_INSTALL_EXECUTABLE       OFF CACHE BOOL "" FORCE)
+            set(CIVETWEB_ENABLE_ASAN              OFF CACHE BOOL "" FORCE)
+            # civetweb v1.16 declares cmake_minimum_required < 3.5, which CMake 4
+            # rejects. Scope the compatibility shim to this subproject only.
+            set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+            FetchContent_MakeAvailable(civetweb)
+        endif()
+        target_sources(${target} PRIVATE
+            ${CMAKE_SOURCE_DIR}/src/web/snapshot_json.cpp
+            ${CMAKE_SOURCE_DIR}/src/web/report_json.cpp
+            ${CMAKE_SOURCE_DIR}/src/web/web_server.cpp)
+        target_link_libraries(${target} PUBLIC civetweb-c-library)
+        target_compile_definitions(${target} PUBLIC HAS_WEB)
+    endif()
+
     # Rich (ncurses) TUI dashboard for shadow/live binaries. Wired here for
     # consistency with the optional-backend pattern, but the tt_wire_rich_tui
     # function below is the actual entry point — engine_core is target-agnostic
