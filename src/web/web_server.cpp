@@ -14,6 +14,12 @@ namespace truetest::web {
 
 namespace {
 
+// Upper bound on simultaneous /stream subscribers. The broadcast loop writes
+// to each client serially, so an unbounded client set would let a flood (or a
+// few slow clients) stall the cadence; this caps the blast radius. Operator
+// tooling on localhost needs only a handful.
+constexpr std::size_t max_ws_clients = 16;
+
 // Compare a bearer/query token in constant-ish time (length-checked equality).
 bool token_matches(const char* got, const std::string& want)
 {
@@ -167,7 +173,10 @@ int WebServer::on_results(mg_connection* c, void* cbdata)
 int WebServer::ws_connect(const mg_connection* c, void* cbdata)
 {
     auto* self = static_cast<WebServer*>(cbdata);
-    return self->authorized(c) ? 0 : 1; // 0 = accept, non-zero = reject
+    if (!self->authorized(c)) return 1; // reject
+    std::lock_guard<std::mutex> lk(self->conns_mu_);
+    if (self->conns_.size() >= max_ws_clients) return 1; // backpressure: cap subscribers
+    return 0; // accept
 }
 
 void WebServer::ws_ready(mg_connection* c, void* cbdata)
@@ -198,6 +207,11 @@ void WebServer::ws_close(const mg_connection* c, void* cbdata)
 void WebServer::broadcast(const std::string& payload)
 {
     if (payload.empty()) return;
+    // The lock is intentionally held across the writes: civetweb keeps a
+    // connection object alive until its close handler returns, and ws_close
+    // takes the same mutex, so holding it here prevents a connection from being
+    // torn down (and freed) mid-write. With max_ws_clients capped and localhost
+    // framing, the serial writes are cheap.
     std::lock_guard<std::mutex> lk(conns_mu_);
     for (mg_connection* c : conns_)
         mg_websocket_write(c, MG_WEBSOCKET_OPCODE_TEXT, payload.data(), payload.size());

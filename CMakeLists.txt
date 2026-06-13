@@ -318,6 +318,25 @@ if(ENABLE_BENCHMARKS)
     tt_apply_common_flags(truetest_benchmarks)
 endif()
 
+# ── Web UI frontend bundle (ENABLE_WEB) ─────────────────────────────────────
+# Optional convenience target: builds the React/Vite SPA into src/web/assets/.
+# Deliberately NOT part of ALL so the C++ build stays node-free. Run explicitly:
+#   cmake --build build --target web_assets
+if(ENABLE_WEB)
+    find_program(NPM_EXECUTABLE npm)
+    if(NPM_EXECUTABLE)
+        add_custom_target(web_assets
+            COMMAND ${NPM_EXECUTABLE} ci
+            COMMAND ${NPM_EXECUTABLE} run build
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/web/frontend
+            COMMENT "Building TrueTest web UI bundle → src/web/assets/"
+            VERBATIM)
+    else()
+        message(STATUS "ENABLE_WEB: npm not found — 'web_assets' target unavailable "
+                       "(build the SPA manually or install Node).")
+    endif()
+endif()
+
 # ── Install rules ───────────────────────────────────────────────────────────
 install(TARGETS engine_backtest engine_shadow engine_live
     RUNTIME DESTINATION bin)

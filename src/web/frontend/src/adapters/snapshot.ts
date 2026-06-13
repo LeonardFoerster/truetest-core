@@ -24,9 +24,9 @@ export interface LiveData {
   equityCurve: EquityPoint[];
 }
 
-// Engine win-rate fields come through on different scales (0..1 in the
-// per-strategy view, 0..100 in perf). Normalize to a 0..1 fraction.
-const frac = (v: number) => (v > 1 ? v / 100 : v);
+// The engine emits win-rate as a percent (sub_analytics::win_rate() × 100);
+// the components want a 0..1 fraction.
+const pctToFrac = (v: number) => v / 100;
 
 const longShort = (sideChar: string): "long" | "short" =>
   sideChar === "L" || sideChar === "l" ? "long" : "short";
@@ -63,7 +63,7 @@ function adaptStrategy(s: WireStrategy): Strategy {
   return {
     name: s.name,
     pnl: s.pnl,
-    win: frac(s.win_rate),
+    win: pctToFrac(s.win_rate),
     pf: s.profit_factor,
     trades: s.trade_count,
     lots: s.open_lots,

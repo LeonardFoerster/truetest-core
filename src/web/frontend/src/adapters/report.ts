@@ -22,11 +22,12 @@ export interface ReportData {
   byStrategy: BreakdownRow[];
 }
 
-const frac = (v: number) => (v > 1 ? v / 100 : v);
+// The engine emits win-rate as a percent (0..100); components want 0..1.
+const pctToFrac = (v: number) => v / 100;
 
 function breakdown(m: Record<string, WireSubAnalytics>): BreakdownRow[] {
   return Object.entries(m)
-    .map(([key, sa]) => ({ key, pnl: sa.total_pnl, win: frac(sa.win_rate), pf: sa.profit_factor, trades: sa.trade_count }))
+    .map(([key, sa]) => ({ key, pnl: sa.total_pnl, win: pctToFrac(sa.win_rate), pf: sa.profit_factor, trades: sa.trade_count }))
     .sort((a, b) => b.pnl - a.pnl);
 }
 
@@ -78,7 +79,7 @@ export function adaptReport(r: ResultsReport): ReportData {
       sortino: r.sortino_ratio,
       calmar: r.calmar_ratio,
       maxDD: -Math.abs(r.max_drawdown) / 100,
-      winRate: frac(r.win_rate),
+      winRate: pctToFrac(r.win_rate),
       profitFactor: r.profit_factor,
       totalTrades: r.total_trades,
       finalEquity: r.final_equity,

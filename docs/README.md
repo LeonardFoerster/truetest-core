@@ -28,6 +28,7 @@ The full aspirational hierarchy (`architecture/`, `operations/`, `reference/`, `
 **Docs/ (current realized files)**:
 - `instructions.md` — Master how-to / CLI / build reference (pointers to `prod.md` for deep phase material; MC section; checklists now point to root gov). Now includes detailed Monte Carlo section (flags, object reuse, parallel caveats, synthetic provider, reporter).
 - `user-manual.md` — High-level architecture + operator overview. Now includes "Stochastic Backtesting (Monte Carlo)" subsection.
+- `web-ui.md` — Opt-in browser cockpit + backtest review (`-DENABLE_WEB=ON`, `--web`); architecture, endpoints, safety notes.
 - `production-readiness-gaps.md`, `AdaptiveHybridStrategy.md`, `db.md`, `flags.md`, questdb guides, this `README.md`.
 
 **Note on "info files"**: `AdaptiveHybridStrategy.md` (detailed spec for lower-priority strategy with demo caveats in code — see root `todo.md` A-*); `production-readiness-gaps.md` (May 2026 honest snapshot, still referenced; many items map to open R/S/H in todo). `questdb-multi-week-hardening-guide.md` moved to `docs/archive/` post-consolidation (historical; phases largely landed — see `db.md` for current).
