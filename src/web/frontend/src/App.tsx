@@ -1,20 +1,26 @@
 /* =========================================================================
-   TrueTest — app shell, mode switch, state machine.
-   Ported from the Claude Design prototype (app.jsx).
+   TrueTest — app shell, mode switch, live/report wiring.
+   Render unchanged from the Claude Design prototype; data now flows from the
+   live WS feed (useLiveFeed) and REST results (useResults), with offline
+   fixtures as fallback. The header "State" rail is a demo override on top of
+   the real connection status.
    ========================================================================= */
-import { useState, useRef } from "react";
+import { useState } from "react";
 import { fmt } from "./format";
-import { Panel, TickNum, Spark, Delta } from "./components";
+import { Panel, TickNum } from "./components";
 import { EquityChart } from "./charts";
-import { useFeed, AccountStrip, PositionsPanel, LotsPanel, OrderBook, FillsTape, StrategyPanel, RiskPanel, HealthStrip } from "./live";
+import { AccountStrip, PositionsPanel, LotsPanel, OrderBook, FillsTape, StrategyPanel, RiskPanel, HealthStrip } from "./live";
 import { BacktestReview } from "./backtest";
-import { TT } from "./data";
-import type { ConnStatus, Mode } from "./types";
+import { useLiveFeed } from "./data/useLiveFeed";
+import { useResults } from "./data/useResults";
+import type { LiveData } from "./adapters/snapshot";
+import type { ConnStatus, Mode, EquityPoint } from "./types";
 
 /* ---- Equity panel (live) ---- */
-function EquityPanel({ equity }: any) {
-  const first = TT.equityCurve[0].eq;
+function EquityPanel({ equityCurve, equity }: { equityCurve: EquityPoint[]; equity: number }) {
+  const first = equityCurve.length ? equityCurve[0].eq : equity;
   const up = equity >= first;
+  const data = equityCurve.length > 1 ? equityCurve : [{ i: 0, eq: equity, peak: equity, dd: 0 }, { i: 1, eq: equity, peak: equity, dd: 0 }];
   return (
     <Panel
       title="Equity & Drawdown"
@@ -23,25 +29,25 @@ function EquityPanel({ equity }: any) {
         <>
           <TickNum value={equity} fmt={(v: number) => fmt.usd(v)} className="hi" />
           <span className="chip" style={{ background: up ? "var(--up-dim)" : "var(--down-dim)", color: up ? "var(--up)" : "var(--down)" }}>
-            {fmt.pct((equity - first) / first)}
+            {fmt.pct(first ? (equity - first) / first : 0)}
           </span>
         </>
       }
       bodyClass="pad"
     >
-      <EquityChart data={TT.equityCurve} />
+      <EquityChart data={data} />
     </Panel>
   );
 }
 
 /* ---- HALTED banner ---- */
-function HaltBanner({ onResume }: any) {
+function HaltBanner({ onResume }: { onResume: () => void }) {
   return (
     <div className="halt-banner">
       <div className="ico blink">!</div>
       <div>
         <div className="ht">RISK HALT · TRADING SUSPENDED</div>
-        <div className="hd">Daily loss limit breached (−$24,100 / −$25,000). All new orders blocked; open brackets held. Manual review required to resume.</div>
+        <div className="hd">Daily loss limit breached. All new orders blocked; open brackets held. Manual review required to resume.</div>
       </div>
       <button
         className="resume"
@@ -114,15 +120,7 @@ function EmptyState() {
             ◴
           </div>
           <div className="pt">No active session</div>
-          <div className="pd">There is no running shadow or live session attached to this workspace. Start an engine session or load a feed to populate the cockpit.</div>
-          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-            <span className="chip acc" style={{ padding: "6px 12px" }}>
-              Attach session
-            </span>
-            <span className="chip" style={{ padding: "6px 12px" }}>
-              Load JSON feed
-            </span>
-          </div>
+          <div className="pd">There is no running shadow or live session attached to this workspace. Start an engine session with --web to populate the cockpit.</div>
         </div>
       </div>
     </div>
@@ -139,12 +137,12 @@ function DisconnectedState() {
           <div className="pt" style={{ color: "var(--warn)" }}>
             Feed disconnected
           </div>
-          <div className="pd">Lost connection to the engine event stream. Last data 3s ago. Holding last known state — values may be stale.</div>
+          <div className="pd">Lost connection to the engine event stream. Holding last known state — values may be stale.</div>
           <div className="reconnbar">
             <div className="b" />
           </div>
           <div className="lbl" style={{ color: "var(--warn)" }}>
-            Reconnecting · attempt 2
+            Reconnecting…
           </div>
         </div>
       </div>
@@ -153,38 +151,38 @@ function DisconnectedState() {
 }
 
 /* ---- Live dashboard composition ---- */
-function LiveDashboard({ status, onResume }: { status: ConnStatus; onResume: () => void }) {
-  const feed = useFeed(status === "live");
-  if (status === "loading") return <SkeletonGrid />;
+function LiveDashboard({ status, live, onResume }: { status: ConnStatus; live: LiveData | null; onResume: () => void }) {
   if (status === "empty") return <EmptyState />;
   if (status === "disconnected") return <DisconnectedState />;
+  if (status === "loading" || !live) return <SkeletonGrid />;
   const halted = status === "halted";
   return (
     <div className="live-grid">
       {halted && <HaltBanner onResume={onResume} />}
       <div className="acct">
-        <AccountStrip equity={feed.equity} marks={feed.marks} />
+        <AccountStrip account={live.account} equityCurve={live.equityCurve} />
       </div>
       <div className="col c1">
-        <EquityPanel equity={feed.equity} />
-        <PositionsPanel marks={feed.marks} />
-        <LotsPanel marks={feed.marks} />
+        <EquityPanel equityCurve={live.equityCurve} equity={live.account.equity} />
+        <PositionsPanel positions={live.positions} />
+        <LotsPanel lots={live.lots} />
       </div>
       <div className="col c2">
-        <OrderBook book={feed.book} />
-        <FillsTape fills={feed.fills} />
+        <OrderBook book={live.book} />
+        <FillsTape fills={live.fills} />
       </div>
       <div className="col c3">
-        <RiskPanel halted={halted} />
-        <StrategyPanel />
-        <HealthStrip eps={feed.eps} />
+        <RiskPanel risk={live.risk} halted={halted} />
+        <StrategyPanel strategies={live.strategies} />
+        <HealthStrip health={live.health} />
       </div>
     </div>
   );
 }
 
 /* ---- header bits ---- */
-function ConnBadge({ status }: { status: ConnStatus }) {
+function ConnBadge({ status, offline }: { status: ConnStatus; offline: boolean }) {
+  if (offline) return <span className="badge conn off"><span className="g" />Demo data</span>;
   const map: Record<string, { c: string; t: string; pulse?: boolean }> = {
     live: { c: "conn", t: "Connected", pulse: true },
     halted: { c: "conn halt", t: "Halted" },
@@ -202,9 +200,18 @@ function ConnBadge({ status }: { status: ConnStatus }) {
 }
 
 export default function App() {
-  const [mode, setMode] = useState<Mode>("live"); // live | backtest
-  const [status, setStatus] = useState<ConnStatus>("live"); // live | loading | empty | disconnected | halted
-  const feedEps = useRef(14820);
+  const [mode, setMode] = useState<Mode>("live");
+  const live = useLiveFeed();
+  const results = useResults();
+  const [override, setOverride] = useState<ConnStatus | null>(null);
+
+  // Real status from the feed; data.halted promotes to the alarm state.
+  const base: ConnStatus =
+    live.data?.halted ? "halted" : live.status === "live" ? "live" : live.status === "disconnected" ? "disconnected" : "loading";
+  const status: ConnStatus = override ?? base;
+
+  const symbols = live.data ? Array.from(new Set(live.data.positions.map((p) => p.sym.replace("USDT", "")))) : [];
+  const eps = live.data ? Math.round(live.data.health.eventsPerSec) : 0;
 
   const states: { k: ConnStatus; l: string; halt?: boolean }[] = [
     { k: "live", l: "Running" },
@@ -230,7 +237,7 @@ export default function App() {
               <div className="hdr-meta">
                 <span className="k">Session</span>
                 <span className="v mono" style={{ fontSize: 12, color: "var(--tx-mid)" }}>
-                  TT-SHADOW-0432
+                  {live.offline ? "OFFLINE-FIXTURE" : "TT-SESSION"}
                 </span>
               </div>
               <span className="badge badge-shadow">
@@ -239,25 +246,19 @@ export default function App() {
               </span>
             </div>
             <div className="hdr-seg">
-              <ConnBadge status={status} />
+              <ConnBadge status={status} offline={live.offline} />
             </div>
             <div className="hdr-seg" style={{ borderRight: "1px solid var(--line-soft)" }}>
               <div className="hdr-meta">
                 <span className="k">Events / sec</span>
                 <span className="v num" style={{ fontSize: 12 }}>
-                  {status === "live" ? "14,820" : status === "empty" ? "—" : "0"}
-                </span>
-              </div>
-              <div className="hdr-meta">
-                <span className="k">Uptime</span>
-                <span className="v num" style={{ fontSize: 12 }}>
-                  06:42:18
+                  {status === "live" ? eps.toLocaleString() : status === "empty" ? "—" : "0"}
                 </span>
               </div>
               <div className="hdr-meta">
                 <span className="k">Symbols</span>
                 <span className="v mono" style={{ fontSize: 12, color: "var(--tx-mid)" }}>
-                  BTC · ETH · SOL
+                  {symbols.length ? symbols.join(" · ") : "—"}
                 </span>
               </div>
             </div>
@@ -267,7 +268,7 @@ export default function App() {
             <div className="hdr-meta">
               <span className="k">Report</span>
               <span className="v" style={{ fontSize: 12, color: "var(--tx-mid)" }}>
-                MOM-XBT + MR-ETH ensemble
+                {results.report?.backtest.name ?? "Backtest"}
               </span>
             </div>
             <span className="badge badge-backtest">
@@ -283,7 +284,11 @@ export default function App() {
           <div className="staterail">
             <span className="sl">State</span>
             {states.map((s) => (
-              <button key={s.k} className={(status === s.k ? "on " : "") + (s.halt ? "halt" : "")} onClick={() => setStatus(s.k)}>
+              <button
+                key={s.k}
+                className={(status === s.k ? "on " : "") + (s.halt ? "halt" : "")}
+                onClick={() => setOverride(s.k === "live" ? null : s.k)}
+              >
                 {s.l}
               </button>
             ))}
@@ -302,7 +307,15 @@ export default function App() {
         </div>
       </div>
 
-      <div className="content">{mode === "live" ? <LiveDashboard status={status} onResume={() => setStatus("live")} /> : <BacktestReview />}</div>
+      <div className="content">
+        {mode === "live" ? (
+          <LiveDashboard status={status} live={live.data} onResume={() => setOverride(null)} />
+        ) : results.report ? (
+          <BacktestReview report={results.report} />
+        ) : (
+          <SkeletonGrid />
+        )}
+      </div>
     </div>
   );
 }

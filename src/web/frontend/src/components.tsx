@@ -4,7 +4,7 @@
    ========================================================================= */
 import { useState, useEffect, useRef, useMemo } from "react";
 import { fmt, cls } from "./format";
-import { TT } from "./data";
+import { symMeta } from "./symbols";
 
 /* ---------- Panel ---------- */
 export function Panel({ title, sub, right, children, className = "", bodyClass = "", style }: any) {
@@ -121,12 +121,10 @@ export function Side({ side, children }: any) {
 
 /* ---------- Symbol cell ---------- */
 export function Sym({ s }: any) {
-  const meta = TT.SYMS[s] || ({} as any);
+  const meta = symMeta(s);
   return (
     <span className="sym">
-      <span className="ic" style={{ background: meta.color || "var(--bg-3)" }}>
-        {meta.short || s[0]}
-      </span>
+      <span className="ic" style={{ background: meta.color }}>{meta.short}</span>
       {s}
     </span>
   );

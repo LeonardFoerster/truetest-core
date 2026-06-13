@@ -1,75 +1,47 @@
 /* =========================================================================
-   TrueTest — Live Dashboard cockpit.
-   Ported from the Claude Design prototype (live.jsx). useFeed currently drives
-   a light in-page simulation; when the WS feed lands it is the single swap
-   point (replace the setInterval generators with the /stream subscription).
+   TrueTest — Live Dashboard cockpit panels.
+   Render is unchanged from the Claude Design prototype; the data source is now
+   the adapted live feed (LiveData slices passed as props) instead of a mock
+   global. Positions/lots use the engine's authoritative mark/upnl directly.
    ========================================================================= */
-import { useState, useEffect, useRef, useMemo } from "react";
-import { fmt, cls } from "./format";
+import { useMemo } from "react";
+import { fmt, cls, fmtClock } from "./format";
 import { Panel, TickNum, Delta, Spark, Gauge, Side, Sym, useSort } from "./components";
-import { TT } from "./data";
+import type { Account, Position, Lot, Book, Fill, Strategy, RiskLimit, Health, EquityPoint } from "./types";
 
-/* ----- light simulated feed ----- */
-export function useFeed(active: boolean) {
-  const [marks, setMarks] = useState<Record<string, number>>({ BTCUSDT: 71248.5, ETHUSDT: 3842.18, SOLUSDT: 177.94 });
-  const [equity, setEquity] = useState(TT.account.equity);
-  const [fills, setFills] = useState<any[]>(TT.fills);
-  const [book, setBook] = useState(TT.book);
-  const [eps, setEps] = useState(TT.health.eventsPerSec);
-  const tickRef = useRef(0);
-  useEffect(() => {
-    if (!active) return;
-    const id = setInterval(() => {
-      tickRef.current++;
-      setMarks((m) => ({
-        BTCUSDT: +(m.BTCUSDT + TT.gauss() * 9).toFixed(1),
-        ETHUSDT: +(m.ETHUSDT + TT.gauss() * 0.8).toFixed(2),
-        SOLUSDT: +(m.SOLUSDT + TT.gauss() * 0.06).toFixed(2),
-      }));
-      setEquity((e) => +(e + TT.gauss() * 380 + 30).toFixed(2));
-      setEps(() => Math.round(14820 + TT.gauss() * 900));
-      setBook(() => TT.buildBook(71248.5 + TT.gauss() * 4, 0.5));
-      if (tickRef.current % 2 === 0) {
-        const symK = ["BTCUSDT", "ETHUSDT", "SOLUSDT"][Math.floor(TT.rnd() * 3)];
-        const base = ({ BTCUSDT: 71248, ETHUSDT: 3842, SOLUSDT: 177.9 } as any)[symK];
-        const side = TT.rnd() > 0.5 ? "buy" : "sell";
-        const qty = symK === "BTCUSDT" ? TT.rnd() * 0.5 + 0.02 : symK === "ETHUSDT" ? TT.rnd() * 8 + 0.5 : TT.rnd() * 90 + 5;
-        const px = base * (1 + TT.gauss() * 0.0005);
-        const nf = { id: Date.now(), t: null, sym: symK, side, qty, px, fee: px * qty * 0.00018, src: TT.rnd() > 0.28 ? "exchange" : "simulated", isNew: true };
-        setFills((f) => [nf, ...f].slice(0, 40));
-      }
-    }, 1700);
-    return () => clearInterval(id);
-  }, [active]);
-  return { marks, equity, fills, book, eps };
-}
-
-/* ----- Account strip ----- */
-function genSpark(n: number, bias: number) {
-  const a = [];
+// Deterministic decorative sparkline (engine emits no per-stat series).
+function genSpark(seed: string, bias: number, n = 40): number[] {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  const rnd = () => {
+    h ^= h << 13;
+    h ^= h >>> 17;
+    h ^= h << 5;
+    return ((h >>> 0) % 1e6) / 1e6 - 0.5;
+  };
+  const a: number[] = [];
   let v = 0;
   for (let i = 0; i < n; i++) {
-    v += TT.gauss() + bias;
+    v += rnd() * 1.1 + bias;
     a.push(v);
   }
   return a;
 }
-export function AccountStrip({ equity, marks }: any) {
+
+/* ----- Account strip ----- */
+export function AccountStrip({ account, equityCurve }: { account: Account; equityCurve: EquityPoint[] }) {
+  const heroSpark = useMemo(
+    () => (equityCurve.length > 1 ? equityCurve.map((p) => p.eq) : genSpark("eq", 0.22, 48)),
+    [equityCurve],
+  );
   const sparks = useMemo(
-    () => ({
-      eq: genSpark(48, 0.22),
-      cash: genSpark(40, -0.1),
-      real: genSpark(40, 0.18),
-      unreal: genSpark(40, -0.05),
-      day: genSpark(40, 0.12),
-    }),
+    () => ({ cash: genSpark("cash", -0.1), real: genSpark("real", 0.18), unreal: genSpark("unreal", -0.05), day: genSpark("day", 0.12) }),
     [],
   );
-  const upnl = TT.positions.reduce((a, p) => {
-    const dir = p.side === "long" ? 1 : -1;
-    return a + (marks[p.sym] - p.entry) * p.qty * dir;
-  }, 0);
-  const a = TT.account;
+  const a = account;
   return (
     <div className="acct-grid statrow">
       <div className="stat hero">
@@ -78,13 +50,13 @@ export function AccountStrip({ equity, marks }: any) {
           <Delta value={a.equityDelta} pct={a.equityPct / 100} />
         </div>
         <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12 }}>
-          <TickNum value={equity} fmt={(v: number) => fmt.usd(v)} className="val" />
-          <Spark data={sparks.eq} w={88} h={28} stroke="var(--up)" fill strokeW={1.5} />
+          <TickNum value={a.equity} fmt={(v: number) => fmt.usd(v)} className="val" />
+          <Spark data={heroSpark} w={88} h={28} stroke="var(--up)" fill strokeW={1.5} />
         </div>
       </div>
       <Stat label="Cash" value={a.cash} delta={a.cashDelta} money spark={sparks.cash} />
       <Stat label="Realized P&L" value={a.realized} delta={a.realizedDelta} money colored spark={sparks.real} signed />
-      <StatLive label="Unrealized P&L" value={upnl} delta={a.unrealizedDelta} spark={sparks.unreal} />
+      <StatLive label="Unrealized P&L" value={a.unrealized} delta={a.unrealizedDelta} spark={sparks.unreal} />
       <Stat label="Day P&L" value={a.equityDelta} delta={a.equityPct} pct money colored spark={sparks.day} signed />
     </div>
   );
@@ -119,13 +91,8 @@ function StatLive({ label, value, delta, spark }: any) {
 }
 
 /* ----- Positions ----- */
-export function PositionsPanel({ marks }: any) {
-  const rows = TT.positions.map((p) => {
-    const dir = p.side === "long" ? 1 : -1;
-    const mark = marks[p.sym];
-    const upnl = (mark - p.entry) * p.qty * dir;
-    return { ...p, mark, upnl, pct: ((mark - p.entry) / p.entry) * dir };
-  });
+export function PositionsPanel({ positions }: { positions: Position[] }) {
+  const rows = positions.map((p) => ({ ...p, pct: ((p.mark - p.entry) / p.entry) * (p.side === "long" ? 1 : -1) }));
   const { sorted, onSort, arrow } = useSort(rows, "upnl");
   return (
     <Panel title="Positions" sub={rows.length + " open"} right={<span className="chip">Net {fmt.usdK(rows.reduce((a, r) => a + r.upnl, 0))}</span>}>
@@ -174,8 +141,8 @@ export function PositionsPanel({ marks }: any) {
 }
 
 /* ----- Open lots / brackets ----- */
-function Bracket({ lot, marks }: any) {
-  const mark = marks[lot.sym];
+function Bracket({ lot }: { lot: Lot }) {
+  const mark = lot.mark;
   const long = lot.side === "long";
   const lo = Math.min(lot.sl, lot.tp),
     hi = Math.max(lot.sl, lot.tp);
@@ -219,12 +186,12 @@ function Bracket({ lot, marks }: any) {
     </div>
   );
 }
-export function LotsPanel({ marks }: any) {
+export function LotsPanel({ lots }: { lots: Lot[] }) {
   return (
-    <Panel title="Open Lots" sub={TT.lots.length + " · brackets"} right={<span className="chip">SL↔TP</span>}>
+    <Panel title="Open Lots" sub={lots.length + " · brackets"} right={<span className="chip">SL↔TP</span>}>
       <div>
-        {TT.lots.map((l) => (
-          <Bracket key={l.id} lot={l} marks={marks} />
+        {lots.map((l) => (
+          <Bracket key={l.id} lot={l} />
         ))}
       </div>
     </Panel>
@@ -232,12 +199,21 @@ export function LotsPanel({ marks }: any) {
 }
 
 /* ----- Order book ladder ----- */
-export function OrderBook({ book }: any) {
-  const maxCum = Math.max(book.bids[book.bids.length - 1].cum, book.asks[book.asks.length - 1].cum);
-  const imb = book.bidVol / (book.bidVol + book.askVol);
+export function OrderBook({ book }: { book: Book }) {
+  if (!book.bids.length || !book.asks.length) {
+    return (
+      <Panel title="Order Book" sub="L2" right={<span className="chip acc">Depth 10</span>}>
+        <div className="placeholder" style={{ minHeight: 160 }}>
+          <div className="pd">No depth for this session.</div>
+        </div>
+      </Panel>
+    );
+  }
+  const maxCum = Math.max(book.bids[book.bids.length - 1].cum, book.asks[book.asks.length - 1].cum) || 1;
+  const imb = book.bidVol / (book.bidVol + book.askVol || 1);
   const spreadBps = (book.spread / book.mid) * 1e4;
   return (
-    <Panel title="Order Book" sub="BTCUSDT · L2" right={<span className="chip acc">Depth 10</span>}>
+    <Panel title="Order Book" sub="L2" right={<span className="chip acc">Depth 10</span>}>
       <div className="imbal">
         <span className="lbl">Imbalance</span>
         <div className="bar">
@@ -248,7 +224,7 @@ export function OrderBook({ book }: any) {
         </span>
       </div>
       <div className="ladder">
-        {[...book.asks].reverse().map((a: any, i: number) => (
+        {[...book.asks].reverse().map((a, i) => (
           <div className="row ask" key={"a" + i}>
             <div className="depth" style={{ width: ((a.cum / maxCum) * 100).toFixed(0) + "%" }} />
             <span className="px num">{fmt.num(a.px, 1)}</span>
@@ -262,7 +238,7 @@ export function OrderBook({ book }: any) {
             spread {fmt.num(book.spread, 1)} · {spreadBps.toFixed(2)} bps
           </span>
         </div>
-        {book.bids.map((b: any, i: number) => (
+        {book.bids.map((b, i) => (
           <div className="row bid" key={"b" + i}>
             <div className="depth" style={{ width: ((b.cum / maxCum) * 100).toFixed(0) + "%" }} />
             <span className="px num">{fmt.num(b.px, 1)}</span>
@@ -276,7 +252,7 @@ export function OrderBook({ book }: any) {
 }
 
 /* ----- Fills tape ----- */
-export function FillsTape({ fills }: any) {
+export function FillsTape({ fills }: { fills: Fill[] }) {
   return (
     <Panel title="Recent Fills" sub="live tape" right={<span className="chip">{fills.length}</span>}>
       <div className="tape">
@@ -294,9 +270,9 @@ export function FillsTape({ fills }: any) {
             Src
           </span>
         </div>
-        {fills.map((f: any, i: number) => (
-          <div className={"f" + (f.isNew && i === 0 ? " new" : "")} key={f.id}>
-            <span className="t">{f.t != null ? TT.fmtClock(f.t) : "now"}</span>
+        {fills.map((f) => (
+          <div className="f" key={f.id}>
+            <span className="t">{f.t != null ? fmtClock(f.t) : "now"}</span>
             <span style={{ fontFamily: "var(--sans)", fontWeight: 600, fontSize: 11 }}>{f.sym.replace("USDT", "")}</span>
             <span className={"s " + (f.side === "buy" ? "up" : "down")}>{f.side === "buy" ? "BUY" : "SELL"}</span>
             <span className="num" style={{ textAlign: "right" }}>
@@ -314,12 +290,12 @@ export function FillsTape({ fills }: any) {
 }
 
 /* ----- Strategy cards ----- */
-export function StrategyPanel() {
-  const { sorted, onSort, key } = useSort(TT.strategies, "pnl");
+export function StrategyPanel({ strategies }: { strategies: Strategy[] }) {
+  const { sorted, onSort, key } = useSort(strategies, "pnl");
   return (
     <Panel
       title="Strategies"
-      sub={TT.strategies.length + " active"}
+      sub={strategies.length + " active"}
       right={
         <select
           className="chip"
@@ -369,7 +345,7 @@ export function StrategyPanel() {
 }
 
 /* ----- Risk panel ----- */
-export function RiskPanel({ halted }: any) {
+export function RiskPanel({ risk, halted }: { risk: RiskLimit[]; halted: boolean }) {
   return (
     <Panel
       title="Risk Limits"
@@ -388,8 +364,8 @@ export function RiskPanel({ halted }: any) {
       bodyClass="pad"
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
-        {TT.risk.map((r) => (
-          <Gauge key={r.name} {...r} used={halted && r.name === "Daily loss" ? 24100 : r.used} />
+        {risk.map((r) => (
+          <Gauge key={r.name} {...r} used={halted && r.name === "Daily loss" ? r.limit * 0.96 : r.used} />
         ))}
       </div>
     </Panel>
@@ -397,8 +373,8 @@ export function RiskPanel({ halted }: any) {
 }
 
 /* ----- System health ----- */
-export function HealthStrip({ eps }: any) {
-  const h = TT.health;
+export function HealthStrip({ health }: { health: Health }) {
+  const h = health;
   return (
     <Panel title="System Health" sub="ops" right={<span className="num" style={{ fontSize: 10.5, color: "var(--tx-lo)" }}>uptime {h.uptime}</span>}>
       <div className="health">
@@ -411,22 +387,22 @@ export function HealthStrip({ eps }: any) {
         </div>
         <div className="hcell">
           <span className="hk">Ring Drops</span>
-          <span className="hv up">{h.ringDrops}</span>
-          <span className="hsub">buffer 0.4%</span>
+          <span className={"hv " + (h.ringDrops > 0 ? "warn" : "up")}>{h.ringDrops}</span>
+          <span className="hsub">lock-free SPSC</span>
         </div>
         <div className="hcell">
           <span className="hk">Provider</span>
-          <span className="hv up" style={{ fontSize: 12 }}>
+          <span className={"hv " + (h.provider === "OK" ? "up" : "down")} style={{ fontSize: 12 }}>
             ● {h.provider}
           </span>
-          <span className="hsub">binance-ws</span>
+          <span className="hsub">feed</span>
         </div>
         <div className="hcell">
           <span className="hk">QuestDB</span>
-          <span className="hv" style={{ fontSize: 11, color: "var(--accent-hi)" }}>
+          <span className="hv" style={{ fontSize: 11, color: h.questdb === "PERSISTING" ? "var(--accent-hi)" : "var(--tx-lo)" }}>
             ● {h.questdb}
           </span>
-          <span className="hsub">{eps.toLocaleString()} ev/s</span>
+          <span className="hsub">{h.eventsPerSec.toLocaleString()} ev/s</span>
         </div>
       </div>
     </Panel>

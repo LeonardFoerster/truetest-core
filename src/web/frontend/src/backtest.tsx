@@ -1,21 +1,22 @@
 /* =========================================================================
    TrueTest — Backtest Review report.
-   Ported from the Claude Design prototype (backtest.jsx).
+   Render unchanged from the Claude Design prototype; data now comes from the
+   adapted ResultsReport (ReportData) instead of a mock global.
    ========================================================================= */
-import { useState, useRef, useMemo } from "react";
+import { useMemo, useState, useRef } from "react";
 import { fmt, cls } from "./format";
 import { Panel, Sym, Side, useSort } from "./components";
 import { BTChart, Histogram } from "./charts";
-import { TT } from "./data";
+import type { ReportData } from "./adapters/report";
+import type { Backtest, BTPoint, BTMarker, BlotterRow, HistBin, BreakdownRow } from "./types";
 
-function MetricBoard() {
-  const h = TT.backtest.headline;
+function MetricBoard({ headline: h }: { headline: Backtest["headline"] }) {
   return (
     <>
       <div className="metric-board">
         <div className="mcell mb-hero">
           <span className="mk">Total Return</span>
-          <span className="mv up">{fmt.pct(h.totalReturn, 1)}</span>
+          <span className={"mv " + cls(h.totalReturn)}>{fmt.pct(h.totalReturn, 1)}</span>
           <span className="ms">
             {fmt.usd(h.startEquity, 0)} → {fmt.usd(h.finalEquity, 0)} · CAGR {fmt.pctP(h.cagr, 1)}
           </span>
@@ -47,12 +48,11 @@ function MCell({ k, v, s, cls: c, good, big }: any) {
   );
 }
 
-function BenchRow() {
-  const b = TT.backtest.bench;
+function BenchRow({ bench: b }: { bench: Backtest["bench"] }) {
   return (
-    <Panel title="Benchmark Comparison" sub="vs Buy & Hold" right={<span className="chip">BTC-spot 60/40 basket</span>}>
+    <Panel title="Benchmark Comparison" sub="vs Buy & Hold" right={<span className="chip">alpha / beta / IR</span>}>
       <div className="bench-row" style={{ border: 0, borderRadius: 0 }}>
-        <BCell k="Alpha" v={fmt.pct(b.alpha, 1)} good />
+        <BCell k="Alpha" v={fmt.pct(b.alpha, 1)} good={b.alpha >= 0} />
         <BCell k="Beta" v={b.beta.toFixed(2)} neutral s="market sensitivity" />
         <BCell k="Information Ratio" v={b.infoRatio.toFixed(2)} good={b.infoRatio > 0} />
         <BCell k="vs Buy & Hold" v={fmt.pct(b.vsBH, 1)} good={b.vsBH > 0} s={"B&H " + fmt.pct(b.bhReturn, 1)} />
@@ -73,12 +73,12 @@ function BCell({ k, v, good, neutral, s }: any) {
   );
 }
 
-function EquityReport() {
+function EquityReport({ btCurve, markers }: { btCurve: { strat: BTPoint[]; bench: BTPoint[] }; markers: BTMarker[] }) {
   const [bw, setBw] = useState<[number, number]>([0, 1]);
   return (
     <Panel
       title="Equity Curve vs Benchmark"
-      sub="2025 · 1m bars"
+      sub="strategy vs buy & hold"
       right={
         <div className="legend">
           <span className="li">
@@ -101,13 +101,13 @@ function EquityReport() {
       }
       bodyClass="pad"
     >
-      <BTChart strat={TT.btCurve.strat} bench={TT.btCurve.bench} markers={TT.btMarkers} brushStart={bw[0]} brushEnd={bw[1]} />
-      <BrushBar value={bw} onChange={setBw} />
+      <BTChart strat={btCurve.strat} bench={btCurve.bench} markers={markers} brushStart={bw[0]} brushEnd={bw[1]} />
+      <BrushBar value={bw} onChange={setBw} strat={btCurve.strat} />
     </Panel>
   );
 }
 
-function BrushBar({ value, onChange }: any) {
+function BrushBar({ value, onChange, strat }: { value: [number, number]; onChange: (v: [number, number]) => void; strat: BTPoint[] }) {
   const ref = useRef<HTMLDivElement>(null);
   const drag = (which: number) => (e: React.MouseEvent) => {
     e.preventDefault();
@@ -123,13 +123,13 @@ function BrushBar({ value, onChange }: any) {
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   };
-  // mini overview path
   const path = useMemo(() => {
-    const arr = TT.btCurve.strat,
-      min = Math.min(...arr.map((d) => d.v)),
-      max = Math.max(...arr.map((d) => d.v));
-    return arr.map((d, i) => (i ? "L" : "M") + ((i / (arr.length - 1)) * 100).toFixed(2) + " " + (28 - ((d.v - min) / (max - min)) * 26).toFixed(2)).join(" ");
-  }, []);
+    if (strat.length < 2) return "";
+    const min = Math.min(...strat.map((d) => d.v)),
+      max = Math.max(...strat.map((d) => d.v));
+    const rng = max - min || 1;
+    return strat.map((d, i) => (i ? "L" : "M") + ((i / (strat.length - 1)) * 100).toFixed(2) + " " + (28 - ((d.v - min) / rng) * 26).toFixed(2)).join(" ");
+  }, [strat]);
   return (
     <div className="brush" ref={ref}>
       <svg width="100%" height="32" viewBox="0 0 100 32" preserveAspectRatio="none" style={{ position: "absolute", inset: 0 }}>
@@ -144,12 +144,12 @@ function BrushBar({ value, onChange }: any) {
 }
 
 /* ----- Trade blotter ----- */
-function Blotter() {
+function Blotter({ blotter }: { blotter: BlotterRow[] }) {
   const [fSide, setFSide] = useState("all");
   const [fStrat, setFStrat] = useState("all");
-  const rows = TT.blotter.filter((r) => (fSide === "all" || r.side === fSide) && (fStrat === "all" || r.strat === fStrat));
+  const strats = useMemo(() => ["all", ...Array.from(new Set(blotter.map((r) => r.strat)))], [blotter]);
+  const rows = blotter.filter((r) => (fSide === "all" || r.side === fSide) && (fStrat === "all" || r.strat === fStrat));
   const { sorted, onSort, arrow } = useSort(rows, "id", "desc");
-  const strats = ["all", "MOM-XBT", "MR-ETH", "BASIS-SOL", "STAT-ARB"];
   return (
     <Panel
       title="Trade Blotter"
@@ -226,12 +226,12 @@ function Blotter() {
 }
 
 /* ----- breakdown small-multiples ----- */
-function BreakdownGrid({ title, rows, isSym }: any) {
-  const max = Math.max(...rows.map((r: any) => Math.abs(r.pnl)));
+function BreakdownGrid({ title, rows, isSym }: { title: string; rows: BreakdownRow[]; isSym?: boolean }) {
+  const max = Math.max(...rows.map((r) => Math.abs(r.pnl)), 1);
   return (
     <Panel title={title} sub={rows.length + (isSym ? " symbols" : " strategies")} bodyClass="pad">
       <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-        {rows.map((r: any) => (
+        {rows.map((r) => (
           <div key={r.key} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 10px", background: "var(--bg-2)", border: "1px solid var(--line-soft)", borderRadius: "var(--r)" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               {isSym ? <Sym s={r.key} /> : <span style={{ fontWeight: 600, fontSize: 12 }}>{r.key}</span>}
@@ -266,8 +266,10 @@ function KV({ k, v, c }: any) {
   );
 }
 
-export function BacktestReview() {
-  const bt = TT.backtest;
+export function BacktestReview({ report }: { report: ReportData }) {
+  const bt = report.backtest;
+  const losers = report.hist.filter((b: HistBin) => b.x1 <= 0).reduce((a, b) => a + b.c, 0);
+  const winners = report.hist.filter((b: HistBin) => b.x0 >= 0).reduce((a, b) => a + b.c, 0);
   return (
     <div className="report">
       <div className="report-head">
@@ -293,26 +295,26 @@ export function BacktestReview() {
           BACKTEST · COMPLETE
         </span>
       </div>
-      <MetricBoard />
-      <BenchRow />
-      <EquityReport />
+      <MetricBoard headline={bt.headline} />
+      <BenchRow bench={bt.bench} />
+      <EquityReport btCurve={report.btCurve} markers={report.btMarkers} />
       <div className="two-col">
-        <Blotter />
+        <Blotter blotter={report.blotter} />
         <Panel title="P&L Distribution" sub="per trade" bodyClass="pad">
-          <Histogram bins={TT.hist} />
+          <Histogram bins={report.hist} />
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, fontSize: 10.5, color: "var(--tx-lo)" }}>
             <span>
-              Losers <b className="down">{TT.hist.filter((b) => b.x1 <= 0).reduce((a, b) => a + b.c, 0)}</b>
+              Losers <b className="down">{losers}</b>
             </span>
             <span>
-              Winners <b className="up">{TT.hist.filter((b) => b.x0 >= 0).reduce((a, b) => a + b.c, 0)}</b>
+              Winners <b className="up">{winners}</b>
             </span>
           </div>
         </Panel>
       </div>
       <div className="two-col" style={{ gridTemplateColumns: "1fr 1fr" }}>
-        <BreakdownGrid title="Per-Symbol Breakdown" rows={TT.bySymbol} isSym />
-        <BreakdownGrid title="Per-Strategy Breakdown" rows={TT.byStrategy} />
+        <BreakdownGrid title="Per-Symbol Breakdown" rows={report.bySymbol} isSym />
+        <BreakdownGrid title="Per-Strategy Breakdown" rows={report.byStrategy} />
       </div>
     </div>
   );

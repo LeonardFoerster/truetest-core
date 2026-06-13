@@ -35,3 +35,11 @@ export const fmt = {
 
 export const cls = (v: number) => (v > 0 ? "up" : v < 0 ? "down" : "flat");
 export const tri = (side: string) => (side === "long" || side === "buy" ? "▲" : "▼");
+
+// Seconds-of-day → HH:MM:SS (the fills tape clock).
+export function fmtClock(s: number) {
+  const h = Math.floor(s / 3600) % 24,
+    m = Math.floor(s / 60) % 60,
+    sec = s % 60;
+  return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0") + ":" + String(sec).padStart(2, "0");
+}

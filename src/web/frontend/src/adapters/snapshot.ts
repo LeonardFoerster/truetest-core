@@ -12,6 +12,7 @@ import type { SnapshotFrame, WireFill, WireStrategy } from "../wire";
 import type { Account, Position, Lot, Book, Fill, Strategy, RiskLimit, Health, EquityPoint } from "../types";
 
 export interface LiveData {
+  halted: boolean;
   account: Account;
   positions: Position[];
   lots: Lot[]; // the SL/TP bracket viz — sourced from engine brackets
@@ -165,5 +166,5 @@ export function adaptSnapshot(f: SnapshotFrame): LiveData {
     return { i, eq, peak, dd };
   });
 
-  return { account, positions, lots, book, fills, strategies, risk, health, equityCurve };
+  return { halted: f.risk.halted, account, positions, lots, book, fills, strategies, risk, health, equityCurve };
 }
