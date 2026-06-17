@@ -147,11 +147,11 @@ public:
     void on_event(const event_pointer& ev) override;
     void on_funding(const funding_event& fe);   // Phase 2.1
 
-    // Phase 2.4 — allow external update of the current 8h funding rate
+    // Phase 2.4 - allow external update of the current 8h funding rate
     // (called from provider when better funding rate data is available)
     void set_current_funding_rate_8h(double rate) { current_funding_8h_rate_ = rate; }
 
-    // Phase 2.1 — cumulative funding P&L (cash deltas from funding events)
+    // Phase 2.1 - cumulative funding P&L (cash deltas from funding events)
     double total_funding_pnl() const { return total_funding_pnl_; }
 
     AnalyticsReport generate_report() const;
@@ -171,7 +171,7 @@ public:
             r.has_last_trade = true;
             r.last_trade_pnl = trades_.back().pnl;
         }
-        // Phase 2.3 + 2.4 — populated from L2 events, funding events, and equity tracking
+        // Phase 2.3 + 2.4 - populated from L2 events, funding events, and equity tracking
         r.equity = last_equity_;
         r.realized_vol_1h = realized_vol_1h_;
         r.current_spread_bps = current_spread_bps_;
@@ -190,7 +190,7 @@ public:
     void reset(double initial_cash);
 
     // Cheap O(n) copy of the last n equity values for the live TUI's
-    // sparkline strip — avoids snapshot()'s full report rebuild on every
+    // sparkline strip - avoids snapshot()'s full report rebuild on every
     // render tick. Returns the most recent n samples (or fewer if the
     // curve is shorter); empty if nothing recorded yet.
     std::vector<double> equity_tail(std::size_t n) const;
@@ -210,7 +210,7 @@ public:
         return per_strategy_;
     }
 
-    // Cheap latency snapshot for the Health panel — same idea as
+    // Cheap latency snapshot for the Health panel - same idea as
     // per_strategy_view: avoid the full report rebuild.
     struct latency_view
     {
@@ -247,7 +247,7 @@ private:
     void on_order(const order_event& o);
     void on_fill(const fill_event& f);
 
-    // Phase 2.4 — track spread from L2 for circuit breakers
+    // Phase 2.4 - track spread from L2 for circuit breakers
     void on_l2_snapshot(const l2_snapshot_event& ev);
     void on_l2_update(const l2_update_event& ev);
 
@@ -286,16 +286,16 @@ private:
     std::vector<trade_record> trades_;
     std::vector<double> trade_returns_;
 
-    // Phase 2.3 — equity and vol for risk_snapshot
+    // Phase 2.3 - equity and vol for risk_snapshot
     double last_equity_ = 0.0;
     double realized_vol_1h_ = 0.0;
     double last_mid_price_ = 0.0;   // for vol calculation
 
-    // Phase 2.4 — current spread and funding rate (updated from L2 / funding events)
+    // Phase 2.4 - current spread and funding rate (updated from L2 / funding events)
     double current_spread_bps_ = 0.0;
     double current_funding_8h_rate_ = 0.0;
 
-    // Phase 2.1 — accumulated funding cash P&L
+    // Phase 2.1 - accumulated funding cash P&L
     double total_funding_pnl_ = 0.0;
     double total_slippage_ = 0.0;
     double total_slippage_signed_ = 0.0;

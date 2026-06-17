@@ -6,7 +6,7 @@
 
 #include <string>
 
-// Pure JSON-parsing helpers — the rest of the reconciler depends on a
+// Pure JSON-parsing helpers - the rest of the reconciler depends on a
 // live REST client and is exercised via testnet integration. Keep these
 // fast unit tests focused on the bits that don't.
 

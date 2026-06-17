@@ -100,7 +100,7 @@ private:
     // provider doesn't supply one (spot, backtest providers, etc.).
     std::shared_ptr<IRiskCheck> risk_check_;
     // Optional liveness watchdog. Created in the constructor only if
-    // the provider returns at least one liveness_source — currently
+    // the provider returns at least one liveness_source - currently
     // only the futures dead-man's switch heartbeat opts in.
     std::unique_ptr<WorkerWatchdog> worker_watchdog_;
     MarketMaker market_maker_;
@@ -109,7 +109,7 @@ private:
 
     std::unordered_map<std::string, std::optional<instrument_spec>> instrument_cache_;
 
-    // Symbols already carrying real L2 depth — MarketMaker::replenish is
+    // Symbols already carrying real L2 depth - MarketMaker::replenish is
     // suppressed here so paper liquidity can't corrupt the fill sim.
     std::unordered_set<std::string> l2_seeded_symbols_;
     const instrument_spec* resolve_instrument_spec(const std::string& symbol);
@@ -228,7 +228,7 @@ private:
     // Invoked by the engine on each fill-poll cycle to register any
     // venue-bracket-leg metadata produced by the unknown_fill_handler
     // installed on the provider's ExecutionBridge. Safe to call when
-    // there is no bridge — it just no-ops.
+    // there is no bridge - it just no-ops.
     void drain_venue_bracket_meta();
 
     // Stamp per-lot attribution (opener_order_id + strategy_name) onto a
@@ -379,7 +379,7 @@ public:
     void run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge);
 
     // Unified-event streaming (bar/tick/l2_snapshot/l2_update). L2 events
-    // populate orderbook_registry_ directly — this is how LocalBookAdapter
+    // populate orderbook_registry_ directly - this is how LocalBookAdapter
     // sees real exchange depth in shadow mode.
     void run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge);
     void set_strategy(std::shared_ptr<IStrategy> strategy);

@@ -3,7 +3,7 @@
 // Token-bucket rate limiter for signed REST calls (Binance IP weight limits,
 // order-rate caps, etc.). Thread-safe: callers can hit it from any worker.
 // Capacity = burst size. refill_per_sec = sustained rate. `try_acquire` is the
-// primary API — non-blocking; returns false if not enough tokens. Callers that
+// primary API - non-blocking; returns false if not enough tokens. Callers that
 // want to wait should consult `time_until` and sleep themselves, or use
 // `acquire_blocking` (which sleeps on the calling thread).
 
@@ -54,7 +54,7 @@ public:
         while (!try_acquire(tokens))
         {
             auto wait = time_until(tokens);
-            if (wait == std::chrono::nanoseconds::max()) return; // refill_per_sec_ == 0 → never
+            if (wait == std::chrono::nanoseconds::max()) return; // refill_per_sec_ == 0 -> never
             std::this_thread::sleep_for(wait);
         }
     }

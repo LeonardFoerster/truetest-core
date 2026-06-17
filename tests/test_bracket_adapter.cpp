@@ -1,6 +1,6 @@
 // Pins the IBracketAdapter contract surface and the NullBracketAdapter
 // fallback. Each venue-specific adapter (BinanceOcoBracketAdapter, etc.)
-// has its own targeted suite — these tests stay generic.
+// has its own targeted suite - these tests stay generic.
 
 #include <gtest/gtest.h>
 

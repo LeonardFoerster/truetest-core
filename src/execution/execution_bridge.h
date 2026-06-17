@@ -29,7 +29,7 @@ public:
         std::shared_ptr<IFillParser>     parser;
 
         // Optional. If set, each submit consults it before sending and
-        // blocks until a token is available — gates the venue's order-rate
+        // blocks until a token is available - gates the venue's order-rate
         // cap (Binance spot: 50 orders / 10s). Left null, submit is ungated.
         std::shared_ptr<TokenBucketRateLimiter> order_rate_limiter;
 
@@ -40,7 +40,7 @@ public:
         std::function<std::string(uint64_t engine_order_id)> client_id_fn;
 
         // Optional. Fires when the parser declines the message via parse()
-        // but accepts it via parse_position_snapshot() — i.e. server-pushed
+        // but accepts it via parse_position_snapshot() - i.e. server-pushed
         // position/balance state changes (futures ACCOUNT_UPDATE). Runs on
         // the fill transport's worker thread; must be thread-safe.
         std::function<void(const parsed_position_snapshot&)>
@@ -58,9 +58,9 @@ public:
     // bridge's by_client_id_ lookup misses for these. If a handler is
     // installed, the bridge invokes it and, if it returns a synth_result,
     // enqueues the fill alongside normal fills AND records the
-    // (engine_order_id → opener_order_id + strategy) metadata for the
+    // (engine_order_id -> opener_order_id + strategy) metadata for the
     // engine to register in its order_meta_ on the main thread.
-    // Handler runs on the fill transport's worker thread → must be
+    // Handler runs on the fill transport's worker thread -> must be
     // thread-safe. ExitManager's venue lookups are mutex-guarded; the
     // engine-side OrderIdGenerator::next() is atomic.
     struct synth_result
@@ -387,7 +387,7 @@ private:
 
         // Record meta first so the engine can register in order_meta_
         // before processing the fill. Both queues use their own mutex
-        // — the meta is shorter-lived (drained before fills each tick).
+        // - the meta is shorter-lived (drained before fills each tick).
         {
             std::lock_guard<std::mutex> lk(synth_mu_);
             pending_synth_meta_.push_back(synth_meta{

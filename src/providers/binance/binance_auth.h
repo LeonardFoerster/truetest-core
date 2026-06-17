@@ -70,7 +70,7 @@ public:
     bool sign(std::string_view data, unsigned char out[32])
     {
         if (!ctx_) return false;
-        // Null key + null params → reset state, keep the existing key.
+        // Null key + null params -> reset state, keep the existing key.
         EVP_MAC_init(ctx_, nullptr, 0, nullptr);
         EVP_MAC_update(ctx_,
                        reinterpret_cast<const unsigned char*>(data.data()),

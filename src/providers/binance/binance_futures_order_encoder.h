@@ -164,7 +164,7 @@ private:
 
     static bool takes_tif(order_type t)
     {
-        // STOP_MARKET (futures `stop`) is a triggered MARKET — no TIF.
+        // STOP_MARKET (futures `stop`) is a triggered MARKET - no TIF.
         return t == order_type::limit || t == order_type::stop_limit;
     }
 

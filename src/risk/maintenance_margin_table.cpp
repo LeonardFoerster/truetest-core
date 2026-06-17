@@ -23,7 +23,7 @@ void MaintenanceMarginTable::load_from_leverage_bracket_json(const std::string& 
         } else if (j.contains("brackets")) {
             brackets = j["brackets"];
         } else {
-            // Unexpected format – leave empty
+            // Unexpected format - leave empty
             return;
         }
 
@@ -43,7 +43,7 @@ void MaintenanceMarginTable::load_from_leverage_bracket_json(const std::string& 
                   });
     }
     catch (...) {
-        // Parsing failed – leave table empty. Caller can decide what to do.
+        // Parsing failed - leave table empty. Caller can decide what to do.
         tiers_.clear();
     }
 }
@@ -59,7 +59,7 @@ double MaintenanceMarginTable::maintenance_margin_rate_for_notional(double notio
             return t.maintenance_margin_rate;
         }
     }
-    // Beyond last tier – use the highest tier's rate
+    // Beyond last tier - use the highest tier's rate
     return tiers_.back().maintenance_margin_rate;
 }
 

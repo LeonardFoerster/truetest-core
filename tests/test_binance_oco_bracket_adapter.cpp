@@ -1,4 +1,4 @@
-// Pins the wire format and parsing of BinanceOcoBracketAdapter — the
+// Pins the wire format and parsing of BinanceOcoBracketAdapter - the
 // venue-bracket adapter for Binance spot. Uses the fake-callable pattern
 // so no real REST call ever happens.
 
@@ -215,7 +215,7 @@ TEST(BinanceOcoBracketAdapter, ListOpenRecoversTrueTestBracketsOnly)
         ++call;
         if (call == 1)
         {
-            // openOrderList — one tt-oco list and one foreign list to
+            // openOrderList - one tt-oco list and one foreign list to
             // confirm the adapter only picks up its own.
             return {200, R"([
                 {"orderListId":42,"listClientOrderId":"tt-oco-7",

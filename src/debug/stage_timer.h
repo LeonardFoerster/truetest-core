@@ -48,7 +48,7 @@ public:
     void log() const;
     void reset();
 
-    // Cheap snapshot for the live Debug tab. No mutex — stats_ is
+    // Cheap snapshot for the live Debug tab. No mutex - stats_ is
     // updated from the engine main thread; callers reading from the
     // dashboard thread accept "eventually-consistent" values (no torn
     // reads in practice on x86 for aligned uint64).

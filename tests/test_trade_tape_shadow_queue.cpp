@@ -1,4 +1,4 @@
-// Queue-position behaviour of TradeTapeShadowAdapter — Phase 2A of the
+// Queue-position behaviour of TradeTapeShadowAdapter - Phase 2A of the
 // realism plan. Without the queue model the adapter fills any limit the
 // moment a real trade crosses it; with --queue-model l2-snapshot it
 // holds the order until the queue ahead has been consumed by prints.
@@ -41,11 +41,11 @@ TEST(TradeTapeShadowQueue, FillsOnlyAfterQueueDrains)
 
     std::vector<fill_event> fills;
 
-    // First print: 3 BTC at our level → consumes 3 of queue → no fill.
+    // First print: 3 BTC at our level -> consumes 3 of queue -> no fill.
     a.on_trade("X", 100.0, 3.0, t0 + ms(1));
     EXPECT_FALSE(a.poll_fills(fills));
 
-    // Second print: 4 BTC at our level → consumes the remaining 2 of
+    // Second print: 4 BTC at our level -> consumes the remaining 2 of
     // queue, then fills 2 of ours.
     a.on_trade("X", 100.0, 4.0, t0 + ms(2));
     ASSERT_TRUE(a.poll_fills(fills));
@@ -59,8 +59,8 @@ TEST(TradeTapeShadowQueue, FillsOnlyAfterQueueDrains)
     EXPECT_EQ(qs.blocked_at_eos,       0u);
 }
 
-// Improving the BBO (price above the best bid → no level at our price)
-// → queue_ahead = 0 → first crossing print fills us immediately.
+// Improving the BBO (price above the best bid -> no level at our price)
+// -> queue_ahead = 0 -> first crossing print fills us immediately.
 TEST(TradeTapeShadowQueue, ImprovingBBOFillsImmediately)
 {
     auto qm = std::make_shared<L2SnapshotQueueModel>(ms(60'000));
@@ -77,12 +77,12 @@ TEST(TradeTapeShadowQueue, ImprovingBBOFillsImmediately)
     ASSERT_TRUE(a.poll_fills(fills));
     EXPECT_EQ(fills.size(), 1u);
 
-    // Improver shouldn't be counted as queue-blocked — initial_queue is 0.
+    // Improver shouldn't be counted as queue-blocked - initial_queue is 0.
     const auto qs = a.get_queue_stats();
     EXPECT_EQ(qs.submitted_with_queue, 0u);
 }
 
-// Order remains queue-blocked at session end → blocked_at_eos counts it.
+// Order remains queue-blocked at session end -> blocked_at_eos counts it.
 // "Submitted with queue ahead" + "filled after drain" + "blocked at EOS"
 // triangulate where each queued order ended up.
 TEST(TradeTapeShadowQueue, QueueBlockedAtSessionEnd)

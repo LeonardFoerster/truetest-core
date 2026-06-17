@@ -80,9 +80,9 @@ struct alignas(64) streaming_stats
 
     // Short halt reason published by engine::trigger_halt; the TUI banner
     // and the plain-mode renderer read this when halt_flag is set.
-    // Single-writer (gated by halt_flag_.exchange) → standard seqlock:
+    // Single-writer (gated by halt_flag_.exchange) -> standard seqlock:
     // odd seq = mid-write, even = published. Cap is generous for "WS lost
-    // — idle 1500ms"-style strings; truncation is fine.
+    // - idle 1500ms"-style strings; truncation is fine.
     static constexpr std::size_t shutdown_reason_cap = 96;
     alignas(64) std::atomic<std::uint64_t> shutdown_reason_seq{0};
     std::uint8_t shutdown_reason_len{0};
@@ -126,7 +126,7 @@ public:
     void set_state(connection_state s);
     void set_feed_label(std::string label);
 
-    // Publishes the short halt reason ("market-data WS lost — idle 1500ms")
+    // Publishes the short halt reason ("market-data WS lost - idle 1500ms")
     // through the seqlock in stats_; renderers call shutdown_reason() to
     // read it. Called once per halt by engine::trigger_halt.
     void set_shutdown_reason(std::string_view msg);
@@ -140,7 +140,7 @@ public:
 
     bool is_tui() const { return resolved_mode_ == output_mode::tui; }
 
-    // Public view of one recent event — used by the rich (ncurses)
+    // Public view of one recent event - used by the rich (ncurses)
     // dashboard, which can't read the private seqlocked storage directly.
     struct recent_event_view
     {
@@ -158,7 +158,7 @@ public:
     double rate_ema() const { return rate_ema_; }
 
     // Returns up to n most recent rate samples (one per render tick).
-    // Used by the Overview panel's sparkline strip — the only consumer
+    // Used by the Overview panel's sparkline strip - the only consumer
     // for now. Lockless: render_loop is the sole writer and the panel
     // reads from the same thread (TabbedDashboard::render_loop_).
     std::vector<double> rate_tail(std::size_t n) const;
@@ -216,7 +216,7 @@ private:
     std::atomic<std::uint64_t>         recent_head_{0};
 
     // Previous frame's row bytes so unchanged rows just advance the cursor
-    // instead of being rewritten — this is what stops the box flickering.
+    // instead of being rewritten - this is what stops the box flickering.
     int last_row_count_{0};
     std::vector<std::string> last_rows_;
 

@@ -13,7 +13,7 @@ public:
               const ConsoleDashboard& data,
               const dashboard_snapshot* snap) override;
 
-    // Cursor + filter — proof-of-concept; other panels can adopt the
+    // Cursor + filter - proof-of-concept; other panels can adopt the
     // same pattern.
     bool supports_cursor() const override { return true; }
     void set_cursor_row(int r) override { cursor_ = r; }

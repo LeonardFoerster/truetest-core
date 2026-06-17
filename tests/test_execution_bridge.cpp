@@ -336,7 +336,7 @@ TEST(ExecutionBridge, ConcurrentFillIngestAndPoll)
 {
     // Drive handle_message from multiple threads while a separate thread
     // drains poll_fills. After joining, total polled fills must equal
-    // total ingested — no loss, no duplicates.
+    // total ingested - no loss, no duplicates.
     bridge_harness h;
     ASSERT_TRUE(h.bridge->open());
 

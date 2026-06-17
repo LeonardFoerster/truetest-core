@@ -11,7 +11,7 @@ namespace truetest::questdb {
 // Non-blocking-friendly POSIX TCP client. Thin wrapper around socket(2) +
 // connect(2) + send(2) + recv(2). Reused by both the HTTP client (DDL,
 // short one-shot requests) and the ILP writer (persistent connection,
-// batched line writes). Blocking I/O is fine — both use cases run off the
+// batched line writes). Blocking I/O is fine - both use cases run off the
 // hot path on the worker thread.
 class TcpClient
 {

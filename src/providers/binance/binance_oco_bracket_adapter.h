@@ -15,7 +15,7 @@
 #include <utility>
 
 // Translates ExitManager intents into Binance spot OCO orders.
-// Single-bracket only (one SL + one TP per opener) — multi-leg scale-outs
+// Single-bracket only (one SL + one TP per opener) - multi-leg scale-outs
 // (TP1/TP2/SL) are deferred; for those the engine-side eval remains the
 // only enforcement until a higher-fidelity adapter ships.
 // Constructed with two callables (post + del) following the same pattern
@@ -50,7 +50,7 @@ public:
         truetest::exits::bracket_caps c;
         c.stop_limit = true;
         c.oco        = true;
-        // stop_market and trailing_stop intentionally false — Binance spot
+        // stop_market and trailing_stop intentionally false - Binance spot
         // OCO requires a stop-limit leg, not stop-market, and trailing
         // stops aren't part of the OCO contract on spot.
         return c;
@@ -64,12 +64,12 @@ public:
         truetest::exits::bracket_handles handles;
 
         // Single-bracket OCO needs both SL and TP. Multi-intent strategies
-        // (TP1/TP2 scale-outs) call us once per intent — refusing the
+        // (TP1/TP2 scale-outs) call us once per intent - refusing the
         // partial ones keeps semantics honest until we ship multi-leg.
         if (!intent.stop_loss || !intent.take_profit)
         {
             std::cerr << "BinanceOcoBracketAdapter: intent missing SL or TP "
-                         "(opener=" << opener_order_id << ") — declining; "
+                         "(opener=" << opener_order_id << ") - declining; "
                          "engine-side eval remains the only enforcer\n";
             return handles;
         }
@@ -111,7 +111,7 @@ public:
             std::cerr << "BinanceOcoBracketAdapter: place failed for opener="
                       << opener_order_id << " HTTP " << resp.status
                       << " body=" << resp.body
-                      << " — engine-side eval remains the only enforcer\n";
+                      << " - engine-side eval remains the only enforcer\n";
             return handles;
         }
 
@@ -147,7 +147,7 @@ public:
         std::vector<truetest::exits::IBracketAdapter::recovered_bracket> out;
         if (!get_) return out;
 
-        // GET /api/v3/openOrderList → array of OCO list summaries; each
+        // GET /api/v3/openOrderList -> array of OCO list summaries; each
         // contains orderListId + listClientOrderId + orders[].
         // To recover SL/TP prices we need the per-leg orders, fetched via
         // GET /api/v3/openOrders (also array, includes price+stopPrice).
@@ -155,7 +155,7 @@ public:
         if (lists_resp.status < 200 || lists_resp.status >= 300)
         {
             std::cerr << "BinanceOcoBracketAdapter: openOrderList HTTP "
-                      << lists_resp.status << " — restart recovery skipped\n";
+                      << lists_resp.status << " - restart recovery skipped\n";
             return out;
         }
 
@@ -163,7 +163,7 @@ public:
         if (orders_resp.status < 200 || orders_resp.status >= 300)
         {
             std::cerr << "BinanceOcoBracketAdapter: openOrders HTTP "
-                      << orders_resp.status << " — restart recovery skipped\n";
+                      << orders_resp.status << " - restart recovery skipped\n";
             return out;
         }
 
@@ -238,7 +238,7 @@ public:
 
             // Approximate entry price as midpoint of SL/TP for trailing
             // bookkeeping. The portfolio holds the real cost basis from
-            // the regular reconciler — this only feeds best_price.
+            // the regular reconciler - this only feeds best_price.
             if (rb.stop_loss && rb.take_profit)
                 rb.entry_price = (*rb.stop_loss + *rb.take_profit) * 0.5;
             else if (rb.stop_loss)   rb.entry_price = *rb.stop_loss;
@@ -265,7 +265,7 @@ public:
             std::cerr << "BinanceOcoBracketAdapter: cancel(orderList="
                       << *handles.oco_list_id << ") for opener="
                       << opener_order_id << " HTTP " << resp.status
-                      << " — falling back to per-leg cancel\n";
+                      << " - falling back to per-leg cancel\n";
         }
 
         for (const auto* id : { &handles.sl_exchange_id, &handles.tp_exchange_id })
@@ -324,7 +324,7 @@ private:
         return ids;
     }
 
-    // Linear scan through openOrders array — N is small in production
+    // Linear scan through openOrders array - N is small in production
     // (hundreds at worst), so a hash index isn't worth the complexity.
     static std::string find_open_order(const std::string& orders_arr,
                                        const std::string& target_order_id)
@@ -383,7 +383,7 @@ private:
         return s;
     }
 
-    // Cheap substring slice — returns the body of `key`'s array as a
+    // Cheap substring slice - returns the body of `key`'s array as a
     // std::string (or "" if absent). We use the engine's hand-rolled
     // string extractors elsewhere; this keeps us off nlohmann/json.
     static std::string slice(const std::string& json, const std::string& key)

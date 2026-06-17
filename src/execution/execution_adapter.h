@@ -93,7 +93,7 @@ public:
         , walked_book_impact_(walked_book_impact) {}
 
     void set_mid_price(double price) { mid_price_ = price; }
-    // Symbol carries real L2 depth — bar_spread shift is suppressed
+    // Symbol carries real L2 depth - bar_spread shift is suppressed
     // because the seeded book's spread already prices the fill correctly.
     void set_l2_seeded(bool seeded) { l2_seeded_ = seeded; }
 
@@ -134,7 +134,7 @@ public:
             // Walked-book impact: when L2 depth is real, the actual VWAP
             // of the levels we'd consume IS the honest reference price.
             // Suppresses bar-spread (already does on l2_seeded_) AND the
-            // parametric impact model — the walk doesn't compose with a
+            // parametric impact model - the walk doesn't compose with a
             // square-root guess on top of the same depth.
             if (walked_book_impact_ && l2_seeded_)
             {
@@ -143,7 +143,7 @@ public:
                     ref_price = vwap;
                     walked_used = true;
                 }
-                // vwap == 0 → insufficient depth, fall through to mid +
+                // vwap == 0 -> insufficient depth, fall through to mid +
                 // impact_model. Underpricing impact for a sweep is worse
                 // than admitting the parametric estimate.
             }
@@ -202,7 +202,7 @@ public:
             {
                 // Legacy: fill at the aggressor's submitted book price
                 // (mid × aggression for market, our limit otherwise).
-                // Realistic: fill at the resting counterparty's price —
+                // Realistic: fill at the resting counterparty's price -
                 // honest passive-side pricing, one event per walked level.
                 double fill_price = realistic_fills_
                     ? counter_trade.price_.to_double()
@@ -332,7 +332,7 @@ private:
     int debug_fills_left_ = 0;
     // Volume-weighted average price for walking `qty` through the
     // passive side of the book. Returns 0 when the book has fewer
-    // resting units than requested — the caller falls back to its
+    // resting units than requested - the caller falls back to its
     // parametric path because partial-walk VWAP systematically
     // understates impact for sweeps. Cost: a single
     // ob_->get_order_infos() snapshot per call; only invoked from

@@ -32,7 +32,7 @@ TEST(Bollinger, ConstantInput)
     auto val = bb.update(5.0);
     ASSERT_TRUE(val.has_value());
     EXPECT_DOUBLE_EQ(val->middle, 5.0);
-    // stddev = 0 → bands collapse to middle
+    // stddev = 0 -> bands collapse to middle
     EXPECT_DOUBLE_EQ(val->upper, 5.0);
     EXPECT_DOUBLE_EQ(val->lower, 5.0);
 }

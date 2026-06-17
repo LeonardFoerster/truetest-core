@@ -81,14 +81,14 @@ void RiskPanel::draw(int body_y0, int width, int height,
 {
     if (!snap)
     {
-        mvaddstr(body_y0, 2, "(no snapshot yet — engine warming up)");
+        mvaddstr(body_y0, 2, "(no snapshot yet - engine warming up)");
         return;
     }
 
     int y = body_y0;
     int y_end = body_y0 + height;
 
-    // Status line — now using semantic colors
+    // Status line - now using semantic colors
     draw_label(y, 2, "Status");
     {
         Color status_color = snap->risk.halted ? Color::Danger : Color::Positive;
@@ -121,7 +121,7 @@ void RiskPanel::draw(int body_y0, int width, int height,
         else if (dd_frac >= 0.3 && overall_risk < RiskLevel::Caution) overall_risk = RiskLevel::Caution;
     }
 
-    // Overall Risk Level — very prominent (critical for futures)
+    // Overall Risk Level - very prominent (critical for futures)
     draw_label(y, 2, "Overall Risk");
     Color risk_col = risk_level_to_color(overall_risk);
     set_color_bold(risk_col);
@@ -135,7 +135,7 @@ void RiskPanel::draw(int body_y0, int width, int height,
     draw_label(y++, 2, "Risk Limits");
     if (y >= y_end) return;
 
-    // Helper for risk limits — gives stronger treatment to the really dangerous ones
+    // Helper for risk limits - gives stronger treatment to the really dangerous ones
     auto risk_limit_row = [&](const char* lbl, double cur, double limit, const char* unit, bool is_critical = false) {
         if (y >= y_end) return;
 

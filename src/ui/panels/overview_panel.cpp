@@ -175,7 +175,7 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     unset_color_bold(pnl_color(unrl));
     ++y;
 
-    // TOTAL PnL — the single most important number (make it stand out)
+    // TOTAL PnL - the single most important number (make it stand out)
     double total_pnl = pnl + unrl;
     draw_label(y, x_label, "TOTAL PnL");
     set_color_bold(pnl_color(total_pnl));
@@ -234,7 +234,7 @@ void OverviewPanel::draw(int body_y0, int width, int height,
         mvaddstr(y, x_value, b);
         unset_color_bold(c);
     }
-    else mvaddstr(y, x_value, "—");
+    else mvaddstr(y, x_value, "-");
 
     draw_label(y, x_label2, "Toxicity");
     if (tox_n > 0)
@@ -246,7 +246,7 @@ void OverviewPanel::draw(int body_y0, int width, int height,
         mvaddstr(y, x_value2, b);
         unset_color(c);
     }
-    else mvaddstr(y, x_value2, "—");
+    else mvaddstr(y, x_value2, "-");
     ++y;
 
     label(y, x_label, "Drawdown");
@@ -296,7 +296,7 @@ void OverviewPanel::draw(int body_y0, int width, int height,
         ++y;
     }
 
-    // Row: per-ring drops detail (only show if any) — status bar shows total.
+    // Row: per-ring drops detail (only show if any) - status bar shows total.
     if (drops_total > 0)
     {
         label(y, x_label, "Drops");

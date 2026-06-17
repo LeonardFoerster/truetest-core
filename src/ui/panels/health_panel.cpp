@@ -51,7 +51,7 @@ void HealthPanel::draw(int body_y0, int width, int height,
 {
     if (!snap)
     {
-        mvaddstr(body_y0, 2, "(no snapshot yet — engine warming up)");
+        mvaddstr(body_y0, 2, "(no snapshot yet - engine warming up)");
         return;
     }
 
@@ -81,7 +81,7 @@ void HealthPanel::draw(int body_y0, int width, int height,
 
     if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
 
-    // ── Latency (tick → trade) ──
+    // ── Latency (tick -> trade) ──
     label(y++, xL, "Latency  (tick → trade)");
     if (y >= y_end) return;
     {

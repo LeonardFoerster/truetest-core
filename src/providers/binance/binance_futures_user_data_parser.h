@@ -15,7 +15,7 @@
 // Wrapper keys we read top-level: `e` (event guard), `E` (event time).
 // Everything else lives one nesting level down. The wrapper key `o`
 // itself collides with the inner type field of the same name, so we
-// never `extract` `o` after slicing — only the bracketing find.
+// never `extract` `o` after slicing - only the bracketing find.
 class BinanceFuturesUserDataParser : public IFillParser
 {
 public:
@@ -45,7 +45,7 @@ public:
                 std::chrono::milliseconds(ms));
         }
 
-        // Walk B[] (balances) — array starts at "B":[ inside the inner.
+        // Walk B[] (balances) - array starts at "B":[ inside the inner.
         for_each_object_in_array(inner, "B", [&](std::string_view obj) {
             parsed_position_snapshot::balance_row row;
             row.asset = std::string(binance::extract_sv_string(obj, "a"));
@@ -175,7 +175,7 @@ private:
         }
     }
 
-    // a.m → reason. Binance enumerates many; we collapse to a coarse
+    // a.m -> reason. Binance enumerates many; we collapse to a coarse
     // set the engine actually distinguishes. "ORDER" is folded into a
     // distinct value so a consumer can dedupe against ORDER_TRADE_UPDATE
     // (the same underlying fill drives both messages on a typical fill).

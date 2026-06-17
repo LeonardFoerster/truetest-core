@@ -103,7 +103,7 @@ static bool confirm_real_money_math()
     std::cout << "\n";
     std::cout << RED << "  ###############################################\n";
     std::cout << "  #                                             #\n";
-    std::cout << "  #   !!!  LIVE TRADING — REAL MONEY  !!!       #\n";
+    std::cout << "  #   !!!  LIVE TRADING - REAL MONEY  !!!       #\n";
     std::cout << "  #                                             #\n";
     std::cout << "  #   Orders submitted from here will execute   #\n";
     std::cout << "  #   on a real exchange against real funds.    #\n";
@@ -159,11 +159,11 @@ static void print_threading_details(std::ostream& os,
     const int         threads = workers + 1;  // +1 = event_loop (main thread)
 
     os << indent << "Threading:  " << BLD << preset_to_string(preset) << OFF
-       << " preset — " << BLD << threads << OFF << " thread"
+       << " preset - " << BLD << threads << OFF << " thread"
        << (threads == 1 ? "" : "s")
        << " on " << phys << " physical core" << (phys == 1 ? "" : "s");
     if (hw > phys)
-        os << " " << DIM << "(" << hw << " logical w/ SMT — siblings left idle)" << OFF;
+        os << " " << DIM << "(" << hw << " logical w/ SMT - siblings left idle)" << OFF;
     os << "\n";
 
     auto cmap = build_core_map();
@@ -811,7 +811,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
         ->default_val(100000);
     app.add_option("--exec-bar-delay", o.exec_bar_delay,
                    "Bars of simulated execution delay for backtest/shadow. "
-                   "1 (default) parks orders until next bar's open — kills same-bar look-ahead. "
+                   "1 (default) parks orders until next bar's open - kills same-bar look-ahead. "
                    "0 disables. Ignored when --mode live or a latency model is configured.")
         ->default_val(1);
     app.add_option("--wire-latency-us", o.wire_latency_us,
@@ -848,7 +848,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_flag("--realistic-fills", o.realistic_fills,
                  "Record fills at the resting counterparty's price (one event per walked "
                  "level) instead of the aggressor's mid×aggression markup. Auto-suppresses "
-                 "--bar-spread-bps. Default off — backtests stay byte-identical until set. "
+                 "--bar-spread-bps. Default off - backtests stay byte-identical until set. "
                  "Ignored in --mode live.");
     app.add_option("--bar-spread-bps", o.bar_spread_bps,
                    "Calibrated full bid-ask in basis points charged to bar-mode market "
@@ -861,7 +861,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                  "the levels they'd walk instead of mid + --impact-k-bps. Walked depth is "
                  "deterministic for sub-book clips; the parametric model is suppressed for "
                  "those submits. Falls back to mid + impact_model when the symbol has no "
-                 "L2 depth or the qty exceeds the book. Default off — byte-identical until "
+                 "L2 depth or the qty exceeds the book. Default off - byte-identical until "
                  "set. Ignored in --mode live.");
     app.add_option("--queue-model", o.queue_model,
                    "Shadow-mode queue-position estimate. 'none' (default) keeps the "
@@ -1358,7 +1358,7 @@ static std::pair<std::string, std::string> resolve_exchange_credentials(
 
     if (!arg_key.empty() && !env_key)
         std::cerr << "  WARNING: --api-key was passed on the command line. "
-                     "Prefer env var TRUETEST_BINANCE_API_KEY — argv is visible "
+                     "Prefer env var TRUETEST_BINANCE_API_KEY - argv is visible "
                      "to other processes and shell history.\n";
     if (!arg_secret.empty() && !env_secret)
         std::cerr << "  WARNING: --api-secret was passed on the command line. "
@@ -1401,7 +1401,7 @@ static int run_provider_mode(const cli_options& o)
     if (o.min_liquidation_distance_pct >= 0.0)
         pcfg["min_liquidation_distance_pct"] =
             std::to_string(o.min_liquidation_distance_pct);
-    // --disarm-deadman wins over --dead-man-countdown-ms — operator
+    // --disarm-deadman wins over --dead-man-countdown-ms - operator
     // intent for "this specific run, no DMS" is unambiguous when both
     // appear on the command line.
     const long effective_countdown = o.disarm_deadman ? 0L
@@ -1624,7 +1624,7 @@ static int run_provider_mode(const cli_options& o)
         prov_cfg.mode = engine_mode::live;
 
     // Ring-buffer drops silently corrupt the shadow portfolio / halt path
-    // — unacceptable when real money or real dry-run validation is on the
+    // - unacceptable when real money or real dry-run validation is on the
     // line. Backtest keeps the lenient default (allow).
     if (prov_cfg.mode != engine_mode::backtest)
         prov_cfg.drop_policy = ring_drop_policy::halt_on_drop;
@@ -1825,7 +1825,7 @@ static int run_provider_mode(const cli_options& o)
         // Rich (ncurses) tabbed dashboard for shadow/live binaries when the
         // resolved status mode is TUI. ncurses takes over the terminal, so
         // we skip render_banner() (it would be cleared on initscr) and skip
-        // the inner ConsoleDashboard render loop — the rich TUI reads from
+        // the inner ConsoleDashboard render loop - the rich TUI reads from
         // the same ConsoleDashboard atomics + recent-event ring, and pulls
         // structured tables (positions, lots, ...) via engine::snapshot_dashboard.
         std::unique_ptr<truetest::ui::TabbedDashboard> rich_tui;
@@ -1842,7 +1842,7 @@ static int run_provider_mode(const cli_options& o)
 
             // Wire operator hotkey actions. Pause/flatten always available;
             // kill switch comes from the provider when one supplies it
-            // (Binance does — backtest does not).
+            // (Binance does - backtest does not).
             truetest::ui::operator_actions ops;
             ops.pause_toggle = [&eng]() {
                 eng.set_pause_all(!eng.is_pause_all());
@@ -1881,7 +1881,7 @@ static int run_provider_mode(const cli_options& o)
             }
         }
 
-        // Unified event-stream path — provider-agnostic. When the provider
+        // Unified event-stream path - provider-agnostic. When the provider
         // advertises it (currently: Binance with --depth-stream set), build
         // a single DataBridge<provider::event>; L2 frames populate the
         // engine's orderbook_registry_ directly so LocalBookAdapter can
@@ -1936,7 +1936,7 @@ static int run_provider_mode(const cli_options& o)
                 dashboard->stop();
         }
 
-        // Skip the multi-line analytics report when the TUI owns stdout —
+        // Skip the multi-line analytics report when the TUI owns stdout -
         // the box on screen is already the report surface, and dumping
         // another fixed-width report below it was the "final analysis
         // windows" complaint. Non-TUI runs still print it. File export
@@ -2360,7 +2360,7 @@ int main(int argc, char* argv[])
 
     cli_options opts;
 
-    CLI::App app{"TrueTest — modular C++23 backtesting / shadow / live engine"};
+    CLI::App app{"TrueTest - modular C++23 backtesting / shadow / live engine"};
     app.set_help_all_flag("--help-all", "Show all help");
     register_cli_options(app, opts);
 

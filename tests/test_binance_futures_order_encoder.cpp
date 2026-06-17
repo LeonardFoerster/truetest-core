@@ -63,7 +63,7 @@ TEST(BinanceFuturesOrderEncoder, SubmitMarketOmitsPriceAndTif)
     EXPECT_EQ(p.find("stopPrice="),   std::string::npos);
 }
 
-// Futures `STOP_MARKET` is a triggered MARKET — no price, no TIF.
+// Futures `STOP_MARKET` is a triggered MARKET - no price, no TIF.
 TEST(BinanceFuturesOrderEncoder, SubmitStopMapsToStopMarketWithoutPriceOrTif)
 {
     BinanceFuturesOrderEncoder enc;
@@ -79,7 +79,7 @@ TEST(BinanceFuturesOrderEncoder, SubmitStopMapsToStopMarketWithoutPriceOrTif)
     EXPECT_EQ(p.find("timeInForce="),     std::string::npos);
 }
 
-// Futures `STOP` is a triggered LIMIT — carries both price and stopPrice + TIF.
+// Futures `STOP` is a triggered LIMIT - carries both price and stopPrice + TIF.
 TEST(BinanceFuturesOrderEncoder, SubmitStopLimitMapsToStopWithPriceAndTif)
 {
     BinanceFuturesOrderEncoder enc;

@@ -153,7 +153,7 @@ TEST(TradeTapeShadowAdapter, Modify_UpdatesPriceAndQty)
     a.submit_order(make_limit(7, order_side::buy, 100.0, 1.0, tp{}));
     EXPECT_TRUE(a.modify_order(7, 105.0, 2.0));
 
-    // New price is above original — trade at 103 would now fill it.
+    // New price is above original - trade at 103 would now fill it.
     a.on_trade("X", 103.0, 10.0, tp{ms(100)});
     std::vector<fill_event> fills;
     ASSERT_TRUE(a.poll_fills(fills));
@@ -175,7 +175,7 @@ TEST(TradeTapeShadowAdapter, ForeignSymbolIgnored)
 TEST(TradeTapeShadowAdapter, TapeQtyCapsTotalFilledAcrossOrders)
 {
     // Two 10-lot buys at 100; one trade of 15 at 99. Trade qty caps how
-    // much we can synthesize — the second order only gets 5.
+    // much we can synthesize - the second order only gets 5.
     TradeTapeShadowAdapter a;
     a.submit_order(make_limit(9,  order_side::buy, 100.0, 10.0, tp{}));
     a.submit_order(make_limit(10, order_side::buy, 100.0, 10.0, tp{}));
@@ -193,7 +193,7 @@ TEST(TradeTapeShadowAdapter, SubmitTs_UsesEarliestEligibleTs)
 {
     // When the engine defers an order via its own latency_model, it bumps
     // earliest_eligible_ts past the creation timestamp. The shadow adapter
-    // must gate matches against eligible_ts, not creation_ts — otherwise
+    // must gate matches against eligible_ts, not creation_ts - otherwise
     // trades that printed during the engine-side latency window would
     // back-fill orders the real exchange hadn't seen yet.
     TradeTapeShadowAdapter a;
@@ -218,14 +218,14 @@ TEST(TradeTapeShadowAdapter, WireLatency_TradesDuringWindowMiss)
 {
     // An extra shadow-side wire latency pushes arrival past the engine's
     // eligible_ts. A trade printed between eligible_ts and
-    // eligible_ts + wire_latency must not fill the shadow order — this is
+    // eligible_ts + wire_latency must not fill the shadow order - this is
     // the whole point of the model: sim books the fill, shadow doesn't.
     auto latency = std::make_shared<FixedLatencyModel>(
         latency_duration(1000));  // 1 ms wire latency
     TradeTapeShadowAdapter a(latency);
 
     order_event o = make_limit(2, order_side::buy, 100.0, 1.0, tp{ms(0)});
-    // earliest_eligible_ts defaults to creation ts (ms 0) — shadow
+    // earliest_eligible_ts defaults to creation ts (ms 0) - shadow
     // arrival becomes ms 0 + 1ms = ms 1.
     a.submit_order(o);
 
@@ -246,7 +246,7 @@ TEST(TradeTapeShadowAdapter, WireLatency_StacksOnEngineLatency)
 {
     // Both layers compose: the engine bumps eligible_ts to 500us, then
     // the shadow adapter adds another 500us of wire latency. A trade at
-    // 800us is past eligibility but still in the wire window — must miss.
+    // 800us is past eligibility but still in the wire window - must miss.
     // A trade at 1100us is past both gates and fills.
     auto latency = std::make_shared<FixedLatencyModel>(
         latency_duration(500));
@@ -269,7 +269,7 @@ TEST(TradeTapeShadowAdapter, WireLatency_StacksOnEngineLatency)
 TEST(TradeTapeShadowAdapter, ZeroLatency_SameAsNoLatencyModel)
 {
     // Regression guard: passing a ZeroLatencyModel is observably equivalent
-    // to not passing one — simplifies wiring for call sites that always
+    // to not passing one - simplifies wiring for call sites that always
     // want to construct with a model.
     TradeTapeShadowAdapter a(std::make_shared<ZeroLatencyModel>());
     a.submit_order(make_limit(4, order_side::buy, 100.0, 1.0, tp{}));

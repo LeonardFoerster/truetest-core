@@ -29,7 +29,7 @@ public:
     }
     bool write_all(std::string_view data) override
     {
-        // Each write may contain >1 line — split on '\n'.
+        // Each write may contain >1 line - split on '\n'.
         std::string buf;
         for (char c : data)
         {
@@ -298,7 +298,7 @@ TEST(QuestdbStore, FlushIsCallableWithoutCrash)
 {
     Fixture f;
     ASSERT_TRUE(f.store->begin());
-    // No-op (buffer empty after begin's flush) — must not crash.
+    // No-op (buffer empty after begin's flush) - must not crash.
     f.store->flush();
     f.store->tick();
     SUCCEED();

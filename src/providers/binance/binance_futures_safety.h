@@ -14,7 +14,7 @@
 
 namespace binance::futures {
 
-// Operator-facing startup advisory. Not a refusal — startup proceeds
+// Operator-facing startup advisory. Not a refusal - startup proceeds
 // regardless. Surfaces conditions the engine cannot fix on its own
 // (margin type vs operator expectation, position uncomfortably close
 // to liquidation) so they don't get noticed for the first time when
@@ -89,8 +89,8 @@ inline double to_double_or_zero(std::string_view sv)
 }
 
 // `position_risk_json` is the body of GET /fapi/v2/positionRisk (an
-// array). `expected_margin_type` empty → margin-mode check disabled.
-// `liquidation_warn_pct` <= 0 → liquidation-distance check disabled.
+// array). `expected_margin_type` empty -> margin-mode check disabled.
+// `liquidation_warn_pct` <= 0 -> liquidation-distance check disabled.
 inline std::vector<advisory> compute_advisories(
     std::string_view position_risk_json,
     std::string_view expected_margin_type,

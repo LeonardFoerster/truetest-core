@@ -12,7 +12,7 @@
 
 // Queue-position estimate for shadow-mode passive limits.
 // TradeTapeShadowAdapter without this model fills any limit the moment a
-// real trade crosses it — optimistic for makers, because real life would
+// real trade crosses it - optimistic for makers, because real life would
 // have served the volume sitting ahead of you first. The model snapshots
 // the depth at our limit price at submit time, and the adapter only
 // emits a fill once that queue has been consumed by subsequent prints.
@@ -32,7 +32,7 @@ public:
 
     // queue_ahead at our limit price, evaluated at submit_ts. Returns 0
     // when we improve the BBO, when no level matches our price, or when
-    // the most recent snapshot is too stale to trust — all degrade to
+    // the most recent snapshot is too stale to trust - all degrade to
     // the legacy fill-on-cross behaviour rather than guessing.
     virtual double queue_ahead(
         const std::string& symbol, order_side side,
@@ -40,7 +40,7 @@ public:
         std::chrono::system_clock::time_point ts) const = 0;
 };
 
-// Default. Always returns 0 → adapter falls through to legacy fill-on-
+// Default. Always returns 0 -> adapter falls through to legacy fill-on-
 // cross. Used when --queue-model none (the default) is set, or when no
 // L2 stream is available.
 class NoQueueModel final : public IQueuePositionModel
@@ -110,7 +110,7 @@ public:
 
         const auto& levels = (side == order_side::buy) ? book.bids : book.asks;
         auto level_it = levels.find(limit_price);
-        // No level at our price → we're alone at this rung (either
+        // No level at our price -> we're alone at this rung (either
         // improving the BBO or sitting deeper than any existing rest).
         // Either way queue_ahead = 0 and the legacy fill-on-cross path
         // takes over.

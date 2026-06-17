@@ -48,7 +48,7 @@ TEST(MarketMaker, Replenish_VolatilityWidensSpread)
         mm_high.replenish(ob_high, (i % 2 == 0) ? 100.0 : 110.0);
     auto info_high = ob_high->get_order_infos();
 
-    // High vol should have wider spreads — hard to assert precisely
+    // High vol should have wider spreads - hard to assert precisely
     // but we can check both produce non-empty books
     EXPECT_FALSE(info_low.get_bids().empty());
     EXPECT_FALSE(info_high.get_bids().empty());

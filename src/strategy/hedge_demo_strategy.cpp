@@ -77,7 +77,7 @@ void hedge_demo_strategy::on_fill(const fill_event& fill,
     }
 
     // Closer: decrement the counter matching the OPENER's side (not this
-    // fill's side — a closer for a long is a sell, and vice versa).
+    // fill's side - a closer for a long is a sell, and vice versa).
     auto it = opener_sides_.find(opener_order_id);
     if (it == opener_sides_.end()) return;
     if (it->second == order_side::buy)

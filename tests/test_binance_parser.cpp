@@ -81,7 +81,7 @@ TEST(BinanceParser, ParseTradeMessage)
     EXPECT_EQ(result->symbol, "BTCUSDT");
     EXPECT_DOUBLE_EQ(result->price, 16800.50);
     EXPECT_EQ(result->quantity, 50000000);  // 0.5 * 1e8 (satoshi-scaled)
-    EXPECT_EQ(result->side, data_tick_side::ask);  // m=true → seller aggressor → ask
+    EXPECT_EQ(result->side, data_tick_side::ask);  // m=true -> seller aggressor -> ask
 
     auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         result->timestamp.time_since_epoch()).count();
@@ -99,7 +99,7 @@ TEST(BinanceParser, ParseTradeMessageBuyAggressor)
     ASSERT_TRUE(result.has_value());
 
     EXPECT_EQ(result->symbol, "ETHUSDT");
-    EXPECT_EQ(result->side, data_tick_side::bid);  // m=false → buyer aggressor → bid
+    EXPECT_EQ(result->side, data_tick_side::bid);  // m=false -> buyer aggressor -> bid
     EXPECT_EQ(result->quantity, 1000000000);  // 10 * 1e8
 }
 

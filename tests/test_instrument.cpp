@@ -32,10 +32,10 @@ TEST(Instrument, MeetsMinQty_UnsetAllowsAll)
 
 TEST(Instrument, MeetsMinNotional_ChecksProduct)
 {
-    // qty 0.001 * price 4999 = 4.999 < min 5 → fail
+    // qty 0.001 * price 4999 = 4.999 < min 5 -> fail
     EXPECT_FALSE(meets_min_notional(0.001, 4999.0, 5.0));
-    // 0.001 * 5000 = 5 → pass
+    // 0.001 * 5000 = 5 -> pass
     EXPECT_TRUE (meets_min_notional(0.001, 5000.0, 5.0));
-    // Unset min → always pass
+    // Unset min -> always pass
     EXPECT_TRUE (meets_min_notional(0.0, 0.0, 0.0));
 }

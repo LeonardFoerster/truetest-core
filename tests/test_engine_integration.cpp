@@ -1,10 +1,10 @@
 // O1: End-to-end integration tests for the engine pipeline.
-// These exercise the full data → strategy → orderbook → fill → portfolio
-// chain — complementing the per-component unit tests in the rest of the
+// These exercise the full data -> strategy -> orderbook -> fill -> portfolio
+// chain - complementing the per-component unit tests in the rest of the
 // suite. Scenarios covered:
 //   * Deterministic replay: two runs with the same seed + inputs produce
 //     byte-identical portfolio state.
-//   * Order → fill → portfolio update: a forced order produces a fill event
+//   * Order -> fill -> portfolio update: a forced order produces a fill event
 //     that is reflected in both the analytics report and the portfolio.
 //   * Risk halt: a tight drawdown limit causes the engine to stop early.
 // The tests construct `engine_config` directly (no CLI parsing) and use small
@@ -87,7 +87,7 @@ private:
     bool position_open_ = false;
 };
 
-// Strategy that buys on every bar it's asked — used to drive a drawdown so the
+// Strategy that buys on every bar it's asked - used to drive a drawdown so the
 // risk manager trips.
 class relentless_buyer : public IStrategy
 {
@@ -114,7 +114,7 @@ private:
 
 
 // ---------------------------------------------------------------------------
-// Full pipeline: CSV-style data → SMA strategy → deterministic end state
+// Full pipeline: CSV-style data -> SMA strategy -> deterministic end state
 // ---------------------------------------------------------------------------
 
 TEST(EngineIntegration, SmaPipelineIsDeterministicWithFixedSeed)
@@ -155,7 +155,7 @@ TEST(EngineIntegration, SmaPipelineIsDeterministicWithFixedSeed)
 
 
 // ---------------------------------------------------------------------------
-// Order → fill → portfolio update
+// Order -> fill -> portfolio update
 // ---------------------------------------------------------------------------
 
 TEST(EngineIntegration, OrderProducesFillAndUpdatesAnalytics)

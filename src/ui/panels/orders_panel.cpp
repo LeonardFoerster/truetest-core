@@ -67,7 +67,7 @@ void OrdersPanel::draw(int body_y0, int width, int height,
 {
     if (!snap)
     {
-        mvaddstr(body_y0, 2, "(no snapshot yet — engine warming up)");
+        mvaddstr(body_y0, 2, "(no snapshot yet - engine warming up)");
         return;
     }
 
@@ -167,7 +167,7 @@ void OrdersPanel::draw(int body_y0, int width, int height,
             mvaddstr(y, 18, type_str(o.type));
             mvprintw(y, 23, "%-10.10s", o.symbol.c_str());
             mvprintw(y, 34, "%14.6f",   o.qty);
-            if (o.type == 'M') mvprintw(y, 50, "%14s", "—");
+            if (o.type == 'M') mvprintw(y, 50, "%14s", "-");
             else               mvprintw(y, 50, "%14.4f", o.price);
             int statpair = (std::string(o.status) == "partial")
                               ? kPairYellow : kPairWhite;

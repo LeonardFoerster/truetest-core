@@ -1,4 +1,4 @@
-// Pins the unknown-fill handler hook on ExecutionBridge — the seam that
+// Pins the unknown-fill handler hook on ExecutionBridge - the seam that
 // turns inbound venue-bracket-leg fills (which the bridge can't recognize
 // via its by_client_id_ map) into engine-routable fill_events. Drives a
 // fake fill transport to feed exec messages without any network or
@@ -52,7 +52,7 @@ struct FakeEncoder : public IOrderEncoder
                                 std::string_view) override { return {}; }
 };
 
-// Hand-written parser that emits exactly what the test wants — no JSON.
+// Hand-written parser that emits exactly what the test wants - no JSON.
 struct ScriptedParser : public IFillParser
 {
     parsed_exec next;

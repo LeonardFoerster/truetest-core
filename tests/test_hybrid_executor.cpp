@@ -70,7 +70,7 @@ TEST(HybridExecutor, WireLatency_FillHeldUntilWindowElapses)
     EXPECT_TRUE(fills.empty());
 
     // A later submit at t=300us advances now_proxy_ but still below the
-    // release_ts window — fill still held.
+    // release_ts window - fill still held.
     auto o2 = make_market(2, order_side::buy, 0.5, tp{us(300)});
     o2.set_earliest_eligible_ts(tp{us(300)});
     hx->submit_order(o2);
@@ -104,7 +104,7 @@ TEST(HybridExecutor, WireLatency_Cancel_ClearsDelayedFill)
 
     EXPECT_TRUE(hx->cancel_order(42));
 
-    // Advance the clock well past the latency window — the cancelled
+    // Advance the clock well past the latency window - the cancelled
     // fill must not reappear.
     auto o2 = make_market(43, order_side::sell, 0.1, tp{us(5000)});
     o2.set_earliest_eligible_ts(tp{us(5000)});

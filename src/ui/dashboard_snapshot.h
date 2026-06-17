@@ -62,7 +62,7 @@ struct dashboard_snapshot
         std::uint64_t opener_order_id = 0;
         std::string   strategy_name;
         std::string   symbol;
-        char          side          = '?';   // 'L' (long entry → SELL closer) / 'S'
+        char          side          = '?';   // 'L' (long entry -> SELL closer) / 'S'
         double        qty           = 0.0;
         double        entry_price   = 0.0;
         std::optional<double> stop_loss;
@@ -132,7 +132,7 @@ struct dashboard_snapshot
     health_view health;
 
     // Engine introspection for the Debug tab. Sourced entirely from
-    // existing accessors and atomics — no new hot-path tracking. Each
+    // existing accessors and atomics - no new hot-path tracking. Each
     // section maps directly to the panel's section layout.
     struct ring_stat
     {
@@ -198,7 +198,7 @@ struct dashboard_snapshot
         std::size_t exit_armed            = 0;
         std::size_t exit_exchange_to_leg  = 0;
 
-        // Stage timings — populated only on HAS_DEBUG builds; vector
+        // Stage timings - populated only on HAS_DEBUG builds; vector
         // stays empty otherwise so the panel can branch on .empty().
         struct stage_row
         {
@@ -213,7 +213,7 @@ struct dashboard_snapshot
     debug_view debug;
 
     // Memory composition for the Debug tab's map view. Sourced from
-    // /proc/self/* (Linux only — `available=false` elsewhere) plus
+    // /proc/self/* (Linux only - `available=false` elsewhere) plus
     // computed pool/ring footprints (always available since they're
     // derived from in-process metadata).
     struct mem_pool_row
@@ -247,7 +247,7 @@ struct dashboard_snapshot
         std::uint64_t peak_rss_bytes = 0;
         std::uint64_t heap_bytes     = 0;    // /proc/self/statm data segment
 
-        // Computed in-process footprints — always populated.
+        // Computed in-process footprints - always populated.
         std::uint64_t pool_bytes_total = 0;
         std::uint64_t ring_bytes_total = 0;
 
@@ -261,7 +261,7 @@ struct dashboard_snapshot
 
     // L2 depth ladder for the active symbol. Sourced from the engine's
     // orderbook_registry. The `source` field disambiguates real venue
-    // depth (subscribed via the provider's L2 stream — Binance
+    // depth (subscribed via the provider's L2 stream - Binance
     // --depth-stream) from MM-seeded synthetic depth (paper liquidity
     // the LocalBookAdapter / HybridExecutor matches against).
     enum class l2_source { none, synthetic, venue };
@@ -278,8 +278,8 @@ struct dashboard_snapshot
         l2_source    source = l2_source::none;
         std::size_t  total_bid_levels = 0;     // before truncation
         std::size_t  total_ask_levels = 0;
-        std::vector<l2_level> bids;            // top-N, high → low
-        std::vector<l2_level> asks;            // top-N, low → high
+        std::vector<l2_level> bids;            // top-N, high -> low
+        std::vector<l2_level> asks;            // top-N, low -> high
         double       best_bid     = 0.0;
         double       best_ask     = 0.0;
         double       mid          = 0.0;

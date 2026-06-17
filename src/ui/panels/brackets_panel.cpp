@@ -53,7 +53,7 @@ void BracketsPanel::draw(int body_y0, int width, int height,
 
     if (!snap)
     {
-        mvaddstr(body_y0, 2, "(no snapshot yet — engine warming up)");
+        mvaddstr(body_y0, 2, "(no snapshot yet - engine warming up)");
         return;
     }
 
@@ -113,7 +113,7 @@ void BracketsPanel::draw(int body_y0, int width, int height,
     {
         attron(A_DIM);
         if (filter_.empty())
-            mvaddstr(y++, 4, "(no armed brackets — strategies haven't entered yet)");
+            mvaddstr(y++, 4, "(no armed brackets - strategies haven't entered yet)");
         else
             mvaddstr(y++, 4,
                 ("(no brackets match filter '" + filter_ + "')").c_str());
@@ -144,7 +144,7 @@ void BracketsPanel::draw(int body_y0, int width, int height,
             mvprintw(y, 35, "%10.4f", r.entry_price);
 
             if (r.mark > 0.0) mvprintw(y, 46, "%10.4f", r.mark);
-            else              mvprintw(y, 46, "%10s", "—");
+            else              mvprintw(y, 46, "%10s", "-");
 
             // SL price + distance.
             if (r.stop_loss)
@@ -158,13 +158,13 @@ void BracketsPanel::draw(int body_y0, int width, int height,
                     mvprintw(y, 68, "%+8.2f%%", d);
                     attroff(COLOR_PAIR(p));
                 }
-                else mvprintw(y, 68, "%9s", "—");
+                else mvprintw(y, 68, "%9s", "-");
             }
             else
             {
                 attron(A_DIM);
-                mvprintw(y, 57, "%10s", "—");
-                mvprintw(y, 68, "%9s",  "—");
+                mvprintw(y, 57, "%10s", "-");
+                mvprintw(y, 68, "%9s",  "-");
                 attroff(A_DIM);
             }
 
@@ -180,13 +180,13 @@ void BracketsPanel::draw(int body_y0, int width, int height,
                     mvprintw(y, 89, "%+8.2f%%", d);
                     attroff(COLOR_PAIR(p));
                 }
-                else mvprintw(y, 89, "%9s", "—");
+                else mvprintw(y, 89, "%9s", "-");
             }
             else
             {
                 attron(A_DIM);
-                mvprintw(y, 78, "%10s", "—");
-                mvprintw(y, 89, "%9s",  "—");
+                mvprintw(y, 78, "%10s", "-");
+                mvprintw(y, 89, "%9s",  "-");
                 attroff(A_DIM);
             }
 
@@ -198,7 +198,7 @@ void BracketsPanel::draw(int body_y0, int width, int height,
 
             mvprintw(y, 107, "%6s", fmt_age(r.age_seconds).c_str());
             mvprintw(y, 114, "%-12.12s",
-                     r.strategy_name.empty() ? "—" : r.strategy_name.c_str());
+                     r.strategy_name.empty() ? "-" : r.strategy_name.c_str());
 
             if (selected) attroff(A_REVERSE);
             ++y;
@@ -220,14 +220,14 @@ void BracketsPanel::draw(int body_y0, int width, int height,
             if (y < y_end)
                 mvprintw(y++, 4,
                     "stop_loss=%s  take_profit=%s  mark=%.4f",
-                    r.stop_loss   ? std::to_string(*r.stop_loss).c_str()  : "—",
-                    r.take_profit ? std::to_string(*r.take_profit).c_str(): "—",
+                    r.stop_loss   ? std::to_string(*r.stop_loss).c_str()  : "-",
+                    r.take_profit ? std::to_string(*r.take_profit).c_str(): "-",
                     r.mark);
             if (y < y_end)
                 mvprintw(y++, 4,
                     "venue_managed=%s  list_id=%s  age=%llds",
                     r.venue_managed ? "yes" : "no",
-                    r.venue_list_id.empty() ? "—" : r.venue_list_id.c_str(),
+                    r.venue_list_id.empty() ? "-" : r.venue_list_id.c_str(),
                     (long long)r.age_seconds);
         }
     }

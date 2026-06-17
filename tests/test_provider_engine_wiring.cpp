@@ -13,7 +13,7 @@
 
 // Verifies the minimum contract of the refactored core: when an engine_config
 // carries a provider with execution, the engine routes orders through the
-// provider's execution adapter — with no HAS_* define needed. The test uses
+// provider's execution adapter - with no HAS_* define needed. The test uses
 // only the always-on build surface (no ENABLE_BINANCE, no ENABLE_WEB_UI, etc.).
 
 namespace {
