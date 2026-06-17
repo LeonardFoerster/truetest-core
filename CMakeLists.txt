@@ -8,6 +8,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 option(ENABLE_LIVE_DATA  "Build with WebSocket live data feed (requires Boost.Beast)" OFF)
 option(ENABLE_DEBUG      "Build with performance instrumentation (requires Abseil)"   OFF)
 option(ENABLE_BINANCE    "Build with Binance exchange provider"                       OFF)
+option(ENABLE_WEB        "Build with embedded web UI server (civetweb)"                 OFF)
 option(ENABLE_QUESTDB    "Build with QuestDB persistence backend"                     OFF)
 option(ENABLE_TSAN       "Enable ThreadSanitizer"                                     OFF)
 option(ENABLE_ASAN       "Enable AddressSanitizer (mutually exclusive with TSAN)"     OFF)
@@ -316,6 +317,25 @@ if(ENABLE_BENCHMARKS)
     target_link_libraries(truetest_benchmarks PRIVATE
         engine_core benchmark::benchmark)
     tt_apply_common_flags(truetest_benchmarks)
+endif()
+
+# ── Web UI frontend bundle (ENABLE_WEB) ─────────────────────────────────────
+# Optional convenience target: builds the React/Vite SPA into src/web/assets/.
+# Deliberately NOT part of ALL so the C++ build stays node-free. Run explicitly:
+#   cmake --build build --target web_assets
+if(ENABLE_WEB)
+    find_program(NPM_EXECUTABLE npm)
+    if(NPM_EXECUTABLE)
+        add_custom_target(web_assets
+            COMMAND ${NPM_EXECUTABLE} ci
+            COMMAND ${NPM_EXECUTABLE} run build
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src/web/frontend
+            COMMENT "Building TrueTest web UI bundle → src/web/assets/"
+            VERBATIM)
+    else()
+        message(STATUS "ENABLE_WEB: npm not found — 'web_assets' target unavailable "
+                       "(build the SPA manually or install Node).")
+    endif()
 endif()
 
 # ── Install rules ───────────────────────────────────────────────────────────

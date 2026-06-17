@@ -70,8 +70,19 @@
 #include "debug/debug_log.h"
 #endif
 
+#ifdef HAS_WEB
+#include "ui/dashboard_snapshot.h"
+#include "web/web_server.h"
+#include "web/report_json.h"
+#endif
+
 static std::atomic<DataBridge<tick_record>*> g_tick_bridge{nullptr};
 static std::atomic<DataBridge<bar_record>*> g_bar_bridge{nullptr};
+#ifdef HAS_WEB
+// Set by SIGINT/SIGTERM so a post-backtest web session can serve the final
+// report until the operator exits.
+static std::atomic<bool> g_web_stop{false};
+#endif
 static void install_shutdown_handler()
 {
     std::signal(SIGINT, [](int) {
@@ -334,6 +345,13 @@ struct cli_options
     // Dashboard: auto (tui if tty, else plain), or force a mode.
     std::string status_format = "auto";
     bool no_tui = false;
+
+    // Embedded web UI (HAS_WEB). Read-only; off by default.
+    bool web = false;
+    int web_port = 8080;
+    std::string web_bind = "127.0.0.1";
+    std::string web_token;
+    std::string web_assets;
 
     double risk_max_position_value = 1e9;
     double risk_max_drawdown = 0.30;
@@ -903,6 +921,16 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Live status display: auto, tui, plain, ndjson, off (default: auto)")
         ->default_val("auto");
     app.add_flag("--no-tui", o.no_tui, "Shortcut for --status-format=plain");
+
+#ifdef HAS_WEB
+    app.add_flag("--web", o.web, "Serve the web UI (read-only) for this session");
+    app.add_option("--web-port", o.web_port, "Web UI port (default: 8080)")->default_val(8080);
+    app.add_option("--web-bind", o.web_bind, "Web UI bind address (default: 127.0.0.1)")
+        ->default_val("127.0.0.1");
+    app.add_option("--web-token", o.web_token, "Optional bearer token required for web UI access");
+    app.add_option("--web-assets", o.web_assets,
+                   "Directory of built web UI assets to serve at / (default: API/WS only)");
+#endif
 
 #ifdef HAS_QUESTDB
     app.add_flag("--persist", o.persist,
@@ -1812,6 +1840,31 @@ static int run_provider_mode(const cli_options& o)
         provider->configure(prov_cfg);
     }
 
+#ifdef HAS_WEB
+    // Read-only web UI factory — attaches to an engine via the same
+    // snapshot_dashboard() seam the ncurses TUI uses; never places orders.
+    auto start_web = [&](engine& eng) -> std::unique_ptr<truetest::web::WebServer> {
+        if (!o.web) return nullptr;
+        truetest::web::web_config wc;
+        wc.bind_addr = o.web_bind;
+        wc.port      = o.web_port;
+        wc.token     = o.web_token;
+        wc.asset_dir = o.web_assets;
+        auto snap = [&eng](truetest::ui::dashboard_snapshot& out) {
+            bool ok = eng.snapshot_dashboard(out);
+            if (ok) out.debug.target = truetest::target_name();
+            return ok;
+        };
+        auto report = [&eng]() {
+            return truetest::web::report_to_json(eng.get_analytics().generate_report());
+        };
+        auto srv = std::make_unique<truetest::web::WebServer>(
+            std::move(wc), std::move(snap), std::move(report));
+        srv->start();
+        return srv;
+    };
+#endif
+
     if (is_streaming)
     {
         engine eng(dh, nullptr, prov_strategy, std::move(prov_cfg));
@@ -1820,6 +1873,12 @@ static int run_provider_mode(const cli_options& o)
             eng.add_strategy(es.second, es.first);
 
         install_shutdown_handler();
+
+#ifdef HAS_WEB
+        // Streams live snapshots over /stream for the duration of the run;
+        // stopped when web_srv leaves scope at the end of this branch.
+        auto web_srv = start_web(eng);
+#endif
 
 #ifdef HAS_RICH_TUI
         // Rich (ncurses) tabbed dashboard for shadow/live binaries when the
@@ -2020,6 +2079,25 @@ static int run_provider_mode(const cli_options& o)
 
         eng.print_summary();
         export_results(eng.get_analytics(), o.output, o.output_format);
+
+#ifdef HAS_WEB
+        // Backtest is blocking and done; keep the server alive so the operator
+        // can review the final report in the browser until they Ctrl-C.
+        if (o.web)
+        {
+            auto web_srv = start_web(eng);
+            if (web_srv && web_srv->running())
+            {
+                std::signal(SIGINT,  [](int) { g_web_stop.store(true, std::memory_order_release); });
+                std::signal(SIGTERM, [](int) { g_web_stop.store(true, std::memory_order_release); });
+                std::cerr << "  web UI serving the backtest report at "
+                          << web_srv->config().url() << " — Ctrl-C to exit\n";
+                while (!g_web_stop.load(std::memory_order_acquire))
+                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                web_srv->stop();
+            }
+        }
+#endif
     }
     return 0;
 }

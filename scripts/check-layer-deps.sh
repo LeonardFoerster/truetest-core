@@ -41,6 +41,7 @@ ALLOWED[data]="core types utils debug"
 ALLOWED[providers]="core types utils data orderbook execution engine"
 ALLOWED[engine]="core types indicator utils debug threading orderbook execution analytics market_maker risk strategy data providers"
 ALLOWED[api]="engine core data strategy execution"
+ALLOWED[web]="ui analytics"   # read-only serializers: dashboard_snapshot + AnalyticsReport
 
 # Files exempted from the check.  Reason must be documented.
 #   debug/debug_report.{h,cpp} + debug/memory_info.cpp  — compiled only when

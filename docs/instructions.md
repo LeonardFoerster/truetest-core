@@ -150,7 +150,7 @@ ctest --test-dir build
 ```
 
 **Key CMake Flags** (see instructions.md §3 for exhaustive table):
-- Feature: ENABLE_BINANCE, ENABLE_QUESTDB, ENABLE_LIVE_DATA, ENABLE_DEBUG (Abseil), ENABLE_BENCHMARKS.
+- Feature: ENABLE_BINANCE, ENABLE_QUESTDB, ENABLE_LIVE_DATA, ENABLE_DEBUG (Abseil), ENABLE_BENCHMARKS, ENABLE_WEB (embedded web UI server, fetches civetweb — see [web-ui.md](web-ui.md)).
 - Build: CMAKE_BUILD_TYPE=Release (with DEBUG for instrumentation), ENABLE_NATIVE_OPT, BUILD_TESTS/SHARED_LIB.
 - Sanitizers (Debug, mutually exclusive where noted): ENABLE_TSAN (preferred for threading), ASAN+UBSAN combos (OPTIONS="halt_on_error=1,abort_on_error=1,...").
 - Perf reference build: Release + ENABLE_DEBUG + NATIVE_OPT + BENCHMARKS.
@@ -185,8 +185,11 @@ ctest --test-dir build
 - Persistence: `--persist --run-tag myrun_YYYYMMDD_HHMM` (QuestDB), `--checkpoint path`.
 - Replay/Record: `--replay events.bin --replay-from/--to`, `--record`, `--replay-data`.
 - Output: `--output results.json`, `--status-format tui|ndjson|minimal`, `--log-events`, `--log-rotation`.
+- Web UI (`-DENABLE_WEB=ON` only): `--web` (serve read-only web UI), `--web-port 8080`, `--web-bind 127.0.0.1`, `--web-token <tok>` (optional bearer auth; also `?token=` in the browser), `--web-assets <dir>` (built SPA to serve at `/`). Streaming runs serve a live cockpit; backtest runs keep serving the final report until Ctrl-C. Read-only on every target — no order/flatten/kill routes. Full guide: [web-ui.md](web-ui.md).
 
 **TUI**: Rich ncurses tabbed dashboard on shadow/live (positions, orders, L2, risk, brackets, debug StageTimer/ring, health/DMS counter). Hotkeys, setup menu on backtest. `--no-tui` for headless/CI.
+
+**Web UI** (opt-in, `-DENABLE_WEB=ON` + `--web`): browser cockpit + backtest review, same data the TUI shows. Embedded civetweb server on its own thread, reading the engine through `snapshot_dashboard()` (off the hot path, outside the frozen live-safety surface). WS `/stream` (live SnapshotFrame), REST `/api/snapshot` + `/api/results`. See [web-ui.md](web-ui.md).
 
 **JSON config**: Full engine_config schema (mode, provider, strategy, risk, threading, persistence, realism, etc.). See instructions §13 for keys.
 
