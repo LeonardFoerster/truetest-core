@@ -24,9 +24,9 @@ Monte Carlo integrated from `monte-carlo` branch (mainline; MC-01/MC-02 landed).
 
 | Phase | Status | Notes |
 |-------|--------|-------|
-| Phase 0 (Tiny-Size Mainnet Futures) | 0/15 qualifying | Paused during MC work; gates unchanged. Full artifacts required. See `prod.md`, `reports/phase0/`. |
+| Phase 0 (Tiny-Size Mainnet Futures) | 0/15 qualifying | Paused during MC work; gates unchanged. Full artifacts required. See `docs/governance/01-prod.md`, `reports/phase0/`. |
 | Phase 1 (Live-Safety Freeze) | Enforced | 10 frozen files + `scripts/check-live-safety-freeze.sh` (CI + pre-commit). Token + CCB + clean shadow run required for edits. |
-| Risk / DMS (R-*, S-*) | Partial | Tiered margin landed; position limits, funding wiring, liq calc, DMS flatten pending. See `todo.md`. |
+| Risk / DMS (R-*, S-*) | Partial | Tiered margin landed; position limits, funding wiring, liq calc, DMS flatten pending. See `docs/governance/03-todo.md` (thin) or docs/todos/04-R-risk-management.md + 05-S-....md (see 00-OVERVIEW.md). |
 
 Safety primitives: compile-time gating, IReconciler, DMS + kill-switch (flatten opt), venue `IRiskCheck`, terminal `halt_flag_`, user-data WS as truth, WorkerWatchdog.
 
@@ -103,15 +103,17 @@ Indicators: sma/ema/rsi/stochastic/bollinger/atr/swing/rolling.
 | File                          | Content |
 |-------------------------------|---------|
 | CLAUDE.md                     | Build matrix, conventions, model selection, freeze policy, web |
-| prod.md                       | Phases, gates, Phase 0 template + ritual |
-| todo.md                       | Tasks (P0/P1/MC/R/S/D/A); ref on frozen PRs |
-| docs/instructions.md          | CLI flags, providers, MC, threading, realism |
-| docs/web-ui.md                | Web UI flags, endpoints, architecture, safety |
+| docs/governance/01-prod.md    | Phases, gates, Phase 0 template + ritual |
+| docs/governance/03-todo.md    | Tasks (P0/P1/MC/R/S/D/A); ref on frozen PRs |
+| docs/reference/01-instructions.md | CLI flags, providers, MC, threading, realism |
+| docs/reference/05-web-ui.md   | Web UI flags, endpoints, architecture, safety |
 | reports/phase0/PROGRESS.md    | Phase 0 tracker (0/15) |
-| docs/user-manual.md           | Architecture + operator overview |
-| docs/production-readiness-gaps.md | Remaining gaps |
+| docs/reference/02-user-manual.md | Architecture + operator overview |
+| docs/archive/production-readiness-gaps-2026-05.md | Historical gaps snapshot (May 2026; current in docs/governance/03-todo.md + 01-prod.md) |
 
 Root governance files + reports/phase0/ + CLAUDE.md are authoritative. MC and web UI do not relax Phase 0/1 gates or safety surface.
+
+**Note (2026-07 docs overhaul)**: Governance moved to docs/governance/ (01-prod.md etc). docs/ is central home. Reference docs in docs/reference/. See docs/README.md.
 
 ## Quick Examples
 
@@ -130,10 +132,10 @@ Web (ENABLE_WEB):
 # http://127.0.0.1:8080/
 ```
 
-Live: add `--live --api-key ... --api-secret ...` + captcha. Full templates in prod.md.
+Live: add `--live --api-key ... --api-secret ...` + captcha. Full templates in docs/governance/01-prod.md.
 
 ## Testing
 
 ~300 GoogleTest cases, golden regression (execution fidelity), CI hot-path (no JSON), live-safety-freeze script, optional sanitizers + benchmarks.
 
-Consult `prod.md` before increasing live capital. All frozen-surface work requires the CCB token and clean shadow run per `scripts/check-live-safety-freeze.sh`.
+Consult `docs/governance/01-prod.md` before increasing live capital. All frozen-surface work requires the CCB token and clean shadow run per `scripts/check-live-safety-freeze.sh`.

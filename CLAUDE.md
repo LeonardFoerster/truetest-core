@@ -4,7 +4,7 @@
 
 For AI coding assistants working in this repo: this codebase has two
 tiers of edits with different model requirements. **Full rationale,
-file list, and pre-merge checklist live in `docs/MODEL.md`** (planned for Doc Phase 2 / deferred; current rules are in this file + `prod.md`). See `docs/README.md` for the current realized documentation structure.
+file list, and pre-merge checklist live in planned `docs/architecture/MODEL.md`** (deferred; current rules are in this file + `docs/governance/01-prod.md`). See `docs/README.md` for the current realized documentation structure.
 
 **Default — Sonnet 4.6** is sufficient for: new strategies, indicators,
 tests, CLI flags, docs, single-file refactors, provider-stack additions
@@ -37,9 +37,9 @@ deterministic per-trial seeding, no hidden shared state between trials,
 `--mc-parallel` must not be treated as a general-purpose threading primitive
 (it conflicts with engine core pinning in most presets).
 
-**Phase 1 Live-Safety Freeze (see `prod.md` Phase 1)**:
+**Phase 1 Live-Safety Freeze (see `docs/governance/01-prod.md` Phase 1)**:
 The files that carry the `LIVE-SAFETY SURFACE — Phase 1 freeze` comment
-block (tt_target.h, engine.cpp + the full list in prod.md) are now under
+block (tt_target.h, engine.cpp + the full list in 01-prod.md) are now under
 an additional mechanical gate:
 - Any edit requires the commit message to contain the token
   `LIVE_SAFETY_CCB_APPROVED`
@@ -51,15 +51,17 @@ unrestricted change to this surface.
 
 ## Documentation Maintenance Rules (added with prod.md / prerequisites.md / todo.md)
 
-- The three root governance files (`prod.md`, `prerequisites.md`, `todo.md`) + `reports/phase0/` are the single source of truth for phases, checklists, and task tracking. Keep them authoritative and up to date.
-- Every PR touching the frozen safety surface (or the *description* of that surface in docs) must reference the relevant items in `todo.md` and run `./scripts/check-live-safety-freeze.sh`.
-- On every phase exit declared in `prod.md`, also update `todo.md` (move/complete items), `prerequisites.md` if the checklist evolved, and the "Last updated" note in the affected docs.
-- When a cross-reference is still aspirational (e.g. `docs/operations/futures-phase0-operator-sop.md` before Doc Phase 1), it must say so explicitly: "Planned for Doc Phase X – current details live in prod.md / instructions.md §N".
-- Extraction rule: long-form phase/ritual/gate content lives in `prod.md` (or the dedicated SOP). `instructions.md` contains pointers + quick command templates, not duplicates.
-- Anti-rot ritual: before increasing any capital tier, the exit review must include "docs verified + links resolve + `todo.md` updated".
-- When new work lands in `src/simulation/` (Monte Carlo), the MC section in `docs/instructions.md` and any governance mentions (README, todo.md, prod.md) must be updated in the same PR or immediate follow-up.
+- The three root governance files (`docs/governance/01-prod.md`, `docs/governance/02-prerequisites.md`, `docs/governance/03-todo.md` (thin high-level)) + `reports/phase0/` + detailed `docs/todos/` (see 00-OVERVIEW.md) are the single source of truth for phases, checklists, and task tracking. Keep them authoritative and up to date. (Large historical plans live in `docs/archive/`.)
+- Every PR touching the frozen safety surface (or the *description* of that surface in docs) must reference the relevant items in `docs/governance/03-todo.md` (or precise docs/todos/ e.g. docs/todos/02-P1-freeze.md#P1-02) and run `./scripts/check-live-safety-freeze.sh`.
+- On every phase exit declared in `docs/governance/01-prod.md`, also update `docs/governance/03-todo.md` (thin) + relevant docs/todos/*.md (move/complete items), `docs/governance/02-prerequisites.md` if the checklist evolved, and the "Last updated" note in the affected docs.
+- When a cross-reference is still aspirational (e.g. `docs/operations/futures-phase0-operator-sop.md` before Doc Phase 1), it must say so explicitly: "Planned for Doc Phase X – current details live in docs/governance/01-prod.md / docs/reference/01-instructions.md §N".
+- Extraction rule: long-form phase/ritual/gate content lives in `docs/governance/01-prod.md` (or the dedicated SOP). `docs/reference/01-instructions.md` contains pointers + quick command templates, not duplicates.
+- Anti-rot ritual: before increasing any capital tier, the exit review must include "docs verified + links resolve + `docs/governance/03-todo.md` updated".
+- When new work lands in `src/simulation/` (Monte Carlo), the MC section in `docs/reference/01-instructions.md` and any governance mentions (README, docs/governance/03-todo.md, docs/governance/01-prod.md, docs/todos/03-MC-simulation.md) must be updated in the same PR or immediate follow-up.
 
-See the approved documentation plan (session plan file) and `docs/README.md` for the phased rollout of the slimmed structure.
+See the approved documentation plan and `docs/README.md` for the phased rollout of the slimmed structure.
+
+**docs/ is now the central authoritative documentation home.** Last updated: 2026-07 (docs overhaul).
 
 ## What this is
 
@@ -327,7 +329,7 @@ one `std::mutex` inside the store. Writes are handed to a batched `IlpWriter`
 six (plus funding) per-run tables prefixed with `--run-tag`. Wire:
 ILP/TCP (port 9009) for ingest, HTTP /exec (port 9000) for DDL — raw POSIX
 sockets, no client library. **Soft-fail** on unreachable daemon: warning to
-stderr, persistence disabled, run continues. Spec in `docs/db.md`.
+stderr, persistence disabled, run continues. Spec in `docs/reference/03-db.md`.
 
 ### Per-lot exit brackets (ExitManager)
 Strategies can attach SL/TP/trailing brackets to entry lots via
@@ -457,7 +459,7 @@ Live WS recording + replay: `BinanceRecorder` captures a live stream to file;
 `BinanceReplayTransport` replays it as a transport — useful for deterministic
 testing against real exchange data.
 
-Operator guide for testnet: `docs/testnet.md` (planned / deferred; current details in `docs/instructions.md` and `prod.md`).
+Operator guide for testnet: planned (current details in `docs/reference/01-instructions.md` and `docs/governance/01-prod.md`).
 
 ### Binance Futures USDT-M (ENABLE_BINANCE=ON)
 Sibling provider registered as `binance-futures`. Same compile-time gate
@@ -529,7 +531,7 @@ every other `closePosition=true` order on the symbol. Partial-fraction
 intents (`qty_fraction != 1.0`) are declined; engine-side ExitManager
 remains the only enforcer for those.
 
-Operator guide: `docs/futures-testnet.md` (planned / deferred; current details in `docs/instructions.md`, `prod.md`, and `prerequisites.md`).
+Operator guide: planned (current details in `docs/reference/01-instructions.md`, `docs/governance/01-prod.md`, `docs/governance/02-prerequisites.md`).
 
 ## Not yet implemented
 
@@ -537,7 +539,7 @@ Operator guide: `docs/futures-testnet.md` (planned / deferred; current details i
 - **Generic ExchangeAdapter** — Binance (spot + futures) is the only live venue family today.
 - **QuestDB hard-fail** — daemon unreachable currently downgrades to a
   warning; "refuse to start when `--persist` is set but QuestDB is down"
-  is documented in `docs/db.md` as a follow-up (deferred; current soft-fail behavior described in `docs/instructions.md` QuestDB section).
+  is documented in `docs/reference/03-db.md` as a follow-up (deferred; current soft-fail behavior described in `docs/reference/01-instructions.md` QuestDB section).
 - **COIN-M (inverse) futures** — separate stack (`dapi.binance.com`,
   `dstream.binance.com`, settles in base asset). Will land as a sibling
   provider, not a flag on `binance-futures`.

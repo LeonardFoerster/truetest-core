@@ -4,6 +4,8 @@
 
 This document serves as the primary operator-facing manual and technical overview. It covers architecture, installation, configuration, usage, risk management, safety features, performance characteristics, and commercial readiness recommendations.
 
+**Note**: Full phase/governance/ritual details in [../governance/01-prod.md](../governance/01-prod.md). docs/ is now the central authoritative documentation home. Last updated: 2026-07 (docs overhaul). This file keeps architecture diagram, build, CLI examples, QuestDB usage, MC technical how-to, features.
+
 ---
 
 # Project Overview
@@ -106,16 +108,14 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 - Live-money math confirmation gate + red warning banner
 - Rate limiter and time sync
 
-**Intended Use & Scope**: TrueTest is a private, personal research and retail tool for the author only. It is not, and will never be, an enterprise-ready, institutional, or production trading system. Monte Carlo simulation, high-fidelity backtesting, and shadow divergence analysis are the primary mature capabilities. The live execution paths (`engine_live`) exist with unusually strong compile-time (`TT_TARGET`) and runtime safety layers (reconciler, DMS, kill-switch, venue risk checks, terminal halt, user-data source of truth, etc.). Any use of live paths is experimental, tiny-size, fully attended by the operator, and done at the author's own risk. The Phase 0/1 rituals and Go-Live language in this repository describe the author's personal evidence-gathering hygiene and self-imposed discipline — they are **not** a formal production release process or claim of readiness for others.
+**Intended Use & Scope**: Full authoritative statement lives in [../governance/01-prod.md](../governance/01-prod.md). This is a private personal research/retail tool only (not enterprise/institutional). Live paths experimental/tiny/attended at own risk. Phase 0/1 describe personal discipline. See docs/governance/01-prod.md for full paragraph.
 
 **Stochastic Backtesting (Monte Carlo)**:
-- Synthetic GBM path generation via the `synthetic` provider (usable standalone with `--provider synthetic --mc-params "..."` or as part of full campaigns)
-- Full multi-trial campaigns with deterministic per-trial seeding via `--monte-carlo --mc-trials N --mc-model gbm --strategy ...`
-- Reuses the complete existing strategy, engine, realism models, analytics, ExitManager, and QuestDB surfaces for each trial
-- Performance features: object reuse between trials (`--mc-reuse-objects`) and experimental parallel execution (`--mc-parallel`, recommended only with `--thread-preset inline`)
-- Reporter produces per-trial + aggregate P&L, Sharpe, max drawdown, win rate, etc. (text + compact JSON)
-- Strong caveats: synthetic L2 is stylized (constant spread + noise), no automatic calibration from historical data, parallel mode has non-deterministic ordering and threading restrictions, QuestDB support is currently campaign-summary only (full per-trial MC-06 future)
-- **Current MC items + status** (MC-01..MC-06, including "substantially complete" for reporter Step A, demo caveats on some strategies for MC-05, L2 fidelity, reuse/parallel limitations): see root `todo.md` MC section + `docs/instructions.md` (detailed MC flags/usage/caveats) + `prod.md` (MC disclaimer: research tool only; does not relax Phase 0/1 gates). Governance in root README + summary.md (root) + CLAUDE.md (for AI rules) + this MERGE_PLAN.md context.
+Full details + caveats + usage in [../governance/01-prod.md](../governance/01-prod.md) (MC disclaimer), [01-instructions.md](01-instructions.md) (MC flags), [../governance/03-todo.md](../governance/03-todo.md) (MC-* high-level) or docs/todos/03-MC-simulation.md (full status verbatim).
+- Use `--monte-carlo --mc-trials N --provider synthetic`
+- Reuses engine/strategies/realism/ExitManager per trial; object reuse (`--mc-reuse-objects`), experimental `--mc-parallel` (inline preset only).
+- Reporter: per-trial + aggregate stats (text/JSON).
+- Caveats: stylized L2; research tool only — does not relax Phase 0/1 gates. See governance for current status (MC-01/MC-02 landed).
 
 **Risk Management**:
 - `RiskManager`: max position, daily loss, trade frequency, unrealized loss
@@ -210,7 +210,7 @@ Per-run tables (e.g. `{run_tag}_orders`, `{run_tag}_fills`, `{run_tag}_events`, 
 
 QuestDB is explicitly a secondary, queryable analytics and observability store. The binary zstd-compressed event log (`--record`) is the authoritative, durable audit trail. In non-strict mode, QuestDB unavailability at startup causes graceful degradation (persistence is disabled for the session with a warning). In strict mode, startup or persistent write failures cause a hard exit.
 
-For operational details, golden queries, retention/TTL recommendations, soak testing with failure injection, and post-run reconciliation, see `docs/db.md` and `docs/questdb-multi-week-hardening-guide.md`.
+For operational details, golden queries, retention/TTL recommendations, soak testing with failure injection, and post-run reconciliation, see [03-db.md](03-db.md) and `docs/archive/questdb-multi-week-hardening-guide.md` (historical).
 
 # Usage Examples
 
@@ -407,3 +407,5 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 
 **Document generated**: Full codebase analysis of the TrueTest / hft-engine trading platform.
 **Intended audience**: Operators, quant developers, and commercial product reviewers.
+
+*Last updated: 2026-07 (docs overhaul) — slimmed; see governance for duplicated content.*

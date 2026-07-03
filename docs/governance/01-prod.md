@@ -1,18 +1,19 @@
 # TrueTest Production Readiness Playbook (prod.md)
 
 **Status**: Authoritative – the central production contract and capital-tier governance document.  
-**Last major update**: 2026 (post-merge; Monte Carlo to master merge — all phases completed successfully)  
+**Last major update**: 2026 (post-merge; Monte Carlo to master merge — all phases completed successfully; todos/ split cross-refs 2026-07)  
 **Owners**: Core maintainers + Phase 0/1 operators (every phase exit must update this file).
 
 This document defines the exact phase definitions, capital-tier gates, Go-Live checklist, Phase 0 operator ritual, and "why we are careful" philosophy. It is the single source of truth that reviewers, CCB members, and future operators consult before any increase in live capital.
 
 See also:
-- `CLAUDE.md` (AI + human reviewer rules + live-safety freeze mechanics)
-- `prerequisites.md` (living pre-PR checklist for the frozen safety surface)
-- `todo.md` (current task list; every frozen-surface PR must reference items here)
-- `docs/production-readiness-gaps.md` (honest snapshot of remaining gaps – read together with this playbook)
-- `docs/operations/futures-phase0-operator-sop.md` (printable checklist, once created)
+- `../CLAUDE.md` (AI + human reviewer rules + live-safety freeze mechanics)
+- `02-prerequisites.md` (mandatory pre-PR checklist for the frozen safety surface)
+- `03-todo.md` (thin high-level canonical task list; every frozen-surface PR must reference items here or precise docs/todos/ e.g. docs/todos/01-P0-phase0.md#P0-01 per 00-OVERVIEW.md)
 - `reports/phase0/PROGRESS.md` (evidence tracker)
+- Historical snapshot: `../archive/production-readiness-gaps-2026-05.md` (May 2026 view; current gaps/status tracked in `03-todo.md` + docs/todos/ + this file)
+
+**docs/ is now the central authoritative documentation home.** Last updated: 2026-07 (docs overhaul). This file (01-prod.md) is the source of truth for phases/gates/ritual. Other files use short pointers.
 
 ---
 
@@ -70,7 +71,7 @@ See also:
 - Two-person batch reviews every 5 sessions.
 - All evidence committed under `reports/phase0/`.
 
-**Ritual** (see the printable SOP once created in `docs/operations/futures-phase0-operator-sop.md`):
+**Ritual** (see the printable SOP planned in `../operations/futures-phase0-operator-sop.md` — "Planned for Doc Phase X – current details live in this file + reports/phase0/"):
 Print/sign the SOP, use `new-session.sh`, keep math-captcha visible the entire session, stay at the terminal, confirm one-way mode, watch DMS counter, run mandatory post-halt grep, run `post-session.sh` + classifier, commit artifacts + note, update PROGRESS.md.
 
 **Current status (2026-05)**: 0/15 qualifying. Scripts and templates exist and are ready. First real tiny-size mainnet validation runs are the immediate focus on the active branch.
@@ -80,14 +81,14 @@ Print/sign the SOP, use `new-session.sh`, keep math-captcha visible the entire s
 **Already completed in planning / mechanical artifacts**:
 - 10 files carry the `LIVE-SAFETY SURFACE — Phase 1 freeze` marker (see `scripts/check-live-safety-freeze.sh` for the exact list: `tt_target.h`, `engine.cpp`, futures provider live block, dead_mans_switch, kill_switch, reconciler, risk_manager, futures_risk_check, live_safety, worker_watchdog).
 - Enforcement script wired into pre-commit + CI.
-- CLAUDE.md and instructions updated with model-selection + CCB rules.
-- `prerequisites.md` created (this document).
+- CLAUDE.md and reference/01-instructions.md updated with model-selection + CCB rules.
+- `02-prerequisites.md` created (mandatory pre-PR checklist).
 
 **Remaining exit criteria**:
 - Complete the current deepdive + per-lot / queue-position / hybrid executor refactor.
 - Clean 8-hour (or longer) mainnet `engine_shadow` run with zero drops / unexplained divergence.
 - Two-person sign-off recorded in `decisions/phase1-freeze-*.md` (or equivalent under the decisions/ tree).
-- Update `prod.md` and `todo.md` to mark Phase 1 complete.
+- Update this file and `03-todo.md` (thin) + relevant docs/todos/ file to mark Phase 1 complete.
 - All future edits to any frozen file must carry the token `LIVE_SAFETY_CCB_APPROVED` in the commit message + pass the check script + 4h+ shadow validation.
 
 **All future safety-surface PRs** require the token, CCB review, and clean shadow run even if they are "only docs" that describe the surface.
@@ -103,9 +104,9 @@ Print/sign the SOP, use `new-session.sh`, keep math-captcha visible the entire s
 
 Monte Carlo simulation (introduced on the monte-carlo branch and now mainline) is a research and strategy-robustness tool for stochastic backtesting (`--monte-carlo --mc-trials N`, `--provider synthetic`, object reuse between trials, experimental parallel execution). It reuses the existing strategy, realism, analytics, and ExitManager surfaces.
 
-**This is a research and risk-distribution tool.** It does not replace or accelerate the Phase 0/1 mainnet shadow/live evidence requirements, does not change the live-order safety surface, and should not be used as a substitute for real-market divergence tracking. See `docs/instructions.md` (Monte Carlo section) and `todo.md` (MC-* items) for current status, limitations (stylized synthetic L2, experimental parallelism, etc.), and open work items.
+**This is a research and risk-distribution tool.** It does not replace or accelerate the Phase 0/1 mainnet shadow/live evidence requirements, does not change the live-order safety surface, and should not be used as a substitute for real-market divergence tracking. See `../reference/01-instructions.md` (Monte Carlo section) and `03-todo.md` (MC-* items) for current status, limitations (stylized synthetic L2, experimental parallelism, etc.), and open work items.
 
-Status notes live in `production-readiness-gaps.md` and `todo.md`.
+Status notes live in `03-todo.md` + docs/todos/ (and historical `../archive/production-readiness-gaps-2026-05.md`).
 
 ### Phases 3–6 (High-Level Roadmap)
 
@@ -138,11 +139,13 @@ Status notes live in `production-readiness-gaps.md` and `todo.md`.
 
 - **Preparing a Phase 0 session** → Read the Phase 0 section + the operator SOP + run `new-session.sh`.
 - **Reviewing a PR that touches safety** → Read the Phase 1 freeze rules + `prerequisites.md` + run the check script.
-- **Considering any increase in the author's personal live capital** → Read the entire Go-Live Gate table + the most recent `reports/phase0/PROGRESS.md` + `production-readiness-gaps.md`. When the author chooses to collect evidence toward personal live use...
-- **Updating after a phase exit** → Edit this file (mark the phase complete, record sign-offs, update the roadmap), update `todo.md`, and reference the PR in the migration log.
+- **Considering any increase in the author's personal live capital** → Read the entire Go-Live Gate table + the most recent `reports/phase0/PROGRESS.md` + current `03-todo.md` (or docs/todos/ for items). (Historical May 2026 gaps view lives in `../archive/production-readiness-gaps-2026-05.md`.) When the author chooses to collect evidence toward personal live use...
+- **Updating after a phase exit** → Edit this file (mark the phase complete, record sign-offs, update the roadmap), update `03-todo.md` + relevant docs/todos/*.md , and reference the PR in the migration log.
 
 **If you find a broken or stale cross-reference**, treat it as a documentation bug and either fix it or open an issue with the exact string that needs updating.
 
 ---
 
 *This playbook is deliberately repetitive on the invariants. Future operators must be able to read only this document (plus the SOP for the current phase) and still understand exactly why every safety mechanism exists and what the capital gates require.*
+
+**Last updated: 2026-07 (docs overhaul)** — docs/ is now the central authoritative documentation home. Cross-refs updated to use docs/governance/ paths.

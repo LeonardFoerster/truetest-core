@@ -4,7 +4,7 @@
 
 Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) are produced from the identical codebase and differ only by the compile-time `TT_TARGET` define. Live-order paths are physically removed via dead-code elimination in non-live targets.
 
-**Intended Use & Scope**: TrueTest is a private, personal research and retail tool for the author only. It is not, and will never be, an enterprise-ready, institutional, or production trading system. Monte Carlo simulation, high-fidelity backtesting, and shadow divergence analysis are the primary mature capabilities. The live execution paths (`engine_live`) exist with unusually strong compile-time (`TT_TARGET`) and runtime safety layers (reconciler, DMS, kill-switch, venue risk checks, terminal halt, user-data source of truth, etc.). Any use of live paths is experimental, tiny-size, fully attended by the operator, and done at the author's own risk. The Phase 0/1 rituals and Go-Live language in this repository describe the author's personal evidence-gathering hygiene and self-imposed discipline — they are **not** a formal production release process or claim of readiness for others.
+**Intended Use & Scope**: Full version in [01-prod.md](01-prod.md). Private personal research/retail tool only. Live experimental/tiny/attended. See 01-prod.md.
 
 ---
 
@@ -173,7 +173,7 @@ cmake -B build && cmake --build build
 ## Current Status (2026)
 
 - Strong production primitives already in place (compile-time gating, layered safety, reconciler, DMS + kill, user-data truth, per-lot exits, queue realism, MC engine).
-- **Phase 0** (tiny-size mainnet futures validation): 0/15 qualifying sessions. Phase 0 collection was paused during priority work on the monte-carlo branch (gates/ritual unchanged). Ritual + templates ready in `prod.md` + `reports/phase0/`.
+- **Phase 0** (tiny-size mainnet futures validation): 0/15 qualifying sessions. Phase 0 collection was paused during priority work on the monte-carlo branch (gates/ritual unchanged). Ritual + templates ready in `01-prod.md` + `reports/phase0/`.
 - **Phase 1** Live-Safety Freeze: 10 files under mechanical CCB gate (`scripts/check-live-safety-freeze.sh`). Token + two-person review + clean multi-hour shadow required for all future edits.
 - Monte Carlo simulation capabilities (integrated from the monte-carlo branch) are available for research and strategy robustness (object reuse, reporter, synthetic provider).
 - **Recommendation**: Research, strategy robustness testing, and tiny-size validation only. Not suitable for meaningful capital until Phase 0/1 exit criteria are met.
@@ -184,14 +184,16 @@ cmake -B build && cmake --build build
 
 - `README.md` — High-level entry point
 - `CLAUDE.md` — Single source of truth for current codebase, conventions, model-selection rules
-- `prod.md` — Production readiness playbook, exact Phase 0/1 gates, Go-Live table, philosophy
-- `docs/user-manual.md` — Operator + technical overview
-- `docs/instructions.md` — Exhaustive CLI flag reference + usage
-- `todo.md` — Living task list (every frozen-surface PR must reference items)
-- `prerequisites.md` — Mandatory pre-PR checklist for the safety surface
+- `01-prod.md` — Production readiness playbook, exact Phase 0/1 gates, Go-Live table, philosophy
+- `../reference/02-user-manual.md` — Operator + technical overview
+- `../reference/01-instructions.md` — Exhaustive CLI flag reference + usage
+- `03-todo.md` (thin) + `docs/todos/` (detailed numbered files) — Living task list (every frozen-surface PR must reference items; see docs/todos/00-OVERVIEW.md)
+- `02-prerequisites.md` — Mandatory pre-PR checklist for the safety surface
 
 See also `reports/phase0/PROGRESS.md` and the `scripts/phase0/` tooling.
 
 ---
 
 *This file is a synthesized feature list for quick reference. All operational, safety, and governance detail lives in the documents listed above.*
+
+**Last updated: 2026-07 (docs overhaul)** — docs/ is now the central authoritative documentation home. Dupe "Intended Use" slimmed to pointer. Cross-refs fixed.

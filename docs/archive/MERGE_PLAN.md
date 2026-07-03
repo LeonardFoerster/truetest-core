@@ -36,7 +36,7 @@ Keep all *technical* safety invariants, the 10-file freeze list, `check-live-saf
 **Actions**:
 1. Call `todo_write` with all phases initialized (see recommended todos at end of this document).
 2. Run comprehensive inventory greps (exact patterns below) and capture results.
-3. Read the key governance files in full or large sections (README.md, CLAUDE.md, todo.md, prod.md, summary.md, prerequisites.md, docs/production-readiness-gaps.md, docs/README.md, docs/instructions.md).
+3. Read the key governance files in full or large sections (README.md, CLAUDE.md, docs/governance/03-todo.md (was todo.md), docs/governance/01-prod.md, docs/governance/04-summary.md, docs/governance/02-prerequisites.md, docs/archive/production-readiness-gaps-2026-05.md, docs/README.md, docs/reference/01-instructions.md).
 4. Confirm working tree is clean and on `monte-carlo`.
 5. Create or confirm this `MERGE_PLAN.md` exists at root (it was written as part of plan creation).
 6. Note the non-existence of `ENGINE_AI_SUMMARY.md` (referenced but missing — will be cleaned in Phase 4).
@@ -47,7 +47,7 @@ Keep all *technical* safety invariants, the 10-file freeze list, `check-live-saf
 - `grep -r --include="*.md" "paused on monte-carlo branch" . | cat` → expect the known instances in docs + reports (will be fixed later)
 - `grep -r --include="*.md" "collection paused on monte-carlo" . | cat`
 - `git status` (via run_terminal_command, read-only) → "On branch monte-carlo" + "nothing to commit, working tree clean"
-- `ls -1 *.md | cat` (root) → confirms MERGE_PLAN.md, README.md, CLAUDE.md, todo.md, prod.md, summary.md, prerequisites.md present
+- `ls -1 *.md | cat` (root) → confirms MERGE_PLAN.md, README.md, CLAUDE.md, (todo.md now thin at docs/governance/03-todo.md + docs/todos/ split), docs/governance/01-prod.md, docs/governance/04-summary.md, docs/governance/02-prerequisites.md present
 - `read_file` on MERGE_PLAN.md (this file) succeeds and shows the private-use context paragraph.
 
 **Success Criteria**: All inventory captured, todo list created with Phase 0 marked completed only after the above gates pass with clean output. No file modifications in this phase.
@@ -63,7 +63,7 @@ Keep all *technical* safety invariants, the 10-file freeze list, `check-live-saf
 **Files to modify** (in this order recommended):
 1. `README.md` (top "Current Development Status" section + Authoritative Documentation table)
 2. `CLAUDE.md` (minor branch/MC notes if any; MC layer safety note stays)
-3. `todo.md` (header, "Current branch focus", P0 standing notes, MC section header)
+3. `docs/governance/03-todo.md` (header, "Current branch focus", P0 standing notes, MC section header; post todos/ split it is thin stub)
 4. `prod.md` (MC simulation paragraph + any status)
 5. `summary.md` ("Current Status (2026, `monte-carlo` branch)" + MC bullets)
 6. `prerequisites.md` (if it contains branch notes — usually minimal)
@@ -71,7 +71,7 @@ Keep all *technical* safety invariants, the 10-file freeze list, `check-live-saf
 **Key changes (use unique `search_replace` strings)**:
 - README.md: Replace the entire "## Current Development Status (2026)" block + the Phase 0 "collection paused..." sentence. Insert the Canonical Disclaimer right after the project description paragraph. Change "Development is active on the `monte-carlo` branch." to "Monte Carlo simulation capabilities were integrated from the `monte-carlo` feature branch (now part of mainline)."
 - Update the table entry for `ENGINE_AI_SUMMARY.md` (see Phase 4 for full cleanup).
-- todo.md: Change section "## Monte Carlo Simulation (current active branch)" → "## Monte Carlo Simulation (integrated)". Update "Current branch focus (monte-carlo):" paragraph to neutral language. Update all "paused on monte-carlo branch" standing notes to "Phase 0 collection was paused during monte-carlo branch priority (gates/ritual unchanged; MC work never touched the live safety surface)."
+- docs/governance/03-todo.md: Change section "## Monte Carlo Simulation (current active branch)" → "## Monte Carlo Simulation (integrated)". Update "Current branch focus (monte-carlo):" paragraph to neutral language. Update all "paused on monte-carlo branch" standing notes to "Phase 0 collection was paused during monte-carlo branch priority (gates/ritual unchanged; MC work never touched the live safety surface)."
 - prod.md: Update the Monte Carlo paragraph (lines ~100-106) to remove "The `monte-carlo` branch introduced..." in favor of "Monte Carlo simulation (introduced on the monte-carlo branch and now mainline) is a research...". Keep the research-tool disclaimer.
 - summary.md: Similar past-tense update to "Current Status" section.
 - Insert Canonical Disclaimer in README, prod.md (near top after Philosophy), and summary.md.
@@ -157,7 +157,7 @@ Keep all *technical* safety invariants, the 10-file freeze list, `check-live-saf
 **Goal**: Clean the todo.md MC section, mark what is landed, demote future items, fix dangling references to the non-existent `ENGINE_AI_SUMMARY.md`, update "Last update" dates/status, clean code/doc comments that say "landed on the monte-carlo branch".
 
 **Specific tasks**:
-- todo.md:
+- docs/governance/03-todo.md (thin post todos/ split; was todo.md):
   - Header "Last update" → add "Monte Carlo integration + merge prep (post-monte-carlo branch)".
   - Change MC section header and the first few MC- bullets status.
   - Mark MC-01 and MC-02 as substantially landed (move or strike if following the "completed after phase declared" rule; otherwise add note "Landed with monte-carlo merge").
@@ -178,10 +178,10 @@ Keep all *technical* safety invariants, the 10-file freeze list, `check-live-saf
 
 **Verification Gate**:
 - `grep -r --include="*.md" "ENGINE_AI_SUMMARY.md" . | cat` → 0 (all replaced)
-- `grep -r --include="*.md" "current active branch" todo.md | cat` → 0
-- `grep -F "Landed with monte-carlo merge" todo.md | cat` → at least one (or clear status update present)
+- `grep -r --include="*.md" "current active branch" docs/governance/03-todo.md | cat` → 0
+- `grep -F "Landed with monte-carlo merge" docs/governance/03-todo.md | cat` → at least one (or clear status update present)
 - `grep -r "landed on the \`monte-carlo\` branch" src/ docs/ | cat` → 0 or only historical notes clearly marked.
-- `read_file todo.md | head -15` shows updated Last update and MC section.
+- `read_file docs/governance/03-todo.md | head -15` shows updated Last update and MC section (post todos/ split see docs/todos/ for full items).
 - Spot check one indicator header and the synthetic provider header via read_file.
 
 **Success Criteria**: MC tasks reflect reality, dangling AI summary refs gone, minor polish done. Gates clean.
@@ -260,10 +260,10 @@ This merge brings the major research/robustness capability to mainline.
 IMPORTANT: Per project charter, TrueTest remains a private retail/personal research tool only and will never be positioned as enterprise production software. Documentation and governance language has been updated in this merge window to reflect that reality while preserving all technical safety primitives (compile-time live gating, Phase 1 freeze surface + enforcement script, hot-path rules, terminal halt semantics, etc.).
 
 See MERGE_PLAN.md for the full phased execution record.
-See todo.md for updated task status.
+See docs/governance/03-todo.md (thin) or docs/todos/ for updated task status.
 See root README.md, prod.md, and docs/production-readiness-gaps.md for revised scope statements.
 
-Addresses MC integration + governance sync (todo.md MC-* and D-items)."`
+Addresses MC integration + governance sync (docs/governance/03-todo.md MC-* and D-items; now also docs/todos/)."`
 4. `git status`
 5. `git log --oneline -6`
 6. `git branch -a` (to see local state)
@@ -293,7 +293,7 @@ Addresses MC integration + governance sync (todo.md MC-* and D-items)."`
 4. (Author decision) `git push origin master` (if remote tracking exists).
 5. (Strongly optional and only if you are sure) `git branch -d monte-carlo` (local). Remote delete is even more optional for a private repo.
 6. Re-read the top of README.md and prod.md to confirm the new reality is the first thing a reader sees.
-7. Mark the overall merge effort complete in todo.md (add a "Completed" entry under the Monte Carlo or Documentation section).
+7. Mark the overall merge effort complete in docs/governance/03-todo.md (add a "Completed" entry under the Monte Carlo or Documentation section; post-split details in docs/todos/ files).
 
 **Verification Gate**:
 - `git branch --show-current` == master
