@@ -230,6 +230,7 @@ private:
     // installed on the provider's ExecutionBridge. Safe to call when
     // there is no bridge - it just no-ops.
     void drain_venue_bracket_meta();
+    void drain_async_submit_results(IExecutionAdapter* adapter);
 
     // Stamp per-lot attribution (opener_order_id + strategy_name) onto a
     // fill_event if not already present. Uses order_meta_ lookup as fallback.
@@ -301,6 +302,13 @@ private:
     uint64_t order_seq_ = 0;
 
     std::vector<std::pair<std::string, uint64_t>> day_order_ids_;
+
+    struct pending_cancel_meta
+    {
+        std::string symbol;
+        std::string reason;
+    };
+    std::unordered_map<uint64_t, pending_cancel_meta> pending_cancels_;
 
     // Per-order metadata recorded at route time. Used when fills come back
     // to route them to the right lot (opener_order_id) and to tag the lot

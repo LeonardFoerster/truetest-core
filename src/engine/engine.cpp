@@ -1920,6 +1920,7 @@ void engine::reset_for_next_trial(uint64_t new_seed)
     // Phase 4 MC reuse hardening: clear order_meta_ for clean per-trial isolation
     // (opener/strategy attribution must not leak between independent trials).
     order_meta_.clear();
+    pending_cancels_.clear();
 
     // Clear shadow_tracker for per-trial isolation (divergence tracking not
     // relevant across MC trials; see MC controller comment).
@@ -2060,8 +2061,14 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         }
     }
 
-    order_tracker_.set_status(o->get_order_id(), order_status::open);
+    auto adapter = get_adapter(o->get_symbol());
+    const bool async_submit = dynamic_cast<ExecutionBridge*>(adapter.get()) != nullptr;
+
+    order_tracker_.set_status(o->get_order_id(),
+        async_submit ? order_status::pending : order_status::open);
     cache_open_order(*o);
+    if (async_submit)
+        update_open_order_status(o->get_order_id(), "submit_pending");
     log_event(*o);
     publish_event(o);
     analytics_.on_event(o);
@@ -2070,8 +2077,11 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     if (questdb_active_ && questdb_store_)
     {
         questdb_store_->record_order_submitted(*o, "pending");
-        questdb_store_->record_status_transition(o->get_order_id(),
-            order_status::pending, order_status::open);
+            if (!async_submit)
+            {
+                questdb_store_->record_status_transition(o->get_order_id(),
+                    order_status::pending, order_status::open);
+            }
         questdb_store_->record_event(
             "order_intent",
             o->get_symbol(),
@@ -2084,8 +2094,6 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     }
 #endif
 
-    auto adapter = get_adapter(o->get_symbol());
-
     if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
     {
         local->set_mid_price(last_mid_price_);
@@ -2094,11 +2102,16 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 
     adapter->submit_order(*o);
 
+    drain_async_submit_results(adapter.get());
+
     if (config_.mode == engine_mode::shadow && config_.provider)
     {
         auto exchange_adapter = config_.provider->get_execution_adapter();
         if (exchange_adapter)
+        {
             exchange_adapter->submit_order(*o);
+            drain_async_submit_results(exchange_adapter.get());
+        }
     }
 
     std::vector<fill_event> fills;
@@ -2167,6 +2180,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         auto exchange_adapter = config_.provider->get_execution_adapter();
         if (exchange_adapter)
         {
+            drain_async_submit_results(exchange_adapter.get());
             std::vector<fill_event> exchange_fills;
             if (exchange_adapter->poll_fills(exchange_fills))
             {
@@ -2197,7 +2211,17 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
                           const std::string& reason)
 {
     auto adapter = get_adapter(symbol);
+
+    drain_async_submit_results(adapter.get());
+
     bool cancelled = adapter->cancel_order(order_id);
+
+    if (cancelled && dynamic_cast<ExecutionBridge*>(adapter.get()))
+    {
+        pending_cancels_[order_id] = pending_cancel_meta{symbol, reason};
+        update_open_order_status(order_id, "cancel_pending");
+        return true;
+    }
 
     if (!cancelled)
     {
@@ -2315,6 +2339,8 @@ void engine::unwind_positions(std::size_t& event_count)
         }
 
         adapter->submit_order(*close_order);
+
+        drain_async_submit_results(adapter.get());
 
         std::vector<fill_event> fills;
         if (adapter->poll_fills(fills))
@@ -2786,6 +2812,97 @@ void engine::drain_venue_bracket_meta()
     }
 }
 
+void engine::drain_async_submit_results(IExecutionAdapter* adapter)
+{
+    auto* bridge = dynamic_cast<ExecutionBridge*>(adapter);
+    if (!bridge) return;
+
+    std::vector<ExecutionBridge::submit_result> results;
+    if (!bridge->poll_submit_results(results)) return;
+
+    for (const auto& sr : results)
+    {
+        if (sr.op == ExecutionBridge::submit_result::operation::submit)
+        {
+            if (sr.ok)
+            {
+                if (order_tracker_.get_order_status(sr.engine_id) == order_status::pending)
+                {
+                    order_tracker_.set_status(sr.engine_id, order_status::open);
+                    update_open_order_status(sr.engine_id, "open");
+#ifdef HAS_QUESTDB
+                    if (questdb_active_ && questdb_store_)
+                    {
+                        questdb_store_->record_status_transition(sr.engine_id,
+                            order_status::pending, order_status::open,
+                            "venue submit acknowledged");
+                    }
+#endif
+                }
+                continue;
+            }
+            if (!order_tracker_.is_active(sr.engine_id)) continue;
+
+            auto rej = acquire_pooled(rejection_pool_,
+                std::chrono::system_clock::now(), sr.symbol, sr.engine_id,
+                "submit failed: " + sr.error);
+            log_event(*rej);
+            publish_event(rej);
+            order_tracker_.set_status(sr.engine_id, order_status::rejected);
+            erase_open_order(sr.engine_id);
+#ifdef HAS_QUESTDB
+            if (questdb_active_ && questdb_store_)
+            {
+                questdb_store_->record_rejection(*rej, "transport_error",
+                                                 sr.error.c_str());
+            }
+#endif
+            continue;
+        }
+
+        auto meta_it = pending_cancels_.find(sr.engine_id);
+        const std::string symbol =
+            !sr.symbol.empty() ? sr.symbol :
+            (meta_it != pending_cancels_.end() ? meta_it->second.symbol : "");
+        const std::string reason =
+            (meta_it != pending_cancels_.end() && !meta_it->second.reason.empty())
+                ? meta_it->second.reason
+                : (sr.ok ? "venue cancel acknowledged" : "venue cancel failed");
+
+        if (sr.ok)
+        {
+            if (order_tracker_.is_active(sr.engine_id))
+            {
+                order_tracker_.set_status(sr.engine_id, order_status::cancelled);
+                erase_open_order(sr.engine_id);
+                auto cancel_ev = acquire_pooled(cancel_pool_,
+                    std::chrono::system_clock::now(), symbol, sr.engine_id, reason);
+                log_event(*cancel_ev);
+                publish_event(cancel_ev);
+                if (!config_.is_threaded())
+                    analytics_.on_event(cancel_ev);
+#ifdef HAS_QUESTDB
+                if (questdb_active_ && questdb_store_)
+                {
+                    questdb_store_->record_cancellation(sr.engine_id, symbol,
+                        lookup_strategy_name(sr.engine_id),
+                        reason.empty() ? "manual" : reason);
+                    questdb_store_->record_status_transition(sr.engine_id,
+                        order_status::open, order_status::cancelled, reason);
+                }
+#endif
+            }
+        }
+        else
+        {
+            update_open_order_status(sr.engine_id, "cancel_failed");
+        }
+
+        if (meta_it != pending_cancels_.end())
+            pending_cancels_.erase(meta_it);
+    }
+}
+
 void engine::register_strategy_exit_intent(IStrategy& strategy,
                                            const std::string& strategy_name,
                                            std::uint64_t order_id)
@@ -2988,6 +3105,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         }
 
         drain_venue_bracket_meta();
+        drain_async_submit_results(provider_adapter.get());
         std::vector<fill_event> provider_fills;
         if (provider_adapter && provider_adapter->poll_fills(provider_fills))
         {
@@ -3106,6 +3224,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         }
 
         drain_venue_bracket_meta();
+        drain_async_submit_results(provider_adapter.get());
         std::vector<fill_event> provider_fills;
         if (provider_adapter && provider_adapter->poll_fills(provider_fills))
         {

@@ -28,7 +28,9 @@ public:
                                             std::memory_order_acq_rel,
                                             std::memory_order_relaxed))
             {
-                slots_[tail & mask_] = item;
+                auto& slot = slots_[tail & mask_];
+                slot.item = item;
+                slot.ready.store(tail + 1, std::memory_order_release);
                 return true;
             }
         }
@@ -41,7 +43,11 @@ public:
         if (head >= tail)
             return false;
 
-        item = slots_[head & mask_];
+        auto& slot = slots_[head & mask_];
+        if (slot.ready.load(std::memory_order_acquire) != head + 1)
+            return false;
+
+        item = slot.item;
         head_.store(head + 1, std::memory_order_release);
         return true;
     }
@@ -56,8 +62,14 @@ public:
     static constexpr std::size_t capacity() noexcept { return Capacity; }
 
 private:
+    struct slot
+    {
+        void* item = nullptr;
+        std::atomic<std::uint64_t> ready{0};
+    };
+
     static constexpr std::uint64_t mask_ = Capacity - 1;
-    std::array<void*, Capacity> slots_{};
+    std::array<slot, Capacity> slots_{};
     alignas(64) std::atomic<std::uint64_t> head_{0};
     alignas(64) std::atomic<std::uint64_t> tail_{0};
 };

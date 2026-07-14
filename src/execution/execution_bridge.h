@@ -10,13 +10,19 @@
 
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
+
+#ifdef __x86_64__
+#include <immintrin.h>
+#endif
 
 class ExecutionBridge : public IExecutionAdapter
 {
@@ -45,12 +51,31 @@ public:
         // the fill transport's worker thread; must be thread-safe.
         std::function<void(const parsed_position_snapshot&)>
             position_snapshot_handler;
+
+        bool start_transport_thread = true;
     };
 
     struct status_event
     {
         IFillTransport::lifecycle state = IFillTransport::lifecycle::closed;
         std::string note;
+    };
+
+    // Async submission result (exchange_order_id may arrive later than enqueue).
+    struct submit_result
+    {
+        enum class operation
+        {
+            submit,
+            cancel
+        };
+
+        uint64_t    engine_id = 0;
+        std::string symbol;
+        std::string exchange_order_id;
+        std::string error;
+        operation   op = operation::submit;
+        bool        ok = false;
     };
 
     // Hook for venue-managed orders that we never submitted ourselves
@@ -99,6 +124,11 @@ public:
         return true;
     }
 
+    ~ExecutionBridge()
+    {
+        close();  // ensure transport thread joined before destroying rings/mutexes/d_
+    }
+
     explicit ExecutionBridge(deps d)
         : d_(std::move(d))
     {
@@ -132,11 +162,25 @@ public:
             set_error("ExecutionBridge: fill transport open failed");
             return false;
         }
+
+        // Start background transport thread (only for live order paths).
+        // The thread owns all actual calls to order_tx.
+        if (d_.start_transport_thread)
+        {
+            transport_running_.store(true, std::memory_order_release);
+            transport_thread_ = std::thread([this] { transport_loop(); });
+        }
+
         return true;
     }
 
     void close()
     {
+        // Stop transport thread first so it can drain / finish I/O cleanly.
+        transport_running_.store(false, std::memory_order_release);
+        if (transport_thread_.joinable())
+            transport_thread_.join();
+
         if (d_.fill_tx)  d_.fill_tx->close();
         if (d_.order_tx) d_.order_tx->close();
     }
@@ -150,9 +194,6 @@ public:
             set_error("ExecutionBridge: not configured");
             return;
         }
-
-        if (d_.order_rate_limiter)
-            d_.order_rate_limiter->acquire_blocking(1.0);
 
         const std::string client_id = d_.client_id_fn
             ? d_.client_id_fn(o.get_order_id())
@@ -172,22 +213,18 @@ public:
             by_client_id_[t.client_id] = t.engine_id;
         }
 
-        auto res = d_.order_tx->submit(enc.endpoint, enc.wire_payload);
-        if (!res.ok)
-        {
-            set_error("submit failed: " + res.error);
-            std::lock_guard<std::mutex> lk(map_mu_);
-            by_engine_id_.erase(t.engine_id);
-            by_client_id_.erase(t.client_id);
-            return;
-        }
+        submit_request req;
+        req.engine_id     = o.get_order_id();
+        req.client_id     = client_id;
+        req.symbol        = o.get_symbol();
+        req.endpoint      = std::string(enc.endpoint);
+        req.wire_payload  = std::string(enc.wire_payload);
+        req.is_cancel     = false;
 
-        if (!res.exchange_order_id.empty())
+        // Enqueue under short lock (orders are rare vs market ticks).
         {
-            std::lock_guard<std::mutex> lk(map_mu_);
-            auto it = by_engine_id_.find(t.engine_id);
-            if (it != by_engine_id_.end())
-                it->second.exchange_id = res.exchange_order_id;
+            std::lock_guard<std::mutex> lk(submit_queue_mu_);
+            submit_queue_.push_back(std::move(req));
         }
     }
 
@@ -216,17 +253,19 @@ public:
 
         if (!d_.encoder || !d_.order_tx) return false;
 
-        if (d_.order_rate_limiter)
-            d_.order_rate_limiter->acquire_blocking(1.0);
+        submit_request req;
+        req.engine_id           = engine_order_id;
+        req.client_id           = client_id;
+        req.symbol              = symbol;
+        req.is_cancel           = true;
+        req.cancel_exchange_id  = exchange_id;
 
-        auto enc = d_.encoder->encode_cancel(symbol, exchange_id, client_id);
-        auto res = d_.order_tx->cancel(enc.endpoint, enc.wire_payload);
-        if (!res.ok)
         {
-            set_error("cancel failed: " + res.error);
-            return false;
+            std::lock_guard<std::mutex> lk(submit_queue_mu_);
+            submit_queue_.push_back(std::move(req));
         }
-        return true;
+
+        return true;   // Enqueued. Actual result is async.
     }
 
     bool poll_status(std::vector<status_event>& out)
@@ -239,6 +278,25 @@ public:
         pending_status_.clear();
         return true;
     }
+
+    // New: drain results from async submits/cancels.
+    // Engine should call this after submit_order (and periodically).
+    // Mirrors the poll_fills pattern used for incoming fills.
+    bool poll_submit_results(std::vector<submit_result>& out)
+    {
+        std::lock_guard<std::mutex> lk(submit_results_mu_);
+        if (pending_submit_results_.empty()) return false;
+        out.insert(out.end(),
+                   std::make_move_iterator(pending_submit_results_.begin()),
+                   std::make_move_iterator(pending_submit_results_.end()));
+        pending_submit_results_.clear();
+        return true;
+    }
+
+    // Test helper: synchronously drain and process any pending outbound
+    // submissions (for unit tests that need deterministic immediate results
+    // without relying on thread scheduling). Safe to call from test thread.
+    void drain_outbound_for_test();
 
     std::string last_error() const
     {
@@ -437,4 +495,178 @@ private:
 
     std::mutex synth_mu_;
     std::vector<synth_meta> pending_synth_meta_;
+
+    // --- Async order submission support (Phase 1) ---
+    struct submit_request
+    {
+        uint64_t    engine_id = 0;
+        std::string client_id;
+        std::string symbol;
+        std::string endpoint;
+        std::string wire_payload;
+        bool        is_cancel = false;
+        std::string cancel_exchange_id;
+    };
+
+    // Simple mutex-protected queue for outbound (orders are low-frequency vs. market ticks,
+    // so a short critical section on enqueue is acceptable and avoids cross-layer dep).
+    std::mutex                  submit_queue_mu_;
+    std::deque<submit_request>  submit_queue_;
+
+    std::mutex submit_results_mu_;
+    std::vector<submit_result> pending_submit_results_;
+
+    std::thread transport_thread_;
+    std::atomic<bool> transport_running_{false};
+
+    void transport_loop();
+    void process_one_submit(const submit_request& req);
 };
+
+
+// ================== Async transport implementations (clean) ==================
+
+inline void ExecutionBridge::transport_loop()
+{
+    submit_request req;
+    while (transport_running_.load(std::memory_order_acquire))
+    {
+        bool did_work = false;
+        {
+            std::lock_guard<std::mutex> lk(submit_queue_mu_);
+            if (!submit_queue_.empty()) {
+                req = std::move(submit_queue_.front());
+                submit_queue_.pop_front();
+                did_work = true;
+            }
+        }
+        if (did_work) {
+            try {
+                process_one_submit(req);
+            } catch (const std::exception& e) {
+                submit_result sr;
+                sr.engine_id = req.engine_id;
+                sr.symbol = req.symbol;
+                sr.error = std::string("exception: ") + e.what();
+                sr.op = req.is_cancel
+                    ? submit_result::operation::cancel
+                    : submit_result::operation::submit;
+                sr.ok = false;
+                {
+                    std::lock_guard<std::mutex> lk(submit_results_mu_);
+                    pending_submit_results_.push_back(std::move(sr));
+                }
+            }
+        } else {
+#ifdef __x86_64__
+            _mm_pause();
+#else
+            std::this_thread::yield();
+#endif
+        }
+    }
+}
+
+inline void ExecutionBridge::process_one_submit(const submit_request& req)
+{
+    if (!d_.order_tx || !d_.encoder) return;
+
+    if (req.is_cancel)
+    {
+        std::string symbol = req.symbol;
+        std::string exchange_id = req.cancel_exchange_id;
+        std::string client_id = req.client_id;
+
+        {
+            std::lock_guard<std::mutex> lk(map_mu_);
+            auto it = by_engine_id_.find(req.engine_id);
+            if (it != by_engine_id_.end())
+            {
+                if (!it->second.symbol.empty()) symbol = it->second.symbol;
+                if (!it->second.exchange_id.empty()) exchange_id = it->second.exchange_id;
+                if (!it->second.client_id.empty()) client_id = it->second.client_id;
+            }
+        }
+
+        if (d_.order_rate_limiter)
+            d_.order_rate_limiter->acquire_blocking(1.0);
+
+        auto enc = d_.encoder->encode_cancel(symbol, exchange_id, client_id);
+        auto res = d_.order_tx->cancel(enc.endpoint, enc.wire_payload);
+
+        if (!res.ok) {
+            set_error("cancel failed: " + res.error);
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lk(map_mu_);
+            by_engine_id_.erase(req.engine_id);
+            if (!client_id.empty())
+                by_client_id_.erase(client_id);
+        }
+
+        submit_result sr;
+        sr.engine_id = req.engine_id;
+        sr.symbol = symbol;
+        sr.exchange_order_id = res.exchange_order_id;
+        sr.error = res.ok ? "" : res.error;
+        sr.op = submit_result::operation::cancel;
+        sr.ok = res.ok;
+        {
+            std::lock_guard<std::mutex> lk(submit_results_mu_);
+            pending_submit_results_.push_back(std::move(sr));
+        }
+        return;
+    }
+
+    if (d_.order_rate_limiter)
+        d_.order_rate_limiter->acquire_blocking(1.0);
+
+    auto res = d_.order_tx->submit(req.endpoint, req.wire_payload);
+
+    if (!res.ok) {
+        set_error("submit failed: " + res.error);
+        std::lock_guard<std::mutex> lk(map_mu_);
+        by_engine_id_.erase(req.engine_id);
+        if (!req.client_id.empty())
+            by_client_id_.erase(req.client_id);
+    }
+
+    if (res.ok && !res.exchange_order_id.empty())
+    {
+        std::lock_guard<std::mutex> lk(map_mu_);
+        auto it = by_engine_id_.find(req.engine_id);
+        if (it != by_engine_id_.end() && it->second.exchange_id.empty())
+            it->second.exchange_id = res.exchange_order_id;
+    }
+
+    submit_result sr;
+    sr.engine_id = req.engine_id;
+    sr.symbol = req.symbol;
+    sr.exchange_order_id = res.exchange_order_id;
+    sr.error = res.ok ? "" : res.error;
+    sr.op = submit_result::operation::submit;
+    sr.ok = res.ok;
+    {
+        std::lock_guard<std::mutex> lk(submit_results_mu_);
+        pending_submit_results_.push_back(std::move(sr));
+    }
+}
+
+inline void ExecutionBridge::drain_outbound_for_test()
+{
+    // Process any queued work right now on the calling thread.
+    // Used only in tests. Locks the queue briefly.
+    submit_request req;
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lk(submit_queue_mu_);
+            if (submit_queue_.empty()) break;
+            req = std::move(submit_queue_.front());
+            submit_queue_.pop_front();
+        }
+        try {
+            process_one_submit(req);
+        } catch (...) {}
+    }
+}
