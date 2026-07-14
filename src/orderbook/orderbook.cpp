@@ -22,7 +22,7 @@ order_id order::get_order_id() const { return order_id_; }
 side order::get_side() const { return side_; }
 Price order::get_price() const { return price_; }
 ob_order_type order::get_order_type() const { return order_type_; }
-quantity order::get_inital_quantity() const { return initial_quantity_; }
+quantity order::get_initial_quantity() const { return initial_quantity_; }
 quantity order::get_remaining_quantity() const { return remaining_quantity; }
 quantity order::get_filled_quantity() const { return initial_quantity_ - remaining_quantity; }
 bool order::is_filled() const { return remaining_quantity == 0; }
@@ -207,26 +207,24 @@ trades orderbook::match_orders()
         trade_info ask_trade{ask_node->order->get_order_id(), ask_node->order->get_price(), trade_qty};
         result.push_back(trade{bid_trade, ask_trade});
 
+        // Always adjust total_qty by the trade amount. For fully filled orders,
+        // remove() will subtract 0 (post-fill remaining), so the manual subtract
+        // ensures correct total even on full fills (fixes previous accounting bug
+        // when a level had multiple orders).
+        bid_lvl.total_qty -= trade_qty;
         if (bid_node->order->is_filled())
         {
             bid_lvl.remove(bid_node);
             order_map_.erase(bid_node->order->get_order_id());
             free_node(bid_node);
         }
-        else
-        {
-            bid_lvl.total_qty -= trade_qty;
-        }
 
+        ask_lvl.total_qty -= trade_qty;
         if (ask_node->order->is_filled())
         {
             ask_lvl.remove(ask_node);
             order_map_.erase(ask_node->order->get_order_id());
             free_node(ask_node);
-        }
-        else
-        {
-            ask_lvl.total_qty -= trade_qty;
         }
 
         if (bid_lvl.empty()) bid_levels_.erase(bid_levels_.begin());

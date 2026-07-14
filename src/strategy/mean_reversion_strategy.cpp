@@ -2,6 +2,7 @@
 #include "strategy_registry.h"
 #include "../core/event.h"
 
+#include <algorithm>
 #include <cmath>
 #include <optional>
 
@@ -26,7 +27,10 @@ double mean_reversion_strategy::compute_quantity_with_sl(double entry, double sl
 {
     double risk_distance = std::abs(entry - sl_price);
     if (risk_distance < 1e-8) risk_distance = 0.01 * entry; // safety floor
-    return (equity_ * risk_fraction_) / risk_distance;
+    const double fixed_risk_qty = (equity_ * risk_fraction_) / risk_distance;
+    const double notional_qty = compute_quantity(entry);
+    if (notional_qty <= 0.0) return fixed_risk_qty;
+    return std::min(fixed_risk_qty, notional_qty);
 }
 
 simple_moving_average& mean_reversion_strategy::get_sma(const std::string& symbol)
@@ -79,6 +83,8 @@ std::optional<order_event> mean_reversion_strategy::on_market(const market_event
     (void)get_swing(mkt.get_symbol()).update(mkt.get_high(), mkt.get_low(), mkt.get_close());
 
     const double price = mkt.get_close();
+    if (position_open_[mkt.get_symbol()])
+        return std::nullopt;
 
     if (price < *sma_value)
     {
@@ -121,6 +127,8 @@ std::optional<order_event> mean_reversion_strategy::on_tick(const tick_event& te
     const double price = te.get_price();
     (void)get_atr(te.get_symbol()).update(price, price, price);
     (void)get_swing(te.get_symbol()).update(price, price, price);
+    if (position_open_[te.get_symbol()])
+        return std::nullopt;
 
     if (price < *sma_value)
     {
@@ -161,9 +169,9 @@ mean_reversion_strategy::take_pending_exit_intents()
     return out;
 }
 
-void mean_reversion_strategy::set_position_open(const std::string& /*symbol*/, bool /*open*/)
+void mean_reversion_strategy::set_position_open(const std::string& symbol, bool open)
 {
-    // Pyramiding enabled - no longer blocking on position state.
+    position_open_[symbol] = open;
 }
 
 
@@ -457,5 +465,6 @@ void mean_reversion_strategy::reset(uint64_t /*seed*/)
     smas_.clear();
     atrs_.clear();
     swings_.clear();
+    position_open_.clear();
     pending_intents_.clear();
 }

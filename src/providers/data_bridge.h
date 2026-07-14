@@ -83,13 +83,38 @@ public:
 			return;
 		}
 
+		std::string_view frame;
 		if (!transport_->is_streaming())
 		{
 			if (auto header_line = transport_->read_line())
+			{
 				parser_->parse_header(*header_line);
+				if (auto record = parser_->parse_record(*header_line))
+				{
+					sink_(*record, handler);
+					if (on_record)
+						on_record(*record);
+				}
+			}
+		}
+		else
+		{
+			if (!transport_->read_frame_blocking(frame))
+			{
+				transport_->close();
+				return;
+			}
+
+			const std::string first_frame(frame);
+			parser_->parse_header(first_frame);
+			if (auto record = parser_->parse_record(first_frame))
+			{
+				sink_(*record, handler);
+				if (on_record)
+					on_record(*record);
+			}
 		}
 
-		std::string_view frame;
 		while (transport_->is_open())
 		{
 			if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))

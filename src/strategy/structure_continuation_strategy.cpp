@@ -192,15 +192,15 @@ void structure_continuation_strategy::advance_continuation_fsm(
 }
 
 double structure_continuation_strategy::compute_quantity(
-    double price, double sl_distance, double /*equity*/) const
+    double price, double sl_distance, double equity) const
 {
-    // TEMPORARY sizing — clearly marked for later replacement by proper risk layer.
-    // Current behavior: use risk_fraction_ of a nominal 10k equity for backtest convenience.
-    // TODO: Replace with real risk-layer sizing that receives suggested SL from the strategy.
+    // Sizing uses provided equity (or 10k fallback for backtests/demos).
+    // Intended to be replaced by proper risk-layer sizing that receives
+    // suggested SL + equity from the risk system.
     if (sl_distance <= 0.0) return 0.0;
 
-    const double nominal_equity = 10000.0; // temporary
-    const double risk_amount = nominal_equity * risk_fraction_;
+    if (equity <= 0.0) equity = 10000.0;
+    const double risk_amount = equity * risk_fraction_;
     return risk_amount / sl_distance;
 }
 
@@ -313,7 +313,7 @@ std::optional<order_event> structure_continuation_strategy::on_market(const mark
                 : (std::max(st.ema100.value(), c * 1.02) - c);
 
             double qty = compute_quantity(c, std::max(sl_dist, c * 0.005), 10000.0);
-            if (qty <= 0.0) qty = 1.0; // fallback for backtests
+            if (qty <= 0.0) qty = 1.0; // fallback for backtests / tiny equity
 
             order_side side = go_long ? order_side::buy : order_side::sell;
 

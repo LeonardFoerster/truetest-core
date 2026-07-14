@@ -63,7 +63,7 @@ public:
     side get_side() const;
     Price get_price() const;
     ob_order_type get_order_type() const;
-    quantity get_inital_quantity() const;
+    quantity get_initial_quantity() const;
     quantity get_remaining_quantity() const;
     quantity get_filled_quantity() const;
     bool is_filled() const;

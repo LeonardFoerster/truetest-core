@@ -158,6 +158,8 @@ private:
     // TP1/TP2/SL scale-outs.
     std::unordered_multimap<std::uint64_t, exit_intent>  pending_;
     std::unordered_multimap<std::uint64_t, armed_intent> armed_;
+    std::unordered_map<std::uint64_t, double> opener_remaining_qty_;
+    std::unordered_map<std::uint64_t, double> opener_close_in_flight_qty_;
 
     // Reverse index supporting legacy cancel(strategy,symbol).
     std::unordered_multimap<strategy_symbol_key, std::uint64_t, ss_hash>
@@ -182,6 +184,8 @@ private:
     void untrack_opener(std::uint64_t opener_order_id,
                         const std::string& strategy_name,
                         const std::string& symbol);
+
+    double consume_opener_qty(std::uint64_t opener_order_id, double requested_qty);
 
     // Single point that drops handles_ + exchange_to_opener_ entries and
     // tells the adapter to clean up venue-side. Called from every cancel

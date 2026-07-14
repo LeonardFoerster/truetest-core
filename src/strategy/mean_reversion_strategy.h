@@ -60,6 +60,7 @@ private:
     std::unordered_map<std::string, simple_moving_average> smas_;
     std::unordered_map<std::string, average_true_range>    atrs_;
     std::unordered_map<std::string, swing_detector>        swings_;
+    std::unordered_map<std::string, bool>                  position_open_;
 
     std::vector<truetest::exits::exit_intent> pending_intents_;
 

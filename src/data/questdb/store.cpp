@@ -2,6 +2,7 @@
 
 #include "store.h"
 #include "http_client.h"
+#include "run_tag.h"
 #include "schema.h"
 
 #include <fstream>
@@ -144,6 +145,13 @@ const char* QuestdbStore::status_str(order_status s)
 
 bool QuestdbStore::begin()
 {
+    if (!is_valid_run_tag(cfg_.run_tag))
+    {
+        std::cerr << "[questdb] begin() aborted: invalid run_tag '"
+                  << cfg_.run_tag << "'\n";
+        return false;
+    }
+
     started_at_ = std::chrono::system_clock::now();
 
     // 1. DDLs (with optional TTL from Phase 4) via HTTP.

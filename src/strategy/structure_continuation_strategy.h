@@ -122,7 +122,8 @@ private:
 
     void advance_continuation_fsm(SymbolState& st, bool long_signal, bool short_signal);
 
-    // Temporary sizing (clearly marked for later replacement)
+    // Sizing based on equity * risk_fraction / sl_distance.
+    // equity <= 0 falls back to 10k for convenience.
     double compute_quantity(double price, double sl_distance, double equity) const;
 
     // Exit intent creation (uses ExitManager) — implements user's SL/TP rules

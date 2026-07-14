@@ -1,5 +1,7 @@
 #include "exits/exit_manager.h"
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <utility>
 
@@ -24,10 +26,30 @@ void ExitManager::on_fill(const fill_event& f)
 
 void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
 {
-    // Closer fill: bracket for the original opener should no longer fire.
+    // Closer fill: fills from our own partial-exit orders were already
+    // reserved when triggered; unrelated manual closes still clear brackets.
     if (opener_order_id != 0 && opener_order_id != f.get_order_id())
     {
-        cancel(opener_order_id);
+        double unaccounted_qty = f.get_filled_quantity();
+        auto inflight = opener_close_in_flight_qty_.find(opener_order_id);
+        if (inflight != opener_close_in_flight_qty_.end())
+        {
+            const double matched = std::min(unaccounted_qty, inflight->second);
+            inflight->second -= matched;
+            unaccounted_qty -= matched;
+            if (inflight->second <= 1e-12)
+                opener_close_in_flight_qty_.erase(inflight);
+        }
+
+        if (unaccounted_qty > 1e-12)
+        {
+            cancel(opener_order_id);
+            return;
+        }
+
+        auto rem = opener_remaining_qty_.find(opener_order_id);
+        if (rem == opener_remaining_qty_.end() || rem->second <= 0.0)
+            cancel(opener_order_id);
         return;
     }
 
@@ -56,6 +78,7 @@ void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
         to_place.push_back(ai.intent);
         armed_.emplace(f.get_order_id(), std::move(ai));
     }
+    opener_remaining_qty_[f.get_order_id()] += f.get_filled_quantity();
     pending_.erase(range.first, range.second);
 
     // Defense-in-depth: hand the venue adapter a copy so it can place
@@ -88,8 +111,6 @@ std::vector<order_event> ExitManager::on_price(
     std::vector<order_event> closes;
     if (armed_.empty() || !(px > 0.0))
         return closes;
-
-    std::vector<std::uint64_t> erased_openers;
 
     for (auto it = armed_.begin(); it != armed_.end(); )
     {
@@ -136,21 +157,43 @@ std::vector<order_event> ExitManager::on_price(
 
         if (!sl_hit && !tp_hit && !time_hit) { ++it; continue; }
 
+        const double close_qty = consume_opener_qty(it->first, ai.intent.qty);
+        if (!(close_qty > 0.0))
+        {
+            const std::string sname = ai.intent.strategy_name;
+            const std::string sym   = ai.intent.symbol;
+            const std::uint64_t opener = it->first;
+            it = armed_.erase(it);
+            if (armed_.count(opener) == 0)
+            {
+                untrack_opener(opener, sname, sym);
+                release_venue_bracket(opener);
+            }
+            continue;
+        }
+
         order_event close(ts, ai.intent.symbol,
                           order_type::market, ai.intent.close_side,
-                          ai.intent.qty, px);
+                          close_qty, px);
         close.set_opener_order_id(it->first);
         close.set_strategy_name(ai.intent.strategy_name);
         closes.push_back(std::move(close));
+        opener_close_in_flight_qty_[it->first] += close_qty;
 
-        erased_openers.push_back(it->first);
         // Capture key fields before erase invalidates `ai`/`it`.
         const std::string sname = ai.intent.strategy_name;
         const std::string sym   = ai.intent.symbol;
         const std::uint64_t opener = it->first;
         it = armed_.erase(it);
-        untrack_opener(opener, sname, sym);
         release_venue_bracket(opener);
+        auto rem = opener_remaining_qty_.find(opener);
+        const bool flat = (rem == opener_remaining_qty_.end() || rem->second <= 0.0);
+        if (flat || armed_.count(opener) == 0)
+        {
+            opener_remaining_qty_.erase(opener);
+            untrack_opener(opener, sname, sym);
+            release_venue_bracket(opener);
+        }
     }
 
     return closes;
@@ -221,18 +264,41 @@ std::vector<order_event> ExitManager::on_bar(
 
         if (!fired) { ++it; continue; }
 
+        const double close_qty = consume_opener_qty(it->first, ai.intent.qty);
+        if (!(close_qty > 0.0))
+        {
+            const std::string sname = ai.intent.strategy_name;
+            const std::string sym   = ai.intent.symbol;
+            const std::uint64_t opener = it->first;
+            it = armed_.erase(it);
+            if (armed_.count(opener) == 0)
+            {
+                untrack_opener(opener, sname, sym);
+                release_venue_bracket(opener);
+            }
+            continue;
+        }
+
         order_event c(ts, ai.intent.symbol, order_type::market,
-                      ai.intent.close_side, ai.intent.qty, fire_px);
+                      ai.intent.close_side, close_qty, fire_px);
         c.set_opener_order_id(it->first);
         c.set_strategy_name(ai.intent.strategy_name);
         closes.push_back(std::move(c));
+        opener_close_in_flight_qty_[it->first] += close_qty;
 
         const std::string sname = ai.intent.strategy_name;
         const std::string sym   = ai.intent.symbol;
         const std::uint64_t opener = it->first;
         it = armed_.erase(it);
-        untrack_opener(opener, sname, sym);
         release_venue_bracket(opener);
+        auto rem = opener_remaining_qty_.find(opener);
+        const bool flat = (rem == opener_remaining_qty_.end() || rem->second <= 0.0);
+        if (flat || armed_.count(opener) == 0)
+        {
+            opener_remaining_qty_.erase(opener);
+            untrack_opener(opener, sname, sym);
+            release_venue_bracket(opener);
+        }
     }
 
     return closes;
@@ -259,6 +325,8 @@ void ExitManager::cancel(std::uint64_t opener_order_id)
 
     pending_.erase(opener_order_id);
     armed_.erase(opener_order_id);
+    opener_remaining_qty_.erase(opener_order_id);
+    opener_close_in_flight_qty_.erase(opener_order_id);
     if (!sname.empty() || !sym.empty())
         untrack_opener(opener_order_id, sname, sym);
     release_venue_bracket(opener_order_id);
@@ -277,6 +345,8 @@ void ExitManager::cancel(const std::string& strategy_name, const std::string& sy
     {
         pending_.erase(id);
         armed_.erase(id);
+        opener_remaining_qty_.erase(id);
+        opener_close_in_flight_qty_.erase(id);
         release_venue_bracket(id);
     }
 }
@@ -351,6 +421,7 @@ void ExitManager::rehydrate(const IBracketAdapter::recovered_bracket& rb)
     ai.ts_armed    = std::chrono::system_clock::now();  // best-effort post-restart
 
     armed_.emplace(rb.opener_order_id, std::move(ai));
+    opener_remaining_qty_[rb.opener_order_id] = rb.qty;
 
     // Strategy-symbol side index: keep openers_for() consistent so the
     // engine's net-flat sweep doesn't accidentally bulk-cancel a
@@ -407,11 +478,29 @@ void ExitManager::untrack_opener(std::uint64_t opener_order_id,
     }
 }
 
+double ExitManager::consume_opener_qty(std::uint64_t opener_order_id, double requested_qty)
+{
+    if (!(requested_qty > 0.0))
+        return 0.0;
+
+    auto it = opener_remaining_qty_.find(opener_order_id);
+    if (it == opener_remaining_qty_.end())
+        return requested_qty;
+
+    const double qty = std::min(requested_qty, it->second);
+    it->second -= qty;
+    if (std::abs(it->second) < 1e-12)
+        it->second = 0.0;
+    return qty;
+}
+
 // Phase A (MC object reuse)
 void ExitManager::reset()
 {
     pending_.clear();
     armed_.clear();
+    opener_remaining_qty_.clear();
+    opener_close_in_flight_qty_.clear();
     strategy_symbol_to_openers_.clear();
 
     {
