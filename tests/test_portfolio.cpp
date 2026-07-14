@@ -71,6 +71,64 @@ TEST(Portfolio, PartialSell)
     EXPECT_EQ(p.get_total_trades(), 0u); // not closed yet
 }
 
+TEST(Portfolio, PartialShortCoverReducesCostBasisTowardZero)
+{
+    portfolio p;
+    const double initial_cash = p.get_cash();
+    fill_event sell(now(), "AAPL", 1, order_side::sell, 10, 100.0, 5.0);
+    fill_event buy(now(), "AAPL", 2, order_side::buy, 5, 90.0, 2.5);
+
+    p.on_fill(sell);
+    p.on_fill(buy);
+
+    const auto& positions = p.get_positions();
+    auto it = positions.find("AAPL");
+    ASSERT_NE(it, positions.end());
+    EXPECT_TRUE(p.position_open("AAPL"));
+    EXPECT_DOUBLE_EQ(it->second.qty, -5.0);
+    EXPECT_DOUBLE_EQ(it->second.cost_basis, -502.5);
+    EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash + 1000.0 - 5.0 - 450.0 - 2.5);
+    EXPECT_EQ(p.get_total_trades(), 0u);
+}
+
+TEST(Portfolio, BuyFlipFromShortProratesCommissionOnce)
+{
+    portfolio p;
+    const double initial_cash = p.get_cash();
+    fill_event sell(now(), "AAPL", 1, order_side::sell, 5, 100.0, 5.0);
+    fill_event buy(now(), "AAPL", 2, order_side::buy, 8, 90.0, 8.0);
+
+    p.on_fill(sell);
+    p.on_fill(buy);
+
+    const auto& positions = p.get_positions();
+    auto it = positions.find("AAPL");
+    ASSERT_NE(it, positions.end());
+    EXPECT_DOUBLE_EQ(it->second.qty, 3.0);
+    EXPECT_DOUBLE_EQ(it->second.cost_basis, 273.0);
+    EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash + 500.0 - 5.0 - 450.0 - 5.0 - 270.0 - 3.0);
+    EXPECT_EQ(p.get_total_trades(), 1u);
+}
+
+TEST(Portfolio, SellFlipFromLongProratesCommissionOnce)
+{
+    portfolio p;
+    const double initial_cash = p.get_cash();
+    fill_event buy(now(), "AAPL", 1, order_side::buy, 5, 100.0, 5.0);
+    fill_event sell(now(), "AAPL", 2, order_side::sell, 8, 110.0, 8.0);
+
+    p.on_fill(buy);
+    p.on_fill(sell);
+
+    const auto& positions = p.get_positions();
+    auto it = positions.find("AAPL");
+    ASSERT_NE(it, positions.end());
+    EXPECT_DOUBLE_EQ(it->second.qty, -3.0);
+    EXPECT_DOUBLE_EQ(it->second.cost_basis, -333.0);
+    EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash - 500.0 - 5.0 + 550.0 - 5.0 + 330.0 - 3.0);
+    EXPECT_EQ(p.get_total_trades(), 1u);
+}
+
 TEST(Portfolio, MultipleBuys_AverageEntry)
 {
     portfolio p;

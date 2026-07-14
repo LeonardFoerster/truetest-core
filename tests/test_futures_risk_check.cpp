@@ -278,3 +278,54 @@ TEST(FuturesRiskCheck, NoopRiskCheckAlwaysAllows)
     EXPECT_TRUE(d.allow);
     EXPECT_TRUE(d.reason.empty());
 }
+
+TEST(MaintenanceMarginTable, ParsesSymbolSpecificLeverageBracketPayload)
+{
+    MaintenanceMarginTable table;
+    table.load_from_leverage_bracket_json(R"json(
+        {
+          "symbol": "BTCUSDT",
+          "brackets": [
+            {"bracket": 2, "notionalCap": 50000, "maintMarginRatio": 0.005, "cum": 100},
+            {"bracket": 1, "notionalCap": 10000, "maintMarginRatio": 0.004, "cum": 0}
+          ]
+        }
+    )json");
+
+    EXPECT_FALSE(table.empty());
+    EXPECT_DOUBLE_EQ(table.maintenance_margin_rate_for_notional(9000.0), 0.004);
+    EXPECT_DOUBLE_EQ(table.maint_amount_for_notional(9000.0), 0.0);
+    EXPECT_DOUBLE_EQ(table.maintenance_margin_rate_for_notional(20000.0), 0.005);
+    EXPECT_DOUBLE_EQ(table.maint_amount_for_notional(20000.0), 100.0);
+}
+
+TEST(MaintenanceMarginTable, ParsesArrayLeverageBracketPayloadAndNumericStrings)
+{
+    MaintenanceMarginTable table;
+    table.load_from_leverage_bracket_json(R"json(
+        [
+          {
+            "symbol": "ETHUSDT",
+            "brackets": [
+              {"notionalCap": "10000", "maintMarginRatio": "0.0065", "cum": "0"},
+              {"notionalCap": "50000", "maintMarginRatio": "0.01", "cum": "35"}
+            ]
+          }
+        ]
+    )json");
+
+    EXPECT_FALSE(table.empty());
+    EXPECT_DOUBLE_EQ(table.maintenance_margin_rate_for_notional(10000.0), 0.0065);
+    EXPECT_DOUBLE_EQ(table.maintenance_margin_rate_for_notional(10001.0), 0.01);
+    EXPECT_DOUBLE_EQ(table.maint_amount_for_notional(10001.0), 35.0);
+}
+
+TEST(MaintenanceMarginTable, InvalidPayloadLeavesTableEmpty)
+{
+    MaintenanceMarginTable table;
+    table.load_from_leverage_bracket_json(R"json({"symbol":"BTCUSDT","no_brackets":[]})json");
+
+    EXPECT_TRUE(table.empty());
+    EXPECT_DOUBLE_EQ(table.maintenance_margin_rate_for_notional(10000.0), 0.005);
+    EXPECT_DOUBLE_EQ(table.maint_amount_for_notional(10000.0), 0.0);
+}

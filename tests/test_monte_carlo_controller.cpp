@@ -33,7 +33,7 @@ TEST(MonteCarloController, RunsMultipleTrials) {
     std::string summary = MonteCarloReporter::render_text_summary(agg, cfg);
     EXPECT_FALSE(summary.empty());
 
-    // New MC-02 robustness metrics (Phase 2 fields now populated)
+    // New MC-02 robustness metrics (Phase 2 fields now populated; see docs/todos/03-MC-simulation.md#MC-02)
     EXPECT_TRUE(std::isfinite(agg.win_rate_mean));
     EXPECT_TRUE(std::isfinite(agg.profit_factor_mean));
     EXPECT_TRUE(std::isfinite(agg.median_win_rate));
@@ -100,7 +100,7 @@ TEST(MonteCarloController, ReuseObjectsProducesPlausibleResults) {
     EXPECT_TRUE(std::isfinite(agg_fresh.median_sharpe));
     EXPECT_TRUE(std::isfinite(agg_reuse.median_sharpe));
 
-    // MC-02 fields also finite under reuse
+    // MC-02 fields also finite under reuse (see docs/todos/03-MC-simulation.md)
     EXPECT_TRUE(std::isfinite(agg_reuse.win_rate_mean));
     EXPECT_TRUE(std::isfinite(agg_reuse.profit_factor_mean));
 

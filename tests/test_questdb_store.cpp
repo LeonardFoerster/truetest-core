@@ -110,18 +110,40 @@ std::shared_ptr<order_event> make_order(std::uint64_t id = 42)
 
 }
 
-TEST(QuestdbStore, BeginIssues7DdlsInOrder)
+TEST(QuestdbStore, BeginIssuesDdlsInOrder)
 {
     Fixture f;
     ASSERT_TRUE(f.store->begin());
-    ASSERT_EQ(f.ddls_seen.size(), 7u);
+    ASSERT_EQ(f.ddls_seen.size(), 9u);
     EXPECT_TRUE(contains(f.ddls_seen[0], "runs_meta"));
     EXPECT_TRUE(contains(f.ddls_seen[1], "tt_test_orders"));
     EXPECT_TRUE(contains(f.ddls_seen[2], "tt_test_order_status"));
     EXPECT_TRUE(contains(f.ddls_seen[3], "tt_test_fills"));
-    EXPECT_TRUE(contains(f.ddls_seen[4], "tt_test_rejections"));
-    EXPECT_TRUE(contains(f.ddls_seen[5], "tt_test_cancellations"));
-    EXPECT_TRUE(contains(f.ddls_seen[6], "tt_test_amendments"));
+    EXPECT_TRUE(contains(f.ddls_seen[4], "tt_test_funding"));
+    EXPECT_TRUE(contains(f.ddls_seen[5], "tt_test_events"));
+    EXPECT_TRUE(contains(f.ddls_seen[6], "tt_test_rejections"));
+    EXPECT_TRUE(contains(f.ddls_seen[7], "tt_test_cancellations"));
+    EXPECT_TRUE(contains(f.ddls_seen[8], "tt_test_amendments"));
+}
+
+TEST(QuestdbStore, BeginRejectsInvalidRunTagBeforeDdl)
+{
+    Fixture f;
+    f.cfg.run_tag = "bad tag;DROP";
+
+    auto t = std::make_unique<RecordingTransport>();
+    auto* tp = t.get();
+    auto writer = std::make_unique<IlpWriter>(
+        f.cfg.host, f.cfg.ilp_port, std::move(t),
+        /*flush_every_n_lines=*/1);
+    QuestdbStore store(f.cfg, std::move(writer),
+        [](const std::string&) {
+            ADD_FAILURE() << "DDL should not run for invalid run_tag";
+            return true;
+        });
+
+    EXPECT_FALSE(store.begin());
+    EXPECT_TRUE(tp->lines.empty());
 }
 
 TEST(QuestdbStore, BeginAbortsIfAnyDdlFails)

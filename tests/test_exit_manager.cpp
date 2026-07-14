@@ -250,17 +250,22 @@ TEST(ExitManager, PartialExit_TP1FiresWithoutAffectingTP2OrSL)
     EXPECT_NEAR(r1[0].get_quantity(), 5.0, 1e-9);
     EXPECT_EQ(m.armed_count(), 2u);
 
+    fill_event tp1_fill(t0, "X", 900, order_side::sell, 5.0, 110.0,
+                        /*commission=*/0.0, /*remaining=*/0.0,
+                        /*fill_id=*/1, "s", 42);
+    m.on_fill(tp1_fill, 42);
+    EXPECT_EQ(m.armed_count(), 2u);
+
     // Touch 120 - TP2 fires, closing 3 units. SL remains.
     auto r2 = m.on_price("X", 120.0, t0);
     ASSERT_FALSE(r2.empty());
     EXPECT_NEAR(r2[0].get_quantity(), 3.0, 1e-9);
     EXPECT_EQ(m.armed_count(), 1u);
 
-    // Crash to 89 - SL fires for the full 10 units (its own fraction=1.0
-    // binds to opener_qty, independent of earlier fires).
+    // Crash to 89 - SL can only close the remaining 2 units after TP1 and TP2.
     auto r3 = m.on_price("X", 89.0, t0);
     ASSERT_FALSE(r3.empty());
-    EXPECT_NEAR(r3[0].get_quantity(), 10.0, 1e-9);
+    EXPECT_NEAR(r3[0].get_quantity(), 2.0, 1e-9);
     EXPECT_EQ(m.armed_count(), 0u);
 }
 
