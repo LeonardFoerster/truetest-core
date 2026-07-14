@@ -195,7 +195,8 @@ public:
             // -1121 mid-stream. Cheap one-shot REST call (weight 10).
             {
                 auto info = rest_->get_unsigned(
-                    "/api/v3/exchangeInfo", "symbol=" + upper(symbol_));
+                    "/api/v3/exchangeInfo",
+                    "symbol=" + binance::url_encode(upper(symbol_)));
                 if (info.status < 200 || info.status >= 300)
                 {
                     std::cerr << "BinanceProvider: refusing to go live - "
@@ -203,7 +204,8 @@ public:
                               << "' not found on "
                               << (endpoints_.is_testnet ? "testnet " : "")
                               << "exchangeInfo (HTTP " << info.status
-                              << "): " << info.body.substr(0, 160) << "\n";
+                              << "): "
+                              << binance::redact_for_log(info.body) << "\n";
                     state_ = lifecycle::error;
                     return false;
                 }

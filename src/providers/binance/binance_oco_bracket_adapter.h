@@ -86,31 +86,24 @@ public:
         // can rehydrate brackets after a restart without an external store.
         const std::string list_cli = "tt-oco-" + std::to_string(opener_order_id);
 
-        char buf[768];
-        std::snprintf(buf, sizeof(buf),
-            "symbol=%s"
-            "&side=%s"
-            "&quantity=%s"
-            "&price=%s"
-            "&stopPrice=%s"
-            "&stopLimitPrice=%s"
-            "&stopLimitTimeInForce=GTC"
-            "&listClientOrderId=%s"
-            "&newOrderRespType=RESULT",
-            symbol.c_str(),
-            side.c_str(),
-            fmt_double(intent.qty).c_str(),
-            fmt_double(tp).c_str(),
-            fmt_double(sl).c_str(),
-            fmt_double(slim).c_str(),
-            list_cli.c_str());
+        std::string params;
+        params.reserve(256);
+        binance::append_param(params, "symbol", symbol);
+        binance::append_param(params, "side", side);
+        binance::append_param(params, "quantity", fmt_double(intent.qty));
+        binance::append_param(params, "price", fmt_double(tp));
+        binance::append_param(params, "stopPrice", fmt_double(sl));
+        binance::append_param(params, "stopLimitPrice", fmt_double(slim));
+        binance::append_param(params, "stopLimitTimeInForce", "GTC");
+        binance::append_param(params, "listClientOrderId", list_cli);
+        binance::append_param(params, "newOrderRespType", "RESULT");
 
-        auto resp = post_("/api/v3/order/oco", buf);
+        auto resp = post_("/api/v3/order/oco", params);
         if (resp.status < 200 || resp.status >= 300)
         {
             std::cerr << "BinanceOcoBracketAdapter: place failed for opener="
                       << opener_order_id << " HTTP " << resp.status
-                      << " body=" << resp.body
+                      << " body=" << binance::redact_for_log(resp.body, 240)
                       << " - engine-side eval remains the only enforcer\n";
             return handles;
         }
@@ -259,7 +252,8 @@ public:
         // DELETE /api/v3/order so we still drop the venue state.
         if (handles.oco_list_id)
         {
-            std::string params = "orderListId=" + *handles.oco_list_id;
+            std::string params;
+            binance::append_param(params, "orderListId", *handles.oco_list_id);
             auto resp = del_("/api/v3/orderList", params);
             if (resp.status >= 200 && resp.status < 300) return;
             std::cerr << "BinanceOcoBracketAdapter: cancel(orderList="
@@ -275,15 +269,9 @@ public:
             if (!handles.symbol.empty())
             {
                 params.reserve(handles.symbol.size() + 32);
-                params.append("symbol=", 7);
-                params.append(handles.symbol);
-                params.append("&orderId=", 9);
+                binance::append_param(params, "symbol", handles.symbol);
             }
-            else
-            {
-                params.append("orderId=", 8);
-            }
-            params.append(**id);
+            binance::append_param(params, "orderId", **id);
             auto resp = del_("/api/v3/order", params);
             if (resp.status >= 400)
                 std::cerr << "BinanceOcoBracketAdapter: per-leg cancel(orderId="

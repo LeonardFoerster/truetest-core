@@ -2,6 +2,7 @@
 #ifdef HAS_BINANCE
 
 #include "../../execution/order_encoder.h"
+#include "providers/binance/binance_auth.h"
 
 #include <array>
 #include <cctype>
@@ -70,8 +71,7 @@ public:
 
         if (!client_order_id.empty())
         {
-            payload.append("&newClientOrderId=", 18);
-            payload.append(client_order_id);
+            binance::append_param(payload, "newClientOrderId", client_order_id);
         }
 
         encoded_order e;
@@ -91,17 +91,14 @@ public:
         std::string params;
         params.reserve(sym_upper.size() + 64 + client_order_id.size()
                        + exchange_order_id.size());
-        params.append("symbol=", 7);
-        params.append(sym_upper);
+        binance::append_param(params, "symbol", sym_upper);
         if (!exchange_order_id.empty())
         {
-            params.append("&orderId=", 9);
-            params.append(exchange_order_id);
+            binance::append_param(params, "orderId", exchange_order_id);
         }
         else if (!client_order_id.empty())
         {
-            params.append("&origClientOrderId=", 19);
-            params.append(client_order_id);
+            binance::append_param(params, "origClientOrderId", client_order_id);
         }
 
         encoded_order e;
@@ -138,16 +135,12 @@ private:
     {
         std::string out;
         out.reserve(sym.size() + 56);
-        out.append("symbol=", 7);
-        out.append(sym);
-        out.append("&side=", 6);
-        out.append(side_to_binance(s));
-        out.append("&type=", 6);
-        out.append(order_type_to_binance(t));
+        binance::append_param(out, "symbol", sym);
+        binance::append_param(out, "side", side_to_binance(s));
+        binance::append_param(out, "type", order_type_to_binance(t));
         if (takes_tif(t))
         {
-            out.append("&timeInForce=", 13);
-            out.append(tif_to_binance(tif));
+            binance::append_param(out, "timeInForce", tif_to_binance(tif));
         }
         return out;
     }

@@ -154,10 +154,8 @@ private:
     {
         std::string params;
         params.reserve(symbol_.size() + 32);
-        params.append("symbol=", 7);
-        params.append(symbol_);
-        params.append("&countdownTime=", 15);
-        params.append(std::to_string(ms));
+        binance::append_param(params, "symbol", symbol_);
+        binance::append_param(params, "countdownTime", std::to_string(ms));
 
         const auto resp = post_("/fapi/v1/countdownCancelAll", params);
         return resp.status >= 200 && resp.status < 300;

@@ -154,15 +154,9 @@ public:
             if (!handles.symbol.empty())
             {
                 params.reserve(handles.symbol.size() + 32);
-                params.append("symbol=", 7);
-                params.append(handles.symbol);
-                params.append("&orderId=", 9);
+                binance::append_param(params, "symbol", handles.symbol);
             }
-            else
-            {
-                params.append("orderId=", 8);
-            }
-            params.append(**l.id);
+            binance::append_param(params, "orderId", **l.id);
             auto resp = del_("/fapi/v1/order", params);
             if (resp.status >= 400 &&
                 resp.body.find("-2011") == std::string::npos &&
@@ -172,7 +166,7 @@ public:
                           << l.tag << " (orderId=" << **l.id
                           << ") for opener=" << opener_order_id
                           << " HTTP " << resp.status << " body="
-                          << resp.body << "\n";
+                          << binance::redact_for_log(resp.body, 240) << "\n";
             }
         }
     }
@@ -302,32 +296,28 @@ private:
                           const std::string& client_id,
                           std::uint64_t opener_order_id)
     {
-        char buf[512];
         // closePosition=true means quantity is omitted (Binance derives
         // it from current position size at trigger time). reduceOnly is
         // implied by closePosition but keeping it explicit makes the
         // intent self-documenting and survives if Binance ever loosens
         // the implication.
-        std::snprintf(buf, sizeof(buf),
-            "symbol=%s"
-            "&side=%s"
-            "&type=%s"
-            "&stopPrice=%s"
-            "&closePosition=true"
-            "&reduceOnly=true"
-            "&newClientOrderId=%s",
-            symbol.c_str(),
-            side.c_str(),
-            type,
-            fmt_double(trigger_price).c_str(),
-            client_id.c_str());
+        std::string params;
+        params.reserve(192);
+        binance::append_param(params, "symbol", symbol);
+        binance::append_param(params, "side", side);
+        binance::append_param(params, "type", type);
+        binance::append_param(params, "stopPrice", fmt_double(trigger_price));
+        binance::append_param(params, "closePosition", "true");
+        binance::append_param(params, "reduceOnly", "true");
+        binance::append_param(params, "newClientOrderId", client_id);
 
-        auto resp = post_("/fapi/v1/order", buf);
+        auto resp = post_("/fapi/v1/order", params);
         if (resp.status < 200 || resp.status >= 300)
         {
             std::cerr << "BinanceFuturesBracketAdapter: " << type
                       << " place failed for opener=" << opener_order_id
-                      << " HTTP " << resp.status << " body=" << resp.body
+                      << " HTTP " << resp.status << " body="
+                      << binance::redact_for_log(resp.body, 240)
                       << "\n";
             return {};
         }

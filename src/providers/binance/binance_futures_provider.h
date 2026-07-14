@@ -264,7 +264,8 @@ public:
             // from prod and a typo otherwise surfaces as -1121 mid-stream.
             {
                 auto info = rest_->get_unsigned(
-                    "/fapi/v1/exchangeInfo", "symbol=" + upper(symbol_));
+                    "/fapi/v1/exchangeInfo",
+                    "symbol=" + binance::url_encode(upper(symbol_)));
                 if (info.status < 200 || info.status >= 300)
                 {
                     std::cerr << "BinanceFuturesProvider: refusing to go "
@@ -272,7 +273,8 @@ public:
                               << "' not found on "
                               << (endpoints_.is_testnet ? "testnet " : "")
                               << "exchangeInfo (HTTP " << info.status
-                              << "): " << info.body.substr(0, 160) << "\n";
+                              << "): "
+                              << binance::redact_for_log(info.body) << "\n";
                     state_ = lifecycle::error;
                     return false;
                 }
@@ -281,7 +283,7 @@ public:
             // Phase 2: load real tiered maintenance margin brackets
             {
                 auto br = rest_->get("/fapi/v1/leverageBracket",
-                                     "symbol=" + upper(symbol_));
+                                     "symbol=" + binance::url_encode(upper(symbol_)));
                 if (br.status >= 200 && br.status < 300) {
                     mm_table_ = std::make_shared<truetest::risk::MaintenanceMarginTable>();
                     mm_table_->load_from_leverage_bracket_json(br.body);
@@ -309,7 +311,7 @@ public:
                     std::cerr << "BinanceFuturesProvider: refusing to go "
                                  "live — /fapi/v1/positionSide/dual HTTP "
                               << resp.status << ": "
-                              << resp.body.substr(0, 160) << "\n";
+                              << binance::redact_for_log(resp.body) << "\n";
                     state_ = lifecycle::error;
                     return false;
                 }
@@ -325,7 +327,7 @@ public:
                                  "live — /fapi/v1/positionSide/dual "
                                  "response missing or malformed "
                                  "dualSidePosition field: "
-                              << resp.body.substr(0, 160) << "\n";
+                              << binance::redact_for_log(resp.body) << "\n";
                     state_ = lifecycle::error;
                     return false;
                 }
@@ -347,7 +349,7 @@ public:
             // this call is the startup-time advisory pass.
             {
                 auto pr = rest_->get("/fapi/v2/positionRisk",
-                                     "symbol=" + upper(symbol_));
+                                     "symbol=" + binance::url_encode(upper(symbol_)));
                 if (pr.status >= 200 && pr.status < 300)
                 {
                     auto advisories = binance::futures::compute_advisories(
@@ -390,7 +392,7 @@ public:
             bracket_adapter_ = make_binance_futures_bracket_adapter(rest_);
 
             ExecutionBridge::deps d;
-            d.order_tx = make_binance_rest_order_transport(rest_);
+            d.order_tx = make_binance_rest_order_transport(rest_);  // actual I/O now happens async inside ExecutionBridge on bg thread
             binance_user_data_ = std::make_shared<BinanceUserDataTransport>(
                              rest_, endpoints_.ws_host, endpoints_.ws_port,
                              binance_keepalive_policy{},
@@ -467,11 +469,14 @@ public:
                     closer = [rest = rest_, sym = upper(symbol_), minter = minter_](const std::string& /*s*/)
                     {
                         if (!rest) return;
-                        auto pr = rest->get("/fapi/v2/positionRisk", "symbol=" + sym);
+                        auto pr = rest->get("/fapi/v2/positionRisk",
+                                            "symbol=" + binance::url_encode(sym));
                         if (pr.status < 200 || pr.status >= 300)
                         {
                             std::cerr << "  [DMS-CLOSE] positionRisk HTTP "
-                                      << pr.status << " " << pr.body.substr(0,80) << "\n";
+                                      << pr.status << " "
+                                      << binance::redact_for_log(pr.body, 80)
+                                      << "\n";
                             return;
                         }
                         double pos_amt = 0.0;
@@ -482,11 +487,14 @@ public:
                         const char* side = (pos_amt > 0.0) ? "SELL" : "BUY";
                         char qbuf[32];
                         std::snprintf(qbuf, sizeof(qbuf), "%.8f", std::abs(pos_amt));
-                        std::string params = "symbol=" + sym
-                            + "&side=" + side
-                            + "&type=MARKET&reduceOnly=true&quantity=" + qbuf;
+                        std::string params;
+                        binance::append_param(params, "symbol", sym);
+                        binance::append_param(params, "side", side);
+                        binance::append_param(params, "type", "MARKET");
+                        binance::append_param(params, "reduceOnly", "true");
+                        binance::append_param(params, "quantity", qbuf);
                         if (minter)
-                            params += "&newClientOrderId=" + minter->next();
+                            binance::append_param(params, "newClientOrderId", minter->next());
 
                         auto r = rest->post("/fapi/v1/order", params);
                         if (r.status >= 200 && r.status < 300)
@@ -497,7 +505,9 @@ public:
                         else
                         {
                             std::cerr << "  [DMS-CLOSE] order failed HTTP "
-                                      << r.status << " " << r.body.substr(0,120) << "\n";
+                                      << r.status << " "
+                                      << binance::redact_for_log(r.body, 120)
+                                      << "\n";
                         }
                     };
                 }

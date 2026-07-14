@@ -56,7 +56,7 @@ public:
         }
 
         {
-            const std::string params = "symbol=" + symbol_;
+            const std::string params = "symbol=" + binance::url_encode(symbol_);
             auto resp = rest_->del("/api/v3/openOrders", params);
             if (resp.status < 200 || resp.status >= 300)
             {
@@ -64,7 +64,9 @@ public:
                 if (resp.body.find("-2011") == std::string::npos)
                 {
                     std::cerr << "BinanceKillSwitch: cancel_all HTTP "
-                              << resp.status << " - " << resp.body << "\n";
+                              << resp.status << " - "
+                              << binance::redact_for_log(resp.body, 240)
+                              << "\n";
                     return false;
                 }
             }
@@ -82,7 +84,8 @@ public:
             if (acct.status < 200 || acct.status >= 300)
             {
                 std::cerr << "BinanceKillSwitch: /api/v3/account HTTP "
-                          << acct.status << " - " << acct.body << "\n";
+                          << acct.status << " - "
+                          << binance::redact_for_log(acct.body, 240) << "\n";
                 return false;
             }
             if (!BinanceReconciler::extract_balance(
@@ -112,17 +115,20 @@ public:
         }
 
         // clientOrderId -> idempotent against transport retries.
-        std::string params = "symbol=" + symbol_
-            + "&side=SELL&type=MARKET&quantity="
-            + format_qty(ex_base_free);
+        std::string params;
+        binance::append_param(params, "symbol", symbol_);
+        binance::append_param(params, "side", "SELL");
+        binance::append_param(params, "type", "MARKET");
+        binance::append_param(params, "quantity", format_qty(ex_base_free));
         if (minter_)
-            params += "&newClientOrderId=" + minter_->next();
+            binance::append_param(params, "newClientOrderId", minter_->next());
 
         auto sell = rest_->post("/api/v3/order", params);
         if (sell.status < 200 || sell.status >= 300)
         {
             std::cerr << "BinanceKillSwitch: flatten order HTTP "
-                      << sell.status << " - " << sell.body << "\n";
+                      << sell.status << " - "
+                      << binance::redact_for_log(sell.body, 240) << "\n";
             return false;
         }
 

@@ -218,7 +218,7 @@ public:
             try
             {
                 rest_->del(listen_key_path_,
-                           "listenKey=" + key_to_delete);
+                           "listenKey=" + binance::url_encode(key_to_delete));
             }
             catch (...) {}
         }
@@ -514,7 +514,7 @@ private:
         try
         {
             auto r = rest_->put_unsigned(
-                listen_key_path_, "listenKey=" + current);
+                listen_key_path_, "listenKey=" + binance::url_encode(current));
             if (r.status < 200 || r.status >= 300)
             {
                 auto post = rest_->post_unsigned(listen_key_path_);
@@ -555,7 +555,7 @@ private:
             using binance_keepalive_detail::ka_response;
             auto put_call = [this](const std::string& key) {
                 auto r = rest_->put_unsigned(
-                    listen_key_path_, "listenKey=" + key);
+                    listen_key_path_, "listenKey=" + binance::url_encode(key));
                 return ka_response{r.status};
             };
             auto post_call = [this](std::string& out_key) {

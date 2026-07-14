@@ -546,7 +546,8 @@ private:
                     else if (r.status >= 400)
                     {
                         std::cerr << "BinanceRestClient: HTTP " << r.status
-                                  << " - " << r.body << "\n";
+                                  << " - " << binance::redact_for_log(r.body, 240)
+                                  << "\n";
                     }
 
                     break;  // transaction completed (success or HTTP error)

@@ -64,11 +64,12 @@ private:
         int limit,
         int64_t end_time_ms) const
     {
-        std::string query = "symbol=" + to_upper(symbol)
-            + "&interval=" + interval
-            + "&limit=" + std::to_string(limit);
+        std::string query;
+        binance::append_param(query, "symbol", to_upper(symbol));
+        binance::append_param(query, "interval", interval);
+        binance::append_param(query, "limit", std::to_string(limit));
         if (end_time_ms > 0) {
-            query += "&endTime=" + std::to_string(end_time_ms);
+            binance::append_param(query, "endTime", std::to_string(end_time_ms));
         }
 
         namespace beast = boost::beast;

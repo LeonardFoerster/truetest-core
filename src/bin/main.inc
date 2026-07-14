@@ -8,6 +8,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <exception>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,6 +54,7 @@
 
 #ifdef HAS_QUESTDB
 #include "data/questdb/store.h"
+#include "data/questdb/run_tag.h"
 #endif
 #include "ui/console_dashboard.h"
 #ifdef HAS_RICH_TUI
@@ -94,6 +96,32 @@ static void install_shutdown_handler()
         if (auto* bb = g_bar_bridge.load(std::memory_order_acquire)) bb->stop();
     });
 }
+
+class provider_close_guard
+{
+public:
+    explicit provider_close_guard(std::shared_ptr<IProvider> provider)
+        : provider_(std::move(provider))
+    {}
+
+    ~provider_close_guard()
+    {
+        if (active_ && provider_)
+        {
+            try { provider_->close(); }
+            catch (...) {}
+        }
+    }
+
+    provider_close_guard(const provider_close_guard&) = delete;
+    provider_close_guard& operator=(const provider_close_guard&) = delete;
+
+    void release() { active_ = false; }
+
+private:
+    std::shared_ptr<IProvider> provider_;
+    bool active_ = true;
+};
 
 // Live-money safety gate. Prints a loud red warning and forces the operator
 // to solve a fresh random addition problem before real orders can be sent.
@@ -375,6 +403,48 @@ struct cli_options
     bool questdb_strict = false;  // Phase 2: hard-fail on QuestDB problems + local fallback
 #endif
 };
+
+static bool validate_binance_futures_live_phase0(const cli_options& o,
+                                                 std::ostream& errors,
+                                                 std::ostream& warnings)
+{
+    const bool resolved_live = (o.mode == "live" || o.live);
+    if (o.provider_name != "binance-futures" || !resolved_live)
+        return true;
+
+    const bool has_venue_caps =
+        o.max_notional_usdt > 0.0 ||
+        o.max_leverage > 0.0 ||
+        o.min_liquidation_distance_pct > 0.0;
+
+    if (!has_venue_caps)
+    {
+        if (!o.testnet)
+        {
+            errors << "  ! Refusing mainnet futures live mode without venue risk caps.\n"
+                      "    Set at least one of --max-notional, --max-leverage, "
+                      "or --min-liq-distance-pct.\n";
+            return false;
+        }
+        warnings << "  [Phase 0] WARNING: No venue risk caps set "
+                    "(--max-notional / --max-leverage / --min-liq-distance-pct).\n"
+                    "           These are strongly recommended before mainnet validation runs.\n";
+    }
+
+    if (o.risk_max_daily_loss <= 0.0)
+    {
+        if (!o.testnet)
+        {
+            errors << "  ! Refusing mainnet futures live mode with --max-daily-loss disabled.\n"
+                      "    Set a conservative positive --max-daily-loss.\n";
+            return false;
+        }
+        warnings << "  [Phase 0] WARNING: --max-daily-loss is 0 (disabled). "
+                    "Set a conservative daily loss limit before mainnet.\n";
+    }
+
+    return true;
+}
 
 static std::vector<std::string> split_csv(const std::string& s)
 {
@@ -1044,7 +1114,7 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
 }
 
 // -----------------------------------------------------------------------------
-// Preset application (P1-01 / P1-02)
+// Preset application (P1-01 / P1-02; see docs/todos/02-P1-freeze.md#P1-01 or docs/governance/03-todo.md)
 // Applies a named bundle only to fields the user did not explicitly supply on
 // the CLI (using the same was_set(app) test as JSON overlay). Establishes:
 //   explicit CLI > --config JSON > --preset bundle > hard defaults.
@@ -1167,6 +1237,7 @@ static int run_dry_run(const cli_options& o)
     std::cout << "  ============================================\n";
 
     bool valid = true;
+    const bool resolved_live = (o.mode == "live" || o.live);
     if (!o.strategy.empty() && !StrategyRegistry::instance().has(o.strategy))
     {
         std::cerr << "  ! Unknown strategy: " << o.strategy << "\n";
@@ -1177,12 +1248,14 @@ static int run_dry_run(const cli_options& o)
         std::cerr << "  ! Unknown mode: " << o.mode << "\n";
         valid = false;
     }
-    if (o.mode == "live" && !truetest::target_allows_live_orders())
+    if (resolved_live && !truetest::target_allows_live_orders())
     {
-        std::cerr << "  ! --mode=live is only permitted on the engine_live binary "
+        std::cerr << "  ! Live mode is only permitted on the engine_live binary "
                      "(this is " << truetest::target_name() << ").\n";
         valid = false;
     }
+    if (!validate_binance_futures_live_phase0(o, std::cerr, std::cout))
+        valid = false;
     if (!o.fee_model.empty() && o.fee_model != "fixed" && o.fee_model != "tiered")
     {
         std::cerr << "  ! Unknown fee model: " << o.fee_model << "\n";
@@ -1285,10 +1358,19 @@ static int run_monte_carlo_mode(const cli_options& o)
         sc.ilp_port = o.questdb_ilp_port ? o.questdb_ilp_port : 9009;
         sc.http_port = o.questdb_http_port ? o.questdb_http_port : 9000;
 
-        std::string base_tag = o.run_tag.empty()
-            ? "mc_" + std::to_string(static_cast<long long>(std::time(nullptr)))
-            : o.run_tag;
-        sc.run_tag = base_tag;
+        try
+        {
+            const std::string base_tag = o.run_tag.empty()
+                ? "mc_" + std::to_string(static_cast<long long>(std::time(nullptr)))
+                : o.run_tag;
+            sc.run_tag = truetest::questdb::make_run_tag(base_tag);
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "  ! Invalid --run-tag for QuestDB persistence: "
+                      << e.what() << "\n";
+            return 1;
+        }
         sc.mode = "backtest";
         sc.binary = "engine_backtest";
         sc.strategy = mc_cfg.strategy_name;
@@ -1445,6 +1527,9 @@ static int run_provider_mode(const cli_options& o)
         return run_monte_carlo_mode(o);
     }
 
+    if (!validate_binance_futures_live_phase0(o, std::cerr, std::cout))
+        return 1;
+
     std::shared_ptr<IProvider> provider;
     try {
         provider = ProviderRegistry::instance().create(o.provider_name, pcfg);
@@ -1584,27 +1669,7 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
     prov_cfg.risk_unwind = o.risk_unwind;
 
-    // Phase 0 soft guidance for live binance-futures (prod.md + futures-phase0-operator-sop.md)
-    if (o.provider_name == "binance-futures" && o.mode == "live")
-    {
-        const bool has_venue_caps =
-            o.max_notional_usdt > 0.0 ||
-            o.max_leverage > 0.0 ||
-            o.min_liquidation_distance_pct > 0.0;
-
-        if (!has_venue_caps)
-        {
-            std::cout << "  [Phase 0] WARNING: No venue risk caps set (--max-notional / --max-leverage / --min-liq-distance-pct).\n"
-                      << "           These are strongly recommended for safe tiny-size mainnet validation runs.\n"
-                      << "           See prod.md (Phase 0) and docs/futures-phase0-operator-sop.md\n";
-        }
-
-        if (o.risk_max_daily_loss <= 0.0)
-        {
-            std::cout << "  [Phase 0] WARNING: --max-daily-loss is 0 (disabled). A conservative daily loss limit is recommended.\n"
-                      << "           See the official Phase 0 command template in prod.md and the Operator SOP.\n";
-        }
-    }
+    const bool resolved_live = (o.mode == "live" || o.live);
 
 #ifdef HAS_QUESTDB
     prov_cfg.persist_enabled = o.persist;
@@ -1648,7 +1713,7 @@ static int run_provider_mode(const cli_options& o)
 
     if (o.mode == "shadow")
         prov_cfg.mode = engine_mode::shadow;
-    else if (o.mode == "live" || o.live)
+    else if (resolved_live)
         prov_cfg.mode = engine_mode::live;
 
     // Ring-buffer drops silently corrupt the shadow portfolio / halt path
@@ -1696,6 +1761,15 @@ static int run_provider_mode(const cli_options& o)
         std::cout << "  [TESTNET] Routing Binance provider to the spot testnet.\n";
     }
 
+#ifdef HAS_WEB
+    if (o.web && prov_cfg.mode != engine_mode::backtest && o.web_token.empty())
+    {
+        std::cerr << "  ! --web in shadow/live mode requires --web-token.\n"
+                     "    Backtest report review can remain tokenless on localhost.\n";
+        return 1;
+    }
+#endif
+
     provider->configure(prov_cfg);
 
     if (provider->has_data_feed() && !provider->open())
@@ -1703,6 +1777,7 @@ static int run_provider_mode(const cli_options& o)
         std::cerr << "  ! Provider failed to open.\n";
         return 1;
     }
+    provider_close_guard opened_provider(provider);
 
     auto transport = provider->get_transport();
     if (!transport)
@@ -2003,6 +2078,7 @@ static int run_provider_mode(const cli_options& o)
         if (!dashboard || !dashboard->is_tui())
             eng.print_summary();
         export_results(eng.get_analytics(), o.output, o.output_format);
+        opened_provider.release();
     }
     else
     {
@@ -2079,6 +2155,7 @@ static int run_provider_mode(const cli_options& o)
 
         eng.print_summary();
         export_results(eng.get_analytics(), o.output, o.output_format);
+        opened_provider.release();
 
 #ifdef HAS_WEB
         // Backtest is blocking and done; keep the server alive so the operator
@@ -2114,7 +2191,7 @@ static int run_tui_mode(const cli_options& o)
     std::cout << "    Backtesting Engine v0.1\n";
     std::cout << "\n";
 
-    // P1-03: lightweight preset-aware entry for the bare invocation.
+    // P1-03: lightweight preset-aware entry for the bare invocation. (see docs/todos/02-P1-freeze.md#P1-03)
     // This makes "just run the binary" discover the new simplification story
     // without forcing the user through dozens of flags for common cases.
     std::cout << "  +-------------------------------------------+\n";

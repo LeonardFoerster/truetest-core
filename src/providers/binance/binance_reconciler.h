@@ -38,10 +38,11 @@ public:
         auto resp = rest_->get("/api/v3/account", "");
         if (resp.status < 200 || resp.status >= 300)
         {
+            const auto body = binance::redact_for_log(resp.body);
             char buf[256];
             std::snprintf(buf, sizeof(buf),
                 "BinanceReconciler: /api/v3/account failed (HTTP %d): %.160s",
-                resp.status, resp.body.c_str());
+                resp.status, body.c_str());
             return buf;
         }
 

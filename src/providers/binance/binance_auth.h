@@ -6,6 +6,7 @@
 #include <openssl/params.h>
 #include <openssl/sha.h>
 
+#include <cctype>
 #include <cstddef>
 #include <cstring>
 #include <iomanip>
@@ -131,6 +132,137 @@ inline std::string url_encode(const std::string& value)
         }
     }
     return ss.str();
+}
+
+inline void append_param(std::string& out,
+                         std::string_view key,
+                         std::string_view value)
+{
+    if (!out.empty()) out.push_back('&');
+    out.append(key.data(), key.size());
+    out.push_back('=');
+    out.append(url_encode(std::string(value)));
+}
+
+inline bool ci_match_at(std::string_view s, std::size_t pos, std::string_view needle)
+{
+    if (pos + needle.size() > s.size()) return false;
+    for (std::size_t i = 0; i < needle.size(); ++i)
+    {
+        const auto a = static_cast<unsigned char>(s[pos + i]);
+        const auto b = static_cast<unsigned char>(needle[i]);
+        if (std::tolower(a) != std::tolower(b)) return false;
+    }
+    return true;
+}
+
+inline std::string redact_for_log(std::string_view input,
+                                  std::size_t max_len = 160)
+{
+    std::string out(input.substr(0, max_len));
+    const bool truncated = input.size() > max_len;
+
+    auto redact_value = [&](std::size_t value_start) {
+        if (value_start >= out.size()) return;
+        std::size_t value_end = value_start;
+        while (value_end < out.size() &&
+               out[value_end] != '&' &&
+               out[value_end] != '"' &&
+               out[value_end] != '\'' &&
+               out[value_end] != ',' &&
+               out[value_end] != '}' &&
+               !std::isspace(static_cast<unsigned char>(out[value_end])))
+        {
+            ++value_end;
+        }
+        out.replace(value_start, value_end - value_start, "<redacted>");
+    };
+
+    auto redact_json_field = [&](std::string_view key) {
+        std::size_t pos = 0;
+        while (pos < out.size())
+        {
+            const std::string needle = "\"" + std::string(key) + "\"";
+            std::size_t key_pos = std::string::npos;
+            for (std::size_t i = pos; i < out.size(); ++i)
+            {
+                if (ci_match_at(out, i, needle))
+                {
+                    key_pos = i;
+                    break;
+                }
+            }
+            if (key_pos == std::string::npos) break;
+
+            auto colon = out.find(':', key_pos + needle.size());
+            if (colon == std::string::npos) break;
+            auto value = colon + 1;
+            while (value < out.size() &&
+                   std::isspace(static_cast<unsigned char>(out[value])))
+                ++value;
+            if (value < out.size() && out[value] == '"')
+                redact_value(value + 1);
+            else
+                redact_value(value);
+            pos = value + 1;
+        }
+    };
+
+    auto redact_param = [&](std::string_view key) {
+        std::size_t pos = 0;
+        while (pos < out.size())
+        {
+            std::size_t key_pos = std::string::npos;
+            for (std::size_t i = pos; i < out.size(); ++i)
+            {
+                if (ci_match_at(out, i, key))
+                {
+                    const auto before_ok =
+                        i == 0 || out[i - 1] == '?' || out[i - 1] == '&' ||
+                        out[i - 1] == ' ' || out[i - 1] == '"';
+                    const auto after = i + key.size();
+                    if (before_ok && after < out.size() && out[after] == '=')
+                    {
+                        key_pos = i;
+                        break;
+                    }
+                }
+            }
+            if (key_pos == std::string::npos) break;
+            redact_value(key_pos + key.size() + 1);
+            pos = key_pos + key.size() + 1;
+        }
+    };
+
+    static constexpr std::string_view keys[] = {
+        "listenKey", "apiKey", "api_key", "apiSecret", "api_secret",
+        "secret", "signature", "token", "Authorization"
+    };
+    for (auto key : keys)
+    {
+        redact_json_field(key);
+        redact_param(key);
+    }
+
+    std::size_t bearer = 0;
+    while (bearer < out.size())
+    {
+        std::size_t found = std::string::npos;
+        for (std::size_t i = bearer; i < out.size(); ++i)
+        {
+            if (ci_match_at(out, i, "Bearer "))
+            {
+                found = i;
+                break;
+            }
+        }
+        if (found == std::string::npos) break;
+        redact_value(found + 7);
+        bearer = found + 7;
+    }
+
+    if (truncated) out += "...";
+    return out;
 }
 
 }
