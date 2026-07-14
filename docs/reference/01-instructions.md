@@ -92,7 +92,7 @@ See [../governance/02-prerequisites.md](../governance/02-prerequisites.md) for t
 
 See [../governance/03-todo.md](../governance/03-todo.md) (thin high-level) for the phased task list or precise docs/todos/01-P0-phase0.md#P0-01 etc (see docs/todos/00-OVERVIEW.md). Every frozen PR must reference relevant items (Addresses todo.md #P1-02 style preserved for backward).
 
-reports/phase0/ contains the evidence machinery (README for layout, PROGRESS.md tracker, PHASE0_COMPLETION_PLAN for campaign details, ops/ for batch reviews, templates/ for session notes).
+reports/phase0/ contains the evidence machinery (README for layout, PROGRESS.md tracker, ops/ for batch reviews, templates/ for session notes). Current Phase 0 gates live in docs/governance/01-prod.md and docs/todos/01-P0-phase0.md.
 
 ---
 
@@ -213,7 +213,7 @@ Strategies self-register via `REGISTER_STRATEGY` (sma, mean-reversion, ma-crosso
 
 ---
 
-## 9. Risk Management, DMS, Kill-Switch, Reconciler, WorkerWatchdog (detailed in futures-testnet.md, killswitch timeline, prod, user-manual)
+## 9. Risk Management, DMS, Kill-Switch, Reconciler, WorkerWatchdog (detailed in docs/operations/02-futures-testnet.md, killswitch timeline, prod, user-manual)
 
 **Layered**:
 - Venue `IRiskCheck` / `FuturesRiskCheck` (notional, leverage, liq-distance, real tiered MMR) - hot path, before RiskManager.
@@ -223,7 +223,7 @@ Strategies self-register via `REGISTER_STRATEGY` (sma, mean-reversion, ma-crosso
 - DMS (countdownCancelAll heartbeat; protects orders only; WorkerWatchdog monitors; 3× heartbeat internal).
 - Halt propagation to all workers + ring policy `halt_on_drop` on safety rings.
 
-**Futures testnet DMS validation playbook** (futures-testnet.md - 5 scenarios A-E with tables, conservative caps command, aliases `bf-orders`/`bf-position`, pass/fail, recording):
+**Futures testnet DMS validation playbook** (`docs/operations/02-futures-testnet.md` - 5 scenarios A-E with tables, conservative caps command, aliases `bf-orders`/`bf-position`, pass/fail, recording):
 - A: Clean SIGINT.
 - B: SIGKILL.
 - C: OOM simulation.
@@ -237,7 +237,7 @@ Strategies self-register via `REGISTER_STRATEGY` (sma, mean-reversion, ma-crosso
 - Kill-switch and DMS flatten require the lost network -> wedge.
 - Implications: unplug validates DMS + halt story, not flatten (use `--dms-attempt-position-close` + independent machine for drill). Phase 3 external watchdog + non-blocking connect needed.
 
-**Refusal modes table** (clock skew, hedge, symbol not found, permissions, reconciler drift, etc.) in futures-testnet.md.
+**Refusal modes table** (clock skew, hedge, symbol not found, permissions, reconciler drift, etc.) in `docs/operations/02-futures-testnet.md`.
 
 ---
 

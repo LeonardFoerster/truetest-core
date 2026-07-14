@@ -1,6 +1,6 @@
 # TrueTest Performance & Technical Capacities
 
-**Status**: Authoritative technical reference for performance characteristics, limits, and tuning. Complements `docs/instructions.md`, `docs/user-manual.md`, `summary.md`, and the benchmark suite.
+**Status**: Authoritative technical reference for performance characteristics, limits, and tuning. Complements `docs/reference/01-instructions.md`, `docs/reference/02-user-manual.md`, `summary.md`, and the benchmark suite.
 
 This document describes the concrete technical capacities of the engine: threading model, memory allocation discipline, concurrency primitives, throughput expectations, latency characteristics, and hard limits.
 
@@ -256,4 +256,4 @@ Current design already provides strong, measurable, and bounded capacities suita
 
 **Last updated**: 2026 (synthesized from CLAUDE.md, engine sources, threading, object pools, orderbook, config, benchmarks, hot-path tests, and user-manual).
 
-Cross-references: `docs/instructions.md` (threading + CLI), `docs/user-manual.md` (high-level), `src/engine/engine_config.h`, `src/threading/`, `src/types/object_pool.h`, `benchmarks/bench_main.cpp`.
+Cross-references: `docs/reference/01-instructions.md` (threading + CLI), `docs/reference/02-user-manual.md` (high-level), `src/engine/engine_config.h`, `src/threading/`, `src/types/object_pool.h`, `benchmarks/bench_main.cpp`.

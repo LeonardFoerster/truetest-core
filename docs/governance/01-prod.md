@@ -71,7 +71,7 @@ See also:
 - Two-person batch reviews every 5 sessions.
 - All evidence committed under `reports/phase0/`.
 
-**Ritual** (see the printable SOP planned in `../operations/futures-phase0-operator-sop.md` — "Planned for Doc Phase X – current details live in this file + reports/phase0/"):
+**Ritual** (see the printable SOP in `../operations/01-futures-phase0-operator-sop.md`; this file remains authoritative for gates and exit criteria):
 Print/sign the SOP, use `new-session.sh`, keep math-captcha visible the entire session, stay at the terminal, confirm one-way mode, watch DMS counter, run mandatory post-halt grep, run `post-session.sh` + classifier, commit artifacts + note, update PROGRESS.md.
 
 **Current status (2026-05)**: 0/15 qualifying. Scripts and templates exist and are ready. First real tiny-size mainnet validation runs are the immediate focus on the active branch.

@@ -20,10 +20,11 @@
 10. `docs/architecture/01-target-architecture.md` — Thin high-level target architecture (extracted; see reference/ for current details).
 11. `docs/architecture/02-model.md` — Model selection rules + explicit anti-patterns (extracted from CLAUDE + instructions).
 12. `docs/architecture/03-realism.md` — Realism models (latency/impact/queue/fill/fee) details (extracted).
-13. `docs/operations/01-futures-phase0-operator-sop.md` — Printable Phase 0 operator SOP (checklists, signatures; planned Doc Phase 1).
-14. `docs/architecture/04-performance.md` — Performance capacities, threading, limits.
-15. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md` — Specialized reference (use as needed).
-16. `docs/archive/` — Historical plans (MERGE_PLAN, production-readiness-gaps-2026-05, questdb guides, Edge1 plans). Do not use for current status.
+13. `docs/operations/01-futures-phase0-operator-sop.md` — Printable Phase 0 operator SOP (checklists, signatures).
+14. `docs/operations/02-futures-testnet.md` — Futures testnet rehearsal guide for DMS/kill-switch/refusal drills (non-qualifying evidence).
+15. `docs/architecture/04-performance.md` — Performance capacities, threading, limits.
+16. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md` — Specialized reference (use as needed).
+17. `docs/archive/` — Historical plans (MERGE_PLAN, production-readiness-gaps-2026-05, questdb guides, Edge1 plans). Do not use for current status.
 
 ## Processing Notes
 - **Operators preparing Phase 0**: 01 → 03 → 07 → 13 (SOP) → 08 (ritual details).
@@ -37,6 +38,7 @@ Cross-references use explicit planned language per CLAUDE rules. This index refl
 ## New Files (this pass)
 - `docs/00-INDEX.md` (this file)
 - `docs/operations/01-futures-phase0-operator-sop.md`
+- `docs/operations/02-futures-testnet.md`
 - `docs/architecture/01-target-architecture.md`
 - `docs/architecture/02-model.md`
 - `docs/architecture/03-realism.md`

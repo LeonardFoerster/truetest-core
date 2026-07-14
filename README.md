@@ -18,7 +18,7 @@ Defined in `src/core/tt_target.h`. Gated in `src/bin/main.inc`.
 
 Monte Carlo integrated from `monte-carlo` branch (mainline; MC-01/MC-02 landed).
 
-**Web UI**: opt-in on `feature/web-ui` (`-DENABLE_WEB=ON` + `--web`). Read-only civetweb server + React SPA. Reuses `snapshot_dashboard()` seam. Off hot path, no order routes, no frozen surface changes. See `docs/web-ui.md`.
+**Web UI**: opt-in on `feature/web-ui` (`-DENABLE_WEB=ON` + `--web`). Read-only civetweb server + React SPA. Reuses `snapshot_dashboard()` seam. Off hot path, no order routes, no frozen surface changes. See `docs/reference/05-web-ui.md`.
 
 ### Phases
 

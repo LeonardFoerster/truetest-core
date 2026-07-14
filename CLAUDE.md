@@ -54,7 +54,7 @@ unrestricted change to this surface.
 - The three root governance files (`docs/governance/01-prod.md`, `docs/governance/02-prerequisites.md`, `docs/governance/03-todo.md` (thin high-level)) + `reports/phase0/` + detailed `docs/todos/` (see 00-OVERVIEW.md) are the single source of truth for phases, checklists, and task tracking. Keep them authoritative and up to date. (Large historical plans live in `docs/archive/`.)
 - Every PR touching the frozen safety surface (or the *description* of that surface in docs) must reference the relevant items in `docs/governance/03-todo.md` (or precise docs/todos/ e.g. docs/todos/02-P1-freeze.md#P1-02) and run `./scripts/check-live-safety-freeze.sh`.
 - On every phase exit declared in `docs/governance/01-prod.md`, also update `docs/governance/03-todo.md` (thin) + relevant docs/todos/*.md (move/complete items), `docs/governance/02-prerequisites.md` if the checklist evolved, and the "Last updated" note in the affected docs.
-- When a cross-reference is still aspirational (e.g. `docs/operations/futures-phase0-operator-sop.md` before Doc Phase 1), it must say so explicitly: "Planned for Doc Phase X – current details live in docs/governance/01-prod.md / docs/reference/01-instructions.md §N".
+- When a cross-reference is still aspirational, it must say so explicitly: "Planned for Doc Phase X – current details live in docs/governance/01-prod.md / docs/reference/01-instructions.md §N". Realized Phase 0 operations docs are `docs/operations/01-futures-phase0-operator-sop.md` and `docs/operations/02-futures-testnet.md`.
 - Extraction rule: long-form phase/ritual/gate content lives in `docs/governance/01-prod.md` (or the dedicated SOP). `docs/reference/01-instructions.md` contains pointers + quick command templates, not duplicates.
 - Anti-rot ritual: before increasing any capital tier, the exit review must include "docs verified + links resolve + `docs/governance/03-todo.md` updated".
 - When new work lands in `src/simulation/` (Monte Carlo), the MC section in `docs/reference/01-instructions.md` and any governance mentions (README, docs/governance/03-todo.md, docs/governance/01-prod.md, docs/todos/03-MC-simulation.md) must be updated in the same PR or immediate follow-up.
@@ -256,7 +256,7 @@ cmake -B build \
   -DENABLE_BINANCE=ON \       # Binance live streaming + REST execution + testnet
                               #   (Boost.Beast + OpenSSL)
   -DENABLE_QUESTDB=ON \       # QuestDB persistence (raw POSIX sockets, no extra deps)
-  -DENABLE_WEB=ON \           # Embedded web UI server (civetweb; --web) — see docs/web-ui.md
+  -DENABLE_WEB=ON \           # Embedded web UI server (civetweb; --web) — see docs/reference/05-web-ui.md
   -DENABLE_LIVE_DATA=ON \     # Generic WebSocket data source
   -DENABLE_DEBUG=ON \         # Performance instrumentation (Abseil)
   -DENABLE_TSAN=ON \          # ThreadSanitizer (mutually exclusive with ASAN/UBSAN)
@@ -399,7 +399,7 @@ kill routes on any target** (read-only by construction). WS `/stream` pushes
 `src/web/frontend/` (plain CSS, not Tailwind). This is a new, deliberately
 decoupled design — distinct from the old Boost.Beast WebSocket UI + React SPA
 that were removed (whose hot-path coupling this layout avoids). Full guide:
-`docs/web-ui.md`.
+`docs/reference/05-web-ui.md`.
 
 ### C API for embedding
 `src/api/truetest_api.h` exposes an opaque handle + JSON-config surface
@@ -459,7 +459,7 @@ Live WS recording + replay: `BinanceRecorder` captures a live stream to file;
 `BinanceReplayTransport` replays it as a transport — useful for deterministic
 testing against real exchange data.
 
-Operator guide for testnet: planned (current details in `docs/reference/01-instructions.md` and `docs/governance/01-prod.md`).
+Operator guide for testnet: `docs/operations/02-futures-testnet.md` (with summary pointers in `docs/reference/01-instructions.md` and gates in `docs/governance/01-prod.md`).
 
 ### Binance Futures USDT-M (ENABLE_BINANCE=ON)
 Sibling provider registered as `binance-futures`. Same compile-time gate
@@ -531,7 +531,7 @@ every other `closePosition=true` order on the symbol. Partial-fraction
 intents (`qty_fraction != 1.0`) are declined; engine-side ExitManager
 remains the only enforcer for those.
 
-Operator guide: planned (current details in `docs/reference/01-instructions.md`, `docs/governance/01-prod.md`, `docs/governance/02-prerequisites.md`).
+Operator guides: `docs/operations/01-futures-phase0-operator-sop.md` and `docs/operations/02-futures-testnet.md` (with current gates in `docs/governance/01-prod.md` and pre-PR rules in `docs/governance/02-prerequisites.md`).
 
 ## Not yet implemented
 
@@ -569,7 +569,7 @@ Operator guide: planned (current details in `docs/reference/01-instructions.md`,
   Vite+TS frontend (`src/web/frontend/`, plain CSS). Third consumer of the
   `snapshot_dashboard()` seam — off the hot path, no control routes. This is a
   fresh, decoupled design; the older Boost.Beast WebSocket UI + React SPA that
-  were removed are unrelated to it. Spec: `docs/web-ui.md`.
+  were removed are unrelated to it. Spec: `docs/reference/05-web-ui.md`.
 - **Live venue: Binance (mainnet + spot testnet).** New venues will be
   sibling providers under `src/providers/`; the core does not need to
   change to add one.

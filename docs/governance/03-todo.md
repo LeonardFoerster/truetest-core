@@ -4,9 +4,9 @@
 
 **Post-merge note (Phase 5)**: Monte Carlo integration complete. All "active on monte-carlo" / "paused on monte-carlo" / "current branch focus" language removed from live docs (except legitimate feature names like --monte-carlo, "Monte Carlo" in capability descriptions, and historical notes in this plan / archive/). Private retail scope ("Intended Use & Scope" + "never be enterprise") established across root docs. ENGINE_AI_SUMMARY.md refs consolidated. MC-01/MC-02 marked landed. Safety freeze untouched by MC work.
 
-**Completed (Phase 8)**: Monte Carlo to master merge — all phases completed successfully. Master is the new baseline. Private retail character clearly stated. All technical safety docs remain intact. See `docs/archive/MERGE_PLAN.md` for the full historical execution record.  
+**Completed (Phase 8)**: Monte Carlo to master merge — all phases completed successfully. Master is the new baseline. Private retail character clearly stated. All technical safety docs remain intact. See `docs/archive/MERGE_PLAN.md` for the full historical execution record.
 
-**Last update**: 2026-07-03 (todos/ split applied per TODOS-SPLIT-SPEC; see docs/todos/00-OVERVIEW.md).  
+**Last update**: 2026-07-06 (removed stale duplicated todo tail after todos/ split; this file is now a thin high-level stub only. Full details live in docs/todos/).
 **How to reference**: "Addresses todo.md #P0-03 (Phase 0 evidence scaffolding)" or "Closes #A-07" (backward compat preserved in thin file); for precision use "Closes docs/todos/01-P0-phase0.md#P0-01" or "Addresses docs/todos/02-P1-freeze.md#P1-02".
 
 Items are grouped by theme (details in numbered docs/todos/ files). Completed items moved/stuck per-file or summarized here after phase declared done in `prod.md`.
@@ -98,79 +98,3 @@ Full details: see docs/todos/09-other-future-gates.md ; see 00-OVERVIEW.md . (In
 **If you find a broken or stale cross-reference**, treat it as a documentation bug (per prod.md) and fix or open an issue with the exact string.
 
 All operational detail, architecture decisions, current invariants, and the full development log live in `CLAUDE.md`, `docs/governance/01-prod.md`, `docs/governance/02-prerequisites.md`, `docs/governance/03-todo.md` (thin high-level) + `docs/todos/` (detailed), summary.md (root) + CLAUDE.md (for AI rules), `docs/reference/01-instructions.md`, `docs/reference/02-user-manual.md`, and the `docs/` tree (with root governance as SoT). Historical merge context: `docs/archive/MERGE_PLAN.md`. Consult `reports/phase0/` for Phase 0 evidence. Full task details authoritative in `docs/todos/`.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
----
-
-
-
-
-- **D-03** (Doc Phase 2): Create the core architecture files (`target-architecture.md`, `migration.md`, `MODEL.md`, `realism.md`) and begin extraction from `instructions.md`. (Aspirational hierarchy under `docs/architecture/` etc.; see docs/README.)
-- **D-04**: Add "Documentation Maintenance Rules" + anti-rot process (checklist in `prerequisites.md`, phase-exit ritual, explicit "planned" language for aspirational links). (Core rules landed in CLAUDE + prereq; enforce on all cross-refs.)
-- **D-05** (Future): Create remaining operations guides, reference material, archive population, and any lightweight link-check tooling.
-- **D-06 (this consolidation)**: After multi-agent analysis (code structure + incompletes + full MD classification), extract all current points from scattered documents, purge the duplicate/outdated todo lists / phase details / action items from docs/ files (replace with thin pointers: "See root `todo.md` (P0-*/MC-*/R-* etc.) and `prod.md` for current tasks, phases, and gates. This file is the technical reference."), produce single authoritative `todo.md` in root. Clean stale "Doc Phase" / missing-dir refs (make explicit "Planned for Doc Phase X – current details live in prod.md / instructions.md §N" per CLAUDE rule). Move historical `questdb-multi-week-hardening-guide.md` to `docs/archive/` (or mark clearly). Resolve 9-vs-10 files inconsistency. Enforce extraction rule (long-form in prod/SOP; pointers + quick templates in instructions). Sync "Last updated" + branch notes. (See plan for full details.)
-
-**Ongoing (CLAUDE "Documentation Maintenance Rules" + prod + prereq + todo)**:
-- The three root governance files (`prod.md`, `prerequisites.md`, `todo.md`) + `reports/phase0/` + CLAUDE are the single source of truth. Keep them authoritative and up to date.
-- Every PR touching the frozen safety surface (or the *description* of that surface in docs) must reference the relevant items in `todo.md` and run `./scripts/check-live-safety-freeze.sh`.
-- On every phase exit declared in `prod.md`, also update `todo.md` (move/complete items), `prerequisites.md` if the checklist evolved, and the "Last updated" note in the affected docs.
-- When a cross-reference is still aspirational (e.g. `docs/operations/futures-phase0-operator-sop.md` before Doc Phase 1), it **must** say so explicitly: "Planned for Doc Phase X – current details live in prod.md / instructions.md §N".
-- Extraction rule: long-form phase/ritual/gate content lives in `prod.md` (or the dedicated SOP). `instructions.md` contains pointers + quick command templates, not duplicates.
-- Anti-rot ritual: before increasing any capital tier, the exit review must include "docs verified + links resolve + `todo.md` updated".
-- When new work lands in `src/simulation/` (Monte Carlo), the MC section in `docs/instructions.md` and any governance mentions (README, `todo.md`, `prod.md`) must be updated in the same PR or immediate follow-up.
-- If you find a broken or stale cross-reference, treat it as a documentation bug and either fix it or open an issue with the exact string that needs updating.
-
-**Aspirational / missing dirs & files** (referenced in docs/README, instructions, CLAUDE, todo, reports, etc.; do not exist yet; use explicit planned language):
-- `docs/operations/futures-phase0-operator-sop.md` (and `futures-testnet.md`, `demo-trading-workflow.md`)
-- `docs/architecture/` (target-architecture.md, migration.md, MODEL.md, realism.md, futures-order-lifecycle.md, ...)
-- `docs/reference/`, `docs/archive/` (unless created for historical guides)
-- Root: `archive/`, `decisions/`, `upcoming/`, `PHASE0_COMPLETION_PLAN.md`, Coiled_Spring...Guide.md
-- Keep lists in docs/README + instructions in sync with realized state.
-
----
-
-
-
-
-
-
----
-
-
-
-
-
----
-
-
-
-
-
-
-
-
-- Go-Live Gate rows (overarching; no capital tier increase permitted until all nine rows have two signatures + concrete evidence): 1. All prior phases met. 2. 60-day shadow report (published or internally audited). 3. Funding + tiered MMR exercised for ≥30 days. 4. DMS position-flattening logic tested (or very strong SOP + automation). 5. `--persist-strict` + encrypted creds demonstrated on ≥10 sessions. 6. Prometheus / alerting drill executed successfully. 7. All critical runbooks walked by at least two operators. 8. CCB size-increase request formally approved. 9. Independent safety review (internal or external) with written sign-off.
-
-
-
-
-
-
----
-
-
-
-

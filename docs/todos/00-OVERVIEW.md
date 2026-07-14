@@ -1,0 +1,138 @@
+# docs/todos/ Overview & Governance
+
+**Purpose**: Split detailed living task list from monolithic root todo.md. Enables precise PR references, easier maintenance, and logical grouping while preserving all substance, status, and context.
+
+**Numbering & Files**:
+- 00-OVERVIEW.md (this file): Structure, rules, mapping, reference guide, maintenance.
+- 01-P0-phase0.md: Phase 0 Immediate (P0-01..P0-04 + standing + status 0/15).
+- 02-P1-freeze.md: Phase 1 / Live-Safety Freeze (P1-01..P1-05 + frozen files list + checklist notes).
+- 03-MC-simulation.md: Monte Carlo Simulation (MC-01..MC-06 + standing invariants + landed notes).
+- 04-R-risk-management.md: Risk Management (R-01..R-05 + additional Go-Live row 3).
+- 05-S-dms-kill-brackets.md: DMS / Kill-Switch / Bracket Hardening (S-01..S-06 + additional).
+- 06-D-documentation-structure.md: Documentation & Structure (D-01..D-06 + ongoing rules + aspirational dirs).
+- 07-A-adaptive-hybrid.md: Adaptive Hybrid Strategy (A-01..A-07 + note on lower-pri + MC context).
+- 08-H-persistence-observability.md: Persistence, Observability & Hardening (H-01..H-06 + additional + QuestDB branch note).
+- 09-other-future-gates.md: Other / Nice-to-Have / Future Venues + Go-Live Gate (9 rows) + invariants from CLAUDE/ENGINE + AI coding rules summary.
+
+**How to Reference in PRs / Commits** (authoritative):
+- Fine-grained (preferred for precision): "Closes docs/todos/01-P0-phase0.md#P0-01" or "Addresses docs/todos/02-P1-freeze.md#P1-02 (deepdive + per-lot)".
+- Use GitHub-style anchors (#P0-01) — items must be headed with `**P0-01**` (or equivalent) for link targets.
+- Overview still valid: "Addresses todo.md #P0-03 (Phase 0 evidence scaffolding)" or "Closes #A-07" (for backward compat with existing prose).
+- Every frozen-surface PR (or docs describing surface) **must** reference relevant item(s) per prerequisites.md + CLAUDE.
+- Example from existing: "Addresses todo.md #P1-02".
+
+**Maintenance Rules** (enforce per CLAUDE "Documentation Maintenance Rules", prod.md, prerequisites.md, docs/README, todo D-04/D-06):
+- Edit the *specific* numbered file for item text, status, additions, or moves/strikes.
+- When phase exit declared in prod.md: (a) move/strike/complete items in the corresponding todos/*.md (add "Landed in PR #XXXX" note), (b) add any surfaced follow-ups to the file, (c) update "Last updated" + summary in that file + thin root todo.md, (d) update prod.md + prerequisites.md + reports/phase0/ as required.
+- Anti-rot: Before any capital tier increase, include "docs verified + links resolve + todo.md updated" (verify cross-refs point to correct docs/todos/ paths or thin root).
+- Extraction: Long-form (ritual, templates, gates) stays in prod.md or dedicated SOP. todos/ files hold actionable items + current status + context paragraphs.
+- Planned language: For aspirational (e.g. docs/operations/... before Doc Phase 1), use "Planned for Doc Phase X – current details live in prod.md / instructions.md §N (or root todo.md / docs/todos/ for tasks)".
+- When MC work lands in src/simulation/: update MC section in docs/reference/01-instructions.md + governance (incl. relevant todos/ file + docs/governance/03-todo.md + docs/governance/01-prod.md).
+- If broken/stale cross-ref found: treat as doc bug; fix or note exact string.
+- Sync lists: Frozen files list in 02-P1-freeze.md must match scripts/check-live-safety-freeze.sh + prod.md + prerequisites.md + CLAUDE.
+- Root thin todo.md (see Decision below) is the high-level entry; detailed content authoritative in docs/todos/.
+- On every update: update "Last update" with summary (e.g. "P0-02 batch review landed; see docs/todos/01-P0-phase0.md").
+- Historical: Completed items moved/stuck in the relevant file's "Completed in this group" subsection (or OVERVIEW summary). Large plans stay in docs/archive/.
+
+**Current Focus Summary** (keep in sync with thin root todo.md + prod.md): Post monte-carlo integration (all phases complete per MERGE_PLAN). Phase 0: 0/15. Phase 1 enforcement active. MC research tool only (does not relax gates). Read first: summary.md + CLAUDE.md + prod.md + prerequisites.md + this + thin root todo.md.
+
+**Mapping from Original todo.md Sections**: See section 3 below.
+
+**Thin Root todo.md Role**: See Decision + section 4.
+
+---
+
+## 1. Recommended Directory Structure for docs/todos/
+
+```
+docs/todos/
+├── 00-OVERVIEW.md
+├── 01-P0-phase0.md
+├── 02-P1-freeze.md
+├── 03-MC-simulation.md
+├── 04-R-risk-management.md
+├── 05-S-dms-kill-brackets.md
+├── 06-D-documentation-structure.md
+├── 07-A-adaptive-hybrid.md
+├── 08-H-persistence-observability.md
+└── 09-other-future-gates.md
+```
+
+(No subdirs; flat for simplicity. No 10-completed.md; completed items handled per-file or in OVERVIEW summary as phases declare done.)
+
+Rationale for grouping + numbering (logical by existing todo.md sections; sequential for easy ordering; P0 first as current focus):
+- 00: Nav, rules, mapping, reference examples (always first)
+- 01: Phase 0 (active, highest operational priority; P0-*)
+- 02: Phase 1 (enforcement active; P1-*)
+- 03: Monte Carlo (recently integrated; MC-*)
+- 04: Risk (highest remaining technical per gaps/todo)
+- 05: DMS/Kill/Brackets (S-* hardening)
+- 06: Documentation (D-* + ongoing rules; self-referential to split)
+- 07: Adaptive Hybrid (lower-pri A-*; historical + MC context)
+- 08: Persistence/QuestDB/Hardening (H-*; note: all QuestDB work on `database` branch per todo)
+- 09: Other/Nice-to-Have + Go-Live Gate rows + future venues (unnumbered bullets + overarching gates)
+
+Filenames chosen for readability (e.g. 01-P0-phase0.md not 01-P0.md) and to match examples in task ("01-P0-phase0.md").
+
+---
+
+## 2. Content for Each File (Full Extraction + Status + Context)
+
+See the individual numbered files. Each contains verbatim extraction of sections/items/status/context paragraphs from the canonical (governance/03-todo.md), with added framing: header, "See 00-OVERVIEW.md", anchors like **P0-01**, last-updated, pointers to prod/reports.
+
+---
+
+## 3. Exact Mapping from Current todo.md Sections to Target Files
+
+| Original todo.md Section Header (approx line) | Target File | Items Included | Notes / Extra Context to Pull |
+|-----------------------------------------------|-------------|----------------|--------------------------------|
+| (Header + Status + Post-merge note + How to reference + Current focus + Read first) | 00-OVERVIEW.md (intro) + thin root todo.md | N/A (structure) | Full header philosophy; "Last update"; MC integration note. |
+| ## Phase 0 Immediate (Unblock...; 0/15) (~19) + P0-01..04 + Standing + Current status | 01-P0-phase0.md | P0-01 to P0-04 + Standing + Current status | Pull ritual details context from prod.md (template) + reports/phase0/README.md + PROGRESS.md (but keep pointers; do not duplicate long-form). Sync 0/15 note. |
+| ## Phase 1 / Live-Safety Freeze (~31) + P1-01..05 + Frozen Files + Mandatory pre-PR + On every phase exit | 02-P1-freeze.md | P1-01 to P1-05 + full Frozen Files block (10 files) + checklist para | Include full P1-02 validation evidence block exactly. Note plan.md ref. Sync frozen list with other sources (but this file is one SoT for tasks). |
+| ## Monte Carlo Simulation (integrated) (~69) + MC-01..06 + Standing invariants + From code incompletes | 03-MC-simulation.md | MC-01 to MC-06 + full Standing + incompletes | Landed notes for MC-01/MC-02. Pull caveats from user-manual.md + docs/README.md + MERGE_PLAN.md (historical). Note MC does not relax P0/1. |
+| ## Risk Management (~89) + R-01..05 + Additional | 04-R-risk-management.md | R-01..R-05 + Additional (Go-Live row 3) | Reference production-readiness-gaps historical if needed (archive). |
+| ## DMS / Kill-Switch / Bracket Hardening (~99) + S-01..06 + Additional | 05-S-dms-kill-brackets.md | S-01..S-06 + Additional (Go-Live row 4) | Note DMS in binance_futures_dead_mans_switch.h etc. |
+| ## Documentation & Structure (~110) + D-01..06 + Ongoing + Aspirational / missing dirs | 06-D-documentation-structure.md | D-01 to D-06 + full Ongoing rules list + Aspirational list | This split is execution of D-06. Update cross-refs in this file + others during impl. Explicit planned language examples. |
+| ## Adaptive Hybrid Strategy (~139) + A-01..07 + (See detailed spec...) | 07-A-adaptive-hybrid.md | A-01 to A-07 + full note | Link to docs/reference/06-adaptive-hybrid-strategy.md (keep status note in sync). MC-05 context. |
+| ## Persistence, Observability & Hardening (~158) + H-01..06 + Additional + (from code/gaps) | 08-H-persistence-observability.md | H-01 to H-06 + Additional + branch note | Link to docs/reference/03-db.md + docs/archive/questdb-multi-week-hardening-guide.md (H-01 explicit). MC-06 note. |
+| ## Other / Nice-to-Have / Future Venues (~172) + multi-symbol list + Go-Live Gate rows + Risk resume + QuestDB hard-fail + From CLAUDE/ENGINE + AI coding rules | 09-other-future-gates.md | All unnumbered bullets + full 9-row Go-Live + invariants + AI rules summary | Cross-ref prod.md Go-Live table (keep long-form in prod). |
+| ## Completed / Superseded Items (~196) + Maintenance note + final para | 00-OVERVIEW.md (summary subsection) + bottoms of relevant numbered files | N/A | Move landed (e.g. D-01, MC-01/02, initial governance) with PR context. Maintenance note distributed to 00-OVERVIEW + CLAUDE/prod cross-refs. |
+
+---
+
+## 4. Decision: Thin Canonical todo.md ?
+
+**Recommendation: KEEP a thin canonical `todo.md` at the ROOT (people/scripts continue to reference/edit the high-level stub for status/summary; full item details + context live in docs/todos/*.md).**
+
+**Justification** (based on analysis of refs + maintenance rules + D-06 + CLAUDE + docs/README):
+- **Compatibility**: Dozens of cross-refs assume "root todo.md", "todo.md", "root `todo.md`", "Addresses todo.md #P1-02", "see root `todo.md` (P0-01..)", "MC-* items in root [todo.md]", "update ... / todo.md ...". Changing location of canonical would require coordinated mass edits (README.md, docs/*.md x6+, prerequisites.md, reports/phase0/*, scripts/phase0/create-*.sh, feature.md, user-manual, instructions, AdaptiveHybridStrategy.md, archive/MERGE_PLAN + questdb guide, main.inc comments, test comments, CLAUDE.md, prod.md indirect). This is scope creep for "todos/ part".
+- **Scripts & rituals**: create-evidence-bundle.sh explicitly says "Update prod.md / todo.md / prerequisites.md". Root path is conventional for governance (alongside prod.md, prerequisites.md, CLAUDE.md, summary.md). Thin root preserves "the single source of record" phrasing in header.
+- **PR / human ergonomics**: Overview references ("Closes #A-07" or "todo.md P0-03") remain valid. Fine-grained use docs/todos/ paths (as specified in task). Humans start at root todo.md.
+- **Maintenance per rules**: Thin root holds high-level "Current focus", "Last update", philosophy, "Read first", and a TOC/links to docs/todos/*.md + "See docs/todos/00-OVERVIEW.md for full split items, numbering, and precise anchors." Detailed edits happen in numbered files. Phase-exit updates hit both (thin root summary + specific file).
+- **Alternatives considered & rejected**:
+  - Fully move to folder (no thin root): High breakage risk; would force updates to 15+ locations as part of this; contradicts "thin canonical ... that people/scripts edit".
+  - docs/todos/00-master.md as canonical editable: Works but less discoverable than root; requires updating "root todo.md" prose everywhere anyway.
+  - docs/governance/todo.md: No such dir; would create new convention inconsistent with current "root governance files" language in CLAUDE/docs/README.
+- **Thin root content skeleton** (high-level only; no full item duplication):
+  - Header/Status/Post-merge/How to ref/Current focus/Read first (mostly unchanged or slimmed).
+  - "Full detailed task items by group live in `docs/todos/` (see `docs/todos/00-OVERVIEW.md` for structure, numbering, anchors, and maintenance). This thin file is the canonical high-level entry point and summary of record."
+  - Short status bullets or links: "P0 status: see docs/todos/01-P0-phase0.md (0/15)".
+  - "Last update: ... (todos/ split applied; see docs/todos/00-OVERVIEW.md)".
+  - Keep "Completed" high-level summary.
+- **Future**: If later decided, root can become pure symlink stub or redirect note, but for this overhaul keep thin root.
+
+**Impl note**: After creating docs/todos/ files, thin the root todo.md (do not delete full content until split files are in place and verified; use search/replace to slim + add pointer). Update D-06 language if present.
+
+---
+
+## 5. Cross-Reference Updates Performed
+
+- Updated examples in prerequisites.md (docs/governance/02-prerequisites.md), docs/README.md, reports/phase0/*, user-manual, AdaptiveHybridStrategy (now in reference/), instructions.md, create-evidence-bundle.sh, root README.md, archive notes, src comments where applicable, prod.md, CLAUDE.md, summary.md, governance files.
+- Precise item refs now point to e.g. `docs/todos/01-P0-phase0.md#P0-01` ; high-level keep "todo.md" + note "full details in docs/todos/ (see 00-OVERVIEW.md)".
+- Backward compat: "Addresses todo.md #P0-03" preserved in thin file and where historical.
+- Frozen files list in 02-P1-freeze.md verified identical to scripts/check-live-safety-freeze.sh + docs/governance/02-prerequisites.md + docs/governance/01-prod.md + CLAUDE.md .
+- Also updated internal governance references post-reorg for accuracy where they intersected todo split (e.g. governance/03-todo.md thinned to point to docs/todos/).
+
+**Last updated**: 2026-07-03 (todos/ split implementation per TODOS-SPLIT-SPEC).
+
+See thin `docs/governance/03-todo.md` for high-level canonical entry + individual `docs/todos/NN-*.md` for full verbatim task details.

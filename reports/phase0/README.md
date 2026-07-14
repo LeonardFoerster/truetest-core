@@ -5,10 +5,10 @@
 **Layout**
 - `PROGRESS.md` — Master tracker table (one row per qualifying session + summary). This is the document reviewers and the CCB consult.
 - `templates/phase0-session-note.md` — Printable/fillable one-page note template (signed after each session).
-- `ops/` — Batch review notes (every 5 sessions) and volatility logs.
+- `ops/` — Batch review notes (every 5 sessions), volatility logs, and `batch-review-template.md`.
 - Individual session artifacts live here or are referenced by run-tag (the zstd `.bin`, QuestDB `run_tag`, post-session `grep` output, etc.).
 
-**Process (see `docs/governance/01-prod.md` for the authoritative command template + ritual + "why each element"; see `reports/phase0/` files + `scripts/phase0/` for operational machinery. Printable SOP planned in `docs/operations/...` — "Planned for Doc Phase X – current details in docs/governance/01-prod.md + these files")**
+**Process (see `docs/governance/01-prod.md` for the authoritative command template + ritual + "why each element"; see `reports/phase0/` files + `scripts/phase0/` for operational machinery; use the printable SOP in `docs/operations/01-futures-phase0-operator-sop.md`)**
 1. Run `./scripts/phase0/new-session.sh` (prints exact command + target dir under this tree).
 2. Execute the session with all safety nets armed.
 3. Run `post-session.sh`, volatility classifier, mandatory post-halt `grep`.
@@ -20,4 +20,4 @@
 
 All entries must survive a clean 4-hour+ `engine_shadow` mainnet run with zero unexplained drift before counting toward the gate.
 
-See `docs/governance/01-prod.md` (Phase 0 section) and the operator SOP for exact exit criteria and artifact checklist.
+See `docs/governance/01-prod.md` (Phase 0 section) and `docs/operations/01-futures-phase0-operator-sop.md` for exact exit criteria and artifact checklist.

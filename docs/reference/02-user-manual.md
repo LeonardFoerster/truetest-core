@@ -401,7 +401,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - `tests/` (~40 test files + fixtures + golden): Comprehensive unit, integration, golden regression, and live testnet tests.
 
 **Documentation** (`docs/`):
-- `demo-trading-workflow.md`, `futures-order-lifecycle.md`, `futures-testnet.md`, `realism.md`, `performance.md`, `strategy-validation.md`, `testnet.md`, `licenses.md`, and others - detailed operational and design guidance.
+- `docs/operations/02-futures-testnet.md`, `docs/architecture/03-realism.md`, `docs/architecture/04-performance.md`, and future/planned files such as demo-trading-workflow, futures-order-lifecycle, strategy-validation, testnet, and licenses - detailed operational and design guidance.
 
 ---
 

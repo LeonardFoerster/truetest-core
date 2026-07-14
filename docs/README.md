@@ -32,8 +32,8 @@ The full aspirational hierarchy is being populated gradually. `docs/archive/` ho
 - `reference/02-user-manual.md` — High-level architecture + operator overview. Includes "Stochastic Backtesting (Monte Carlo)" subsection.
 - `reference/05-web-ui.md` — Opt-in browser cockpit + backtest review (`-DENABLE_WEB=ON`, `--web`).
 - `reference/03-db.md`, `reference/04-flags.md`, `reference/06-adaptive-hybrid-strategy.md`, this `README.md`.
-- `architecture/` — only `04-performance.md` realized; others aspirational.
-- `operations/` — empty (SOPs planned).
+- `architecture/` — `01-target-architecture.md`, `02-model.md`, `03-realism.md`, and `04-performance.md` realized; deeper architecture files remain aspirational.
+- `operations/` — `01-futures-phase0-operator-sop.md` and `02-futures-testnet.md` realized; additional runbooks remain planned.
 - `governance/` — `01-prod.md`, `02-prerequisites.md`, `03-todo.md`, `04-summary.md` (authoritative; content reduction + pointers applied in 2026-07).
 
 **Note on "info files"**: `reference/06-adaptive-hybrid-strategy.md` (lower-priority strategy spec with demo caveats — see governance/03-todo.md A-*). `docs/archive/questdb-multi-week-hardening-guide.md` (historical).
@@ -67,7 +67,7 @@ Older aspirational refs cleaned. Archive is for completed/historical plans. Acti
 See also the master recommended sequence in [`00-INDEX.md`](00-INDEX.md) (01-N reading/processing order per Planner-Structure spec).
 
 1. **I just want to build and run the engine** → Start with [reference/01-instructions.md](reference/01-instructions.md)
-2. **I'm preparing for live trading or Phase 0** → Read [governance/01-prod.md](governance/01-prod.md) (current ritual + command template + full exit criteria + why each element) + `reports/phase0/` (evidence + templates) + [governance/03-todo.md](governance/03-todo.md) (P0-01..P0-04; 0/15 status). Printable SOP planned in operations/ ( "Planned for Doc Phase X – current details in governance/01-prod.md + reports/phase0/").
+2. **I'm preparing for live trading or Phase 0** → Read [governance/01-prod.md](governance/01-prod.md) (current ritual + command template + full exit criteria + why each element) + `reports/phase0/` (evidence + templates) + [operations/01-futures-phase0-operator-sop.md](operations/01-futures-phase0-operator-sop.md) + [governance/03-todo.md](governance/03-todo.md) (P0-01..P0-04; 0/15 status). Use [operations/02-futures-testnet.md](operations/02-futures-testnet.md) for non-qualifying testnet rehearsal drills.
 3. **I'm reviewing a PR that touches safety** → Read [../CLAUDE.md](../CLAUDE.md) + [governance/02-prerequisites.md](governance/02-prerequisites.md) (mandatory checklist) + [governance/03-todo.md](governance/03-todo.md) (P1-* + frozen files + process; or docs/todos/02-P1-freeze.md#P1-02). See CLAUDE + governance/01-prod.md (model rules + anti-patterns; planned architecture/ for D-03).
 4. **I need the full technical picture** → [reference/02-user-manual.md](reference/02-user-manual.md) + [reference/01-instructions.md](reference/01-instructions.md) + root governance + [governance/01-prod.md](governance/01-prod.md). Target architecture / realism docs planned under architecture/ (D-03; current details in governance/01-prod.md + reference/01-instructions.md).
 5. **I want to understand the Monte Carlo / stochastic backtesting capability** → Start with the Monte Carlo section in [reference/01-instructions.md](reference/01-instructions.md), the "Stochastic Backtesting" subsection in [reference/02-user-manual.md](reference/02-user-manual.md), and the MC-* items in [governance/03-todo.md](governance/03-todo.md) (high-level) or docs/todos/03-MC-simulation.md. Governance in root README, governance/01-prod.md, governance/04-summary.md + CLAUDE.md. (MC is research/robustness tool; does not relax Phase 0/1 gates. Historical merge plan in `docs/archive/MERGE_PLAN.md`).
