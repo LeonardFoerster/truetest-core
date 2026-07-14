@@ -368,16 +368,28 @@ MigrationBackup/
 FodyWeavers.xsd
 
 
-# To-do file
+# Root-level junk docs (docs/ subtree is always tracked and wanted)
 to_do.md
-CLAUDE.MD
 features.md
-*.md
-*.csv
-# Project documentation under docs/ is intentionally tracked.
-!docs/*.md
+CLAUDE.md
 .claude/
-upcmoing/
+upcoming/
+
+# IDE metadata (JetBrains; was accidentally tracked)
+.idea/
+
+# Volatile logs and large temp data. Narrow rules so intentional small
+# samples, golden data and fixtures under tests/ stay trackable.
+*.ttlog
+*.ttcache
+truetest_debug.log
+truetest_*.log
+
+# Root data dumps only (historical large CSV ignored; small sample kept)
+*.csv
+!market_data.csv
+!tests/fixtures/*.csv
+!tests/golden/*.csv
 
 # CMake build directory — single canonical build dir only
 build/
