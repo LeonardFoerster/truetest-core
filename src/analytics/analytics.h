@@ -170,6 +170,7 @@ public:
         {
             r.has_last_trade = true;
             r.last_trade_pnl = trades_.back().pnl;
+            r.last_trade_seq = trades_.size();
         }
         // Phase 2.3 + 2.4 - populated from L2 events, funding events, and equity tracking
         r.equity = last_equity_;

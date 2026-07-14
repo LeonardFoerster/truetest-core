@@ -3,6 +3,51 @@
 
 #include <cmath>
 
+namespace {
+
+constexpr double kQtyEps = 1e-12;
+
+double signed_order_quantity(const order_event& order)
+{
+    return (order.get_side() == order_side::buy)
+        ? order.get_quantity()
+        : -order.get_quantity();
+}
+
+double position_price(const position& pos)
+{
+    return std::abs(pos.qty) > kQtyEps
+        ? std::abs(pos.cost_basis / pos.qty)
+        : 0.0;
+}
+
+double valuation_price(const order_event& order, const position* pos)
+{
+    if (order.get_price() > 0.0)
+        return order.get_price();
+    return pos ? position_price(*pos) : 0.0;
+}
+
+double projected_position_notional(const order_event& order,
+                                   const position* pos)
+{
+    const double current_qty = pos ? pos->qty : 0.0;
+    const double projected_qty = current_qty + signed_order_quantity(order);
+    const double price = valuation_price(order, pos);
+    return std::abs(projected_qty) * price;
+}
+
+bool reduces_position_exposure(const order_event& order, const position* pos)
+{
+    if (!pos)
+        return false;
+    const double current_qty = pos->qty;
+    const double projected_qty = current_qty + signed_order_quantity(order);
+    return std::abs(projected_qty) < std::abs(current_qty) - kQtyEps;
+}
+
+} // namespace
+
 RiskManager::RiskManager(risk_limits limits)
     : limits_(std::move(limits)) {}
 
@@ -48,42 +93,45 @@ risk_action RiskManager::check_order(const order_event& order,
     if (static_cast<int>(snap.total_orders - snap.total_fills) >= limits_.max_open_orders)
         return risk_action::reject;
 
-    if (order.get_side() == order_side::buy)
-    {
-        const auto& positions = port.get_positions();
-        auto it = positions.find(order.get_symbol());
-        double current_notional = 0.0;
-        if (it != positions.end())
-            current_notional = std::abs(it->second.cost_basis);
+    const auto& positions = port.get_positions();
+    const auto it = positions.find(order.get_symbol());
+    const position* current_pos = (it != positions.end()) ? &it->second : nullptr;
+    const bool reducing_exposure = reduces_position_exposure(order, current_pos);
+    const double projected_notional = projected_position_notional(order, current_pos);
 
-        double order_notional = order.get_quantity() * order.get_price();
-        if (current_notional + order_notional > limits_.max_position_value)
+    if (!reducing_exposure &&
+        projected_notional > limits_.max_position_value)
+        return risk_action::reject;
+
+    // Phase 2.3 - max position as % of equity
+    if (!reducing_exposure &&
+        limits_.max_position_pct_of_equity > 0.0 && snap.equity > 0.0) {
+        double max_notional = snap.equity * limits_.max_position_pct_of_equity;
+        if (projected_notional > max_notional)
             return risk_action::reject;
-
-        // Phase 2.3 - max position as % of equity
-        if (limits_.max_position_pct_of_equity > 0.0 && snap.equity > 0.0) {
-            double max_notional = snap.equity * limits_.max_position_pct_of_equity;
-            if (current_notional + order_notional > max_notional)
-                return risk_action::reject;
-        }
     }
 
-    if (order.get_side() == order_side::buy)
+    double projected_total_exposure = 0.0;
+    for (const auto& [sym, pos] : positions)
     {
-        double total_exposure = 0.0;
-        for (const auto& [sym, pos] : port.get_positions())
-            total_exposure += std::abs(pos.cost_basis);
+        if (sym == order.get_symbol())
+            projected_total_exposure += projected_notional;
+        else
+            projected_total_exposure += std::abs(pos.cost_basis);
+    }
+    if (it == positions.end())
+        projected_total_exposure += projected_notional;
 
-        double order_notional = order.get_quantity() * order.get_price();
-        if (total_exposure + order_notional > limits_.max_portfolio_exposure)
+    if (!reducing_exposure &&
+        projected_total_exposure > limits_.max_portfolio_exposure)
+        return risk_action::reject;
+
+    // Phase 2.3 - portfolio-wide % of equity
+    if (!reducing_exposure &&
+        limits_.max_position_pct_of_equity > 0.0 && snap.equity > 0.0) {
+        double max_portfolio_notional = snap.equity * limits_.max_position_pct_of_equity;
+        if (projected_total_exposure > max_portfolio_notional)
             return risk_action::reject;
-
-        // Phase 2.3 - portfolio-wide % of equity
-        if (limits_.max_position_pct_of_equity > 0.0 && snap.equity > 0.0) {
-            double max_portfolio_notional = snap.equity * limits_.max_position_pct_of_equity;
-            if (total_exposure + order_notional > max_portfolio_notional)
-                return risk_action::reject;
-        }
     }
 
     // Phase 2.4 - spread circuit breaker (populated in Analytics from L2 snapshots when --depth-stream is active)
@@ -141,6 +189,15 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
     if (limits_.max_daily_loss > 0.0)
     {
         update_daily_reset(fill.get_timestamp());
+        // Include realized trading losses. Analytics trade PnL is already net
+        // of opening/closing commissions, so do not add fill commissions again.
+        if (snap.has_last_trade && snap.last_trade_seq != 0 &&
+            snap.last_trade_pnl < 0.0 &&
+            snap.last_trade_seq != last_daily_trade_seq_added_)
+        {
+            daily_loss_ += -snap.last_trade_pnl;
+            last_daily_trade_seq_added_ = snap.last_trade_seq;
+        }
         if (daily_loss_ >= limits_.max_daily_loss)
             return risk_action::halt;
     }
@@ -171,10 +228,11 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
     risk_snapshot rs;
     rs.max_drawdown = snap.max_drawdown;
     if (!snap.trades.empty())
-    {
-        rs.has_last_trade = true;
-        rs.last_trade_pnl = snap.trades.back().pnl;
-    }
+	    {
+	        rs.has_last_trade = true;
+	        rs.last_trade_pnl = snap.trades.back().pnl;
+	        rs.last_trade_seq = snap.trades.size();
+	    }
     rs.equity = snap.final_equity;
     return check_post_fill(fill, port, rs);
 }
@@ -189,10 +247,7 @@ void RiskManager::on_fill(const fill_event& fill)
     }
 
     if (limits_.max_daily_loss > 0.0)
-    {
         update_daily_reset(fill.get_timestamp());
-        daily_loss_ += fill.get_commission();
-    }
 }
 
 // Phase A (MC object reuse)
@@ -203,4 +258,5 @@ void RiskManager::reset()
     daily_loss_ = 0.0;
     daily_start_equity_ = 0.0;
     daily_reset_tp_ = {};
+    last_daily_trade_seq_added_ = 0;
 }

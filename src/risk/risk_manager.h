@@ -28,7 +28,7 @@ struct risk_limits
     int max_open_orders = 1000;
     double max_portfolio_exposure = 5e9;
 
-    double max_daily_loss = 0.0;
+    double max_daily_loss = 0.0;  // daily_loss_ accumulates realized negative PnL
     int daily_reset_hour = 0;
     int max_trades_per_hour = 0;
     int max_orders_per_minute = 0;
@@ -54,6 +54,9 @@ struct risk_snapshot
     std::size_t  total_fills    = 0;
     double       last_trade_pnl = 0.0;
     bool         has_last_trade = false;
+    std::size_t  last_trade_seq = 0;
+
+    // Note: daily_loss is maintained internally in RiskManager (realized negative trade PnL)
 
     // Phase 2.3 — filled by analytics worker before passing to RiskManager
     double equity = 0.0;
@@ -100,9 +103,13 @@ private:
     std::deque<timestamped_entry> order_timestamps_;
     std::deque<timestamped_entry> trade_timestamps_;
 
-    double daily_loss_ = 0.0;
+    double daily_loss_ = 0.0;  // realized losses (see check_post_fill)
     double daily_start_equity_ = 0.0;
     std::chrono::system_clock::time_point daily_reset_tp_{};
+
+    // Guard to avoid re-adding the same closed trade if check_post_fill is
+    // invoked multiple times for the latest analytics snapshot.
+    std::size_t last_daily_trade_seq_added_ = 0;
 
     void update_daily_reset(std::chrono::system_clock::time_point now);
     void prune_old_entries(std::deque<timestamped_entry>& entries,
