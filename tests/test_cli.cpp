@@ -5,10 +5,12 @@
 #include <string>
 #include <fstream>
 
-// Helper: run truetest with args, capture stdout+stderr, return exit code
-static int run_truetest(const std::string& args, std::string& output)
+// Helper: run engine binary with args, capture stdout+stderr, return exit code
+static int run_engine(const std::string& binary,
+                      const std::string& args,
+                      std::string& output)
 {
-    std::string cmd = "./build/engine_backtest " + args + " 2>&1";
+    std::string cmd = "./build/" + binary + " " + args + " 2>&1";
     std::array<char, 4096> buf;
     output.clear();
 
@@ -21,6 +23,16 @@ static int run_truetest(const std::string& args, std::string& output)
     int status = pclose(pipe);
     // pclose returns the process exit status encoded; extract it
     return WEXITSTATUS(status);
+}
+
+static int run_truetest(const std::string& args, std::string& output)
+{
+    return run_engine("engine_backtest", args, output);
+}
+
+static int run_engine_live(const std::string& args, std::string& output)
+{
+    return run_engine("engine_live", args, output);
 }
 
 // ─── B1: CLI11 parsing ─────────────────────────────────────────────────────
@@ -246,6 +258,72 @@ TEST(DryRun, InvalidFeeModelExitsOne)
     int rc = run_truetest("--dry-run --fee badmodel", out);
     EXPECT_EQ(rc, 1);
     EXPECT_NE(out.find("Unknown fee model"), std::string::npos);
+}
+
+TEST(DryRun, LiveFlagRejectedOnBacktestBinary)
+{
+    std::string out;
+    int rc = run_truetest("--dry-run --live", out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("Live mode is only permitted on the engine_live binary"),
+              std::string::npos);
+}
+
+TEST(DryRun, ModeLiveRejectedOnBacktestBinary)
+{
+    std::string out;
+    int rc = run_truetest("--dry-run --mode live", out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("Live mode is only permitted on the engine_live binary"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetFuturesRequiresVenueCaps)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("Refusing mainnet futures live mode without venue risk caps"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetFuturesRequiresDailyLoss)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live --max-notional 25",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("Refusing mainnet futures live mode with --max-daily-loss disabled"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetFuturesAcceptsCapsAndDailyLoss)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live --max-notional 25 --max-daily-loss 5",
+        out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryTestnetFuturesAllowsWarningOnlyCaps)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live --testnet",
+        out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("No venue risk caps set"), std::string::npos);
+    EXPECT_NE(out.find("--max-daily-loss is 0"), std::string::npos);
+    EXPECT_NE(out.find("Config is VALID"), std::string::npos);
 }
 
 // ─── B4: QuestDB persistence flags ─────────────────────────────────────────

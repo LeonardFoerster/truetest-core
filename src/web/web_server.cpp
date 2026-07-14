@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <vector>
 
 namespace truetest::web {
@@ -25,6 +26,12 @@ bool token_matches(const char* got, const std::string& want)
 {
     if (!got) return false;
     return want == got;
+}
+
+bool starts_with(const std::string& s, const char* prefix)
+{
+    const std::size_t n = std::strlen(prefix);
+    return s.size() >= n && s.compare(0, n, prefix) == 0;
 }
 
 } // namespace
@@ -106,7 +113,7 @@ void WebServer::stop()
 }
 
 // ── auth ────────────────────────────────────────────────────────────────────
-bool WebServer::authorized(const mg_connection* c) const
+bool WebServer::authorized(const mg_connection* c, bool allow_query_token) const
 {
     if (cfg_.token.empty()) return true;
 
@@ -117,8 +124,10 @@ bool WebServer::authorized(const mg_connection* c) const
         const char* p = std::strstr(h, "Bearer ");
         if (p && token_matches(p + 7, cfg_.token)) return true;
     }
-    // ?token=<token> fallback (browsers can't set headers on a WS handshake).
-    if (ri && ri->query_string)
+    // ?token=<token> fallback is allowed only where browser APIs cannot send
+    // headers (WebSocket handshake). REST uses Authorization to keep tokens
+    // out of URLs, logs and browser history.
+    if (allow_query_token && ri && ri->query_string)
     {
         char buf[256];
         int n = mg_get_var(ri->query_string, std::strlen(ri->query_string),
@@ -126,6 +135,23 @@ bool WebServer::authorized(const mg_connection* c) const
         if (n > 0 && token_matches(buf, cfg_.token)) return true;
     }
     return false;
+}
+
+bool WebServer::origin_allowed(const mg_connection* c) const
+{
+    const char* origin = mg_get_header(c, "Origin");
+    if (!origin || !*origin) return true; // CLI/local non-browser clients.
+
+    const char* host = mg_get_header(c, "Host");
+    if (!host || !*host) return false;
+
+    const std::string o(origin);
+    return o == "http://" + std::string(host)
+        || o == "https://" + std::string(host)
+        || (starts_with(o, "http://localhost:")
+            && cfg_.bind_addr == "127.0.0.1")
+        || (starts_with(o, "http://127.0.0.1:")
+            && cfg_.bind_addr == "localhost");
 }
 
 // ── serialization helpers ────────────────────────────────────────────────────
@@ -142,7 +168,6 @@ void WebServer::send_json(mg_connection* c, const std::string& body, const char*
               "HTTP/1.1 %s\r\n"
               "Content-Type: application/json\r\n"
               "Content-Length: %zu\r\n"
-              "Access-Control-Allow-Origin: *\r\n"
               "Cache-Control: no-store\r\n"
               "Connection: close\r\n\r\n",
               status, body.size());
@@ -173,7 +198,8 @@ int WebServer::on_results(mg_connection* c, void* cbdata)
 int WebServer::ws_connect(const mg_connection* c, void* cbdata)
 {
     auto* self = static_cast<WebServer*>(cbdata);
-    if (!self->authorized(c)) return 1; // reject
+    if (!self->origin_allowed(c)) return 1; // reject
+    if (!self->authorized(c, /*allow_query_token=*/true)) return 1; // reject
     std::lock_guard<std::mutex> lk(self->conns_mu_);
     if (self->conns_.size() >= max_ws_clients) return 1; // backpressure: cap subscribers
     return 0; // accept

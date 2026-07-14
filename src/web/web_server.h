@@ -63,7 +63,8 @@ private:
     static int  ws_data(mg_connection* c, int bits, char* data, size_t len, void* cbdata);
     static void ws_close(const mg_connection* c, void* cbdata);
 
-    bool authorized(const mg_connection* c) const;
+    bool authorized(const mg_connection* c, bool allow_query_token = false) const;
+    bool origin_allowed(const mg_connection* c) const;
     void send_json(mg_connection* c, const std::string& body, const char* status = "200 OK") const;
     std::string current_snapshot_json() const;
     void broadcast_loop();

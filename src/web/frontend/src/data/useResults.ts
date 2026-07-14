@@ -9,7 +9,7 @@ import { useEffect, useState } from "react";
 import { adaptReport, type ReportData } from "../adapters/report";
 import type { ResultsReport } from "../wire";
 import { fixtureReport } from "../fixtures";
-import { authToken } from "./store";
+import { authHeaders } from "./store";
 
 export interface ResultsState {
   report: ReportData | null;
@@ -22,10 +22,9 @@ export function useResults(): ResultsState {
 
   useEffect(() => {
     let cancelled = false;
-    const tok = authToken();
-    const url = "/api/results" + (tok ? "?token=" + encodeURIComponent(tok) : "");
+    const url = "/api/results";
 
-    fetch(url)
+    fetch(url, { headers: authHeaders() })
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((j: ResultsReport) => {
         if (!cancelled) setState({ report: adaptReport(j), loading: false, offline: false });
