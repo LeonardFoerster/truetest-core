@@ -33,15 +33,23 @@ ALLOWED[debug]=""
 ALLOWED[orderbook]="core types"
 ALLOWED[threading]="core utils debug"
 ALLOWED[execution]="core types orderbook"
-ALLOWED[analytics]="core threading"
+ALLOWED[analytics]="core threading risk"
 ALLOWED[market_maker]="core orderbook threading types"
 ALLOWED[risk]="core execution analytics"
-ALLOWED[strategy]="core indicator execution"
-ALLOWED[data]="core types utils debug"
-ALLOWED[providers]="core types utils data orderbook execution engine"
-ALLOWED[engine]="core types indicator utils debug threading orderbook execution analytics market_maker risk strategy data providers"
+ALLOWED[strategy]="core indicator execution exits threading"
+ALLOWED[data]="core types utils debug execution"
+ALLOWED[providers]="core types utils data orderbook execution engine exits risk simulation threading ui"
+ALLOWED[engine]="core types indicator utils debug threading orderbook execution analytics market_maker risk strategy data providers exits ui"
 ALLOWED[api]="engine core data strategy execution"
 ALLOWED[web]="ui analytics"   # read-only serializers: dashboard_snapshot + AnalyticsReport
+
+# Current cross-module contracts beyond the original lower-layer graph:
+#   * analytics exposes a risk snapshot used by RiskManager gatekeeping.
+#   * strategies emit exit intents, and adaptive hybrid owns worker/thread knobs.
+#   * data/questdb serializes execution order tracker state.
+#   * providers bind venue adapters for exits, futures risk, synthetic generation,
+#     watchdog callbacks, and optional UI status plumbing.
+#   * engine is the composition root for exits and UI dashboard snapshots.
 
 # Files exempted from the check.  Reason must be documented.
 #   debug/debug_report.{h,cpp} + debug/memory_info.cpp  — compiled only when

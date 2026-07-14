@@ -287,6 +287,11 @@ if(BUILD_TESTS)
             tests/test_questdb_integration.cpp)
     endif()
 
+    if(ENABLE_WEB)
+        list(APPEND TEST_SOURCES
+            tests/test_web_server_auth.cpp)
+    endif()
+
     add_executable(truetest_tests ${TEST_SOURCES})
     target_include_directories(truetest_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/tests")
@@ -298,10 +303,10 @@ if(BUILD_TESTS)
     include(GoogleTest)
     gtest_discover_tests(truetest_tests)
 
-    # CLI integration tests — exec engine_backtest as subprocess
+    # CLI integration tests — exec engine_backtest / engine_live as subprocesses
     add_executable(truetest_cli_tests tests/test_cli.cpp)
     target_link_libraries(truetest_cli_tests PRIVATE GTest::gtest GTest::gtest_main)
-    add_dependencies(truetest_cli_tests engine_backtest)
+    add_dependencies(truetest_cli_tests engine_backtest engine_live)
     if(ENABLE_QUESTDB)
         target_compile_definitions(truetest_cli_tests PRIVATE HAS_QUESTDB)
     endif()

@@ -14,7 +14,6 @@
 #include "engine/engine.h"
 #include "engine/engine_config.h"
 #include "core/event.h"
-#include "engine/event_json.h"
 #include "data/data_handler.h"
 #include "indicator/sma.h"
 #include "market_maker/market_maker.h"
@@ -122,39 +121,8 @@ static void BM_RingBuffer_PushPop(benchmark::State& state)
 }
 BENCHMARK(BM_RingBuffer_PushPop);
 
-// ─── Event JSON serialization: market event ─────────────────────────────────
-static void BM_EventJson_Market(benchmark::State& state)
-{
-    market_event mkt(
-        std::chrono::system_clock::now(),
-        "BTCUSDT", 100.0, 101.0, 99.5, 100.5, 1234);
-    for (auto _ : state)
-    {
-        auto s = event_json::to_json(mkt);
-        benchmark::DoNotOptimize(s);
-    }
-    state.SetItemsProcessed(state.iterations());
-}
-BENCHMARK(BM_EventJson_Market);
-
-// ─── Event JSON serialization: fill event ───────────────────────────────────
-static void BM_EventJson_Fill(benchmark::State& state)
-{
-    fill_event f(
-        std::chrono::system_clock::now(),
-        "BTCUSDT",
-        /*order_id=*/42, order_side::buy,
-        /*filled_qty=*/1.5, /*fill_price=*/100.25,
-        /*commission=*/0.1, /*remaining=*/0.0,
-        /*fill_id=*/1);
-    for (auto _ : state)
-    {
-        auto s = event_json::to_json(f);
-        benchmark::DoNotOptimize(s);
-    }
-    state.SetItemsProcessed(state.iterations());
-}
-BENCHMARK(BM_EventJson_Fill);
+// ─── (Event JSON benchmarks removed — event_json.h no longer exists)
+//     If you need JSON microbenchmarks, implement using current json_emit or nlohmann.
 
 // ─── SMA indicator update throughput ────────────────────────────────────────
 static void BM_SMA_Update(benchmark::State& state)
@@ -236,6 +204,8 @@ static void BM_Engine_Throughput_100k(benchmark::State& state)
         cfg.seed            = 424242;
         cfg.threading       = thread_preset::inline_mode;
         cfg.disable_pinning = true;
+        cfg.pool_prewarm.orderbook_order_blocks = 50;  // extra safety for benchmark
+        cfg.pool_prewarm.forbid_runtime_grow = false;  // allow grow for benchmark stability
 
         engine eng(dh, ob, strat, cfg);
         eng.run();
