@@ -6,6 +6,7 @@
 #include "order_encoder.h"
 #include "fill_parser.h"
 #include "rate_limiter.h"
+#include "async_support.h"
 #include "../core/event.h"
 
 #include <chrono>
@@ -24,9 +25,16 @@
 #include <immintrin.h>
 #endif
 
-class ExecutionBridge : public IExecutionAdapter
+class ExecutionBridge : public IExecutionAdapter, public IAsyncSubmitSupport
 {
 public:
+    // Source-compat aliases (transition only). New code should use the
+    // top-level names from async_support.h or go through IAsyncSubmitSupport.
+    using submit_result = ::submit_result;
+    using synth_meta    = ::synth_meta;
+    using synth_result  = ::synth_result;
+    using unknown_fill_handler = ::unknown_fill_handler;
+
     struct deps
     {
         std::shared_ptr<IOrderTransport> order_tx;
@@ -61,23 +69,6 @@ public:
         std::string note;
     };
 
-    // Async submission result (exchange_order_id may arrive later than enqueue).
-    struct submit_result
-    {
-        enum class operation
-        {
-            submit,
-            cancel
-        };
-
-        uint64_t    engine_id = 0;
-        std::string symbol;
-        std::string exchange_order_id;
-        std::string error;
-        operation   op = operation::submit;
-        bool        ok = false;
-    };
-
     // Hook for venue-managed orders that we never submitted ourselves
     // (e.g. Binance OCO legs placed by BinanceOcoBracketAdapter). The
     // bridge's by_client_id_ lookup misses for these. If a handler is
@@ -88,32 +79,28 @@ public:
     // Handler runs on the fill transport's worker thread -> must be
     // thread-safe. ExitManager's venue lookups are mutex-guarded; the
     // engine-side OrderIdGenerator::next() is atomic.
-    struct synth_result
-    {
-        fill_event    fill;
-        std::uint64_t opener_order_id = 0;
-        std::string   strategy_name;
-    };
-    using unknown_fill_handler =
-        std::function<std::optional<synth_result>(const parsed_exec&,
-                                                  std::uint64_t fill_id)>;
 
-    struct synth_meta
-    {
-        std::uint64_t engine_order_id  = 0;
-        std::uint64_t opener_order_id  = 0;
-        std::string   strategy_name;
-    };
+    // Types and handler type are now defined in async_support.h (top level)
+    // for narrow capability consumption without depending on ExecutionBridge.
+    // The using declarations below provide source compatibility for code that
+    // still spelled ExecutionBridge::synth_result etc. during the transition.
 
-    void set_unknown_fill_handler(unknown_fill_handler h)
+    // IAsyncSubmitSupport overrides (also satisfy direct calls on concrete bridge).
+    void set_unknown_fill_handler(unknown_fill_handler h) override
     {
         std::lock_guard<std::mutex> lk(handler_mu_);
         unknown_fill_handler_ = std::move(h);
     }
 
+    void clear_unknown_fill_handler() override
+    {
+        std::lock_guard<std::mutex> lk(handler_mu_);
+        unknown_fill_handler_ = {};
+    }
+
     // Engine drains this BEFORE poll_fills so order_meta_ has the
     // mapping ready when lookup_opener fires inside the fill loop.
-    bool poll_synth_meta(std::vector<synth_meta>& out)
+    bool poll_synth_meta(std::vector<synth_meta>& out) override
     {
         std::lock_guard<std::mutex> lk(synth_mu_);
         if (pending_synth_meta_.empty()) return false;
@@ -176,6 +163,11 @@ public:
 
     void close()
     {
+        // Revoke the handler immediately so that any in-flight or late
+        // dispatch_unknown_fill on the worker cannot observe a stale
+        // functor after close returns.
+        clear_unknown_fill_handler();
+
         // Stop transport thread first so it can drain / finish I/O cleanly.
         transport_running_.store(false, std::memory_order_release);
         if (transport_thread_.joinable())
@@ -279,10 +271,26 @@ public:
         return true;
     }
 
+    // Capability hooks (IExecutionAdapter + IAsyncSubmitSupport).
+    // Declared here so they are part of the concrete public surface.
+    bool supports_async_submit() const override { return true; }
+    const std::string& last_error() const override
+    {
+        // Note: lock is taken but we return a reference to the member.
+        // Callers (dashboard) copy the string immediately. This matches
+        // the pre-existing pattern in BinanceExecutor.
+        static thread_local std::string cached;
+        std::lock_guard<std::mutex> lk(error_mu_);
+        cached = last_error_;
+        return cached;
+    }
+    IAsyncSubmitSupport* get_async_support() override { return this; }
+
     // New: drain results from async submits/cancels.
     // Engine should call this after submit_order (and periodically).
     // Mirrors the poll_fills pattern used for incoming fills.
-    bool poll_submit_results(std::vector<submit_result>& out)
+    // Also implements IAsyncSubmitSupport.
+    bool poll_submit_results(std::vector<submit_result>& out) override
     {
         std::lock_guard<std::mutex> lk(submit_results_mu_);
         if (pending_submit_results_.empty()) return false;
@@ -297,12 +305,6 @@ public:
     // submissions (for unit tests that need deterministic immediate results
     // without relying on thread scheduling). Safe to call from test thread.
     void drain_outbound_for_test();
-
-    std::string last_error() const
-    {
-        std::lock_guard<std::mutex> lk(error_mu_);
-        return last_error_;
-    }
 
 private:
     struct tracked_order

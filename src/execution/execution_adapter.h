@@ -6,6 +6,7 @@
 #include "fee_model.h"
 #include "impact_model.h"
 #include "latency_model.h"
+#include "async_support.h"
 
 #include <chrono>
 #include <cmath>
@@ -63,6 +64,30 @@ public:
     virtual std::size_t queue_submitted_with_queue() const { return 0; }
     virtual std::size_t queue_filled_after_drain()   const { return 0; }
     virtual std::size_t queue_blocked_at_eos()       const { return 0; }
+
+    // --- Capability / adapter kind queries (added to eliminate ad-hoc
+    // dynamic_cast<ConcreteAdapter*> proliferation in engine/router).
+    // All have cheap default implementations.
+
+    // True for live ExecutionBridge adapters that perform async submit/cancel
+    // over the wire and report results via poll_submit_results + synth meta.
+    virtual bool supports_async_submit() const { return false; }
+
+    // Optional hook for LocalBookAdapter (and QueueAware in hybrid) when the
+    // symbol carries real L2 depth from the venue (shadow mode). Default no-op.
+    // Used to suppress bar-spread adjustments and mark seeded state.
+    virtual void set_l2_seeded(bool /*seeded*/) {}
+
+    // Last transient error string. Used by dashboard for the "bridge" row.
+    // Bridge overrides to surface transport / rate-limiter / submit errors.
+    // Return by const ref to be compatible with existing implementations
+    // (e.g. BinanceExecutor).
+    virtual const std::string& last_error() const { static const std::string empty{}; return empty; }
+
+    // Capability query returning the narrow async support interface when
+    // present. Preferred over dynamic_cast<IAsyncSubmitSupport*>.
+    // Callers: engine ctor wiring for unknown-fill handler, drain paths.
+    virtual IAsyncSubmitSupport* get_async_support() { return nullptr; }
 };
 
 class LocalBookAdapter : public IExecutionAdapter
@@ -92,10 +117,10 @@ public:
         , bar_spread_bps_(bar_spread_bps)
         , walked_book_impact_(walked_book_impact) {}
 
-    void set_mid_price(double price) { mid_price_ = price; }
+    void set_mid_price(double price) override { mid_price_ = price; }
     // Symbol carries real L2 depth - bar_spread shift is suppressed
     // because the seeded book's spread already prices the fill correctly.
-    void set_l2_seeded(bool seeded) { l2_seeded_ = seeded; }
+    void set_l2_seeded(bool seeded) override { l2_seeded_ = seeded; }
 
     void set_debug_fills(bool enabled, int budget = 20)
     {
