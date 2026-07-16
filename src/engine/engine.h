@@ -309,21 +309,9 @@ private:
 
     std::vector<std::pair<std::string, uint64_t>> day_order_ids_;
 
-    struct pending_cancel_meta
-    {
-        std::string symbol;
-        std::string reason;
-    };
+    // Types and maps now owned/co-owned via ExecutionRouter (structs declared in execution_router.h for shared use).
+    // Engine keeps the maps for reset/attribution compatibility; router receives non-owning refs.
     std::unordered_map<uint64_t, pending_cancel_meta> pending_cancels_;
-
-    // Per-order metadata recorded at route time. Used when fills come back
-    // to route them to the right lot (opener_order_id) and to tag the lot
-    // with its owning strategy.
-    struct order_meta
-    {
-        uint64_t opener_order_id = 0;
-        std::string strategy_name;
-    };
     std::unordered_map<uint64_t, order_meta> order_meta_;
 
     void register_order_meta(const order_event& o);

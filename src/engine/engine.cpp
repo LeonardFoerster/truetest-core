@@ -219,12 +219,15 @@ engine::engine(std::shared_ptr<data_handler> dh,
     }
 #endif
 
-    // Router skeleton wiring (simplified for PR-02/03; full collaborators in later PR).
+    // Router wiring (adapters map passed by ref so resolve populates the original execution_adapters_ for iterator compat).
     router_ = std::make_unique<ExecutionRouter>(
         orderbook_registry_,
         config_,
         l2_seeded_symbols_,
-        config_.provider.get()
+        config_.provider.get(),
+        pending_cancels_,
+        order_meta_,
+        execution_adapters_
     );
 
     prewarm_object_pools();
@@ -367,46 +370,8 @@ void engine::switch_symbol(const std::string& new_symbol)
 
 std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol)
 {
-    auto it = execution_adapters_.find(symbol);
-    if (it != execution_adapters_.end())
-        return it->second;
-
-    std::shared_ptr<IExecutionAdapter> adapter;
-    if (config_.mode != engine_mode::shadow &&
-        config_.provider && config_.provider->has_execution())
-    {
-        adapter = config_.provider->get_execution_adapter();
-    }
-    if (!adapter)
-    {
-        auto ob = orderbook_registry_.get_or_create(symbol);
-
-        if (config_.maker_queue_model)
-        {
-            // Use queue-aware paper execution for passive limits
-            auto qa = std::make_shared<QueueAwareBookAdapter>(
-                config_.maker_queue_model,
-                config_.fee_model,
-                config_.latency_model);
-            adapter = qa;
-        }
-        else
-        {
-            auto local = std::make_shared<LocalBookAdapter>(
-                ob, config_.fee_model, config_.fill_model,
-                config_.seed != 0 ? static_cast<unsigned>(config_.seed + 2) : config_.fill_rng_seed,
-                config_.market_aggression, config_.qty_scale,
-                config_.latency_model, config_.impact_model,
-                config_.realistic_fills, config_.bar_spread_bps,
-                config_.walked_book_impact);
-            if (config_.debug_fills)
-                local->set_debug_fills(true, config_.debug_fills_budget);
-            adapter = local;
-        }
-    }
-
-    execution_adapters_[symbol] = adapter;
-    return adapter;
+    // Thin delegate to router (router owns creation + map population via ref).
+    return router_ ? router_->resolve_adapter(symbol) : nullptr;
 }
 
 void engine::log_event(const event& ev)
@@ -426,12 +391,12 @@ void engine::publish_event(const event_pointer& ev)
     if (ev && ev->get_type() == event_type::funding) {
         if (auto* fe = dynamic_cast<funding_event*>(ev.get())) {
             portfolio_.on_funding(*fe);
-            audit_sink_->record_funding(*fe, questdb_store_ ? questdb_store_->run_tag() : "");  // LIVE_SAFETY_AUDIT_SEAM narrow carve-out
 #ifdef HAS_QUESTDB
-            if (questdb_store_) {
-                questdb_store_->record_funding(*fe, questdb_store_->run_tag());
-            }
+            audit_sink_->record_funding(*fe, questdb_store_ ? questdb_store_->run_tag() : "");
+#else
+            audit_sink_->record_funding(*fe, "");
 #endif
+            // (old direct questdb_store_ record removed; sink handles)
         }
     }
 
@@ -1255,25 +1220,16 @@ void engine::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
                 config_.provider->lifecycle_state());
         }
 
-#ifdef HAS_QUESTDB
-        if (questdb_active_ && questdb_store_)
-        {
-            auto qh = questdb_store_->health();
-            out.health.questdb.active = true;
-            out.health.questdb.connected = qh.connected;
-            out.health.questdb.pending_lines = qh.pending_lines;
-            out.health.questdb.dropped_lines = qh.dropped_lines;
-            out.health.questdb.fallback_lines = qh.fallback_lines;
-            out.health.questdb.strict_mode = qh.strict_mode;
-
-            if (qh.last_flush.time_since_epoch().count() != 0)
-            {
-                auto age = std::chrono::steady_clock::now() - qh.last_flush;
-                out.health.questdb.last_flush_age_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(age).count();
-            }
-        }
-#endif
+        // Unconditional audit_sink health (replaces remaining questdb guard + #ifdef).
+        // strict_mode and last_flush default (0/-1) as sink seam does not yet surface full QuestdbStore::Health.
+        auto qh = audit_sink_ ? audit_sink_->health() : IOrderAuditSink::Health{};
+        out.health.questdb.active = qh.connected || qh.pending_lines > 0 || qh.dropped_lines > 0 || qh.fallback_lines > 0;
+        out.health.questdb.connected = qh.connected;
+        out.health.questdb.pending_lines = qh.pending_lines;
+        out.health.questdb.dropped_lines = qh.dropped_lines;
+        out.health.questdb.fallback_lines = qh.fallback_lines;
+        out.health.questdb.strict_mode = false;
+        out.health.questdb.last_flush_age_ms = -1;
     }
 
     // Per-strategy attribution. analytics_.per_strategy_view() copies
@@ -2070,8 +2026,8 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         }
     }
 
-    auto adapter = get_adapter(o->get_symbol());
-    const bool async_submit = dynamic_cast<ExecutionBridge*>(adapter.get()) != nullptr;
+    auto adapter = router_->resolve_adapter(o->get_symbol());
+    const bool async_submit = router_->is_async_submit(adapter.get());
 
     order_tracker_.set_status(o->get_order_id(),
         async_submit ? order_status::pending : order_status::open);
@@ -2105,7 +2061,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         local->set_l2_seeded(l2_seeded_symbols_.count(o->get_symbol()) > 0);
     }
 
-    adapter->submit_order(*o);
+    router_->submit(*o, adapter.get());
 
     drain_async_submit_results(adapter.get());
 
@@ -2120,7 +2076,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     }
 
     std::vector<fill_event> fills;
-    if (adapter->poll_fills(fills))
+    if (router_->poll_fills(adapter.get(), fills))
     {
         DEBUG_STAGE(stage_timer_, fill_processing);
         for (auto& f : fills)
@@ -2145,18 +2101,14 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             adverse_selection_.on_fill(f);
             exit_manager_.on_fill(f, opener);
             risk_manager_.on_fill(f);
-#ifdef HAS_QUESTDB
-            if (questdb_active_ && questdb_store_)
-            {
-                const char* src =
-                    (f.get_source() == fill_source::exchange)  ? "exchange"
-                  : (f.get_source() == fill_source::simulated) ? "simulated"
-                  :                                              "local";
-                questdb_store_->record_fill(f, opener, strat, src);
-                questdb_store_->record_status_transition(f.get_order_id(),
-                    order_status::open, new_status);
-            }
-#endif
+            // Unconditional via audit_sink (replaces questdb guard + #ifdef). Rich fill + status.
+            const char* src =
+                (f.get_source() == fill_source::exchange)  ? "exchange"
+              : (f.get_source() == fill_source::simulated) ? "simulated"
+              :                                              "local";
+            audit_sink_->record_fill(f, opener, strat, src);
+            audit_sink_->record_status_transition(f.get_order_id(),
+                order_status::open, new_status);
             notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
             publish_event(fill_ptr);
             analytics_.on_event(fill_ptr);
@@ -2215,7 +2167,7 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
                           const std::string& reason)
 {
-    auto adapter = get_adapter(symbol);
+    auto adapter = router_->resolve_adapter(symbol);
 
     drain_async_submit_results(adapter.get());
 
@@ -2251,16 +2203,12 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
         publish_event(cancel_ev);
         if (!config_.is_threaded())
             analytics_.on_event(cancel_ev);
-#ifdef HAS_QUESTDB
-        if (questdb_active_ && questdb_store_)
-        {
-            questdb_store_->record_cancellation(order_id, symbol,
-                lookup_strategy_name(order_id),
-                reason.empty() ? "manual" : reason);
-            questdb_store_->record_status_transition(order_id,
-                order_status::open, order_status::cancelled, reason);
-        }
-#endif
+        // Unconditional via audit_sink (replaces questdb guard + #ifdef).
+        audit_sink_->record_cancellation(order_id, symbol,
+            lookup_strategy_name(order_id),
+            reason.empty() ? "manual" : reason.c_str());
+        audit_sink_->record_status_transition(order_id,
+            order_status::open, order_status::cancelled, reason.empty() ? nullptr : reason.c_str());
     }
 
     return cancelled;
@@ -2269,7 +2217,7 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
 bool engine::modify_order(const std::string& symbol, uint64_t order_id,
                           double new_price, double new_qty)
 {
-    auto adapter = get_adapter(symbol);
+    auto adapter = router_->resolve_adapter(symbol);
     bool modified = adapter->modify_order(order_id, new_price, new_qty);
 
     if (modified)
@@ -2281,16 +2229,12 @@ bool engine::modify_order(const std::string& symbol, uint64_t order_id,
         publish_event(amend_ev);
         if (!config_.is_threaded())
             analytics_.on_event(amend_ev);
-#ifdef HAS_QUESTDB
-        if (questdb_active_ && questdb_store_)
-        {
-            // Engine doesn't preserve old price/qty cleanly here; log zeros
-            // and rely on the orders/order_status tables for history.
-            questdb_store_->record_amendment(order_id, symbol,
-                /*old_price=*/0.0, new_price,
-                /*old_qty=*/0.0, new_qty, now);
-        }
-#endif
+        // Unconditional via audit_sink (replaces questdb guard + #ifdef).
+        // Engine doesn't preserve old price/qty cleanly here; log zeros
+        // and rely on the orders/order_status tables for history.
+        audit_sink_->record_amendment(order_id, symbol,
+            /*old_price=*/0.0, new_price,
+            /*old_qty=*/0.0, new_qty, now);
     }
 
     return modified;
@@ -2327,28 +2271,24 @@ void engine::unwind_positions(std::size_t& event_count)
         publish_event(close_order);
         analytics_.on_event(close_order);
 
-#ifdef HAS_QUESTDB
-        if (questdb_active_ && questdb_store_)
-        {
-            questdb_store_->record_order_submitted(*close_order, "pending");
-            questdb_store_->record_status_transition(close_order->get_order_id(),
-                order_status::pending, order_status::open, "risk_unwind");
-        }
-#endif
+        // Unconditional via audit_sink (replaces questdb guard + #ifdef).
+        audit_sink_->record_order_submitted(*close_order, "pending");
+        audit_sink_->record_status_transition(close_order->get_order_id(),
+            order_status::pending, order_status::open, "risk_unwind");
 
-        auto adapter = get_adapter(symbol);
+        auto adapter = router_->resolve_adapter(symbol);
         if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
         {
             local->set_mid_price(last_mid_price_);
             local->set_l2_seeded(l2_seeded_symbols_.count(symbol) > 0);
         }
 
-        adapter->submit_order(*close_order);
+        router_->submit(*close_order, adapter.get());
 
         drain_async_submit_results(adapter.get());
 
         std::vector<fill_event> fills;
-        if (adapter->poll_fills(fills))
+        if (router_->poll_fills(adapter.get(), fills))
         {
             for (auto& f : fills)
             {
@@ -2372,18 +2312,14 @@ void engine::unwind_positions(std::size_t& event_count)
                 adverse_selection_.on_fill(f);
                 exit_manager_.on_fill(f, opener);
                 risk_manager_.on_fill(f);
-#ifdef HAS_QUESTDB
-                if (questdb_active_ && questdb_store_)
-                {
-                    const char* src =
-                        (f.get_source() == fill_source::exchange)  ? "exchange"
-                      : (f.get_source() == fill_source::simulated) ? "simulated"
-                      :                                              "local";
-                    questdb_store_->record_fill(f, opener, strat, src);
-                    questdb_store_->record_status_transition(f.get_order_id(),
-                        order_status::open, new_status, "risk_unwind");
-                }
-#endif
+                // Unconditional via audit_sink (replaces questdb guard + #ifdef). Rich fill + status (unwind).
+                const char* src =
+                    (f.get_source() == fill_source::exchange)  ? "exchange"
+                  : (f.get_source() == fill_source::simulated) ? "simulated"
+                  :                                              "local";
+                audit_sink_->record_fill(f, opener, strat, src);
+                audit_sink_->record_status_transition(f.get_order_id(),
+                    order_status::open, new_status, "risk_unwind");
                 notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
                 publish_event(fill_ptr);
                 analytics_.on_event(fill_ptr);
@@ -2613,14 +2549,9 @@ bool engine::route_order(order_event& order,
                 order.get_order_id(), reason);
             log_event(*rej);
             publish_event(rej);
-#ifdef HAS_QUESTDB
-            if (questdb_active_ && questdb_store_)
-            {
-                questdb_store_->record_order_submitted(order, "rejected");
-                questdb_store_->record_rejection(order, "venue_filter", reason);
-                questdb_total_rejections_++;
-            }
-#endif
+            // Unconditional via audit_sink (replaces questdb guard + #ifdef + dead total_rejections_).
+            audit_sink_->record_order_submitted(order, "rejected");
+            audit_sink_->record_rejection(order, "venue_filter", reason);
             order_tracker_.set_status(order.get_order_id(), order_status::rejected);
             (void)event_count;
             (void)halt_requested;
@@ -2835,14 +2766,10 @@ void engine::drain_async_submit_results(IExecutionAdapter* adapter)
                 {
                     order_tracker_.set_status(sr.engine_id, order_status::open);
                     update_open_order_status(sr.engine_id, "open");
-#ifdef HAS_QUESTDB
-                    if (questdb_active_ && questdb_store_)
-                    {
-                        questdb_store_->record_status_transition(sr.engine_id,
-                            order_status::pending, order_status::open,
-                            "venue submit acknowledged");
-                    }
-#endif
+                    // Unconditional via audit_sink (replaces questdb guard + #ifdef).
+                    audit_sink_->record_status_transition(sr.engine_id,
+                        order_status::pending, order_status::open,
+                        "venue submit acknowledged");
                 }
                 continue;
             }
@@ -2885,16 +2812,12 @@ void engine::drain_async_submit_results(IExecutionAdapter* adapter)
                 publish_event(cancel_ev);
                 if (!config_.is_threaded())
                     analytics_.on_event(cancel_ev);
-#ifdef HAS_QUESTDB
-                if (questdb_active_ && questdb_store_)
-                {
-                    questdb_store_->record_cancellation(sr.engine_id, symbol,
-                        lookup_strategy_name(sr.engine_id),
-                        reason.empty() ? "manual" : reason);
-                    questdb_store_->record_status_transition(sr.engine_id,
-                        order_status::open, order_status::cancelled, reason);
-                }
-#endif
+                // Unconditional via audit_sink (replaces questdb guard + #ifdef).
+                audit_sink_->record_cancellation(sr.engine_id, symbol,
+                    lookup_strategy_name(sr.engine_id),
+                    reason.empty() ? "manual" : reason.c_str());
+                audit_sink_->record_status_transition(sr.engine_id,
+                    order_status::open, order_status::cancelled, reason.empty() ? nullptr : reason.c_str());
             }
         }
         else
