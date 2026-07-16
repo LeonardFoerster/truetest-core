@@ -5,10 +5,12 @@
 #include <chrono>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "overlays.h"  // brings ConfirmKind into truetest::ui
+#include "toast.h"     // for ToastStack (small include, only under HAS_RICH_TUI)
 
 namespace truetest::ui {
 
@@ -117,21 +119,11 @@ private:
 
     operator_actions actions_{};
 
-    // Confirm overlay state. When non-zero, render_loop draws a centered
-    // "y/n" prompt and blocks tab/quit input until resolved. Set by `F`
-    // / `K` hotkeys; cleared by 'y' (run action) or 'n' / Esc / any other.
-    enum class confirm_kind { none, flatten, kill };
-    std::atomic<int> pending_confirm_{static_cast<int>(confirm_kind::none)};
+    // Confirm overlay state. Uses ConfirmKind values (from overlays.h) for storage.
+    std::atomic<int> pending_confirm_{static_cast<int>(ConfirmKind::none)};
 
-    // Toast queue: short ring of recent operator-feedback messages.
-    // Each entry has a timestamp so the panel can fade old ones. Newest
-    // first. Atomic last_toast_ms_ retained as the "most recent" marker
-    // for the frame-skip digest.
-    struct toast_entry { std::string msg; long long ts_ms = 0; };
-    std::atomic<long long>  last_toast_ms_{0};
-    std::vector<toast_entry> toasts_;
-    std::mutex               toast_mu_;
-    static constexpr std::size_t kToastQueueCap = 6;
+    // Extracted toast management (see toast.h). Owns queue, TTL, drawing.
+    ToastStack toasts_;
 
     std::atomic<int>  active_tab_{0};
     std::atomic<bool> running_{false};
