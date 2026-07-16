@@ -226,6 +226,7 @@ if(BUILD_TESTS)
         tests/test_engine.cpp
         tests/test_engine_lookahead.cpp
         tests/test_engine_instrument_spec.cpp
+        tests/test_order_audit_sink.cpp
         tests/test_instrument.cpp
         tests/test_rate_limiter.cpp
         tests/test_client_order_id.cpp
@@ -279,6 +280,7 @@ if(BUILD_TESTS)
         tests/test_provider_event.cpp
         tests/test_provider_registry.cpp
         tests/test_provider_engine_wiring.cpp
+        tests/test_order_audit_sink.cpp
     )
 
     if(ENABLE_QUESTDB)
@@ -294,6 +296,21 @@ if(BUILD_TESTS)
     if(ENABLE_WEB)
         list(APPEND TEST_SOURCES
             tests/test_web_server_auth.cpp)
+    endif()
+
+    # LOC regression guard (per engine-decomposition plan PR-09 / Phase 5)
+    # Fails build if src/engine/engine.cpp exceeds limit without explicit waiver comment.
+    file(STRINGS src/engine/engine.cpp _engine_lines)
+    list(LENGTH _engine_lines _engine_loc)
+    set(ENGINE_LOC_MAX 4300)  # current ~4272 + buffer; tighten after further cleanup
+    if(_engine_loc GREATER ENGINE_LOC_MAX)
+        file(STRINGS src/engine/engine.cpp _waiver_lines REGEX "ENGINE_LOC_WAIVER:")
+        if(NOT _waiver_lines)
+            message(FATAL_ERROR
+                "engine.cpp has ${_engine_loc} lines (limit ${ENGINE_LOC_MAX}). "
+                "Add a comment containing 'ENGINE_LOC_WAIVER: <reason>' or reduce LOC. "
+                "See docs/code-review-todos-july-16th/01-engine-god-class.md")
+        endif()
     endif()
 
     add_executable(truetest_tests ${TEST_SOURCES})

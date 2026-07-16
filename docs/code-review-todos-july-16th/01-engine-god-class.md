@@ -161,15 +161,23 @@ Only after all verifications pass: consider committing (use `git-push` skill wit
 
 All PRs in the attached design plan executed via subagent chain (PR-01 sink, PR-02 router skeleton, PR-03 wiring, PR-04+ QuestDB migration + router adoption, PR-07 cold extractions, PR-08 cleanup + reduction).
 
+Post-refactor items closed:
+- test_order_audit_sink.cpp wired into CMake TEST_SOURCES.
+- LOC regression guard added to CMakeLists.txt (fails if >4300 LOC without ENGINE_LOC_WAIVER comment).
+- Minor router drain partial ownership noted as non-blocking follow-up (hot paths use router; full move can be separate issue).
+
 Final metrics:
-- `engine.cpp`: 4266 LOC (net reduction; 214 deletions in main migration commit)
+- `engine.cpp`: 4272 LOC (net reduction; 214 deletions in main migration commit)
 - QuestDB guards: 1 (ctor wiring only; all hot-path `if (questdb_active_ && questdb_store_)` eliminated)
 - Seams: `IOrderAuditSink`, `ExecutionRouter`, `InstrumentSpecCache`, `CheckpointManager`
 - All checks passed repeatedly (`check-live-safety-freeze.sh` with token, `check-layer-deps.sh`, hotpath tests)
 - Contracts preserved; zero new hot-path allocs (verified by subagents + 11/11 tests)
 - Commits contain `LIVE_SAFETY_CCB_APPROVED`
 
-See final verification subagent report (check-work/quality) for full ritual evidence. No remaining concerns from this item.
+See final verification subagent reports (check-work/quality, zero-alloc-perf) for full ritual evidence. No blocking remaining concerns; minors moved to follow-up.
+
+---
+*Created as output of `/code-review` follow-up. Execution completed per engine-decomposition skill.*
 
 ---
 *Created as output of `/code-review` follow-up. Execution completed per engine-decomposition skill.*
