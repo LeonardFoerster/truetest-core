@@ -215,10 +215,7 @@ engine::engine(std::shared_ptr<data_handler> dh,
     audit_sink_ = std::make_unique<NoopOrderAuditSink>();
 #ifdef HAS_QUESTDB
     if (config_.persist_enabled) {
-        questdb_begin();  // unchanged activation semantics
-        if (questdb_active_ && questdb_store_) {
-            audit_sink_ = std::make_unique<QuestdbOrderAuditSink>(questdb_store_, &questdb_active_);
-        }
+        questdb_begin();  // activation (including sink swap to real QuestdbOrderAuditSink on success) lives inside
     }
 #endif
 
@@ -362,12 +359,9 @@ void engine::publish_event(const event_pointer& ev)
     if (ev && ev->get_type() == event_type::funding) {
         if (auto* fe = dynamic_cast<funding_event*>(ev.get())) {
             portfolio_.on_funding(*fe);
-#ifdef HAS_QUESTDB
-            audit_sink_->record_funding(*fe, questdb_store_ ? questdb_store_->run_tag().c_str() : "");
-#else
-            audit_sink_->record_funding(*fe, "");
-#endif
-            // (old direct questdb_store_ record removed; sink handles)
+            // Unconditional via sink seam (run_tag supplied by sink; "" when no persistence).
+            // No direct questdb_store_ access. Zero-alloc public seam.
+            audit_sink_->record_funding(*fe, audit_sink_ ? audit_sink_->run_tag() : "");
         }
     }
 
@@ -1594,6 +1588,9 @@ void engine::questdb_begin()
         last_questdb_flush_ = std::chrono::steady_clock::now() - config_.questdb_flush_cadence;
         std::cerr << "  QuestDB persistence ENABLED (run_tag="
                   << questdb_store_->run_tag() << ")\n";
+        // Single canonical place that decides the concrete sink (ctor starts with Noop).
+        // No raw if(active && store) remains in caller paths.
+        audit_sink_ = std::make_unique<QuestdbOrderAuditSink>(questdb_store_, &questdb_active_);
     }
     else
     {
@@ -1623,22 +1620,31 @@ void engine::questdb_end()
     if (!questdb_active_ || !questdb_store_) return;
     const auto report = analytics_.snapshot();
     const double final_equity = portfolio_.get_equity(last_mid_price_);
-    questdb_store_->end(final_equity,
-                        report.total_orders,
-                        report.total_fills,
-                        audit_sink_ ? audit_sink_->total_rejections() : 0,
-                        // Phase 4: richer campaign summary for long runs
-                        report.max_drawdown,
-                        report.sharpe_ratio,
-                        report.sortino_ratio,
-                        report.profit_factor,
-                        report.win_rate,
-                        report.calmar_ratio,
-                        report.total_trades,
-                        report.winning_trades);
-    // Best-effort final flush of any remaining ILP buffer on clean shutdown.
-    // This improves data completeness for the final rows of a run.
-    questdb_store_->flush();
+    const std::size_t rejs = audit_sink_ ? audit_sink_->total_rejections() : 0;
+    // Prefer delegating through the seam when available (single place for persistence finalization).
+    if (audit_sink_)
+    {
+        audit_sink_->finalize_run(final_equity,
+                                  report.total_orders,
+                                  report.total_fills,
+                                  rejs,
+                                  report.max_drawdown,
+                                  report.sharpe_ratio,
+                                  report.sortino_ratio,
+                                  report.profit_factor,
+                                  report.win_rate,
+                                  report.calmar_ratio,
+                                  report.total_trades,
+                                  report.winning_trades);
+    }
+    else if (questdb_store_)
+    {
+        questdb_store_->end(final_equity, report.total_orders, report.total_fills, rejs,
+                            report.max_drawdown, report.sharpe_ratio, report.sortino_ratio,
+                            report.profit_factor, report.win_rate, report.calmar_ratio,
+                            report.total_trades, report.winning_trades);
+        questdb_store_->flush();
+    }
     questdb_active_ = false;
 }
 #endif

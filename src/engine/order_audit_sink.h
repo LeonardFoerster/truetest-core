@@ -14,6 +14,13 @@
 
 // Full proposed interface. All methods use const char* where possible to avoid temporaries on hot paths.
 // Matches QuestdbStore call sites 1:1 but hides overloads and QuestDB types from engine callers.
+//
+// SEAM CONTRACT (engine-decomposition + 02-questdb-persistence-leakage):
+// - Engine (and all hot paths) call ONLY these methods on audit_sink_. Never inspect questdb_store_ or active_ for recording decisions.
+// - Sparse vs rich is resolved inside the concrete sink impl (strings/"unknown" only when Questdb active).
+// - Future QuestDB features: add method here + noop + Questdb impl. Do not add guarded blocks in engine.
+// - Zero-alloc on public seam: callers pass literals / .c_str() / const event refs. No std::string in signatures.
+
 
 class IOrderAuditSink {
 public:
@@ -56,6 +63,9 @@ public:
 
     virtual std::size_t total_rejections() const { return 0; }
 
+    // Run tag for metadata (e.g. funding records). Noop returns empty; real sink captures at activation.
+    virtual const char* run_tag() const { return ""; }
+
     // Health: provide minimal struct for non-QuestDB builds; real one from QuestdbStore when enabled.
     struct Health {
         bool connected = false;
@@ -64,6 +74,14 @@ public:
         std::size_t fallback_lines = 0;
     };
     virtual Health health() const { return {}; }
+
+    // Lifecycle delegation (optional; allows engine to route tick/flush/finalize through seam in future).
+    // Safe no-ops on Noop.
+    virtual void tick() {}
+    virtual void flush() {}
+    virtual void finalize_run(double final_equity, std::size_t total_orders, std::size_t total_fills, std::size_t total_rejections,
+                              double max_drawdown, double sharpe, double sortino, double profit_factor,
+                              double win_rate, double calmar, std::size_t total_trades, std::size_t winning_trades) {}
 };
 
 class NoopOrderAuditSink final : public IOrderAuditSink {
@@ -78,7 +96,13 @@ public:
     void record_funding(const funding_event&, const char*) override {}
     void record_event(const char*, const char*, const char*, uint64_t, const char*, const char*, const char*) override {}
     std::size_t total_rejections() const override { return 0; }
+    const char* run_tag() const override { return ""; }
     Health health() const override { return {}; }
+    void tick() override {}
+    void flush() override {}
+    void finalize_run([[maybe_unused]] double, [[maybe_unused]] std::size_t, [[maybe_unused]] std::size_t, [[maybe_unused]] std::size_t,
+                      [[maybe_unused]] double, [[maybe_unused]] double, [[maybe_unused]] double, [[maybe_unused]] double,
+                      [[maybe_unused]] double, [[maybe_unused]] double, [[maybe_unused]] std::size_t, [[maybe_unused]] std::size_t) override {}
 };
 
 #ifdef HAS_QUESTDB
@@ -122,7 +146,13 @@ public:
                       const char* details_json = "") override;
 
     std::size_t total_rejections() const override;
+    const char* run_tag() const override;
     Health health() const override;
+    void tick() override;
+    void flush() override;
+    void finalize_run(double final_equity, std::size_t total_orders, std::size_t total_fills, std::size_t total_rejections,
+                      double max_drawdown, double sharpe, double sortino, double profit_factor,
+                      double win_rate, double calmar, std::size_t total_trades, std::size_t winning_trades) override;
 
 private:
     std::shared_ptr<truetest::questdb::QuestdbStore> store_;

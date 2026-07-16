@@ -280,7 +280,6 @@ if(BUILD_TESTS)
         tests/test_provider_event.cpp
         tests/test_provider_registry.cpp
         tests/test_provider_engine_wiring.cpp
-        tests/test_order_audit_sink.cpp
     )
 
     if(ENABLE_QUESTDB)

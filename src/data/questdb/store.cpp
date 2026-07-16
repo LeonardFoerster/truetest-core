@@ -295,20 +295,62 @@ void QuestdbStore::record_rejection(const order_event& o,
                                     const std::string& reason_category,
                                     const std::string& reason_detail)
 {
+    const int64_t ts = ns_from(o.get_timestamp());
+    write_rejection_line(
+        o.get_symbol(),
+        side_str(o.get_side()),
+        o.get_strategy_name().empty() ? "unknown" : o.get_strategy_name(),
+        o.get_order_id(),
+        o.get_quantity(),
+        o.get_price(),
+        reason_category.empty() ? "unknown" : reason_category,
+        reason_detail,
+        ts
+    );
+}
+
+void QuestdbStore::record_rejection(std::uint64_t order_id,
+                                    const std::string& symbol,
+                                    const std::string& reason_category,
+                                    const std::string& reason_detail)
+{
+    // Sparse path: use fallbacks for fields not available (side/strategy/qty/price unknown at this point).
+    const int64_t ts = now_ns();
+    write_rejection_line(
+        symbol.empty() ? "unknown" : symbol,
+        "unknown",
+        "unknown",
+        order_id,
+        0.0,
+        0.0,
+        reason_category.empty() ? "unknown" : reason_category,
+        reason_detail,
+        ts
+    );
+}
+
+void QuestdbStore::write_rejection_line(const std::string& symbol,
+                                        const std::string& side,
+                                        const std::string& strategy,
+                                        std::uint64_t order_id,
+                                        double qty,
+                                        double price,
+                                        const std::string& reason,
+                                        const std::string& detail,
+                                        std::int64_t ts_ns)
+{
     LineBuilder lb(table_name("rejections"));
     lb.add_tag("run_tag", cfg_.run_tag);
-    lb.add_tag("symbol", o.get_symbol());
-    lb.add_tag("side", side_str(o.get_side()));
-    lb.add_tag("strategy_name",
-               o.get_strategy_name().empty() ? "unknown" : o.get_strategy_name());
-    lb.add_tag("reason",
-               reason_category.empty() ? "unknown" : reason_category);
-    lb.add_field_long("order_id", static_cast<std::int64_t>(o.get_order_id()));
-    lb.add_field_double("qty", o.get_quantity());
-    lb.add_field_double("price", o.get_price());
-    lb.add_field_str("reason_detail", reason_detail);
+    lb.add_tag("symbol", symbol);
+    lb.add_tag("side", side);
+    lb.add_tag("strategy_name", strategy);
+    lb.add_tag("reason", reason);
+    lb.add_field_long("order_id", static_cast<std::int64_t>(order_id));
+    lb.add_field_double("qty", qty);
+    lb.add_field_double("price", price);
+    lb.add_field_str("reason_detail", detail);
     std::lock_guard<std::mutex> lk(mu_);
-    ilp_->enqueue(lb.finish(ns_from(o.get_timestamp())));
+    ilp_->enqueue(lb.finish(ts_ns));
 }
 
 void QuestdbStore::record_funding(const funding_event& fe, const std::string& /*run_tag*/)

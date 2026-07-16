@@ -375,6 +375,11 @@ CLAUDE.md
 .claude/
 upcoming/
 
+# Planning documents for future Grok skills (detailed proposals only — not yet implemented)
+# These live under docs/ for visibility during planning but are gitignored per request
+# until the actual skills are created and moved to .grok/skills/
+docs/upcoming_skills/
+
 # IDE metadata (JetBrains; was accidentally tracked)
 .idea/
 

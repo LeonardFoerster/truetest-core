@@ -3,7 +3,6 @@
 #include "core/event.h"
 
 #include <chrono>
-#include <string>
 
 static auto now() { return std::chrono::system_clock::now(); }
 
@@ -23,7 +22,7 @@ TEST(OrderAuditSink, NoopDoesNotCrash)
     sink.record_fill(f, 42, "test_strat", "engine");
 
     sink.record_rejection(o, "test_cat", "test_detail");
-    sink.record_rejection(99, std::string("AAPL"), "sparse_cat", "sparse_det");
+    sink.record_rejection(99, "AAPL", "sparse_cat", "sparse_det");
 
     sink.record_cancellation(42, "AAPL", "test_strat", "user");
     sink.record_amendment(42, "AAPL", 150.0, 149.0, 10.0, 9.0, ts);
@@ -62,7 +61,7 @@ TEST(OrderAuditSink, QuestdbOrderAuditSinkSkeleton)
     sink.record_fill(f, 1, "s", "src");
 
     sink.record_rejection(o, "cat", "det");
-    sink.record_rejection(2, std::string("SYM"), "scat", "sdet");
+    sink.record_rejection(2, "SYM", "scat", "sdet");
 
     sink.record_cancellation(1, "AAPL", "s", "r");
     sink.record_amendment(1, "AAPL", 100.0, 99.0, 1.0, 0.5, ts);

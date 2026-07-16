@@ -9,13 +9,13 @@ namespace ts = truetest::questdb::schema;
 TEST(QuestdbSchema, RunsMetaHasStartedAtAsDesignatedTimestamp)
 {
     const std::string ddl = ts::runs_meta_ddl();
-    EXPECT_NE(ddl.find("TIMESTAMP(started_at) PARTITION BY MONTH"),
+    EXPECT_NE(ddl.find("TIMESTAMP(started_at) PARTITION BY WEEK"),
               std::string::npos);
 }
 
 TEST(QuestdbSchema, PerRunDdlsCount)
 {
-    EXPECT_EQ(ts::per_run_ddls("myrun").size(), 6u);
+    EXPECT_EQ(ts::per_run_ddls("myrun").size(), 8u);
 }
 
 TEST(QuestdbSchema, PerRunDdlsPrefix)
@@ -32,10 +32,11 @@ TEST(QuestdbSchema, PerRunDdlsTables)
 {
     const auto ddls = ts::per_run_ddls("p");
     const std::string suffixes[] = {"_orders", "_order_status", "_fills",
+                                    "_funding", "_events",
                                     "_rejections", "_cancellations",
                                     "_amendments"};
-    ASSERT_EQ(ddls.size(), 6u);
-    for (std::size_t i = 0; i < 6; ++i)
+    ASSERT_EQ(ddls.size(), 8u);
+    for (std::size_t i = 0; i < 8; ++i)
     {
         EXPECT_NE(ddls[i].find("p" + suffixes[i] + " ("), std::string::npos)
             << "ddl=" << ddls[i].substr(0, 80);
@@ -72,7 +73,7 @@ TEST(QuestdbSchema, AllPerRunPartitionByDay)
 TEST(QuestdbSchema, AllDdlsStartsWithRunsMeta)
 {
     const auto ddls = ts::all_ddls("p");
-    ASSERT_EQ(ddls.size(), 7u);
+    ASSERT_EQ(ddls.size(), 9u);
     EXPECT_EQ(ddls[0], ts::runs_meta_ddl());
 }
 

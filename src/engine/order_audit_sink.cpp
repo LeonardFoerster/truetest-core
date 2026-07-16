@@ -59,10 +59,13 @@ void QuestdbOrderAuditSink::record_rejection(uint64_t order_id,
                                              const char* detail)
 {
     ++total_rejections_;
-    // Sparse: no corresponding overload on current QuestdbStore yet (skeleton).
-    // Full data delegation will be enabled when store gains sparse variant;
-    // counter is updated here per design. No store call for now to match existing API.
-    (void)order_id; (void)symbol; (void)category; (void)detail;
+    if (store_ && active_flag_ && *active_flag_)
+    {
+        store_->record_rejection(order_id,
+                                 symbol ? std::string(symbol) : std::string{},
+                                 category ? std::string(category) : std::string{},
+                                 detail ? std::string(detail) : std::string{});
+    }
 }
 
 void QuestdbOrderAuditSink::record_cancellation(uint64_t order_id,
@@ -126,6 +129,13 @@ std::size_t QuestdbOrderAuditSink::total_rejections() const
     return total_rejections_;
 }
 
+const char* QuestdbOrderAuditSink::run_tag() const
+{
+    if (store_ && active_flag_ && *active_flag_)
+        return store_->run_tag().c_str();
+    return "";
+}
+
 IOrderAuditSink::Health QuestdbOrderAuditSink::health() const
 {
     if (store_ && active_flag_ && *active_flag_)
@@ -134,5 +144,37 @@ IOrderAuditSink::Health QuestdbOrderAuditSink::health() const
         return { sh.connected, sh.pending_lines, sh.dropped_lines, sh.fallback_lines };
     }
     return {};
+}
+
+void QuestdbOrderAuditSink::tick()
+{
+    if (store_ && active_flag_ && *active_flag_) store_->tick();
+}
+
+void QuestdbOrderAuditSink::flush()
+{
+    if (store_ && active_flag_ && *active_flag_) store_->flush();
+}
+
+void QuestdbOrderAuditSink::finalize_run(double final_equity,
+                                         std::size_t total_orders,
+                                         std::size_t total_fills,
+                                         std::size_t total_rejections_in,
+                                         double max_drawdown,
+                                         double sharpe,
+                                         double sortino,
+                                         double profit_factor,
+                                         double win_rate,
+                                         double calmar,
+                                         std::size_t total_trades,
+                                         std::size_t winning_trades)
+{
+    if (store_ && active_flag_ && *active_flag_)
+    {
+        store_->end(final_equity, total_orders, total_fills, total_rejections_in,
+                    max_drawdown, sharpe, sortino, profit_factor, win_rate, calmar,
+                    total_trades, winning_trades);
+        store_->flush();
+    }
 }
 #endif
