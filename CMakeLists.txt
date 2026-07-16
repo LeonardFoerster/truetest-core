@@ -63,6 +63,7 @@ configure_file(
 set(ENGINE_CORE_SOURCES
     src/engine/engine.cpp
     src/engine/execution_router.cpp
+    src/engine/order_audit_sink.cpp
     src/analytics/adverse_selection_tracker.cpp
     src/analytics/analytics.cpp
     src/analytics/ascii_widgets.cpp
