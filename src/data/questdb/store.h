@@ -90,8 +90,9 @@ public:
     virtual void record_rejection(const order_event& o,
                                   const std::string& reason_category,
                                   const std::string& reason_detail);
-    // Sparse variant for cases without a full order_event (e.g. async transport errors).
-    // Delegates to the same internal writer for schema-identical rows (fallbacks used).
+    // Kept for direct test usage and internal completeness. Engine callers go
+    // through the audit sink which uses the rich shape (sparse resolved by
+    // minimal event synthesis where needed).
     virtual void record_rejection(std::uint64_t order_id,
                                   const std::string& symbol,
                                   const std::string& reason_category,
