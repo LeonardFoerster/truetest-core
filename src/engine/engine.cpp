@@ -208,6 +208,25 @@ engine::engine(std::shared_ptr<data_handler> dh,
         }
     }
 
+    // Wire new seams (PR-03, behind existing activation, minimal).
+    audit_sink_ = std::make_unique<NoopOrderAuditSink>();
+#ifdef HAS_QUESTDB
+    if (config_.persist_enabled) {
+        questdb_begin();  // unchanged activation semantics
+        if (questdb_active_ && questdb_store_) {
+            audit_sink_ = std::make_unique<QuestdbOrderAuditSink>(questdb_store_, &questdb_active_);
+        }
+    }
+#endif
+
+    // Router skeleton wiring (simplified for PR-02/03; full collaborators in later PR).
+    router_ = std::make_unique<ExecutionRouter>(
+        orderbook_registry_,
+        config_,
+        l2_seeded_symbols_,
+        config_.provider.get()
+    );
+
     prewarm_object_pools();
 }
 
@@ -407,6 +426,7 @@ void engine::publish_event(const event_pointer& ev)
     if (ev && ev->get_type() == event_type::funding) {
         if (auto* fe = dynamic_cast<funding_event*>(ev.get())) {
             portfolio_.on_funding(*fe);
+            audit_sink_->record_funding(*fe, questdb_store_ ? questdb_store_->run_tag() : "");  // LIVE_SAFETY_AUDIT_SEAM narrow carve-out
 #ifdef HAS_QUESTDB
             if (questdb_store_) {
                 questdb_store_->record_funding(*fe, questdb_store_->run_tag());
@@ -1679,7 +1699,7 @@ void engine::questdb_end()
     questdb_store_->end(final_equity,
                         report.total_orders,
                         report.total_fills,
-                        questdb_total_rejections_,
+                        audit_sink_ ? audit_sink_->total_rejections() : 0,
                         // Phase 4: richer campaign summary for long runs
                         report.max_drawdown,
                         report.sharpe_ratio,
@@ -1996,15 +2016,9 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                     o->get_order_id(), reason_str);
                 log_event(*rej);
                 publish_event(rej);
-#ifdef HAS_QUESTDB
-                if (questdb_active_ && questdb_store_)
-                {
-                    questdb_store_->record_order_submitted(*o, "rejected");
-                    questdb_store_->record_rejection(*o, "venue_risk_reject",
-                                                     reason_str.c_str());
-                    questdb_total_rejections_++;
-                }
-#endif
+                // Migrated to sink (PR-04)
+                audit_sink_->record_order_submitted(*o, "rejected");
+                audit_sink_->record_rejection(*o, "venue_risk_reject", reason_str.c_str());
                 order_tracker_.set_status(o->get_order_id(),
                                           order_status::rejected);
                 erase_open_order(o->get_order_id());
@@ -2028,25 +2042,20 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             log_event(*rej);
             publish_event(rej);
 
-#ifdef HAS_QUESTDB
-            if (questdb_active_ && questdb_store_)
-            {
-                questdb_store_->record_order_submitted(*o, "rejected");
-                questdb_store_->record_rejection(*o,
-                    (action == risk_action::halt) ? "risk_halt" : "risk_reject",
-                    reason);
-                questdb_store_->record_event(
-                    "risk_decision",
-                    o->get_symbol(),
-                    o->get_strategy_name(),
-                    o->get_order_id(),
-                    (action == risk_action::halt) ? "halt" : "reject",
-                    reason,
-                    "{}"  // could be extended with more JSON context later
-                );
-                questdb_total_rejections_++;
-            }
-#endif
+            // Migrated to sink (PR-04)
+            audit_sink_->record_order_submitted(*o, "rejected");
+            audit_sink_->record_rejection(*o,
+                (action == risk_action::halt) ? "risk_halt" : "risk_reject",
+                reason);
+            audit_sink_->record_event(
+                "risk_decision",
+                o->get_symbol().c_str(),
+                o->get_strategy_name(),
+                o->get_order_id(),
+                (action == risk_action::halt) ? "halt" : "reject",
+                reason,
+                "{}"
+            );
 
             order_tracker_.set_status(o->get_order_id(), order_status::rejected);
             erase_open_order(o->get_order_id());
@@ -2073,26 +2082,22 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     publish_event(o);
     analytics_.on_event(o);
 
-#ifdef HAS_QUESTDB
-    if (questdb_active_ && questdb_store_)
+    // Migrated to sink (PR-04)
+    audit_sink_->record_order_submitted(*o, "pending");
+    if (!async_submit)
     {
-        questdb_store_->record_order_submitted(*o, "pending");
-            if (!async_submit)
-            {
-                questdb_store_->record_status_transition(o->get_order_id(),
-                    order_status::pending, order_status::open);
-            }
-        questdb_store_->record_event(
-            "order_intent",
-            o->get_symbol(),
-            o->get_strategy_name(),
-            o->get_order_id(),
-            "info",
-            "order generated by strategy",
-            "{}"
-        );
+        audit_sink_->record_status_transition(o->get_order_id(),
+            order_status::pending, order_status::open);
     }
-#endif
+    audit_sink_->record_event(
+        "order_intent",
+        o->get_symbol().c_str(),
+        o->get_strategy_name(),
+        o->get_order_id(),
+        "info",
+        "order generated by strategy",
+        "{}"
+    );
 
     if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
     {
@@ -2850,13 +2855,12 @@ void engine::drain_async_submit_results(IExecutionAdapter* adapter)
             publish_event(rej);
             order_tracker_.set_status(sr.engine_id, order_status::rejected);
             erase_open_order(sr.engine_id);
-#ifdef HAS_QUESTDB
-            if (questdb_active_ && questdb_store_)
-            {
-                questdb_store_->record_rejection(*rej, "transport_error",
-                                                 sr.error.c_str());
-            }
-#endif
+            // Migrated to sink (PR-04). Sparse path for async transport error.
+            audit_sink_->record_status_transition(sr.engine_id,
+                order_status::pending, order_status::rejected,
+                ("transport_error: " + sr.error).c_str());
+            audit_sink_->record_rejection(sr.engine_id, sr.symbol,
+                "transport_error", sr.error.c_str());
             continue;
         }
 

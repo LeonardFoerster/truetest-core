@@ -44,6 +44,9 @@ namespace truetest::ui { struct streaming_stats; }
 
 #include "debug/stage_timer.h"
 
+#include "order_audit_sink.h"
+#include "execution_router.h"
+
 #ifdef HAS_QUESTDB
 #include "data/questdb/store.h"
 #endif
@@ -161,7 +164,6 @@ private:
 #ifdef HAS_QUESTDB
     std::shared_ptr<truetest::questdb::QuestdbStore> questdb_store_;
     bool questdb_active_ = false;  // true only after successful begin()
-    std::size_t questdb_total_rejections_ = 0;
 
     // Last time we called tick() for time-based ILP flushing (Phase 1 hardening).
     std::chrono::steady_clock::time_point last_questdb_flush_{};
@@ -174,6 +176,10 @@ private:
     // once per config_.questdb_flush_cadence.
     void maybe_questdb_tick();
 #endif
+
+    // New seams from engine-decomposition (PR-03 wiring).
+    std::unique_ptr<IOrderAuditSink> audit_sink_;
+    std::unique_ptr<ExecutionRouter> router_;
 
     // Dashboard view: read from the rich (ncurses) TUI render thread.
     // Filled on the event loop (no contention with the hot path) and
