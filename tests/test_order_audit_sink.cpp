@@ -22,7 +22,11 @@ TEST(OrderAuditSink, NoopDoesNotCrash)
     sink.record_fill(f, 42, "test_strat", "engine");
 
     sink.record_rejection(o, "test_cat", "test_detail");
-    sink.record_rejection(99, "AAPL", "sparse_cat", "sparse_det");
+    // Exercise rejection via the single (rich) shape. For identity-only cases the
+    // caller synthesizes a minimal order_event (or the sink impl could resolve internally).
+    order_event sparse_dummy(ts, "AAPL", order_type::limit, order_side::buy, 0.0);
+    sparse_dummy.set_order_id(99);
+    sink.record_rejection(sparse_dummy, "sparse_cat", "sparse_det");
 
     sink.record_cancellation(42, "AAPL", "test_strat", "user");
     sink.record_amendment(42, "AAPL", 150.0, 149.0, 10.0, 9.0, ts);
@@ -61,7 +65,9 @@ TEST(OrderAuditSink, QuestdbOrderAuditSinkSkeleton)
     sink.record_fill(f, 1, "s", "src");
 
     sink.record_rejection(o, "cat", "det");
-    sink.record_rejection(2, "SYM", "scat", "sdet");
+    order_event sparse_dummy(ts, "SYM", order_type::limit, order_side::buy, 0.0);
+    sparse_dummy.set_order_id(2);
+    sink.record_rejection(sparse_dummy, "scat", "sdet");
 
     sink.record_cancellation(1, "AAPL", "s", "r");
     sink.record_amendment(1, "AAPL", 100.0, 99.0, 1.0, 0.5, ts);
