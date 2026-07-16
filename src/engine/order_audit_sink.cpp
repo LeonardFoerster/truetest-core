@@ -29,12 +29,13 @@ void QuestdbOrderAuditSink::record_status_transition(uint64_t order_id,
 
 void QuestdbOrderAuditSink::record_fill(const fill_event& f,
                                         uint64_t opener_order_id,
-                                        const std::string& strategy_name,
+                                        const char* strategy_name,
                                         const char* source)
 {
     if (store_ && active_flag_ && *active_flag_)
     {
-        store_->record_fill(f, opener_order_id, strategy_name,
+        store_->record_fill(f, opener_order_id,
+                            strategy_name ? std::string(strategy_name) : std::string{},
                             source ? std::string(source) : std::string{});
     }
 }
@@ -53,7 +54,7 @@ void QuestdbOrderAuditSink::record_rejection(const order_event& o,
 }
 
 void QuestdbOrderAuditSink::record_rejection(uint64_t order_id,
-                                             const std::string& symbol,
+                                             const char* symbol,
                                              const char* category,
                                              const char* detail)
 {
@@ -65,40 +66,44 @@ void QuestdbOrderAuditSink::record_rejection(uint64_t order_id,
 }
 
 void QuestdbOrderAuditSink::record_cancellation(uint64_t order_id,
-                                                const std::string& symbol,
-                                                const std::string& strategy_name,
+                                                const char* symbol,
+                                                const char* strategy_name,
                                                 const char* reason)
 {
     if (store_ && active_flag_ && *active_flag_)
     {
-        store_->record_cancellation(order_id, symbol, strategy_name,
+        store_->record_cancellation(order_id,
+                                    symbol ? std::string(symbol) : std::string{},
+                                    strategy_name ? std::string(strategy_name) : std::string{},
                                     reason ? std::string(reason) : std::string{});
     }
 }
 
 void QuestdbOrderAuditSink::record_amendment(uint64_t order_id,
-                                             const std::string& symbol,
+                                             const char* symbol,
                                              double old_price, double new_price,
                                              double old_qty, double new_qty,
                                              std::chrono::system_clock::time_point ts)
 {
     if (store_ && active_flag_ && *active_flag_)
     {
-        store_->record_amendment(order_id, symbol, old_price, new_price, old_qty, new_qty, ts);
+        store_->record_amendment(order_id,
+                                 symbol ? std::string(symbol) : std::string{},
+                                 old_price, new_price, old_qty, new_qty, ts);
     }
 }
 
-void QuestdbOrderAuditSink::record_funding(const funding_event& fe, const std::string& run_tag)
+void QuestdbOrderAuditSink::record_funding(const funding_event& fe, const char* run_tag)
 {
     if (store_ && active_flag_ && *active_flag_)
     {
-        store_->record_funding(fe, run_tag);
+        store_->record_funding(fe, run_tag ? std::string(run_tag) : std::string{});
     }
 }
 
 void QuestdbOrderAuditSink::record_event(const char* event_type,
-                                         const std::string& symbol,
-                                         const std::string& strategy_name,
+                                         const char* symbol,
+                                         const char* strategy_name,
                                          uint64_t order_id,
                                          const char* severity,
                                          const char* message,
@@ -107,8 +112,8 @@ void QuestdbOrderAuditSink::record_event(const char* event_type,
     if (store_ && active_flag_ && *active_flag_)
     {
         store_->record_event(event_type ? std::string(event_type) : std::string{},
-                             symbol,
-                             strategy_name,
+                             symbol ? std::string(symbol) : std::string{},
+                             strategy_name ? std::string(strategy_name) : std::string{},
                              order_id,
                              severity ? std::string(severity) : std::string{},
                              message ? std::string(message) : std::string{},
