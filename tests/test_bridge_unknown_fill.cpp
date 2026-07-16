@@ -212,3 +212,81 @@ TEST(ExecutionBridgeUnknownFill, NoExchangeIdSkipsHandler)
 
     EXPECT_EQ(handler_calls, 0);  // bridge short-circuits without exchange id
 }
+
+TEST(ExecutionBridgeUnknownFill, ClearHandlerPreventsLateInvocation)
+{
+    auto fill_tx  = std::make_shared<FakeFillTransport>();
+    auto order_tx = std::make_shared<FakeOrderTransport>();
+    auto encoder  = std::make_shared<FakeEncoder>();
+    auto parser   = std::make_shared<ScriptedParser>();
+
+    ExecutionBridge::deps d;
+    d.order_tx = order_tx;
+    d.fill_tx  = fill_tx;
+    d.encoder  = encoder;
+    d.parser   = parser;
+
+    ExecutionBridge bridge(std::move(d));
+
+    int handler_calls = 0;
+    bridge.set_unknown_fill_handler(
+        [&](const parsed_exec&, std::uint64_t)
+            -> std::optional<ExecutionBridge::synth_result>
+        {
+            ++handler_calls;
+            return std::nullopt;
+        });
+
+    // Explicit clear (as engine will do on stop paths).
+    bridge.clear_unknown_fill_handler();
+
+    parser->next = parsed_exec{};
+    parser->next.k                  = parsed_exec::kind::full_fill;
+    parser->next.client_order_id    = "unknown-binance-id";
+    parser->next.exchange_order_id  = "LATE-001";
+    parser->next.symbol             = "BTCUSDT";
+    parser->next.side               = order_side::buy;
+    parser->next.last_fill_qty      = 0.1;
+    parser->next.last_fill_price    = 100.0;
+
+    fill_tx->inject(R"({"e":"executionReport"})");
+
+    EXPECT_EQ(handler_calls, 0);  // must not fire after clear
+}
+
+TEST(ExecutionBridgeUnknownFill, CloseClearsHandler)
+{
+    auto fill_tx  = std::make_shared<FakeFillTransport>();
+    auto order_tx = std::make_shared<FakeOrderTransport>();
+    auto encoder  = std::make_shared<FakeEncoder>();
+    auto parser   = std::make_shared<ScriptedParser>();
+
+    ExecutionBridge::deps d;
+    d.order_tx = order_tx;
+    d.fill_tx  = fill_tx;
+    d.encoder  = encoder;
+    d.parser   = parser;
+
+    ExecutionBridge bridge(std::move(d));
+
+    int handler_calls = 0;
+    bridge.set_unknown_fill_handler(
+        [&](const parsed_exec&, std::uint64_t)
+            -> std::optional<ExecutionBridge::synth_result>
+        {
+            ++handler_calls;
+            return std::nullopt;
+        });
+
+    bridge.close();  // should internally clear
+
+    parser->next = parsed_exec{};
+    parser->next.k                  = parsed_exec::kind::full_fill;
+    parser->next.client_order_id    = "unknown";
+    parser->next.exchange_order_id  = "AFTER-CLOSE";
+    parser->next.symbol             = "ETHUSDT";
+
+    fill_tx->inject("{}");
+
+    EXPECT_EQ(handler_calls, 0);
+}
