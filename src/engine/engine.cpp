@@ -50,6 +50,9 @@ engine::engine(std::shared_ptr<data_handler> dh,
       market_maker_(config_.seed != 0 ? MarketMaker(static_cast<unsigned>(config_.seed + 1))
                                       : MarketMaker())
 {
+    // Checkpoint mgr early (used by restore path in ctor).
+    checkpoint_mgr_ = std::make_unique<CheckpointManager>(config_);
+
     if (ob)
         orderbook_registry_ = OrderbookRegistry();
 
@@ -230,6 +233,10 @@ engine::engine(std::shared_ptr<data_handler> dh,
         execution_adapters_
     );
 
+    // InstrumentSpecCache wiring (PR final). Refs to overrides/provider (cold).
+    instrument_spec_cache_ = std::make_unique<InstrumentSpecCache>(
+        config_.instrument_overrides, config_.provider.get());
+
     prewarm_object_pools();
 }
 
@@ -312,42 +319,12 @@ void engine::drain_object_pool_returns() noexcept
 
 void engine::write_checkpoint_if_due(std::size_t event_count)
 {
-    if (config_.checkpoint_path.empty()) return;
-    if (config_.checkpoint_interval_events == 0) return;
-    if (event_count == 0 || event_count % config_.checkpoint_interval_events != 0) return;
-
-    try {
-        auto wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        checkpoint::write_file(config_.checkpoint_path, portfolio_,
-                               static_cast<uint64_t>(event_count), wall_ms);
-    } catch (const std::exception& e) {
-        std::cerr << "[checkpoint] write failed: " << e.what() << std::endl;
-    }
+    if (checkpoint_mgr_) checkpoint_mgr_->write_if_due(portfolio_, event_count);
 }
 
 void engine::restore_from_checkpoint()
 {
-    if (config_.resume_checkpoint_path.empty()) return;
-
-    try {
-        auto cp = checkpoint::read_file(config_.resume_checkpoint_path);
-        std::unordered_map<std::string, position> pos_map;
-        pos_map.reserve(cp.positions.size());
-        for (const auto& e : cp.positions)
-        {
-            position p;
-            p.qty = e.qty;
-            p.cost_basis = e.cost_basis;
-            pos_map.emplace(e.symbol, p);
-        }
-        portfolio_.restore_state(cp.cash, static_cast<std::size_t>(cp.total_trades),
-                                 std::move(pos_map));
-        std::cerr << "[checkpoint] resumed from " << config_.resume_checkpoint_path
-                  << " at event " << cp.event_count << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "[checkpoint] restore failed: " << e.what() << std::endl;
-    }
+    if (checkpoint_mgr_) checkpoint_mgr_->restore(portfolio_);
 }
 
 void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
@@ -366,12 +343,6 @@ void engine::switch_symbol(const std::string& new_symbol)
     data_handler_->db_data_symbol.push_back(new_symbol);
 
     strategy_->set_position_open(new_symbol, false);
-}
-
-std::shared_ptr<IExecutionAdapter> engine::get_adapter(const std::string& symbol)
-{
-    // Thin delegate to router (router owns creation + map population via ref).
-    return router_ ? router_->resolve_adapter(symbol) : nullptr;
 }
 
 void engine::log_event(const event& ev)
@@ -1672,17 +1643,17 @@ void engine::questdb_end()
 }
 #endif
 
-#ifdef HAS_QUESTDB
 void engine::maybe_questdb_tick()
 {
+#ifdef HAS_QUESTDB
     if (!questdb_active_ || !questdb_store_) return;
     auto now = std::chrono::steady_clock::now();
     if (now - last_questdb_flush_ >= config_.questdb_flush_cadence) {
         questdb_store_->tick();
         last_questdb_flush_ = now;
     }
-}
 #endif
+}
 
 void engine::print_summary()
 {
@@ -1880,7 +1851,7 @@ void engine::reset_for_next_trial(uint64_t new_seed)
     adverse_selection_.reset();
 
     // Reset per-symbol caches that can leak state between trials
-    instrument_cache_.clear();
+    if (instrument_spec_cache_) instrument_spec_cache_->clear();
     l2_seeded_symbols_.clear();
 
     // Reset tick aggregator (prevents partial bar leakage between trials)
@@ -2375,11 +2346,7 @@ void engine::apply_l2_snapshot(const std::string& symbol,
                                                     abids.begin() + n_bids);
     std::vector<std::pair<double, double>> aask_vec(aasks.begin(),
                                                     aasks.begin() + n_asks);
-    for (auto& [_, ad] : execution_adapters_)
-        if (ad) ad->on_l2_snapshot(symbol, abid_vec, aask_vec);
-    if (config_.provider)
-        if (auto pa = config_.provider->get_execution_adapter())
-            pa->on_l2_snapshot(symbol, abid_vec, aask_vec);
+    if (router_) router_->on_l2_snapshot(symbol, abid_vec, aask_vec);
 
     auto ev = acquire_pooled(l2_snapshot_pool_,
         std::chrono::system_clock::now(), symbol,
@@ -2402,11 +2369,7 @@ void engine::apply_l2_update(const std::string& symbol,
 
     // Forward L2 update to adapters for queue models (see apply_l2_snapshot).
     const order_side os = (ts_side == tick_side::bid) ? order_side::buy : order_side::sell;
-    for (auto& [_, ad] : execution_adapters_)
-        if (ad) ad->on_l2_update(symbol, os, price, static_cast<double>(new_qty));
-    if (config_.provider)
-        if (auto pa = config_.provider->get_execution_adapter())
-            pa->on_l2_update(symbol, os, price, static_cast<double>(new_qty));
+    if (router_) router_->on_l2_update(symbol, os, price, static_cast<double>(new_qty));
 
     auto ev = acquire_pooled(l2_update_pool_,
         std::chrono::system_clock::now(), symbol, ts_side, price, new_qty);
@@ -2471,50 +2434,13 @@ void engine::refresh_top_of_book_atomics(const orderbook& ob)
 
 const instrument_spec* engine::resolve_instrument_spec(const std::string& symbol)
 {
-    auto it = instrument_cache_.find(symbol);
-    if (it != instrument_cache_.end())
-        return it->second ? &*it->second : nullptr;
-
-    std::optional<instrument_spec> spec;
-    auto ov = config_.instrument_overrides.find(symbol);
-    if (ov != config_.instrument_overrides.end())
-        spec = ov->second;
-    else if (config_.provider)
-        spec = config_.provider->get_instrument(symbol);
-
-    auto [cit, _] = instrument_cache_.emplace(symbol, std::move(spec));
-    return cit->second ? &*cit->second : nullptr;
+    return instrument_spec_cache_ ? instrument_spec_cache_->resolve_instrument_spec(symbol) : nullptr;
 }
 
 bool engine::apply_instrument_spec(order_event& o, const instrument_spec& spec) const
 {
-    if (spec.tick_size > 0.0)
-    {
-        if (o.get_order_type() == order_type::limit ||
-            o.get_order_type() == order_type::stop_limit)
-        {
-            o.set_price(quantize_price_to_tick(o.get_price(), spec.tick_size));
-        }
-        if (o.get_order_type() == order_type::stop ||
-            o.get_order_type() == order_type::stop_limit)
-        {
-            o.set_stop_price(quantize_price_to_tick(o.get_stop_price(), spec.tick_size));
-        }
-    }
-
-    if (spec.lot_size > 0.0)
-        o.set_quantity(floor_qty_to_lot(o.get_quantity(), spec.lot_size));
-
-    if (!meets_min_qty(o.get_quantity(), spec.min_qty))
-        return false;
-
-    const double ref_price = (o.get_order_type() == order_type::stop)
-        ? o.get_stop_price()
-        : o.get_price();
-    if (!meets_min_notional(o.get_quantity(), ref_price, spec.min_notional))
-        return false;
-
-    return true;
+    // Delegate (no duplication); cache owns impl + cache map.
+    return instrument_spec_cache_ ? instrument_spec_cache_->apply_instrument_spec(o, spec) : true;
 }
 
 bool engine::route_order(order_event& order,
@@ -2975,13 +2901,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
     // Advance adapter clocks first so cancels whose in-flight window has
     // elapsed are drained before this event's matching runs.
-    for (auto& [_, ad] : execution_adapters_)
-        if (ad) ad->advance_time(timestamp);
-    if (config_.provider)
-    {
-        if (auto pa = config_.provider->get_execution_adapter())
-            pa->advance_time(timestamp);
-    }
+    if (router_) router_->advance_all(timestamp);
 
     market_event mkt(
         timestamp,
@@ -3111,13 +3031,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     if (flatten_request_.exchange(false, std::memory_order_acq_rel))
         unwind_positions(event_count);
 
-    for (auto& [_, ad] : execution_adapters_)
-        if (ad) ad->advance_time(rec.timestamp);
-    if (config_.provider)
-    {
-        if (auto pa = config_.provider->get_execution_adapter())
-            pa->advance_time(rec.timestamp);
-    }
+    if (router_) router_->advance_all(rec.timestamp);
 
     tick_side ts = tick_side::unknown;
     if (rec.side == data_tick_side::bid) ts = tick_side::bid;
@@ -3375,9 +3289,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
                           << " | Round-trips: " << portfolio_.get_total_trades()
                           << std::flush;
                 last_report_time = now_report;
-#ifdef HAS_QUESTDB
                 maybe_questdb_tick();
-#endif
             }
         }
     });
@@ -3516,9 +3428,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
                           << " | Round-trips: " << portfolio_.get_total_trades()
                           << std::flush;
                 last_report_time = now_report;
-#ifdef HAS_QUESTDB
                 maybe_questdb_tick();
-#endif
             }
         }
     });
@@ -3701,9 +3611,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
                           << " | Round-trips: " << portfolio_.get_total_trades()
                           << std::flush;
                 last_report_time = now_report;
-#ifdef HAS_QUESTDB
                 maybe_questdb_tick();
-#endif
             }
         }
     });
@@ -3915,9 +3823,7 @@ void engine::run()
                               << std::flush;
                 }
                 last_report_time = now_report;
-#ifdef HAS_QUESTDB
                 maybe_questdb_tick();
-#endif
             }
         }
 
@@ -4139,9 +4045,7 @@ void engine::run_tick_data()
                               << std::flush;
                 }
                 last_report_time = now_report;
-#ifdef HAS_QUESTDB
                 maybe_questdb_tick();
-#endif
             }
         }
     }

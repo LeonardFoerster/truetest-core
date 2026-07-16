@@ -46,6 +46,8 @@ namespace truetest::ui { struct streaming_stats; }
 
 #include "order_audit_sink.h"
 #include "execution_router.h"
+#include "instrument_spec_cache.h"
+#include "checkpoint.h"
 
 #ifdef HAS_QUESTDB
 #include "data/questdb/store.h"
@@ -110,7 +112,8 @@ private:
     double last_mid_price_ = 0.0;
     std::string last_mark_symbol_;
 
-    std::unordered_map<std::string, std::optional<instrument_spec>> instrument_cache_;
+    // Instrument spec cache (moved out; engine delegates). Cold path.
+    std::unique_ptr<InstrumentSpecCache> instrument_spec_cache_;
 
     // Symbols already carrying real L2 depth - MarketMaker::replenish is
     // suppressed here so paper liquidity can't corrupt the fill sim.
@@ -170,12 +173,11 @@ private:
 
     void questdb_begin();
     void questdb_end();
-
-    // Cheap periodic call (intended to be invoked from the 200ms reporting blocks).
-    // Does nothing if persist is not active. Calls QuestdbStore::tick() at most
-    // once per config_.questdb_flush_cadence.
-    void maybe_questdb_tick();
 #endif
+
+    // Declared unconditionally (guarded impl) to eliminate #ifdef guards from hot paths.
+    // Does nothing if persist is not active.
+    void maybe_questdb_tick();
 
     // New seams from engine-decomposition (PR-03 wiring).
     std::unique_ptr<IOrderAuditSink> audit_sink_;
@@ -221,6 +223,8 @@ private:
     void write_checkpoint_if_due(std::size_t event_count);
     void restore_from_checkpoint();
 
+    std::unique_ptr<CheckpointManager> checkpoint_mgr_;
+
     std::unique_ptr<EventLogger> event_logger_;
 
     std::unique_ptr<ShadowTracker> shadow_tracker_;
@@ -260,8 +264,6 @@ private:
                         std::int64_t recv_ns);
 
     void log_event(const event& ev);
-
-    std::shared_ptr<IExecutionAdapter> get_adapter(const std::string& symbol);
 
     bool process_order(const std::shared_ptr<order_event>& o,
                        std::size_t& event_count,

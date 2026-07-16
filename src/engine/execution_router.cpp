@@ -96,3 +96,36 @@ void ExecutionRouter::submit_to_exchange_shadow(const order_event& o) noexcept
     // Skeleton no-op. Shadow dual-submit lives in engine until moved.
     (void)o;
 }
+
+// Iteration moved from engine (net reduction + central). Includes provider adapter.
+void ExecutionRouter::advance_all(std::chrono::system_clock::time_point ts) noexcept
+{
+    for (auto& [_, ad] : adapters_)
+        if (ad) ad->advance_time(ts);
+    if (provider_)
+    {
+        if (auto pa = provider_->get_execution_adapter())
+            pa->advance_time(ts);
+    }
+}
+
+void ExecutionRouter::on_l2_snapshot(const std::string& symbol,
+                                     const std::vector<std::pair<double, double>>& bids,
+                                     const std::vector<std::pair<double, double>>& asks) noexcept
+{
+    for (auto& [_, ad] : adapters_)
+        if (ad) ad->on_l2_snapshot(symbol, bids, asks);
+    if (provider_)
+        if (auto pa = provider_->get_execution_adapter())
+            pa->on_l2_snapshot(symbol, bids, asks);
+}
+
+void ExecutionRouter::on_l2_update(const std::string& symbol, order_side os,
+                                   double price, double new_qty) noexcept
+{
+    for (auto& [_, ad] : adapters_)
+        if (ad) ad->on_l2_update(symbol, os, price, new_qty);
+    if (provider_)
+        if (auto pa = provider_->get_execution_adapter())
+            pa->on_l2_update(symbol, os, price, new_qty);
+}

@@ -10,6 +10,8 @@
 #include <memory>
 #include <string>
 #include <cstdint>
+#include <chrono>
+#include <vector>
 
 // Skeleton-local redeclarations of meta types to match the exact design
 // signatures using bare names. These mirror the nested structs currently
@@ -45,6 +47,15 @@ public:
     void drain_submit_results(IExecutionAdapter* a) noexcept;
     bool poll_fills(IExecutionAdapter* a, std::vector<fill_event>& out) noexcept;
     void submit_to_exchange_shadow(const order_event& o) noexcept;
+
+    // Adapter map iteration moved fully into router (final cleanup).
+    // Also forwards to provider's execution adapter when present (for live/shadow).
+    void advance_all(std::chrono::system_clock::time_point ts) noexcept;
+    void on_l2_snapshot(const std::string& symbol,
+                        const std::vector<std::pair<double, double>>& bids,
+                        const std::vector<std::pair<double, double>>& asks) noexcept;
+    void on_l2_update(const std::string& symbol, order_side os,
+                      double price, double new_qty) noexcept;
 
 private:
     // Backing map is the engine's execution_adapters_ (passed by ref). Router owns creation/lookup logic.
