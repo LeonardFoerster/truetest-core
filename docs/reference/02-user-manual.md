@@ -157,7 +157,19 @@ Full details + caveats + usage in [../governance/01-prod.md](../governance/01-pr
 # Minimal (CSV backtesting only, no network)
 cmake -B build
 cmake --build build -j
+```
 
+Core + test source registration lives in `cmake/Sources.cmake` (the single obvious place to add new code).
+
+Common real combinations are available as presets:
+```bash
+cmake --preset linux-tests
+cmake --preset linux-binance-questdb
+cmake --preset linux-web
+cmake --preset linux-asan
+```
+
+```bash
 # Full-featured (Binance + QuestDB + debug + native opt)
 cmake -B build -DENABLE_BINANCE=ON -DENABLE_QUESTDB=ON \
                -DENABLE_DEBUG=ON -DENABLE_NATIVE_OPT=ON \

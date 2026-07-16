@@ -158,6 +158,8 @@ Strategies can emit both `order_event`s and `exit_intent` vectors (for per-lot b
 cmake -B build && cmake --build build
 ```
 
+Source registration is centralized in `cmake/Sources.cmake`. Common real setups use presets (see `cmake --list-presets` or reference docs).
+
 **Key CMake options**:
 - `ENABLE_BINANCE`, `ENABLE_QUESTDB`, `ENABLE_LIVE_DATA`, `ENABLE_DEBUG`, `ENABLE_NATIVE_OPT`
 - `BUILD_TESTS`, `ENABLE_BENCHMARKS`, `BUILD_SHARED_LIB`

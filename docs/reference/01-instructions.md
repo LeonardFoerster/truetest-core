@@ -105,7 +105,9 @@ cmake --build build
 ```
 Produces `engine_backtest` (default), `engine_shadow`, `engine_live` (TT_TARGET=1/2/3).
 
-**Full-featured**:
+Core and test source lists live in `cmake/Sources.cmake` (the single obvious place to register a new strategy, simulation component, or test).
+
+**Full-featured** (or use presets for common combos):
 ```bash
 cmake -B build \
   -DENABLE_BINANCE=ON \
@@ -118,6 +120,17 @@ cmake -B build \
   -DBUILD_SHARED_LIB=ON
 cmake --build build -j$(nproc)
 ctest --test-dir build
+```
+
+**CMake Presets** (recommended for real combinations):
+```bash
+cmake --preset linux-tests
+cmake --preset linux-binance-questdb
+cmake --preset linux-web
+cmake --preset linux-asan
+cmake --preset linux-tsan
+cmake --preset linux-benchmarks
+cmake --preset linux-release-native
 ```
 
 **Key CMake Flags** (see instructions.md §3 for exhaustive table):

@@ -489,7 +489,7 @@ The strategy returns rich telemetry for the dashboard, analytics, and QuestDB:
 | Main implementation + config struct    | `src/strategy/adaptive_hybrid_strategy.h` |
 | Full logic + 9-step flow               | `src/strategy/adaptive_hybrid_strategy.cpp` |
 | JSON config loader (init-time only)    | `src/strategy/adaptive_hybrid_config.{h,cpp}` |
-| Example configuration                  | `adaptive_hybrid_config.example.json` (root) |
+| Example configuration                  | siehe §9.3 (JSON-Beispiel im Dokument) |
 | Unit + harness tests                   | `tests/test_adaptive_hybrid.cpp` |
 | L2 dispatch (with CCB comment)         | `src/engine/engine.cpp` |
 | This documentation                     | `docs/AdaptiveHybridStrategy.md` |

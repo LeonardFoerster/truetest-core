@@ -37,6 +37,18 @@ cmake -B build
 cmake --build build
 ```
 
+**Modernized build system** (2026-07 cmake-update):
+- Core + test source registration lives in one obvious file: `cmake/Sources.cmake` (still fully explicit lists; no globs).
+- Many real-world combinations are first-class via `CMakePresets.json`:
+  ```bash
+  cmake --preset linux-tests
+  cmake --preset linux-binance-questdb
+  cmake --preset linux-web
+  cmake --preset linux-asan
+  # etc.
+  ```
+See `docs/reference/01-instructions.md` for the full list.
+
 Key options:
 
 | Flag | Effect |
