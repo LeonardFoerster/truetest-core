@@ -37,3 +37,5 @@ src/threading/worker_watchdog.h
 **On every phase exit declared in `prod.md`**: Also update `todo.md` (move/complete items + add follow-ups surfaced by review), `prerequisites.md` if the checklist evolved, and "Last updated" notes. Anti-rot ritual before any capital tier increase must include "docs verified + links resolve + `todo.md` updated".
 
 **Last updated**: 2026-07-03 (split from governance/03-todo.md per TODOS-SPLIT-SPEC; verbatim extraction of all items/status/evidence paragraphs + frozen list; see 00-OVERVIEW.md; frozen list matches check script + prereq + prod + CLAUDE).
+
+**Session note (2026-07-16)**: Technical implementation of the execution adapter abstractions cleanup (narrow `IAsyncSubmitSupport` capability + elimination of ad-hoc `dynamic_cast`s to concrete adapters) was performed against the frozen list (engine.cpp touched). Per prerequisites, this change requires a separate `LIVE_SAFETY_CCB_APPROVED` commit + CCB process. The one-time review follow-up notes for this work have been retired.
