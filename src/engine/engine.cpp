@@ -2717,15 +2717,31 @@ void engine::drain_async_submit_results(IExecutionAdapter* adapter)
             publish_event(rej);
             order_tracker_.set_status(sr.engine_id, order_status::rejected);
             erase_open_order(sr.engine_id);
-            // Migrated to sink (PR-04). Sparse path for async transport error.
-            // Use stack buffer to avoid std::string temporary on (error) hot path.
+            // Unconditional via audit_sink using the single record_rejection shape
+            // (the rich order_event overload). For async submit transport errors
+            // we synthesize a minimal stack order_event carrying the identity we have
+            // (id + symbol + looked-up strategy). qty/price/side are best-effort zeros
+            // (the sink path will record zeros for qty/price as before).
+            // Strategy lookup mirrors the pattern used for cancellations in the same drain.
+            const std::string& strat = lookup_strategy_name(sr.engine_id);
+            order_event ghost{
+                std::chrono::system_clock::now(),
+                sr.symbol,
+                order_type::market,
+                order_side::buy,
+                0.0,
+                0.0
+            };
+            ghost.set_order_id(sr.engine_id);
+            if (!strat.empty())
+                ghost.set_strategy_name(strat);
+
             char transport_msg[128];
             std::snprintf(transport_msg, sizeof(transport_msg), "transport_error: %s", sr.error.c_str());
             audit_sink_->record_status_transition(sr.engine_id,
                 order_status::pending, order_status::rejected,
                 transport_msg);
-            audit_sink_->record_rejection(sr.engine_id, sr.symbol.c_str(),
-                "transport_error", sr.error.c_str());
+            audit_sink_->record_rejection(ghost, "transport_error", sr.error.c_str());
             continue;
         }
 

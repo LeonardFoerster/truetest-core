@@ -53,21 +53,6 @@ void QuestdbOrderAuditSink::record_rejection(const order_event& o,
     }
 }
 
-void QuestdbOrderAuditSink::record_rejection(uint64_t order_id,
-                                             const char* symbol,
-                                             const char* category,
-                                             const char* detail)
-{
-    ++total_rejections_;
-    if (store_ && active_flag_ && *active_flag_)
-    {
-        store_->record_rejection(order_id,
-                                 symbol ? std::string(symbol) : std::string{},
-                                 category ? std::string(category) : std::string{},
-                                 detail ? std::string(detail) : std::string{});
-    }
-}
-
 void QuestdbOrderAuditSink::record_cancellation(uint64_t order_id,
                                                 const char* symbol,
                                                 const char* strategy_name,

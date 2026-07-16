@@ -38,11 +38,6 @@ public:
     virtual void record_rejection(const order_event& o,
                                   const char* category,
                                   const char* detail) = 0;
-    // Sparse variant: used for transport errors after async submit (no full order_event).
-    virtual void record_rejection(uint64_t order_id,
-                                  const char* symbol,
-                                  const char* category,
-                                  const char* detail) = 0;
     virtual void record_cancellation(uint64_t order_id,
                                      const char* symbol,
                                      const char* strategy_name,
@@ -90,7 +85,6 @@ public:
     void record_status_transition(uint64_t, order_status, order_status, const char*) override {}
     void record_fill(const fill_event&, uint64_t, const char*, const char*) override {}
     void record_rejection(const order_event&, const char*, const char*) override {}
-    void record_rejection(uint64_t, const char*, const char*, const char*) override {}
     void record_cancellation(uint64_t, const char*, const char*, const char*) override {}
     void record_amendment(uint64_t, const char*, double, double, double, double, std::chrono::system_clock::time_point) override {}
     void record_funding(const funding_event&, const char*) override {}
@@ -121,10 +115,6 @@ public:
                      const char* strategy_name,
                      const char* source) override;
     void record_rejection(const order_event& o,
-                          const char* category,
-                          const char* detail) override;
-    void record_rejection(uint64_t order_id,
-                          const char* symbol,
                           const char* category,
                           const char* detail) override;
     void record_cancellation(uint64_t order_id,
