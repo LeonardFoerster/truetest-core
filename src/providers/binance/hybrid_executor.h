@@ -172,6 +172,11 @@ public:
         paper_->set_last_price(mid);
     }
 
+    void set_l2_seeded(bool seeded) override
+    {
+        if (book_adapter_) book_adapter_->set_l2_seeded(seeded);
+    }
+
 private:
     struct delayed_fill {
         fill_event fill;
