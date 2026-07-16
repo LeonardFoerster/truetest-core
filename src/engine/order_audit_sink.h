@@ -15,7 +15,7 @@
 // Full proposed interface. All methods use const char* where possible to avoid temporaries on hot paths.
 // Matches QuestdbStore call sites 1:1 but hides overloads and QuestDB types from engine callers.
 //
-// SEAM CONTRACT (engine-decomposition + 02-questdb-persistence-leakage):
+// SEAM CONTRACT (engine-decomposition):
 // - Engine (and all hot paths) call ONLY these methods on audit_sink_. Never inspect questdb_store_ or active_ for recording decisions.
 // - Sparse vs rich is resolved inside the concrete sink impl (strings/"unknown" only when Questdb active).
 // - Future QuestDB features: add method here + noop + Questdb impl. Do not add guarded blocks in engine.

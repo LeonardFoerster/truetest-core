@@ -373,6 +373,8 @@ public:
            std::shared_ptr<IStrategy> strategy,
            engine_config config = {});
 
+    ~engine();
+
     OrderbookRegistry& get_orderbook_registry() { return orderbook_registry_; }
     void run();
     void run_tick_data();

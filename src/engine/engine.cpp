@@ -7,8 +7,7 @@
 #include "data/date_parse.h"
 #include "execution/portfolio.h"
 #include "execution/latency_model.h"
-#include "execution/execution_bridge.h"
-#include "execution/trade_tape_shadow_adapter.h"
+#include "execution/async_support.h"
 #include "execution/fill_parser.h"
 #include "execution/queue_aware_book_adapter.h"
 #include "execution/queue_model.h"
@@ -128,11 +127,11 @@ engine::engine(std::shared_ptr<data_handler> dh,
         // by_client_id_ misses them) into engine-recognized fill_events.
         if (auto adapter = config_.provider->get_execution_adapter())
         {
-            if (auto* bridge = dynamic_cast<ExecutionBridge*>(adapter.get()))
+            if (auto* cap = adapter->get_async_support())
             {
-                bridge->set_unknown_fill_handler(
+                cap->set_unknown_fill_handler(
                     [this](const parsed_exec& msg, std::uint64_t fill_id)
-                        -> std::optional<ExecutionBridge::synth_result>
+                        -> std::optional<synth_result>
                     {
                         const auto opener = exit_manager_
                             .opener_for_exchange_order(msg.exchange_order_id);
@@ -155,7 +154,7 @@ engine::engine(std::shared_ptr<data_handler> dh,
                         fe.set_source(fill_source::exchange);
                         if (!strategy_name.empty()) fe.set_strategy_name(strategy_name);
                         if (opener != 0) fe.set_opener_order_id(opener);
-                        return ExecutionBridge::synth_result{
+                        return synth_result{
                             std::move(fe), opener, std::move(strategy_name)};
                     });
             }
@@ -1151,10 +1150,8 @@ void engine::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
         if (config_.provider)
         {
             auto adapter = config_.provider->get_execution_adapter();
-            if (auto* bridge = dynamic_cast<ExecutionBridge*>(adapter.get()))
-                d.errors.push_back(snap_t::subsys_error{"bridge", bridge->last_error()});
-            else
-                d.errors.push_back(snap_t::subsys_error{"bridge", ""});
+            std::string bridge_err = adapter ? adapter->last_error() : "";
+            d.errors.push_back(snap_t::subsys_error{"bridge", std::move(bridge_err)});
         }
         else d.errors.push_back(snap_t::subsys_error{"bridge", ""});
         d.errors.push_back(snap_t::subsys_error{"provider", ""});
@@ -1435,8 +1432,104 @@ void engine::start_workers()
 
 }
 
+engine::~engine()
+{
+    // Ensure workers are joined and provider resources (incl. any
+    // lingering transport threads and callbacks) are torn down before
+    // our members (pools, rings, exit_manager, etc.) are destroyed.
+    stop_workers();
+
+    // Additional explicit clear of provider callbacks in case a code
+    // path constructed the engine but never ran a full stop (e.g. early
+    // exception after wiring but before run()).
+    if (config_.provider)
+    {
+        if (auto adapter = config_.provider->get_execution_adapter())
+        {
+            if (auto* cap = adapter->get_async_support())
+                cap->clear_unknown_fill_handler();
+        }
+        try { config_.provider->close(); } catch (...) {}
+        config_.provider->set_halt_callback([](std::string_view){});
+        config_.provider->set_event_publisher({});
+    }
+
+#ifdef NDEBUG
+    // In release, keep silent. In debug we want the checks below.
+#else
+    // Phase 3: assert that pooled objects have all been released by
+    // the time the engine dies. Violations indicate lifetime bugs
+    // (shared_ptrs escaping via rings, late callbacks, etc.).
+    // These are debug-only; release builds do not pay for them.
+    auto check_pool = [](const char* name, auto& pool) {
+        const auto u = pool.in_use();
+        if (u != 0) {
+            std::fprintf(stderr,
+                "[engine dtor] WARNING: %s still has %zu objects in_use()\n",
+                name, u);
+        }
+    };
+    check_pool("market_pool", market_pool_);
+    check_pool("order_pool", order_pool_);
+    check_pool("fill_pool", fill_pool_);
+    check_pool("tick_pool", tick_pool_);
+    check_pool("l2_update_pool", l2_update_pool_);
+    check_pool("l2_snapshot_pool", l2_snapshot_pool_);
+    check_pool("rejection_pool", rejection_pool_);
+    check_pool("cancel_pool", cancel_pool_);
+    check_pool("amend_pool", amend_pool_);
+    check_pool("funding_pool", funding_pool_);
+    // control_block_pool_ has similar accounting
+    const auto cb_in_use = control_block_pool_.in_use();
+    if (cb_in_use != 0) {
+        std::fprintf(stderr,
+            "[engine dtor] WARNING: control_block_pool still has %zu in_use()\n",
+            cb_in_use);
+    }
+#endif
+}
+
 void engine::stop_workers()
 {
+    // Phase 2 memory-safety: revoke any callbacks we installed that
+    // capture [this] and may still be invoked from provider-owned
+    // transport / worker threads while we are shutting down.
+    if (config_.provider)
+    {
+        // Clear the async unknown-fill handler first (invoked from
+        // ExecutionBridge fill-transport worker thread).
+        if (auto adapter = config_.provider->get_execution_adapter())
+        {
+            if (auto* cap = adapter->get_async_support())
+            {
+                cap->clear_unknown_fill_handler();
+            }
+        }
+
+        // Best-effort clear of other [this]-capturing callbacks the
+        // engine installed on the provider during construction.
+        config_.provider->set_halt_callback([](std::string_view) {});
+        config_.provider->set_event_publisher([](std::shared_ptr<event>) {});
+
+        // funding_event_factory has no dedicated clearer; overwrite
+        // with a no-op via the protected base (harmless in practice
+        // because funding events stop arriving once transports close).
+        // We set an empty one to break the capture.
+        config_.provider->set_funding_event_factory(
+            [](auto, const auto&, double, const auto&) -> std::shared_ptr<funding_event> {
+                return {};
+            });
+
+        if (config_.mode == engine_mode::live)
+        {
+            // Explicitly close the provider (and therefore its bridge,
+            // transports, DMS etc.) before we proceed to join workers
+            // and unwind engine state. The RAII guard in main.inc is
+            // best-effort; engine must drive this for interleaving safety.
+            try { config_.provider->close(); } catch (...) {}
+        }
+    }
+
     if (observer_worker_) observer_worker_->stop();
     if (logging_worker_) logging_worker_->stop();
     if (risk_worker_) risk_worker_->stop();
@@ -1687,18 +1780,20 @@ void engine::print_summary()
         shadow_tracker_->print_report();
 
     // Queue-position telemetry (shadow + --queue-model l2-snapshot only).
+    // Use the IExecutionAdapter virtuals (implemented by TradeTapeShadowAdapter
+    // and others); no concrete cast required.
     if (config_.mode == engine_mode::shadow && config_.provider)
     {
         auto exec = config_.provider->get_execution_adapter();
-        if (auto* ts = dynamic_cast<TradeTapeShadowAdapter*>(exec.get()))
+        if (exec)
         {
-            const auto qs = ts->get_queue_stats();
-            if (qs.submitted_with_queue > 0)
+            const auto submitted = exec->queue_submitted_with_queue();
+            if (submitted > 0)
             {
                 std::cout << "  Queue model (shadow):\n"
-                          << "    Submitted with queue ahead: " << qs.submitted_with_queue << "\n"
-                          << "    Filled after queue drained: " << qs.filled_after_drain << "\n"
-                          << "    Still queue-blocked at EOS: " << qs.blocked_at_eos << "\n";
+                          << "    Submitted with queue ahead: " << submitted << "\n"
+                          << "    Filled after queue drained: " << exec->queue_filled_after_drain() << "\n"
+                          << "    Still queue-blocked at EOS: " << exec->queue_blocked_at_eos() << "\n";
             }
         }
     }
@@ -2035,11 +2130,8 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         "{}"
     );
 
-    if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
-    {
-        local->set_mid_price(last_mid_price_);
-        local->set_l2_seeded(l2_seeded_symbols_.count(o->get_symbol()) > 0);
-    }
+    adapter->set_mid_price(last_mid_price_);
+    adapter->set_l2_seeded(l2_seeded_symbols_.count(o->get_symbol()) > 0);
 
     router_->submit(*o, adapter.get());
 
@@ -2153,7 +2245,7 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
 
     bool cancelled = adapter->cancel_order(order_id);
 
-    if (cancelled && dynamic_cast<ExecutionBridge*>(adapter.get()))
+    if (cancelled && adapter->supports_async_submit())
     {
         pending_cancels_[order_id] = pending_cancel_meta{symbol, reason};
         update_open_order_status(order_id, "cancel_pending");
@@ -2257,11 +2349,8 @@ void engine::unwind_positions(std::size_t& event_count)
             order_status::pending, order_status::open, "risk_unwind");
 
         auto adapter = router_->resolve_adapter(symbol);
-        if (auto* local = dynamic_cast<LocalBookAdapter*>(adapter.get()))
-        {
-            local->set_mid_price(last_mid_price_);
-            local->set_l2_seeded(l2_seeded_symbols_.count(symbol) > 0);
-        }
+        adapter->set_mid_price(last_mid_price_);
+        adapter->set_l2_seeded(l2_seeded_symbols_.count(symbol) > 0);
 
         router_->submit(*close_order, adapter.get());
 
@@ -2670,11 +2759,11 @@ void engine::drain_venue_bracket_meta()
 {
     if (!config_.provider) return;
     auto adapter = config_.provider->get_execution_adapter();
-    auto* bridge = dynamic_cast<ExecutionBridge*>(adapter.get());
-    if (!bridge) return;
+    auto* cap = adapter ? adapter->get_async_support() : nullptr;
+    if (!cap) return;
 
-    std::vector<ExecutionBridge::synth_meta> meta;
-    if (!bridge->poll_synth_meta(meta)) return;
+    std::vector<synth_meta> meta;
+    if (!cap->poll_synth_meta(meta)) return;
 
     for (const auto& m : meta)
     {
@@ -2685,15 +2774,15 @@ void engine::drain_venue_bracket_meta()
 
 void engine::drain_async_submit_results(IExecutionAdapter* adapter)
 {
-    auto* bridge = dynamic_cast<ExecutionBridge*>(adapter);
-    if (!bridge) return;
+    auto* cap = adapter ? adapter->get_async_support() : nullptr;
+    if (!cap) return;
 
-    std::vector<ExecutionBridge::submit_result> results;
-    if (!bridge->poll_submit_results(results)) return;
+    std::vector<submit_result> results;
+    if (!cap->poll_submit_results(results)) return;
 
     for (const auto& sr : results)
     {
-        if (sr.op == ExecutionBridge::submit_result::operation::submit)
+        if (sr.op == submit_result::operation::submit)
         {
             if (sr.ok)
             {

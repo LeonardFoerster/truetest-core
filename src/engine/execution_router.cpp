@@ -1,7 +1,8 @@
 #include "execution_router.h"
 
-#include "execution/execution_bridge.h"
 #include "execution/queue_aware_book_adapter.h"
+// NOTE: no concrete bridge / local / shadow includes here.
+// Capability queries go through the IExecutionAdapter base.
 
 ExecutionRouter::ExecutionRouter(
     OrderbookRegistry& ob_reg,
@@ -69,7 +70,7 @@ std::shared_ptr<IExecutionAdapter> ExecutionRouter::resolve_adapter(const std::s
 
 bool ExecutionRouter::is_async_submit(IExecutionAdapter* a) const noexcept
 {
-    return dynamic_cast<ExecutionBridge*>(a) != nullptr;
+    return a && a->supports_async_submit();
 }
 
 void ExecutionRouter::submit(const order_event& o, IExecutionAdapter* a) noexcept
