@@ -92,6 +92,7 @@ set(ENGINE_CORE_SOURCES
     src/risk/maintenance_margin_table.cpp
     src/providers/local/local_register.cpp
     src/ui/console_dashboard.cpp
+    src/ui/console_format.cpp
     src/exits/exit_manager.cpp
 
     # Monte Carlo / synthetic simulation (integrated from monte-carlo branch)
@@ -223,6 +224,7 @@ if(BUILD_TESTS)
         tests/test_trade_tape_shadow_queue.cpp
         tests/test_walked_book_impact.cpp
         tests/test_execution_bridge.cpp
+        tests/test_engine_async_support.cpp
         tests/test_engine.cpp
         tests/test_engine_lookahead.cpp
         tests/test_engine_instrument_spec.cpp
@@ -276,6 +278,10 @@ if(BUILD_TESTS)
         tests/test_worker_watchdog.cpp
         tests/test_binance_futures_dead_mans_switch.cpp
         tests/test_provider_transport.cpp
+        tests/test_toast.cpp
+        tests/test_tui_prefs.cpp
+        tests/test_console_format.cpp
+        tests/test_overlays.cpp
         tests/test_data_bridge.cpp
         tests/test_provider_event.cpp
         tests/test_provider_registry.cpp
@@ -297,8 +303,9 @@ if(BUILD_TESTS)
             tests/test_web_server_auth.cpp)
     endif()
 
-    # LOC regression guard (per engine-decomposition plan PR-09 / Phase 5)
+    # LOC regression guard (introduced during 2026-07-16 engine god-class decomposition)
     # Fails build if src/engine/engine.cpp exceeds limit without explicit waiver comment.
+    # See engine-decomposition skill for background.
     file(STRINGS src/engine/engine.cpp _engine_lines)
     list(LENGTH _engine_lines _engine_loc)
     set(ENGINE_LOC_MAX 4300)  # current ~4272 + buffer; tighten after further cleanup
@@ -308,7 +315,7 @@ if(BUILD_TESTS)
             message(FATAL_ERROR
                 "engine.cpp has ${_engine_loc} lines (limit ${ENGINE_LOC_MAX}). "
                 "Add a comment containing 'ENGINE_LOC_WAIVER: <reason>' or reduce LOC. "
-                "See docs/code-review-todos-july-16th/01-engine-god-class.md")
+                "The limit and guard were introduced as part of the 2026-07-16 engine decomposition (see engine-decomposition skill).")
         endif()
     endif()
 

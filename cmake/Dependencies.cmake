@@ -201,6 +201,9 @@ function(tt_wire_rich_tui target)
     target_sources(${target} PRIVATE
         ${CMAKE_SOURCE_DIR}/src/ui/tabbed_dashboard.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/tui_style.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/tui_prefs.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/toast.cpp
+        ${CMAKE_SOURCE_DIR}/src/ui/overlays.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/panels/overview_panel.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/panels/positions_panel.cpp
         ${CMAKE_SOURCE_DIR}/src/ui/panels/orders_panel.cpp
