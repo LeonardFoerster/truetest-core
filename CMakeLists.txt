@@ -20,6 +20,7 @@ option(ENABLE_BENCHMARKS "Build performance benchmarks (Google Benchmark)"      
 
 include(CompilerFlags)   # sets C++23, opt profiles, provides tt_apply_* helpers
 include(Dependencies)    # provides tt_fetch_* and tt_wire_optional_backends
+include(Sources)         # canonical ENGINE_CORE_SOURCES + TEST_SOURCES (explicit lists)
 
 tt_fetch_dependencies()
 
@@ -57,54 +58,8 @@ configure_file(
     @ONLY)
 
 # ── Shared engine core (OBJECT library) ─────────────────────────────────────
-# Every source file that is identical across the three binaries lives here.
-# main.cpp is intentionally NOT part of engine_core — each executable owns
-# its own copy, compiled with a distinct TT_TARGET define.
-set(ENGINE_CORE_SOURCES
-    src/engine/engine.cpp
-    src/engine/execution_router.cpp
-    src/engine/order_audit_sink.cpp
-    src/engine/instrument_spec_cache.cpp
-    src/engine/checkpoint.cpp
-    src/analytics/adverse_selection_tracker.cpp
-    src/analytics/analytics.cpp
-    src/analytics/ascii_widgets.cpp
-    src/analytics/report_generator.cpp
-    src/data/data_loader.cpp
-    src/data/csv_data_source.cpp
-    src/data/binary_cache_source.cpp
-    src/data/tick_csv_data_source.cpp
-    src/execution/portfolio.cpp
-    src/orderbook/orderbook.cpp
-    src/strategy/mean_reversion_strategy.cpp
-    src/strategy/sma_strategy.cpp
-    src/strategy/ma_crossover_strategy.cpp
-    src/strategy/hedge_demo_strategy.cpp
-    src/strategy/breakout_strategy.cpp
-    src/strategy/larry_connor_strategy.cpp
-    src/strategy/coiled_spring_strategy.cpp
-    src/strategy/sma.cpp
-    src/strategy/adaptive_hybrid_config.cpp
-    src/strategy/adaptive_hybrid_strategy.cpp
-    src/strategy/structure_continuation_strategy.cpp
-    src/market_maker/market_maker.cpp
-    src/risk/risk_manager.cpp
-    src/risk/maintenance_margin_table.cpp
-    src/providers/local/local_register.cpp
-    src/ui/console_dashboard.cpp
-    src/ui/console_format.cpp
-    src/exits/exit_manager.cpp
-
-    # Monte Carlo / synthetic simulation (integrated from monte-carlo branch)
-    src/simulation/imonte_carlo_generator.cpp
-    src/simulation/monte_carlo_controller.cpp
-    src/simulation/monte_carlo_reporter.cpp
-    src/simulation/generators/gbm_generator.cpp
-    src/providers/synthetic/synthetic_transport.cpp
-    src/providers/synthetic/synthetic_provider.cpp
-    src/providers/synthetic/synthetic_register.cpp
-)
-
+# Source list lives in cmake/Sources.cmake (ENGINE_CORE_SOURCES).
+# This keeps the one obvious registration point for core code.
 add_library(engine_core OBJECT ${ENGINE_CORE_SOURCES})
 target_include_directories(engine_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -177,148 +132,9 @@ if(BUILD_TESTS)
     enable_testing()
     tt_fetch_tests_dependencies()
 
-    set(TEST_SOURCES
-        tests/test_main.cpp
-        tests/test_adverse_selection.cpp
-        tests/test_cancel_race.cpp
-        tests/test_queue_model.cpp
-        tests/test_queue_aware_adapter.cpp
-        tests/test_impact_model.cpp
-        tests/test_events.cpp
-        tests/test_orderbook.cpp
-        tests/test_portfolio.cpp
-        tests/test_fee_model.cpp
-        tests/test_latency_model.cpp
-        tests/test_fill_model.cpp
-        tests/test_sma.cpp
-        tests/test_ema.cpp
-        tests/test_rsi.cpp
-        tests/test_stochastic.cpp
-        tests/test_swing_detector.cpp
-        tests/test_ema_regime.cpp
-        tests/test_bollinger.cpp
-        tests/test_strategies.cpp
-        tests/test_adaptive_hybrid.cpp
-        tests/test_monte_carlo_generators.cpp
-        tests/test_monte_carlo_controller.cpp
-        tests/test_ring_buffer.cpp
-        tests/test_bar_aggregator.cpp
-        tests/test_analytics.cpp
-        tests/test_report_generator.cpp
-        tests/test_market_maker.cpp
-        tests/test_data_handler.cpp
-        tests/test_date_parse.cpp
-        tests/test_trade_tape_shadow_adapter.cpp
-        tests/test_exit_manager.cpp
-        tests/test_engine_brackets.cpp
-        tests/test_bracket_adapter.cpp
-        tests/test_binance_oco_bracket_adapter.cpp
-        tests/test_bridge_unknown_fill.cpp
-        tests/test_hybrid_executor.cpp
-        tests/test_binance_combined_parser.cpp
-        tests/test_provider_event_stream_contract.cpp
-        tests/test_engine_l2_ingestion.cpp
-        tests/test_execution_adapter.cpp
-        tests/test_realistic_fills.cpp
-        tests/test_queue_position_model.cpp
-        tests/test_trade_tape_shadow_queue.cpp
-        tests/test_walked_book_impact.cpp
-        tests/test_execution_bridge.cpp
-        tests/test_engine_async_support.cpp
-        tests/test_engine.cpp
-        tests/test_engine_lookahead.cpp
-        tests/test_engine_instrument_spec.cpp
-        tests/test_order_audit_sink.cpp
-        tests/test_instrument.cpp
-        tests/test_rate_limiter.cpp
-        tests/test_client_order_id.cpp
-        tests/test_live_safety.cpp
-        tests/test_order_id.cpp
-        tests/test_price.cpp
-        tests/test_orderbook_registry.cpp
-        tests/test_order_types.cpp
-        tests/test_object_pool.cpp
-        tests/helpers/alloc_counter.cpp
-        tests/test_hotpath_allocs.cpp
-        tests/test_hotpath_alloc_matrix.cpp
-        tests/test_hotpath_pool_prewarm.cpp
-        tests/test_control_block_pool.cpp
-        tests/test_symbol_table.cpp
-        tests/test_orderbook_order_pool.cpp
-        tests/test_deferred_return_queue.cpp
-        tests/test_risk_manager.cpp
-        tests/test_event_log.cpp
-        tests/test_thread_preset.cpp
-        tests/test_threading_correctness.cpp
-        tests/test_engine_streaming.cpp
-        tests/test_engine_integration.cpp
-        tests/test_golden_regression.cpp
-        tests/test_binance_parser.cpp
-        tests/test_binance_order_encoder.cpp
-        tests/test_binance_rest_order_transport.cpp
-        tests/test_binance_user_data_parser.cpp
-        tests/test_binance_user_data_transport.cpp
-        tests/test_binance_rest_client_time.cpp
-        tests/test_binance_rest_client_rate_limit.cpp
-        tests/test_binance_rest_client_keepalive_timeout.cpp
-        tests/test_binance_user_data_transport_keepalive.cpp
-        tests/test_binance_user_data_transport_reconnect.cpp
-        tests/test_binance_endpoints.cpp
-        tests/test_binance_testnet_live.cpp
-        tests/test_binance_futures_order_encoder.cpp
-        tests/test_binance_futures_user_data_parser.cpp
-        tests/test_binance_futures_register.cpp
-        tests/test_binance_futures_reconciler.cpp
-        tests/test_binance_futures_kill_switch.cpp
-        tests/test_binance_futures_bracket_adapter.cpp
-        tests/test_binance_futures_testnet_live.cpp
-        tests/test_binance_futures_safety.cpp
-        tests/test_futures_risk_check.cpp
-        tests/test_engine_venue_risk_check.cpp
-        tests/test_worker_watchdog.cpp
-        tests/test_binance_futures_dead_mans_switch.cpp
-        tests/test_provider_transport.cpp
-        tests/test_toast.cpp
-        tests/test_tui_prefs.cpp
-        tests/test_console_format.cpp
-        tests/test_overlays.cpp
-        tests/test_data_bridge.cpp
-        tests/test_provider_event.cpp
-        tests/test_provider_registry.cpp
-        tests/test_provider_engine_wiring.cpp
-    )
-
-    if(ENABLE_QUESTDB)
-        list(APPEND TEST_SOURCES
-            tests/test_questdb_http_client.cpp
-            tests/test_questdb_ilp_writer.cpp
-            tests/test_questdb_schema.cpp
-            tests/test_questdb_run_tag.cpp
-            tests/test_questdb_store.cpp
-            tests/test_questdb_integration.cpp)
-    endif()
-
-    if(ENABLE_WEB)
-        list(APPEND TEST_SOURCES
-            tests/test_web_server_auth.cpp)
-    endif()
-
-    # LOC regression guard (introduced during 2026-07-16 engine god-class decomposition)
-    # Fails build if src/engine/engine.cpp exceeds limit without explicit waiver comment.
-    # See engine-decomposition skill for background.
-    file(STRINGS src/engine/engine.cpp _engine_lines)
-    list(LENGTH _engine_lines _engine_loc)
-    set(ENGINE_LOC_MAX 4300)  # current ~4272 + buffer; tighten after further cleanup
-    if(_engine_loc GREATER ENGINE_LOC_MAX)
-        file(STRINGS src/engine/engine.cpp _waiver_lines REGEX "ENGINE_LOC_WAIVER:")
-        if(NOT _waiver_lines)
-            message(FATAL_ERROR
-                "engine.cpp has ${_engine_loc} lines (limit ${ENGINE_LOC_MAX}). "
-                "Add a comment containing 'ENGINE_LOC_WAIVER: <reason>' or reduce LOC. "
-                "The limit and guard were introduced as part of the 2026-07-16 engine decomposition (see engine-decomposition skill).")
-        endif()
-    endif()
-
+    # TEST_SOURCES (base list + conditional appends for QUESTDB/WEB) and the
+    # engine.cpp LOC regression guard now live in cmake/Sources.cmake.
+    # This is the single obvious place for test registration.
     add_executable(truetest_tests ${TEST_SOURCES})
     target_include_directories(truetest_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/tests")

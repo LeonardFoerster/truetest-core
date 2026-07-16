@@ -93,11 +93,13 @@ endfunction()
 # Call this ONCE on engine_core (the OBJECT library). PUBLIC usage-requirements
 # propagate to every executable / test / benchmark that links engine_core.
 function(tt_wire_optional_backends target)
+    set(_src "${CMAKE_SOURCE_DIR}/src")
+
     # Generic WebSocket data feed
     if(ENABLE_LIVE_DATA)
         find_package(Boost REQUIRED COMPONENTS system)
         target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/src/data/websocket_data_source.cpp)
+            ${_src}/data/websocket_data_source.cpp)
         target_link_libraries(${target} PUBLIC Boost::system)
         target_compile_definitions(${target} PUBLIC HAS_LIVE_DATA)
     endif()
@@ -107,9 +109,9 @@ function(tt_wire_optional_backends target)
         find_package(Boost REQUIRED)
         find_package(OpenSSL REQUIRED)
         target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/src/providers/binance/binance_register.cpp
-            ${CMAKE_SOURCE_DIR}/src/providers/binance/binance_futures_register.cpp
-            ${CMAKE_SOURCE_DIR}/src/providers/binance/binance_backfill.h)
+            ${_src}/providers/binance/binance_register.cpp
+            ${_src}/providers/binance/binance_futures_register.cpp)
+        # Note: binance_backfill.h is a header-only include (not a source)
         target_link_libraries(${target} PUBLIC
             Boost::headers OpenSSL::SSL OpenSSL::Crypto)
         target_compile_definitions(${target} PUBLIC HAS_BINANCE)
@@ -118,12 +120,12 @@ function(tt_wire_optional_backends target)
     # QuestDB persistence (raw POSIX sockets, zero external deps).
     if(ENABLE_QUESTDB)
         target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/src/data/questdb/tcp_client.cpp
-            ${CMAKE_SOURCE_DIR}/src/data/questdb/http_client.cpp
-            ${CMAKE_SOURCE_DIR}/src/data/questdb/ilp_writer.cpp
-            ${CMAKE_SOURCE_DIR}/src/data/questdb/schema.cpp
-            ${CMAKE_SOURCE_DIR}/src/data/questdb/run_tag.cpp
-            ${CMAKE_SOURCE_DIR}/src/data/questdb/store.cpp)
+            ${_src}/data/questdb/tcp_client.cpp
+            ${_src}/data/questdb/http_client.cpp
+            ${_src}/data/questdb/ilp_writer.cpp
+            ${_src}/data/questdb/schema.cpp
+            ${_src}/data/questdb/run_tag.cpp
+            ${_src}/data/questdb/store.cpp)
         target_compile_definitions(${target} PUBLIC HAS_QUESTDB)
     endif()
 
@@ -151,9 +153,9 @@ function(tt_wire_optional_backends target)
             FetchContent_MakeAvailable(civetweb)
         endif()
         target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/src/web/snapshot_json.cpp
-            ${CMAKE_SOURCE_DIR}/src/web/report_json.cpp
-            ${CMAKE_SOURCE_DIR}/src/web/web_server.cpp)
+            ${_src}/web/snapshot_json.cpp
+            ${_src}/web/report_json.cpp
+            ${_src}/web/web_server.cpp)
         target_link_libraries(${target} PUBLIC civetweb-c-library)
         target_compile_definitions(${target} PUBLIC HAS_WEB)
     endif()
@@ -177,10 +179,10 @@ function(tt_wire_optional_backends target)
         endif()
 
         target_sources(${target} PRIVATE
-            ${CMAKE_SOURCE_DIR}/src/debug/hardware_info.cpp
-            ${CMAKE_SOURCE_DIR}/src/debug/stage_timer.cpp
-            ${CMAKE_SOURCE_DIR}/src/debug/memory_info.cpp
-            ${CMAKE_SOURCE_DIR}/src/debug/debug_report.cpp)
+            ${_src}/debug/hardware_info.cpp
+            ${_src}/debug/stage_timer.cpp
+            ${_src}/debug/memory_info.cpp
+            ${_src}/debug/debug_report.cpp)
         target_link_libraries(${target} PUBLIC
             absl::log absl::log_initialize absl::log_severity
             absl::log_sink absl::log_sink_registry
@@ -198,21 +200,22 @@ function(tt_wire_rich_tui target)
     set(CURSES_NEED_WIDE    TRUE)
     find_package(Curses REQUIRED)
 
+    set(_src "${CMAKE_SOURCE_DIR}/src")
     target_sources(${target} PRIVATE
-        ${CMAKE_SOURCE_DIR}/src/ui/tabbed_dashboard.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/tui_style.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/tui_prefs.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/toast.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/overlays.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/panels/overview_panel.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/panels/positions_panel.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/panels/orders_panel.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/panels/risk_panel.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/panels/brackets_panel.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/panels/strategy_panel.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/panels/health_panel.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/panels/debug_panel.cpp
-        ${CMAKE_SOURCE_DIR}/src/ui/panels/l2_panel.cpp)
+        ${_src}/ui/tabbed_dashboard.cpp
+        ${_src}/ui/tui_style.cpp
+        ${_src}/ui/tui_prefs.cpp
+        ${_src}/ui/toast.cpp
+        ${_src}/ui/overlays.cpp
+        ${_src}/ui/panels/overview_panel.cpp
+        ${_src}/ui/panels/positions_panel.cpp
+        ${_src}/ui/panels/orders_panel.cpp
+        ${_src}/ui/panels/risk_panel.cpp
+        ${_src}/ui/panels/brackets_panel.cpp
+        ${_src}/ui/panels/strategy_panel.cpp
+        ${_src}/ui/panels/health_panel.cpp
+        ${_src}/ui/panels/debug_panel.cpp
+        ${_src}/ui/panels/l2_panel.cpp)
     target_include_directories(${target} PRIVATE ${CURSES_INCLUDE_DIRS})
     target_link_libraries(${target} PRIVATE ${CURSES_LIBRARIES})
     target_compile_definitions(${target} PRIVATE HAS_RICH_TUI)

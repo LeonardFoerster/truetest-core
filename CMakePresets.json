@@ -27,11 +27,105 @@
     {
       "name": "linux-default",
       "displayName": "Linux (Unix Makefiles)",
+      "description": "Basic Linux debug build",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+
+    {
+      "name": "linux-tests",
+      "displayName": "Linux + Tests (Debug)",
+      "description": "Common developer setup with full unit tests",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-binance-questdb",
+      "displayName": "Linux + Binance + QuestDB + Tests",
+      "description": "Featured combination for Binance futures + QuestDB persistence + tests",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_BINANCE": "ON",
+        "ENABLE_QUESTDB": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-web",
+      "displayName": "Linux + Web UI + Tests",
+      "description": "Embedded web server (civetweb) + tests. Requires npm for web_assets target.",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_WEB": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-asan",
+      "displayName": "Linux + ASAN + Tests (Debug)",
+      "description": "AddressSanitizer + UBSAN (mutually exclusive with TSAN)",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTS": "ON",
+        "ENABLE_ASAN": "ON",
+        "ENABLE_UBSAN": "ON"
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "displayName": "Linux + TSAN + Tests (Debug)",
+      "description": "ThreadSanitizer (cannot be combined with ASAN/UBSAN)",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTS": "ON",
+        "ENABLE_TSAN": "ON"
+      }
+    },
+    {
+      "name": "linux-benchmarks",
+      "displayName": "Linux + Benchmarks + Debug + Tests",
+      "description": "Google Benchmark + instrumentation + tests",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_DEBUG": "ON",
+        "ENABLE_BENCHMARKS": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-release-native",
+      "displayName": "Linux Release + Native Opt (live tuning)",
+      "description": "Release with -march=native etc. (affects all three engines)",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "ENABLE_NATIVE_OPT": "ON"
       }
     }
   ]
