@@ -39,3 +39,7 @@ src/threading/worker_watchdog.h
 **Last updated**: 2026-07-03 (split from governance/03-todo.md per TODOS-SPLIT-SPEC; verbatim extraction of all items/status/evidence paragraphs + frozen list; see 00-OVERVIEW.md; frozen list matches check script + prereq + prod + CLAUDE).
 
 **Session note (2026-07-16)**: Technical implementation of the execution adapter abstractions cleanup (narrow `IAsyncSubmitSupport` capability + elimination of ad-hoc `dynamic_cast`s to concrete adapters) was performed against the frozen list (engine.cpp touched). Per prerequisites, this change requires a separate `LIVE_SAFETY_CCB_APPROVED` commit + CCB process. The one-time review follow-up notes for this work have been retired.
+
+**Related**: `docs/engine.md` is the authoritative phased execution plan for further `engine.cpp` / `engine.h` decomposition work. Any future god-class reduction must follow that plan + the `engine-decomposition` skill. Reference items as `core/docs/engine.md#E-30` etc.
+
+**Phase 1 update (2026-07-17)**: Design document produced per engine.md Phase 1 (E-10..E-14) using design skill + writer/reviewer loop to 0 issues. Full PR/Wave DAG now in engine.md + persisted at core/docs/internal/engine-decomposition-design.md. Addresses core/docs/engine.md#E-11. Next: execution via worktrees + execute-plan when authorized. All changes to frozen surface will still require LIVE_SAFETY_CCB_APPROVED + checks.
