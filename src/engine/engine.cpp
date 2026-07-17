@@ -29,12 +29,21 @@
 #include <iomanip>
 
 // ============================================================
-// LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md)
+// LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md, 02-prerequisites.md)
 // Any edit requires explicit two-person CCB review + 4 h
 // mainnet shadow run on engine_shadow before merge.
+// Commit message MUST contain: LIVE_SAFETY_CCB_APPROVED
+// Run: ./scripts/check-live-safety-freeze.sh after changes.
 // Files in this set: tt_target.h, engine.{h,cpp}, all
 // *kill_switch*, *dead_mans_switch*, *reconciler* under
 // providers/binance/, risk/*, ExecutionBridge, live_safety.h
+//
+// Engine decomposition (see core/docs/engine.md + ~/.grok/skills/engine-decomposition/SKILL.md):
+// Phase 2 prep in progress. Cold-path extractions (dashboard, scheduler, workers, run skeleton)
+// planned in subsequent waves. All changes must preserve zero-alloc hot path,
+// identical behavior for MC reuse / backtest / shadow / live, and single
+// IOrderAuditSink + ExecutionRouter seams. No direct questdb recording or
+// ad-hoc adapter bypasses allowed.
 // ============================================================
 
 engine::engine(std::shared_ptr<data_handler> dh,
@@ -211,6 +220,10 @@ engine::engine(std::shared_ptr<data_handler> dh,
     }
 
     // Wire new seams (PR-03, behind existing activation, minimal).
+    // See core/docs/engine.md Phase 2 (E-21) + engine-decomposition skill:
+    // All recording MUST go exclusively through audit_sink_ (IOrderAuditSink).
+    // No raw questdb decision sites for data capture. Activation only here.
+    // Router owns adapter resolution, submit/poll, L2, advance. No ad-hoc bypass.
     audit_sink_ = std::make_unique<NoopOrderAuditSink>();
 #ifdef HAS_QUESTDB
     if (config_.persist_enabled) {
@@ -219,7 +232,7 @@ engine::engine(std::shared_ptr<data_handler> dh,
 #endif
 
     // Router wiring (adapters map passed by ref so resolve populates the original execution_adapters_ for iterator compat).
-    router_ = std::make_unique<ExecutionRouter>(
+    // See core/docs/engine.md (execution router extraction) and engine-decomposition/SKILL.md.
         orderbook_registry_,
         config_,
         l2_seeded_symbols_,
@@ -560,6 +573,8 @@ void engine::cache_fill(const fill_event& f)
 
 void engine::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
 {
+    // See core/docs/engine.md Wave 1 (E-30) + engine-decomposition skill.
+    // This large cold method + supporting caches will move to DashboardSnapshotBuilder.
     using snap_t = truetest::ui::dashboard_snapshot;
 
     // Account
@@ -1278,6 +1293,8 @@ void engine::pin_event_loop_thread()
 
 void engine::start_workers()
 {
+    // Worker/ring orchestration. See core/docs/engine.md Wave 4 (E-60) + engine-decomposition.
+    // Will be delegated to WorkerOrchestrator (rings, pinning, start/stop, drops).
     halt_flag_.store(false, std::memory_order_release);
     worker_failed_.store(false, std::memory_order_release);
 
@@ -1715,6 +1732,9 @@ void engine::questdb_end()
     const double final_equity = portfolio_.get_equity(last_mid_price_);
     const std::size_t rejs = audit_sink_ ? audit_sink_->total_rejections() : 0;
     // Prefer delegating through the seam when available (single place for persistence finalization).
+    // See core/docs/engine.md Phase 2 (E-21) + engine-decomposition skill "QuestDB Isolation".
+    // The else branch below is legacy fallback only (should be unreachable when questdb_active_).
+    // All recording paths use audit_sink_; finalize should too.
     if (audit_sink_)
     {
         audit_sink_->finalize_run(final_equity,
@@ -1730,14 +1750,9 @@ void engine::questdb_end()
                                   report.total_trades,
                                   report.winning_trades);
     }
-    else if (questdb_store_)
-    {
-        questdb_store_->end(final_equity, report.total_orders, report.total_fills, rejs,
-                            report.max_drawdown, report.sharpe_ratio, report.sortino_ratio,
-                            report.profit_factor, report.win_rate, report.calmar_ratio,
-                            report.total_trades, report.winning_trades);
-        questdb_store_->flush();
-    }
+    // Note: legacy direct questdb_store_ finalize path removed in Phase 2 prep
+    // (core/docs/engine.md#E-21) to enforce single IOrderAuditSink seam.
+    // Activation in questdb_begin always sets a real sink when store is active.
     questdb_active_ = false;
 }
 #endif
@@ -1920,6 +1935,8 @@ const Analytics* engine::get_exchange_analytics() const
 // See declaration in engine.h for documentation.
 void engine::reset_for_next_trial(uint64_t new_seed)
 {
+    // Reset for MC object reuse. See core/docs/engine.md (Phase 0 notes + future waves).
+    // State owned by future extracted collaborators will be cleared via their clear/reset hooks.
     // Reset main portfolio (cash, positions, lots)
     portfolio_.reset();
 
@@ -3757,6 +3774,10 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
 
 void engine::run()
 {
+    // One of four similar run* methods. Duplicated event-loop skeleton (pending clear,
+    // workers, pin, questdb, progress, drains, teardown) targeted for Wave 2 refactor
+    // (shared run_event_loop or thin EventLoopCoordinator) per core/docs/engine.md#E-40
+    // + engine-decomposition skill. Cold extraction only; hot paths unchanged.
     if (!data_handler_) throw std::runtime_error("missing dependencies");
 
     if (data_handler_->has_tick_data())

@@ -16,6 +16,7 @@
 // Matches QuestdbStore call sites 1:1 but hides overloads and QuestDB types from engine callers.
 //
 // SEAM CONTRACT (engine-decomposition):
+// See core/docs/engine.md Phase 2 (E-20/E-21) + ~/.grok/skills/engine-decomposition/SKILL.md "QuestDB Isolation".
 // - Engine (and all hot paths) call ONLY these methods on audit_sink_. Never inspect questdb_store_ or active_ for recording decisions.
 // - Sparse vs rich is resolved inside the concrete sink impl (strings/"unknown" only when Questdb active).
 // - Future QuestDB features: add method here + noop + Questdb impl. Do not add guarded blocks in engine.

@@ -180,6 +180,11 @@ private:
     void maybe_questdb_tick();
 
     // New seams from engine-decomposition (PR-03 wiring).
+    // See core/docs/engine.md Phase 2 (E-20/E-21) + ~/.grok/skills/engine-decomposition/SKILL.md.
+    // - audit_sink_: single seam for *all* order/fill/reject/cancel/amend/funding/event recording.
+    //   Engine calls ONLY record_* methods. No questdb_store_ inspection for decisions.
+    // - router_: adapter resolution, submit/poll_fills, L2 forwarding, advance.
+    //   No direct execution_adapters_ bypass for submit/poll in hot paths.
     std::unique_ptr<IOrderAuditSink> audit_sink_;
     std::unique_ptr<ExecutionRouter> router_;
 
@@ -187,6 +192,9 @@ private:
     // Filled on the event loop (no contention with the hot path) and
     // swapped into the slot under a mutex; readers take a quick lock to
     // copy. Refresh is debounced to ~100 ms aligned with the render tick.
+    //
+    // Planned extraction: Wave 1 (DashboardSnapshotBuilder) per core/docs/engine.md
+    // (E-30..) + engine-decomposition skill. Cold path only.
     mutable std::mutex                    dashboard_view_mu_;
     truetest::ui::dashboard_snapshot      dashboard_view_;
     bool                                  dashboard_view_initialised_ = false;
@@ -294,6 +302,9 @@ private:
 
     std::vector<std::shared_ptr<order_event>> pending_stops_;
 
+    // Pending order scheduling state.
+    // Planned extraction Wave 3 (PendingOrderScheduler) per core/docs/engine.md#E-50
+    // + engine-decomposition skill. Must preserve exact determinism for MC/golden.
     struct pending_entry
     {
         std::shared_ptr<order_event> order;
@@ -354,6 +365,9 @@ private:
     std::unique_ptr<RiskStatsWorker> risk_stats_worker_;
     std::unique_ptr<MarketMakerWorker> mm_worker_;
 
+    // Worker/ring lifecycle state.
+    // Planned extraction Wave 4 (WorkerOrchestrator) per core/docs/engine.md#E-60
+    // + engine-decomposition skill. Keep public getters for compat.
     std::mutex switch_mu_;
     std::string pending_symbol_;
     std::string pending_strategy_;

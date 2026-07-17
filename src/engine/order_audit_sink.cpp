@@ -1,5 +1,8 @@
 #include "order_audit_sink.h"
 
+// Implementation of IOrderAuditSink seam (see core/docs/engine.md Phase 2 E-21 + engine-decomposition skill).
+// Engine never bypasses this for recording.
+
 #ifdef HAS_QUESTDB
 QuestdbOrderAuditSink::QuestdbOrderAuditSink(std::shared_ptr<truetest::questdb::QuestdbStore> store, bool* active_flag)
     : store_(std::move(store))
