@@ -233,6 +233,7 @@ engine::engine(std::shared_ptr<data_handler> dh,
 
     // Router wiring (adapters map passed by ref so resolve populates the original execution_adapters_ for iterator compat).
     // See core/docs/engine.md (execution router extraction) and engine-decomposition/SKILL.md.
+    router_ = std::make_unique<ExecutionRouter>(
         orderbook_registry_,
         config_,
         l2_seeded_symbols_,
