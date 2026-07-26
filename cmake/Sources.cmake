@@ -28,6 +28,7 @@ set(ENGINE_CORE_SOURCES
     src/engine/order_audit_sink.cpp
     src/engine/instrument_spec_cache.cpp
     src/engine/checkpoint.cpp
+    src/engine/dashboard_snapshot_builder.cpp
 
     # --- Analytics & reporting ---
     src/analytics/adverse_selection_tracker.cpp
@@ -108,6 +109,7 @@ set(TEST_SOURCES
     # --- Orderbook & execution model ---
     tests/test_orderbook.cpp
     tests/test_portfolio.cpp
+    tests/test_position_sizing.cpp
     tests/test_fee_model.cpp
     tests/test_latency_model.cpp
     tests/test_fill_model.cpp
@@ -139,6 +141,7 @@ set(TEST_SOURCES
     tests/test_risk_manager.cpp
     tests/test_futures_risk_check.cpp
     tests/test_live_safety.cpp
+    tests/test_dashboard_snapshot.cpp
 
     # --- Exits / brackets ---
     tests/test_exit_manager.cpp
@@ -205,6 +208,7 @@ set(TEST_SOURCES
 
     # --- Binance (always built; many are gated by HAS_BINANCE at runtime) ---
     tests/test_binance_parser.cpp
+    tests/test_binance_depth_parser.cpp
     tests/test_binance_order_encoder.cpp
     tests/test_binance_rest_order_transport.cpp
     tests/test_binance_user_data_parser.cpp
