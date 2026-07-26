@@ -9,10 +9,11 @@
 
 #include "exits/exit_intent.h"
 
+#include "symbol_state_store.h"
+
 #include <deque>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 /**
@@ -63,6 +64,12 @@ public:
 private:
     // Config (temporary sizing parameters)
     double      risk_fraction_;
+    double      entry_fee_rate_ = 0.0;
+    double      exit_fee_rate_  = 0.0;
+    double      entry_slip_bps_ = 0.0;
+    double      exit_slip_bps_  = 0.0;
+    double      fixed_fee_per_leg_ = 0.0;
+    double      max_notional_frac_ = 0.0;
     std::size_t swing_strength_;
     std::size_t swing_history_;
 
@@ -106,14 +113,14 @@ private:
         double last_close = 0.0;
     };
 
-    std::unordered_map<std::string, SymbolState> states_;
+    // Dense id-indexed state — no string-hash per bar on the hot path.
+    // Constructed in .cpp so swing strength/history from ctor are applied.
+    SymbolStateStore<SymbolState> states_;
 
     // Strategy-level pending exit intents (populated by create_exit_intents at entry).
     // We use a flat list (breakout pattern) for clean hand-off via take_pending_exit_intents.
     // This keeps things simple for v1 (one lot per symbol).
     std::vector<truetest::exits::exit_intent> pending_intents_;
-
-    SymbolState& get_state(const std::string& symbol);
 
     // Core logic
     void update_all_indicators(SymbolState& st, double open, double high, double low, double close);
@@ -122,9 +129,9 @@ private:
 
     void advance_continuation_fsm(SymbolState& st, bool long_signal, bool short_signal);
 
-    // Sizing based on equity * risk_fraction / sl_distance.
-    // equity <= 0 falls back to 10k for convenience.
-    double compute_quantity(double price, double sl_distance, double equity) const;
+    // Fee/slip-aware fixed-risk sizing. equity <= 0 falls back to 10k.
+    double compute_quantity(double price, double sl_distance, double equity,
+                            bool is_long) const;
 
     // Exit intent creation (uses ExitManager) — implements user's SL/TP rules
     void create_exit_intents(const std::string& symbol, SymbolState& st,
