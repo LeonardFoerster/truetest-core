@@ -174,6 +174,42 @@ TEST(ExitManager, FillBindsToActualOpenerPriceAndQty)
     EXPECT_DOUBLE_EQ(r[0].get_quantity(), 0.6);
 }
 
+TEST(ExitManager, EntryRelativeBracketsRebaseOnFillSlippage)
+{
+    // Intended entry 100, SL 98 ($2 risk), TP 106. Fill at 100.5 must
+    // shift both levels by +0.5 → SL 98.5, TP 106.5.
+    ExitManager m;
+    exit_intent ei = make_long_intent("s", "X", 1, /*sl=*/98.0, /*tp=*/106.0, /*qty=*/1.0);
+    ei.reference_entry = 100.0;
+    m.register_pending(std::move(ei));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.5));
+
+    // Above rebased SL (98.5): still armed.
+    auto miss = m.on_price("X", 98.6, t0);
+    EXPECT_TRUE(miss.empty());
+    EXPECT_EQ(m.armed_count(), 1u);
+
+    // At rebased SL: long fires when px <= stop.
+    // Without rebase this would still be above the old SL of 98.0.
+    auto hit = m.on_price("X", 98.5, t0);
+    ASSERT_FALSE(hit.empty());
+    EXPECT_EQ(m.armed_count(), 0u);
+}
+
+TEST(ExitManager, AbsoluteStructureStopDoesNotRebaseWithoutReference)
+{
+    // Absolute structure SL stays put when reference_entry is unset —
+    // used for consol-low / swing stops that are market levels.
+    ExitManager m;
+    exit_intent ei = make_long_intent("s", "X", 1, /*sl=*/98.0, std::nullopt, /*qty=*/1.0);
+    // reference_entry deliberately left unset
+    m.register_pending(std::move(ei));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.5));
+
+    auto hit = m.on_price("X", 98.0, t0);
+    ASSERT_FALSE(hit.empty());
+}
+
 TEST(ExitManager, MultipleStrategiesOnSameSymbolKeyIndependently)
 {
     // Two strategies both long X with different stops; canceling one

@@ -89,6 +89,31 @@ TEST(GBMGenerator, BatchGenerationDeterministic) {
     }
 }
 
+// Batch path seeds must use derive_mc_trial_seed (controller contract).
+TEST(GBMGenerator, BatchUsesCanonicalTrialSeeds) {
+    GBMGenerator gen;
+    McGeneratorConfig cfg = gen.default_config();
+    cfg.n_steps = 10;
+
+    const uint64_t base = 42;
+    auto batch = gen.generate_batch(4, base, cfg);
+    ASSERT_EQ(batch.size(), 4u);
+    for (size_t i = 0; i < 4; ++i) {
+        EXPECT_EQ(batch[i].seed_used, derive_mc_trial_seed(base, i));
+        // Explicit generate with that seed must match batch path
+        auto single = gen.generate(derive_mc_trial_seed(base, i), cfg);
+        ASSERT_EQ(single.mids.size(), batch[i].mids.size());
+        for (size_t j = 0; j < single.mids.size(); ++j) {
+            EXPECT_DOUBLE_EQ(single.mids[j], batch[i].mids[j]);
+        }
+    }
+
+    // base_seed 0 → fixed default base
+    auto batch0 = gen.generate_batch(2, 0, cfg);
+    EXPECT_EQ(batch0[0].seed_used, derive_mc_trial_seed(0, 0));
+    EXPECT_EQ(batch0[0].seed_used, kMcDefaultBaseSeed);
+}
+
 TEST(GBMGenerator, SyntheticPathContainsBarsAndTicks) {
     GBMGenerator gen;
     McGeneratorConfig cfg = gen.default_config();

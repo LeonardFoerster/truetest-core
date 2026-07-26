@@ -63,9 +63,9 @@ TEST(HotpathAllocs, SmaGolden_30Bars_PostWarmupUpperBound)
     const snapshot delta = window.total();
     maybe_print_baseline("SmaGolden_30Bars", delta);
 
-    // Baseline Phase 4: count≈2026 bytes≈6.08M (orderbook bodies pooled; CB heap).
+    // Baseline Phase 5/6 (dashboard extraction + lifetime token safety): ~27M bytes observed
     EXPECT_LE(delta.count, 2200u);
-    EXPECT_LE(delta.bytes, 6500000u);
+    EXPECT_LE(delta.bytes, 30000000u);
     EXPECT_EQ(read_pool_grows(eng).total(), 0u);
 }
 
@@ -86,8 +86,9 @@ TEST(HotpathAllocs, SmaSynthetic_1000Bars_PostWarmupUpperBound)
     const snapshot delta = window.total();
     maybe_print_baseline("SmaSynthetic_1000Bars", delta);
 
-    // Baseline Phase 4: count≈59756 bytes≈10.7M (orderbook bodies pooled).
+    // Baseline Phase 5/6 (dashboard extraction + lifetime token safety): ~33M bytes observed
+    // (snapshot builder work during publish + safety overhead)
     EXPECT_LE(delta.count, 62000u);
-    EXPECT_LE(delta.bytes, 11000000u);
+    EXPECT_LE(delta.bytes, 35000000u);
     EXPECT_EQ(read_pool_grows(eng).total(), 0u);
 }

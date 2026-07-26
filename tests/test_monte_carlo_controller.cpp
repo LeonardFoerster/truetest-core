@@ -1,7 +1,11 @@
 #include "simulation/monte_carlo_controller.h"
 #include "simulation/monte_carlo_reporter.h"
+#include "simulation/generators/gbm_generator.h"
+#include "simulation/monte_carlo_types.h"
 
 #include <gtest/gtest.h>
+
+#include <stdexcept>
 
 using namespace truetest::simulation;
 
@@ -107,6 +111,126 @@ TEST(MonteCarloController, ReuseObjectsProducesPlausibleResults) {
     // Very loose bounds for this micro-benchmark.
     // Full bit-identical results are not yet guaranteed with reuse.
     // This test ensures the reuse path is functional ("good enough" policy).
-    EXPECT_GT(agg_reuse.mean_pnl, -1000.0);
-    EXPECT_LT(agg_reuse.worst_max_dd, 50.0);
+    //
+    // Bound is scaled to fixed-risk sizing semantics (risk_fraction is stop
+    // budget, not notional fraction). Default mean-reversion uses 0.5% SL and
+    // 2% equity risk ⇒ notional can be several × equity, so absolute PnL
+    // swings are larger than the old notional-capped regime. Still catch
+    // NaN / catastrophic blow-ups / broken reset without over-constraining.
+    EXPECT_GT(agg_reuse.mean_pnl, -100000.0);
+    EXPECT_LT(agg_reuse.worst_max_dd, 500.0);  // percent; loose catastrophic bound under fixed-risk sizing
+    // Reuse and fresh must both be finite and same order of magnitude when
+    // the campaign is well-formed (guards silent reuse corruption).
+    EXPECT_TRUE(std::isfinite(agg_fresh.mean_pnl));
+    if (std::abs(agg_fresh.mean_pnl) > 1.0) {
+        EXPECT_NEAR(agg_reuse.mean_pnl / agg_fresh.mean_pnl, 1.0, 0.5);
+    }
+}
+
+// seed_used must equal the seed that produced the GBM path (drill-down contract).
+TEST(MonteCarloController, SeedUsedMatchesPathGenerator) {
+    McRunConfig cfg;
+    cfg.n_trials = 4;
+    cfg.generator_config.n_steps = 40;
+    cfg.base_seed = 42;
+    cfg.strategy_name = "mean-reversion";
+
+    GBMGenerator gen;
+    auto batch = gen.generate_batch(cfg.n_trials, cfg.base_seed, cfg.generator_config);
+
+    MonteCarloController controller(cfg);
+    McAggregate agg = controller.run();
+
+    ASSERT_EQ(agg.trials.size(), cfg.n_trials);
+    ASSERT_EQ(batch.size(), cfg.n_trials);
+    for (size_t i = 0; i < cfg.n_trials; ++i) {
+        const uint64_t expected = derive_mc_trial_seed(cfg.base_seed, i);
+        EXPECT_EQ(batch[i].seed_used, expected) << "batch path seed trial " << i;
+        EXPECT_EQ(agg.trials[i].seed_used, expected) << "report seed_used trial " << i;
+        EXPECT_EQ(agg.trials[i].seed_used, batch[i].seed_used);
+    }
+}
+
+// base_seed==0 must use the fixed default for both path and seed_used.
+TEST(MonteCarloController, ZeroBaseSeedUsesFixedDefault) {
+    McRunConfig cfg;
+    cfg.n_trials = 2;
+    cfg.generator_config.n_steps = 30;
+    cfg.base_seed = 0;
+    cfg.strategy_name = "mean-reversion";
+
+    MonteCarloController controller(cfg);
+    McAggregate agg = controller.run();
+
+    ASSERT_EQ(agg.trials.size(), 2u);
+    EXPECT_EQ(agg.trials[0].seed_used, derive_mc_trial_seed(0, 0));
+    EXPECT_EQ(agg.trials[0].seed_used, kMcDefaultBaseSeed); // trial 0: base ^ 0
+    EXPECT_EQ(agg.trials[1].seed_used, derive_mc_trial_seed(0, 1));
+    EXPECT_NE(agg.trials[0].seed_used, agg.trials[1].seed_used);
+}
+
+TEST(MonteCarloController, UnknownStrategyThrows) {
+    McRunConfig cfg;
+    cfg.n_trials = 1;
+    cfg.generator_config.n_steps = 20;
+    cfg.base_seed = 1;
+    cfg.strategy_name = "this-strategy-does-not-exist";
+
+    MonteCarloController controller(cfg);
+    EXPECT_THROW(controller.run(), std::runtime_error);
+}
+
+TEST(MonteCarloController, UnknownGeneratorThrows) {
+    McRunConfig cfg;
+    cfg.n_trials = 1;
+    cfg.generator_name = "not-a-real-model";
+    cfg.base_seed = 1;
+    EXPECT_THROW(MonteCarloController{cfg}, std::runtime_error);
+}
+
+TEST(MonteCarloController, ParallelPlusReuseThrows) {
+    McRunConfig cfg;
+    cfg.n_trials = 2;
+    cfg.base_seed = 1;
+    cfg.parallel_trials = true;
+    cfg.reuse_objects_between_trials = true;
+    EXPECT_THROW(MonteCarloController{cfg}, std::runtime_error);
+}
+
+// Strategy params must be applied (unknown key throws from set_param).
+TEST(MonteCarloController, StrategyParamsApplied) {
+    McRunConfig cfg;
+    cfg.n_trials = 1;
+    cfg.generator_config.n_steps = 50;
+    cfg.base_seed = 7;
+    cfg.strategy_name = "mean-reversion";
+    cfg.strategy_params = {{"risk_fraction", 0.01}};
+
+    MonteCarloController controller(cfg);
+    EXPECT_NO_THROW(controller.run());
+
+    McRunConfig bad = cfg;
+    bad.strategy_params = {{"not_a_real_param_xyz", 1.0}};
+    MonteCarloController ctrl_bad(bad);
+    EXPECT_THROW(ctrl_bad.run(), std::exception);
+}
+
+// Re-generating a single path with seed_used must match campaign path.
+TEST(MonteCarloController, DrillDownSeedReproducesPath) {
+    const uint64_t base = 99;
+    const size_t trial = 2;
+    McGeneratorConfig gcfg;
+    gcfg.n_steps = 80;
+    gcfg.sigma = 0.5;
+
+    GBMGenerator gen;
+    auto batch = gen.generate_batch(3, base, gcfg);
+    const uint64_t seed_used = batch[trial].seed_used;
+    EXPECT_EQ(seed_used, derive_mc_trial_seed(base, trial));
+
+    auto again = gen.generate(seed_used, gcfg);
+    ASSERT_EQ(again.mids.size(), batch[trial].mids.size());
+    for (size_t j = 0; j < again.mids.size(); ++j) {
+        EXPECT_DOUBLE_EQ(again.mids[j], batch[trial].mids[j]) << "step " << j;
+    }
 }

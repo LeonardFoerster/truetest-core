@@ -103,6 +103,83 @@ TEST(MeanRevStrategy, NoReentryWhilePositionOpen)
     EXPECT_FALSE(order.has_value());
 }
 
+TEST(MeanRevStrategy, NoFreeFireWhileStillBelowSma)
+{
+    // Performance/correctness gate: after the first below-SMA edge, further
+    // bars that remain below the mean must not emit orders or exit intents.
+    mean_reversion_strategy s(3);
+    s.set_param("exit_style", 0.0); // pct — deterministic SL/TP
+    s.set_position_open("TEST", false);
+    s.on_market(make_mkt(0, 100.0));
+    s.on_market(make_mkt(1, 100.0));
+    s.on_market(make_mkt(2, 100.0));
+
+    auto first = s.on_market(make_mkt(3, 90.0)); // edge into below
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first->get_side(), order_side::buy);
+    auto intents1 = s.take_pending_exit_intents();
+    EXPECT_FALSE(intents1.empty());
+
+    // Still below SMA, gate locked optimistically — no free-fire.
+    for (int i = 0; i < 20; ++i)
+    {
+        auto o = s.on_market(make_mkt(4 + i, 88.0 - i * 0.1));
+        EXPECT_FALSE(o.has_value()) << "bar " << i;
+        EXPECT_TRUE(s.take_pending_exit_intents().empty()) << "bar " << i;
+    }
+}
+
+TEST(MeanRevStrategy, ReentryRequiresFreshSmaCross)
+{
+    // After flat while still on the same side of the SMA, no re-entry until
+    // price visits the other side and crosses back (edge re-arm).
+    mean_reversion_strategy s(3);
+    s.set_param("exit_style", 0.0);
+    s.set_position_open("TEST", false);
+    s.on_market(make_mkt(0, 100.0));
+    s.on_market(make_mkt(1, 100.0));
+    s.on_market(make_mkt(2, 100.0));
+
+    ASSERT_TRUE(s.on_market(make_mkt(3, 90.0)).has_value()); // long edge
+    (void)s.take_pending_exit_intents();
+
+    // Simulate stop-out / flat while still below the mean.
+    s.set_position_open("TEST", false);
+
+    // Still below — must NOT re-fire (no free-fire after flat).
+    EXPECT_FALSE(s.on_market(make_mkt(4, 89.0)).has_value());
+    EXPECT_TRUE(s.take_pending_exit_intents().empty());
+
+    // Cross above SMA to re-arm the below-side edge (and may open a short).
+    auto short_edge = s.on_market(make_mkt(5, 120.0));
+    ASSERT_TRUE(short_edge.has_value());
+    EXPECT_EQ(short_edge->get_side(), order_side::sell);
+    (void)s.take_pending_exit_intents();
+    s.set_position_open("TEST", false);
+
+    // Cross back below — fresh long edge allowed.
+    auto reentry = s.on_market(make_mkt(6, 80.0));
+    ASSERT_TRUE(reentry.has_value());
+    EXPECT_EQ(reentry->get_side(), order_side::buy);
+}
+
+TEST(MeanRevStrategy, OptimisticLockBlocksUntilEngineFlats)
+{
+    // Emitting an order locks the gate even before set_position_open(true)
+    // from the engine, so the next bar cannot spam another entry.
+    mean_reversion_strategy s(3);
+    s.set_param("exit_style", 0.0);
+    s.on_market(make_mkt(0, 100.0));
+    s.on_market(make_mkt(1, 100.0));
+    s.on_market(make_mkt(2, 100.0));
+
+    ASSERT_TRUE(s.on_market(make_mkt(3, 90.0)).has_value());
+    (void)s.take_pending_exit_intents();
+
+    // Do NOT call set_position_open — optimistic lock must still hold.
+    EXPECT_FALSE(s.on_market(make_mkt(4, 85.0)).has_value());
+}
+
 // --- MA Crossover Strategy ---
 
 TEST(MACrossoverStrategy, NoSignalDuringWarmup)

@@ -235,4 +235,6 @@ TEST(EngineIntegration, RiskDrawdownLimitHaltsEngine)
 
     // Engine should have stopped before consuming every bar.
     EXPECT_LT(strat->calls(), 500);
+    // Risk halt must raise process-wide halt_flag_ (not only local halt_requested).
+    EXPECT_TRUE(eng.get_halt_flag().load(std::memory_order_acquire));
 }
