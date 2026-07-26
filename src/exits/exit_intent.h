@@ -35,6 +35,13 @@ struct exit_intent
     std::optional<double> stop_loss;
     std::optional<double> take_profit;
 
+    // When set, SL/TP were computed relative to this intended entry. On
+    // opener fill the ExitManager shifts both levels by
+    // (fill_price - reference_entry) so entry-relative brackets keep their
+    // designed risk distance under entry slippage. Absolute structure stops
+    // leave this unset.
+    std::optional<double> reference_entry;
+
     // Fraction of best price (0.005 = 0.5% trail). Raises stop_loss each
     // tick to max(stop_loss, best * (1 - trailing_pct)) for longs.
     std::optional<double> trailing_pct;
@@ -55,9 +62,10 @@ inline exit_intent make_long_exit_intent(const std::string& symbol,
                                          const std::string& strategy_name = {})
 {
     exit_intent ei;
-    ei.symbol        = symbol;
-    ei.close_side    = order_side::sell;
-    ei.qty           = qty;
+    ei.symbol          = symbol;
+    ei.close_side      = order_side::sell;
+    ei.qty             = qty;
+    ei.reference_entry = entry;
     if (sl_pct > 0.0) ei.stop_loss   = entry * (1.0 - sl_pct);
     if (tp_pct > 0.0) ei.take_profit = entry * (1.0 + tp_pct);
     ei.strategy_name = strategy_name;
@@ -70,9 +78,10 @@ inline exit_intent make_short_exit_intent(const std::string& symbol,
                                           const std::string& strategy_name = {})
 {
     exit_intent ei;
-    ei.symbol        = symbol;
-    ei.close_side    = order_side::buy;
-    ei.qty           = qty;
+    ei.symbol          = symbol;
+    ei.close_side      = order_side::buy;
+    ei.qty             = qty;
+    ei.reference_entry = entry;
     if (sl_pct > 0.0) ei.stop_loss   = entry * (1.0 + sl_pct);
     if (tp_pct > 0.0) ei.take_profit = entry * (1.0 - tp_pct);
     ei.strategy_name = strategy_name;

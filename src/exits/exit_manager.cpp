@@ -75,6 +75,22 @@ void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
         if (frac > 1.0)  frac = 1.0;
         ai.intent.qty = f.get_filled_quantity() * frac;
 
+        // Entry-relative brackets: preserve designed |entry - SL/TP|
+        // distance when the opener fills away from the intended price.
+        // Absolute structure levels leave reference_entry unset.
+        if (ai.intent.reference_entry && *ai.intent.reference_entry > 0.0)
+        {
+            const double delta = f.get_fill_price() - *ai.intent.reference_entry;
+            if (std::abs(delta) > 1e-15)
+            {
+                if (ai.intent.stop_loss)
+                    *ai.intent.stop_loss += delta;
+                if (ai.intent.take_profit)
+                    *ai.intent.take_profit += delta;
+            }
+            ai.intent.reference_entry = f.get_fill_price();
+        }
+
         to_place.push_back(ai.intent);
         armed_.emplace(f.get_order_id(), std::move(ai));
     }
