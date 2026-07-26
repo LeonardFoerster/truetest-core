@@ -1,153 +1,197 @@
-# TrueTest (hft-engine)
+# TrueTest
 
-C++23 trading engine. Single source tree produces three binaries via compile-time `TT_TARGET`: `engine_backtest`, `engine_shadow`, `engine_live`. Live orders physically impossible except on `engine_live` (dead-code elimination).
+**A modular C++23 trading engine for reproducible backtesting, divergence-aware shadow trading, and gated live execution — from a single source tree.**
 
-**Intended use**: private personal research and retail tool only. Not enterprise, institutional or production software for others. Primary mature capabilities: Monte Carlo simulation, backtesting, shadow divergence analysis. Live paths (`engine_live`) are experimental, tiny-size, attended, at own risk. Phase 0/1 describe personal discipline only.
+Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) are produced from the same codebase. They differ only by the compile-time `TT_TARGET` define. Live-order paths are physically eliminated via dead-code elimination in non-live targets.
 
-## Binaries
+> **Intended use**: Private personal research and retail tool only. Not enterprise, institutional, or production software for others.  
+> Primary mature capabilities: Monte Carlo simulation, high-fidelity backtesting, and shadow divergence analysis.  
+> Live paths (`engine_live`) are experimental, tiny-size, fully attended, and used at your own risk. Phase 0/1 describe personal discipline and evidence-gathering practices.
 
-| Binary           | TT_TARGET | Live Orders | Default |
-|------------------|-----------|-------------|---------|
-| engine_backtest  | BACKTEST  | Impossible  | backtest |
-| engine_shadow    | SHADOW    | Impossible  | shadow  |
-| engine_live      | LIVE      | Allowed     | live    |
+## The Three Binaries
 
-Defined in `src/core/tt_target.h`. Gated in `src/bin/main.inc`.
+| Binary           | TT_TARGET | Live Orders | Primary Use                          |
+|------------------|-----------|-------------|--------------------------------------|
+| `engine_backtest` | BACKTEST  | Impossible  | Historical replay, MC campaigns      |
+| `engine_shadow`   | SHADOW    | Impossible  | Real-time paper trading vs. exchange |
+| `engine_live`     | LIVE      | Allowed     | Real-money execution (with safeguards) |
 
-## Status (2026)
+The `TT_TARGET` mechanism and `target_allows_live_orders()` gate are defined in `src/core/tt_target.h`.
 
-Monte Carlo integrated from `monte-carlo` branch (mainline; MC-01/MC-02 landed).
+## Core Capabilities
 
-**Web UI**: opt-in on `feature/web-ui` (`-DENABLE_WEB=ON` + `--web`). Read-only civetweb server + React SPA. Reuses `snapshot_dashboard()` seam. Off hot path, no order routes, no frozen surface changes. See `docs/reference/05-web-ui.md`.
+- **Monte Carlo simulation** — Stochastic backtesting with GBM paths, deterministic multi-trial campaigns, object reuse, and experimental parallelism. Use `--monte-carlo --mc-trials N`.
+- **High-fidelity backtesting** — Local CSV (OHLCV + tick), binary log replay, walked-book impact, configurable realism models (latency, queue position, market impact, fees, fills).
+- **Shadow trading** — Real-time Binance streaming with `TradeTapeShadowAdapter`. Tracks divergence between simulated and observed fills.
+- **Strong safety architecture** (compile-time + runtime):
+  - `TT_TARGET` dead-code elimination for live orders
+  - Position/order reconciler, Dead Man's Switch, Kill Switch
+  - Venue `IRiskCheck` (futures notional, leverage, liquidation distance)
+  - Terminal `halt_flag_`, user-data WebSocket as source of truth, `WorkerWatchdog`
+- **Observability** — Binary zstd event logs, optional QuestDB ILP, rich ncurses TUI (shadow/live), optional read-only web UI.
+- **Zero-allocation hot path** — `ObjectPool` + lock-free SPSC `RingBuffer` (64k slots). CI-enforced.
 
-### Phases
-
-| Phase | Status | Notes |
-|-------|--------|-------|
-| Phase 0 (Tiny-Size Mainnet Futures) | 0/15 qualifying | Paused during MC work; gates unchanged. Full artifacts required. See `docs/governance/01-prod.md`, `reports/phase0/`. |
-| Phase 1 (Live-Safety Freeze) | Enforced | 10 frozen files + `scripts/check-live-safety-freeze.sh` (CI + pre-commit). Token + CCB + clean shadow run required for edits. |
-| Risk / DMS (R-*, S-*) | Partial | Tiered margin landed; position limits, funding wiring, liq calc, DMS flatten pending. See `docs/governance/03-todo.md` (thin) or docs/todos/04-R-risk-management.md + 05-S-....md (see 00-OVERVIEW.md). |
-
-Safety primitives: compile-time gating, IReconciler, DMS + kill-switch (flatten opt), venue `IRiskCheck`, terminal `halt_flag_`, user-data WS as truth, WorkerWatchdog.
-
-## Build
+## Quick Start
 
 ```bash
+# Minimal build (CSV backtesting only)
 cmake -B build
-cmake --build build
+cmake --build build -j
 ```
 
-**Modernized build system** (2026-07 cmake-update):
-- Core + test source registration lives in one obvious file: `cmake/Sources.cmake` (still fully explicit lists; no globs).
-- Many real-world combinations are first-class via `CMakePresets.json`:
-  ```bash
-  cmake --preset linux-tests
-  cmake --preset linux-binance-questdb
-  cmake --preset linux-web
-  cmake --preset linux-asan
-  # etc.
-  ```
-See `docs/reference/01-instructions.md` for the full list.
+```bash
+# Run a simple backtest
+./build/engine_backtest \
+  --provider local \
+  --path market_data.csv \
+  --strategy sma
+```
 
-Key options:
+```bash
+# Shadow trade against Binance futures (paper only)
+./build/engine_shadow \
+  --provider binance-futures \
+  --symbol BTCUSDT \
+  --stream trade \
+  --depth-stream depth20@100ms \
+  --persist --run-tag my_shadow_run
+```
 
-| Flag | Effect |
-|------|--------|
-| -DENABLE_BINANCE=ON | Binance spot + futures |
-| -DENABLE_QUESTDB=ON | QuestDB ILP + schema |
-| -DENABLE_WEB=ON | civetweb + --web UI (feature/web-ui) |
-| -DENABLE_LIVE_DATA=ON | Generic WS |
-| -DENABLE_DEBUG=ON | Stage timers |
-| -DENABLE_NATIVE_OPT=ON | -march=native (live) |
-| -DBUILD_TESTS=ON | GoogleTest |
+For live execution you must add `--live` together with API credentials and complete the interactive math captcha. The full recommended Phase 0 template and operator ritual are documented in `docs/governance/01-prod.md`.
 
-Web assets (after ENABLE_WEB):
+### Web UI
+
+The optional web interface (civetweb + React SPA) serves a read-only live cockpit and backtest report viewer. It reuses the same snapshot data as the TUI and cannot place or modify orders.
+
+Enable at build time:
+
+```bash
+cmake -B build -DENABLE_WEB=ON
+cmake --build build
+cd src/web/frontend && npm ci && npm run build
+```
+
+Run with:
+
+```bash
+./build/engine_shadow ... --web --web-assets src/web/assets
+# Then open http://127.0.0.1:8080/
+```
+
+## Build System
+
+Modernized CMake setup (single source of truth in `cmake/Sources.cmake`; no globs).
+
+Common configurations are available as presets:
+
+```bash
+cmake --preset linux-tests
+cmake --preset linux-binance-questdb
+cmake --preset linux-web
+cmake --preset linux-asan
+cmake --preset linux-release-native
+# ... see docs/reference/01-instructions.md for the full list
+```
+
+Key CMake options:
+
+| Option                    | Effect                              |
+|---------------------------|-------------------------------------|
+| `-DENABLE_BINANCE=ON`     | Binance spot + USDT-M futures       |
+| `-DENABLE_QUESTDB=ON`     | QuestDB ILP writer + schema         |
+| `-DENABLE_WEB=ON`         | Embedded civetweb + `--web` UI      |
+| `-DENABLE_DEBUG=ON`       | Stage timers + instrumentation      |
+| `-DENABLE_NATIVE_OPT=ON`  | `-march=native` (performance builds)|
+| `-DBUILD_TESTS=ON`        | GoogleTest suite                    |
+
+After enabling the web UI, build the frontend once:
+
 ```bash
 cd src/web/frontend && npm ci && npm run build
 ```
 
+See `docs/reference/01-instructions.md` for the complete reference.
+
 ## Providers
 
-| Name            | Sources                     | Execution          |
-|-----------------|-----------------------------|--------------------|
-| local           | OHLCV / tick CSV            | paper / hybrid     |
-| binance         | REST + WS (trade/depth)     | live + paper       |
-| binance-futures | REST + WS (trade/depth20)   | live + brackets    |
-| synthetic       | GBM (on demand)             | MC / backtest      |
+| Provider          | Data Sources                     | Execution                  |
+|-------------------|----------------------------------|----------------------------|
+| `local`           | OHLCV / tick CSV files           | Paper / hybrid             |
+| `binance`         | REST + WebSocket (trade/depth)   | Live + paper               |
+| `binance-futures` | REST + WebSocket (trade/depth20) | Live + bracket orders      |
+| `synthetic`       | GBM paths (on demand)            | Monte Carlo / backtest     |
 
-Replay: `--replay` from zstd binary logs. Realism models: latency, impact, queue (l2-snapshot), fill.
-
-## Safety Surface (Phase 1)
-
-Frozen (single source of truth in script + markers):
-
-- src/core/tt_target.h
-- src/engine/engine.cpp
-- src/providers/binance/binance_futures_{provider,dead_mans_switch,kill_switch,reconciler}.h
-- src/risk/{risk_manager,futures_risk_check}.h
-- src/execution/live_safety.h
-- src/threading/worker_watchdog.h
-
-All edits require `LIVE_SAFETY_CCB_APPROVED` token, CCB review, clean multi-hour `engine_shadow` run.
-
-## Data Flow (relations)
-
-main.inc → IProvider (or synthetic/MC) → IDataSource / DataBridge → engine → strategy → RiskManager + IRiskCheck → IExecutionAdapter (LocalBook / QueueAware / Hybrid / Bridge) → portfolio + ExitManager (per-lot via opener) + analytics → workers (rings) + snapshot.
-
-`reset_for_next_trial` (MC) clears portfolio/exits/analytics/order state.
-
-## UI
-
-- Console (backtest)
-- Tabbed ncurses (shadow/live)
-- Web (`--web`): live cockpit + backtest review SPA. Same snapshot data. Read-only.
+Additional modes include `--replay` from zstd-compressed binary logs. Realism models cover latency, market impact, queue position (based on L2 snapshots), and synthetic fill simulation.
 
 ## Strategies
 
-Registered via macro (`src/strategy/strategy_registry.h`):
+Registered via the `REGISTER_STRATEGY` macro (`src/strategy/strategy_registry.h`):
 
-sma, ma-crossover, mean-reversion, breakout, coiled-spring, larry_connor, hedge-demo, adaptive-hybrid, structure-continuation.
+`sma`, `ma-crossover`, `mean-reversion`, `breakout`, `coiled-spring`, `larry_connor`, `hedge-demo`, `adaptive-hybrid`, `structure-continuation`.
 
-Indicators: sma/ema/rsi/stochastic/bollinger/atr/swing/rolling.
+Supported indicators: SMA, EMA, RSI, Stochastic, Bollinger Bands, ATR, swing detection, rolling extremes.
+
+Multiple strategies can run together: `--strategy sma,mean-reversion`.
+
+## User Interfaces
+
+- **Backtest**: Clean console dashboard (fast, non-interactive)
+- **Shadow / Live**: Rich tabbed ncurses TUI with panels for positions, orders, L2, risk, brackets, analytics, etc.
+- **Web** (`--web`): Read-only browser cockpit and backtest report viewer (same snapshot data as the TUI). Opt-in, off the hot path, no order submission routes.
+
+## Safety Surface (Phase 1 Freeze)
+
+The following core files and modules are under the live-safety freeze (see the enforcement script for the exact list):
+
+- `src/core/tt_target.h`
+- `src/engine/engine.cpp`
+- `src/providers/binance/` (futures provider, dead_mans_switch, kill_switch, reconciler)
+- `src/risk/{risk_manager, futures_risk_check}.h`
+- `src/execution/live_safety.h`
+- `src/threading/worker_watchdog.h`
+
+All modifications require the `LIVE_SAFETY_CCB_APPROVED` token in the commit message, two-person CCB review, and a clean multi-hour `engine_shadow` run. Enforcement is provided by `scripts/check-live-safety-freeze.sh` (wired into pre-commit and CI).
+
+See `docs/governance/01-prod.md`, `docs/governance/02-prerequisites.md`, and `CLAUDE.md`.
+
+## Development Phases
+
+| Phase                              | Status          | Notes |
+|------------------------------------|-----------------|-------|
+| Phase 0 (Tiny-Size Mainnet Futures) | 0/15 qualifying | Full artifacts + two signatures required. See `docs/governance/01-prod.md` and `reports/phase0/`. |
+| Phase 1 (Live-Safety Freeze)        | Enforced        | 10 frozen files + token + CCB + clean shadow run. |
+| Risk / DMS (R-*, S-*)               | Partial         | Tiered margin support landed; further items tracked in `docs/governance/03-todo.md`. |
+
+Monte Carlo capabilities are fully integrated into the mainline engine and do not relax any Phase 0/1 gates or safety requirements.
 
 ## Documentation
 
-| File                          | Content |
-|-------------------------------|---------|
-| CLAUDE.md                     | Build matrix, conventions, model selection, freeze policy, web |
-| docs/governance/01-prod.md    | Phases, gates, Phase 0 template + ritual |
-| docs/governance/03-todo.md    | Tasks (P0/P1/MC/R/S/D/A); ref on frozen PRs |
-| docs/reference/01-instructions.md | CLI flags, providers, MC, threading, realism |
-| docs/reference/05-web-ui.md   | Web UI flags, endpoints, architecture, safety |
-| reports/phase0/PROGRESS.md    | Phase 0 tracker (0/15) |
-| docs/reference/02-user-manual.md | Architecture + operator overview |
-| docs/archive/production-readiness-gaps-2026-05.md | Historical gaps snapshot (May 2026; current in docs/governance/03-todo.md + 01-prod.md) |
+| Document                              | Purpose |
+|---------------------------------------|---------|
+| `docs/reference/01-instructions.md`   | Master reference: CLI, build, providers, MC, realism, threading |
+| `docs/governance/01-prod.md`          | Production playbook, phases, Go-Live gate, Phase 0 ritual |
+| `docs/governance/03-todo.md`          | High-level task list (detailed items live under `docs/todos/`) |
+| `docs/reference/02-user-manual.md`    | Architecture and operator overview |
+| `CLAUDE.md`                           | AI coding rules, model selection, freeze policy |
+| `docs/reference/05-web-ui.md`         | Web UI usage, endpoints, architecture |
+| `reports/phase0/PROGRESS.md`          | Phase 0 qualifying session tracker |
+| `docs/README.md`                      | Documentation navigation |
 
-Root governance files + reports/phase0/ + CLAUDE.md are authoritative. MC and web UI do not relax Phase 0/1 gates or safety surface.
-
-**Note (2026-07 docs overhaul)**: Governance moved to docs/governance/ (01-prod.md etc). docs/ is central home. Reference docs in docs/reference/. See docs/README.md.
-
-## Quick Examples
-
-```bash
-./build/engine_backtest --provider local --path market_data.csv --strategy sma
-```
-
-```bash
-./build/engine_shadow --provider binance-futures --symbol BTCUSDT \
-  --stream trade --depth-stream depth20@100ms --persist --run-tag ...
-```
-
-Web (ENABLE_WEB):
-```bash
-./build/engine_shadow ... --web --web-assets src/web/assets
-# http://127.0.0.1:8080/
-```
-
-Live: add `--live --api-key ... --api-secret ...` + captcha. Full templates in docs/governance/01-prod.md.
+Root governance files, `CLAUDE.md`, `reports/phase0/`, and the reference manuals are authoritative. MC and Web UI work do not relax safety or phase gates.
 
 ## Testing
 
-~300 GoogleTest cases, golden regression (execution fidelity), CI hot-path (no JSON), live-safety-freeze script, optional sanitizers + benchmarks.
+Extensive GoogleTest suite (~850+ cases) including:
 
-Consult `docs/governance/01-prod.md` before increasing live capital. All frozen-surface work requires the CCB token and clean shadow run per `scripts/check-live-safety-freeze.sh`.
+- Golden regression tests for execution fidelity
+- Hot-path allocation discipline checks (`scripts/check-hotpath-json.sh`)
+- Live-safety-freeze enforcement
+- Optional sanitizers (ASAN/UBSAN/TSAN) and benchmarks
+
+Run with `ctest --test-dir build` or the `linux-tests` preset.
+
+Before using live capital, consult `docs/governance/01-prod.md`. All changes to the frozen surface must pass the CCB process and `scripts/check-live-safety-freeze.sh`.
+
+---
+
+**TrueTest is a personal research platform.** Use it responsibly. All live trading carries risk.

@@ -59,6 +59,7 @@ Located in [`docs/archive/`](archive/):
 - `MERGE_PLAN.md` — Monte Carlo merge execution record (historical).
 - `docs/archive/production-readiness-gaps-2026-05.md` — May 2026 snapshot of gaps (current status in `docs/governance/03-todo.md` + `docs/governance/01-prod.md`).
 - Edge 1 plans: `Edge1_Dynamic_Cointegration_*` + source PDF guideline (future implementation work; not yet started. When ready to implement, pull from here + PDF).
+- `engine.md` — Detailed phased todo/execution plan for `src/engine/engine.{h,cpp}` god-class decomposition. Designed to be consumed by Grok Build (`/design` + `/execute-plan`). All waves preserve identical functionality. See the `engine-decomposition` skill.
 
 Older aspirational refs cleaned. Archive is for completed/historical plans. Active reference material is in root governance + `reference/01-instructions.md` + `reference/02-user-manual.md` + new `architecture/` + `operations/` thin docs + `00-INDEX.md`.
 
