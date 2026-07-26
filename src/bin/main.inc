@@ -479,6 +479,39 @@ static void apply_strategy_params(IStrategy& strategy,
     }
 }
 
+// Push CLI fee / spread realism into strategy sizing params when supported.
+// Market entries and stop exits are treated as taker; half bar-spread is a
+// conservative adverse-slip estimate when no L2 walk is available at size time.
+static void apply_execution_cost_params(IStrategy& strategy, const cli_options& o)
+{
+    auto schema = strategy.get_param_schema();
+    auto has = [&](const char* name) {
+        for (const auto& p : schema)
+            if (p.name == name) return true;
+        return false;
+    };
+    auto set_if = [&](const char* name, double value) {
+        if (value <= 0.0 || !has(name)) return;
+        try { strategy.set_param(name, value); }
+        catch (const std::exception&) { /* schema race / unknown — ignore */ }
+    };
+
+    // Prefer taker for market-style risk; fall back to maker if only that is set.
+    const double entry_fee = (o.taker_rate > 0.0) ? o.taker_rate
+                           : (o.maker_rate > 0.0) ? o.maker_rate : 0.0;
+    const double exit_fee  = entry_fee;
+    set_if("entry_fee_rate", entry_fee);
+    set_if("exit_fee_rate",  exit_fee);
+
+    // Half-spread as per-leg adverse slip when bar-spread realism is enabled.
+    if (o.bar_spread_bps > 0.0)
+    {
+        const double half = o.bar_spread_bps * 0.5;
+        set_if("entry_slip_bps", half);
+        set_if("exit_slip_bps",  half);
+    }
+}
+
 // Parse one --instrument entry (e.g. "BTCUSDT:tick=0.01,lot=0.00001,minn=5").
 // Unknown fields are ignored so the syntax stays extensible.
 static bool parse_instrument_arg(const std::string& arg, instrument_spec& out)
@@ -1280,6 +1313,7 @@ static int run_replay_mode(const cli_options& o)
     std::cout << "  Using Mean Reversion strategy (default) for replay.\n";
 
     auto strategy = std::make_shared<mean_reversion_strategy>(20);
+    apply_execution_cost_params(*strategy, o);
     apply_strategy_params(*strategy, o.params);
 
     engine_config cfg;
@@ -1336,6 +1370,22 @@ static int run_monte_carlo_mode(const cli_options& o)
     mc_cfg.base_seed = o.seed;
     mc_cfg.initial_balance = o.balance;
 
+    // Strategy --param key=value (same contract as single-run backtests)
+    for (const auto& p : o.params) {
+        auto eq = p.find('=');
+        if (eq == std::string::npos) {
+            std::cerr << "  ! Invalid --param format (expected key=value): " << p << "\n";
+            return 1;
+        }
+        try {
+            mc_cfg.strategy_params.emplace_back(
+                p.substr(0, eq), std::stod(p.substr(eq + 1)));
+        } catch (const std::exception& e) {
+            std::cerr << "  ! Invalid --param value for '" << p << "': " << e.what() << "\n";
+            return 1;
+        }
+    }
+
     // Apply some realism from top-level flags (best effort for Phase 3)
     mc_cfg.realistic_fills = o.realistic_fills;
     mc_cfg.order_latency_us = o.order_latency_us;
@@ -1349,6 +1399,12 @@ static int run_monte_carlo_mode(const cli_options& o)
 
     // Phase A object reuse
     mc_cfg.reuse_objects_between_trials = o.mc_reuse_objects;
+
+    if (mc_cfg.parallel_trials && mc_cfg.reuse_objects_between_trials) {
+        std::cerr << "  ! --mc-parallel and --mc-reuse-objects are mutually exclusive "
+                     "(shared strategy/data_handler would race).\n";
+        return 1;
+    }
 
 #ifdef HAS_QUESTDB
     std::unique_ptr<truetest::questdb::QuestdbStore> questdb_store;
@@ -1390,10 +1446,22 @@ static int run_monte_carlo_mode(const cli_options& o)
     std::cout << "  Trials:   " << mc_cfg.n_trials << "\n";
     std::cout << "  Model:    " << mc_cfg.generator_name << "\n";
     std::cout << "  Strategy: " << mc_cfg.strategy_name << "\n";
-    std::cout << "  Balance:  " << mc_cfg.initial_balance << "\n\n";
+    std::cout << "  Balance:  " << mc_cfg.initial_balance << "\n";
+    std::cout << "  Base seed:" << mc_cfg.base_seed
+              << (mc_cfg.base_seed == 0
+                      ? " (using fixed default " +
+                            std::to_string(truetest::simulation::kMcDefaultBaseSeed) + ")"
+                      : "")
+              << "\n\n";
 
-    truetest::simulation::MonteCarloController controller(mc_cfg);
-    auto results = controller.run();
+    truetest::simulation::McAggregate results;
+    try {
+        truetest::simulation::MonteCarloController controller(mc_cfg);
+        results = controller.run();
+    } catch (const std::exception& e) {
+        std::cerr << "  ! Monte Carlo campaign failed: " << e.what() << "\n";
+        return 1;
+    }
 
     std::string mc_json = truetest::simulation::MonteCarloReporter::render_json(results, mc_cfg);
 
@@ -1569,6 +1637,7 @@ static int run_provider_mode(const cli_options& o)
         if (o.balance != 10000.0) prov_strategy->set_param("equity", o.balance);
         if (o.risk_fraction != 0.02) prov_strategy->set_param("risk_fraction", o.risk_fraction);
     }
+    apply_execution_cost_params(*prov_strategy, o);
     apply_strategy_params(*prov_strategy, o.params);
 
     std::vector<std::pair<std::string, std::shared_ptr<IStrategy>>> extra_strategies;
@@ -1579,6 +1648,7 @@ static int run_provider_mode(const cli_options& o)
             return 1;
         }
         auto extra = StrategyRegistry::instance().create(nm);
+        apply_execution_cost_params(*extra, o);
         apply_strategy_params(*extra, o.params);
         extra_strategies.emplace_back(nm, std::move(extra));
     }
@@ -2179,7 +2249,10 @@ static int run_provider_mode(const cli_options& o)
     return 0;
 }
 
-static int run_tui_mode(const cli_options& o)
+// Small helper extracted so that the initial frame of run_tui_mode stays tiny.
+// The banner + first cin + preset logic used to contribute to the ~11 MiB frame.
+[[gnu::noinline]]
+static int prompt_quickstart_preset(const cli_options& o, cli_options& effective)
 {
     std::cout << "\n";
     std::cout << "   _____                _____         _   \n";
@@ -2207,7 +2280,7 @@ static int run_tui_mode(const cli_options& o)
     int preset_choice = 0;
     std::cin >> preset_choice;
 
-    cli_options effective = o;  // start from passed (may have --param etc.)
+    effective = o;  // start from passed (may have --param etc.)
     if (preset_choice == 1) {
         effective.preset = "backtest-local-l2";
     } else if (preset_choice == 2) {
@@ -2235,6 +2308,27 @@ static int run_tui_mode(const cli_options& o)
             effective.mc_reuse_objects = true;
         }
     }
+    return 0;
+}
+
+// Forward declaration so run_tui_mode can call it (definition appears later in this TU).
+static int run_tui_configured_engine(const cli_options& o,
+                                     const cli_options& effective,
+                                     std::unique_ptr<IDataSource> source,
+                                     std::shared_ptr<IStrategy> strategy,
+                                     int fee_choice);
+
+static int run_tui_mode(const cli_options& o)
+{
+    // NOTE: run_tui_mode is deliberately kept very small (menus only).
+    // The heavy config population, model construction and engine execution
+    // live in run_tui_configured_engine (called at the end) and the first
+    // preset interaction lives in prompt_quickstart_preset. This prevents
+    // the ~11 MiB stack frame that used to crash bare launches on default
+    // 8 MiB ulimit -s.
+    cli_options effective;
+    if (int rc = prompt_quickstart_preset(o, effective); rc != 0)
+        return rc;
 
     std::cout << "\n";
     std::cout << "  +-------------------------------------------+\n";
@@ -2268,6 +2362,7 @@ static int run_tui_mode(const cli_options& o)
     auto strategy = StrategyRegistry::instance().create(tui_strategy_name);
     if (tui_strategy_name == "sma" || tui_strategy_name == "mean-reversion")
         strategy->set_param("period", static_cast<double>(sma_period));
+    apply_execution_cost_params(*strategy, o);
     apply_strategy_params(*strategy, o.params);
 
     std::cout << "\n";
@@ -2314,6 +2409,22 @@ static int run_tui_mode(const cli_options& o)
     std::cout << "  > ";
     int fee_choice;
     std::cin >> fee_choice;
+
+    // Hand off to separate function. This is the main source of the giant
+    // stack frame (long config population + models + engine construction).
+    return run_tui_configured_engine(o, effective, std::move(source), strategy, fee_choice);
+}
+
+// Extracted heavy path. [[gnu::noinline]] + separate frame keeps the
+// entry frame of run_tui_mode (and prompt_quickstart_preset) small.
+[[gnu::noinline]]
+static int run_tui_configured_engine(const cli_options& o,
+                                     const cli_options& effective,
+                                     std::unique_ptr<IDataSource> source,
+                                     std::shared_ptr<IStrategy> strategy,
+                                     int fee_choice)
+{
+    (void)effective; // currently not differing in this path; kept for future
 
     engine_config config;
     config.seed = o.seed;

@@ -46,8 +46,9 @@ struct pool_prewarm_settings
     std::size_t amend_blocks = 1;
     std::size_t funding_blocks = 1;
     // Phase 4: synthetic/MM orderbook depth (~20 orders/bar/tick accumulation).
-    // 18 blocks ≈ 73k slots (covers tick-3600 idle @ ~20 replenishes/tick).
-    std::size_t orderbook_order_blocks = 18;
+    // Default raised to cover full-length synthetic backtests (e.g. default ~5000 records * ~20 GTC MM orders).
+    // 128 blocks ≈ 524k slots is still modest for a backtest tool and keeps forbid_runtime_grow semantics.
+    std::size_t orderbook_order_blocks = 128;
     // 0 = auto (sum of all event-pool capacity slots after prewarm).
     std::size_t control_block_slots = 0;
     bool forbid_runtime_grow = true;

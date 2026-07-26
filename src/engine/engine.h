@@ -48,6 +48,7 @@ namespace truetest::ui { struct streaming_stats; }
 #include "execution_router.h"
 #include "instrument_spec_cache.h"
 #include "checkpoint.h"
+#include "dashboard_snapshot_builder.h"
 
 #ifdef HAS_QUESTDB
 #include "data/questdb/store.h"
@@ -109,7 +110,10 @@ private:
     // only the futures dead-man's switch heartbeat opts in.
     std::unique_ptr<WorkerWatchdog> worker_watchdog_;
     MarketMaker market_maker_;
-    double last_mid_price_ = 0.0;
+    // Written from event processing thread(s), read by cold snapshot builder,
+    // risk checks, adapters, logging. Atomic for price to avoid data race
+    // surface on plain double& held by builder (see memory check 2026-07-18).
+    alignas(64) std::atomic<double> last_mid_price_{0.0};
     std::string last_mark_symbol_;
 
     // Instrument spec cache (moved out; engine delegates). Cold path.
@@ -188,45 +192,11 @@ private:
     std::unique_ptr<IOrderAuditSink> audit_sink_;
     std::unique_ptr<ExecutionRouter> router_;
 
-    // Dashboard view: read from the rich (ncurses) TUI render thread.
-    // Filled on the event loop (no contention with the hot path) and
-    // swapped into the slot under a mutex; readers take a quick lock to
-    // copy. Refresh is debounced to ~100 ms aligned with the render tick.
-    //
-    // Planned extraction: Wave 1 (DashboardSnapshotBuilder) per core/docs/engine.md
-    // (E-30..) + engine-decomposition skill. Cold path only.
-    mutable std::mutex                    dashboard_view_mu_;
-    truetest::ui::dashboard_snapshot      dashboard_view_;
-    bool                                  dashboard_view_initialised_ = false;
-    std::chrono::steady_clock::time_point dashboard_view_last_{};
-    bool                                  dashboard_view_force_ = false;  // set by request_dashboard_refresh (Fix #3)
-
-    // Memory-view cache. /proc/self/* parsing was the dominant cost of
-    // the snapshot path; refresh at ~1 Hz instead of every snapshot.
-    // mutable so build_dashboard_view (const) can update it.
-    mutable truetest::ui::dashboard_snapshot::memory_view memory_cache_{};
-    mutable std::chrono::steady_clock::time_point         memory_cache_last_{};
-    mutable bool                                          memory_cache_initialised_ = false;
-    std::chrono::milliseconds             dashboard_view_interval_{100};
-    void refresh_dashboard_view_if_due();
-    void build_dashboard_view(truetest::ui::dashboard_snapshot& out) const;
-
-    // Side caches for the rich TUI's Orders & Fills pane. Mutated on the
-    // event-loop thread alongside order_tracker_/portfolio_; copied into
-    // the snapshot during build_dashboard_view().
-    struct open_order_cache_entry
-    {
-        truetest::ui::dashboard_snapshot::open_order_row row{};
-        std::chrono::system_clock::time_point            ts{};
-    };
-    std::unordered_map<std::uint64_t, open_order_cache_entry> open_orders_cache_;
-    std::deque<truetest::ui::dashboard_snapshot::fill_row>    recent_fills_cache_;
-    static constexpr std::size_t kRecentFillsCap = 64;
-
-    void cache_open_order(const order_event& o);
-    void update_open_order_status(std::uint64_t id, const char* status);
-    void erase_open_order(std::uint64_t id);
-    void cache_fill(const fill_event& f);
+    // Dashboard logic extracted to cold collaborator (Wave 1).
+    // See core/docs/engine.md (E-30..) + engine-decomposition skill.
+    // Engine delegates public snapshot API and the refresh tick from publish_event.
+    // Cache mutations from hot paths (fills, orders) now go through the builder.
+    std::unique_ptr<DashboardSnapshotBuilder> dashboard_builder_;
 
     void write_checkpoint_if_due(std::size_t event_count);
     void restore_from_checkpoint();
@@ -336,6 +306,23 @@ private:
     void dispatch_fill_to_strategy(const fill_event& f);
 
     std::atomic<bool> halt_flag_{false};
+
+    // Heap-allocated armed flag for provider callbacks.
+    // Callbacks (which may fire after engine destruction) capture a
+    // shared_ptr copy of this token so the "still armed?" check itself
+    // is never a use-after-destruction of the engine object.
+    //
+    // Lifetime contract (see 2026-07-18 memory check): this flag + the
+    // lifetime_ tokens in ObjectPools + explicit revoke/close/drain order
+    // in stop_workers protect against in-flight callbacks touching
+    // destroyed members. In-flight bodies that passed the load may still
+    // execute; they must only touch things with independent lifetime
+    // (shared rings) or guarded pools.
+    std::shared_ptr<std::atomic<bool>> callbacks_armed_flag_ = std::make_shared<std::atomic<bool>>(true);
+
+    // (kept for compatibility with some internal reads; the real authority is the flag above)
+    std::atomic<bool> provider_callbacks_armed_{true};
+
     std::atomic<bool> worker_failed_{false};
     std::atomic<bool> pause_all_{false};
     std::atomic<bool> flatten_request_{false};
@@ -379,7 +366,24 @@ private:
     void start_workers();
     void stop_workers();
 
+    // Centralize revocation of all [this]-capturing callbacks we installed on
+    // the provider / async adapter. Called from stop paths to reduce the
+    // window where in-flight callbacks can observe partially destroyed state.
+    // Safe to call multiple times.
+    void revoke_provider_callbacks();
+
     std::unique_ptr<LoggingWorker> make_logging_worker();
+
+    // Wave 2 helpers: common skeleton for run* methods (E-40..E-44)
+    // See core/docs/engine.md + engine-decomposition skill.
+    // Extracted as private methods first (minimal surface on frozen file).
+    // Later waves will delegate pending (W3), workers (W4).
+    void clear_pending_state();
+    void setup_event_loop_infra();
+    void teardown_event_loop_infra();
+    void drain_final_pending(std::size_t& event_count, bool& halt_requested);
+    void cancel_day_orders();
+    void report_run_summary(std::size_t event_count, std::chrono::high_resolution_clock::time_point start_time);
 
 public:
     engine(std::shared_ptr<data_handler> dh,
