@@ -1,5 +1,6 @@
 #include "portfolio.h"
 #include "../core/event.h"
+#include "position_sizing.h"
 
 #include <cmath>
 #include <iostream>
@@ -186,29 +187,31 @@ bool portfolio::position_open(const std::string& symbol) const
     return it != positions_.end() && std::abs(it->second.qty) > 1e-12;
 }
 
-bool portfolio::can_afford(order_side side, double quantity, double price) const
+bool portfolio::can_afford(order_side side, double quantity, double price,
+                           double commission) const
 {
     if (side == order_side::buy)
-        return cash_ >= quantity * price;
+        return cash_ >= quantity * price + std::max(0.0, commission);
     for (const auto& [_, pos] : positions_)
         if (pos.qty >= quantity) return true;
     return false;
 }
 
 bool portfolio::can_afford(const std::string& symbol, order_side side,
-                           double quantity, double price) const
+                           double quantity, double price, double commission) const
 {
     if (side == order_side::buy)
-        return cash_ >= quantity * price;
+        return cash_ >= quantity * price + std::max(0.0, commission);
 
     auto it = positions_.find(symbol);
     return it != positions_.end() && it->second.qty >= quantity;
 }
 
-double portfolio::compute_quantity(double price, double risk_fraction) const
+double portfolio::compute_quantity(double price, double risk_fraction,
+                                   double entry_fee_rate) const
 {
-    if (price <= 0.0) return 0.0;
-    return cash_ * risk_fraction / price;
+    return truetest::risk::compute_notional_quantity(
+        cash_, risk_fraction, price, entry_fee_rate);
 }
 
 double portfolio::get_equity(double last_price) const

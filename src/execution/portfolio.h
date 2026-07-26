@@ -57,10 +57,17 @@ public:
     bool position_open() const;
     bool position_open(const std::string& symbol) const;
 
-    bool can_afford(order_side side, double quantity, double price) const;
-    bool can_afford(const std::string& symbol, order_side side, double quantity, double price) const;
+    // `commission` is the expected fee for this order (default 0 for
+    // legacy callers). Buys require cash >= qty*price + commission.
+    bool can_afford(order_side side, double quantity, double price,
+                    double commission = 0.0) const;
+    bool can_afford(const std::string& symbol, order_side side, double quantity,
+                    double price, double commission = 0.0) const;
 
-    double compute_quantity(double price, double risk_fraction) const;
+    // Notional sizing: deploy risk_fraction of cash as position notional,
+    // optionally shrinking for entry fee rate (fraction of notional).
+    double compute_quantity(double price, double risk_fraction,
+                            double entry_fee_rate = 0.0) const;
 
     std::size_t get_total_trades() const { return total_trades_; }
     std::size_t get_total_fills() const { return total_fills_; }
