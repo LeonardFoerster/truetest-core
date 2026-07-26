@@ -5,11 +5,12 @@
 #include <cstddef>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 class ControlBlockPool;
 
+// Per-symbol orderbooks indexed by dense SymbolTable id (not string-hash).
+// get_or_create: one intern_id hash, then O(1) vector slot.
 class OrderbookRegistry
 {
 public:
@@ -20,48 +21,63 @@ public:
         cb_pool_ = cb_pool;
         order_blocks_ = min_blocks;
         forbid_runtime_grow_ = forbid_runtime_grow;
-        for (auto& [_, ob] : books_)
-            ob->configure_order_pool(cb_pool_, order_blocks_, forbid_runtime_grow_);
+        for (auto& ob : books_)
+        {
+            if (ob)
+                ob->configure_order_pool(cb_pool_, order_blocks_, forbid_runtime_grow_);
+        }
     }
 
     std::shared_ptr<orderbook> get_or_create(const std::string& symbol)
     {
-        const std::string& key = symbols_.intern(symbol);
-        auto it = books_.find(key);
-        if (it != books_.end())
-            return it->second;
-        auto ob = std::make_shared<orderbook>();
-        if (order_blocks_ > 0)
-            ob->configure_order_pool(cb_pool_, order_blocks_, forbid_runtime_grow_);
-        books_[key] = ob;
-        return ob;
+        const std::uint16_t id = symbols_.intern_id(symbol);
+        ensure_slot(id);
+        if (!books_[id])
+        {
+            auto ob = std::make_shared<orderbook>();
+            if (order_blocks_ > 0)
+                ob->configure_order_pool(cb_pool_, order_blocks_, forbid_runtime_grow_);
+            books_[id] = std::move(ob);
+        }
+        return books_[id];
     }
 
     std::shared_ptr<orderbook> get(const std::string& symbol) const
     {
         const std::uint16_t id = symbols_.id_of(symbol);
-        if (id == SymbolTable::kInvalidId)
+        if (id == SymbolTable::kInvalidId ||
+            static_cast<std::size_t>(id) >= books_.size())
             return nullptr;
-        const std::string& key = symbols_.resolve(id);
-        auto it = books_.find(key);
-        return (it != books_.end()) ? it->second : nullptr;
+        return books_[id];
     }
 
     std::vector<std::string> symbols() const
     {
         std::vector<std::string> result;
-        result.reserve(books_.size());
-        for (const auto& [sym, _] : books_)
-            result.push_back(sym);
+        result.reserve(symbols_.size());
+        for (std::size_t i = 0; i < books_.size(); ++i)
+        {
+            if (books_[i])
+                result.push_back(symbols_.resolve(static_cast<std::uint16_t>(i)));
+        }
         return result;
     }
 
-    std::size_t size() const { return books_.size(); }
+    std::size_t size() const
+    {
+        std::size_t n = 0;
+        for (const auto& ob : books_)
+            if (ob) ++n;
+        return n;
+    }
 
     void clear()
     {
-        for (auto& [_, ob] : books_)
-            ob->clear();
+        for (auto& ob : books_)
+        {
+            if (ob)
+                ob->clear();
+        }
         books_.clear();
         symbols_.clear();
     }
@@ -70,10 +86,16 @@ public:
     const SymbolTable& symbol_table() const { return symbols_; }
 
 private:
+    void ensure_slot(std::uint16_t id)
+    {
+        const std::size_t need = static_cast<std::size_t>(id) + 1;
+        if (books_.size() < need)
+            books_.resize(need);
+    }
+
     SymbolTable symbols_;
+    std::vector<std::shared_ptr<orderbook>> books_;
     ControlBlockPool* cb_pool_ = nullptr;
     std::size_t order_blocks_ = 0;
     bool forbid_runtime_grow_ = false;
-
-    std::unordered_map<std::string, std::shared_ptr<orderbook>> books_;
 };

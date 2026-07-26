@@ -55,7 +55,11 @@ public:
                !high_watermark_.compare_exchange_weak(cur_hw, occ, std::memory_order_relaxed))
         {}
 
-        if (watermark_threshold_ > 0 && occ >= watermark_threshold_ && watermark_cb_)
+        // Watermark callback surface (currently unused in tree).
+        // Install ONLY at startup before producers (see on_watermark contract).
+        // Use acquire to pair with release-store in on_watermark.
+        const auto thresh = watermark_threshold_.load(std::memory_order_acquire);
+        if (thresh > 0 && occ >= thresh && watermark_cb_)
             watermark_cb_(occ);
 
         return true;
@@ -134,8 +138,12 @@ public:
 
     void on_watermark(std::size_t threshold, std::function<void(std::size_t)> cb)
     {
-        watermark_threshold_ = threshold;
+        // Contract: call only during startup (single-threaded, before any
+        // producers can invoke try_push). The cb is plain std::function;
+        // concurrent mutation + invoke is data race / UB.
+        // Threshold is atomic to reduce (but not eliminate) races on the flag.
         watermark_cb_ = std::move(cb);
+        watermark_threshold_.store(threshold, std::memory_order_release);
     }
 
 private:
@@ -149,6 +157,11 @@ private:
     alignas(64) std::atomic<std::size_t> high_watermark_;
     std::atomic<std::size_t> drop_count_;
 
-    std::size_t watermark_threshold_ = 0;
+    // Made atomic for the threshold to reduce (but not eliminate) data-race
+    // surface when on_watermark is used concurrently with try_push.
+    // The callback itself remains a plain std::function; install it only
+    // at startup from a single thread before any producers, or accept
+    // best-effort semantics.
+    std::atomic<std::size_t> watermark_threshold_{0};
     std::function<void(std::size_t)> watermark_cb_;
 };

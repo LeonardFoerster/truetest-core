@@ -48,6 +48,17 @@ class ObjectPool
 
     std::atomic<std::size_t> grow_count_atomic_{0};
 
+    // Heap-allocated lifetime token so that Returner deleters (which may
+    // be invoked after the ObjectPool object itself has been destroyed)
+    // can safely decide whether the pool is still alive without ever
+    // dereferencing a potentially dangling `this`.
+    std::shared_ptr<std::atomic<bool>> lifetime_ = std::make_shared<std::atomic<bool>>(true);
+
+    // Monotonic epoch bumped on rearm_for_reuse (e.g. MC reset). Returners
+    // capture the epoch at acquire time. This lets us reject late drops from
+    // a prior "epoch" (trial) even after a rearm flipped the bool token.
+    std::atomic<uint64_t> epoch_{1};
+
     bool forbid_runtime_grow_ = false;
     const char* pool_name_ = "object_pool";
 
@@ -112,7 +123,15 @@ public:
         grow(false);
     }
 
-    ~ObjectPool() = default;
+    ~ObjectPool()
+    {
+        // Disarm the lifetime token. Any concurrently-running or late
+        // deleters holding a shared_ptr copy of the token will see false
+        // and become no-ops (without touching the now-destroyed pool).
+        if (lifetime_) {
+            lifetime_->store(false, std::memory_order_release);
+        }
+    }
 
     ObjectPool(const ObjectPool&) = delete;
     ObjectPool& operator=(const ObjectPool&) = delete;
@@ -124,11 +143,34 @@ public:
         in_use_atomic_.fetch_add(1, std::memory_order_relaxed);
         T* obj = new (slot) T(std::forward<Args>(args)...);
 
-        auto dtor_and_return = [this](T* p) {
-            p->~T();
-            defer_release(static_cast<void*>(p));
-            in_use_atomic_.fetch_sub(1, std::memory_order_relaxed);
+        // Returner holds a *copy* of the heap lifetime token (shared_ptr) + the
+        // epoch at acquire time. This lets the deleter decide "pool still alive
+        // AND same epoch?" without ever going through a raw pointer that may have
+        // become dangling after the ObjectPool was destroyed or after MC rearm.
+        const uint64_t acq_epoch = epoch_.load(std::memory_order_acquire);
+        struct Returner {
+            std::shared_ptr<std::atomic<bool>> lifetime;
+            ObjectPool* pool;   // only dereferenced when lifetime says alive
+            uint64_t epoch_at_acquire;
+            void operator()(T* p) const noexcept {
+                bool still_alive = lifetime && lifetime->load(std::memory_order_acquire);
+                bool same_epoch = true;
+                if (still_alive && pool) {
+                    // Safe to deref pool only when still_alive (the token is only
+                    // disarmed in ~ObjectPool, so the pointed-to pool is alive).
+                    same_epoch = (pool->epoch_.load(std::memory_order_acquire) == epoch_at_acquire);
+                }
+                if (still_alive && pool && same_epoch) {
+                    p->~T();
+                    pool->defer_release(static_cast<void*>(p));
+                    pool->in_use_atomic_.fetch_sub(1, std::memory_order_relaxed);
+                } else {
+                    // Leak the object + slot. Safe, no UAF on destroyed pool or
+                    // cross-epoch late drop. For non-trivial T this leaks until exit.
+                }
+            }
         };
+        Returner dtor_and_return{lifetime_, this, acq_epoch};
 
         if (cb_pool_)
         {
@@ -197,6 +239,20 @@ public:
 
     void drain_deferred_returns() noexcept
     {
+        bool still_alive = lifetime_ && lifetime_->load(std::memory_order_acquire);
+        if (!still_alive)
+        {
+            // Pool is being / has been destroyed. Drop any pending returns
+            // without touching freed structures. The objects were already
+            // destroyed by their deleters; we are only discarding slot ptrs.
+            void* ptr = nullptr;
+            while (deferred_returns_.try_pop(ptr))
+            {
+                // no-op
+            }
+            return;
+        }
+
         // Drain without intermediate container to avoid any heap traffic
         // on the engine acquire path (hot path + alloc measurement).
         void* ptr = nullptr;
@@ -212,6 +268,22 @@ public:
     void set_control_block_pool(ControlBlockPool* p) noexcept
     {
         cb_pool_ = p;
+    }
+
+    // Re-arm the lifetime token after a reset that reuses the pool (e.g. MC
+    // reset_for_next_trial on the same engine instance). Bumps epoch so that
+    // any still-alive shared_ptrs from the *previous* epoch will see mismatch
+    // in their Returner and safely leak instead of double-dtor or UAF on reused slots.
+    // Caller must ensure no outstanding live references from prior epoch are
+    // racing the rearm (documented contract; enforced best-effort via epoch).
+    void rearm_for_reuse() noexcept
+    {
+        if (lifetime_) {
+            lifetime_->store(true, std::memory_order_release);
+        }
+        // Bump generation. Relaxed is fine; the acquire in Returner + release here
+        // pair with the loads in deleters for the cross-epoch check.
+        epoch_.fetch_add(1, std::memory_order_acq_rel);
     }
 
 #ifdef HAS_DEBUG
