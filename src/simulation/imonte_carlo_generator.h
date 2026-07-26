@@ -41,9 +41,9 @@ public:
 
     /**
      * Generate multiple independent paths from a base seed.
-     * Default implementation simply loops over generate(base_seed + i, cfg).
-     * Concrete generators may override with a more cache-efficient or
-     * parallelized batch implementation.
+     * Default implementation loops over generate(derive_mc_trial_seed(base, i), cfg).
+     * Concrete generators must use the same seed formula so seed_used is
+     * drill-down compatible with MonteCarloController.
      */
     virtual std::vector<SyntheticPath> generate_batch(
         size_t n_paths,

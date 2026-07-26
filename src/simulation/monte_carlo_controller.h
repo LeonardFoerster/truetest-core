@@ -23,9 +23,13 @@ namespace truetest::simulation {
  * Responsibilities:
  *   - Owns or creates the IMonteCarloGenerator for the chosen model
  *   - Runs N independent trials with deterministic per-trial seeding
+ *     (derive_mc_trial_seed — same formula as path generators)
  *   - Ensures clean isolation between trials (fresh data_handler, engine, strategy)
+ *   - Applies strategy_params on construct; fails hard on unknown strategy/generator
  *   - Collects lightweight TrialResult + optional full AnalyticsReport
  *   - Produces McAggregate summary
+ *
+ * parallel_trials and reuse_objects_between_trials are mutually exclusive.
  *
  * This class is the core of Phase 2. It is designed to be usable both
  * programmatically (from tests or future C API) and later from the CLI.

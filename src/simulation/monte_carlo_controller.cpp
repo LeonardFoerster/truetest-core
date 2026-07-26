@@ -15,6 +15,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -37,34 +38,41 @@ void load_synthetic_path_into_handler(const SyntheticPath& path,
     // Note: caller may need to sort if multi-symbol, but single symbol here
 }
 
+void apply_strategy_params(IStrategy& strategy,
+                           const std::vector<std::pair<std::string, double>>& params) {
+    for (const auto& [key, value] : params) {
+        strategy.set_param(key, value);
+    }
+}
+
 } // anonymous namespace
 
 MonteCarloController::MonteCarloController(const McRunConfig& run_config)
     : config_(run_config)
 {
+    if (config_.parallel_trials && config_.reuse_objects_between_trials) {
+        throw std::runtime_error(
+            "MonteCarlo: parallel_trials and reuse_objects_between_trials are "
+            "mutually exclusive (shared strategy/data_handler would race)");
+    }
     ensure_generator();
 }
 
 void MonteCarloController::ensure_generator() {
     if (generator_) return;
 
-    // Phase 2: only GBM supported (easy to extend with factory later)
+    // Phase 2: only GBM supported. Unknown names fail hard (no silent fallback).
     if (config_.generator_name == "gbm" || config_.generator_name.empty()) {
         generator_ = std::make_unique<GBMGenerator>();
     } else {
-        // Fallback to GBM for now
-        generator_ = std::make_unique<GBMGenerator>();
+        throw std::runtime_error(
+            "MonteCarlo: unknown generator '" + config_.generator_name +
+            "' (only 'gbm' is supported)");
     }
 }
 
 uint64_t MonteCarloController::derive_trial_seed(std::size_t trial_index) const {
-    uint64_t base = config_.base_seed;
-    if (base == 0) {
-        // Stable default if user didn't provide one
-        base = 0xA5A5C0DE42ULL;
-    }
-    // Good statistical mixing + reproducibility
-    return base ^ (static_cast<uint64_t>(trial_index) * 0x9e3779b97f4a7c15ULL + 0x123456789ABCDEFULL);
+    return derive_mc_trial_seed(config_.base_seed, trial_index);
 }
 
 TrialResult MonteCarloController::run_single_trial(std::size_t trial_index) {
@@ -76,9 +84,19 @@ TrialResult MonteCarloController::run_single_trial(std::size_t trial_index) {
 TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_index, SyntheticPath path) {
     TrialResult result;
     result.trial_id = trial_index;
+    // Single source of truth: same derive_mc_trial_seed used by generate_batch.
     result.seed_used = derive_trial_seed(trial_index);
 
-    // 1. (path already provided by caller / batch generation)
+    // Guard: path must have been generated with that seed (drill-down contract).
+    const bool path_has_data =
+        !path.bars.empty() || !path.ticks.empty() || !path.mids.empty();
+    if (path_has_data && path.seed_used != result.seed_used) {
+        throw std::runtime_error(
+            "MonteCarlo: path.seed_used mismatch for trial " +
+            std::to_string(trial_index) + " (path=" + std::to_string(path.seed_used) +
+            ", expected=" + std::to_string(result.seed_used) +
+            ") — seed derivation is inconsistent between generator and controller");
+    }
 
     // 2. Data handler (reuse or fresh)
     std::shared_ptr<data_handler> dh;
@@ -107,8 +125,11 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
     {
         strategy = StrategyRegistry::instance().create(config_.strategy_name);
         if (!strategy) {
-            strategy = StrategyRegistry::instance().create("mean-reversion");
+            throw std::runtime_error(
+                "MonteCarlo: unknown strategy '" + config_.strategy_name +
+                "' (no silent fallback)");
         }
+        apply_strategy_params(*strategy, config_.strategy_params);
         if (config_.reuse_objects_between_trials)
             reusable_strategy_ = strategy;
     }
@@ -118,6 +139,7 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
     ecfg.mode = engine_mode::backtest;
     ecfg.initial_balance = config_.initial_balance;
     ecfg.seed = result.seed_used;     // important for any internal RNGs
+    ecfg.show_progress = false;       // MC campaigns: avoid progress spam
 
     // Apply realism settings from McRunConfig (Phase 2 keeps this lightweight)
     if (config_.realistic_fills) {
@@ -128,13 +150,6 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
 
     // 5. Construct engine (still fresh construction in Phase A)
     engine eng(dh, nullptr, strategy, std::move(ecfg));
-
-    // If reuse requested, reset the heavy objects the engine owns so they can be
-    // reused for the next trial (good-enough reuse, not bit-identical in all cases).
-    if (config_.reuse_objects_between_trials)
-    {
-        eng.reset_for_next_trial(result.seed_used);
-    }
 
     // Run the backtest
     if (!path.bars.empty()) {
@@ -161,6 +176,12 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
 }
 
 McAggregate MonteCarloController::run() {
+    if (config_.parallel_trials && config_.reuse_objects_between_trials) {
+        throw std::runtime_error(
+            "MonteCarlo: parallel_trials and reuse_objects_between_trials are "
+            "mutually exclusive (shared strategy/data_handler would race)");
+    }
+
     McAggregate aggregate;
     aggregate.n_trials = config_.n_trials;
     aggregate.trials.reserve(config_.n_trials);
@@ -168,8 +189,7 @@ McAggregate MonteCarloController::run() {
     auto start = std::chrono::steady_clock::now();
 
     // Performance optimization (Phase 5): generate all paths in one batch first.
-    // This is cache-friendly and allows the generator implementation to optimize
-    // (future SIMD / vectorized path generation, prefetch, etc.).
+    // Uses the same derive_mc_trial_seed(base_seed, i) as run_single_trial.
     auto paths = generator_->generate_batch(config_.n_trials, config_.base_seed, config_.generator_config);
 
     if (config_.parallel_trials && config_.n_trials > 1) {
@@ -213,6 +233,12 @@ McAggregate MonteCarloController::run() {
         for (auto& w : workers) {
             if (w.joinable()) w.join();
         }
+
+        // Stable ordering for deterministic aggregates / report drill-down
+        std::sort(aggregate.trials.begin(), aggregate.trials.end(),
+                  [](const TrialResult& a, const TrialResult& b) {
+                      return a.trial_id < b.trial_id;
+                  });
 
     } else {
         for (std::size_t i = 0; i < config_.n_trials; ++i) {

@@ -135,9 +135,8 @@ std::vector<SyntheticPath> GBMGenerator::generate_batch(
     paths.reserve(n_paths);
 
     for (size_t i = 0; i < n_paths; ++i) {
-        // Deterministic per-path seed derivation (good statistical independence + reproducibility)
-        const uint64_t path_seed = base_seed ^ (static_cast<uint64_t>(i) * 0x9e3779b97f4a7c15ULL);
-        paths.push_back(generate(path_seed, cfg));
+        // Canonical per-trial seed (same as MonteCarloController / derive_mc_trial_seed)
+        paths.push_back(generate(derive_mc_trial_seed(base_seed, i), cfg));
     }
     return paths;
 }

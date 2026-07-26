@@ -14,8 +14,8 @@ std::vector<SyntheticPath> IMonteCarloGenerator::generate_batch(
     std::vector<SyntheticPath> paths;
     paths.reserve(n_paths);
     for (size_t i = 0; i < n_paths; ++i) {
-        const uint64_t path_seed = base_seed ^ (static_cast<uint64_t>(i) * 0x9e3779b97f4a7c15ULL);
-        paths.push_back(generate(path_seed, cfg));
+        // Must match MonteCarloController::derive_trial_seed / derive_mc_trial_seed
+        paths.push_back(generate(derive_mc_trial_seed(base_seed, i), cfg));
     }
     return paths;
 }
