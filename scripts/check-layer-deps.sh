@@ -36,7 +36,7 @@ ALLOWED[execution]="core types orderbook"
 ALLOWED[analytics]="core threading risk"
 ALLOWED[market_maker]="core orderbook threading types"
 ALLOWED[risk]="core execution analytics"
-ALLOWED[strategy]="core indicator execution exits threading"
+ALLOWED[strategy]="core types indicator execution exits threading"
 ALLOWED[data]="core types utils debug execution"
 ALLOWED[providers]="core types utils data orderbook execution engine exits risk simulation threading ui"
 ALLOWED[engine]="core types indicator utils debug threading orderbook execution analytics market_maker risk strategy data providers exits ui"
@@ -45,6 +45,7 @@ ALLOWED[web]="ui analytics"   # read-only serializers: dashboard_snapshot + Anal
 
 # Current cross-module contracts beyond the original lower-layer graph:
 #   * analytics exposes a risk snapshot used by RiskManager gatekeeping.
+#   * strategies use dense SymbolTable ids via SymbolStateStore (types layer).
 #   * strategies emit exit intents, and adaptive hybrid owns worker/thread knobs.
 #   * data/questdb serializes execution order tracker state.
 #   * providers bind venue adapters for exits, futures risk, synthetic generation,
