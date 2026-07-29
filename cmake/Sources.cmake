@@ -237,6 +237,7 @@ set(TEST_SOURCES
     tests/test_bitget_auth.cpp
     tests/test_bitget_parser.cpp
     tests/test_bitget_transport_subscribe.cpp
+    tests/test_bitget_futures_register.cpp
 
     # --- CLI integration (separate binary) ---
     # (see truetest_cli_tests in root)
