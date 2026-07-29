@@ -117,6 +117,17 @@ function(tt_wire_optional_backends target)
         target_compile_definitions(${target} PUBLIC HAS_BINANCE)
     endif()
 
+    # Bitget exchange provider (UTA v3 USDT-M futures)
+    if(ENABLE_BITGET)
+        find_package(Boost REQUIRED)
+        find_package(OpenSSL REQUIRED)
+        target_sources(${target} PRIVATE
+            ${_src}/providers/bitget/bitget_futures_register.cpp)
+        target_link_libraries(${target} PUBLIC
+            Boost::headers OpenSSL::SSL OpenSSL::Crypto)
+        target_compile_definitions(${target} PUBLIC HAS_BITGET)
+    endif()
+
     # QuestDB persistence (raw POSIX sockets, zero external deps).
     if(ENABLE_QUESTDB)
         target_sources(${target} PRIVATE
