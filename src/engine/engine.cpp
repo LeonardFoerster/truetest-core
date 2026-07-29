@@ -1453,6 +1453,14 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
                            std::size_t& event_count,
                            bool& halt_requested)
 {
+    // S3: process-wide halt is terminal for ALL submit call sites, including
+    // check_pending_stops / pending drains that bypass route_order.
+    if (halt_flag_.load(std::memory_order_acquire))
+    {
+        halt_requested = true;
+        return false;
+    }
+
     // ========================================================================
     // CANONICAL HOT-PATH ORDERING (Phase 3 deepdive cleanup)
     // This documents the enforced sequence for order + fill processing.
@@ -1625,61 +1633,13 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
     if (router_->poll_fills(adapter.get(), fills))
     {
         DEBUG_STAGE(stage_timer_, fill_processing);
+        const bool mark_sim = (config_.mode == engine_mode::shadow);
         for (auto& f : fills)
         {
-            stamp_fill_attribution(f);
-
-            const uint64_t opener = f.get_opener_order_id();
-            const std::string& strat = f.get_strategy_name();
-
-            const auto new_status = f.is_partial()
-                ? order_status::partially_filled : order_status::filled;
-            order_tracker_.set_status(f.get_order_id(), new_status);
-            if (dashboard_builder_) {
-                dashboard_builder_->cache_fill(f);
-                if (f.is_partial())
-                    dashboard_builder_->update_open_order_status(f.get_order_id(), "partial");
-                else
-                    dashboard_builder_->erase_open_order(f.get_order_id());
-            }
-            auto fill_ptr = acquire_pooled(fill_pool_,f);
-            log_event(f);
-            portfolio_.on_fill(f, opener, strat);
-            dispatch_fill_to_strategy(f);
-            adverse_selection_.on_fill(f);
-            exit_manager_.on_fill(f, opener);
-            risk_manager_.on_fill(f);
-            // Unconditional via audit_sink (replaces questdb guard + #ifdef). Rich fill + status.
-            const char* src =
-                (f.get_source() == fill_source::exchange)  ? "exchange"
-              : (f.get_source() == fill_source::simulated) ? "simulated"
-              :                                              "local";
-            audit_sink_->record_fill(f, opener, strat.c_str(), src);
-            audit_sink_->record_status_transition(f.get_order_id(),
-                order_status::open, new_status);
-            notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
-            publish_event(fill_ptr);
-            analytics_.on_event(fill_ptr);
-
-            if (config_.mode == engine_mode::shadow && shadow_tracker_)
-                shadow_tracker_->on_simulated_fill(f);
-
-            event_count++;
-
-            {
-                auto post_snap = analytics_.risk_view();
-                auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
-                if (post_action == risk_action::halt)
-                {
-                    // Same terminal semantics as pre-trade risk halt: raise
-                    // halt_flag_ so live streaming cannot keep submitting.
-                    if (config_.risk_unwind)
-                        unwind_positions(event_count);
-                    trigger_halt("risk post-fill limit breached - engine halted");
-                    halt_requested = true;
-                    return false;
-                }
-            }
+            if (!handle_engine_fill(f, event_count, halt_requested,
+                                    /*run_post_fill_risk=*/true,
+                                    /*mark_shadow_sim=*/mark_sim))
+                return false;
         }
     }
 
@@ -1768,6 +1728,12 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
 bool engine::modify_order(const std::string& symbol, uint64_t order_id,
                           double new_price, double new_qty)
 {
+    // S3: no amend of resting live orders after process-wide terminal halt
+    // or operator pause (new risk / size changes must not sneak through).
+    if (halt_flag_.load(std::memory_order_acquire) ||
+        pause_all_.load(std::memory_order_acquire))
+        return false;
+
     auto adapter = router_->resolve_adapter(symbol);
     bool modified = adapter->modify_order(order_id, new_price, new_qty);
 
@@ -1838,41 +1804,14 @@ void engine::unwind_positions(std::size_t& event_count)
         std::vector<fill_event> fills;
         if (router_->poll_fills(adapter.get(), fills))
         {
+            bool unwind_halt = false;
             for (auto& f : fills)
             {
-                stamp_fill_attribution(f);
-
-                const uint64_t opener = f.get_opener_order_id();
-                const std::string& strat = f.get_strategy_name();
-
-                const auto new_status = f.is_partial()
-                    ? order_status::partially_filled : order_status::filled;
-                order_tracker_.set_status(f.get_order_id(), new_status);
-            if (dashboard_builder_) dashboard_builder_->cache_fill(f);
-                if (f.is_partial())
-            if (dashboard_builder_) dashboard_builder_->update_open_order_status(f.get_order_id(), "partial");
-                else
-            if (dashboard_builder_) dashboard_builder_->erase_open_order(f.get_order_id());
-                auto fill_ptr = acquire_pooled(fill_pool_,f);
-                log_event(f);
-                portfolio_.on_fill(f, opener, strat);
-            dispatch_fill_to_strategy(f);
-                adverse_selection_.on_fill(f);
-                exit_manager_.on_fill(f, opener);
-                risk_manager_.on_fill(f);
-                // Unconditional via audit_sink (replaces questdb guard + #ifdef). Rich fill + status (unwind).
-                const char* src =
-                    (f.get_source() == fill_source::exchange)  ? "exchange"
-                  : (f.get_source() == fill_source::simulated) ? "simulated"
-                  :                                              "local";
-                audit_sink_->record_fill(f, opener, strat.c_str(), src);
-                audit_sink_->record_status_transition(f.get_order_id(),
-                    order_status::open, new_status, "risk_unwind");
-                notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
-                publish_event(fill_ptr);
-                analytics_.on_event(fill_ptr);
-
-                event_count++;
+                // Already in halt/unwind — skip post-fill re-halt.
+                (void)handle_engine_fill(f, event_count, unwind_halt,
+                                         /*run_post_fill_risk=*/false,
+                                         /*mark_shadow_sim=*/false,
+                                         "risk_unwind");
             }
         }
     }
@@ -1948,42 +1887,74 @@ void engine::apply_l2_update(const std::string& symbol,
     const order_side os = (ts_side == tick_side::bid) ? order_side::buy : order_side::sell;
     if (router_) router_->on_l2_update(symbol, os, price, static_cast<double>(new_qty));
 
+    const auto l2_ts = std::chrono::system_clock::now();
+    const int64_t l2_recv_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
     auto ev = acquire_pooled(l2_update_pool_,
-        std::chrono::system_clock::now(), symbol, ts_side, price, new_qty);
+        l2_ts, symbol, ts_side, price, new_qty);
+    ev->set_recv_ns(l2_recv_ns);
     log_event(*ev);
     publish_event(ev);
 
-    /* LIVE_SAFETY_CCB_APPROVED: Minimal non-invasive dispatch of l2_update
-       to IStrategy (primary + additional). This enables L2-driven HFT
-       strategies such as AdaptiveHybridStrategy without touching
-       halt_flag_, risk paths, live-order gates, TT_TARGET, reconciler,
-       kill-switch, or any other Phase-1 frozen surface.
-       Dispatch occurs after apply + publish (same thread as on_tick/on_market).
-       Two-person CCB + clean 4-hour engine_shadow run required before merge.
-       See CLAUDE.md and docs/production-readiness-gaps.md. */
-    if (!pause_all_.load(std::memory_order_acquire) &&
-        !halt_flag_.load(std::memory_order_acquire))
+    /* LIVE_SAFETY_CCB_APPROVED: L2 strategy dispatch after apply + publish
+       (same thread as on_tick/on_market). Halt-gated per strategy; exit
+       evaluation + exit intents mirror the tick path. */
+    if (pause_all_.load(std::memory_order_acquire) ||
+        halt_flag_.load(std::memory_order_acquire))
+        return;
+
+    size_t l2_event_count = 0;
+    bool l2_halt = false;
+
+    // Drain pending orders eligible at this L2 timestamp. Default
+    // execution_bar_delay parks strategy emissions one ns ahead of
+    // sim_time; without this drain, pure L2 streams never submit.
+    if (router_) router_->advance_all(l2_ts);
+    while (!pending_orders_.empty() &&
+           pending_orders_.top().order->get_earliest_eligible_ts() <= l2_ts &&
+           !l2_halt &&
+           !halt_flag_.load(std::memory_order_acquire))
     {
-        size_t l2_event_count = 0;
-        if (strategy_) {
-            if (auto o = strategy_->on_l2_update(*ev)) {
-                o->set_recv_ns(0); // TODO: wire real ingress ns in future patch
-                o->set_strategy_name(primary_strategy_name_);
-                bool dummy_halt = false;
-                route_order(*o, ev->get_timestamp(), l2_event_count, dummy_halt);
-                if (!dummy_halt)
-                    register_strategy_exit_intent(*strategy_, primary_strategy_name_, o->get_order_id());
-            }
+        auto entry = pending_orders_.top();
+        pending_orders_.pop();
+        if (entry.order->get_tif() == time_in_force::day)
+            day_order_ids_.push_back({entry.order->get_symbol(), entry.order->get_order_id()});
+        if (!process_order(entry.order, l2_event_count, l2_halt)) break;
+    }
+    if (l2_halt || halt_flag_.load(std::memory_order_acquire))
+        return;
+
+    // Mid/last price for ExitManager on pure L2 streams (no tick/bar).
+    const double exit_px = (last_mid_price_.load(std::memory_order_relaxed) > 0.0)
+        ? last_mid_price_.load(std::memory_order_relaxed)
+        : price;
+    if (evaluate_exits(symbol, exit_px, l2_ts, l2_event_count, l2_recv_ns))
+        return;
+
+    if (strategy_) {
+        if (auto o = strategy_->on_l2_update(*ev)) {
+            o->set_recv_ns(l2_recv_ns);
+            o->set_strategy_name(primary_strategy_name_);
+            bool route_halt = false;
+            route_order(*o, l2_ts, l2_event_count, route_halt);
+            finalize_strategy_route(*strategy_, primary_strategy_name_, *o, route_halt);
+            if (route_halt || halt_flag_.load(std::memory_order_acquire))
+                return;
         }
-        for (std::size_t i = 0; i < additional_strategies_.size(); ++i) {
-            auto& s = additional_strategies_[i];
-            if (s) {
-                if (auto o = s->on_l2_update(*ev)) {
-                    o->set_strategy_name(additional_strategy_names_[i]);
-                    bool dummy_halt = false;
-                    route_order(*o, ev->get_timestamp(), l2_event_count, dummy_halt);
-                }
-            }
+    }
+    for (std::size_t i = 0; i < additional_strategies_.size(); ++i) {
+        if (halt_flag_.load(std::memory_order_acquire))
+            return;
+        auto& s = additional_strategies_[i];
+        if (!s) continue;
+        if (auto o = s->on_l2_update(*ev)) {
+            o->set_recv_ns(l2_recv_ns);
+            o->set_strategy_name(additional_strategy_names_[i]);
+            bool route_halt = false;
+            route_order(*o, l2_ts, l2_event_count, route_halt);
+            finalize_strategy_route(*s, additional_strategy_names_[i], *o, route_halt);
+            if (route_halt || halt_flag_.load(std::memory_order_acquire))
+                return;
         }
     }
 }
@@ -2024,11 +1995,19 @@ bool engine::route_order(order_event& order,
                          const std::chrono::system_clock::time_point& sim_time,
                          std::size_t& event_count, bool& halt_requested)
 {
+    // Terminal halt gate: refuse new submits even if a call site forgot to
+    // re-check halt_flag_ (e.g. L2 multi-strategy loop after primary halt).
+    if (halt_flag_.load(std::memory_order_acquire))
+    {
+        halt_requested = true;
+        return false;
+    }
+
     // Operator-pause gate: intercept here so every strategy call site is
     // covered by one branch. Strategies still run (so analytics + lots
     // stay live for fills already in flight), but no new orders reach
-    // the venue. The intent's order_id stays 0, which makes
-    // register_strategy_exit_intent a no-op for paused emissions.
+    // the venue. The intent's order_id stays 0; finalize_strategy_route
+    // drains exit intents and resyncs optimistic position gates.
     if (pause_all_.load(std::memory_order_acquire))
     {
         (void)sim_time; (void)event_count; (void)halt_requested;
@@ -2096,7 +2075,9 @@ void engine::check_pending_stops(double high, double low,
                                  std::size_t& event_count, bool& halt_requested)
 {
     auto it = pending_stops_.begin();
-    while (it != pending_stops_.end() && !halt_requested)
+    while (it != pending_stops_.end() &&
+           !halt_requested &&
+           !halt_flag_.load(std::memory_order_acquire))
     {
         auto& stop = *it;
         bool triggered = false;
@@ -2115,10 +2096,14 @@ void engine::check_pending_stops(double high, double low,
                     stop->get_side(), stop->get_quantity(), stop->get_stop_price(),
                     time_in_force::ioc);
                 market_order->set_order_id(stop->get_order_id());
+                market_order->set_strategy_name(stop->get_strategy_name());
+                market_order->set_opener_order_id(stop->get_opener_order_id());
+                market_order->set_recv_ns(stop->get_recv_ns());
                 market_order->set_earliest_eligible_ts(sim_time);
                 if (market_order->get_tif() == time_in_force::day)
                     day_order_ids_.push_back({market_order->get_symbol(), market_order->get_order_id()});
-                process_order(market_order, event_count, halt_requested);
+                if (!process_order(market_order, event_count, halt_requested))
+                    return;
             }
             else
             {
@@ -2127,10 +2112,14 @@ void engine::check_pending_stops(double high, double low,
                     stop->get_side(), stop->get_quantity(), stop->get_price(),
                     stop->get_tif());
                 limit_order->set_order_id(stop->get_order_id());
+                limit_order->set_strategy_name(stop->get_strategy_name());
+                limit_order->set_opener_order_id(stop->get_opener_order_id());
+                limit_order->set_recv_ns(stop->get_recv_ns());
                 limit_order->set_earliest_eligible_ts(sim_time);
                 if (limit_order->get_tif() == time_in_force::day)
                     day_order_ids_.push_back({limit_order->get_symbol(), limit_order->get_order_id()});
-                process_order(limit_order, event_count, halt_requested);
+                if (!process_order(limit_order, event_count, halt_requested))
+                    return;
             }
             it = pending_stops_.erase(it);
         }
@@ -2209,6 +2198,102 @@ void engine::stamp_fill_attribution(fill_event& f)
         if (!sn.empty())
             f.set_strategy_name(sn);
     }
+}
+
+bool engine::handle_engine_fill(fill_event& f,
+                                std::size_t& event_count,
+                                bool& halt_requested,
+                                bool run_post_fill_risk,
+                                bool mark_shadow_sim,
+                                const char* status_reason)
+{
+    stamp_fill_attribution(f);
+
+    const uint64_t opener = f.get_opener_order_id();
+    const std::string& strat = f.get_strategy_name();
+
+    const auto new_status = f.is_partial()
+        ? order_status::partially_filled : order_status::filled;
+    order_tracker_.set_status(f.get_order_id(), new_status);
+    if (dashboard_builder_) {
+        dashboard_builder_->cache_fill(f);
+        if (f.is_partial())
+            dashboard_builder_->update_open_order_status(f.get_order_id(), "partial");
+        else
+            dashboard_builder_->erase_open_order(f.get_order_id());
+    }
+    auto fill_ptr = acquire_pooled(fill_pool_, f);
+    log_event(f);
+    portfolio_.on_fill(f, opener, strat);
+    dispatch_fill_to_strategy(f);
+    adverse_selection_.on_fill(f);
+    exit_manager_.on_fill(f, opener);
+    risk_manager_.on_fill(f);
+    const char* src =
+        (f.get_source() == fill_source::exchange)  ? "exchange"
+      : (f.get_source() == fill_source::simulated) ? "simulated"
+      :                                              "local";
+    audit_sink_->record_fill(f, opener, strat.c_str(), src);
+    audit_sink_->record_status_transition(f.get_order_id(),
+        order_status::open, new_status, status_reason);
+    notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+    publish_event(fill_ptr);
+    analytics_.on_event(fill_ptr);
+
+    if (mark_shadow_sim && config_.mode == engine_mode::shadow && shadow_tracker_)
+        shadow_tracker_->on_simulated_fill(f);
+
+    event_count++;
+
+    if (run_post_fill_risk)
+    {
+        auto post_snap = analytics_.risk_view();
+        auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
+        if (post_action == risk_action::halt)
+        {
+            if (config_.risk_unwind)
+                unwind_positions(event_count);
+            trigger_halt("risk post-fill limit breached - engine halted");
+            halt_requested = true;
+            return false;
+        }
+    }
+    return true;
+}
+
+void engine::finalize_strategy_route(IStrategy& strategy,
+                                     const std::string& strategy_name,
+                                     const order_event& order,
+                                     bool halted)
+{
+    if (halted)
+    {
+        // Drop pending exit intents; do not arm brackets after terminal halt.
+        (void)strategy.take_pending_exit_intents();
+        return;
+    }
+
+    const uint64_t oid = order.get_order_id();
+    if (oid == 0)
+    {
+        // Paused / never assigned — drain intents and unlock optimistic gates.
+        (void)strategy.take_pending_exit_intents();
+        notify_position_change_all(order.get_symbol(),
+                                   portfolio_.position_open(order.get_symbol()));
+        return;
+    }
+
+    const auto st = order_tracker_.get_order_status(oid);
+    if (st == order_status::rejected)
+    {
+        // Venue/risk reject after id assignment — do not arm exits; resync gates.
+        (void)strategy.take_pending_exit_intents();
+        notify_position_change_all(order.get_symbol(),
+                                   portfolio_.position_open(order.get_symbol()));
+        return;
+    }
+
+    register_strategy_exit_intent(strategy, strategy_name, oid);
 }
 
 void engine::dispatch_fill_to_strategy(const fill_event& f)
@@ -2356,7 +2441,13 @@ void engine::register_strategy_exit_intent(IStrategy& strategy,
                                            const std::string& strategy_name,
                                            std::uint64_t order_id)
 {
-    if (order_id == 0) return;  // opener not yet assigned — cannot key
+    if (order_id == 0)
+    {
+        // Opener not assigned (pause/drop) — drain so intents cannot leak
+        // and re-arm on a later unrelated entry.
+        (void)strategy.take_pending_exit_intents();
+        return;
+    }
     auto intents = strategy.take_pending_exit_intents();
     for (auto& intent : intents)
     {
@@ -2413,6 +2504,7 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
     if (additional_strategies_.empty()) return;
     for (std::size_t i = 0; i < additional_strategies_.size(); ++i)
     {
+        if (halt_flag_.load(std::memory_order_acquire)) return;
         auto& s = additional_strategies_[i];
         if (!s) continue;
 
@@ -2427,9 +2519,8 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
             o->set_strategy_name(additional_strategy_names_[i]);
             bool halt = false;
             route_order(*o, ts, event_count, halt);
-            if (!halt)
-                register_strategy_exit_intent(*s, additional_strategy_names_[i], o->get_order_id());
-            if (halt) return;
+            finalize_strategy_route(*s, additional_strategy_names_[i], *o, halt);
+            if (halt || halt_flag_.load(std::memory_order_acquire)) return;
         }
     }
 }
@@ -2441,6 +2532,7 @@ void engine::dispatch_extras_on_tick(const tick_event& te,
     if (additional_strategies_.empty()) return;
     for (std::size_t i = 0; i < additional_strategies_.size(); ++i)
     {
+        if (halt_flag_.load(std::memory_order_acquire)) return;
         auto& s = additional_strategies_[i];
         if (!s) continue;
 
@@ -2454,9 +2546,8 @@ void engine::dispatch_extras_on_tick(const tick_event& te,
             o->set_strategy_name(additional_strategy_names_[i]);
             bool halt = false;
             route_order(*o, ts, event_count, halt);
-            if (!halt)
-                register_strategy_exit_intent(*s, additional_strategy_names_[i], o->get_order_id());
-            if (halt) return;
+            finalize_strategy_route(*s, additional_strategy_names_[i], *o, halt);
+            if (halt || halt_flag_.load(std::memory_order_acquire)) return;
         }
     }
 }
@@ -2584,32 +2675,24 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                     }
                     continue;
                 }
-                stamp_fill_attribution(f);
-
-                const uint64_t opener = f.get_opener_order_id();
-                const std::string& strat = f.get_strategy_name();
-
-                if (dashboard_builder_) {
-                    dashboard_builder_->cache_fill(f);
-                    dashboard_builder_->erase_open_order(f.get_order_id());
-                }
-                auto fill_ptr = acquire_pooled(fill_pool_,f);
-                portfolio_.on_fill(f, opener, strat);
-            dispatch_fill_to_strategy(f);
-                adverse_selection_.on_fill(f);
-                exit_manager_.on_fill(f, opener);
-                notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
-                publish_event(fill_ptr);
-                if (!config_.is_threaded())
-                    analytics_.on_event(fill_ptr);
-                event_count++;
+                // Live/async fills: full canonical pipeline (risk + tracker + audit).
+                bool fill_halt = false;
+                if (!handle_engine_fill(f, event_count, fill_halt))
+                    return;
             }
         }
     }
 
+    // Canonical order: pending stops → exits → strategy → route (matches tick path).
+    {
+        bool stop_halt = false;
+        check_pending_stops(mkt.get_high(), mkt.get_low(), timestamp,
+                            event_count, stop_halt);
+        if (stop_halt || halt_flag_.load(std::memory_order_acquire))
+            return;
+    }
+
     auto mkt_ptr = acquire_pooled(market_pool_,mkt);
-    auto order_opt = strategy_->on_market(mkt);
-    if (order_opt) order_opt->set_recv_ns(mkt.get_recv_ns());
     log_event(mkt);
     publish_event(mkt_ptr);
     if (!config_.is_threaded())
@@ -2621,14 +2704,18 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                        timestamp, event_count, mkt.get_recv_ns()))
         return;
 
+    if (!strategy_ || halt_flag_.load(std::memory_order_acquire))
+        return;
+
+    auto order_opt = strategy_->on_market(mkt);
     if (order_opt && !halt_flag_.load(std::memory_order_acquire))
     {
+        order_opt->set_recv_ns(mkt.get_recv_ns());
         if (!primary_strategy_name_.empty())
             order_opt->set_strategy_name(primary_strategy_name_);
         bool route_halt = false;
         route_order(*order_opt, timestamp, event_count, route_halt);
-        if (!route_halt && !halt_flag_.load(std::memory_order_acquire) && strategy_)
-            register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
+        finalize_strategy_route(*strategy_, primary_strategy_name_, *order_opt, route_halt);
     }
     if (!halt_flag_.load(std::memory_order_acquire))
         dispatch_extras_on_market(mkt, timestamp, event_count);
@@ -2703,25 +2790,10 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                     }
                     continue;
                 }
-                stamp_fill_attribution(f);
-
-                const uint64_t opener = f.get_opener_order_id();
-                const std::string& strat = f.get_strategy_name();
-
-                if (dashboard_builder_) {
-                    dashboard_builder_->cache_fill(f);
-                    dashboard_builder_->erase_open_order(f.get_order_id());
-                }
-                auto fill_ptr = acquire_pooled(fill_pool_,f);
-                portfolio_.on_fill(f, opener, strat);
-            dispatch_fill_to_strategy(f);
-                adverse_selection_.on_fill(f);
-                exit_manager_.on_fill(f, opener);
-                notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
-                publish_event(fill_ptr);
-                if (!config_.is_threaded())
-                    analytics_.on_event(fill_ptr);
-                event_count++;
+                // Live/async fills: full canonical pipeline (risk + tracker + audit).
+                bool fill_halt = false;
+                if (!handle_engine_fill(f, event_count, fill_halt))
+                    return;
             }
         }
     }
@@ -2764,6 +2836,9 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
                        event_count, te.get_recv_ns()))
         return;
 
+    if (!strategy_ || halt_flag_.load(std::memory_order_acquire))
+        return;
+
     std::optional<order_event> order_opt;
     {
         DEBUG_STAGE(stage_timer_, strategy);
@@ -2775,8 +2850,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         if (!primary_strategy_name_.empty())
             order_opt->set_strategy_name(primary_strategy_name_);
         route_order(*order_opt, rec.timestamp, event_count, halt);
-        if (!halt && !halt_flag_.load(std::memory_order_acquire) && strategy_)
-            register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
+        finalize_strategy_route(*strategy_, primary_strategy_name_, *order_opt, halt);
     }
     if (!halt_flag_.load(std::memory_order_acquire))
         dispatch_extras_on_tick(te, rec.timestamp, event_count);
@@ -3351,7 +3425,9 @@ void engine::run()
         {
             DEBUG_STAGE(stage_timer_, pending_drain);
             while (!pending_orders_.empty() &&
-                   pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time)
+                   pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time &&
+                   !halt_requested &&
+                   !halt_flag_.load(std::memory_order_acquire))
             {
                 auto entry = pending_orders_.top();
                 pending_orders_.pop();
@@ -3360,7 +3436,7 @@ void engine::run()
                 if (!process_order(entry.order, event_count, halt_requested)) break;
             }
         }
-        if (halt_requested) break;
+        if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
         last_mid_price_.store(mkt.get_close(), std::memory_order_release);
 
@@ -3368,6 +3444,46 @@ void engine::run()
             DEBUG_STAGE(stage_timer_, stop_check);
             check_pending_stops(mkt.get_high(), mkt.get_low(), sim_time, event_count, halt_requested);
         }
+        if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
+
+        // Drain async venue fills that arrived after a prior submit's
+        // process_order poll (live/async). Same canonical handle_engine_fill
+        // path as process_single_bar/tick.
+        if (config_.provider && config_.provider->has_execution())
+        {
+            config_.provider->on_mid_price(symbol,
+                last_mid_price_.load(std::memory_order_relaxed));
+            auto provider_adapter = config_.provider->get_execution_adapter();
+            drain_venue_bracket_meta();
+            drain_async_submit_results(provider_adapter.get());
+            std::vector<fill_event> provider_fills;
+            if (provider_adapter && provider_adapter->poll_fills(provider_fills))
+            {
+                for (auto& f : provider_fills)
+                {
+                    if (config_.mode == engine_mode::shadow)
+                    {
+                        if (shadow_tracker_)
+                            shadow_tracker_->on_exchange_fill(f);
+                        if (exchange_portfolio_.has_value())
+                        {
+                            stamp_fill_attribution(f);
+                            exchange_portfolio_->on_fill(f, f.get_opener_order_id(),
+                                                       f.get_strategy_name());
+                        }
+                        if (exchange_analytics_.has_value())
+                        {
+                            auto fill_ptr = acquire_pooled(fill_pool_, f);
+                            exchange_analytics_->on_event(fill_ptr);
+                        }
+                        continue;
+                    }
+                    if (!handle_engine_fill(f, event_count, halt_requested))
+                        break;
+                }
+            }
+        }
+        if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
         {
             DEBUG_STAGE(stage_timer_, mm_replenish);
@@ -3397,11 +3513,6 @@ void engine::run()
         }
 
         auto mkt_ptr = acquire_pooled(market_pool_,mkt);
-        std::optional<order_event> order_opt;
-        {
-            DEBUG_STAGE(stage_timer_, strategy);
-            order_opt = strategy_->on_market(mkt);
-        }
         log_event(mkt);
         {
             DEBUG_STAGE(stage_timer_, ring_publish);
@@ -3411,10 +3522,20 @@ void engine::run()
             analytics_.on_event(mkt_ptr);
         event_count++;
 
+        // Canonical: exits before strategy decision (matches tick path).
         if (evaluate_exits(symbol,
                            mkt.get_low(), mkt.get_high(), mkt.get_close(),
                            sim_time, event_count, mkt.get_recv_ns()))
             break;
+
+        if (!strategy_ || halt_flag_.load(std::memory_order_acquire))
+            break;
+
+        std::optional<order_event> order_opt;
+        {
+            DEBUG_STAGE(stage_timer_, strategy);
+            order_opt = strategy_->on_market(mkt);
+        }
 
         if (order_opt)
         {
@@ -3422,10 +3543,11 @@ void engine::run()
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
             route_order(*order_opt, sim_time, event_count, halt_requested);
-            if (!halt_requested && strategy_)
-                register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
+            finalize_strategy_route(*strategy_, primary_strategy_name_, *order_opt,
+                                    halt_requested);
         }
-        dispatch_extras_on_market(mkt, sim_time, event_count);
+        if (!halt_flag_.load(std::memory_order_acquire))
+            dispatch_extras_on_market(mkt, sim_time, event_count);
 
         {
             auto now_report = std::chrono::steady_clock::now();
@@ -3517,26 +3639,31 @@ void engine::run_tick_data()
             std::chrono::steady_clock::now().time_since_epoch()).count();
         auto bar_ptr = acquire_pooled(market_pool_,bar);
         bar_ptr->set_recv_ns(bar_recv_ns);
-        auto order_opt = strategy_->on_market(bar);
         publish_event(bar_ptr);
         if (!config_.is_threaded())
             analytics_.on_event(bar_ptr);
 
+        // Canonical: exits before strategy decision (matches tick path).
         if (evaluate_exits(bar.get_symbol(),
                            bar.get_low(), bar.get_high(), bar.get_close(),
                            bar.get_timestamp(), event_count, bar_recv_ns))
             return;
 
+        if (!strategy_ || halt_flag_.load(std::memory_order_acquire))
+            return;
+
+        auto order_opt = strategy_->on_market(bar);
         if (order_opt)
         {
             order_opt->set_recv_ns(bar_recv_ns);
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
             route_order(*order_opt, bar.get_timestamp(), event_count, halt_requested);
-            if (!halt_requested && strategy_)
-                register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
+            finalize_strategy_route(*strategy_, primary_strategy_name_, *order_opt,
+                                    halt_requested);
         }
-        dispatch_extras_on_market(bar, bar.get_timestamp(), event_count);
+        if (!halt_flag_.load(std::memory_order_acquire))
+            dispatch_extras_on_market(bar, bar.get_timestamp(), event_count);
     });
 
     for (std::size_t i = 0; i < n && !halt_requested
@@ -3557,7 +3684,9 @@ void engine::run_tick_data()
         {
             DEBUG_STAGE(stage_timer_, pending_drain);
             while (!pending_orders_.empty() &&
-                   pending_orders_.top().order->get_earliest_eligible_ts() <= tick.timestamp)
+                   pending_orders_.top().order->get_earliest_eligible_ts() <= tick.timestamp &&
+                   !halt_requested &&
+                   !halt_flag_.load(std::memory_order_acquire))
             {
                 auto entry = pending_orders_.top();
                 pending_orders_.pop();
@@ -3566,13 +3695,13 @@ void engine::run_tick_data()
                 if (!process_order(entry.order, event_count, halt_requested)) break;
             }
         }
-        if (halt_requested) break;
+        if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
         {
             DEBUG_STAGE(stage_timer_, stop_check);
             check_pending_stops(tick.price, tick.price, tick.timestamp, event_count, halt_requested);
         }
-        if (halt_requested) break;
+        if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
         tick_side ts = tick_side::unknown;
         if (tick.side == data_tick_side::bid) ts = tick_side::bid;
@@ -3607,10 +3736,12 @@ void engine::run_tick_data()
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
             route_order(*order_opt, tick.timestamp, event_count, halt_requested);
-            if (!halt_requested && strategy_)
-                register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
+            if (strategy_)
+                finalize_strategy_route(*strategy_, primary_strategy_name_, *order_opt,
+                                        halt_requested);
         }
-        dispatch_extras_on_tick(te, tick.timestamp, event_count);
+        if (!halt_flag_.load(std::memory_order_acquire))
+            dispatch_extras_on_tick(te, tick.timestamp, event_count);
         if (halt_requested) break;
 
         bar_agg.on_tick(tick.symbol, tick.price, tick.quantity, tick.timestamp);
@@ -3696,7 +3827,9 @@ void engine::run_replay(const std::string& log_path,
             last_mid_price_.store(mkt.get_open(), std::memory_order_release);
 
             while (!pending_orders_.empty() &&
-                   pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time)
+                   pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time &&
+                   !halt_requested &&
+                   !halt_flag_.load(std::memory_order_acquire))
             {
                 auto entry = pending_orders_.top();
                 pending_orders_.pop();
@@ -3704,38 +3837,43 @@ void engine::run_replay(const std::string& log_path,
                     day_order_ids_.push_back({entry.order->get_symbol(), entry.order->get_order_id()});
                 if (!process_order(entry.order, event_count, halt_requested)) break;
             }
-            if (halt_requested) break;
+            if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
             last_mid_price_.store(mkt.get_close(), std::memory_order_release);
 
             check_pending_stops(mkt.get_high(), mkt.get_low(), sim_time,
                                 event_count, halt_requested);
-            if (halt_requested) break;
+            if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
             auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
             if (!l2_seeded_symbols_.count(mkt.get_symbol()))
                 market_maker_.replenish(ob, last_mid_price_.load(std::memory_order_relaxed));
 
-            auto order_opt = strategy_->on_market(mkt);
             publish_event(ev);
             if (!config_.is_threaded())
                 analytics_.on_event(ev);
 
+            // Canonical: exits before strategy decision (matches tick path).
             if (evaluate_exits(mkt.get_symbol(),
                                mkt.get_low(), mkt.get_high(), mkt.get_close(),
                                sim_time, event_count, mkt.get_recv_ns()))
                 break;
 
+            if (!strategy_ || halt_flag_.load(std::memory_order_acquire))
+                break;
+
+            auto order_opt = strategy_->on_market(mkt);
             if (order_opt)
             {
                 if (!primary_strategy_name_.empty())
                     order_opt->set_strategy_name(primary_strategy_name_);
                 order_opt->set_recv_ns(mkt.get_recv_ns());
                 route_order(*order_opt, sim_time, event_count, halt_requested);
-                if (!halt_requested && strategy_)
-                    register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
+                finalize_strategy_route(*strategy_, primary_strategy_name_, *order_opt,
+                                        halt_requested);
             }
-            dispatch_extras_on_market(mkt, sim_time, event_count);
+            if (!halt_flag_.load(std::memory_order_acquire))
+                dispatch_extras_on_market(mkt, sim_time, event_count);
             break;
         }
         case event_type::tick: {
@@ -3745,7 +3883,9 @@ void engine::run_replay(const std::string& log_path,
             last_mid_price_.store(te.get_price(), std::memory_order_release);
 
             while (!pending_orders_.empty() &&
-                   pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time)
+                   pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time &&
+                   !halt_requested &&
+                   !halt_flag_.load(std::memory_order_acquire))
             {
                 auto entry = pending_orders_.top();
                 pending_orders_.pop();
@@ -3753,7 +3893,7 @@ void engine::run_replay(const std::string& log_path,
                     day_order_ids_.push_back({entry.order->get_symbol(), entry.order->get_order_id()});
                 if (!process_order(entry.order, event_count, halt_requested)) break;
             }
-            if (halt_requested) break;
+            if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
             check_pending_stops(te.get_price(), te.get_price(), sim_time,
                                 event_count, halt_requested);
@@ -3767,6 +3907,9 @@ void engine::run_replay(const std::string& log_path,
                                event_count, te.get_recv_ns()))
                 break;
 
+            if (!strategy_ || halt_flag_.load(std::memory_order_acquire))
+                break;
+
             auto order_opt = strategy_->on_tick(te);
             if (order_opt)
             {
@@ -3774,10 +3917,11 @@ void engine::run_replay(const std::string& log_path,
                     order_opt->set_strategy_name(primary_strategy_name_);
                 order_opt->set_recv_ns(te.get_recv_ns());
                 route_order(*order_opt, sim_time, event_count, halt_requested);
-                if (!halt_requested && strategy_)
-                    register_strategy_exit_intent(*strategy_, primary_strategy_name_, order_opt->get_order_id());
+                finalize_strategy_route(*strategy_, primary_strategy_name_, *order_opt,
+                                        halt_requested);
             }
-            dispatch_extras_on_tick(te, sim_time, event_count);
+            if (!halt_flag_.load(std::memory_order_acquire))
+                dispatch_extras_on_tick(te, sim_time, event_count);
             break;
         }
         default:

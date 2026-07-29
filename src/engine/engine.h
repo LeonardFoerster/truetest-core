@@ -227,6 +227,28 @@ private:
     // consolidation.
     void stamp_fill_attribution(fill_event& f);
 
+    // Canonical engine-book fill pipeline (tracker, portfolio, strategy,
+    // exits, risk, audit, analytics, publish). Used by process_order,
+    // provider async drain, and unwind so no path can skip post-fill risk.
+    // Returns false if post-fill risk triggered a terminal halt.
+    // run_post_fill_risk: false for risk_unwind fills (already halting).
+    // mark_shadow_sim: true for paper/sim fills in shadow dual-track mode.
+    // status_reason: optional audit reason (e.g. "risk_unwind").
+    bool handle_engine_fill(fill_event& f,
+                            std::size_t& event_count,
+                            bool& halt_requested,
+                            bool run_post_fill_risk = true,
+                            bool mark_shadow_sim = false,
+                            const char* status_reason = nullptr);
+
+    // After strategy on_* + route_order: arm exit intents only when the
+    // order was accepted; drain intents + resync position gates on
+    // pause/reject so optimistic strategy locks cannot stick forever.
+    void finalize_strategy_route(IStrategy& strategy,
+                                 const std::string& strategy_name,
+                                 const order_event& order,
+                                 bool halted);
+
     // Returns true if an exit fire caused the engine to halt.
     bool evaluate_exits(const std::string& symbol, double px,
                         std::chrono::system_clock::time_point ts,
