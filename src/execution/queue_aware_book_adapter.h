@@ -59,6 +59,7 @@ public:
         po.submit_ts = o.get_earliest_eligible_ts();
         po.strategy_name = o.get_strategy_name();
         po.opener_order_id = o.get_opener_order_id();
+        po.recv_ns = o.get_recv_ns();
         orders_[po.order_id] = std::move(po);
     }
 
@@ -190,6 +191,13 @@ public:
                              po.side, fill_qty, trade_price, commission);
                 if (!po.strategy_name.empty()) f.set_strategy_name(po.strategy_name);
                 if (po.opener_order_id != 0) f.set_opener_order_id(po.opener_order_id);
+                f.set_recv_ns(po.recv_ns);
+                if (po.recv_ns > 0)
+                {
+                    const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    f.set_latency_ns(now_ns - po.recv_ns);
+                }
                 pending_fills_.push_back(std::move(f));
 
                 po.qty_remaining -= fill_qty;
@@ -249,6 +257,7 @@ private:
         // Per-lot attribution captured at submit time (Phase 1 deepdive).
         std::string   strategy_name;
         std::uint64_t opener_order_id = 0;
+        int64_t       recv_ns = 0;  // tick ingress for tick-to-trade samples
     };
     struct level_state
     {
