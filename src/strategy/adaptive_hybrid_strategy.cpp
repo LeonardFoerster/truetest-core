@@ -390,11 +390,15 @@ std::optional<order_event> AdaptiveHybridStrategy::on_l2_update(const l2_update_
 
     last_mids_[ev.get_symbol()] = ev.get_price(); // rough
 
-    // === STEP 3: Latency sample (would be fed from engine recv_ns in real wiring) ===
+    // === STEP 3: Latency sample (engine stamps recv_ns on L2 events) ===
     auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                       std::chrono::steady_clock::now().time_since_epoch()).count();
-    // In production the engine would have set a recv_ns on the event or via LatencyMonitor
-    latency_hist_.record_ns(2'800'000); // placeholder < 20 ms for demo
+    if (ev.get_recv_ns() > 0)
+    {
+        const int64_t sample = now_ns - ev.get_recv_ns();
+        if (sample > 0)
+            latency_hist_.record_ns(sample);
+    }
 
     if (latency_hist_.snapshot().p99 > static_cast<int64_t>(cfg_.max_latency_ms * 1'000'000)) {
         defensive_mode_.store(true, std::memory_order_release);
