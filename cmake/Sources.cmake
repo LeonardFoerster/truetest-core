@@ -134,6 +134,7 @@ set(TEST_SOURCES
     tests/test_engine_l2_ingestion.cpp
     tests/test_engine_venue_risk_check.cpp
     tests/test_engine_brackets.cpp
+    tests/test_tick_to_trade_safety.cpp
     tests/test_orderbook_registry.cpp
     tests/test_worker_watchdog.cpp
 
