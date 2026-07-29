@@ -43,9 +43,9 @@ namespace bitget {
 // ---------------------------------------------------------------------------
 //
 // One connection, multi args[] subscribe (e.g. trade + books5).
-// Same path-based URL, text ping/pong (SO_RCVTIMEO wake), and fatal-disconnect
-// semantics as BitgetTransport. Stream names are CLI-facing (trade, books5,
-// kline1m, …) and mapped via map_stream_to_topic / build_subscribe_json_for_streams.
+// Same path-based URL, text ping/pong (poll-before-read wake), and
+// fatal-disconnect semantics as BitgetTransport. Stream names are CLI-facing
+// (trade, books5, kline1m, …) via map_stream_to_topic.
 
 class BitgetCombinedTransport : public IDataTransport
 {
@@ -94,6 +94,7 @@ public:
                 websocket::stream<beast::ssl_stream<tcp::socket>>>(ioc_, ctx_);
 
             auto& lowest = beast::get_lowest_layer(*ws_);
+            // No wall-clock bound on resolve/connect/TLS/WS upgrade (pure-sync).
             net::connect(lowest, results);
 
             const int fd = lowest.native_handle();
@@ -108,10 +109,6 @@ public:
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
             }
 
-            // Bound TLS + WS upgrade (TCP connect above remains unbounded on
-            // this pure-sync path). See BitgetTransport for full rationale.
-            set_socket_timeo(fd, kHandshakeTimeo, kHandshakeTimeo);
-
             if (!SSL_set_tlsext_host_name(
                     ws_->next_layer().native_handle(), host_.c_str()))
             {
@@ -121,8 +118,7 @@ public:
 
             ws_->next_layer().handshake(ssl::stream_base::client);
 
-            // Beast stream_base::timeout is async-only; disable so it is not
-            // mistaken for a real bound on sync tcp::socket reads.
+            // Beast stream_base::timeout is async-only — leave none().
             {
                 websocket::stream_base::timeout opt;
                 opt.handshake_timeout = websocket::stream_base::none();
@@ -146,9 +142,6 @@ public:
             const std::string sub =
                 build_subscribe_json_for_streams(symbol_, streams_);
             ws_->write(net::buffer(sub));
-
-            // Steady-state SO_RCVTIMEO wake for app-level text "ping".
-            set_socket_timeo(fd, kRecvWakeTimeo, kSendTimeo);
             last_ping_ = std::chrono::steady_clock::now();
 
             open_ = true;
@@ -215,6 +208,15 @@ public:
             {
                 maybe_send_ping();
 
+                // poll-before-read — see BitgetTransport / poll helpers.
+                if (!wait_ready_for_read())
+                {
+                    if (stopped_.load())
+                        return false;
+                    maybe_send_ping(/*force=*/true);
+                    continue;
+                }
+
                 if (frame_buffer_.size() > 0)
                     frame_buffer_.consume(frame_buffer_.size());
 
@@ -240,13 +242,6 @@ public:
             }
             catch (const beast::system_error& se)
             {
-                // SO_RCVTIMEO wake — not a disconnect (see BitgetTransport).
-                if (is_socket_recv_timeout(se.code()) && !stopped_.load())
-                {
-                    maybe_send_ping(/*force=*/true);
-                    continue;
-                }
-
                 const bool clean_close = (se.code() == websocket::error::closed);
                 std::cerr << "BitgetCombinedTransport: websocket "
                           << (clean_close ? "closed by server" : "read error")
@@ -336,9 +331,7 @@ private:
     std::chrono::steady_clock::time_point last_ping_{};
 
     static constexpr auto kPingInterval = std::chrono::seconds(30);
-    static constexpr auto kHandshakeTimeo = std::chrono::seconds(5);
-    static constexpr auto kRecvWakeTimeo = std::chrono::seconds(25);
-    static constexpr auto kSendTimeo = std::chrono::seconds(5);
+    static constexpr auto kPollWake = std::chrono::seconds(25);
     static constexpr unsigned MAX_RECONNECTS = 5;
 
     void send_text(std::string_view text)
@@ -365,6 +358,19 @@ private:
             std::cerr << "BitgetCombinedTransport: ping failed: " << e.what()
                       << "\n";
         }
+    }
+
+    bool wait_ready_for_read()
+    {
+        if (!ws_ || stopped_.load())
+            return false;
+        if (ssl_has_pending_app_data(ws_->next_layer().native_handle()))
+            return true;
+        const int fd = beast::get_lowest_layer(*ws_).native_handle();
+        const auto pr = poll_fd_readable(fd, kPollWake);
+        if (pr == poll_wait_result::timeout)
+            return false;
+        return true;
     }
 
     bool reconnect()

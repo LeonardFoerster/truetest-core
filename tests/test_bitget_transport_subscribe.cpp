@@ -4,9 +4,11 @@
 
 #include "providers/bitget/bitget_transport.h"
 
-#include <cerrno>
+#include <chrono>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 // --- map_stream_to_topic (plan §7.5) ---
 
@@ -142,22 +144,33 @@ TEST(BitgetTransportSubscribe, PingPongTextHelpers)
     EXPECT_FALSE(bitget::is_ping_text(R"({"op":"ping"})"));
 }
 
-TEST(BitgetTransportSubscribe, IsSocketRecvTimeoutRecognizesWakeErrors)
+TEST(BitgetTransportSubscribe, PollFdReadableTimeoutAndReady)
 {
-    using beast::error_code;
-    namespace net = boost::asio;
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::pipe(fds), 0);
 
-    EXPECT_FALSE(bitget::is_socket_recv_timeout(error_code{}));
-    EXPECT_TRUE(bitget::is_socket_recv_timeout(net::error::would_block));
-    EXPECT_TRUE(bitget::is_socket_recv_timeout(net::error::try_again));
-    EXPECT_TRUE(bitget::is_socket_recv_timeout(net::error::timed_out));
-    EXPECT_TRUE(bitget::is_socket_recv_timeout(
-        error_code(EAGAIN, boost::system::system_category())));
-    EXPECT_TRUE(bitget::is_socket_recv_timeout(
-        error_code(ETIMEDOUT, boost::system::system_category())));
-    // Real disconnects must not be classified as wake.
-    EXPECT_FALSE(bitget::is_socket_recv_timeout(
-        boost::beast::websocket::error::closed));
+    // Empty pipe → short poll times out (wake path for app ping).
+    auto t0 = std::chrono::steady_clock::now();
+    auto r = bitget::poll_fd_readable(fds[0], std::chrono::milliseconds(50));
+    auto elapsed = std::chrono::steady_clock::now() - t0;
+    EXPECT_EQ(r, bitget::poll_wait_result::timeout);
+    EXPECT_GE(elapsed, std::chrono::milliseconds(30));
+
+    // Write one byte → readable without waiting full timeout.
+    ASSERT_EQ(::write(fds[1], "x", 1), 1);
+    r = bitget::poll_fd_readable(fds[0], std::chrono::milliseconds(500));
+    EXPECT_EQ(r, bitget::poll_wait_result::ready);
+
+    EXPECT_EQ(bitget::poll_fd_readable(-1, std::chrono::milliseconds(1)),
+              bitget::poll_wait_result::error);
+
+    ::close(fds[0]);
+    ::close(fds[1]);
+}
+
+TEST(BitgetTransportSubscribe, SslPendingNullIsFalse)
+{
+    EXPECT_FALSE(bitget::ssl_has_pending_app_data(nullptr));
 }
 
 #endif // HAS_BITGET

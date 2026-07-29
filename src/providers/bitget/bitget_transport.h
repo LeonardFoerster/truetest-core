@@ -29,8 +29,9 @@
 
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <openssl/ssl.h>
+#include <poll.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;
@@ -170,58 +171,73 @@ inline bool is_pong_text(std::string_view msg)
 }
 
 // ---------------------------------------------------------------------------
-// Socket timeouts for pure-sync Beast streams (tcp::socket)
+// Pure-sync WS wake helpers (poll-before-read)
 // ---------------------------------------------------------------------------
 //
-// Beast `websocket::stream_base::timeout` applies to **asynchronous** ops only
-// (see Boost.Beast stream_base.hpp). On a blocking `ws_->read()` over
-// `tcp::socket`, idle_timeout / handshake_timeout do **not** wake or cancel
-// the call. We therefore use kernel SO_RCVTIMEO / SO_SNDTIMEO:
-//   - short pair during TLS+WS handshake (fail hung servers)
-//   - ~25s SO_RCVTIMEO in steady state so a silent market can still app-ping
-//     text "ping" before Bitget's ~2 min idle disconnect
-// The single consumer thread owns both read and write (no concurrent Beast
-// write races).
+// Why not Beast timeouts / SO_RCVTIMEO?
+// - Beast `stream_base::timeout` is **async-only** (stream_base.hpp).
+// - SO_RCVTIMEO does **not** bound Asio synchronous I/O: Asio drives the
+//   socket non-blocking and, on EAGAIN, polls with an *infinite* timeout
+//   (see binance_rest_client.h). Kernel socket timeouts never surface.
+//
+// Real silent-market wake: `poll(fd, POLLIN, ~25s)` *before* `ws_->read()`.
+// If poll times out → send raw text `"ping"` and loop. If readable (or TLS
+// already has app data via SSL_pending) → `ws_->read()`.
+//
+// Caveats (honest):
+// - TCP connect + TLS + WS handshake on this pure-sync path have **no**
+//   wall-clock bound (only kernel TCP retransmit / peer close).
+// - Once inside `ws_->read()`, a partial WebSocket frame can still block
+//   until more bytes arrive; poll only guards the *start* of each message.
+// - Single consumer thread owns read + write (no concurrent Beast writes).
 
-inline timeval ms_to_timeval(std::chrono::milliseconds ms)
+enum class poll_wait_result
 {
-    timeval tv{};
-    const auto count = ms.count();
-    tv.tv_sec = static_cast<time_t>(count / 1000);
-    tv.tv_usec = static_cast<suseconds_t>((count % 1000) * 1000);
-    return tv;
+    ready,   // POLLIN / POLLHUP — caller should read
+    timeout, // no socket activity within timeout
+    error,   // poll failure or POLLERR/POLLNVAL
+};
+
+// Unit-testable poll wrapper (pass any fd; transports use the WS socket).
+inline poll_wait_result poll_fd_readable(int fd, std::chrono::milliseconds timeout)
+{
+    if (fd < 0)
+        return poll_wait_result::error;
+
+    pollfd pfd{};
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+
+    int ms = static_cast<int>(timeout.count());
+    if (ms < 0)
+        ms = 0;
+
+    for (;;)
+    {
+        const int rc = ::poll(&pfd, 1, ms);
+        if (rc < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            return poll_wait_result::error;
+        }
+        if (rc == 0)
+            return poll_wait_result::timeout;
+
+        // Error conditions on the fd.
+        if (pfd.revents & (POLLERR | POLLNVAL))
+            return poll_wait_result::error;
+        // Readable data or peer hangup (read will surface clean close).
+        if (pfd.revents & (POLLIN | POLLHUP))
+            return poll_wait_result::ready;
+        return poll_wait_result::error;
+    }
 }
 
-// Best-effort; returns false if either setsockopt fails (non-fatal for caller).
-inline bool set_socket_timeo(int fd,
-                             std::chrono::milliseconds recv_ms,
-                             std::chrono::milliseconds send_ms)
+// True when OpenSSL already holds decrypted app bytes (poll would miss them).
+inline bool ssl_has_pending_app_data(SSL* ssl)
 {
-    const timeval rcv = ms_to_timeval(recv_ms);
-    const timeval snd = ms_to_timeval(send_ms);
-    bool ok = true;
-    if (::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv, sizeof(rcv)) != 0)
-        ok = false;
-    if (::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd)) != 0)
-        ok = false;
-    return ok;
-}
-
-// Linux SO_RCVTIMEO on a blocking socket returns EAGAIN/EWOULDBLOCK when no
-// data arrived; some stacks report ETIMEDOUT / asio::error::timed_out.
-// Treat all of these as "wake for app ping", not disconnect.
-inline bool is_socket_recv_timeout(const beast::error_code& ec)
-{
-    if (!ec)
-        return false;
-    if (ec == net::error::would_block || ec == net::error::try_again ||
-        ec == net::error::timed_out)
-        return true;
-    if (ec == boost::system::error_code(EAGAIN, boost::system::system_category()) ||
-        ec == boost::system::error_code(EWOULDBLOCK, boost::system::system_category()) ||
-        ec == boost::system::error_code(ETIMEDOUT, boost::system::system_category()))
-        return true;
-    return false;
+    return ssl != nullptr && ::SSL_pending(ssl) > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +247,7 @@ inline bool is_socket_recv_timeout(const beast::error_code& ec)
 // Connect path: wss://{host}:{port}{path}  (default /v3/ws/public)
 // After handshake: JSON subscribe with lowercase instType "usdt-futures".
 // Heartbeat: raw text "ping" every ~30s → expect "pong" (not JSON / not WS ping).
-// Silent markets: SO_RCVTIMEO (~25s) returns from blocked sync read → app ping.
+// Silent markets: poll-before-read (~25s) → app text "ping" (see helpers above).
 // fatal_cb_ set → fail loud, no reconnect (live path). Unset → reconnect.
 
 class BitgetTransport : public IDataTransport
@@ -275,6 +291,9 @@ public:
                 websocket::stream<beast::ssl_stream<tcp::socket>>>(ioc_, ctx_);
 
             auto& lowest = beast::get_lowest_layer(*ws_);
+            // No wall-clock bound on resolve/connect/TLS/WS upgrade on this
+            // pure-sync path (Asio sync I/O + SO_*TIMEO are ineffective;
+            // see poll helpers comment). Kernel TCP retransmit is the floor.
             net::connect(lowest, results);
 
             const int fd = lowest.native_handle();
@@ -290,10 +309,6 @@ public:
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
             }
 
-            // Bound TLS + WS upgrade recvs/sends. (TCP connect above is still
-            // unbounded — pure sync path has no Asio deadline timer here.)
-            set_socket_timeo(fd, kHandshakeTimeo, kHandshakeTimeo);
-
             if (!SSL_set_tlsext_host_name(
                     ws_->next_layer().native_handle(), host_.c_str()))
             {
@@ -303,9 +318,8 @@ public:
 
             ws_->next_layer().handshake(ssl::stream_base::client);
 
-            // Beast stream_base::timeout is async-only on this stack (sync
-            // tcp::socket reads ignore handshake_timeout / idle_timeout).
-            // Explicitly disable so nobody mistakes them for the real bound.
+            // Beast stream_base::timeout is async-only — leave none() so it is
+            // never mistaken for a real bound on sync tcp::socket ops.
             {
                 websocket::stream_base::timeout opt;
                 opt.handshake_timeout = websocket::stream_base::none();
@@ -332,11 +346,6 @@ public:
             const std::string sub =
                 build_subscribe_json(symbol_, mapped.topic, mapped.interval);
             ws_->write(net::buffer(sub));
-
-            // Steady-state: SO_RCVTIMEO wakes blocked sync reads so the read
-            // loop can emit raw text "ping" under silence (venue ~2 min idle
-            // kill). SO_SNDTIMEO keeps ping/write fail-fast.
-            set_socket_timeo(fd, kRecvWakeTimeo, kSendTimeo);
             last_ping_ = std::chrono::steady_clock::now();
 
             open_ = true;
@@ -400,9 +409,19 @@ public:
         {
             try
             {
-                // App-level text ping when 30s elapsed between frames
-                // (continuous market data still needs a heartbeat).
+                // Continuous markets: still need text "ping" every ~30s.
                 maybe_send_ping();
+
+                // Silent markets: do not call blocking ws_->read until the
+                // socket (or TLS buffer) has data — otherwise we cannot ping.
+                if (!wait_ready_for_read())
+                {
+                    if (stopped_.load())
+                        return false;
+                    // poll timeout → app ping, re-enter (not a disconnect).
+                    maybe_send_ping(/*force=*/true);
+                    continue;
+                }
 
                 if (frame_buffer_.size() > 0)
                     frame_buffer_.consume(frame_buffer_.size());
@@ -430,14 +449,6 @@ public:
             }
             catch (const beast::system_error& se)
             {
-                // SO_RCVTIMEO: blocked sync read returned with no data — not
-                // a disconnect. Send text "ping" and re-enter read.
-                if (is_socket_recv_timeout(se.code()) && !stopped_.load())
-                {
-                    maybe_send_ping(/*force=*/true);
-                    continue;
-                }
-
                 const bool clean_close = (se.code() == websocket::error::closed);
                 std::cerr << "BitgetTransport: websocket "
                           << (clean_close ? "closed by server" : "read error")
@@ -540,11 +551,8 @@ private:
     std::chrono::steady_clock::time_point last_ping_{};
 
     static constexpr auto kPingInterval = std::chrono::seconds(30);
-    // Handshake phase (TLS + WS upgrade) — short kernel I/O bound.
-    static constexpr auto kHandshakeTimeo = std::chrono::seconds(5);
-    // Steady-state read wake so silent markets still app-ping < venue idle kill.
-    static constexpr auto kRecvWakeTimeo = std::chrono::seconds(25);
-    static constexpr auto kSendTimeo = std::chrono::seconds(5);
+    // poll() timeout when waiting for the next frame under silence.
+    static constexpr auto kPollWake = std::chrono::seconds(25);
     static constexpr unsigned MAX_RECONNECTS = 30;
 
     void send_text(std::string_view text)
@@ -570,6 +578,26 @@ private:
         {
             std::cerr << "BitgetTransport: ping failed: " << e.what() << "\n";
         }
+    }
+
+    // true  → safe to call ws_->read() (socket readable, TLS pending, or
+    //         POLLERR so read can surface the real error).
+    // false → poll timed out under silence (caller sends text "ping") or stop.
+    bool wait_ready_for_read()
+    {
+        if (!ws_ || stopped_.load())
+            return false;
+
+        // TLS may already hold decrypted bytes that poll cannot see.
+        if (ssl_has_pending_app_data(ws_->next_layer().native_handle()))
+            return true;
+
+        const int fd = beast::get_lowest_layer(*ws_).native_handle();
+        const auto pr = poll_fd_readable(fd, kPollWake);
+        if (pr == poll_wait_result::timeout)
+            return false;
+        // ready or error → let ws_->read report disconnect / deliver data.
+        return true;
     }
 
     bool reconnect()
