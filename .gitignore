@@ -435,3 +435,6 @@ secret*
 # otherwise swallow the per-binary entry wrappers added in Step 10.
 !src/bin/
 !src/bin/**
+
+
+upcoming_plattform/
