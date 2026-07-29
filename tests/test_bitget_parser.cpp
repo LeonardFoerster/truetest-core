@@ -131,6 +131,42 @@ TEST(BitgetParser, ParseAllTrades_MultiElementData)
     EXPECT_EQ(all[1].side, 1);
 }
 
+// Multi-trade data[] is fully accessible via parse_all_trades (N==3).
+// parse_trade / BitgetCombinedParser only surface the first element.
+TEST(BitgetParser, ParseAllTrades_ReturnsAllN_CombinedFirstOnly)
+{
+    constexpr const char* kThree = R"({
+      "arg": {"topic":"publicTrade","symbol":"BTCUSDT"},
+      "data": [
+        {"i":"1","p":"10.0","v":"0.1","S":"buy","T":"100"},
+        {"i":"2","p":"20.0","v":"0.2","S":"sell","T":"200"},
+        {"i":"3","p":"30.0","v":"0.3","S":"buy","T":"300"}
+      ],
+      "ts": 301
+    })";
+
+    auto all = bitget::parse_all_trades(kThree);
+    ASSERT_EQ(all.size(), 3u);
+    EXPECT_DOUBLE_EQ(all[0].price, 10.0);
+    EXPECT_DOUBLE_EQ(all[1].price, 20.0);
+    EXPECT_DOUBLE_EQ(all[2].price, 30.0);
+    EXPECT_EQ(all[0].symbol, "BTCUSDT");
+    EXPECT_EQ(all[2].symbol, "BTCUSDT");
+    EXPECT_EQ(all[0].side, 0);
+    EXPECT_EQ(all[1].side, 1);
+    EXPECT_EQ(all[2].side, 0);
+
+    auto first = bitget::parse_trade(kThree);
+    ASSERT_TRUE(first.has_value());
+    EXPECT_DOUBLE_EQ(first->price, 10.0);
+
+    BitgetCombinedParser combined;
+    auto ev = combined.parse_record(std::string_view{kThree});
+    ASSERT_TRUE(ev.has_value());
+    ASSERT_TRUE(std::holds_alternative<provider::tick>(*ev));
+    EXPECT_DOUBLE_EQ(std::get<provider::tick>(*ev).price, 10.0);
+}
+
 TEST(BitgetParser, ParseTrade_WrongTopic)
 {
     const char* json =
@@ -218,6 +254,70 @@ TEST(BitgetParser, ParseBooks5_WrongTopic)
     EXPECT_FALSE(bitget::parse_books5(json).has_value());
 }
 
+TEST(BitgetParser, ParseBooks5_MissingSymbol)
+{
+    const char* no_sym =
+        R"({"arg":{"topic":"books5"},"data":[{"a":[["1","1"]],"b":[["1","1"]],"ts":"1"}]})";
+    EXPECT_FALSE(bitget::parse_books5(no_sym).has_value());
+}
+
+// books5/books1/books50: missing action OK; action=update rejected.
+TEST(BitgetParser, ParseBooks5_ActionUpdateRejected)
+{
+    const char* update = R"({
+      "arg": {"topic":"books5","symbol":"BTCUSDT"},
+      "action": "update",
+      "data": [{"a":[["97001.0","1.0"]],"b":[["97000.0","1.0"]],"ts":"1"}]
+    })";
+    EXPECT_FALSE(bitget::parse_books5(update).has_value());
+}
+
+TEST(BitgetParser, ParseBooks5_MissingActionAccepted)
+{
+    const char* no_action = R"({
+      "arg": {"topic":"books5","symbol":"BTCUSDT"},
+      "data": [{"a":[["97001.0","1.0"]],"b":[["97000.0","1.0"]],"ts":"1"}]
+    })";
+    auto snap = bitget::parse_books5(no_action);
+    ASSERT_TRUE(snap.has_value());
+    EXPECT_EQ(snap->symbol, "BTCUSDT");
+    ASSERT_EQ(snap->bids.size(), 1u);
+}
+
+// Full books channel: require action==snapshot; update → nullopt.
+TEST(BitgetParser, ParseBooks_ActionUpdateRejected)
+{
+    const char* update = R"({
+      "arg": {"topic":"books","symbol":"BTCUSDT"},
+      "action": "update",
+      "data": [{"a":[["1","1"]],"b":[["1","1"]],"ts":"1"}]
+    })";
+    EXPECT_FALSE(bitget::parse_books5(update).has_value());
+}
+
+TEST(BitgetParser, ParseBooks_MissingActionRejected)
+{
+    const char* no_action = R"({
+      "arg": {"topic":"books","symbol":"BTCUSDT"},
+      "data": [{"a":[["1","1"]],"b":[["1","1"]],"ts":"1"}]
+    })";
+    EXPECT_FALSE(bitget::parse_books5(no_action).has_value());
+}
+
+TEST(BitgetParser, ParseBooks_SnapshotAccepted)
+{
+    const char* snap = R"({
+      "arg": {"topic":"books","symbol":"ETHUSDT"},
+      "action": "snapshot",
+      "data": [{"a":[["2001","0.5"]],"b":[["2000","1.0"]],"ts":"9"}]
+    })";
+    auto out = bitget::parse_books5(snap);
+    ASSERT_TRUE(out.has_value());
+    EXPECT_EQ(out->symbol, "ETHUSDT");
+    ASSERT_EQ(out->asks.size(), 1u);
+    EXPECT_DOUBLE_EQ(out->asks[0].price, 2001.0);
+}
+
 TEST(BitgetParser, ParseBooks5_MalformedNoCrash)
 {
     EXPECT_FALSE(bitget::parse_books5("").has_value());
@@ -290,6 +390,15 @@ TEST(BitgetParser, ParseKline_MissingOHLC)
     const char* missing =
         R"({"arg":{"topic":"kline","symbol":"BTCUSDT"},"data":[{"open":"1","high":"2"}]})";
     EXPECT_FALSE(bitget::parse_kline(missing).has_value());
+}
+
+TEST(BitgetParser, ParseKline_MissingSymbol)
+{
+    const char* no_sym = R"({
+      "arg": {"topic":"kline","interval":"1m"},
+      "data": [{"start":"1","open":"1","high":"2","low":"0.5","close":"1.5","volume":"10"}]
+    })";
+    EXPECT_FALSE(bitget::parse_kline(no_sym).has_value());
 }
 
 TEST(BitgetParser, ParseKline_MalformedNoCrash)

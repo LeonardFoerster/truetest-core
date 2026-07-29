@@ -464,7 +464,10 @@ inline std::optional<provider::tick> parse_trade_object(std::string_view obj,
     return t;
 }
 
-// Full UTA publicTrade WS push → first trade in data[].
+// Full UTA publicTrade WS push → **first** trade in data[] only.
+// Multi-trade frames (N elements in data[]): use parse_all_trades().
+// BitgetCombinedParser / parse_ws_message also surface only the first trade;
+// Task 4 provider loops must call parse_all_trades for batch emit.
 inline std::optional<provider::tick> parse_trade(std::string_view json)
 {
     auto arg = detail::extract_object(json, "arg");
@@ -487,7 +490,9 @@ inline std::optional<provider::tick> parse_trade(std::string_view json)
     return parse_trade_object(obj, symbol);
 }
 
-// All trades in a publicTrade push (data array).
+// All trades in a publicTrade push (data[]). Provider-facing batch API:
+// when data[] has N trades, returns N ticks (empty vector on miss/malformed).
+// Prefer this over parse_trade / BitgetCombinedParser for multi-trade frames.
 inline std::vector<provider::tick> parse_all_trades(std::string_view json)
 {
     std::vector<provider::tick> out;
@@ -539,18 +544,30 @@ inline std::optional<provider::l2_snapshot> parse_books5(std::string_view json)
     }
     if (symbol.empty())
         symbol = extract_sv_string(json, "symbol");
+    // Require symbol (same fail-closed rule as trade).
+    if (symbol.empty())
+        return std::nullopt;
 
-    // Snapshot channels. Full `books` only when action is snapshot (Phase 0).
+    // Action / topic gates (Phase 0 snapshot path only):
+    // - books5 / books1 / books50: always snapshot; missing action OK;
+    //   reject action=update (or any non-snapshot).
+    // - books (full): require action=="snapshot"; deltas rejected.
+    auto action = extract_sv_string(json, "action");
     if (!topic.empty())
     {
-        const bool ok = topic == "books5" || topic == "books1" || topic == "books50" ||
-                        topic == "books";
-        if (!ok) return std::nullopt;
-        if (topic == "books")
+        const bool limited =
+            topic == "books5" || topic == "books1" || topic == "books50";
+        const bool full = topic == "books";
+        if (!limited && !full)
+            return std::nullopt;
+        if (full)
         {
-            auto action = extract_sv_string(json, "action");
-            if (!action.empty() && action != "snapshot")
+            if (action != "snapshot")
                 return std::nullopt;
+        }
+        else if (!action.empty() && action != "snapshot")
+        {
+            return std::nullopt;
         }
     }
 
@@ -558,8 +575,7 @@ inline std::optional<provider::l2_snapshot> parse_books5(std::string_view json)
     std::string_view body = obj.empty() ? json : obj;
 
     provider::l2_snapshot snap;
-    if (!symbol.empty())
-        snap.symbol.assign(symbol.data(), symbol.size());
+    snap.symbol.assign(symbol.data(), symbol.size());
 
     auto ts_sv = extract_sv_number(body, "ts");
     if (ts_sv.empty())
@@ -600,6 +616,9 @@ inline std::optional<provider::bar> parse_kline(std::string_view json)
     }
     if (symbol.empty())
         symbol = extract_sv_string(json, "symbol");
+    // Require symbol (same fail-closed rule as trade).
+    if (symbol.empty())
+        return std::nullopt;
 
     if (!topic.empty() && topic != "kline")
         return std::nullopt;
@@ -641,8 +660,7 @@ inline std::optional<provider::bar> parse_kline(std::string_view json)
         return std::nullopt;
 
     provider::bar b;
-    if (!symbol.empty())
-        b.symbol.assign(symbol.data(), symbol.size());
+    b.symbol.assign(symbol.data(), symbol.size());
 
     double v = 0.0;
     if (!detail::parse_double_sv(open_sv, v))  return std::nullopt;
@@ -685,6 +703,9 @@ inline std::optional<bar_record> parse_kline_record(std::string_view json)
 // ---------------------------------------------------------------------------
 // Combined dispatcher (arg.topic → event)
 // ---------------------------------------------------------------------------
+// Single-event surface for IDataParser<provider::event>. For publicTrade,
+// only the **first** data[] trade is returned. Multi-trade batch:
+// callers (Task 4 provider) must use parse_all_trades() and emit each tick.
 
 inline std::optional<provider::event> parse_ws_message(std::string_view json)
 {
@@ -695,6 +716,7 @@ inline std::optional<provider::event> parse_ws_message(std::string_view json)
 
     if (topic == "publicTrade")
     {
+        // First trade only — see parse_all_trades for full data[] batch.
         auto t = parse_trade(json);
         if (!t) return std::nullopt;
         return provider::event{std::move(*t)};
@@ -777,6 +799,8 @@ public:
     }
 };
 
+// IDataParser single-event adapter. publicTrade → first trade only;
+// multi-trade frames: use bitget::parse_all_trades (not this class).
 class BitgetCombinedParser : public IDataParser<provider::event>
 {
 public:
