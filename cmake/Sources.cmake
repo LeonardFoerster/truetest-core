@@ -235,6 +235,7 @@ set(TEST_SOURCES
     # --- Bitget (always built; gated by HAS_BITGET at compile time) ---
     tests/test_bitget_endpoints.cpp
     tests/test_bitget_auth.cpp
+    tests/test_bitget_parser.cpp
 
     # --- CLI integration (separate binary) ---
     # (see truetest_cli_tests in root)
