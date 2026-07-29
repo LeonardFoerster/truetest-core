@@ -43,9 +43,9 @@ namespace bitget {
 // ---------------------------------------------------------------------------
 //
 // One connection, multi args[] subscribe (e.g. trade + books5).
-// Same path-based URL, text ping/pong, and fatal-disconnect semantics as
-// BitgetTransport. Stream names are CLI-facing (trade, books5, kline1m, …)
-// and mapped via map_stream_to_topic / build_subscribe_json_for_streams.
+// Same path-based URL, text ping/pong (SO_RCVTIMEO wake), and fatal-disconnect
+// semantics as BitgetTransport. Stream names are CLI-facing (trade, books5,
+// kline1m, …) and mapped via map_stream_to_topic / build_subscribe_json_for_streams.
 
 class BitgetCombinedTransport : public IDataTransport
 {
@@ -96,16 +96,21 @@ public:
             auto& lowest = beast::get_lowest_layer(*ws_);
             net::connect(lowest, results);
 
+            const int fd = lowest.native_handle();
+
             // TCP keepalive — see BitgetTransport for rationale.
             {
                 const int yes = 1;
                 const int idle = 1, intvl = 1, cnt = 2;
-                const int fd = lowest.native_handle();
                 ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
             }
+
+            // Bound TLS + WS upgrade (TCP connect above remains unbounded on
+            // this pure-sync path). See BitgetTransport for full rationale.
+            set_socket_timeo(fd, kHandshakeTimeo, kHandshakeTimeo);
 
             if (!SSL_set_tlsext_host_name(
                     ws_->next_layer().native_handle(), host_.c_str()))
@@ -116,11 +121,12 @@ public:
 
             ws_->next_layer().handshake(ssl::stream_base::client);
 
-            // Text "ping"/"pong" heartbeat; Beast WS pings off (see single).
+            // Beast stream_base::timeout is async-only; disable so it is not
+            // mistaken for a real bound on sync tcp::socket reads.
             {
                 websocket::stream_base::timeout opt;
-                opt.handshake_timeout = std::chrono::seconds(3);
-                opt.idle_timeout = std::chrono::seconds(25);
+                opt.handshake_timeout = websocket::stream_base::none();
+                opt.idle_timeout = websocket::stream_base::none();
                 opt.keep_alive_pings = false;
                 ws_->set_option(opt);
             }
@@ -140,6 +146,9 @@ public:
             const std::string sub =
                 build_subscribe_json_for_streams(symbol_, streams_);
             ws_->write(net::buffer(sub));
+
+            // Steady-state SO_RCVTIMEO wake for app-level text "ping".
+            set_socket_timeo(fd, kRecvWakeTimeo, kSendTimeo);
             last_ping_ = std::chrono::steady_clock::now();
 
             open_ = true;
@@ -231,7 +240,8 @@ public:
             }
             catch (const beast::system_error& se)
             {
-                if (se.code() == beast::error::timeout && !stopped_.load())
+                // SO_RCVTIMEO wake — not a disconnect (see BitgetTransport).
+                if (is_socket_recv_timeout(se.code()) && !stopped_.load())
                 {
                     maybe_send_ping(/*force=*/true);
                     continue;
@@ -326,6 +336,9 @@ private:
     std::chrono::steady_clock::time_point last_ping_{};
 
     static constexpr auto kPingInterval = std::chrono::seconds(30);
+    static constexpr auto kHandshakeTimeo = std::chrono::seconds(5);
+    static constexpr auto kRecvWakeTimeo = std::chrono::seconds(25);
+    static constexpr auto kSendTimeo = std::chrono::seconds(5);
     static constexpr unsigned MAX_RECONNECTS = 5;
 
     void send_text(std::string_view text)

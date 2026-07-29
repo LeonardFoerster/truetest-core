@@ -4,6 +4,7 @@
 
 #include "providers/bitget/bitget_transport.h"
 
+#include <cerrno>
 #include <string>
 #include <vector>
 
@@ -139,6 +140,24 @@ TEST(BitgetTransportSubscribe, PingPongTextHelpers)
     EXPECT_FALSE(bitget::is_ping_text("pong"));
     EXPECT_FALSE(bitget::is_pong_text("ping"));
     EXPECT_FALSE(bitget::is_ping_text(R"({"op":"ping"})"));
+}
+
+TEST(BitgetTransportSubscribe, IsSocketRecvTimeoutRecognizesWakeErrors)
+{
+    using beast::error_code;
+    namespace net = boost::asio;
+
+    EXPECT_FALSE(bitget::is_socket_recv_timeout(error_code{}));
+    EXPECT_TRUE(bitget::is_socket_recv_timeout(net::error::would_block));
+    EXPECT_TRUE(bitget::is_socket_recv_timeout(net::error::try_again));
+    EXPECT_TRUE(bitget::is_socket_recv_timeout(net::error::timed_out));
+    EXPECT_TRUE(bitget::is_socket_recv_timeout(
+        error_code(EAGAIN, boost::system::system_category())));
+    EXPECT_TRUE(bitget::is_socket_recv_timeout(
+        error_code(ETIMEDOUT, boost::system::system_category())));
+    // Real disconnects must not be classified as wake.
+    EXPECT_FALSE(bitget::is_socket_recv_timeout(
+        boost::beast::websocket::error::closed));
 }
 
 #endif // HAS_BITGET

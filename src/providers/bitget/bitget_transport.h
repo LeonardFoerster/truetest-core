@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -29,6 +30,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 
 namespace beast = boost::beast;
 namespace websocket = beast::websocket;
@@ -168,13 +170,68 @@ inline bool is_pong_text(std::string_view msg)
 }
 
 // ---------------------------------------------------------------------------
+// Socket timeouts for pure-sync Beast streams (tcp::socket)
+// ---------------------------------------------------------------------------
+//
+// Beast `websocket::stream_base::timeout` applies to **asynchronous** ops only
+// (see Boost.Beast stream_base.hpp). On a blocking `ws_->read()` over
+// `tcp::socket`, idle_timeout / handshake_timeout do **not** wake or cancel
+// the call. We therefore use kernel SO_RCVTIMEO / SO_SNDTIMEO:
+//   - short pair during TLS+WS handshake (fail hung servers)
+//   - ~25s SO_RCVTIMEO in steady state so a silent market can still app-ping
+//     text "ping" before Bitget's ~2 min idle disconnect
+// The single consumer thread owns both read and write (no concurrent Beast
+// write races).
+
+inline timeval ms_to_timeval(std::chrono::milliseconds ms)
+{
+    timeval tv{};
+    const auto count = ms.count();
+    tv.tv_sec = static_cast<time_t>(count / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((count % 1000) * 1000);
+    return tv;
+}
+
+// Best-effort; returns false if either setsockopt fails (non-fatal for caller).
+inline bool set_socket_timeo(int fd,
+                             std::chrono::milliseconds recv_ms,
+                             std::chrono::milliseconds send_ms)
+{
+    const timeval rcv = ms_to_timeval(recv_ms);
+    const timeval snd = ms_to_timeval(send_ms);
+    bool ok = true;
+    if (::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv, sizeof(rcv)) != 0)
+        ok = false;
+    if (::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd)) != 0)
+        ok = false;
+    return ok;
+}
+
+// Linux SO_RCVTIMEO on a blocking socket returns EAGAIN/EWOULDBLOCK when no
+// data arrived; some stacks report ETIMEDOUT / asio::error::timed_out.
+// Treat all of these as "wake for app ping", not disconnect.
+inline bool is_socket_recv_timeout(const beast::error_code& ec)
+{
+    if (!ec)
+        return false;
+    if (ec == net::error::would_block || ec == net::error::try_again ||
+        ec == net::error::timed_out)
+        return true;
+    if (ec == boost::system::error_code(EAGAIN, boost::system::system_category()) ||
+        ec == boost::system::error_code(EWOULDBLOCK, boost::system::system_category()) ||
+        ec == boost::system::error_code(ETIMEDOUT, boost::system::system_category()))
+        return true;
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // BitgetTransport — single-topic public WS (UTA v3)
 // ---------------------------------------------------------------------------
 //
 // Connect path: wss://{host}:{port}{path}  (default /v3/ws/public)
 // After handshake: JSON subscribe with lowercase instType "usdt-futures".
 // Heartbeat: raw text "ping" every ~30s → expect "pong" (not JSON / not WS ping).
-// Idle disconnect on venue ~2 min — we wake via Beast idle_timeout to app-ping.
+// Silent markets: SO_RCVTIMEO (~25s) returns from blocked sync read → app ping.
 // fatal_cb_ set → fail loud, no reconnect (live path). Unset → reconnect.
 
 class BitgetTransport : public IDataTransport
@@ -220,17 +277,22 @@ public:
             auto& lowest = beast::get_lowest_layer(*ws_);
             net::connect(lowest, results);
 
+            const int fd = lowest.native_handle();
+
             // TCP keepalive: kernel-side cable-pull detection (~3s) when the
             // app-level text ping path is itself wedged. Best-effort.
             {
                 const int yes = 1;
                 const int idle = 1, intvl = 1, cnt = 2;
-                const int fd = lowest.native_handle();
                 ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
             }
+
+            // Bound TLS + WS upgrade recvs/sends. (TCP connect above is still
+            // unbounded — pure sync path has no Asio deadline timer here.)
+            set_socket_timeo(fd, kHandshakeTimeo, kHandshakeTimeo);
 
             if (!SSL_set_tlsext_host_name(
                     ws_->next_layer().native_handle(), host_.c_str()))
@@ -241,13 +303,13 @@ public:
 
             ws_->next_layer().handshake(ssl::stream_base::client);
 
-            // Bitget wants raw text "ping"/"pong", not WS-protocol pings.
-            // idle_timeout wakes a silent read so we can app-ping before the
-            // venue's ~2 min idle disconnect. keep_alive_pings stays off.
+            // Beast stream_base::timeout is async-only on this stack (sync
+            // tcp::socket reads ignore handshake_timeout / idle_timeout).
+            // Explicitly disable so nobody mistakes them for the real bound.
             {
                 websocket::stream_base::timeout opt;
-                opt.handshake_timeout = std::chrono::seconds(3);
-                opt.idle_timeout = std::chrono::seconds(25);
+                opt.handshake_timeout = websocket::stream_base::none();
+                opt.idle_timeout = websocket::stream_base::none();
                 opt.keep_alive_pings = false;
                 ws_->set_option(opt);
             }
@@ -270,6 +332,11 @@ public:
             const std::string sub =
                 build_subscribe_json(symbol_, mapped.topic, mapped.interval);
             ws_->write(net::buffer(sub));
+
+            // Steady-state: SO_RCVTIMEO wakes blocked sync reads so the read
+            // loop can emit raw text "ping" under silence (venue ~2 min idle
+            // kill). SO_SNDTIMEO keeps ping/write fail-fast.
+            set_socket_timeo(fd, kRecvWakeTimeo, kSendTimeo);
             last_ping_ = std::chrono::steady_clock::now();
 
             open_ = true;
@@ -363,8 +430,9 @@ public:
             }
             catch (const beast::system_error& se)
             {
-                // Idle timeout: wake, app-ping, continue (not a disconnect).
-                if (se.code() == beast::error::timeout && !stopped_.load())
+                // SO_RCVTIMEO: blocked sync read returned with no data — not
+                // a disconnect. Send text "ping" and re-enter read.
+                if (is_socket_recv_timeout(se.code()) && !stopped_.load())
                 {
                     maybe_send_ping(/*force=*/true);
                     continue;
@@ -472,6 +540,11 @@ private:
     std::chrono::steady_clock::time_point last_ping_{};
 
     static constexpr auto kPingInterval = std::chrono::seconds(30);
+    // Handshake phase (TLS + WS upgrade) — short kernel I/O bound.
+    static constexpr auto kHandshakeTimeo = std::chrono::seconds(5);
+    // Steady-state read wake so silent markets still app-ping < venue idle kill.
+    static constexpr auto kRecvWakeTimeo = std::chrono::seconds(25);
+    static constexpr auto kSendTimeo = std::chrono::seconds(5);
     static constexpr unsigned MAX_RECONNECTS = 30;
 
     void send_text(std::string_view text)
