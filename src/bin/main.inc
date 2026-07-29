@@ -1608,6 +1608,17 @@ static int run_provider_mode(const cli_options& o)
     const std::string& resolved_secret     = creds.secret;
     const std::string& resolved_passphrase = creds.passphrase;
     const bool is_bitget = provider_is_bitget(o.provider_name);
+    // Sandbox routing must match pcfg: bitget accepts --demo|--testnet as
+    // demo/paptrading; Binance (and others) only --testnet. Never let --demo
+    // alone skip the live real-money captcha on non-bitget mainnet.
+    const bool sandbox = is_bitget ? (o.demo || o.testnet) : o.testnet;
+
+    if (o.demo && !is_bitget)
+    {
+        std::cerr << "  WARNING: --demo is Bitget-specific (paptrading). "
+                     "Ignored for provider '" << o.provider_name
+                  << "'; use --testnet for Binance sandbox.\n";
+    }
 
     provider_config pcfg;
     if (!primary_path.empty())  pcfg["path"] = primary_path;
@@ -1869,10 +1880,11 @@ static int run_provider_mode(const cli_options& o)
         {
             std::cerr << "  ! Live mode is only permitted on the engine_live binary "
                          "(this is " << truetest::target_name() << ").\n";
-            if (o.testnet || o.demo)
+            if (sandbox)
                 std::cerr << "    Sandbox still uses the live order code path; "
-                             "build and run engine_live with --testnet/--demo "
-                             "to trade on the venue sandbox.\n";
+                             "build and run engine_live with --testnet"
+                             << (is_bitget ? "/--demo" : "")
+                             << " to trade on the venue sandbox.\n";
             return 1;
         }
         if (!o.live)
@@ -1899,7 +1911,7 @@ static int run_provider_mode(const cli_options& o)
             }
             return 1;
         }
-        if (o.testnet || o.demo)
+        if (sandbox)
         {
             if (is_bitget)
                 std::cout << "  [DEMO] Live mode will submit orders to Bitget "
@@ -1914,11 +1926,11 @@ static int run_provider_mode(const cli_options& o)
                 return 0;
         }
     }
-    else if (o.testnet || o.demo)
+    else if (sandbox)
     {
         if (is_bitget)
             std::cout << "  [DEMO] Routing Bitget provider to demo/paptrading.\n";
-        else if (o.testnet)
+        else
             std::cout << "  [TESTNET] Routing Binance provider to the spot testnet.\n";
     }
 
