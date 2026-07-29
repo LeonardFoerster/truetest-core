@@ -135,4 +135,46 @@ TEST(BitgetFuturesRegister, HasDataAndExecution)
     EXPECT_TRUE(p->has_execution());
 }
 
+// Live + keys refuses before transport->open(), so this is network-free.
+// Trade-only engine smoke (public WS + hybrid) needs Task 5 CLI parser
+// wiring; depth_stream uses the event-parser path already covered above.
+TEST(BitgetFuturesRegister, LiveWithKeysRefusesOpen)
+{
+    provider_config cfg;
+    cfg["symbol"]  = "BTCUSDT";
+    cfg["api_key"] = "not-a-real-key";
+
+    auto p = create(cfg);
+    ASSERT_NE(p, nullptr);
+
+    engine_config ec;
+    ec.mode = engine_mode::live;
+    p->configure(ec);
+
+    EXPECT_FALSE(p->open());
+    EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
+}
+
+// Risk caps are applied at the top of open() before the live refuse, so
+// live+keys still builds FuturesRiskCheck without touching the network.
+TEST(BitgetFuturesRegister, RiskCapsInstallRiskCheckOnOpen)
+{
+    provider_config cfg;
+    cfg["symbol"]            = "BTCUSDT";
+    cfg["api_key"]           = "not-a-real-key";
+    cfg["max_notional_usdt"] = "1000";
+
+    auto p = create(cfg);
+    ASSERT_NE(p, nullptr);
+    EXPECT_EQ(p->get_risk_check(), nullptr); // not built until open()
+
+    engine_config ec;
+    ec.mode = engine_mode::live;
+    p->configure(ec);
+
+    EXPECT_FALSE(p->open()); // live refuse after risk_check construction
+    EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
+    EXPECT_NE(p->get_risk_check(), nullptr);
+}
+
 #endif // HAS_BITGET
