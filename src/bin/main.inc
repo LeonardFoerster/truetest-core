@@ -68,6 +68,10 @@
 #include "providers/binance/binance_replay_transport.h"
 #endif
 
+#ifdef HAS_BITGET
+#include "providers/bitget/bitget_parser.h"
+#endif
+
 #ifdef HAS_DEBUG
 #include "debug/debug_log.h"
 #endif
@@ -296,6 +300,7 @@ struct cli_options
     std::string stream;
     std::string api_key;
     std::string api_secret;
+    std::string api_passphrase;  // Bitget (and similar) signed-REST passphrase
     std::string host;
     std::string port;
     std::string depth_stream;
@@ -303,6 +308,7 @@ struct cli_options
     std::string replay_data_path;
     bool live = false;
     bool testnet = false;
+    bool demo = false;  // Bitget demo/paptrading (also accepted via --testnet for bitget*)
 
     // Futures-only advisory inputs. Sentinel -1 = operator didn't set,
     // use provider default (5%). Empty margin_type = check disabled.
@@ -650,12 +656,14 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_str("stream", o.stream);
     get_str("api_key", o.api_key);
     get_str("api_secret", o.api_secret);
+    get_str("api_passphrase", o.api_passphrase);
     get_str("host", o.host);
     get_str("port", o.port);
     get_str("record", o.record_path);
     get_str("replay_data", o.replay_data_path);
     get_bool("live", o.live);
     get_bool("testnet", o.testnet);
+    get_bool("demo", o.demo);
     get_str("mode", o.mode);
     get_double("balance", o.balance);
     get_double("risk_fraction", o.risk_fraction);
@@ -745,6 +753,7 @@ static void dump_config(const cli_options& o)
     j["replay_data"] = o.replay_data_path;
     j["live"] = o.live;
     j["testnet"] = o.testnet;
+    j["demo"] = o.demo;
     j["mode"] = o.mode.empty() ? TT_DEFAULT_MODE : o.mode;
     j["balance"] = o.balance;
     j["risk_fraction"] = o.risk_fraction;
@@ -801,7 +810,9 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--preset", o.preset, "Named run preset/profile (e.g. futures-phase0, mc-robustness, backtest-l2, shadow-tape). Provides bundles of realistic defaults for common scenarios; explicit flags and --config override the preset. See --help or docs for the list.");
     app.add_flag("--no-pin", o.no_pin, "Disable CPU affinity pinning");
     app.add_option("--spin-policy", o.spin_policy_str, "Worker spin policy: spin, yield, adaptive (default: adaptive)");
-    app.add_option("--provider", o.provider_name, "Provider name: local, binance, synthetic");
+    app.add_option("--provider", o.provider_name,
+                   "Provider name: local, binance, binance-futures, bitget, "
+                   "bitget-futures, synthetic");
     app.add_option("--path", o.provider_path, "Data file path (for local provider)");
     app.add_option("--mc-params", o.mc_params, "Synthetic/Monte-Carlo params (e.g. \"mu=0.0,sigma=0.65,n_steps=5000\")");
     app.add_flag("--monte-carlo", o.monte_carlo, "Run Monte Carlo campaign (use with --mc-trials)");
@@ -829,66 +840,69 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "by real exchange levels (LocalBookAdapter in shadow "
                    "stops matching against paper-seeded MM liquidity).");
     app.add_option("--margin-type", o.margin_type,
-        "(binance-futures only) Expected margin type for advisory "
+        "(futures providers) Expected margin type for advisory "
         "comparison: ISOLATED or CROSSED. Empty = no check.");
     app.add_option("--liquidation-warn-pct", o.liquidation_warn_pct,
-        "(binance-futures only) Warn at startup if any open position "
+        "(futures providers) Warn at startup if any open position "
         "is within this fraction of liquidation. 0.05 = 5%. Set to 0 "
         "to disable. Default: 0.05.");
     app.add_flag("--margin-type-strict", o.margin_type_strict,
-        "(binance-futures only) Escalate margin-mode mismatch from "
+        "(futures providers) Escalate margin-mode mismatch from "
         "advisory (warning) to refusal. Requires --margin-type to be "
         "set; otherwise has no effect.");
     app.add_option("--max-notional", o.max_notional_usdt,
-        "(binance-futures only) Pre-trade notional cap in USDT: "
+        "(futures providers) Pre-trade notional cap in USDT: "
         "|post_qty| * mark_price <= cap. 0 disables. Default: 0.");
     app.add_option("--max-leverage", o.max_leverage,
-        "(binance-futures only) Pre-trade implied-leverage cap: "
+        "(futures providers) Pre-trade implied-leverage cap: "
         "post_notional / cash <= cap. 0 disables. Default: 0.");
     app.add_option("--min-liq-distance-pct", o.min_liquidation_distance_pct,
-        "(binance-futures only) Minimum projected post-trade buffer "
+        "(futures providers) Minimum projected post-trade buffer "
         "to liquidation, as a fraction (0.05 = 5%). 0 disables. "
         "Default: 0. See docs/futures-testnet.md for caveats on the "
         "approximation.");
     app.add_option("--dead-man-countdown-ms", o.dead_man_countdown_ms,
-        "(binance-futures only) Server-side dead-man's-switch countdown "
-        "in milliseconds. POSTs to /fapi/v1/countdownCancelAll. The "
-        "engine's heartbeat refreshes the timer; if the engine dies, "
-        "Binance auto-cancels all orders for the symbol within this "
-        "many ms of the last successful heartbeat. 0 disables. "
-        "Default: 30000 (30s).");
+        "(futures providers) Server-side dead-man's-switch countdown "
+        "in milliseconds. Venue auto-cancels open orders for the "
+        "symbol within this many ms of the last successful heartbeat "
+        "if the engine dies. 0 disables. Default: 30000 (30s).");
     app.add_option("--dead-man-heartbeat-ms", o.dead_man_heartbeat_ms,
-        "(binance-futures only) Heartbeat interval for the dead-man's "
+        "(futures providers) Heartbeat interval for the dead-man's "
         "switch. Smaller = tighter recovery from server-side timer "
         "expiry; larger = fewer API calls and more tolerance for "
         "transient network jitter. 0 means use countdown / 3. "
         "Default: 0.");
     app.add_flag("--disarm-deadman", o.disarm_deadman,
-        "(binance-futures only) Don't arm the dead-man's switch for "
+        "(futures providers) Don't arm the dead-man's switch for "
         "this run. Equivalent to --dead-man-countdown-ms 0 but "
         "intent-revealing for debug / deploy workflows where the "
         "operator deliberately wants to pause without venue-side "
         "auto-cancel.");
 
     app.add_flag("--dms-attempt-position-close", o.dms_attempt_position_close,
-        "(binance-futures only, Phase 3) When the DMS heartbeat thread "
-        "detects persistent failure to refresh /countdownCancelAll, "
+        "(futures providers, Phase 3) When the DMS heartbeat thread "
+        "detects persistent failure to refresh the venue countdown, "
         "invoke a reduceOnly MARKET close of the current position "
-        "(queried live via positionRisk) in addition to the venue "
-        "order-cancel countdown. This hardens the DMS into a full "
-        "in-process last-resort flattener. Pairs with the external "
-        "tt_watchdog for total process death. Default: false (safe, "
-        "no behavior change for existing Phase 0 runs).");
+        "in addition to the venue order-cancel countdown. This hardens "
+        "the DMS into a full in-process last-resort flattener. Pairs "
+        "with the external tt_watchdog for total process death. "
+        "Default: false (safe, no behavior change for existing Phase 0 runs).");
 
     app.add_option("--api-key", o.api_key, "API key for exchange");
     app.add_option("--api-secret", o.api_secret, "API secret for exchange");
+    app.add_option("--api-passphrase", o.api_passphrase,
+                   "API passphrase (Bitget and similar venues)");
     app.add_option("--host", o.host, "WebSocket host");
     app.add_option("--port", o.port, "Port number");
     app.add_option("--record", o.record_path, "Record market data to file");
     app.add_option("--replay-data", o.replay_data_path, "Replay recorded market data");
     app.add_flag("--live", o.live, "Safety flag for live (real money) mode");
     app.add_flag("--testnet", o.testnet,
-                 "Route Binance provider to the spot testnet (stream.testnet.binance.vision / testnet.binance.vision)");
+                 "Sandbox routing: Binance → spot/futures testnet hosts; "
+                 "Bitget → demo/paptrading (same as --demo)");
+    app.add_flag("--demo", o.demo,
+                 "Bitget demo/paptrading endpoints (also set by --testnet "
+                 "when provider is bitget*)");
 
     app.add_option("--balance", o.balance, "Initial account balance")->default_val(10000.0);
     app.add_option("--risk-fraction", o.risk_fraction, "Position size as equity fraction")->default_val(0.02);
@@ -1092,12 +1106,14 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--stream")) opts.stream = file_opts.stream;
     if (!was_set("--api-key")) opts.api_key = file_opts.api_key;
     if (!was_set("--api-secret")) opts.api_secret = file_opts.api_secret;
+    if (!was_set("--api-passphrase")) opts.api_passphrase = file_opts.api_passphrase;
     if (!was_set("--host")) opts.host = file_opts.host;
     if (!was_set("--port")) opts.port = file_opts.port;
     if (!was_set("--record")) opts.record_path = file_opts.record_path;
     if (!was_set("--replay-data")) opts.replay_data_path = file_opts.replay_data_path;
     if (!was_set("--live")) opts.live = file_opts.live;
     if (!was_set("--testnet")) opts.testnet = file_opts.testnet;
+    if (!was_set("--demo")) opts.demo = file_opts.demo;
     if (!was_set("--mode")) opts.mode = file_opts.mode;
     if (!was_set("--balance")) opts.balance = file_opts.balance;
     if (!was_set("--risk-fraction")) opts.risk_fraction = file_opts.risk_fraction;
@@ -1524,25 +1540,57 @@ static int run_monte_carlo_mode(const cli_options& o)
 
 // Resolve exchange credentials. Environment variables win over CLI arguments;
 // argv-supplied secrets trigger a warning because they leak via `ps` and shell
-// history. Returns the resolved (key, secret) pair.
-static std::pair<std::string, std::string> resolve_exchange_credentials(
-    const std::string& arg_key, const std::string& arg_secret)
-{
-    const char* env_key    = std::getenv("TRUETEST_BINANCE_API_KEY");
-    const char* env_secret = std::getenv("TRUETEST_BINANCE_API_SECRET");
+// history. Env prefix is provider-aware: bitget* → TRUETEST_BITGET_*, else
+// TRUETEST_BINANCE_* (historical default for binance / binance-futures).
+struct exchange_credentials {
+    std::string key;
+    std::string secret;
+    std::string passphrase;
+};
 
-    std::string key    = env_key    ? env_key    : arg_key;
-    std::string secret = env_secret ? env_secret : arg_secret;
+static bool provider_is_bitget(const std::string& name)
+{
+    return name.rfind("bitget", 0) == 0;
+}
+
+static exchange_credentials resolve_exchange_credentials(
+    const std::string& provider_name,
+    const std::string& arg_key,
+    const std::string& arg_secret,
+    const std::string& arg_passphrase)
+{
+    const bool is_bitget = provider_is_bitget(provider_name);
+
+    const char* env_key    = std::getenv(
+        is_bitget ? "TRUETEST_BITGET_API_KEY" : "TRUETEST_BINANCE_API_KEY");
+    const char* env_secret = std::getenv(
+        is_bitget ? "TRUETEST_BITGET_API_SECRET" : "TRUETEST_BINANCE_API_SECRET");
+    const char* env_pass   = is_bitget
+        ? std::getenv("TRUETEST_BITGET_API_PASSPHRASE")
+        : nullptr;
+
+    exchange_credentials out;
+    out.key        = env_key    ? env_key    : arg_key;
+    out.secret     = env_secret ? env_secret : arg_secret;
+    out.passphrase = env_pass   ? env_pass   : arg_passphrase;
+
+    const char* key_hint = is_bitget
+        ? "TRUETEST_BITGET_API_KEY" : "TRUETEST_BINANCE_API_KEY";
+    const char* secret_hint = is_bitget
+        ? "TRUETEST_BITGET_API_SECRET" : "TRUETEST_BINANCE_API_SECRET";
 
     if (!arg_key.empty() && !env_key)
         std::cerr << "  WARNING: --api-key was passed on the command line. "
-                     "Prefer env var TRUETEST_BINANCE_API_KEY - argv is visible "
-                     "to other processes and shell history.\n";
+                     "Prefer env var " << key_hint
+                  << " - argv is visible to other processes and shell history.\n";
     if (!arg_secret.empty() && !env_secret)
         std::cerr << "  WARNING: --api-secret was passed on the command line. "
-                     "Prefer env var TRUETEST_BINANCE_API_SECRET.\n";
+                     "Prefer env var " << secret_hint << ".\n";
+    if (is_bitget && !arg_passphrase.empty() && !env_pass)
+        std::cerr << "  WARNING: --api-passphrase was passed on the command line. "
+                     "Prefer env var TRUETEST_BITGET_API_PASSPHRASE.\n";
 
-    return {std::move(key), std::move(secret)};
+    return out;
 }
 
 static int run_provider_mode(const cli_options& o)
@@ -1554,18 +1602,34 @@ static int run_provider_mode(const cli_options& o)
             primary_path = primary_path.substr(0, comma);
     }
 
-    auto [resolved_key, resolved_secret] = resolve_exchange_credentials(o.api_key, o.api_secret);
+    const auto creds = resolve_exchange_credentials(
+        o.provider_name, o.api_key, o.api_secret, o.api_passphrase);
+    const std::string& resolved_key        = creds.key;
+    const std::string& resolved_secret     = creds.secret;
+    const std::string& resolved_passphrase = creds.passphrase;
+    const bool is_bitget = provider_is_bitget(o.provider_name);
 
     provider_config pcfg;
     if (!primary_path.empty())  pcfg["path"] = primary_path;
     if (!o.symbol.empty())      pcfg["symbol"] = o.symbol;
     if (!o.stream.empty())      pcfg["stream"] = o.stream;
     if (!o.depth_stream.empty()) pcfg["depth_stream"] = o.depth_stream;
-    if (!resolved_key.empty())     pcfg["api_key"] = resolved_key;
-    if (!resolved_secret.empty())  pcfg["api_secret"] = resolved_secret;
+    if (!resolved_key.empty())        pcfg["api_key"] = resolved_key;
+    if (!resolved_secret.empty())     pcfg["api_secret"] = resolved_secret;
+    if (!resolved_passphrase.empty()) pcfg["api_passphrase"] = resolved_passphrase;
     if (!o.host.empty())        pcfg["host"] = o.host;
     if (!o.port.empty())        pcfg["port"] = o.port;
-    if (o.testnet)              pcfg["testnet"] = "1";
+    // Bitget demo/paptrading: --demo or --testnet → pcfg["demo"].
+    // Binance keeps pcfg["testnet"] for its testnet hosts.
+    if (is_bitget)
+    {
+        if (o.demo || o.testnet)
+            pcfg["demo"] = "1";
+    }
+    else if (o.testnet)
+    {
+        pcfg["testnet"] = "1";
+    }
 
     if (!o.mc_params.empty())   pcfg["mc_params"] = o.mc_params;
     if (!o.margin_type.empty()) pcfg["margin_type"] = o.margin_type;
@@ -1605,6 +1669,9 @@ static int run_provider_mode(const cli_options& o)
         std::cerr << "  ! " << e.what() << "\n";
         if (o.provider_name == "binance")
             std::cerr << "    Example: --provider binance --symbol btcusdt --stream trade\n";
+        else if (provider_is_bitget(o.provider_name))
+            std::cerr << "    Example: --provider bitget-futures --symbol BTCUSDT "
+                         "--stream trade\n";
         else if (o.provider_name == "local")
             std::cerr << "    Example: --provider local --path market_data.csv\n";
         else if (o.provider_name == "synthetic" || o.provider_name == "montecarlo")
@@ -1756,14 +1823,18 @@ static int run_provider_mode(const cli_options& o)
     }
 #endif
 
-    if (o.testnet)
-        prov_cfg.backfill_host = "testnet.binance.vision";
-    else if (!o.host.empty())
+    // Binance-only REST backfill hosts; Bitget backfill is provider-owned.
+    if (!is_bitget)
     {
-        if (o.host.find("testnet") != std::string::npos)
+        if (o.testnet)
             prov_cfg.backfill_host = "testnet.binance.vision";
-        else
-            prov_cfg.backfill_host = "api.binance.com";
+        else if (!o.host.empty())
+        {
+            if (o.host.find("testnet") != std::string::npos)
+                prov_cfg.backfill_host = "testnet.binance.vision";
+            else
+                prov_cfg.backfill_host = "api.binance.com";
+        }
     }
 
     if (!o.thread_preset_str.empty())
@@ -1798,10 +1869,10 @@ static int run_provider_mode(const cli_options& o)
         {
             std::cerr << "  ! Live mode is only permitted on the engine_live binary "
                          "(this is " << truetest::target_name() << ").\n";
-            if (o.testnet)
-                std::cerr << "    Testnet still uses the live order code path; "
-                             "build and run engine_live with --testnet to trade "
-                             "on the spot sandbox.\n";
+            if (o.testnet || o.demo)
+                std::cerr << "    Sandbox still uses the live order code path; "
+                             "build and run engine_live with --testnet/--demo "
+                             "to trade on the venue sandbox.\n";
             return 1;
         }
         if (!o.live)
@@ -1809,16 +1880,33 @@ static int run_provider_mode(const cli_options& o)
             std::cerr << "  ! Live mode requires --live flag.\n";
             return 1;
         }
-        if (resolved_key.empty() || resolved_secret.empty())
+        if (resolved_key.empty() || resolved_secret.empty()
+            || (is_bitget && resolved_passphrase.empty()))
         {
-            std::cerr << "  ! Live mode requires credentials via env vars "
-                         "TRUETEST_BINANCE_API_KEY / TRUETEST_BINANCE_API_SECRET "
-                         "(or as a fallback, --api-key / --api-secret).\n";
+            if (is_bitget)
+            {
+                std::cerr << "  ! Live mode requires credentials via env vars "
+                             "TRUETEST_BITGET_API_KEY / TRUETEST_BITGET_API_SECRET / "
+                             "TRUETEST_BITGET_API_PASSPHRASE "
+                             "(or as a fallback, --api-key / --api-secret / "
+                             "--api-passphrase).\n";
+            }
+            else
+            {
+                std::cerr << "  ! Live mode requires credentials via env vars "
+                             "TRUETEST_BINANCE_API_KEY / TRUETEST_BINANCE_API_SECRET "
+                             "(or as a fallback, --api-key / --api-secret).\n";
+            }
             return 1;
         }
-        if (o.testnet)
+        if (o.testnet || o.demo)
         {
-            std::cout << "  [TESTNET] Live mode will submit orders to the Binance spot testnet.\n";
+            if (is_bitget)
+                std::cout << "  [DEMO] Live mode will submit orders to Bitget "
+                             "demo/paptrading.\n";
+            else
+                std::cout << "  [TESTNET] Live mode will submit orders to the "
+                             "Binance spot testnet.\n";
         }
         else
         {
@@ -1826,9 +1914,12 @@ static int run_provider_mode(const cli_options& o)
                 return 0;
         }
     }
-    else if (o.testnet)
+    else if (o.testnet || o.demo)
     {
-        std::cout << "  [TESTNET] Routing Binance provider to the spot testnet.\n";
+        if (is_bitget)
+            std::cout << "  [DEMO] Routing Bitget provider to demo/paptrading.\n";
+        else if (o.testnet)
+            std::cout << "  [TESTNET] Routing Binance provider to the spot testnet.\n";
     }
 
 #ifdef HAS_WEB
@@ -1872,12 +1963,15 @@ static int run_provider_mode(const cli_options& o)
     bool is_tick = (o.format == "tick");
     bool is_streaming = transport->is_streaming();
 
-#ifdef HAS_BINANCE
-    if (o.provider_name == "binance" || is_streaming)
+#if defined(HAS_BINANCE) || defined(HAS_BITGET)
+    if (o.provider_name == "binance"
+        || provider_is_bitget(o.provider_name)
+        || is_streaming)
     {
         if (o.stream.empty() || o.stream == "trade")
             is_tick = true;
-        else if (o.stream.find("kline") != std::string::npos)
+        else if (o.stream.find("kline") != std::string::npos
+                 || o.stream.find("candle") != std::string::npos)
             is_tick = false;
     }
 #endif
@@ -2106,6 +2200,11 @@ static int run_provider_mode(const cli_options& o)
                 parser = std::make_shared<BinanceTradeParser>();
             else
 #endif
+#ifdef HAS_BITGET
+            if (provider_is_bitget(o.provider_name))
+                parser = std::make_shared<BitgetTradeParser>();
+            else
+#endif
                 parser = std::make_shared<CsvTickParser>();
 
             auto bridge = std::make_shared<DataBridge<tick_record>>(
@@ -2120,6 +2219,11 @@ static int run_provider_mode(const cli_options& o)
 #ifdef HAS_BINANCE
             if (o.provider_name == "binance")
                 parser = std::make_shared<BinanceKlineParser>();
+            else
+#endif
+#ifdef HAS_BITGET
+            if (provider_is_bitget(o.provider_name))
+                parser = std::make_shared<BitgetKlineParser>();
             else
 #endif
                 parser = std::make_shared<CsvBarParser>();
@@ -2160,6 +2264,11 @@ static int run_provider_mode(const cli_options& o)
                 parser = std::make_shared<BinanceTradeParser>();
             else
 #endif
+#ifdef HAS_BITGET
+            if (provider_is_bitget(o.provider_name))
+                parser = std::make_shared<BitgetTradeParser>();
+            else
+#endif
                 parser = std::make_shared<CsvTickParser>();
 
             auto bridge = std::make_shared<DataBridge<tick_record>>(
@@ -2177,6 +2286,11 @@ static int run_provider_mode(const cli_options& o)
 #ifdef HAS_BINANCE
             if (o.provider_name == "binance")
                 parser = std::make_shared<BinanceKlineParser>();
+            else
+#endif
+#ifdef HAS_BITGET
+            if (provider_is_bitget(o.provider_name))
+                parser = std::make_shared<BitgetKlineParser>();
             else
 #endif
                 parser = std::make_shared<CsvBarParser>();
