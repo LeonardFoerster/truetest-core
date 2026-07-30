@@ -173,7 +173,16 @@ public:
         if (transport_thread_.joinable())
             transport_thread_.join();
 
-        if (d_.fill_tx)  d_.fill_tx->close();
+        // Drop fill-tx callbacks before close so late/reused transport
+        // messages cannot call into a destroyed bridge (ctor captures
+        // [this]). Destructor calls close() first; this is the revoke
+        // path for both explicit close and dtor teardown.
+        if (d_.fill_tx)
+        {
+            d_.fill_tx->set_on_message({});
+            d_.fill_tx->set_on_status({});
+            d_.fill_tx->close();
+        }
         if (d_.order_tx) d_.order_tx->close();
     }
 
