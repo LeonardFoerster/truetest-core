@@ -290,6 +290,18 @@ public:
     {
         state_ = lifecycle::opening;
 
+        // Classic mix/v2 is Phase 4 deferred — only empty/"uta" allowed.
+        // Checked here so direct set_api_surface() cannot bypass register.
+        if (!api_surface_is_uta(api_surface_))
+        {
+            std::cerr << "BitgetFuturesProvider: refusing open — "
+                         "api_surface='" << api_surface_
+                      << "' is not implemented (only empty/'uta'). "
+                         "Classic mix/v2 is Phase 4 deferred.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
+
         // Risk check before mode dispatch — applies in shadow/paper/live.
         if (rc_cfg_.max_notional_usdt > 0.0
             || rc_cfg_.max_leverage > 0.0
@@ -345,6 +357,11 @@ public:
         {
             if (!open_live_path())
             {
+                // Partial live setup (bridge / private WS / DMS arm) must not
+                // leak: main.inc only installs the close-guard after open()
+                // returns true. close() stops+disarms DMS and tears down
+                // bridge/private/public transports.
+                close();
                 state_ = lifecycle::error;
                 return false;
             }
@@ -370,6 +387,10 @@ public:
 
         if (!live_transport->open())
         {
+            // Public WS fail after open_live_path() (DMS may already be armed)
+            // would leave the account-wide countdown running unless we
+            // stop+disarm here. Same full teardown as close().
+            close();
             state_ = lifecycle::error;
             return false;
         }
@@ -467,8 +488,10 @@ public:
         return !depth_stream_.empty();
     }
 
-    // Phase 0: BitgetCombinedParser returns first trade only per publicTrade
-    // frame (multi-trade data[] → see bitget::parse_all_trades).
+    // Phase 0 / deferred multi-emit: BitgetCombinedParser returns first trade
+    // only per publicTrade frame. Multi-trade data[] batch emit needs a
+    // multi-record parser surface (IDataParser is single-event); use
+    // bitget::parse_all_trades when that lands. Not a live-safety issue.
     std::shared_ptr<IDataParser<provider::event>> get_event_parser() override
     {
         if (depth_stream_.empty()) return nullptr;
@@ -769,6 +792,16 @@ private:
             bitget_combined_transport_->set_fatal_disconnect_callback(halt_cb_);
         if (bitget_private_ws_)
             bitget_private_ws_->set_fatal_disconnect_callback(halt_cb_);
+    }
+
+    // Empty or "uta" (any case) → allowed. Everything else → refuse.
+    static bool api_surface_is_uta(std::string_view surface)
+    {
+        if (surface.empty()) return true;
+        if (surface.size() != 3) return false;
+        return (surface[0] == 'u' || surface[0] == 'U')
+            && (surface[1] == 't' || surface[1] == 'T')
+            && (surface[2] == 'a' || surface[2] == 'A');
     }
 
     static std::string upper(const std::string& s)

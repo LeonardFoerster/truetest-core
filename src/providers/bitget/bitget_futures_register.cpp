@@ -4,6 +4,8 @@
 #include "providers/bitget/bitget_futures_provider.h"
 #include "providers/bitget/bitget_endpoints.h"
 
+#include <cctype>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -69,7 +71,24 @@ std::shared_ptr<IProvider> make_bitget_futures(const provider_config& cfg)
 
     auto surface = get("api_surface");
     if (!surface.empty())
+    {
+        // Only UTA is implemented (Phase 0–3). Classic mix/v2 = Phase 4.
+        std::string lower;
+        lower.reserve(surface.size());
+        for (unsigned char c : surface)
+            lower.push_back(static_cast<char>(std::tolower(c)));
+        if (lower != "uta")
+        {
+            std::cerr << "bitget-futures: refusing api_surface='" << surface
+                      << "' — only empty/'uta' is implemented "
+                         "(classic mix/v2 is Phase 4 deferred).\n";
+            throw std::runtime_error(
+                "bitget-futures: api_surface='" + surface
+                + "' is not implemented (only 'uta' or omit). "
+                  "Classic mix/v2 is Phase 4 deferred.");
+        }
         provider->set_api_surface(surface);
+    }
 
     // Optional advisory inputs.
     auto margin_type = get("margin_type");

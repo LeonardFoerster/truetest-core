@@ -125,6 +125,43 @@ TEST(BitgetFuturesRegister, PassphraseStored)
     EXPECT_EQ(p->api_passphrase(), "secret-pass");
 }
 
+// Classic / unknown surface is Phase 4 — register must refuse loudly.
+TEST(BitgetFuturesRegister, RefusesNonUtaApiSurface)
+{
+    provider_config cfg;
+    cfg["symbol"]      = "BTCUSDT";
+    cfg["api_surface"] = "classic";
+    EXPECT_THROW(
+        ProviderRegistry::instance().create("bitget-futures", cfg),
+        std::runtime_error);
+}
+
+TEST(BitgetFuturesRegister, AcceptsUtaApiSurfaceCaseInsensitive)
+{
+    provider_config cfg;
+    cfg["symbol"]      = "BTCUSDT";
+    cfg["api_surface"] = "UTA";
+    auto p = create(cfg);
+    ASSERT_NE(p, nullptr);
+}
+
+// Direct set_api_surface bypass of register still refused at open().
+TEST(BitgetFuturesRegister, OpenRefusesNonUtaApiSurface)
+{
+    provider_config cfg;
+    cfg["symbol"] = "BTCUSDT";
+    auto p = create(cfg);
+    ASSERT_NE(p, nullptr);
+    p->set_api_surface("classic");
+
+    engine_config ec;
+    ec.mode = engine_mode::backtest;
+    p->configure(ec);
+
+    EXPECT_FALSE(p->open());
+    EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
+}
+
 TEST(BitgetFuturesRegister, HasDataAndExecution)
 {
     provider_config cfg;
