@@ -192,6 +192,24 @@ public:
             : make_client_id(o.get_order_id());
         auto enc = d_.encoder->encode_submit(o, client_id);
 
+        // Empty encode (stop types, bad clientOid, missing symbol) must not
+        // POST an empty path or leave a phantom tracked order.
+        if (enc.endpoint.empty())
+        {
+            set_error("ExecutionBridge: encoder refused submit (empty endpoint)");
+            submit_result sr;
+            sr.engine_id = o.get_order_id();
+            sr.symbol = o.get_symbol();
+            sr.error = "encoder refused submit (empty endpoint)";
+            sr.op = submit_result::operation::submit;
+            sr.ok = false;
+            {
+                std::lock_guard<std::mutex> lk(submit_results_mu_);
+                pending_submit_results_.push_back(std::move(sr));
+            }
+            return;
+        }
+
         tracked_order t;
         t.engine_id = o.get_order_id();
         t.client_id = client_id;
@@ -377,10 +395,19 @@ private:
             total_qty = eit->second.total_qty;
             tracked_cumulative = eit->second.cumulative_qty;
 
+            // Complete when venue says full_fill OR cumulative covers the
+            // tracked total (fill-channel venues that never emit full_fill,
+            // and dual-channel paths that demote order-channel filled→other).
+            constexpr double k_qty_eps = 1e-12;
+            const bool qty_complete =
+                (total_qty > 0.0
+                 && tracked_cumulative + k_qty_eps >= total_qty);
+
             if (msg.k == parsed_exec::kind::full_fill   ||
                 msg.k == parsed_exec::kind::canceled    ||
                 msg.k == parsed_exec::kind::rejected    ||
-                msg.k == parsed_exec::kind::expired)
+                msg.k == parsed_exec::kind::expired     ||
+                qty_complete)
             {
                 by_client_id_.erase(msg.client_order_id);
                 by_engine_id_.erase(engine_id);
@@ -392,9 +419,9 @@ private:
             return;
 
         // Venue-agnostic: order-status channels often emit full_fill /
-        // partial_fill with last_fill_qty==0 (lifecycle only). Untrack
-        // already ran above for full_fill; skip zero-qty fill_event so
-        // dual-channel venues (e.g. Bitget order+fill) do not invent fills.
+        // partial_fill with last_fill_qty==0 (lifecycle only). Skip
+        // zero-qty fill_event so dual-channel venues do not invent fills.
+        // (Untrack for terminal/qty-complete already ran above.)
         if (msg.last_fill_qty <= 0.0)
             return;
 
@@ -621,6 +648,28 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
         sr.error = res.ok ? "" : res.error;
         sr.op = submit_result::operation::cancel;
         sr.ok = res.ok;
+        {
+            std::lock_guard<std::mutex> lk(submit_results_mu_);
+            pending_submit_results_.push_back(std::move(sr));
+        }
+        return;
+    }
+
+    if (req.endpoint.empty())
+    {
+        set_error("submit failed: empty endpoint");
+        {
+            std::lock_guard<std::mutex> lk(map_mu_);
+            by_engine_id_.erase(req.engine_id);
+            if (!req.client_id.empty())
+                by_client_id_.erase(req.client_id);
+        }
+        submit_result sr;
+        sr.engine_id = req.engine_id;
+        sr.symbol = req.symbol;
+        sr.error = "empty endpoint";
+        sr.op = submit_result::operation::submit;
+        sr.ok = false;
         {
             std::lock_guard<std::mutex> lk(submit_results_mu_);
             pending_submit_results_.push_back(std::move(sr));

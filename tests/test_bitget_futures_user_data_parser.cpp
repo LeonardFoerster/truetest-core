@@ -158,7 +158,9 @@ TEST(BitgetFuturesUserDataParser, OrderStatusFilled)
     BitgetFuturesUserDataParser p;
     parsed_exec out;
     ASSERT_TRUE(p.parse(order_push("filled", "1.0"), out));
-    EXPECT_EQ(out.k, parsed_exec::kind::full_fill);
+    // Order channel last_fill=0 → demote filled→other so bridge does not
+    // untrack before fill-channel slices arrive (dual-channel race).
+    EXPECT_EQ(out.k, parsed_exec::kind::other);
     EXPECT_DOUBLE_EQ(out.cumulative_qty, 1.0);
     EXPECT_DOUBLE_EQ(out.last_fill_qty, 0.0);
 }

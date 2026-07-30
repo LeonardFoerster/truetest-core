@@ -333,8 +333,7 @@ TEST(ExecutionBridge, UnknownClientIdDropsFill)
     EXPECT_FALSE(h.bridge->poll_fills(fills));
 }
 
-// Dual-channel venues (Bitget order+fill) emit full_fill with last_fill_qty=0
-// for lifecycle untrack. Bridge must untrack without inventing a zero-qty fill.
+// Zero-qty full_fill still untracks (terminal kind) but emits no fill_event.
 TEST(ExecutionBridge, ZeroQtyFullFillUntracksWithoutFillEvent)
 {
     bridge_harness h;
@@ -362,8 +361,68 @@ TEST(ExecutionBridge, ZeroQtyPartialFillEmitsNothing)
     std::vector<fill_event> fills;
     EXPECT_FALSE(h.bridge->poll_fills(fills));
 
-    // Still tracked (partial is non-terminal) — cancel should find it
+    // Still tracked (partial is non-terminal and qty incomplete)
     EXPECT_TRUE(h.bridge->cancel_order(22));
+}
+
+// Fill-channel style: only partial_fill slices; untrack when cumulative
+// covers total_qty (no full_fill message required).
+TEST(ExecutionBridge, PartialFillsUntrackWhenCumulativeComplete)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+
+    h.bridge->submit_order(make_order(23, "BTCUSDT", 1.0, 50000.0));
+    h.ft->deliver("partial|tt-23|EX-23|BTCUSDT|buy|0.4|50000");
+    h.ft->deliver("partial|tt-23|EX-23|BTCUSDT|buy|0.6|50000");
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(h.bridge->poll_fills(fills));
+    ASSERT_EQ(fills.size(), 2u);
+    EXPECT_DOUBLE_EQ(fills[0].get_filled_quantity(), 0.4);
+    EXPECT_DOUBLE_EQ(fills[1].get_filled_quantity(), 0.6);
+
+    // Fully filled via cumulative — mapping cleared
+    EXPECT_FALSE(h.bridge->cancel_order(23));
+}
+
+TEST(ExecutionBridge, EmptyEncodeRefusesSubmit)
+{
+    class EmptyEncoder : public IOrderEncoder
+    {
+    public:
+        encoded_order encode_submit(const order_event&,
+                                    std::string_view) override
+        {
+            return {}; // empty endpoint
+        }
+        encoded_order encode_cancel(std::string_view, std::string_view,
+                                    std::string_view) override
+        {
+            return {};
+        }
+    };
+
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<EmptyEncoder>();
+    auto pa = std::make_shared<FakeParser>();
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.encoder = en;
+    d.parser = pa;
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    bridge.submit_order(make_order(99, "BTCUSDT", 1.0, 100.0));
+    bridge.drain_outbound_for_test();
+
+    EXPECT_NE(bridge.last_error().find("empty endpoint"), std::string::npos);
+    EXPECT_TRUE(tx->submissions_.empty());
+    // Never tracked
+    EXPECT_FALSE(bridge.cancel_order(99));
 }
 
 TEST(ExecutionBridge, StatusTransitionsDrainable)

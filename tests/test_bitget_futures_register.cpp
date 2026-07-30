@@ -217,6 +217,36 @@ TEST(BitgetOneWayHoldMode, RefusesMissing)
     EXPECT_NE(note.find("holdMode"), std::string::npos);
 }
 
+TEST(BitgetMarginTypeStrict, MatchPasses)
+{
+    const char* body =
+        R"({"code":"00000","data":{"holdMode":"one_way_mode",)"
+        R"("symbolConfigList":[{"symbol":"BTCUSDT","marginMode":"crossed"}]}})";
+    EXPECT_TRUE(bitget::check_margin_type_strict(
+        body, "BTCUSDT", "CROSSED").empty());
+    EXPECT_TRUE(bitget::check_margin_type_strict(
+        body, "BTCUSDT", "crossed").empty());
+}
+
+TEST(BitgetMarginTypeStrict, MismatchRefuses)
+{
+    const char* body =
+        R"({"code":"00000","data":{"symbolConfigList":[)"
+        R"({"symbol":"BTCUSDT","marginMode":"isolated"}]}})";
+    auto note = bitget::check_margin_type_strict(body, "BTCUSDT", "CROSSED");
+    EXPECT_NE(note.find("margin-type-strict"), std::string::npos);
+    EXPECT_NE(note.find("ISOLATED"), std::string::npos);
+}
+
+TEST(BitgetMarginTypeStrict, MissingSymbolRefuses)
+{
+    const char* body =
+        R"({"code":"00000","data":{"symbolConfigList":[)"
+        R"({"symbol":"ETHUSDT","marginMode":"crossed"}]}})";
+    auto note = bitget::check_margin_type_strict(body, "BTCUSDT", "CROSSED");
+    EXPECT_NE(note.find("not found"), std::string::npos);
+}
+
 TEST(BitgetShortClientOidMinter, FitsCharsetAndLength)
 {
     bitget::ShortClientOidMinter m(/*seed=*/0xdeadbeefull, /*epoch_ms=*/1'700'000'000'000);

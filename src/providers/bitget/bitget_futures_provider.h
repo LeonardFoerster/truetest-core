@@ -113,6 +113,74 @@ inline std::string check_one_way_hold_mode(std::string_view body)
     return "account/settings unknown holdMode '" + std::string(hold) + "'";
 }
 
+// Canonicalize margin mode for comparison (crossed/cross → CROSSED, etc.).
+inline std::string canonical_margin_mode(std::string_view mode)
+{
+    if (mode.empty()) return {};
+    std::string lower;
+    lower.reserve(mode.size());
+    for (unsigned char c : mode)
+        lower.push_back(static_cast<char>(std::tolower(c)));
+    if (lower == "crossed" || lower == "cross" || lower == "c")
+        return "CROSSED";
+    if (lower == "isolated" || lower == "isola" || lower == "i")
+        return "ISOLATED";
+    // Already canonical or unknown — upper-case for compare.
+    std::string up;
+    up.reserve(mode.size());
+    for (unsigned char c : mode)
+        up.push_back(static_cast<char>(std::toupper(c)));
+    return up;
+}
+
+// Extract marginMode for symbol from account/settings body
+// (data.symbolConfigList[]). Empty if not found.
+inline std::string extract_symbol_margin_mode(std::string_view body,
+                                              std::string_view want_symbol)
+{
+    auto arr = detail::extract_array(body, "symbolConfigList");
+    if (arr.empty()) return {};
+    std::string found;
+    detail::for_each_array_object(arr, [&](std::string_view obj) {
+        if (!found.empty()) return;
+        auto sym = extract_sv_string(obj, "symbol");
+        if (sym != want_symbol) return;
+        auto mm = extract_sv_string(obj, "marginMode");
+        if (mm.empty())
+            mm = extract_sv_string(obj, "marginType");
+        found.assign(mm.data(), mm.size());
+    });
+    return found;
+}
+
+// Strict margin gate. Empty = pass. Non-empty = refuse reason.
+// Fail-closed: missing symbol config or mismatch refuses.
+inline std::string check_margin_type_strict(std::string_view settings_body,
+                                            std::string_view symbol,
+                                            std::string_view expected_margin)
+{
+    if (expected_margin.empty()) return {};
+    const std::string want = canonical_margin_mode(expected_margin);
+    if (want.empty()) return {};
+
+    const std::string raw = extract_symbol_margin_mode(settings_body, symbol);
+    if (raw.empty())
+    {
+        return "margin-type-strict: symbol '" + std::string(symbol)
+             + "' marginMode not found in account/settings "
+               "symbolConfigList (cannot enforce expected="
+             + want + ")";
+    }
+    const std::string got = canonical_margin_mode(raw);
+    if (got != want)
+    {
+        return "margin-type-strict: symbol '" + std::string(symbol)
+             + "' marginMode=" + got + " (venue raw='" + raw
+             + "') does not match expected " + want;
+    }
+    return {};
+}
+
 } // namespace bitget
 
 class BitgetFuturesProvider : public IProvider
@@ -537,15 +605,20 @@ private:
                           << hold_err << "\n";
                 return false;
             }
-        }
 
-        // Optional margin_type_strict: no advisory helpers yet (Task 9).
-        if (margin_type_strict_ && !expected_margin_type_.empty())
-        {
-            std::cerr << "  BitgetFuturesProvider: --margin-type-strict set "
-                         "but advisory helpers not yet wired; skipping strict "
-                         "margin gate (expected="
-                      << expected_margin_type_ << ")\n";
+            // Strict margin gate (fail-closed) via same settings body.
+            // Missing symbolConfigList entry or mismatch → refuse open.
+            if (margin_type_strict_ && !expected_margin_type_.empty())
+            {
+                auto mm_err = bitget::check_margin_type_strict(
+                    resp.body, upper(symbol_), expected_margin_type_);
+                if (!mm_err.empty())
+                {
+                    std::cerr << "BitgetFuturesProvider: refusing to go live — "
+                              << mm_err << "\n";
+                    return false;
+                }
+            }
         }
 
         minter_ = std::make_shared<bitget::ShortClientOidMinter>(seed_);
