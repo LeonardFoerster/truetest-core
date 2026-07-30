@@ -1435,10 +1435,11 @@ static int run_replay_mode(const cli_options& o)
     cfg.log_max_files = o.log_keep;
 
     auto dh = std::make_shared<data_handler>();
-    engine eng(dh, nullptr, strategy, std::move(cfg));
-    eng.run_replay(o.replay_path, o.replay_from_us, o.replay_to_us);
-    eng.print_summary();
-    export_results(eng.get_analytics(), o.output, o.output_format);
+    // engine embeds multi-MiB ObjectPools — never stack-allocate (8 MiB default RLIMIT_STACK).
+    auto eng = std::make_unique<engine>(dh, nullptr, strategy, std::move(cfg));
+    eng->run_replay(o.replay_path, o.replay_from_us, o.replay_to_us);
+    eng->print_summary();
+    export_results(eng->get_analytics(), o.output, o.output_format);
     return 0;
 }
 
@@ -2126,17 +2127,18 @@ static int run_provider_mode(const cli_options& o)
 
     if (is_streaming)
     {
-        engine eng(dh, nullptr, prov_strategy, std::move(prov_cfg));
-        eng.set_primary_strategy_name(resolved);
+        // engine embeds multi-MiB ObjectPools — heap only (default stack is 8 MiB).
+        auto eng = std::make_unique<engine>(dh, nullptr, prov_strategy, std::move(prov_cfg));
+        eng->set_primary_strategy_name(resolved);
         for (auto& es : extra_strategies)
-            eng.add_strategy(es.second, es.first);
+            eng->add_strategy(es.second, es.first);
 
         install_shutdown_handler();
 
 #ifdef HAS_WEB
         // Streams live snapshots over /stream for the duration of the run;
         // stopped when web_srv leaves scope at the end of this branch.
-        auto web_srv = start_web(eng);
+        auto web_srv = start_web(*eng);
 #endif
 
 #ifdef HAS_RICH_TUI
@@ -2151,7 +2153,7 @@ static int run_provider_mode(const cli_options& o)
             && dashboard->is_tui())
         {
             auto snap_fn = [&eng](truetest::ui::dashboard_snapshot& out) {
-                bool ok = eng.snapshot_dashboard(out);
+                bool ok = eng->snapshot_dashboard(out);
                 if (ok) out.debug.target = truetest::target_name();
                 return ok;
             };
@@ -2163,10 +2165,10 @@ static int run_provider_mode(const cli_options& o)
             // (Binance does - backtest does not).
             truetest::ui::operator_actions ops;
             ops.pause_toggle = [&eng]() {
-                eng.set_pause_all(!eng.is_pause_all());
+                eng->set_pause_all(!eng->is_pause_all());
             };
-            ops.pause_state  = [&eng]() { return eng.is_pause_all(); };
-            ops.flatten      = [&eng]() { eng.request_flatten(); };
+            ops.pause_state  = [&eng]() { return eng->is_pause_all(); };
+            ops.flatten      = [&eng]() { eng->request_flatten(); };
             if (provider) {
                 if (auto ks = provider->get_kill_switch()) {
                     ops.kill = [ks](std::chrono::milliseconds dl) {
@@ -2210,7 +2212,7 @@ static int run_provider_mode(const cli_options& o)
             auto parser = provider->get_event_parser();
             auto bridge = std::make_shared<DataBridge<provider::event>>(
                 transport, parser, provider::event_sink);
-            eng.run_streaming(bridge);
+            eng->run_streaming(bridge);
         }
         else if (is_tick)
         {
@@ -2225,7 +2227,7 @@ static int run_provider_mode(const cli_options& o)
             auto bridge = std::make_shared<DataBridge<tick_record>>(
                 transport, parser, tick_record_sink);
             g_tick_bridge.store(bridge.get(), std::memory_order_release);
-            eng.run_streaming(bridge);
+            eng->run_streaming(bridge);
             g_tick_bridge.store(nullptr, std::memory_order_release);
         }
         else
@@ -2241,7 +2243,7 @@ static int run_provider_mode(const cli_options& o)
             auto bridge = std::make_shared<DataBridge<bar_record>>(
                 transport, parser, bar_record_sink);
             g_bar_bridge.store(bridge.get(), std::memory_order_release);
-            eng.run_streaming(bridge);
+            eng->run_streaming(bridge);
             g_bar_bridge.store(nullptr, std::memory_order_release);
         }
 
@@ -2260,8 +2262,8 @@ static int run_provider_mode(const cli_options& o)
         // windows" complaint. Non-TUI runs still print it. File export
         // via --output is unaffected in either case.
         if (!dashboard || !dashboard->is_tui())
-            eng.print_summary();
-        export_results(eng.get_analytics(), o.output, o.output_format);
+            eng->print_summary();
+        export_results(eng->get_analytics(), o.output, o.output_format);
         opened_provider.release();
     }
     else
@@ -2327,18 +2329,19 @@ static int run_provider_mode(const cli_options& o)
             }
         }
 
-        engine eng(dh, nullptr, prov_strategy, std::move(prov_cfg));
-        eng.set_primary_strategy_name(resolved);
+        // engine embeds multi-MiB ObjectPools — heap only (default stack is 8 MiB).
+        auto eng = std::make_unique<engine>(dh, nullptr, prov_strategy, std::move(prov_cfg));
+        eng->set_primary_strategy_name(resolved);
         for (auto& es : extra_strategies)
-            eng.add_strategy(es.second, es.first);
+            eng->add_strategy(es.second, es.first);
 
         if (is_tick)
-            eng.run_tick_data();
+            eng->run_tick_data();
         else
-            eng.run();
+            eng->run();
 
-        eng.print_summary();
-        export_results(eng.get_analytics(), o.output, o.output_format);
+        eng->print_summary();
+        export_results(eng->get_analytics(), o.output, o.output_format);
         opened_provider.release();
 
 #ifdef HAS_WEB
@@ -2346,7 +2349,7 @@ static int run_provider_mode(const cli_options& o)
         // can review the final report in the browser until they Ctrl-C.
         if (o.web)
         {
-            auto web_srv = start_web(eng);
+            auto web_srv = start_web(*eng);
             if (web_srv && web_srv->running())
             {
                 std::signal(SIGINT,  [](int) { g_web_stop.store(true, std::memory_order_release); });
@@ -2721,10 +2724,11 @@ static int run_tui_configured_engine(const cli_options& o,
         return 1;
     }
 
-    engine eng(dh, nullptr, strategy, std::move(config));
-    eng.run();
-    eng.print_summary();
-    export_results(eng.get_analytics(), o.output, o.output_format);
+    // engine embeds multi-MiB ObjectPools — heap only (default stack is 8 MiB).
+    auto eng = std::make_unique<engine>(dh, nullptr, strategy, std::move(config));
+    eng->run();
+    eng->print_summary();
+    export_results(eng->get_analytics(), o.output, o.output_format);
 
     return 0;
 }

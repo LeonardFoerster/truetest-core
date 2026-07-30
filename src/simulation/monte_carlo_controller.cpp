@@ -145,18 +145,19 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
     // Latency / impact can be wired here in later phases using the existing model classes
     // when McRunConfig exposes more detailed realism knobs.
 
-    // 5. Construct engine (still fresh construction in Phase A)
-    engine eng(dh, nullptr, strategy, std::move(ecfg));
+    // 5. Construct engine (still fresh construction in Phase A).
+    // engine embeds multi-MiB ObjectPools — never stack-allocate (8 MiB default stack).
+    auto eng = std::make_unique<engine>(dh, nullptr, strategy, std::move(ecfg));
 
     // Run the backtest
     if (!path.bars.empty()) {
-        eng.run();
+        eng->run();
     } else if (!path.ticks.empty()) {
-        eng.run_tick_data();
+        eng->run_tick_data();
     }
 
     // 6. Extract key metrics
-    const auto& analytics = eng.get_analytics();
+    const auto& analytics = eng->get_analytics();
     auto report = analytics.snapshot();   // or generate_report()
 
     result.initial_equity = report.initial_equity;
