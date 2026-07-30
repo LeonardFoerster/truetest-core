@@ -780,7 +780,9 @@ inline std::optional<bar_record> parse_kline_record(std::string_view json)
 {
     auto b = parse_kline(json);
     if (!b) return std::nullopt;
-    return to_bar_record(*b);
+    // Qualify: provider::to_bar_record also exists via provider_convert.h
+    // when this header is pulled into main.inc with ENABLE_BITGET.
+    return bitget::to_bar_record(*b);
 }
 
 // ---------------------------------------------------------------------------
