@@ -147,6 +147,20 @@ public:
     void on_event(const event_pointer& ev) override;
     void on_funding(const funding_event& fe);   // Phase 2.1
 
+    // Lightweight synchronous mark-to-market for the engine's hot path when
+    // full analytics runs on a worker thread: keeps risk_view()'s equity and
+    // drawdown current (and identical to inline mode) without the per-event
+    // heavy work (equity curve, return stats, benchmark) the worker does.
+    void on_mark(const std::string& symbol, double price)
+    {
+        if (!symbol.empty() && price > 0.0)
+            books_[symbol].last_mark = price;
+        last_close_ = price;
+        const double equity = mark_to_market_equity();
+        last_equity_ = equity;
+        update_peak_drawdown(equity);
+    }
+
     // Phase 2.4 - allow external update of the current 8h funding rate
     // (called from provider when better funding rate data is available)
     void set_current_funding_rate_8h(double rate) { current_funding_8h_rate_ = rate; }
@@ -339,7 +353,11 @@ private:
 
     welford_state return_stats_;
 
-    welford_state downside_stats_;
+    // Sum over ALL return periods of min(r - MAR, 0)^2; downside deviation
+    // for Sortino is sqrt(downside_sq_sum_ / return_stats_.n). (A Welford
+    // stddev over only the negative returns ignores the loss level and uses
+    // the wrong observation count.)
+    double downside_sq_sum_ = 0.0;
 
     double peak_equity_ = 0.0;
     double max_drawdown_ = 0.0;

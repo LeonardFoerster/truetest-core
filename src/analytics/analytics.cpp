@@ -22,7 +22,9 @@ Analytics::Analytics(double initial_cash, std::size_t rolling_window, double ris
       rolling_window_(rolling_window), risk_free_rate_(risk_free_rate),
       periods_per_year_(periods_per_year > 0 ? periods_per_year : 252),
       max_equity_points_(max_equity_points > 4 ? max_equity_points : 4),
-      prev_equity_(initial_cash), last_equity_(initial_cash), peak_equity_(initial_cash) {}
+      // last_equity_ stays 0 until the first market/tick/fill mark so risk_view
+      // does not pretend a mark-to-market has already run.
+      prev_equity_(initial_cash), peak_equity_(initial_cash) {}
 
 void Analytics::reserve_hint(std::size_t expected_bars)
 {
@@ -98,9 +100,9 @@ void Analytics::reset(double initial_cash)
     trades_.clear();
     trade_returns_.clear();
 
-    // Seed equity so risk_view() / max_position_pct_of_equity work before the
-    // first market or funding event (previously stayed 0 and fail-opened).
-    last_equity_ = initial_cash;
+    // Match ctor: stay 0 until the first market/tick/fill mark so risk_view
+    // does not claim a mark-to-market before any price is observed.
+    last_equity_ = 0.0;
     realized_vol_1h_ = 0.0;
     last_mid_price_ = 0.0;
     current_spread_bps_ = 0.0;
@@ -130,7 +132,7 @@ void Analytics::reset(double initial_cash)
     per_strategy_.clear();
 
     return_stats_.reset();
-    downside_stats_.reset();
+    downside_sq_sum_ = 0.0;
 
     peak_equity_ = initial_cash;
     max_drawdown_ = 0.0;
@@ -277,7 +279,10 @@ void Analytics::on_market(const market_event& m)
         strategy_returns_.push_back(strat_ret);
 
         return_stats_.update(strat_ret);
-        if (strat_ret < 0.0) downside_stats_.update(strat_ret);
+        const double mar = (periods_per_year_ > 0)
+            ? risk_free_rate_ / static_cast<double>(periods_per_year_) : 0.0;
+        const double shortfall = strat_ret - mar;
+        if (shortfall < 0.0) downside_sq_sum_ += shortfall * shortfall;
 
         if (have_bh_now && prev_bh_equity_ > 0.0)
         {
@@ -657,16 +662,14 @@ AnalyticsReport Analytics::snapshot() const
         double excess_mean = return_stats_.mean - rf_per_period;
         r.sharpe_ratio = (return_stats_.stddev() > 0.0)
             ? (excess_mean / return_stats_.stddev()) * ann_factor : 0.0;
-    }
-    if (downside_stats_.n > 1)
-    {
-        double excess_mean = return_stats_.mean - rf_per_period;
-        r.sortino_ratio = (downside_stats_.stddev() > 0.0)
-            ? (excess_mean / downside_stats_.stddev()) * ann_factor : 0.0;
-    }
-    else if (return_stats_.n > 1 && return_stats_.mean > rf_per_period)
-    {
-        r.sortino_ratio = 1e9;
+
+        // Downside deviation over ALL periods: sqrt(mean of min(r - MAR, 0)^2).
+        double downside_dev = std::sqrt(
+            downside_sq_sum_ / static_cast<double>(return_stats_.n));
+        if (downside_dev > 0.0)
+            r.sortino_ratio = (excess_mean / downside_dev) * ann_factor;
+        else if (excess_mean > 0.0)
+            r.sortino_ratio = 1e9;   // no downside observed at all
     }
 
     r.max_drawdown = max_drawdown_ * 100.0;
