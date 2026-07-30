@@ -2821,6 +2821,10 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                             timestamp, event_count, halt);
         sweep_resting_limits(mkt.get_symbol(), mkt.get_low(), mkt.get_high(),
                              timestamp, event_count, halt);
+        // Match tick/history paths: do not generate new MM/provider fills
+        // after a terminal halt on this bar.
+        if (halt || halt_flag_.load(std::memory_order_acquire))
+            return;
     }
 
     auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
