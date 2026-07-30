@@ -1517,9 +1517,13 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         if (risk_check_)
         {
             // Symbol-bound mark: never feed another symbol's mid into
-            // FuturesRiskCheck notional/leverage (mark==0 → check skips).
-            auto vd = risk_check_->evaluate(*o, portfolio_,
-                                            mark_for_symbol(o->get_symbol()));
+            // FuturesRiskCheck notional/leverage. Prefer last mid for the
+            // order symbol; fall back to a positive limit price so market
+            // opens are not permanently skip-on-zero when L2/tick mid is late.
+            double mark = mark_for_symbol(o->get_symbol());
+            if (mark <= 0.0 && o->get_price() > 0.0)
+                mark = o->get_price();
+            auto vd = risk_check_->evaluate(*o, portfolio_, mark);
             if (!vd.allow)
             {
                 const std::string reason_str =
@@ -1546,6 +1550,9 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         }
 
         auto snap = analytics_.risk_view();
+        // True resting inventory (pending|open|partial) — not orders-fills.
+        snap.active_orders = order_tracker_.active_count();
+        snap.active_orders_valid = true;
         auto action = risk_manager_.check_order(*o, portfolio_, snap);
         if (action == risk_action::halt || action == risk_action::reject)
         {
@@ -1867,6 +1874,16 @@ void engine::apply_l2_snapshot(const std::string& symbol,
     ob->apply_l2_snapshot(ob_bids.data(), n_bids, ob_asks.data(), n_asks);
     refresh_top_of_book_atomics(*ob);
 
+    // Seed per-symbol mid from BBO so FuturesRiskCheck is not skip-on-zero
+    // for pure-L2 / depth-before-trade streams.
+    if (n_bids > 0 && n_asks > 0)
+    {
+        const double bid = bids[0].price;
+        const double ask = asks[0].price;
+        if (bid > 0.0 && ask > bid)
+            note_mark_price(symbol, 0.5 * (bid + ask));
+    }
+
     // Forward L2 to execution adapters so QueueAwareBookAdapter (paper) and
     // TradeTapeShadowAdapter (shadow queue model) can maintain level aggregates
     // / queue_ahead. Central place for all L2-driven paths (direct apply, replay,
@@ -1896,6 +1913,20 @@ void engine::apply_l2_update(const std::string& symbol,
     ob->apply_l2_update(ob_side, Price::from_double(price),
                         static_cast<quantity>(new_qty));
     refresh_top_of_book_atomics(*ob);
+
+    // Keep mark warm from L2 book BBO after incremental updates.
+    {
+        const auto infos = ob->get_order_infos();
+        const auto& bb = infos.get_bids();
+        const auto& ba = infos.get_asks();
+        if (!bb.empty() && !ba.empty())
+        {
+            const double bid = bb.front().price_.to_double();
+            const double ask = ba.front().price_.to_double();
+            if (bid > 0.0 && ask > bid)
+                note_mark_price(symbol, 0.5 * (bid + ask));
+        }
+    }
 
     // Forward L2 update to adapters for queue models (see apply_l2_snapshot).
     const order_side os = (ts_side == tick_side::bid) ? order_side::buy : order_side::sell;
@@ -2070,7 +2101,10 @@ bool engine::route_order(order_event& order,
         return true;
     }
 
-    if (config_.execution_bar_delay > 0)
+    // Strategy entries: delay one bar to avoid look-ahead fills at bar close.
+    // Exit/bracket closes (opener_order_id set) and stop-triggered markets
+    // must not inherit that delay — they already fire at a known trigger px.
+    if (config_.execution_bar_delay > 0 && order.get_opener_order_id() == 0)
     {
         order.set_earliest_eligible_ts(sim_time + std::chrono::nanoseconds(1));
         pending_orders_.push({acquire_pooled(order_pool_,order), order_seq_++});
