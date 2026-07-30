@@ -42,7 +42,7 @@ Aspirational items (e.g. full architecture/ , operations/ SOPs) use "Planned for
 
 **docs/ is now the central authoritative documentation home.** (See REORG plan; this pass is slim+pointers+links only.)
 
-**Build system note (2026-07):** Source lists were extracted to `cmake/Sources.cmake` (single obvious registration point). `CMakePresets.json` now includes many practical combinations (`linux-tests`, `linux-binance-questdb`, `linux-asan`, etc.). Classic `cmake -B build ...` commands are unchanged. See `reference/01-instructions.md` §5.
+**Build system note (2026-07, hygiene 2026-07-30):** Source lists live in `cmake/Sources.cmake` (single obvious registration point for core + tests). Optional backends stay in `cmake/Dependencies.cmake`. `CMakePresets.json` covers common combos (`linux-tests`, `linux-binance-questdb`, `linux-bitget`, `linux-providers-questdb`, `linux-web`, sanitizers, benchmarks, release-native) with matching **build** presets (`cmake --build --preset …`; trees under `out/build/<preset>`). Classic `cmake -B build ...` is unchanged. See `reference/01-instructions.md` §5.
 
 See `governance/03-todo.md` (D-01..D-06 + consolidation) + this README (nav) for the phased rollout, extraction strategy, and 2026 doc hygiene (pointers + minimal duplication). "Session plan file" references point to internal agent session plans (not committed).
 

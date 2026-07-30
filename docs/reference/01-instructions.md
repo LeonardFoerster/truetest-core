@@ -74,7 +74,7 @@ Full authoritative details, Phase 0/1 gates, exact ritual, Go-Live table (9 rows
 ```
 Status: 0/15 qualifying (see reports/phase0/PROGRESS.md + docs/governance/03-todo.md).
 
-**Phase 1 Live-Safety Freeze**: 10 frozen files + `LIVE_SAFETY_CCB_APPROVED` token + CCB + clean shadow run enforced (see docs/governance/01-prod.md, 02-prerequisites.md, scripts/check-live-safety-freeze.sh).
+**Phase 1 Live-Safety Freeze**: frozen safety files (Binance + Bitget futures + core/engine/risk/threading; see `scripts/check-live-safety-freeze.sh`) + `LIVE_SAFETY_CCB_APPROVED` token + CCB + clean shadow run enforced (see docs/governance/01-prod.md, 02-prerequisites.md).
 
 **Phases 2–6**: High-level roadmap in docs/governance/01-prod.md.
 
@@ -111,6 +111,7 @@ Core and test source lists live in `cmake/Sources.cmake` (the single obvious pla
 ```bash
 cmake -B build \
   -DENABLE_BINANCE=ON \
+  -DENABLE_BITGET=ON \
   -DENABLE_QUESTDB=ON \
   -DENABLE_LIVE_DATA=ON \
   -DENABLE_DEBUG=ON \
@@ -122,22 +123,27 @@ cmake --build build -j$(nproc)
 ctest --test-dir build
 ```
 
-**CMake Presets** (recommended for real combinations):
+**CMake Presets** (recommended for real combinations). Configure + build share the
+same preset name; trees live under `out/build/<preset>` (not the ad-hoc `build/` dir):
 ```bash
-cmake --preset linux-tests
+cmake --preset linux-tests && cmake --build --preset linux-tests -j
 cmake --preset linux-binance-questdb
+cmake --preset linux-bitget
+cmake --preset linux-providers-questdb   # Binance + Bitget + QuestDB
 cmake --preset linux-web
 cmake --preset linux-asan
 cmake --preset linux-tsan
 cmake --preset linux-benchmarks
 cmake --preset linux-release-native
+ctest --test-dir out/build/linux-tests
 ```
 
 **Key CMake Flags** (see instructions.md §3 for exhaustive table):
-- Feature: ENABLE_BINANCE, ENABLE_QUESTDB, ENABLE_LIVE_DATA, ENABLE_DEBUG (Abseil), ENABLE_BENCHMARKS, ENABLE_WEB (embedded web UI server, fetches civetweb — see [web-ui.md](web-ui.md)).
-- Build: CMAKE_BUILD_TYPE=Release (with DEBUG for instrumentation), ENABLE_NATIVE_OPT, BUILD_TESTS/SHARED_LIB.
+- Feature: ENABLE_BINANCE, ENABLE_BITGET (UTA futures), ENABLE_QUESTDB, ENABLE_LIVE_DATA, ENABLE_DEBUG (Abseil), ENABLE_BENCHMARKS, ENABLE_WEB (embedded web UI server, fetches civetweb — see [web-ui.md](web-ui.md)).
+- Build: CMAKE_BUILD_TYPE=Release (with DEBUG for instrumentation), ENABLE_NATIVE_OPT (all three engines when ON), BUILD_TESTS/SHARED_LIB.
 - Sanitizers (Debug, mutually exclusive where noted): ENABLE_TSAN (preferred for threading), ASAN+UBSAN combos (OPTIONS="halt_on_error=1,abort_on_error=1,...").
 - Perf reference build: Release + ENABLE_DEBUG + NATIVE_OPT + BENCHMARKS.
+- Source registration: always-on core + tests in `cmake/Sources.cmake`; optional backends in `cmake/Dependencies.cmake` via `tt_wire_optional_backends`.
 
 **Build audit header**: Every binary prints `AUDIT: git=... timestamp=... pins=...` (truetest_version.h generated).
 

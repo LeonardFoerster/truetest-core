@@ -158,12 +158,13 @@ Strategies can emit both `order_event`s and `exit_intent` vectors (for per-lot b
 cmake -B build && cmake --build build
 ```
 
-Source registration is centralized in `cmake/Sources.cmake`. Common real setups use presets (see `cmake --list-presets` or reference docs).
+Source registration is centralized in `cmake/Sources.cmake`. Common real setups use presets (`cmake --list-presets`; build with `cmake --build --preset <name>`; trees under `out/build/<preset>`). Ad-hoc `cmake -B build …` remains valid.
 
 **Key CMake options**:
-- `ENABLE_BINANCE`, `ENABLE_QUESTDB`, `ENABLE_LIVE_DATA`, `ENABLE_DEBUG`, `ENABLE_NATIVE_OPT`
+- `ENABLE_BINANCE`, `ENABLE_BITGET`, `ENABLE_QUESTDB`, `ENABLE_LIVE_DATA`, `ENABLE_WEB`, `ENABLE_DEBUG`, `ENABLE_NATIVE_OPT`
 - `BUILD_TESTS`, `ENABLE_BENCHMARKS`, `BUILD_SHARED_LIB`
 - Sanitizers: `ENABLE_ASAN` / `TSAN` / `UBSAN`
+- Presets include `linux-bitget`, `linux-providers-questdb` (Binance+Bitget+QuestDB), sanitizers, web, benchmarks
 
 - **C API** (`src/api/`): Opaque handle + JSON config surface (`tt_create_engine`, `tt_run`, `tt_get_results`, …) for embedding (Python ctypes, Node ffi, etc.).
 - **Strategy & Provider registries**: Macro-based self-registration. Drop-in `.cpp` files + re-link.

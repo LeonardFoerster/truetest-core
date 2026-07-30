@@ -11,6 +11,8 @@
 
   CMake modernization (2026-07) advanced build maintainability: lists moved to `cmake/Sources.cmake` (one place for core + tests), rich presets added, absolute paths reduced. This supports D-04 maintenance rules and makes adding files dramatically cheaper.
 
+  **2026-07-30 cmake-update hygiene**: Confirmed lists complete (sole intentional orphan: `src/web/tools/dump_fixtures.cpp`). Added `linux-bitget` + `linux-providers-questdb` presets and matching `buildPresets`; documented `ENABLE_BITGET` + preset `out/build/<preset>` contract; aligned NATIVE_OPT comments with “all three engines when ON”. New core `.cpp` or unit test still requires **1–2 edits in `cmake/Sources.cmake` only**.
+
 **Ongoing (CLAUDE "Documentation Maintenance Rules" + prod + prereq + todo)**:
 - The three root governance files (`prod.md`, `prerequisites.md`, `todo.md`) + `reports/phase0/` + CLAUDE are the single source of truth. Keep them authoritative and up to date.
 - Every PR touching the frozen safety surface (or the *description* of that surface in docs) must reference the relevant items in `todo.md` and run `./scripts/check-live-safety-freeze.sh`.
@@ -28,4 +30,4 @@
 - Root: `archive/`, `decisions/`, `upcoming/`, `PHASE0_COMPLETION_PLAN.md`, Coiled_Spring...Guide.md
 - Keep lists in docs/README + instructions in sync with realized state.
 
-**Last updated**: 2026-07-06 (SOP path reconciled; futures testnet guide realized as docs/operations/02-futures-testnet.md; see 00-OVERVIEW.md and docs/README.md for cross-ref hygiene).
+**Last updated**: 2026-07-30 (cmake-update light hygiene: Bitget presets + Sources.cmake registration still 1–2 places; see build note above).

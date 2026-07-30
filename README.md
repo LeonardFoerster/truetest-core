@@ -82,26 +82,33 @@ Run with:
 
 Modernized CMake setup (single source of truth in `cmake/Sources.cmake`; no globs).
 
-Common configurations are available as presets:
+Common configurations are available as presets (binary dirs under
+`out/build/<preset>`; build with matching `--build --preset`):
 
 ```bash
 cmake --preset linux-tests
+cmake --build --preset linux-tests -j
 cmake --preset linux-binance-questdb
+cmake --preset linux-bitget
+cmake --preset linux-providers-questdb
 cmake --preset linux-web
 cmake --preset linux-asan
 cmake --preset linux-release-native
 # ... see docs/reference/01-instructions.md for the full list
 ```
 
+Ad-hoc classic tree (`build/`) still works: `cmake -B build -DBUILD_TESTS=ON`.
+
 Key CMake options:
 
 | Option                    | Effect                              |
 |---------------------------|-------------------------------------|
 | `-DENABLE_BINANCE=ON`     | Binance spot + USDT-M futures       |
+| `-DENABLE_BITGET=ON`      | Bitget UTA v3 USDT-M futures        |
 | `-DENABLE_QUESTDB=ON`     | QuestDB ILP writer + schema         |
 | `-DENABLE_WEB=ON`         | Embedded civetweb + `--web` UI      |
 | `-DENABLE_DEBUG=ON`       | Stage timers + instrumentation      |
-| `-DENABLE_NATIVE_OPT=ON`  | `-march=native` (performance builds)|
+| `-DENABLE_NATIVE_OPT=ON`  | `-march=native` on all three engines (Release) |
 | `-DBUILD_TESTS=ON`        | GoogleTest suite                    |
 
 After enabling the web UI, build the frontend once:
@@ -119,6 +126,7 @@ See `docs/reference/01-instructions.md` for the complete reference.
 | `local`           | OHLCV / tick CSV files           | Paper / hybrid             |
 | `binance`         | REST + WebSocket (trade/depth)   | Live + paper               |
 | `binance-futures` | REST + WebSocket (trade/depth20) | Live + bracket orders      |
+| `bitget-futures`  | UTA v3 WS + REST (needs ENABLE_BITGET) | Live + DMS/kill/brackets |
 | `synthetic`       | GBM paths (on demand)            | Monte Carlo / backtest     |
 
 Additional modes include `--replay` from zstd-compressed binary logs. Realism models cover latency, market impact, queue position (based on L2 snapshots), and synthetic fill simulation.
@@ -159,7 +167,7 @@ See `docs/governance/01-prod.md`, `docs/governance/02-prerequisites.md`, and `CL
 | Phase                              | Status          | Notes |
 |------------------------------------|-----------------|-------|
 | Phase 0 (Tiny-Size Mainnet Futures) | 0/15 qualifying | Full artifacts + two signatures required. See `docs/governance/01-prod.md` and `reports/phase0/`. |
-| Phase 1 (Live-Safety Freeze)        | Enforced        | 10 frozen files + token + CCB + clean shadow run. |
+| Phase 1 (Live-Safety Freeze)        | Enforced        | Frozen safety files (Binance + Bitget + core) + token + CCB + clean shadow run. |
 | Risk / DMS (R-*, S-*)               | Partial         | Tiered margin support landed; further items tracked in `docs/governance/03-todo.md`. |
 
 Monte Carlo capabilities are fully integrated into the mainline engine and do not relax any Phase 0/1 gates or safety requirements.

@@ -185,7 +185,7 @@ QuestDB writes never block the hot path under normal conditions.
 ## 8. Build & Runtime Tuning for Performance
 
 Key CMake flags:
-- `-DENABLE_NATIVE_OPT=ON` → `-march=native` + unrolling (recommended for live/shadow binaries).
+- `-DENABLE_NATIVE_OPT=ON` → `-march=native` + unrolling on all three engines (Release; leave OFF for portable CI).
 - `-DENABLE_DEBUG=ON` → StageTimer, ring stats, memory/copy trackers, thread utilization (Abseil-based).
 - `-DENABLE_BENCHMARKS=ON` → Google Benchmark.
 - Release build (`-DCMAKE_BUILD_TYPE=Release`) + LTO where supported.

@@ -146,9 +146,11 @@ Full details + caveats + usage in [../governance/01-prod.md](../governance/01-pr
 
 **Optional features** (enable via CMake flags):
 - `ENABLE_BINANCE`: Binance WS/REST (Boost.Beast + OpenSSL)
+- `ENABLE_BITGET`: Bitget UTA v3 USDT-M futures (Boost + OpenSSL)
 - `ENABLE_QUESTDB`: QuestDB ILP persistence
+- `ENABLE_WEB`: Embedded civetweb web UI
 - `ENABLE_DEBUG`: StageTimer + memory instrumentation
-- `ENABLE_NATIVE_OPT`: `-march=native` + aggressive opts (live binary only)
+- `ENABLE_NATIVE_OPT`: `-march=native` + aggressive opts on all three engines (Release)
 - `BUILD_TESTS`, `ENABLE_BENCHMARKS`, `BUILD_SHARED_LIB`
 
 **Build steps**:
@@ -159,25 +161,27 @@ cmake -B build
 cmake --build build -j
 ```
 
-Core + test source registration lives in `cmake/Sources.cmake` (the single obvious place to add new code).
+Core + test source registration lives in `cmake/Sources.cmake` (the single obvious place to add new code). Optional backends (`ENABLE_BINANCE`, `ENABLE_BITGET`, …) are wired in `cmake/Dependencies.cmake`.
 
-Common real combinations are available as presets:
+Common real combinations are available as presets (trees under `out/build/<preset>`):
 ```bash
-cmake --preset linux-tests
+cmake --preset linux-tests && cmake --build --preset linux-tests -j
 cmake --preset linux-binance-questdb
+cmake --preset linux-bitget
+cmake --preset linux-providers-questdb
 cmake --preset linux-web
 cmake --preset linux-asan
 ```
 
 ```bash
-# Full-featured (Binance + QuestDB + debug + native opt)
-cmake -B build -DENABLE_BINANCE=ON -DENABLE_QUESTDB=ON \
+# Full-featured (Binance + Bitget + QuestDB + debug + native opt)
+cmake -B build -DENABLE_BINANCE=ON -DENABLE_BITGET=ON -DENABLE_QUESTDB=ON \
                -DENABLE_DEBUG=ON -DENABLE_NATIVE_OPT=ON \
                -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j --target engine_backtest engine_shadow engine_live
 
 # With tests
-cmake -B build -DBUILD_TESTS=ON -DENABLE_BINANCE=ON
+cmake -B build -DBUILD_TESTS=ON -DENABLE_BINANCE=ON -DENABLE_BITGET=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
@@ -284,7 +288,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - Hot path uses pre-allocated `ObjectPool` events; no `new`/`malloc` on critical path.
 - Lock-free SPSC rings (65536 slots) for inter-thread handoff; workers spin/yield/adaptive.
 - CPU pinning + thread presets reduce jitter.
-- LTO + `-O3` in Release; optional `-march=native` on live binary.
+- LTO + `-O3` in Release; optional `-march=native` on all three engines (`ENABLE_NATIVE_OPT`).
 - StageTimer (ENABLE_DEBUG) provides per-stage microsecond breakdown for profiling.
 - Binary event logging with zstd compression adds minimal overhead when enabled.
 

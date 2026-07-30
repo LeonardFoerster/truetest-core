@@ -33,13 +33,14 @@ C++ standard: **C++23**. Build system: CMake + `cmake/Sources.cmake` (no globs) 
 
 # Tests
 cmake --preset linux-tests   # or: cmake -B build -DBUILD_TESTS=ON ...
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-./build/truetest_tests
-./build/truetest_cli_tests
+cmake --build --preset linux-tests -j   # preset trees: out/build/linux-tests
+# ad-hoc: cmake --build build -j
+ctest --test-dir out/build/linux-tests --output-on-failure
+# ad-hoc: ctest --test-dir build --output-on-failure
+./out/build/linux-tests/truetest_tests   # or ./build/truetest_tests
 
 # Hot-path focus
-ctest --test-dir build -R 'hotpath|Hotpath|ObjectPool|Ring' --output-on-failure
+ctest --test-dir out/build/linux-tests -R 'hotpath|Hotpath|ObjectPool|Ring' --output-on-failure
 
 # ASAN when touching pools/rings/lifetime
 cmake --preset linux-asan && cmake --build --preset linux-asan -j
