@@ -92,9 +92,17 @@ public:
 	// Long-lived threads owned by the provider can advertise themselves
 	// here so the engine's WorkerWatchdog halts the engine if any of
 	// them goes silent. Empty default -> no liveness monitoring (engine
-	// won't even create a watchdog). The atomic must outlive both this
-	// provider and the engine - the same lifetime constraint Worker's
-	// failure_flag follows.
+	// won't even create a watchdog).
+	//
+	// Lifetime contract (raw pointer, not shared_ptr):
+	//   - last_alive_ms is owned by the provider (or a subobject such as
+	//     DMS). It is NOT a process-global that "must outlive the engine"
+	//     in isolation.
+	//   - Engine must stop WorkerWatchdog before destroying/closing the
+	//     provider (engine already does this at shutdown). While the
+	//     watchdog runs, the pointed-to atomic must remain live.
+	//   - The raw pointer is valid only while the provider/DMS is alive
+	//     and no watchdog is still sampling a destroyed atomic.
 	struct liveness_source
 	{
 		std::string name;

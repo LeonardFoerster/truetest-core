@@ -149,7 +149,7 @@ std::shared_ptr<IProvider> make_bitget_futures(const provider_config& cfg)
 // Single static init registers both names (REGISTER_PROVIDER pastes
 // __LINE__ literally as _reg___LINE__, so two macro uses collide).
 namespace {
-static const bool _reg_bitget_futures = []() {
+static const bool k_reg_bitget_futures = []() {
     ProviderRegistry::instance().register_provider(
         "bitget-futures", make_bitget_futures);
     ProviderRegistry::instance().register_provider(

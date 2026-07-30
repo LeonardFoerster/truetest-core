@@ -449,6 +449,8 @@ public:
         std::vector<liveness_source> out;
         if (dms_)
         {
+            // last_alive_ms points into dms_; WorkerWatchdog must stop
+            // before provider close/destruction (engine shutdown order).
             // Deadline = 3 × heartbeat: tolerate one missed cycle before
             // halt. Matches Binance futures DMS wiring.
             liveness_source s;
@@ -582,6 +584,10 @@ private:
             endpoints_.rest_host, endpoints_.rest_port,
             "/api/v2/public/time",
             /*paptrading=*/endpoints_.is_demo);
+
+        // Bound shared REST I/O so DMS/kill cannot stall forever behind one hung call.
+        // Kill-switch may tighten further per-call; this is the live default floor.
+        rest_->set_per_call_timeout(std::chrono::milliseconds(3000));
 
         if (!rest_->resync_clock_now())
         {
@@ -783,15 +789,29 @@ private:
         return true;
     }
 
+    // Wire halt_cb_ (or a live provisional) so disconnect fails closed.
+    // main.inc calls provider->open() before engine set_halt_callback; any
+    // installed fatal_cb disables transport reconnect. Real halt replaces
+    // the provisional when set_halt_callback runs later.
+    // Paper/shadow: leave unset when halt_cb_ empty so public WS can reconnect.
     void apply_halt_cb_to_transports()
     {
-        if (!halt_cb_) return;
+        std::function<void(std::string_view)> cb = halt_cb_;
+        if (!cb)
+        {
+            if (mode_ != engine_mode::live)
+                return;
+            cb = [](std::string_view reason) {
+                std::cerr << "BitgetFuturesProvider: transport fatal before "
+                             "engine halt_cb wired: " << reason << "\n";
+            };
+        }
         if (bitget_transport_)
-            bitget_transport_->set_fatal_disconnect_callback(halt_cb_);
+            bitget_transport_->set_fatal_disconnect_callback(cb);
         if (bitget_combined_transport_)
-            bitget_combined_transport_->set_fatal_disconnect_callback(halt_cb_);
+            bitget_combined_transport_->set_fatal_disconnect_callback(cb);
         if (bitget_private_ws_)
-            bitget_private_ws_->set_fatal_disconnect_callback(halt_cb_);
+            bitget_private_ws_->set_fatal_disconnect_callback(cb);
     }
 
     // Empty or "uta" (any case) → allowed. Everything else → refuse.

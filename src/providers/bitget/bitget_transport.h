@@ -359,17 +359,24 @@ public:
         }
     }
 
+    // Foreign-thread stop: set flags, then interrupt via lowest-layer socket
+    // cancel/close only. Beast websocket::stream is NOT thread-safe — do not
+    // call ws_->close() while a reader may still be in read_frame_blocking.
+    // Stream reset happens on reconnect / open after stop.
     void close() override
     {
-        std::lock_guard<std::mutex> lk(mu_);
-        open_ = false;
+        stopped_.store(true);
+        open_.store(false);
 
+        std::lock_guard<std::mutex> lk(mu_);
         if (ws_)
         {
             try
             {
                 beast::error_code ec;
-                ws_->close(websocket::close_code::normal, ec);
+                auto& lowest = beast::get_lowest_layer(*ws_);
+                lowest.cancel(ec);
+                lowest.close(ec);
             }
             catch (...)
             {
@@ -400,6 +407,8 @@ public:
         return std::string(view);
     }
 
+    // `out` views frame_buffer_ — valid only until the next
+    // read_frame_blocking / consume (caller must copy).
     bool read_frame_blocking(std::string_view& out) override
     {
         if (!ws_ || stopped_.load())
@@ -432,6 +441,7 @@ public:
                     return false;
 
                 auto const_buf = frame_buffer_.data();
+                // View into frame_buffer_; invalidated by next read/consume.
                 out = std::string_view(
                     static_cast<const char*>(const_buf.data()),
                     const_buf.size());

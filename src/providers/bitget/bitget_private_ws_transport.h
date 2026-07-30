@@ -179,6 +179,11 @@ public:
             return false;
         }
 
+        // Ensure previous reader is fully reaped (error/fatal paths leave
+        // joinable threads). Assigning to a joinable std::thread terminates.
+        if (reader_.joinable())
+            reader_.join();
+
         stop_flag_.store(false);
         set_state(lifecycle::connecting, "connecting private WS");
         reader_ = std::thread([this] { run(); });
@@ -187,29 +192,57 @@ public:
 
     void close() override
     {
+        // 1. Signal stop so the reader exits poll/wait loops.
         stop_flag_.store(true);
         cv_.notify_all();
 
-        if (ws_)
+        // 2. Foreign-thread interrupt: Beast websocket::stream is NOT
+        // thread-safe. Do NOT call ws_->close() while the reader may still
+        // be in read/write. Cancel/close the lowest-layer socket only — that
+        // unblocks a blocking read without concurrent protocol ops on *ws_.
         {
-            try
+            std::lock_guard<std::mutex> lk(ws_mu_);
+            if (ws_)
             {
-                beast::error_code ec;
-                ws_->close(websocket::close_code::normal, ec);
-            }
-            catch (...)
-            {
+                try
+                {
+                    beast::error_code ec;
+                    auto& lowest = beast::get_lowest_layer(*ws_);
+                    lowest.cancel(ec);
+                    lowest.close(ec);
+                }
+                catch (...)
+                {
+                }
             }
         }
 
+        // 3. Reap reader — sole stream user after open until join returns.
         if (reader_.joinable())
             reader_.join();
 
+        // 4. Now safe: optional graceful WS close, then drop the stream.
         {
             std::lock_guard<std::mutex> lk(ws_mu_);
+            if (ws_)
+            {
+                try
+                {
+                    beast::error_code ec;
+                    ws_->close(websocket::close_code::normal, ec);
+                }
+                catch (...)
+                {
+                }
+            }
             ws_.reset();
             ioc_.restart();
         }
+
+        // 5. Drop bridge callbacks so a reused fill_tx cannot fire into a
+        // destroyed owner (UAF hardening). Keep fatal_cb_ (wired by engine).
+        message_cb_ = {};
+        status_cb_ = {};
 
         set_state(lifecycle::closed, "closed");
     }
@@ -299,6 +332,7 @@ private:
 
     // Read one application frame (handles text ping/pong). Returns false
     // on stop/error; throws beast::system_error on socket failure.
+    // `out` views frame_buffer_ — valid only until the next read.
     bool read_app_frame(std::string_view& out)
     {
         while (!stop_flag_.load())
