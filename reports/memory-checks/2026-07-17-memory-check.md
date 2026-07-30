@@ -252,7 +252,7 @@ new_string:
 3. Re-run the three gate scripts.
 4. Invoke this skill again with the **same output directory** the user originally provided:
    ```bash
-   /memory-checks /home/leonard/work/projects/truetest/core/check-ups
+   /memory-checks /home/leonard/work/projects/truetest/core/reports/memory-checks
    ```
 5. Compare the new `2026-07-17-...` (or next date) report against this one. Zero HIGH findings is the target.
 6. If late fills or shutdown interleaving tests were added, run them under sanitizer.

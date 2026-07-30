@@ -21,7 +21,7 @@ TrueTest is a modular C++23 engine for reproducible backtesting, divergence-awar
 4. **Hot-path discipline** (enforced by `scripts/check-hotpath-json.sh` + layer-deps) - Zero `nlohmann::json` on hot path; zero (or object-pool) allocations on event loop; lock-free SPSC RingBuffer (65536 slots, exactly one producer/consumer); no second writer on any ring.
 5. **Reconciler refusal is default** - Blocks startup on position/order drift > tolerance (configurable `--reconcile-tolerance-bps`). Only documented soft-warn exception: spot testnet monthly account resets (futures has none).
 6. **User-data WebSocket is source of truth** (Binance futures/spot) - `ORDER_TRADE_UPDATE` + `ACCOUNT_UPDATE` after initial REST ack. Position snapshots from REST are advisory only until reconciled.
-7. **DMS protects orders only** (`/fapi/v1/countdownCancelAll`) - Venue-side auto-cancel on heartbeat loss. Does **not** emit reduceOnly MARKET flattens (Phase 3 work). Kill-switch (orderly) does cancel-all + reduceOnly flatten with hard deadline.
+7. **DMS protects orders by default** - Venue-side auto-cancel on heartbeat loss (Binance: symbol-scoped countdownCancelAll; Bitget UTA: account-wide countdown). Venue countdown alone does **not** flatten positions. Optional in-process flatten on persistent HB failure: `--dms-attempt-position-close` (default off; Binance reduceOnly MARKET / Bitget close-positions). Kill-switch (orderly) does cancel-all + flatten with hard deadline.
 8. **Futures mandates** - One-way mode hard refusal in `BinanceFuturesProvider::open()`; `reduceOnly` + `closePosition=true` brackets (non-atomic, two POSTs with auto-cancel guarantee); pre-trade venue `FuturesRiskCheck` (notional/leverage/liq-distance + real tiered MMR from `/fapi/v1/leverageBracket`) consulted **before** `RiskManager` in hot path (`engine.cpp:1600-1628`).
 9. **Provider abstraction is the sole extension point** - `IProvider` + four safety hooks (`IReconciler`, `IKillSwitch`, `IRiskCheck`, `IBracketAdapter`) + transport/parser/executor. Core engine never contains `#ifdef HAS_*` or venue specifics.
 10. **Small capital first + evidence-based gates** - Every phase exit requires artifacts (binary logs, QuestDB run_tag, signed notes, shadow reports) + two-person sign-off before capital tier increase. "No capital tier increase is permitted until all nine rows [Go-Live Gate] have two signatures."
@@ -34,7 +34,7 @@ TrueTest is a modular C++23 engine for reproducible backtesting, divergence-awar
 
 ## 2. AI Coding Assistant Rules & Model Selection + Phase 1 Live-Safety Freeze
 
-From CLAUDE.md + [architecture/MODEL.md](architecture/MODEL.md) (full rationale):
+From CLAUDE.md / AGENTS.md + [../architecture/02-model.md](../architecture/02-model.md) (full rationale):
 
 - **Default**: Sonnet 4.6 sufficient for strategies, indicators, tests, CLI, docs, single-file refactors, new providers following patterns.
 - **Switch to Opus 4.7 (`/model opus`) before touching**:
@@ -46,9 +46,9 @@ From CLAUDE.md + [architecture/MODEL.md](architecture/MODEL.md) (full rationale)
   - Hot-path (no nlohmann/json)
   - Binance live safety glue (refusal gates, time sync, OCO/brackets, REST signing, DMS heartbeats)
 - **Why**: These carry cross-file invariants (compile-time gating, terminal halt, no hot-path alloc/JSON, no auto-retry on safety). Sonnet has measurable tendency to add "helpful" fallback/retry logic that violates them.
-- **Anti-patterns** ([architecture/MODEL.md](architecture/MODEL.md) explicit rejects): retry on kill-switch, resettable halt, hot-path JSON, runtime live-order check, HAS_* in core, second producer on SPSC, reconciler soft-warn for convenience, adaptive heartbeat.
+- **Anti-patterns** ([../architecture/02-model.md](../architecture/02-model.md) explicit rejects): retry on kill-switch, resettable halt, hot-path JSON, runtime live-order check, HAS_* in core, second producer on SPSC, reconciler soft-warn for convenience, adaptive heartbeat.
 
-**Phase 1 Live-Safety Freeze**: See full in [../governance/01-prod.md](../governance/01-prod.md) and [../governance/02-prerequisites.md](../governance/02-prerequisites.md). 10 files under `LIVE_SAFETY_CCB_APPROVED` token + CCB + clean multi-hour `engine_shadow` (enforced by scripts/check-live-safety-freeze.sh). 
+**Phase 1 Live-Safety Freeze**: See full in [../governance/01-prod.md](../governance/01-prod.md) and [../governance/02-prerequisites.md](../governance/02-prerequisites.md). **14 files** (Binance + Bitget futures safety + core/engine/risk/threading) under `LIVE_SAFETY_CCB_APPROVED` token + CCB + clean multi-hour `engine_shadow` (enforced by scripts/check-live-safety-freeze.sh). 
 
 **Pre-merge safety checklist** (see CLAUDE.md + prod): model used, target gate not bypassed, halt terminal, scripts pass, no anti-patterns.
 
@@ -84,7 +84,7 @@ Status: 0/15 qualifying (see reports/phase0/PROGRESS.md + docs/governance/03-tod
 
 ## 4. Prerequisites, Change Control, Task Tracking
 
-See [../governance/02-prerequisites.md](../governance/02-prerequisites.md) for the living Phase 1+ checklist (must be green before PRs touching frozen surface). Run `./scripts/check-live-safety-freeze.sh --check-head`, reference relevant items in [../governance/03-todo.md](../governance/03-todo.md) (or docs/todos/ e.g. docs/todos/02-P1-freeze.md#P1-02). Historical plans/gaps live in `docs/archive/`.
+See [../governance/02-prerequisites.md](../governance/02-prerequisites.md) for the living Phase 1+ checklist (must be green before PRs touching frozen surface). Run `./scripts/check-live-safety-freeze.sh` (optional `--base <commit>`; default `HEAD~1`), reference relevant items in [../governance/03-todo.md](../governance/03-todo.md) (or docs/todos/ e.g. docs/todos/02-P1-freeze.md#P1-02). Historical plans/gaps live in `docs/archive/`.
 
 (Planned architecture docs under ../architecture/ use "Planned for Doc Phase X – current details in docs/governance/01-prod.md + this file".)
 
@@ -139,7 +139,7 @@ ctest --test-dir out/build/linux-tests
 ```
 
 **Key CMake Flags** (see instructions.md §3 for exhaustive table):
-- Feature: ENABLE_BINANCE, ENABLE_BITGET (UTA futures), ENABLE_QUESTDB, ENABLE_LIVE_DATA, ENABLE_DEBUG (Abseil), ENABLE_BENCHMARKS, ENABLE_WEB (embedded web UI server, fetches civetweb — see [web-ui.md](web-ui.md)).
+- Feature: ENABLE_BINANCE, ENABLE_BITGET (UTA futures), ENABLE_QUESTDB, ENABLE_LIVE_DATA, ENABLE_DEBUG (Abseil), ENABLE_BENCHMARKS, ENABLE_WEB (embedded web UI server, fetches civetweb — see [05-web-ui.md](05-web-ui.md)).
 - Build: CMAKE_BUILD_TYPE=Release (with DEBUG for instrumentation), ENABLE_NATIVE_OPT (all three engines when ON), BUILD_TESTS/SHARED_LIB.
 - Sanitizers (Debug, mutually exclusive where noted): ENABLE_TSAN (preferred for threading), ASAN+UBSAN combos (OPTIONS="halt_on_error=1,abort_on_error=1,...").
 - Perf reference build: Release + ENABLE_DEBUG + NATIVE_OPT + BENCHMARKS.
@@ -151,35 +151,35 @@ ctest --test-dir out/build/linux-tests
 
 **FetchContent pins** (CLI11, zstd, nlohmann/json, etc.) and license rules in [reference/licenses.md](reference/licenses.md) (no copyleft, Abseil never in engine_live, hot-path JSON CI gate).
 
-**Performance build/instrumentation** ([../architecture/engine-optimization.md](../architecture/engine-optimization.md) + [../architecture/performance.md](../architecture/performance.md) + [../architecture/perf-baseline.md](../architecture/perf-baseline.md)):
+**Performance build/instrumentation** ([../architecture/04-performance.md](../architecture/04-performance.md); older filenames `engine-optimization.md` / `perf-baseline.md` are not present as separate files):
 - Reference workload: 50k-bar synthetic CSV, SMA, inline preset (baseline ~36.67s wall, 1.4k ev/s on Ryzen 9 5900X; 5+ median runs).
 - Instrumentation: StageTimer (9 stages: market_create, strategy, orderbook, fill, ring_publish, risk_check, mm_replenish, ...), ring_stats (drops/HWM critical, 0 drops required in prod), memory/copy trackers.
-- Investigation: reproduce -> read StageTimer/ring/copy -> microbench -> lock with baseline update in [../architecture/perf-baseline.md](../architecture/perf-baseline.md) + regression guard.
+- Investigation: reproduce → read StageTimer/ring/copy → microbench → lock baseline + regression guard in performance docs.
 - Historical wins (locked): mimalloc (tails -29%), PGO (layout/tails -47-97% on cheap stages), absl::flat_hash_map (maps), deque->ring + prealloc scratch (mm_replenish), etc. Dominant remaining cost: mm_replenish + market_create alloc volume (~1M make_shared<order> per 50k bars).
 
 ---
 
 ## 6. Complete CLI Flags, JSON Config, TUI, Dry-Run (instructions.md exhaustive)
 
-**Precedence**: CLI > JSON config (`--config path` or `TRUETEST_CONFIG`) > defaults. `--dump-config` (snake_case JSON), `--dry-run` (validate + exit 0/1 without running).
+**Precedence**: CLI > JSON config (`--config path` or `TRUETEST_CONFIG`) > `--preset` bundle > hard defaults. `--dump-config` (snake_case JSON), `--dry-run` (validate + exit 0/1 without running). Full flag tables: [04-flags.md](04-flags.md).
 
-**Core groups** (selected critical; full tables in original instructions §12):
-- Mode: `--mode backtest|shadow|live`, `--live` (required for real orders on mainnet + math captcha red banner; auto-skipped on --testnet).
-- Provider: `--provider local|binance|binance-futures`, `--symbol`, `--stream trade|kline_*|depth*`, `--depth-stream depth20@100ms` (for L2/queue), `--testnet`.
-- Futures extras: `--margin-type isolated|cross`, `--margin-type-strict`, `--liquidation-warn-pct`, risk caps (`--max-notional`, `--max-leverage`, `--min-liq-distance-pct`), DMS (`--dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 --disarm-deadman`), kill (`--kill-switch-deadline-ms 5000`).
-- Credentials: env `TRUETEST_BINANCE_*` (preferred; argv leaks to ps), `--api-key/--api-secret` (warns).
+**Core groups** (selected critical):
+- Mode: `--mode backtest|shadow|live`, `--live` (required for real orders on mainnet + math captcha; auto-skipped on sandbox `--testnet` / Bitget `--demo`).
+- Provider: `--provider local|binance|binance-futures|bitget|bitget-futures|synthetic`, `--symbol`, `--stream trade|kline_*|depth*`, `--depth-stream` (Binance e.g. `depth20@100ms`; Bitget e.g. `books5`), `--testnet`, `--demo` (Bitget paptrading).
+- Futures extras: `--margin-type isolated|crossed`, `--margin-type-strict`, `--liquidation-warn-pct`, risk caps (`--max-notional`, `--max-leverage`, `--min-liq-distance-pct`), DMS (`--dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 --disarm-deadman`), kill (`--kill-switch-deadline-ms 5000`), optional `--dms-attempt-position-close`.
+- Credentials: env `TRUETEST_BINANCE_*` / `TRUETEST_BITGET_*` (preferred; argv leaks to ps), `--api-key/--api-secret/--api-passphrase` (Bitget needs passphrase).
 - Strategy: `--strategy sma,mean-reversion`, `--param key=value` (multi-strategy comma-separated).
-- Risk/portfolio: `--initial-cash`, `--risk-fraction`, `--sl-atr`, `--tp-atr`, `--max-daily-loss`, `--max-trades-per-hour`, `--risk-unwind 0.4`, `--reconcile-tolerance-bps`.
+- Risk/portfolio: `--balance`, `--risk-fraction`, `--sl`/`--tp`, `--max-daily-loss`, `--max-trades-per-hour`, `--risk-unwind 0.4`, `--reconcile-tolerance-bps`.
 - Realism (backtest/shadow only; bypassed in live): `--realistic-fills`, `--order-latency-us N --order-latency-stddev-us M`, `--impact-k-bps`, `--bar-spread-bps`, `--queue-model l2-snapshot` (shadow + depth-stream), `--maker-queue-model uniform|front|back` (paper + depth-stream; uniform recommended default).
-- Threading: `--thread-preset inline|light|standard|full|extended` (auto from cores), `--spin-policy adaptive|spin|yield`, `--no-pin`, `--seed`.
-- Persistence: `--persist --run-tag myrun_YYYYMMDD_HHMM` (QuestDB), `--checkpoint path`.
+- Threading: `--thread-preset inline|light|standard|full|extended` (auto from cores), `--spin-policy adaptive|spin|yield`, `--no-pin`, `--seed`, named `--preset` (e.g. `futures-phase0`, `mc-robustness`).
+- Persistence: `--persist --run-tag myrun_YYYYMMDD_HHMM` (QuestDB), optional `--persist-strict` / `--questdb-flush-ms`, `--checkpoint path`.
 - Replay/Record: `--replay events.bin --replay-from/--to`, `--record`, `--replay-data`.
-- Output: `--output results.json`, `--status-format tui|ndjson|minimal`, `--log-events`, `--log-rotation`.
-- Web UI (`-DENABLE_WEB=ON` only): `--web` (serve read-only web UI), `--web-port 8080`, `--web-bind 127.0.0.1`, `--web-token <tok>` (optional bearer auth; also `?token=` in the browser), `--web-assets <dir>` (built SPA to serve at `/`). Streaming runs serve a live cockpit; backtest runs keep serving the final report until Ctrl-C. Read-only on every target — no order/flatten/kill routes. Full guide: [web-ui.md](web-ui.md).
+- Output: `--output results.json`, `--status-format auto|tui|plain|ndjson|off`, `--log-events`, `--no-tui`.
+- Web UI (`-DENABLE_WEB=ON` only): `--web`, `--web-port 8080`, `--web-bind 127.0.0.1`, `--web-token <tok>`, `--web-assets <dir>`. Full guide: [05-web-ui.md](05-web-ui.md).
 
 **TUI**: Rich ncurses tabbed dashboard on shadow/live (positions, orders, L2, risk, brackets, debug StageTimer/ring, health/DMS counter). Hotkeys, setup menu on backtest. `--no-tui` for headless/CI.
 
-**Web UI** (opt-in, `-DENABLE_WEB=ON` + `--web`): browser cockpit + backtest review, same data the TUI shows. Embedded civetweb server on its own thread, reading the engine through `snapshot_dashboard()` (off the hot path, outside the frozen live-safety surface). WS `/stream` (live SnapshotFrame), REST `/api/snapshot` + `/api/results`. See [web-ui.md](web-ui.md).
+**Web UI** (opt-in, `-DENABLE_WEB=ON` + `--web`): browser cockpit + backtest review, same data the TUI shows. Embedded civetweb server on its own thread, reading the engine through `snapshot_dashboard()` (off the hot path, outside the frozen live-safety surface). WS `/stream` (live SnapshotFrame), REST `/api/snapshot` + `/api/results`. See [05-web-ui.md](05-web-ui.md).
 
 **JSON config**: Full engine_config schema (mode, provider, strategy, risk, threading, persistence, realism, etc.). See instructions §13 for keys.
 
@@ -191,13 +191,14 @@ ctest --test-dir out/build/linux-tests
 
 **Providers** (`IProvider`):
 - `local`: CSV OHLCV (bar) or tick-level; BinaryCache decorator; multi-path.
-- `binance` / `binance-futures`: Combined trade + depth WS, REST execution (HybridExecutor paper/shadow, signed REST + user-data WS live), L2 seeding for realism when `--depth-stream`.
+- `binance` / `binance-futures`: Combined trade + depth WS, REST execution (HybridExecutor paper/shadow, signed REST + user-data WS live), L2 seeding for realism when `--depth-stream`. Build with `-DENABLE_BINANCE=ON`.
+- `bitget` / `bitget-futures` (alias → same UTA factory): Bitget UTA v3 USDT-M only (classic mix/v2 refused). Public WS + REST, private user-data dual-channel fills, DMS/kill/reconciler/brackets, `--demo` paptrading. Build with `-DENABLE_BITGET=ON`. Ops: [../operations/03-bitget-demo.md](../operations/03-bitget-demo.md).
+- `synthetic` (alias `montecarlo`): GBM paths for MC / standalone synthetic runs.
 - Replay: binary event log or `--replay-data`.
-- Future: `drift` (see upcoming plans).
 
 **Data validation + formats**: Strict schema checks; see instructions §19.
 
-**Realism models** ([../architecture/realism.md](../architecture/realism.md) - all default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
+**Realism models** ([../architecture/03-realism.md](../architecture/03-realism.md) - all default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
 - `--realistic-fills`: passive/resting prices, one fill_event per level walked.
 - Latency: two layers (`latency_model` strategy->eligible, `wire_latency_model` order->venue).
 - Impact: SquareRootImpactModel applied before aggression.
@@ -212,7 +213,7 @@ ctest --test-dir out/build/linux-tests
 
 ## 8. Strategies, Exits, Brackets, Full Order Lifecycle (futures-order-lifecycle.md + exits/)
 
-Strategies self-register via `REGISTER_STRATEGY` (sma, mean-reversion, ma-crossover, hedge-demo + indicators sma/ema/rsi/bollinger). Multi-strategy support. Emit `order_event` + `exit_intent` vectors.
+Strategies self-register via `REGISTER_STRATEGY` (CLI help lists: mean-reversion, sma, ma-crossover, breakout, coiled-spring, adaptive-hybrid, structure-continuation; also registered: hedge-demo, larry_connor). Indicators: sma/ema/rsi/bollinger/etc. Multi-strategy support. Emit `order_event` + `exit_intent` vectors.
 
 **ExitManager + brackets**: Per-lot SL/TP/trailing; `IBracketAdapter` (OCO spot, separate reduceOnly STOPs + closePosition futures). Non-atomic on futures but with auto-cancel guarantee in adapter.
 
@@ -313,14 +314,14 @@ Full `provider::event` variant + market/tick/l2/order/fill/funding. OrderTracker
 
 ## 13. Target Architecture, Migration History, Performance Baselines
 
-**[../architecture/target-architecture.md](../architecture/target-architecture.md)** (north star, Phase 1 artifact):
+**[../architecture/01-target-architecture.md](../architecture/01-target-architecture.md)** (north star extract):
 - 6 guiding principles (compile-time safety, terminal halt, provider + 4 hooks, hot-path discipline, observability by default, small capital first).
 - Steady-state components: event/execution model, layered risk/safety, persistence (binary mandatory, QuestDB opt-in), providers (local/binance + future drift/), observability (TUI/ndjson/Prometheus future).
 - Deferred: hedge, COIN-M, generic cross-margin, web UI (removed).
 
-**[../architecture/migration.md](../architecture/migration.md)**: Chronological audit trail. Every core PR adds entry (date | desc | files | PR). Groups by phase. Records Phase 0 SOP, Phase 1 freeze artifacts/blocks/script, Phase 2.2 tiered MMR + funding wiring.
+**Migration / audit trail**: No dedicated `architecture/migration.md` in-tree today; phase history lives in [../governance/01-prod.md](../governance/01-prod.md), [../governance/04-summary.md](../governance/04-summary.md), and `docs/archive/`.
 
-**[../architecture/perf-baseline.md](../architecture/perf-baseline.md) + [../architecture/performance.md](../architecture/performance.md)**: Detailed numerical anchor (36.67s baseline, StageTimer breakdown, memory, rings), append-only changelog of every locked optimization (with before/after, verification, reproduction steps), recommended order for remaining items (symbol interning largest, lock-free dashboard, shared_ptr audit, etc.). "0-2% wall = noise"; treat as regression targets.
+**[../architecture/04-performance.md](../architecture/04-performance.md)**: Capacities, pools/rings, StageTimer notes, re-verify recipes. Treat measured baselines as regression targets ("0-2% wall = noise").
 
 ---
 

@@ -1,6 +1,6 @@
 # OKX Futures Provider — Grok Build Implementation Guide
 
-**Zielpfad:** `upcoming_plattform/okx.md`  
+**Zielpfad:** `docs/upcoming_platform/okx.md`  
 **Workspace:** `/home/leonard/work/projects/truetest/core`  
 **Golden Reference:** `src/providers/binance/*` (USDT-M Futures)  
 **API-Quelle:** [OKX API v5](https://www.okx.com/docs-v5/en/) — nur dokumentierte Features, keine Erfindungen.
@@ -374,7 +374,7 @@ Registry-Alias `"okx"` erstellt dieselbe Klasse; `name()` bleibt `"okx-futures"`
 4. `get_liveness_sources()` + `set_halt_callback` auf public/private transports.
 5. `FuturesRiskCheck` caps aus Config.
 
-**Exit:** Fake-REST-Tests für Reconciler/Kill/DMS (Pattern: `tests/test_binance_futures_*.cpp`); Demo-Run mit bewaffnetem DMS.
+**Exit:** Fake-REST-Tests für Reconciler/Kill/DMS (Pattern: `tests/providers/binance/test_binance_futures_*.cpp`); Demo-Run mit bewaffnetem DMS.
 
 ### Phase 4 — Brackets / Risk / Demo-Hardening
 
@@ -871,7 +871,7 @@ if (!o.td_mode.empty()) pcfg["td_mode"] = o.td_mode;
 | `test_okx_futures_dead_mans_switch.cpp` | arm timeOut, disarm 0, heartbeat, start fail |
 | `test_okx_futures_bracket_adapter.cpp` | attachAlgoOrds shape; cancel legs |
 
-**Pattern:** Inject `post_fn` / fake REST wie `tests/test_binance_futures_dead_mans_switch.cpp`.
+**Pattern:** Inject `post_fn` / fake REST wie `tests/providers/binance/test_binance_futures_dead_mans_switch.cpp`.
 
 ### 13.2 Integration (gated, `HAS_OKX` + env)
 

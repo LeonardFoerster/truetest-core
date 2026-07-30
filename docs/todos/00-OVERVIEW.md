@@ -88,7 +88,7 @@ See the individual numbered files. Each contains verbatim extraction of sections
 |-----------------------------------------------|-------------|----------------|--------------------------------|
 | (Header + Status + Post-merge note + How to reference + Current focus + Read first) | 00-OVERVIEW.md (intro) + thin root todo.md | N/A (structure) | Full header philosophy; "Last update"; MC integration note. |
 | ## Phase 0 Immediate (Unblock...; 0/15) (~19) + P0-01..04 + Standing + Current status | 01-P0-phase0.md | P0-01 to P0-04 + Standing + Current status | Pull ritual details context from prod.md (template) + reports/phase0/README.md + PROGRESS.md (but keep pointers; do not duplicate long-form). Sync 0/15 note. |
-| ## Phase 1 / Live-Safety Freeze (~31) + P1-01..05 + Frozen Files + Mandatory pre-PR + On every phase exit | 02-P1-freeze.md | P1-01 to P1-05 + full Frozen Files block (10 files) + checklist para | Include full P1-02 validation evidence block exactly. Note plan.md ref. Sync frozen list with other sources (but this file is one SoT for tasks). |
+| ## Phase 1 / Live-Safety Freeze (~31) + P1-01..05 + Frozen Files + Mandatory pre-PR + On every phase exit | 02-P1-freeze.md | P1-01 to P1-05 + full Frozen Files block (**14 files**, Binance+Bitget) + checklist para | Include full P1-02 validation evidence block exactly. Note plan.md ref. Sync frozen list with script + prereq + AGENTS (mechanical SoT: freeze script). |
 | ## Monte Carlo Simulation (integrated) (~69) + MC-01..06 + Standing invariants + From code incompletes | 03-MC-simulation.md | MC-01 to MC-06 + full Standing + incompletes | Landed notes for MC-01/MC-02. Pull caveats from user-manual.md + docs/README.md + MERGE_PLAN.md (historical). Note MC does not relax P0/1. |
 | ## Risk Management (~89) + R-01..05 + Additional | 04-R-risk-management.md | R-01..R-05 + Additional (Go-Live row 3) | Reference production-readiness-gaps historical if needed (archive). |
 | ## DMS / Kill-Switch / Bracket Hardening (~99) + S-01..06 + Additional | 05-S-dms-kill-brackets.md | S-01..S-06 + Additional (Go-Live row 4) | Note DMS in binance_futures_dead_mans_switch.h etc. |
@@ -130,7 +130,7 @@ See the individual numbered files. Each contains verbatim extraction of sections
 - Updated examples in prerequisites.md (docs/governance/02-prerequisites.md), docs/README.md, reports/phase0/*, user-manual, AdaptiveHybridStrategy (now in reference/), instructions.md, create-evidence-bundle.sh, root README.md, archive notes, src comments where applicable, prod.md, CLAUDE.md, summary.md, governance files.
 - Precise item refs now point to e.g. `docs/todos/01-P0-phase0.md#P0-01` ; high-level keep "todo.md" + note "full details in docs/todos/ (see 00-OVERVIEW.md)".
 - Backward compat: "Addresses todo.md #P0-03" preserved in thin file and where historical.
-- Frozen files list in 02-P1-freeze.md verified identical to scripts/check-live-safety-freeze.sh + docs/governance/02-prerequisites.md + docs/governance/01-prod.md + CLAUDE.md .
+- Frozen files list in 02-P1-freeze.md must stay identical to `scripts/check-live-safety-freeze.sh` + `docs/governance/02-prerequisites.md` + AGENTS.md (14 files incl. Bitget; re-synced 2026-07-30).
 - Also updated internal governance references post-reorg for accuracy where they intersected todo split (e.g. governance/03-todo.md thinned to point to docs/todos/).
 
 **Last updated**: 2026-07-03 (todos/ split implementation per TODOS-SPLIT-SPEC).

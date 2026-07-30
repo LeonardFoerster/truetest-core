@@ -4,7 +4,7 @@
 
 **Planned / extracted; see reference/ for current** authoritative details. Full rationale lives in `CLAUDE.md` + `docs/reference/01-instructions.md` (§2) + `docs/governance/01-prod.md`.
 
-**Last updated**: 2026-07 (new content impl — synthesized from CLAUDE.md + instructions.md anti-patterns list).
+**Last updated**: 2026-07-30 (14-file freeze + multi-venue safety glue).
 
 ---
 
@@ -23,7 +23,7 @@
 - `src/threading/` (SPSC, spin, affinity)
 - `src/risk/` + any `halt_flag_` code
 - Hot-path code (no `nlohmann/json` — CI via `check-hotpath-json.sh`)
-- Binance live safety glue (refusal gates, time sync, OCO/brackets, REST signing, DMS heartbeats)
+- Venue live safety glue (Binance/Bitget refusal gates, time sync, brackets, REST signing, DMS heartbeats)
 
 **Why**: These areas carry **cross-file invariants**:
 - Compile-time live-order gating (absolute via TT_TARGET)
@@ -60,7 +60,7 @@ These are **non-negotiable rejects** (pre-merge checklist must confirm none intr
 
 ## Phase 1 Live-Safety Freeze (mechanical + cultural)
 
-10 files carry `LIVE-SAFETY SURFACE — Phase 1 freeze` markers (exact list in `scripts/check-live-safety-freeze.sh`, `prod.md`, `prerequisites.md`).
+**14 files** carry Phase 1 freeze markers (exact list in `scripts/check-live-safety-freeze.sh`, `prod.md`, `prerequisites.md` — includes Binance + Bitget futures safety headers).
 
 - Every edit (even "docs only" describing the surface) requires the token in commit message.
 - Enforcement: pre-commit + CI script.

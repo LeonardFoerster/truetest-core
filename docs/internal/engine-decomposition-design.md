@@ -350,7 +350,7 @@ None for persisted data or public schemas. Internal:
 **Per-wave verification gate** (from plan + SKILL Phase 3/4):
 ```bash
 cd /path/to/worktree
-./scripts/check-live-safety-freeze.sh --check-head   # or --base
+./scripts/check-live-safety-freeze.sh   # optional: --base <commit>
 ./scripts/check-layer-deps.sh
 ctest -R 'Hotpath|Engine|snapshot|dashboard|Golden|monte_carlo' --output-on-failure
 # MC reuse campaign (5+ trials)

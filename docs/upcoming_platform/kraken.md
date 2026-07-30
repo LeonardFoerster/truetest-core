@@ -961,4 +961,4 @@ export KRAKEN_FUTURES_DEMO_SECRET=...
 
 ---
 
-*Ende des Implementation Guides — für Grok Build Agents. Commit-Ziel: `upcoming_plattform/kraken.md`.*
+*Ende des Implementation Guides — für Grok Build Agents. Commit-Ziel: `docs/upcoming_platform/kraken.md`.*

@@ -33,7 +33,7 @@ The full aspirational hierarchy is being populated gradually. `docs/archive/` ho
 - `reference/05-web-ui.md` — Opt-in browser cockpit + backtest review (`-DENABLE_WEB=ON`, `--web`).
 - `reference/03-db.md`, `reference/04-flags.md`, `reference/06-adaptive-hybrid-strategy.md`, this `README.md`.
 - `architecture/` — `01-target-architecture.md`, `02-model.md`, `03-realism.md`, and `04-performance.md` realized; deeper architecture files remain aspirational.
-- `operations/` — `01-futures-phase0-operator-sop.md` and `02-futures-testnet.md` realized; additional runbooks remain planned.
+- `operations/` — `01-futures-phase0-operator-sop.md` (Binance Phase 0), `02-futures-testnet.md` (Binance testnet drills), `03-bitget-demo.md` (Bitget UTA demo SOP).
 - `governance/` — `01-prod.md`, `02-prerequisites.md`, `03-todo.md`, `04-summary.md` (authoritative; content reduction + pointers applied in 2026-07).
 
 **Note on "info files"**: `reference/06-adaptive-hybrid-strategy.md` (lower-priority strategy spec with demo caveats — see governance/03-todo.md A-*). `docs/archive/questdb-multi-week-hardening-guide.md` (historical).
@@ -59,9 +59,10 @@ Located in [`docs/archive/`](archive/):
 - `MERGE_PLAN.md` — Monte Carlo merge execution record (historical).
 - `docs/archive/production-readiness-gaps-2026-05.md` — May 2026 snapshot of gaps (current status in `docs/governance/03-todo.md` + `docs/governance/01-prod.md`).
 - Edge 1 plans: `Edge1_Dynamic_Cointegration_*` + source PDF guideline (future implementation work; not yet started. When ready to implement, pull from here + PDF).
-- `engine.md` — Detailed phased todo/execution plan for `src/engine/engine.{h,cpp}` god-class decomposition. Designed to be consumed by Grok Build (`/design` + `/execute-plan`). All waves preserve identical functionality. See the `engine-decomposition` skill.
 
-Older aspirational refs cleaned. Archive is for completed/historical plans. Active reference material is in root governance + `reference/01-instructions.md` + `reference/02-user-manual.md` + new `architecture/` + `operations/` thin docs + `00-INDEX.md`.
+**Active (not archive):** `docs/engine.md` — phased todo/execution plan for `src/engine/engine.{h,cpp}` god-class decomposition (Grok Build `/design` + `/execute-plan`; see `engine-decomposition` skill). Provider design guides for not-yet-started venues: `docs/upcoming_platform/` (Bitget code already under `src/providers/bitget/`).
+
+Older aspirational refs cleaned. Archive is for completed/historical plans. Active reference material is in root governance + `reference/01-instructions.md` + `reference/02-user-manual.md` + `architecture/` + `operations/` thin docs + `00-INDEX.md`.
 
 ---
 
@@ -70,7 +71,7 @@ Older aspirational refs cleaned. Archive is for completed/historical plans. Acti
 See also the master recommended sequence in [`00-INDEX.md`](00-INDEX.md) (01-N reading/processing order per Planner-Structure spec).
 
 1. **I just want to build and run the engine** → Start with [reference/01-instructions.md](reference/01-instructions.md)
-2. **I'm preparing for live trading or Phase 0** → Read [governance/01-prod.md](governance/01-prod.md) (current ritual + command template + full exit criteria + why each element) + `reports/phase0/` (evidence + templates) + [operations/01-futures-phase0-operator-sop.md](operations/01-futures-phase0-operator-sop.md) + [governance/03-todo.md](governance/03-todo.md) (P0-01..P0-04; 0/15 status). Use [operations/02-futures-testnet.md](operations/02-futures-testnet.md) for non-qualifying testnet rehearsal drills.
+2. **I'm preparing for live trading or Phase 0** → Read [governance/01-prod.md](governance/01-prod.md) (current ritual + command template + full exit criteria + why each element) + `reports/phase0/` (evidence + templates) + [operations/01-futures-phase0-operator-sop.md](operations/01-futures-phase0-operator-sop.md) + [governance/03-todo.md](governance/03-todo.md) (P0-01..P0-04; 0/15 status). Use [operations/02-futures-testnet.md](operations/02-futures-testnet.md) for non-qualifying Binance testnet drills; [operations/03-bitget-demo.md](operations/03-bitget-demo.md) for Bitget UTA demo (not mainnet Phase 0 credit).
 3. **I'm reviewing a PR that touches safety** → Read [../CLAUDE.md](../CLAUDE.md) + [governance/02-prerequisites.md](governance/02-prerequisites.md) (mandatory checklist) + [governance/03-todo.md](governance/03-todo.md) (P1-* + frozen files + process; or docs/todos/02-P1-freeze.md#P1-02). See CLAUDE + governance/01-prod.md (model rules + anti-patterns; planned architecture/ for D-03).
 4. **I need the full technical picture** → [reference/02-user-manual.md](reference/02-user-manual.md) + [reference/01-instructions.md](reference/01-instructions.md) + root governance + [governance/01-prod.md](governance/01-prod.md). Target architecture / realism docs planned under architecture/ (D-03; current details in governance/01-prod.md + reference/01-instructions.md).
 5. **I want to understand the Monte Carlo / stochastic backtesting capability** → Start with the Monte Carlo section in [reference/01-instructions.md](reference/01-instructions.md), the "Stochastic Backtesting" subsection in [reference/02-user-manual.md](reference/02-user-manual.md), and the MC-* items in [governance/03-todo.md](governance/03-todo.md) (high-level) or docs/todos/03-MC-simulation.md. Governance in root README, governance/01-prod.md, governance/04-summary.md + CLAUDE.md. (MC is research/robustness tool; does not relax Phase 0/1 gates. Historical merge plan in `docs/archive/MERGE_PLAN.md`).
@@ -78,6 +79,6 @@ See also the master recommended sequence in [`00-INDEX.md`](00-INDEX.md) (01-N r
 
 ---
 
-**Last updated**: 2026-07 (docs overhaul — impl-slim + docs-impl-todos): docs/ now central authoritative home. Governance under docs/governance/ (01-prod.md etc). docs/todos/ created (00-OVERVIEW + 9 numbered) with verbatim extraction; 03-todo.md thinned per spec. Cross-refs fixed to new paths + precise docs/todos/ anchors (or keep todo.md high-level + note). See governance/03-todo.md + docs/todos/00-OVERVIEW.md .
+**Last updated**: 2026-07-30 — ops nav includes Bitget demo SOP; `engine.md` corrected as active (not archive-only); freeze/provider docs resynced.
 
 Cross-refs updated to avoid rot. Broken links or stale refs = doc bug. Root governance (`CLAUDE.md`, `governance/01-prod.md` etc.), `reports/phase0/`, `reference/01-instructions.md` + `reference/02-user-manual.md` + new thin architecture/ops are the practical active set. Large future feature plans belong in archive/ until active implementation. "Planned for Doc Phase X – current details live in ..." language used per CLAUDE rules.

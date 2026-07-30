@@ -43,7 +43,7 @@ cmake --build build -j
 # Run a simple backtest
 ./build/engine_backtest \
   --provider local \
-  --path market_data.csv \
+  --path data/market_data.csv \
   --strategy sma
 ```
 
@@ -149,11 +149,12 @@ Multiple strategies can run together: `--strategy sma,mean-reversion`.
 
 ## Safety Surface (Phase 1 Freeze)
 
-The following core files and modules are under the live-safety freeze (see the enforcement script for the exact list):
+The following core files and modules are under the live-safety freeze (see the enforcement script for the exact **14-file** list):
 
 - `src/core/tt_target.h`
 - `src/engine/engine.cpp`
 - `src/providers/binance/` (futures provider, dead_mans_switch, kill_switch, reconciler)
+- `src/providers/bitget/` (futures provider, dead_mans_switch, kill_switch, reconciler)
 - `src/risk/{risk_manager, futures_risk_check}.h`
 - `src/execution/live_safety.h`
 - `src/threading/worker_watchdog.h`

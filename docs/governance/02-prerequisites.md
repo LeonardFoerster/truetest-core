@@ -48,7 +48,9 @@ Before opening or merging any PR that edits a frozen file (or significantly desc
 
 2. **Run the mechanical check** (must pass or explicitly only non-frozen files changed):
    ```bash
-   ./scripts/check-live-safety-freeze.sh --check-head
+   ./scripts/check-live-safety-freeze.sh
+   # Optional: ./scripts/check-live-safety-freeze.sh --base <commit>
+   # Default compares against HEAD~1; fails if frozen files changed without LIVE_SAFETY_CCB_APPROVED in the commit message.
    ```
 
 3. **Commit message requirement**:
@@ -78,7 +80,7 @@ Before opening or merging any PR that edits a frozen file (or significantly desc
    - Two-person CCB review for any frozen surface change
 
 8. **Model discipline**:
-   - Use Opus-class model (per CLAUDE) for any edit touching the 10 frozen files or their core invariants.
+   - Use Opus-class model (per CLAUDE) for any edit touching the frozen files (14-file list above) or their core invariants.
 
 Escalate to CCB if borderline or if the change is large.
 

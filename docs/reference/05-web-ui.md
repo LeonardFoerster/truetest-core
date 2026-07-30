@@ -25,7 +25,7 @@ cd src/web/frontend && npm ci && npm run build && cd -
 # → open http://127.0.0.1:8080/
 
 # Backtest review: serves the final report until Ctrl-C
-./build/engine_backtest --provider local --path market_data.csv --strategy sma \
+./build/engine_backtest --provider local --path data/market_data.csv --strategy sma \
   --web --web-assets src/web/assets
 ```
 

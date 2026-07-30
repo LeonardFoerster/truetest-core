@@ -1,6 +1,6 @@
 # Gate.io Futures Provider — Grok Build Implementation Guide
 
-> **Ziel-Datei:** `core/upcoming_plattform/gateio.md`  
+> **Ziel-Datei:** `core/docs/upcoming_platform/gateio.md`  
 > **Registry-Namen:** `"gate"` (Alias) / `"gate-futures"` (kanonisch)  
 > **Code-Pfad:** `src/providers/gate/`  
 > **Golden Reference:** `src/providers/binance/*` (USDT-M Futures-Stack)  

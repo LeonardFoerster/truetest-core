@@ -17,7 +17,7 @@ Next: real mainnet/testnet with --depth-stream depth20@100ms --queue-model l2-sn
 - **P1-04** Record two-person Phase 1 freeze sign-off (in `decisions/phase1-freeze-*.md` or equivalent under the decisions/ tree — note: dir does not exist yet) and update `prod.md` / `todo.md`.
 - **P1-05** Ensure every future edit to any frozen safety file (see `scripts/check-live-safety-freeze.sh`, incl. Bitget futures) carries the token + CCB + shadow run (mechanical + cultural). All future safety-surface PRs (even "only docs" that describe the surface) require the token in commit message, CCB review, and clean multi-hour mainnet `engine_shadow` run.
 
-**Frozen Files (single source of truth – also in `scripts/check-live-safety-freeze.sh`; keep lists in sync across prereq/prod/script/CLAUDE)**:
+**Frozen Files (single source of truth – also in `scripts/check-live-safety-freeze.sh`; keep lists in sync across prereq/prod/script/AGENTS/CLAUDE)**:
 ```
 src/core/tt_target.h
 src/engine/engine.cpp
@@ -25,18 +25,22 @@ src/providers/binance/binance_futures_provider.h
 src/providers/binance/binance_futures_dead_mans_switch.h
 src/providers/binance/binance_futures_kill_switch.h
 src/providers/binance/binance_futures_reconciler.h
+src/providers/bitget/bitget_futures_provider.h
+src/providers/bitget/bitget_futures_dead_mans_switch.h
+src/providers/bitget/bitget_futures_kill_switch.h
+src/providers/bitget/bitget_futures_reconciler.h
 src/risk/risk_manager.h
 src/risk/futures_risk_check.h
 src/execution/live_safety.h
 src/threading/worker_watchdog.h
 ```
-(Note: some refs say "9 critical files"; standardize on the exact 10-file list above.)
+(Exact **14-file** list: Binance futures ×4 + Bitget futures ×4 + core/engine/risk/execution/threading. Script is mechanical SoT.)
 
 **Mandatory pre-PR checklist**: See the full authoritative checklist in `prerequisites.md`. (Summary: read CLAUDE + prod + this; use `LIVE_SAFETY_CCB_APPROVED` token; run the freeze check script; no anti-patterns; reference todo items; exercise in clean run; update governance.)
 
 **On every phase exit declared in `prod.md`**: Also update `todo.md` (move/complete items + add follow-ups surfaced by review), `prerequisites.md` if the checklist evolved, and "Last updated" notes. Anti-rot ritual before any capital tier increase must include "docs verified + links resolve + `todo.md` updated".
 
-**Last updated**: 2026-07-03 (split from governance/03-todo.md per TODOS-SPLIT-SPEC; verbatim extraction of all items/status/evidence paragraphs + frozen list; see 00-OVERVIEW.md; frozen list matches check script + prereq + prod + CLAUDE).
+**Last updated**: 2026-07-30 (frozen list synced to 14 files incl. Bitget; matches `scripts/check-live-safety-freeze.sh` + prereq + AGENTS).
 
 **Session note (2026-07-16)**: Technical implementation of the execution adapter abstractions cleanup (narrow `IAsyncSubmitSupport` capability + elimination of ad-hoc `dynamic_cast`s to concrete adapters) was performed against the frozen list (engine.cpp touched). Per prerequisites, this change requires a separate `LIVE_SAFETY_CCB_APPROVED` commit + CCB process. The one-time review follow-up notes for this work have been retired.
 

@@ -38,7 +38,8 @@ Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) are produced 
 ## Providers & Data Sources
 
 - **`local`** (always available): OHLCV bar CSV and tick-level CSV.
-- **`binance`** / **`binance-futures`**: Binance Spot + USDT-M Futures (trade, kline, depth20, combined streams). Full REST + WebSocket execution, backfill, recording/replay.
+- **`binance`** / **`binance-futures`**: Binance Spot + USDT-M Futures (trade, kline, depth20, combined streams). Full REST + WebSocket execution, backfill, recording/replay (`ENABLE_BINANCE`).
+- **`bitget`** / **`bitget-futures`**: Bitget UTA v3 USDT-M only (classic refused). REST + public/private WS, DMS/kill/reconciler/brackets, demo via `--demo` (`ENABLE_BITGET`). Ops: `docs/operations/03-bitget-demo.md`.
 - **`synthetic`**: On-demand GBM path generation (standalone or Monte Carlo campaigns). Configurable `mu`, `sigma`, steps, initial price.
 - **Binary replay**: `--replay` from zstd-compressed event logs (deterministic, with time slicing).
 - **Generic WebSocket** (opt-in `ENABLE_LIVE_DATA`).
@@ -199,4 +200,4 @@ See also `reports/phase0/PROGRESS.md` and the `scripts/phase0/` tooling.
 
 *This file is a synthesized feature list for quick reference. All operational, safety, and governance detail lives in the documents listed above.*
 
-**Last updated: 2026-07 (docs overhaul)** — docs/ is now the central authoritative documentation home. Dupe "Intended Use" slimmed to pointer. Cross-refs fixed.
+**Last updated: 2026-07-30** — Bitget provider catalog entry; freeze still Binance+Bitget.

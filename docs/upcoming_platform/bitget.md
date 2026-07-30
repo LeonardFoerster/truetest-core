@@ -1,9 +1,21 @@
 # Bitget Futures Provider — Grok Build Implementation Guide
 
-**Ziel-Datei:** `upcoming_plattform/bitget.md`  
+**Ziel-Datei:** `docs/upcoming_platform/bitget.md`  
 **Workspace:** `/home/leonard/work/projects/truetest/core`  
 **Golden Path (Vorbild):** `src/providers/binance/*` — insbesondere `binance_futures_*`  
 **Stand API-Recherche:** 2026-07 (UTA v3 primär; Classic mix/v2 als Fallback-Oberfläche dokumentiert)
+
+### Status (2026-07-30) — implemented
+
+| Surface | Location |
+|---------|----------|
+| Code | `src/providers/bitget/` (UTA v3 USDT-M; classic refused) |
+| Build | `-DENABLE_BITGET=ON`, presets `linux-bitget`, `linux-providers-questdb` |
+| Freeze | `bitget_futures_{provider,dead_mans_switch,kill_switch,reconciler}.h` on Phase 1 freeze list |
+| Ops SOP | [`docs/operations/03-bitget-demo.md`](../operations/03-bitget-demo.md) (demo drills; **not** mainnet authorization) |
+| CLI | `--provider bitget\|bitget-futures`, `--demo`, `--api-passphrase`, env `TRUETEST_BITGET_*` |
+
+This file remains a **design / DoD / API map** reference. Prefer code + the ops SOP for current behaviour. Unchecked checkboxes below are historical scaffold language unless re-opened as follow-ups. **Mainnet capital** still requires human CCB + Phase 0 evidence (`docs/governance/01-prod.md`).
 
 ---
 
@@ -58,7 +70,7 @@ Agents müssen diese Regeln **wörtlich** einhalten. Verstöße = Reject, kein M
 - DMS-Countdown **nicht** adaptiv verlängern unter Load.
 - Kill-Switch, DMS und Freeze **nicht** zu einem vagen „cancel everything“ vermischen.
 - `FuturesRiskCheck` vor `RiskManager` bleibt Engine-Verantwortung; Provider liefert nur `get_risk_check()`.
-- Neue Safety-Dateien unter `providers/bitget/` sind **nicht** auf der aktuellen Freeze-Liste der 10 Dateien — trotzdem Safety-Mindset (`/saftey`). Wenn später Freeze erweitert wird: CCB + Token.
+- Bitget Safety-Header (`bitget_futures_{provider,dead_mans_switch,kill_switch,reconciler}.h`) sind **auf der Freeze-Liste** (14 Dateien gesamt). Edits brauchen `LIVE_SAFETY_CCB_APPROVED` + CCB + Shadow-Evidence (`/safety`).
 
 ### 2.4 Geo / Operator-Precondition (kein Skip der Implementation)
 
@@ -222,17 +234,17 @@ Register-TU:
 Unter `TEST_SOURCES` (analog Binance-Block, runtime-gated mit `#ifdef HAS_BITGET`):
 
 ```
-tests/test_bitget_auth.cpp
-tests/test_bitget_endpoints.cpp
-tests/test_bitget_parser.cpp
-tests/test_bitget_futures_order_encoder.cpp
-tests/test_bitget_futures_user_data_parser.cpp
-tests/test_bitget_futures_register.cpp
-tests/test_bitget_futures_reconciler.cpp
-tests/test_bitget_futures_kill_switch.cpp
-tests/test_bitget_futures_dead_mans_switch.cpp
-tests/test_bitget_rest_client_time.cpp          # optional Phase 2
-tests/test_bitget_demo_live.cpp                 # opt-in network, default skip
+tests/providers/bitget/test_bitget_auth.cpp
+tests/providers/bitget/test_bitget_endpoints.cpp
+tests/providers/bitget/test_bitget_parser.cpp
+tests/providers/bitget/test_bitget_futures_order_encoder.cpp
+tests/providers/bitget/test_bitget_futures_user_data_parser.cpp
+tests/providers/bitget/test_bitget_futures_register.cpp
+tests/providers/bitget/test_bitget_futures_reconciler.cpp
+tests/providers/bitget/test_bitget_futures_kill_switch.cpp
+tests/providers/bitget/test_bitget_futures_dead_mans_switch.cpp
+tests/providers/bitget/test_bitget_rest_client_time.cpp          # optional Phase 2
+tests/providers/bitget/test_bitget_demo_live.cpp                 # opt-in network, default skip
 ```
 
 ### 5.4 Build-Kommandos

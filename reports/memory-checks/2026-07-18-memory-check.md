@@ -263,7 +263,7 @@ new_string:
 ### Phase 5: Verification & Re-Check
 1. Clean reconfigure + full ASAN+UBSAN build.
 2. Run the exact hotpath/engine/risk/object_pool/bridge filters + gates from Phase 1.
-3. Re-run this memory-checks skill with the **same user-provided path** (`/home/leonard/work/projects/truetest/core/check-ups`).
+3. Re-run this memory-checks skill with the **same user-provided path** (`/home/leonard/work/projects/truetest/core/reports/memory-checks`).
 4. Diff the new report vs this one. No HIGHs remaining is the target for this cycle.
 5. Run TSAN on the critical concurrent paths if not already.
 6. If new issues surface, add to next phase or new report.
@@ -280,4 +280,4 @@ The original reported launch segfault ("Adressbereichsfehler") was a stack overf
 
 All analysis performed read-only. No source files modified except creation of this report. Subagents were fresh. 
 
-Report written to: `/home/leonard/work/projects/truetest/core/check-ups/2026-07-18-memory-check.md`
+Report written to: `/home/leonard/work/projects/truetest/core/reports/memory-checks/2026-07-18-memory-check.md`

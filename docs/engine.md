@@ -148,7 +148,7 @@ Use the following reference style in commits/PRs:
 - **E-24** Commit with `LIVE_SAFETY_CCB_APPROVED` (even for comments, follow process).
 
 **Verification**:
-- `./scripts/check-live-safety-freeze.sh --check-head`
+- `./scripts/check-live-safety-freeze.sh` (optional `--base <commit>`)
 - Full relevant test run + one shadow-style execution.
 - No LOC reduction expected (or very small); focus is on clean starting point.
 

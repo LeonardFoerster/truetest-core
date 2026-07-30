@@ -1,22 +1,22 @@
 # Upcoming Platforms — Multi-Venue Provider Integration
 
-**Status:** Research + Implementation Guides (Read-only design complete, code not started)  
-**Date:** 2026-07-29  
+**Status:** Design guides for remaining venues; **Bitget UTA futures is implemented** under `src/providers/bitget/`  
+**Date:** 2026-07-30  
 **Audience:** Grok Build agents implementing new CEX providers for TrueTest `core/`
 
-This folder contains **actionable build instructions** for integrating five additional centralized exchanges after the existing Binance Spot / Binance USDT-M Futures stack.
+This folder holds **actionable build instructions** for additional centralized exchanges beyond Binance Spot / Binance USDT-M Futures. **Bitget** has landed (Phases 0–4 code + freeze surface + demo SOP); keep [bitget.md](./bitget.md) as the design/DoD reference and use [docs/operations/03-bitget-demo.md](../operations/03-bitget-demo.md) for current ops.
 
 ---
 
 ## Documents
 
-| File | Venue | Registry names (planned) | Product focus (v1) |
-|------|-------|--------------------------|--------------------|
-| [bybit.md](./bybit.md) | **Bybit** | `bybit-futures`, `bybit` | Linear USDT perps (`BTCUSDT`) |
-| [okx.md](./okx.md) | **OKX** | `okx-futures`, `okx` | USDT-M SWAP (`BTC-USDT-SWAP`) |
-| [gateio.md](./gateio.md) | **Gate.io** | `gate-futures`, `gate` | USDT perps (`BTC_USDT`) |
-| [bitget.md](./bitget.md) | **Bitget** | `bitget-futures`, `bitget` | UTA USDT-M (`BTCUSDT`) |
-| [kraken.md](./kraken.md) | **Kraken Futures** | `kraken-futures`, `kraken` | Linear multi-collateral (`PF_XBTUSD`) |
+| File | Venue | Registry names | Product focus (v1) | Code status |
+|------|-------|----------------|--------------------|-------------|
+| [bybit.md](./bybit.md) | **Bybit** | `bybit-futures`, `bybit` | Linear USDT perps (`BTCUSDT`) | Not started (guide only) |
+| [okx.md](./okx.md) | **OKX** | `okx-futures`, `okx` | USDT-M SWAP (`BTC-USDT-SWAP`) | Not started (guide only) |
+| [gateio.md](./gateio.md) | **Gate.io** | `gate-futures`, `gate` | USDT perps (`BTC_USDT`) | Not started (guide only) |
+| [bitget.md](./bitget.md) | **Bitget** | `bitget-futures`, `bitget` | UTA USDT-M (`BTCUSDT`) | **Landed** in `src/providers/bitget/` |
+| [kraken.md](./kraken.md) | **Kraken Futures** | `kraken-futures`, `kraken` | Linear multi-collateral (`PF_XBTUSD`) | Not started (guide only) |
 
 Each guide was produced by a dedicated subagent that:
 
@@ -26,18 +26,19 @@ Each guide was produced by a dedicated subagent that:
 
 ---
 
-## Recommended implementation order
+## Recommended implementation order (remaining venues)
 
 ```
 1. Bybit   — closest to Binance (symbols, V5 linear, testnet)
 2. OKX     — best retail DMS (cancel-all-after) + deep liquidity + demo
 3. Gate.io — countdown DMS + testnet + alt breadth
-4. Bitget  — close-positions kill-switch gold; check DE/FR geo access first
-5. Kraken  — regulated/EU fit; different auth (challenge + HMAC-SHA512)
+4. Kraken  — regulated/EU fit; different auth (challenge + HMAC-SHA512)
 ```
 
-Do **not** start all five in parallel on the same branch without isolation (worktrees).  
-Shared scaffolding (HMAC helpers, depth-sync, CLI credential resolve) may be extracted after the first two venues land.
+**Bitget is done** for the UTA futures path (not “next to implement”). Prefer it as a second golden reference beside Binance when wiring new venues.
+
+Do **not** start multiple remaining venues in parallel on the same branch without isolation (worktrees).  
+Shared scaffolding (HMAC helpers, depth-sync, CLI credential resolve) may be extracted after the next venue lands.
 
 ---
 
@@ -206,7 +207,9 @@ ctest --test-dir build -R 'bybit|Bybit' --output-on-failure
 - Coinbase Advanced (JWT + product fragmentation)
 - MEXC / HTX (testnet / trust / DMS gaps)
 - Spot multi-venue (futures-first; spot can follow per venue later)
-- Actual C++ implementation (guides only)
+- Runtime ops for landed venues (use `docs/operations/` + `src/providers/`)
+
+Guides for **not-yet-started** venues are design-only until code lands under `src/providers/<venue>/`.
 
 ---
 
@@ -218,8 +221,8 @@ Guides were cross-checked against:
 - Official API docs: Bybit V5, OKX V5, Gate APIv4/Futures WS, Bitget UTA, Kraken Futures
 - CMC/CoinGecko derivatives rankings (liquidity context only)
 
-If an official doc and a guide disagree, **trust the live official docs** and update the guide.
+If an official doc and a guide disagree, **trust the live official docs** and update the guide. For Bitget implementation truth, prefer `src/providers/bitget/` + `docs/operations/03-bitget-demo.md` over unchecked DoD boxes in [bitget.md](./bitget.md).
 
 ---
 
-*Last updated: 2026-07-29 — multi-agent research pack for Grok Build.*
+*Last updated: 2026-07-30 — Bitget status corrected to landed; remaining venues still guide-only.*

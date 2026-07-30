@@ -1,6 +1,6 @@
 # Bybit Futures Provider — Grok Build Implementation Guide
 
-> **Ziel-Datei:** `upcoming_plattform/bybit.md`  
+> **Ziel-Datei:** `docs/upcoming_platform/bybit.md`  
 > **Goldene Referenz im Repo:** `src/providers/binance/*` (insb. `binance_futures_provider.h`)  
 > **API-Stand:** Bybit V5 (offizielle Docs: https://bybit-exchange.github.io/docs/v5/)  
 > **Sprache:** Narrative auf Deutsch; Identifier, Pfade, API-Namen unverändert Englisch.

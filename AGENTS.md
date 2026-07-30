@@ -91,7 +91,7 @@ src/threading/worker_watchdog.h
 
 Requirements: `LIVE_SAFETY_CCB_APPROVED` in commit body, `docs/governance/02-prerequisites.md`, clean path exercise, **T3 multi-agent protocol** (root `AGENTS.md` §6), human CCB.
 
-Related hot files (not always in the ten, but treat as high-risk / often T2–T3):
+Related hot files (not always on the freeze list above, but treat as high-risk / often T2–T3):
 
 - `src/engine/engine.h`, `engine_config.h`
 - `src/threading/*` (SPSC, spin, affinity)
@@ -327,4 +327,4 @@ Then: `/testing` → `TESTING VERDICT: PASS` → `/check-work` → thematic comm
 
 ---
 
-*Last updated: 2026-07-26 — nested core rulebook; pairs with workspace root AGENTS.md.*
+*Last updated: 2026-07-30 — freeze wording (14-file list); pairs with workspace root AGENTS.md.*

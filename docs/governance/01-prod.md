@@ -28,7 +28,7 @@ See also:
 4. Hot-path discipline (no `nlohmann::json`, no allocations, lock-free SPSC only, CI-enforced).
 5. Reconciler refusal is default (drift > tolerance blocks live start).
 6. User-data WebSocket is source of truth.
-7. DMS protects orders only (Phase 3 work to add position flattening).
+7. DMS protects orders by default (venue countdown cancels open orders only). Optional in-process position flatten on persistent HB failure via `--dms-attempt-position-close` (default off).
 8. Futures mandates (one-way mode, `reduceOnly` + `closePosition=true` brackets, venue `FuturesRiskCheck` first).
 9. Small capital first + evidence-based gates (no tier increase without artifacts + two signatures on the full Go-Live Gate).
 
@@ -79,7 +79,7 @@ Print/sign the SOP, use `new-session.sh`, keep math-captcha visible the entire s
 ### Phase 1 — Deepdive Stabilization & Live-Safety Freeze (Required before meaningful size)
 
 **Already completed in planning / mechanical artifacts**:
-- 10 files carry the `LIVE-SAFETY SURFACE — Phase 1 freeze` marker (see `scripts/check-live-safety-freeze.sh` for the exact list: `tt_target.h`, `engine.cpp`, futures provider live block, dead_mans_switch, kill_switch, reconciler, risk_manager, futures_risk_check, live_safety, worker_watchdog).
+- **14 files** carry the Phase 1 freeze (see `scripts/check-live-safety-freeze.sh` for the exact list): `tt_target.h`, `engine.cpp`, Binance futures provider/DMS/kill/reconciler, Bitget futures provider/DMS/kill/reconciler, `risk_manager`, `futures_risk_check`, `live_safety`, `worker_watchdog`.
 - Enforcement script wired into pre-commit + CI.
 - CLAUDE.md and reference/01-instructions.md updated with model-selection + CCB rules.
 - `02-prerequisites.md` created (mandatory pre-PR checklist).

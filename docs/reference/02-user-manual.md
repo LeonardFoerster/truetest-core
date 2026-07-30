@@ -63,7 +63,7 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 
 **Main components**:
 - **Core engine** (`src/engine/`): Orchestrates the event loop, worker threads, and lifecycle.
-- **Providers** (`src/providers/`): Data + execution boundary. `local` for CSV/tick replay; `binance` and `binance-futures` for live streaming + REST execution; `synthetic` for on-demand GBM path generation (standalone or via Monte Carlo campaigns).
+- **Providers** (`src/providers/`): Data + execution boundary. `local` for CSV/tick replay; `binance` and `binance-futures` for live streaming + REST execution (`ENABLE_BINANCE`); `bitget` / `bitget-futures` for Bitget UTA v3 USDT-M (`ENABLE_BITGET`); `synthetic` for on-demand GBM path generation (standalone or via Monte Carlo campaigns).
 - **Strategies** (`src/strategy/`): Pluggable via `REGISTER_STRATEGY` macro. Can emit `order_event` and `exit_intent` vectors for brackets.
 - **Execution layer** (`src/execution/`): `IExecutionAdapter`, `Portfolio`, `OrderTracker`, realistic models (`FeeModel`, `FillModel`, `LatencyModel`, `ImpactModel`, `QueuePositionModel`).
 - **Order book & matching** (`src/orderbook/`): `Orderbook` + `FillModel` for backtest realism.
@@ -198,7 +198,7 @@ ctest --test-dir build --output-on-failure
 **Primary interface**: Command-line flags (CLI11). No mandatory config file, but strategies accept `--param key=value` and JSON strategy config is supported in some paths.
 
 **Key configuration categories**:
-- `--provider local|binance|binance-futures` + `--path`, `--symbol`, `--stream`, `--depth-stream`
+- `--provider local|binance|binance-futures|bitget|bitget-futures|synthetic` + `--path`, `--symbol`, `--stream`, `--depth-stream`, `--demo` (Bitget paptrading), `--api-passphrase`
 - `--strategy name` (or comma-separated list) + `--param`
 - Realism models: `--fee`, `--fill-model`, `--latency-model`, `--impact-model`, `--queue-model`
 - Threading: `--thread-preset`, `--no-pin`, `--spin-policy`
@@ -235,7 +235,7 @@ For operational details, golden queries, retention/TTL recommendations, soak tes
 ```bash
 ./build/engine_backtest \
     --provider local \
-    --path market_data.csv \
+    --path data/market_data.csv \
     --strategy sma \
     --sma-period 20 \
     --initial-balance 10000 \
@@ -307,7 +307,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - Pre-trade: `RiskManager` limits + venue `IRiskCheck` (futures notional, leverage, liquidation distance).
 - Startup reconciliation (Binance futures): local vs exchange position/order state; refuses to start on mismatch.
 - Source-of-truth: User-data WebSocket drives portfolio and bracket state in live mode.
-- Dead-man's switch: automatic flatten if engine heartbeat or connection fails within countdown.
+- Dead-man's switch: venue auto-cancels **open orders** if engine heartbeat fails within countdown (orders-only by default; Bitget UTA is account-wide). Position flatten is separate (`--dms-attempt-position-close` / kill-switch), not the venue countdown alone.
 - Kill switch: emergency cancel-all + reduceOnly market close with deadline.
 - ExitManager: strategy-declared brackets (SL/TP/trailing) automatically attached with `reduceOnly`.
 - Live-money gate: interactive math confirmation + red banner; only present in `engine_live`.
@@ -324,7 +324,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 # Limitations & Known Issues
 
 - TUI requires a capable terminal (ncurses); backtest falls back to simpler ANSI dashboard.
-- Live trading currently limited to Binance spot and USDT-M futures (other venues require new providers).
+- Live trading: Binance spot + USDT-M futures (`ENABLE_BINANCE`) and Bitget UTA USDT-M futures (`ENABLE_BITGET`; demo drills documented, mainnet capital not authorized without Phase 0/CCB). Further venues remain planned under `docs/upcoming_platform/`.
 - Strategy library (self-registering): SMA, mean-reversion, MA crossover, breakout/coiled-spring, adaptive-hybrid, structure-continuation (plus supporting indicators: EMA regime, stochastic, swing detector). No built-in portfolio optimization or ML inference.
 - Realism in backtest/shadow is only as good as the configured models and data quality; L2 replay for impact is powerful but data-intensive.
 - No native Windows GUI or installer; command-line + TUI only.
@@ -384,7 +384,9 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 **Providers** (`src/providers/`):
 - `provider.h`, `provider_registry.h`, `data_bridge.h` - Core interfaces and registration.
 - `local/` (4 files) - CSV/tick file transport + parser for backtesting and replay.
-- `binance/` (32 files) - Complete spot + USDT-M futures implementation: parsers, transports, executors, order encoders, bracket adapter, dead-man's switch, kill switch, reconciler, safety checks, user-data handling, time sync, REST client, hybrid executor.
+- `binance/` - Spot + USDT-M futures: parsers, transports, executors, order encoders, bracket adapter, dead-man's switch, kill switch, reconciler, safety checks, user-data handling, time sync, REST client, hybrid executor.
+- `bitget/` - UTA v3 USDT-M futures only (`ENABLE_BITGET`): public/private WS, REST order path, kill/DMS/reconciler/brackets/backfill. See `docs/operations/03-bitget-demo.md`.
+- `synthetic/` - GBM path generation for MC.
 
 **Strategies & Indicators** (`src/strategy/`, `src/indicator/`):
 - `strategy_interface.h`, `strategy_registry.h`, `strategy_factory.h` - Extension points and registration.
@@ -424,4 +426,4 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 **Document generated**: Full codebase analysis of the TrueTest / hft-engine trading platform.
 **Intended audience**: Operators, quant developers, and commercial product reviewers.
 
-*Last updated: 2026-07 (docs overhaul) — slimmed; see governance for duplicated content.*
+*Last updated: 2026-07-30 — Bitget provider + DMS wording (orders-only default).*

@@ -3,7 +3,7 @@
 **Modus:** PR / Ad-hoc Feature (Bitget Futures Provider branch `provider`)  
 **Analysierter Pfad:** Branch `provider` @ `ee17a89` vs merge-base `master` `73fb4ed`  
 **Projekt-Root:** `/home/leonard/work/projects/truetest/core`  
-**Report-Ziel:** `check-ups/2026-07-30-memory-check.md`  
+**Report-Ziel:** `reports/memory-checks/2026-07-30-memory-check.md`  
 **Skill:** `/memory-checks` — strikt read-only (nur dieser Report geschrieben)
 
 ---
@@ -399,9 +399,9 @@ If alloc baselines intentionally change: `TRUETEST_REBASELINE_ALLOCS=1` only wit
 3. Gate scripts (Phase 5).
 4. Re-run this skill:
    ```text
-   /memory-checks check-ups
+   /memory-checks reports/memory-checks
    ```
-5. Compare new report to `check-ups/2026-07-30-memory-check.md`.
+5. Compare new report to `reports/memory-checks/2026-07-30-memory-check.md`.
 6. Exit criteria: **no HIGH findings**; MEDIUM either fixed or explicitly accepted with owner.
 
 ---
@@ -440,7 +440,7 @@ src/execution/execution_bridge.h
 src/bin/main.inc
 cmake/*, CMakeLists.txt
 docs/operations/03-bitget-demo.md
-tests/test_bitget_*.cpp, test_cli.cpp, test_execution_bridge.cpp
+tests/providers/bitget/test_bitget_*.cpp, test_cli.cpp, test_execution_bridge.cpp
 ```
 
 ## Appendix B — Commands used this run
@@ -463,7 +463,7 @@ Verify after write:
 
 ```bash
 git status --porcelain | head
-# Expect report under check-ups/ as untracked or intended artifact only
+# Expect report under reports/memory-checks/ as untracked or intended artifact only
 ```
 
 ---

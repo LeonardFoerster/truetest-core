@@ -1,8 +1,8 @@
 # CLI Flags Reference
 
-**All CLI flags live in one place:** `src/bin/main.inc:654` (function `register_cli_options`, using CLI11). The three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) share the exact same registration via `#include "../main.inc"`. QuestDB flags are conditional on `HAS_QUESTDB` at build time.
+**All CLI flags live in one place:** `src/bin/main.inc` (function `register_cli_options`, using CLI11). The three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) share the exact same registration via `#include "../main.inc"`. QuestDB flags are conditional on `HAS_QUESTDB` at build time; web flags on `HAS_WEB`.
 
-**Precedence:** CLI > `--config` JSON (or `TRUETEST_CONFIG`) > defaults.  
+**Precedence:** CLI > `--config` JSON (or `TRUETEST_CONFIG`) > `--preset` bundle > hard defaults.  
 **Introspection:** `--dry-run` (validate + print summary + exit), `--dump-config` (emit resolved snake_case JSON).
 
 ### Core / Replay / Logging
@@ -17,17 +17,18 @@
 | `--compress-log / --no-compress-log` | Toggle zstd compression of binary event logs (default on). |
 | `--seed <uint64>`             | Master RNG seed (0 = non-deterministic). |
 
-### Threading / CPU
+### Threading / CPU / Named presets
 | Flag                    | What it does |
 |-------------------------|--------------|
 | `--thread-preset <name>` | One of: `inline`, `light`, `standard`, `full`, `extended` (auto-selected from core count if omitted). |
+| `--preset <name>`       | Named run profile (bundles defaults). Aliases: `futures-phase0`/`phase0`/`futures-p0`, `mc-robustness`/`mc`/`monte-carlo`, `backtest-local-l2`/`backtest-l2`/`local-l2`, `shadow-tape`/`shadow`/`paper`. Explicit CLI and `--config` override the preset. |
 | `--no-pin`              | Disable CPU affinity pinning. |
 | `--spin-policy <name>`  | Worker spin policy: `spin`, `yield`, or `adaptive` (default). |
 
-### Provider / Data / Monte Carlo (current branch)
+### Provider / Data / Monte Carlo
 | Flag                    | What it does |
 |-------------------------|--------------|
-| `--provider <name>`     | Provider: `local`, `binance`, `binance-futures`, `synthetic` (or `montecarlo`). |
+| `--provider <name>`     | Provider: `local`, `binance`, `binance-futures`, `bitget`, `bitget-futures`, `synthetic` (registry also accepts alias `montecarlo` for synthetic). Bitget names require `-DENABLE_BITGET=ON`; Binance requires `-DENABLE_BINANCE=ON`. |
 | `--path <path>`         | Data file path (for `local` provider; supports comma-separated for multi-path). |
 | `--mc-params "..."`     | Synthetic/Monte-Carlo generator params (`mu=...,sigma=...,n_steps=...,initial_price=...`). |
 | `--monte-carlo`         | Run a Monte Carlo campaign (requires `--mc-trials`). |
@@ -57,27 +58,29 @@
 |-------------------------|--------------|
 | `--symbol <SYM>`        | Trading symbol (e.g. `BTCUSDT`). |
 | `--stream <type>`       | `trade`, `kline`, `kline_1m`, etc. |
-| `--depth-stream <spec>` | L2 depth stream (e.g. `depth20@100ms`) on same WS connection. Enables queue/impact realism and real-book seeding. |
-| `--live`                | Required safety flag for real-money orders (mainnet triggers math captcha; testnet skips it). Only works on `engine_live` binary. |
-| `--testnet`             | Route Binance provider to testnet endpoints. |
+| `--depth-stream <spec>` | L2 depth stream on same WS connection (e.g. Binance `depth20@100ms`, Bitget `books5`). Enables queue/impact realism and real-book seeding. |
+| `--live`                | Required safety flag for real-money orders (mainnet triggers math captcha; sandbox skips it). Only works on `engine_live` binary. |
+| `--testnet`             | Sandbox routing: Binance → spot/futures testnet hosts; Bitget → demo/paptrading (same effect as `--demo` for `bitget*`). |
+| `--demo`                | Bitget demo/paptrading endpoints. On non-Bitget providers this warns and does **not** skip the mainnet captcha. |
 
-### Futures-only (binance-futures)
+### Futures (binance-futures and bitget-futures)
 | Flag                              | What it does |
 |-----------------------------------|--------------|
-| `--margin-type <isolated|crossed>` | Advisory margin-mode check at startup. |
+| `--margin-type <isolated\|crossed>` | Advisory margin-mode check at startup (`ISOLATED` / `CROSSED`). |
 | `--margin-type-strict`            | Turn margin-mode mismatch into a hard refusal. |
-| `--liquidation-warn-pct <f>`      | Warn if any position is within this % of liquidation (default 5%). |
-| `--max-notional / --max-leverage / --min-liq-distance-pct` | Pre-trade venue risk caps (FuturesRiskCheck). |
-| `--dead-man-countdown-ms / --dead-man-heartbeat-ms` | DMS `/fapi/v1/countdownCancelAll` settings (default 30s / auto). |
+| `--liquidation-warn-pct <f>`      | Warn if any position is within this fraction of liquidation (default 0.05 = 5%). |
+| `--max-notional / --max-leverage / --min-liq-distance-pct` | Pre-trade venue risk caps (FuturesRiskCheck). Mainnet futures live refuses without caps + positive `--max-daily-loss` (sandbox may warn only). |
+| `--dead-man-countdown-ms / --dead-man-heartbeat-ms` | DMS settings (default countdown 30s; heartbeat 0 → countdown/3). Binance futures: symbol-scoped cancel-all. Bitget UTA: **account-wide** cancel; countdown clamped to seconds [5,60]; HB floor 1000 ms. |
 | `--disarm-deadman`                | Explicitly do not arm DMS for this run. |
-| `--dms-attempt-position-close`    | Phase 3: on persistent DMS heartbeat failure, also send a reduceOnly MARKET flatten (pairs with external watchdog). |
+| `--dms-attempt-position-close`    | Phase 3: on persistent DMS heartbeat failure, also attempt position flatten (Binance: reduceOnly MARKET; Bitget: close-positions). Venue countdown alone still cancels **orders only**. |
 
 ### Credentials / Network / Recording
 | Flag                    | What it does |
 |-------------------------|--------------|
-| `--api-key / --api-secret` | Exchange credentials (env vars `TRUETEST_BINANCE_*` preferred). |
+| `--api-key / --api-secret` | Exchange credentials. Prefer env: `TRUETEST_BINANCE_API_KEY` / `TRUETEST_BINANCE_API_SECRET`, or `TRUETEST_BITGET_API_KEY` / `TRUETEST_BITGET_API_SECRET` (env wins over CLI; CLI secrets warn about argv leaks). |
+| `--api-passphrase`      | Passphrase for Bitget (and similar venues). Prefer `TRUETEST_BITGET_API_PASSPHRASE`. Required for Bitget live. |
 | `--host / --port`       | Override WS host/port. |
-| `--record <path>`       | Record live WS feed to file (via `BinanceRecorder`). |
+| `--record <path>`       | Record live WS feed to file. |
 | `--replay-data <path>`  | Replay a previously recorded WS file. |
 
 ### Portfolio / Risk Basics / Checkpoints
@@ -149,6 +152,19 @@
 | `--run-tag <string>`        | Table prefix (auto-generated if omitted). |
 | `--run-notes <string>`      | Free-form note stored in `runs_meta`. |
 | `--questdb-host / --questdb-ilp-port / --questdb-http-port` | Connection details (defaults: 127.0.0.1, 9009, 9000). |
+| `--questdb-flush-ms <ms>`   | Time-based ILP flush interval. |
+| `--persist-strict`          | Fail closed if QuestDB is unavailable / write path fails (default remains soft-fail). |
+
+### Web UI (only when built with `ENABLE_WEB=ON`)
+| Flag                    | What it does |
+|-------------------------|--------------|
+| `--web`                 | Serve the read-only web UI for this session. |
+| `--web-port <N>`        | Port (default 8080). |
+| `--web-bind <addr>`     | Bind address (default `127.0.0.1`; never implicit `0.0.0.0`). |
+| `--web-token <tok>`     | Optional bearer auth on `/api/*` and `/stream` (header or `?token=`). |
+| `--web-assets <dir>`    | Built SPA directory to serve at `/` (omit = API/WS only). |
+
+See `docs/reference/05-web-ui.md` and Bitget ops `docs/operations/03-bitget-demo.md`.
 
 **Implicit (CLI11):** `-h/--help`, `--help-all`.
 
