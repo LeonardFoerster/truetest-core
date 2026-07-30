@@ -186,3 +186,99 @@ TEST(EngineVenueRiskCheck, AllowsOrderWhenCheckPasses)
     EXPECT_GT(eng.get_analytics().snapshot().total_fills, 0u)
         << "allow=true must not block the existing fill path";
 }
+
+// Captures engine event publisher so tests can inject funding while the
+// engine is still armed (mirrors live user-data funding path).
+class PublisherSpyProvider : public IProvider
+{
+public:
+    using publisher_fn = std::function<void(std::shared_ptr<event>)>;
+
+    std::string name() const override { return "pub-spy"; }
+    bool has_data_feed() const override { return false; }
+    bool has_execution() const override { return false; }
+    bool open() override { return true; }
+    void close() override {}
+    std::shared_ptr<IDataTransport> get_transport() override { return nullptr; }
+    std::shared_ptr<IExecutionAdapter> get_execution_adapter() override { return nullptr; }
+
+    void set_event_publisher(publisher_fn fn) override
+    {
+        pub_ = std::move(fn);
+        IProvider::set_event_publisher(pub_);
+    }
+
+    publisher_fn pub_;
+};
+
+TEST(EngineVenueRiskCheck, FundingEventUpdatesAnalyticsRiskView)
+{
+    SilenceCout quiet;
+
+    auto dh = make_bars(3);
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<BuyAtBarThreeStrategy>();
+    auto spy = std::make_shared<PublisherSpyProvider>();
+
+    engine_config cfg;
+    cfg.provider = spy;
+    cfg.initial_balance = 100000.0;
+
+    engine eng(dh, ob, strat, cfg);
+
+    // Publisher is wired in the constructor when provider is set.
+    ASSERT_TRUE(static_cast<bool>(spy->pub_))
+        << "engine must wire provider event publisher at construct";
+
+    auto funding = std::make_shared<funding_event>(
+        std::chrono::system_clock::now(), "TEST", 0.0, 250.0, "FUNDING_FEE");
+    spy->pub_(funding);
+
+    EXPECT_NEAR(eng.get_analytics().risk_view().equity, 100250.0, 1e-6)
+        << "funding must update engine analytics (risk_view), not only portfolio";
+    EXPECT_NEAR(eng.get_analytics().total_funding_pnl(), 250.0, 1e-6);
+
+    eng.run();  // clean teardown path
+}
+
+// Records the mark_price passed into evaluate so we can assert symbol-bound
+// mids (not a stale other-symbol last mid).
+class MarkCaptureRiskCheck : public IRiskCheck
+{
+public:
+    mutable std::vector<double> marks;
+
+    decision evaluate(const order_event&,
+                      const portfolio&,
+                      double mark_price) const override
+    {
+        marks.push_back(mark_price);
+        return {};
+    }
+};
+
+TEST(EngineVenueRiskCheck, VenueRiskCheckReceivesSymbolMarkFromBars)
+{
+    SilenceCout quiet;
+
+    auto dh = make_bars(10);
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<BuyAtBarThreeStrategy>();
+    auto rc = std::make_shared<MarkCaptureRiskCheck>();
+
+    engine_config cfg;
+    cfg.provider = std::make_shared<MockProvider>(rc);
+
+    engine eng(dh, ob, strat, cfg);
+    eng.run();
+
+    ASSERT_FALSE(rc->marks.empty()) << "risk check must be consulted";
+    // Order may be latency-deferred to the next bar open, so the exact
+    // mid is path-dependent — but it must be this symbol's tracked mid
+    // (make_bars opens/closes live in [100, 111]), never 0 / unknown.
+    for (double m : rc->marks) {
+        EXPECT_GT(m, 0.0) << "symbol-bound mark must not be missing";
+        EXPECT_GE(m, 100.0);
+        EXPECT_LE(m, 111.0);
+    }
+}

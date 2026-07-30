@@ -174,6 +174,42 @@ TEST(RiskManager, DailyLossCountsEqualPnLLossesAsSeparateTrades)
     EXPECT_EQ(rm.check_post_fill(fill2, port, snap2), risk_action::halt);
 }
 
+TEST(RiskManager, ZeroPriceMarketOpen_RejectsFailClosed)
+{
+    risk_limits lim;
+    lim.max_position_value = 1000.0;
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    // Market open with price=0 and no avg-entry fallback would previously
+    // project notional 0 and bypass max_position_value.
+    order_event mkt(epoch_ms(0), "AAPL", order_type::market, order_side::buy, 100, 0.0);
+    risk_snapshot snap;
+    snap.equity = 100000.0;
+
+    EXPECT_EQ(rm.check_order(mkt, port, snap), risk_action::reject);
+}
+
+TEST(RiskManager, MaxPositionPctOfEquity_RejectsWhenEquityPopulated)
+{
+    risk_limits lim;
+    lim.max_position_value = 1e12;  // absolute cap not binding
+    lim.max_position_pct_of_equity = 0.10;  // 10% of equity
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    risk_snapshot snap;
+    snap.equity = 10000.0;  // max notional = 1000
+
+    order_event small(epoch_ms(0), "AAPL", order_type::limit, order_side::buy, 5, 100.0);
+    EXPECT_EQ(rm.check_order(small, port, snap), risk_action::pass);
+
+    order_event large(epoch_ms(1), "AAPL", order_type::limit, order_side::buy, 20, 100.0);
+    EXPECT_EQ(rm.check_order(large, port, snap), risk_action::reject);
+}
+
 TEST(RiskManager, MaxOpenOrders_Reject)
 {
     risk_limits lim;

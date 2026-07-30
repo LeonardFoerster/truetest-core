@@ -200,6 +200,51 @@ TEST(FuturesRiskCheck, LeverageCapZeroCashSkipsCheck)
     EXPECT_TRUE(d.allow);
 }
 
+// Spot-style cash credits short proceeds. Leverage must use mark equity
+// (cash + qty*mark), not inflated cash — otherwise max_leverage fails open.
+TEST(FuturesRiskCheck, AfterShort_LeverageUsesMarkEquityNotCash)
+{
+    FuturesRiskCheck::config c;
+    c.max_leverage = 5.0;
+    FuturesRiskCheck check(c);
+
+    // Post short 1 BTC @ 30k from 10k equity: cash=40k, qty=-1.
+    // Equity = 40k + (-1)*30k = 10k. Add another 1 BTC short:
+    // post_notional=60k → lev 6x on equity (reject) vs 1.5x on cash (would allow).
+    auto p = with_state(/*cash=*/40000.0, /*existing=*/-1.0);
+    auto o = make_order("BTCUSDT", order_side::sell, 1.0);
+
+    auto d = check.evaluate(o, p, /*mark=*/30000.0);
+    EXPECT_FALSE(d.allow) << d.reason;
+    EXPECT_NE(d.reason.find("leverage"), std::string::npos);
+    EXPECT_NE(d.reason.find("equity"), std::string::npos);
+}
+
+TEST(FuturesRiskCheck, AfterShort_LiquidationUsesMarkEquityNotCash)
+{
+    FuturesRiskCheck::config c;
+    c.min_liquidation_distance_pct = 0.05;  // 5%
+    c.maintenance_margin_pct       = 0.005;
+    FuturesRiskCheck check(c);
+
+    // cash=40k, short 1 @ 30k → equity 10k. Add short 1 → notional 60k.
+    // equity margin_ratio = 10k/60k ≈ 0.167, distance ≈ 16.2% > 5% → allow.
+    // cash margin_ratio = 40k/60k would be even looser; tighten by stacking.
+    auto p = with_state(40000.0, -1.0);
+    // Add 2 BTC short: post_qty=-3, notional=90k, equity still 10k
+    // ratio=10k/90k≈0.111, distance≈10.6% > 5% → still allow
+    // Add enough that distance fails on equity but would pass on cash:
+    // post notional with equity 10k needs distance < 5% → ratio < 0.055
+    // → notional > 10k/0.055 ≈ 181818 → qty add ≈ 181818/30000 - 1 ≈ 5.06
+    auto o = make_order("BTCUSDT", order_side::sell, 6.0); // post_qty=-7, notional=210k
+    // equity ratio = 10k/210k ≈ 0.0476 - 0.005 = 0.0426 < 5% → reject
+    // cash ratio = 40k/210k ≈ 0.190 - 0.005 = 0.185 >> 5% → would allow
+
+    auto d = check.evaluate(o, p, 30000.0);
+    EXPECT_FALSE(d.allow) << d.reason;
+    EXPECT_NE(d.reason.find("liquidation"), std::string::npos);
+}
+
 TEST(FuturesRiskCheck, LiquidationDistanceRejectsHighLeverage)
 {
     FuturesRiskCheck::config c;

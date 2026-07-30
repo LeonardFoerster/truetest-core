@@ -479,3 +479,30 @@ TEST(Analytics, FundingEvent_UpdatesCashAndEquityAndRiskView)
     // Equity curve should have recorded the funding adjustment point
     EXPECT_GE(report.equity_curve.size(), 1u);
 }
+
+// risk_view().equity must be usable for max_position_pct_of_equity from t0,
+// not only after a funding event (was stuck at 0 and fail-opened).
+TEST(Analytics, RiskViewEquity_SeededAndUpdatedOnMarket)
+{
+    Analytics a(100000.0);
+    EXPECT_NEAR(a.risk_view().equity, 100000.0, 1e-9);
+
+    auto m = std::make_shared<market_event>(epoch_ms(1), "X",
+                                            100.0, 100.0, 100.0, 100.0);
+    a.on_event(m);
+    EXPECT_NEAR(a.risk_view().equity, 100000.0, 1e-9);
+
+    // Open long 10 @ 100, then mark to 110 → equity +100
+    auto buy = std::make_shared<fill_event>(
+        epoch_ms(2), "X", 1, order_side::buy, 10.0, 100.0, 0.0);
+    a.on_event(buy);
+    EXPECT_NEAR(a.risk_view().equity, 100000.0, 1e-6);
+
+    auto m2 = std::make_shared<market_event>(epoch_ms(3), "X",
+                                             110.0, 110.0, 110.0, 110.0);
+    a.on_event(m2);
+    EXPECT_NEAR(a.risk_view().equity, 100100.0, 1e-6);
+
+    a.reset(50000.0);
+    EXPECT_NEAR(a.risk_view().equity, 50000.0, 1e-9);
+}

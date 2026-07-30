@@ -234,3 +234,26 @@ TEST(Portfolio, MultiSymbol_CashTracking)
     p.on_fill(buy_b);
     EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash - 1000.0 - 1000.0);
 }
+
+// Single last_price marks every symbol identically and is wrong for multi-symbol
+// books; the marks map API values each symbol independently.
+TEST(Portfolio, MultiSymbol_EquityUsesPerSymbolMarks)
+{
+    portfolio p;
+    const double initial_cash = p.get_cash();
+
+    // AAPL 10 @ 100, GOOG 5 @ 200 → cash spent 1000+1000
+    p.on_fill(fill_event(now(), "AAPL", 1, order_side::buy, 10, 100.0, 0.0));
+    p.on_fill(fill_event(now(), "GOOG", 2, order_side::buy, 5, 200.0, 0.0));
+
+    // Single-price path: last_mid=200 marks AAPL at 200 too → inflated equity
+    EXPECT_DOUBLE_EQ(p.get_equity(200.0), initial_cash - 2000.0 + 10 * 200.0 + 5 * 200.0);
+
+    std::unordered_map<std::string, double> marks{{"AAPL", 100.0}, {"GOOG", 200.0}};
+    EXPECT_DOUBLE_EQ(p.get_equity(marks), initial_cash);
+
+    marks["AAPL"] = 110.0;
+    marks["GOOG"] = 220.0;
+    // +10*10 + 5*20 = 200
+    EXPECT_DOUBLE_EQ(p.get_equity(marks), initial_cash + 200.0);
+}
