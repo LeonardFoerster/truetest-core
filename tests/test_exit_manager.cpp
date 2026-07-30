@@ -429,6 +429,29 @@ TEST(ExitManager, OnBar_NoTriggerLeavesIntentArmed)
     EXPECT_EQ(m.armed_count(), 1u);
 }
 
+// Same-bar high must not raise the trailing stop and then fire SL on the
+// low against the *new* trail (look-ahead). Trail advances only if the
+// bar does not fire the pre-bar SL.
+TEST(ExitManager, OnBar_TrailingDoesNotLookAheadWithinBar)
+{
+    ExitManager m;
+    exit_intent ei = make_long_intent("s", "X", 1, /*sl=*/95.0, std::nullopt);
+    ei.trailing_pct = 0.01;  // 1%
+    m.register_pending(std::move(ei));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
+
+    // High 110 would trail SL to 108.9; low 104 is above pre-bar SL 95 but
+    // below look-ahead trail. Must NOT fire this bar (no look-ahead).
+    auto r = m.on_bar("X", /*low=*/104.0, /*high=*/110.0, /*close=*/105.0, t0);
+    EXPECT_TRUE(r.empty()) << "same-bar trail+SL is look-ahead";
+    EXPECT_EQ(m.armed_count(), 1u);
+
+    // Next bar: trail is now active from prior high; low through 108.9 fires.
+    auto r2 = m.on_bar("X", /*low=*/108.5, /*high=*/109.0, /*close=*/108.8, t0);
+    ASSERT_FALSE(r2.empty());
+    EXPECT_DOUBLE_EQ(r2[0].get_price(), 108.5);
+}
+
 // ---- Bracket adapter integration ---------------------------------------
 
 namespace {

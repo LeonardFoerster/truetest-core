@@ -480,6 +480,73 @@ TEST(Analytics, FundingEvent_UpdatesCashAndEquityAndRiskView)
     EXPECT_GE(report.equity_curve.size(), 1u);
 }
 
+// Funding debits are real cash P&L and must update peak/max_drawdown
+// immediately — without waiting for a subsequent market event.
+TEST(Analytics, FundingDebit_UpdatesMaxDrawdownWithoutMarket)
+{
+    Analytics a(100000.0);
+
+    // Optional market seed establishes last_close / curve; peak stays at initial.
+    auto m = std::make_shared<market_event>(epoch_ms(1), "BTCUSDT",
+                                            50000.0, 50000.0, 50000.0, 50000.0);
+    a.on_event(m);
+    EXPECT_NEAR(a.max_drawdown_pct(), 0.0, 1e-9);
+    EXPECT_NEAR(a.risk_view().max_drawdown, 0.0, 1e-9);
+
+    // Large funding debit: equity 100000 -> 80000 => 20% drawdown from peak.
+    auto funding_debit = std::make_shared<funding_event>(
+        epoch_ms(2), "BTCUSDT", 0.0, -20000.0, "FUNDING_FEE");
+    a.on_event(funding_debit);
+
+    EXPECT_NEAR(a.risk_view().equity, 80000.0, 1e-6);
+    EXPECT_NEAR(a.total_funding_pnl(), -20000.0, 1e-6);
+    EXPECT_NEAR(a.max_drawdown_pct(), 20.0, 1e-6);
+    EXPECT_NEAR(a.risk_view().max_drawdown, 20.0, 1e-6);
+    EXPECT_NEAR(a.snapshot().max_drawdown, 20.0, 1e-6);
+
+    // Pure funding path (no market): same DD update must still apply.
+    Analytics b(100000.0);
+    auto debit_only = std::make_shared<funding_event>(
+        epoch_ms(1), "BTCUSDT", 0.0, -25000.0, "FUNDING_FEE");
+    b.on_event(debit_only);
+    EXPECT_NEAR(b.max_drawdown_pct(), 25.0, 1e-6);
+    EXPECT_NEAR(b.risk_view().max_drawdown, 25.0, 1e-6);
+}
+
+// Multi-symbol fills must not net inventory or share one mark across books.
+TEST(Analytics, MultiSymbol_IndependentInventoryAndEquity)
+{
+    Analytics a(100000.0);
+
+    // Long 10 AAPL @ 100, long 5 GOOG @ 200.
+    a.on_event(std::make_shared<fill_event>(
+        epoch_ms(1), "AAPL", 1, order_side::buy, 10.0, 100.0, 0.0));
+    a.on_event(std::make_shared<fill_event>(
+        epoch_ms(2), "GOOG", 2, order_side::buy, 5.0, 200.0, 0.0));
+
+    // Marks at entry → equity unchanged.
+    a.on_event(std::make_shared<market_event>(
+        epoch_ms(3), "AAPL", 100.0, 100.0, 100.0, 100.0));
+    a.on_event(std::make_shared<market_event>(
+        epoch_ms(4), "GOOG", 200.0, 200.0, 200.0, 200.0));
+    EXPECT_NEAR(a.risk_view().equity, 100000.0, 1e-6);
+
+    // AAPL marks to 110, GOOG stays 200 → +100 equity.
+    a.on_event(std::make_shared<market_event>(
+        epoch_ms(5), "AAPL", 110.0, 110.0, 110.0, 110.0));
+    EXPECT_NEAR(a.risk_view().equity, 100100.0, 1e-6);
+
+    // Selling GOOG must not close AAPL. Close GOOG at 220 → realized +100.
+    a.on_event(std::make_shared<fill_event>(
+        epoch_ms(6), "GOOG", 3, order_side::sell, 5.0, 220.0, 0.0));
+    auto r = a.generate_report();
+    ASSERT_EQ(r.trade_returns.size(), 1u);
+    EXPECT_NEAR(r.trade_returns[0], 100.0, 1e-6);
+    // Still long AAPL 10 @ 110 mark: cash after opens/closes:
+    // start 100k -1000 AAPL -1000 GOOG +1100 GOOG sell = 99100 + 10*110 = 100200
+    EXPECT_NEAR(a.risk_view().equity, 100200.0, 1e-6);
+}
+
 // risk_view().equity must be usable for max_position_pct_of_equity from t0,
 // not only after a funding event (was stuck at 0 and fail-opened).
 TEST(Analytics, RiskViewEquity_SeededAndUpdatedOnMarket)

@@ -191,6 +191,36 @@ TEST(RiskManager, ZeroPriceMarketOpen_RejectsFailClosed)
     EXPECT_EQ(rm.check_order(mkt, port, snap), risk_action::reject);
 }
 
+TEST(RiskManager, MaxOpenOrders_UsesActiveCountNotOrdersMinusFills)
+{
+    risk_limits lim;
+    lim.max_open_orders = 2;
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    order_event ord(epoch_ms(0), "AAPL", order_type::limit, order_side::buy, 1, 100.0);
+
+    // Legacy proxy would see 10-8=2 and reject; true active is 1 → pass.
+    risk_snapshot snap;
+    snap.total_orders = 10;
+    snap.total_fills = 8;
+    snap.active_orders = 1;
+    snap.active_orders_valid = true;
+    EXPECT_EQ(rm.check_order(ord, port, snap), risk_action::pass);
+
+    snap.active_orders = 2;
+    EXPECT_EQ(rm.check_order(ord, port, snap), risk_action::reject);
+
+    // Partial-fill undercount: fills > "open proxy" would underflow; active wins.
+    risk_snapshot partial;
+    partial.total_orders = 3;
+    partial.total_fills = 5;  // multi-partial fills
+    partial.active_orders = 2;
+    partial.active_orders_valid = true;
+    EXPECT_EQ(rm.check_order(ord, port, partial), risk_action::reject);
+}
+
 TEST(RiskManager, MaxPositionPctOfEquity_RejectsWhenEquityPopulated)
 {
     risk_limits lim;
