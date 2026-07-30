@@ -131,9 +131,9 @@ TEST(BitgetParser, ParseAllTrades_MultiElementData)
     EXPECT_EQ(all[1].side, 1);
 }
 
-// Multi-trade data[] is fully accessible via parse_all_trades (N==3).
-// parse_trade / BitgetCombinedParser only surface the first element.
-TEST(BitgetParser, ParseAllTrades_ReturnsAllN_CombinedFirstOnly)
+// Multi-trade data[]: parse_all_trades + production parse_records emit all N.
+// parse_trade / parse_record still return first only (compat).
+TEST(BitgetParser, ParseAllTrades_ReturnsAllN_ProductionPathEmitsAll)
 {
     constexpr const char* kThree = R"({
       "arg": {"topic":"publicTrade","symbol":"BTCUSDT"},
@@ -160,7 +160,24 @@ TEST(BitgetParser, ParseAllTrades_ReturnsAllN_CombinedFirstOnly)
     ASSERT_TRUE(first.has_value());
     EXPECT_DOUBLE_EQ(first->price, 10.0);
 
+    BitgetTradeParser trade_parser;
+    auto recs = trade_parser.parse_records(std::string_view{kThree});
+    ASSERT_EQ(recs.size(), 3u);
+    EXPECT_DOUBLE_EQ(recs[0].price, 10.0);
+    EXPECT_DOUBLE_EQ(recs[1].price, 20.0);
+    EXPECT_DOUBLE_EQ(recs[2].price, 30.0);
+    EXPECT_EQ(recs[1].side, data_tick_side::ask);
+
     BitgetCombinedParser combined;
+    auto events = combined.parse_records(std::string_view{kThree});
+    ASSERT_EQ(events.size(), 3u);
+    for (std::size_t i = 0; i < 3; ++i)
+    {
+        ASSERT_TRUE(std::holds_alternative<provider::tick>(events[i]));
+        EXPECT_DOUBLE_EQ(std::get<provider::tick>(events[i]).price,
+                         all[i].price);
+    }
+    // parse_record remains first-only for single-record callers.
     auto ev = combined.parse_record(std::string_view{kThree});
     ASSERT_TRUE(ev.has_value());
     ASSERT_TRUE(std::holds_alternative<provider::tick>(*ev));
@@ -358,8 +375,10 @@ TEST(BitgetParser, ParseKline_OHLCV)
     EXPECT_EQ(bar->date, "1710000000000");
 }
 
-TEST(BitgetParser, ParseKline_ConfirmFalseSkips)
+TEST(BitgetParser, ParseKline_ConfirmFalseStillParsesRaw)
 {
+    // Pure parse_kline no longer filters on confirm — closed-bar policy is
+    // the stateful gate on BitgetKlineParser / BitgetCombinedParser.
     const char* open_candle = R"({
       "arg": {"topic":"kline","symbol":"BTCUSDT","interval":"1m"},
       "data": [{
@@ -367,10 +386,15 @@ TEST(BitgetParser, ParseKline_ConfirmFalseSkips)
         "confirm":false
       }]
     })";
-    EXPECT_FALSE(bitget::parse_kline(open_candle).has_value());
+    auto bar = bitget::parse_kline(open_candle);
+    ASSERT_TRUE(bar.has_value());
+    EXPECT_DOUBLE_EQ(bar->close, 1.5);
+    auto conf = bitget::extract_kline_confirm(open_candle);
+    ASSERT_TRUE(conf.has_value());
+    EXPECT_FALSE(*conf);
 }
 
-TEST(BitgetParser, ParseKline_ConfirmTrueEmits)
+TEST(BitgetParser, ParseKline_ConfirmTrueStillParsesRaw)
 {
     const char* closed = R"({
       "arg": {"topic":"kline","symbol":"ETHUSDT","interval":"5m"},
@@ -380,6 +404,100 @@ TEST(BitgetParser, ParseKline_ConfirmTrueEmits)
       }]
     })";
     auto bar = bitget::parse_kline(closed);
+    ASSERT_TRUE(bar.has_value());
+    EXPECT_EQ(bar->symbol, "ETHUSDT");
+    EXPECT_DOUBLE_EQ(bar->close, 11.0);
+}
+
+TEST(BitgetParser, KlineClosedGate_ConfirmFalseBuffersConfirmTrueEmits)
+{
+    bitget::kline_closed_gate gate;
+    provider::bar open_b;
+    open_b.symbol = "BTCUSDT";
+    open_b.date = "1";
+    open_b.open = 1;
+    open_b.high = 2;
+    open_b.low = 0.5;
+    open_b.close = 1.5;
+
+    EXPECT_FALSE(gate.on_bar(open_b, /*confirm=*/false).has_value());
+
+    provider::bar closed_b = open_b;
+    closed_b.close = 1.8;
+    auto emitted = gate.on_bar(closed_b, /*confirm=*/true);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_DOUBLE_EQ(emitted->close, 1.8);
+}
+
+TEST(BitgetParser, KlineClosedGate_UtaStartRolloverEmitsPrevious)
+{
+    // UTA has no confirm — mid-candle updates must not emit; start change does.
+    bitget::kline_closed_gate gate;
+    provider::bar a;
+    a.symbol = "BTCUSDT";
+    a.date = "1000";
+    a.open = 10;
+    a.high = 11;
+    a.low = 9;
+    a.close = 10.5;
+    a.volume = 1;
+
+    EXPECT_FALSE(gate.on_bar(a, std::nullopt).has_value());
+
+    provider::bar a2 = a;
+    a2.high = 12;
+    a2.close = 11;
+    EXPECT_FALSE(gate.on_bar(a2, std::nullopt).has_value()); // same start
+
+    provider::bar b = a;
+    b.date = "2000";
+    b.open = 11;
+    b.high = 11.5;
+    b.low = 10.5;
+    b.close = 11.2;
+    auto closed = gate.on_bar(b, std::nullopt);
+    ASSERT_TRUE(closed.has_value());
+    EXPECT_EQ(closed->date, "1000");
+    EXPECT_DOUBLE_EQ(closed->close, 11.0); // last update of period 1000
+    EXPECT_DOUBLE_EQ(closed->high, 12.0);
+}
+
+TEST(BitgetParser, BitgetKlineParser_UtaHoldsOpenUntilRollover)
+{
+    BitgetKlineParser parser;
+    const char* t1 = R"({
+      "arg": {"topic":"kline","symbol":"BTCUSDT","interval":"1m"},
+      "data": [{"start":"1000","open":"10","high":"11","low":"9","close":"10.5","volume":"1"}]
+    })";
+    const char* t1b = R"({
+      "arg": {"topic":"kline","symbol":"BTCUSDT","interval":"1m"},
+      "data": [{"start":"1000","open":"10","high":"12","low":"9","close":"11","volume":"2"}]
+    })";
+    const char* t2 = R"({
+      "arg": {"topic":"kline","symbol":"BTCUSDT","interval":"1m"},
+      "data": [{"start":"2000","open":"11","high":"11.5","low":"10.5","close":"11.2","volume":"1"}]
+    })";
+
+    EXPECT_FALSE(parser.parse_record(std::string_view{t1}).has_value());
+    EXPECT_FALSE(parser.parse_record(std::string_view{t1b}).has_value());
+    auto closed = parser.parse_record(std::string_view{t2});
+    ASSERT_TRUE(closed.has_value());
+    EXPECT_EQ(closed->date, "1000");
+    EXPECT_DOUBLE_EQ(closed->close, 11.0);
+    EXPECT_DOUBLE_EQ(closed->high, 12.0);
+}
+
+TEST(BitgetParser, BitgetKlineParser_ConfirmTrueEmitsImmediately)
+{
+    BitgetKlineParser parser;
+    const char* closed = R"({
+      "arg": {"topic":"kline","symbol":"ETHUSDT","interval":"5m"},
+      "data": [{
+        "start":"2","open":"10","high":"12","low":"9","close":"11","volume":"3",
+        "confirm":true
+      }]
+    })";
+    auto bar = parser.parse_record(std::string_view{closed});
     ASSERT_TRUE(bar.has_value());
     EXPECT_EQ(bar->symbol, "ETHUSDT");
     EXPECT_DOUBLE_EQ(bar->close, 11.0);
@@ -423,10 +541,25 @@ TEST(BitgetParser, Combined_DispatchesByTopic)
     ASSERT_TRUE(std::holds_alternative<provider::l2_snapshot>(*books_ev));
     EXPECT_EQ(std::get<provider::l2_snapshot>(*books_ev).bids.size(), 2u);
 
-    auto kline_ev = parser.parse_record(std::string_view{kKline});
+    // UTA kline without confirm: first open candle is held until start rolls.
+    EXPECT_FALSE(parser.parse_record(std::string_view{kKline}).has_value());
+    const char* kKlineNext = R"({
+      "arg": {"instType":"usdt-futures","topic":"kline","symbol":"BTCUSDT","interval":"1m"},
+      "data": [{
+        "start": "1710000060000",
+        "open": "97050",
+        "high": "97100",
+        "low": "97000",
+        "close": "97080",
+        "volume": "10"
+      }],
+      "ts": 1710000060001
+    })";
+    auto kline_ev = parser.parse_record(std::string_view{kKlineNext});
     ASSERT_TRUE(kline_ev.has_value());
     ASSERT_TRUE(std::holds_alternative<provider::bar>(*kline_ev));
     EXPECT_DOUBLE_EQ(std::get<provider::bar>(*kline_ev).close, 97050.0);
+    EXPECT_EQ(std::get<provider::bar>(*kline_ev).date, "1710000000000");
 }
 
 TEST(BitgetParser, Combined_UnknownTopic)
@@ -451,10 +584,20 @@ TEST(BitgetParser, TradeParserAdapter)
 TEST(BitgetParser, KlineParserAdapter)
 {
     BitgetKlineParser parser;
-    auto rec = parser.parse_record(std::string_view{kKline});
+    // First UTA frame held; second start emits the closed previous bar.
+    EXPECT_FALSE(parser.parse_record(std::string_view{kKline}).has_value());
+    const char* next = R"({
+      "arg": {"instType":"usdt-futures","topic":"kline","symbol":"BTCUSDT","interval":"1m"},
+      "data": [{
+        "start": "1710000060000",
+        "open": "97050","high":"97100","low":"97000","close":"97080","volume":"10"
+      }]
+    })";
+    auto rec = parser.parse_record(std::string_view{next});
     ASSERT_TRUE(rec.has_value());
     EXPECT_EQ(rec->symbol, "BTCUSDT");
     EXPECT_DOUBLE_EQ(rec->close, 97050.0);
+    EXPECT_EQ(rec->date, "1710000000000");
 }
 
 TEST(BitgetParser, BooksParserAdapter)

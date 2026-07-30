@@ -195,8 +195,55 @@ TEST(BitgetFuturesKillSwitch, SetsPerCallTimeoutWhenProvided)
 
     BitgetFuturesKillSwitch ks(wrap(post), "USDT-FUTURES", "BTCUSDT", set_to);
     EXPECT_TRUE(ks.cancel_all_and_flatten(std::chrono::milliseconds(4500)));
-    // min(1500, 4500/3=1500) = 1500
-    EXPECT_EQ(last_timeout_ms.load(), 1500);
+    // No get_timeout → restore uses 0; final value after RAII restore.
+    EXPECT_EQ(last_timeout_ms.load(), 0);
+}
+
+TEST(BitgetFuturesKillSwitch, RestoresPreviousTimeoutAfterSuccess)
+{
+    auto post = std::make_shared<fake_post>();
+    std::atomic<long long> current_ms{3000};
+    std::vector<long long> set_log;
+    auto set_to = [&](std::chrono::milliseconds ms) {
+        current_ms.store(ms.count(), std::memory_order_release);
+        set_log.push_back(ms.count());
+    };
+    auto get_to = [&]() {
+        return std::chrono::milliseconds(
+            current_ms.load(std::memory_order_acquire));
+    };
+
+    BitgetFuturesKillSwitch ks(wrap(post), "USDT-FUTURES", "BTCUSDT",
+                               set_to, get_to);
+    EXPECT_TRUE(ks.cancel_all_and_flatten(std::chrono::milliseconds(4500)));
+
+    // tighten to min(1500, 1500)=1500, then restore 3000
+    ASSERT_GE(set_log.size(), 2u);
+    EXPECT_EQ(set_log.front(), 1500);
+    EXPECT_EQ(set_log.back(), 3000);
+    EXPECT_EQ(current_ms.load(), 3000);
+}
+
+TEST(BitgetFuturesKillSwitch, RestoresPreviousTimeoutAfterCancelFail)
+{
+    SilenceStderr quiet;
+    auto post = std::make_shared<fake_post>();
+    post->responses = {{500, R"({"code":"50000","msg":"server error"})"}};
+
+    std::atomic<long long> current_ms{3000};
+    auto set_to = [&](std::chrono::milliseconds ms) {
+        current_ms.store(ms.count(), std::memory_order_release);
+    };
+    auto get_to = [&]() {
+        return std::chrono::milliseconds(
+            current_ms.load(std::memory_order_acquire));
+    };
+
+    BitgetFuturesKillSwitch ks(wrap(post), "USDT-FUTURES", "BTCUSDT",
+                               set_to, get_to);
+    EXPECT_FALSE(ks.cancel_all_and_flatten(std::chrono::milliseconds(3000)));
+    EXPECT_EQ(current_ms.load(), 3000)
+        << "timeout must restore even on early cancel failure";
 }
 
 TEST(BitgetFuturesKillSwitch, NoopCodeHelpers)

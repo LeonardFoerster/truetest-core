@@ -81,11 +81,32 @@ TEST(BitgetPrivateWsTransportHelpers, LoginJsonExact)
         R"({"op":"login","args":[{"apiKey":"key","passphrase":"pass","timestamp":"1627366780545","sign":"SIG"}]})");
 }
 
+TEST(BitgetPrivateWsTransportHelpers, LoginJsonEscapesSpecialChars)
+{
+    // Passphrase / key with JSON metacharacters must not break the frame.
+    const std::string j = bitget::build_login_json(
+        R"(k"ey)", R"(p\ass"x)", "1627366780545", "SI/G+=");
+    EXPECT_EQ(
+        j,
+        R"({"op":"login","args":[{"apiKey":"k\"ey","passphrase":"p\\ass\"x","timestamp":"1627366780545","sign":"SI/G+="}]})");
+}
+
+TEST(BitgetPrivateWsTransportHelpers, AppendJsonEscapedControlChars)
+{
+    std::string out;
+    bitget::append_json_escaped(out, "a\nb\tc");
+    EXPECT_EQ(out, R"(a\nb\tc)");
+
+    out.clear();
+    bitget::append_json_escaped(out, std::string("\x01", 1));
+    EXPECT_EQ(out, R"(\u0001)");
+}
+
 TEST(BitgetPrivateWsTransportHelpers, PrivateSubscribeExact)
 {
     EXPECT_EQ(
         bitget::build_private_subscribe_json(),
-        R"({"op":"subscribe","args":[{"instType":"UTA","topic":"order"},{"instType":"UTA","topic":"fill"},{"instType":"UTA","topic":"position"}]})");
+        R"({"op":"subscribe","args":[{"instType":"UTA","topic":"order"},{"instType":"UTA","topic":"fill"},{"instType":"UTA","topic":"position"},{"instType":"UTA","topic":"account"}]})");
 }
 
 TEST(BitgetPrivateWsTransportHelpers, LoginSuccessCodes)
@@ -249,11 +270,24 @@ TEST(BitgetFuturesUserDataParser, PositionLongPositive)
     EXPECT_DOUBLE_EQ(s.positions[0].qty, 0.5);
     EXPECT_EQ(s.positions[0].position_side, "long");
     EXPECT_EQ(s.positions[0].margin_type, "CROSSED");
+    // Position topic → other (not order) so provider logs are not filtered.
+    EXPECT_EQ(s.r, parsed_position_snapshot::reason::other);
 
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   s.ts.time_since_epoch())
                   .count();
     EXPECT_EQ(ms, 1700000000011LL);
+}
+
+TEST(BitgetFuturesUserDataParser, FillChannelDoesNotInventCumulative)
+{
+    BitgetFuturesUserDataParser p;
+    parsed_exec out;
+    ASSERT_TRUE(p.parse(fill_push("0.4", "60000.5"), out));
+    EXPECT_EQ(out.k, parsed_exec::kind::partial_fill);
+    EXPECT_DOUBLE_EQ(out.last_fill_qty, 0.4);
+    // No cumExecQty on fill channel → leave 0 (bridge sums last_fill).
+    EXPECT_DOUBLE_EQ(out.cumulative_qty, 0.0);
 }
 
 TEST(BitgetFuturesUserDataParser, PositionShortNegative)

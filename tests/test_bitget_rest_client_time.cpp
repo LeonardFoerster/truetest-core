@@ -34,6 +34,19 @@ get_fn_t make_time_ok(long long server_ms, int status = 200,
 
 } // namespace
 
+// --- query sort (prehash) ----------------------------------------------------
+
+TEST(BitgetQuerySort, SortsKeysAlphabetically)
+{
+    EXPECT_EQ(bitget::sort_query_string("symbol=BTCUSDT&category=USDT-FUTURES"),
+              "category=USDT-FUTURES&symbol=BTCUSDT");
+    EXPECT_EQ(bitget::sort_query_string("category=USDT-FUTURES&symbol=BTCUSDT"),
+              "category=USDT-FUTURES&symbol=BTCUSDT");
+    EXPECT_EQ(bitget::sort_query_string("z=1&a=2&m=3"), "a=2&m=3&z=1");
+    EXPECT_EQ(bitget::sort_query_string(""), "");
+    EXPECT_EQ(bitget::sort_query_string("only=one"), "only=one");
+}
+
 // --- business code detection -------------------------------------------------
 
 TEST(BitgetBusinessCode, SuccessCode00000)

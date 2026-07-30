@@ -115,6 +115,24 @@ TEST(BitgetFuturesReconciler, PositionAmtEmptyListIsFlatZero)
     EXPECT_DOUBLE_EQ(out, 0.0);
 }
 
+TEST(BitgetFuturesReconciler, PositionAmtOtherSymbolsOnlyRefuses)
+{
+    // Non-empty list without the requested symbol must not silent-flat.
+    const std::string body = pos_json("1.5", "long", "ETHUSDT");
+    double out = 99.0;
+    EXPECT_FALSE(BitgetFuturesReconciler::extract_position_amt(
+        body, out, "BTCUSDT"));
+}
+
+TEST(BitgetFuturesReconciler, PositionAmtWrongSymbolSingleObjectRefuses)
+{
+    std::string body =
+        R"({"code":"00000","data":{"symbol":"ETHUSDT","total":"2.0","posSide":"long"}})";
+    double out = 99.0;
+    EXPECT_FALSE(BitgetFuturesReconciler::extract_position_amt(
+        body, out, "BTCUSDT"));
+}
+
 TEST(BitgetFuturesReconciler, PositionAmtZeroIsParseable)
 {
     double out = 99.0;

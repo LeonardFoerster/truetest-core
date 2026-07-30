@@ -59,7 +59,28 @@ TEST(BitgetTransportSubscribe, MapCandleAliasToKline)
 
     auto m4 = bitget::map_stream_to_topic("candle4h");
     EXPECT_EQ(m4.topic, "kline");
-    EXPECT_EQ(m4.interval, "4h");
+    // UTA requires uppercase H for hour intervals.
+    EXPECT_EQ(m4.interval, "4H");
+}
+
+TEST(BitgetTransportSubscribe, NormalizeKlineIntervalCase)
+{
+    EXPECT_EQ(bitget::normalize_kline_interval("1m"), "1m");
+    EXPECT_EQ(bitget::normalize_kline_interval("15m"), "15m");
+    EXPECT_EQ(bitget::normalize_kline_interval("1h"), "1H");
+    EXPECT_EQ(bitget::normalize_kline_interval("4h"), "4H");
+    EXPECT_EQ(bitget::normalize_kline_interval("4H"), "4H");
+    EXPECT_EQ(bitget::normalize_kline_interval("1d"), "1D");
+    EXPECT_EQ(bitget::normalize_kline_interval("1D"), "1D");
+    EXPECT_EQ(bitget::normalize_kline_interval("1w"), "1W");
+
+    auto h = bitget::map_stream_to_topic("kline1h");
+    EXPECT_EQ(h.topic, "kline");
+    EXPECT_EQ(h.interval, "1H");
+
+    auto d = bitget::map_stream_to_topic("kline1d");
+    EXPECT_EQ(d.topic, "kline");
+    EXPECT_EQ(d.interval, "1D");
 }
 
 TEST(BitgetTransportSubscribe, MapAlreadyMappedPassThrough)
