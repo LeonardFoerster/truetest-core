@@ -7,7 +7,7 @@ produced by engine_backtest / engine_shadow.
 
 Usage examples:
     # Single backtest (recommended)
-    ./build/engine_backtest --provider local --path market_data.csv --strategy sma \
+    ./build/engine_backtest --provider local --path data/market_data.csv --strategy sma \
         --output results.json
     python scripts/plot.py results.json --show --outdir plots/
 
