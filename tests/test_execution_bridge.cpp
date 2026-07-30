@@ -448,6 +448,38 @@ TEST(ExecutionBridge, StatusTransitionsDrainable)
     EXPECT_TRUE(saw_reconnected);
 }
 
+// close() must revoke fill-tx callbacks so late deliver/status cannot
+// call into a torn-down bridge (ctor installs [this] lambdas).
+TEST(ExecutionBridge, CloseClearsFillCallbacks)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+
+    h.bridge->submit_order(make_order(77));
+    h.bridge->drain_outbound_for_test();
+
+    // Drain status queued by FakeFillTransport::open so post-close
+    // poll_status only reflects late traffic.
+    {
+        std::vector<ExecutionBridge::status_event> drain;
+        (void)h.bridge->poll_status(drain);
+    }
+
+    h.bridge->close();
+
+    EXPECT_FALSE(static_cast<bool>(h.ft->message_cb_));
+    EXPECT_FALSE(static_cast<bool>(h.ft->status_cb_));
+
+    // Late messages after revoke must be no-ops (no fill/status queued).
+    h.ft->deliver("full|tt-77|EX-1|TEST|buy|10|100");
+    h.ft->report_status(IFillTransport::lifecycle::degraded, "late");
+
+    std::vector<fill_event> fills;
+    EXPECT_FALSE(h.bridge->poll_fills(fills));
+    std::vector<ExecutionBridge::status_event> statuses;
+    EXPECT_FALSE(h.bridge->poll_status(statuses));
+}
+
 TEST(ExecutionBridge, TerminalStatesClearMapping)
 {
     bridge_harness h;

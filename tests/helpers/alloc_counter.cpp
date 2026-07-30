@@ -33,6 +33,8 @@ snapshot read() noexcept
 
 } // namespace truetest::test::alloc
 
+// Global new/delete overrides for hotpath alloc counting. ASan/LSan may
+// report process-exit noise from this harness path; that is intentional.
 void* operator new(std::size_t n)
 {
     truetest::test::alloc::record(n);
