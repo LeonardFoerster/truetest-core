@@ -88,6 +88,23 @@ public:
     // present. Preferred over dynamic_cast<IAsyncSubmitSupport*>.
     // Callers: engine ctor wiring for unknown-fill handler, drain paths.
     virtual IAsyncSubmitSupport* get_async_support() { return nullptr; }
+
+    // External book trades (e.g. MarketMaker re-quotes) that may cross
+    // resting strategy limits. LocalBookAdapter records maker fills;
+    // HybridExecutor forwards to its inner book adapter. Live bridges
+    // and tape-only adapters default to no-op (not a live submit path).
+    virtual void on_book_trades(const trades& /*trs*/,
+                                std::chrono::system_clock::time_point /*ts*/) {}
+
+    // Bar-mode traversal: fill resting limits whose price lies inside
+    // [low, high]. Returns true if any fill was produced (caller should
+    // poll_fills). Default false — paper LocalBookAdapter / Hybrid only.
+    virtual bool sweep_resting_range(const std::string& /*symbol*/,
+                                     double /*low*/, double /*high*/,
+                                     std::chrono::system_clock::time_point /*ts*/)
+    {
+        return false;
+    }
 };
 
 class LocalBookAdapter : public IExecutionAdapter
@@ -187,7 +204,9 @@ public:
 
         quantity book_quantity = static_cast<quantity>(std::round(o.get_quantity() * qty_scale_));
 
-        auto book_order = std::make_shared<order>(
+        // Prefer the orderbook object pool (prewarmed + forbid_runtime_grow)
+        // over a freestanding heap allocation on every paper submit.
+        auto book_order = ob_->create_order(
             book_order_type, o.get_order_id(), book_side, book_price, book_quantity);
 
         double pre_bid = 0.0, pre_ask = 0.0;
@@ -355,7 +374,7 @@ public:
     // is a tracked resting order becomes a maker fill at that order's
     // own limit price.
     void on_book_trades(const trades& trs,
-                        std::chrono::system_clock::time_point ts)
+                        std::chrono::system_clock::time_point ts) override
     {
         for (const auto& tr : trs)
         {
@@ -372,7 +391,7 @@ public:
     // (maker) and removes it from the book. Returns true if anything filled.
     bool sweep_resting_range(const std::string& symbol,
                              double low, double high,
-                             std::chrono::system_clock::time_point ts)
+                             std::chrono::system_clock::time_point ts) override
     {
         if (resting_.empty() || !(low > 0.0) || !(high > 0.0))
             return false;

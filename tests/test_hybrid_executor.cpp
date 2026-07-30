@@ -172,3 +172,71 @@ TEST(HybridExecutor, RestingLimitSurvivesMidUpdateAndFills)
     EXPECT_EQ(fills[0].get_order_id(), 100007u);
     EXPECT_DOUBLE_EQ(fills[0].get_fill_price(), 99.0);
 }
+
+TEST(HybridExecutor, EngineFacingOnBookTradesViaIExecutionAdapter)
+{
+    // Residual-risk regression: engine used to dynamic_cast to
+    // LocalBookAdapter*, so HybridExecutor silently dropped MM book
+    // trades. Delivery must work through IExecutionAdapter*.
+    auto paper = std::make_shared<BinanceExecutor>();
+    paper->set_symbol("BTCUSDT");
+    paper->set_last_price(100.0);
+    auto book = std::make_shared<orderbook>();
+    auto hx = std::make_shared<HybridExecutor>(
+        paper, book, /*fee_model=*/nullptr,
+        std::make_shared<PerfectFillModel>(),
+        /*qty_scale=*/1e8, /*spread_step_factor=*/0.0001);
+    hx->on_mid_price(100.0);
+
+    order_event o(tp{us(0)}, "BTCUSDT", order_type::limit, order_side::buy,
+                  1.0, 99.0, time_in_force::gtc);
+    o.set_order_id(100101);
+    hx->submit_order(o);
+
+    // Simulate an external MM trade that fills our resting buy as maker
+    // at its own limit (same shape LocalBookAdapter::record_resting_fill
+    // expects from orderbook trades).
+    trade_info bid_ti{/*orderId=*/100101u, Price::from_double(99.0),
+                      static_cast<quantity>(1e8)};
+    trade_info ask_ti{/*counterparty quote id*/ 42u, Price::from_double(99.0),
+                      static_cast<quantity>(1e8)};
+    trades trs;
+    trs.emplace_back(bid_ti, ask_ti);
+
+    IExecutionAdapter* iface = hx.get();
+    iface->on_book_trades(trs, tp{us(1)});
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(iface->poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].get_order_id(), 100101u);
+    EXPECT_DOUBLE_EQ(fills[0].get_fill_price(), 99.0);
+}
+
+TEST(HybridExecutor, EngineFacingSweepRestingRangeViaIExecutionAdapter)
+{
+    // Same residual: bar-range sweep must reach Hybrid's inner LocalBook.
+    auto paper = std::make_shared<BinanceExecutor>();
+    paper->set_symbol("BTCUSDT");
+    paper->set_last_price(100.0);
+    auto book = std::make_shared<orderbook>();
+    auto hx = std::make_shared<HybridExecutor>(
+        paper, book, /*fee_model=*/nullptr,
+        std::make_shared<PerfectFillModel>(),
+        /*qty_scale=*/1e8, /*spread_step_factor=*/0.0001);
+    hx->on_mid_price(100.0);
+
+    order_event o(tp{us(0)}, "BTCUSDT", order_type::limit, order_side::buy,
+                  1.0, 99.0, time_in_force::gtc);
+    o.set_order_id(100202);
+    hx->submit_order(o);
+
+    IExecutionAdapter* iface = hx.get();
+    ASSERT_TRUE(iface->sweep_resting_range("BTCUSDT", 98.0, 101.0, tp{us(2)}));
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(iface->poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].get_order_id(), 100202u);
+    EXPECT_DOUBLE_EQ(fills[0].get_fill_price(), 99.0);
+}

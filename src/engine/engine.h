@@ -303,9 +303,10 @@ private:
     bool process_adapter_fills(const std::shared_ptr<IExecutionAdapter>& adapter,
                                std::size_t& event_count, bool& halt_requested);
 
-    // Routes MarketMaker quote-update crossings to the symbol's
-    // LocalBookAdapter so resting strategy limits fill when the seeded
-    // book moves through their level.
+    // Routes MarketMaker quote-update crossings via IExecutionAdapter::
+    // on_book_trades (LocalBookAdapter records fills; HybridExecutor
+    // forwards; live bridges no-op) so resting strategy limits fill when
+    // the seeded book moves through their level.
     void deliver_mm_book_trades(const std::string& symbol, const trades& trs,
                                 const std::chrono::system_clock::time_point& ts,
                                 std::size_t& event_count, bool& halt_requested);
@@ -478,9 +479,10 @@ public:
         return pause_all_.load(std::memory_order_acquire);
     }
 
-    // Flatten on demand: drains all open positions through the unwind
-    // path. Halts the engine afterwards (operator can resume by clearing
-    // the halt flag separately if desired).
+    // Flatten on demand: sets a one-shot flag; on the next market/tick
+    // event the engine drains open positions via unwind_positions.
+    // Does NOT call trigger_halt and does NOT clear halt_flag_ — halt
+    // remains write-once terminal (S3); recovery is process restart only.
     void request_flatten()
     {
         flatten_request_.store(true, std::memory_order_release);
@@ -552,6 +554,12 @@ public:
 
     const OrderTracker& get_order_tracker() const { return order_tracker_; }
 
+    // Prefer is_halted() for production reads. Mutable ref is retained for
+    // tests; production code must never clear halt mid-run (S3 terminal).
+    bool is_halted() const
+    {
+        return halt_flag_.load(std::memory_order_acquire);
+    }
     std::atomic<bool>& get_halt_flag() { return halt_flag_; }
 
     // Single thread-safe halt entry-point. Use this everywhere a halt is

@@ -1739,13 +1739,12 @@ void engine::deliver_mm_book_trades(const std::string& symbol, const trades& trs
         return;
     // Only adapters that already exist can hold resting strategy orders;
     // don't create one just to deliver MM-vs-MM crossings.
+    // Virtual dispatch: LocalBookAdapter records fills; HybridExecutor
+    // forwards to its inner book adapter; live bridges no-op.
     auto it = execution_adapters_.find(symbol);
     if (it == execution_adapters_.end() || !it->second)
         return;
-    auto* local = dynamic_cast<LocalBookAdapter*>(it->second.get());
-    if (!local)
-        return;
-    local->on_book_trades(trs, ts);
+    it->second->on_book_trades(trs, ts);
     process_adapter_fills(it->second, event_count, halt_requested);
 }
 
@@ -2653,10 +2652,8 @@ void engine::sweep_resting_limits(const std::string& symbol,
     auto it = execution_adapters_.find(symbol);
     if (it == execution_adapters_.end() || !it->second)
         return;
-    auto* local = dynamic_cast<LocalBookAdapter*>(it->second.get());
-    if (!local)
-        return;
-    if (local->sweep_resting_range(symbol, low, high, ts))
+    // Virtual dispatch (same capability surface as deliver_mm_book_trades).
+    if (it->second->sweep_resting_range(symbol, low, high, ts))
         process_adapter_fills(it->second, event_count, halt_requested);
 }
 
