@@ -153,7 +153,14 @@ public:
         Price book_price;
         if (o.get_order_type() == order_type::market)
         {
-            double ref_price = (mid_price_ > 0.0) ? mid_price_ : o.get_price();
+            // Exit/bracket closes stamp the trigger extreme as order price
+            // (opener_order_id set). Prefer that over bar mid so SL fills
+            // do not look ahead to the bar close.
+            double ref_price;
+            if (o.get_opener_order_id() != 0 && o.get_price() > 0.0)
+                ref_price = o.get_price();
+            else
+                ref_price = (mid_price_ > 0.0) ? mid_price_ : o.get_price();
             bool walked_used = false;
 
             // Walked-book impact: when L2 depth is real, the actual VWAP
