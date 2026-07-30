@@ -410,13 +410,34 @@ struct cli_options
 #endif
 };
 
-static bool validate_binance_futures_live_phase0(const cli_options& o,
-                                                 std::ostream& errors,
-                                                 std::ostream& warnings)
+// Phase-0 live discipline for futures venues (Binance USDT-M + Bitget UTA).
+// Mainnet/live without sandbox flags: refuse if no venue caps or daily-loss.
+// Sandbox (Binance --testnet; Bitget --demo|--testnet): warn only.
+static bool is_futures_live_provider(const std::string& name)
+{
+    if (name == "binance-futures")
+        return true;
+    // bitget / bitget-futures (spot Bitget is not in scope)
+    return name.rfind("bitget", 0) == 0;
+}
+
+static bool futures_live_sandbox_flags(const cli_options& o)
+{
+    // Bitget paptrading accepts --demo or --testnet; Binance futures only --testnet.
+    if (o.provider_name.rfind("bitget", 0) == 0)
+        return o.demo || o.testnet;
+    return o.testnet;
+}
+
+static bool validate_futures_live_phase0(const cli_options& o,
+                                         std::ostream& errors,
+                                         std::ostream& warnings)
 {
     const bool resolved_live = (o.mode == "live" || o.live);
-    if (o.provider_name != "binance-futures" || !resolved_live)
+    if (!is_futures_live_provider(o.provider_name) || !resolved_live)
         return true;
+
+    const bool sandbox = futures_live_sandbox_flags(o);
 
     const bool has_venue_caps =
         o.max_notional_usdt > 0.0 ||
@@ -425,7 +446,7 @@ static bool validate_binance_futures_live_phase0(const cli_options& o,
 
     if (!has_venue_caps)
     {
-        if (!o.testnet)
+        if (!sandbox)
         {
             errors << "  ! Refusing mainnet futures live mode without venue risk caps.\n"
                       "    Set at least one of --max-notional, --max-leverage, "
@@ -439,7 +460,7 @@ static bool validate_binance_futures_live_phase0(const cli_options& o,
 
     if (o.risk_max_daily_loss <= 0.0)
     {
-        if (!o.testnet)
+        if (!sandbox)
         {
             errors << "  ! Refusing mainnet futures live mode with --max-daily-loss disabled.\n"
                       "    Set a conservative positive --max-daily-loss.\n";
@@ -863,15 +884,17 @@ static void register_cli_options(CLI::App& app, cli_options& o)
         "approximation.");
     app.add_option("--dead-man-countdown-ms", o.dead_man_countdown_ms,
         "(futures providers) Server-side dead-man's-switch countdown "
-        "in milliseconds. Venue auto-cancels open orders for the "
-        "symbol within this many ms of the last successful heartbeat "
-        "if the engine dies. 0 disables. Default: 30000 (30s).");
+        "in milliseconds (Bitget UTA clamps to seconds [5,60]). "
+        "On expiry the venue auto-cancels open orders: Binance futures "
+        "is symbol-scoped; Bitget UTA is ACCOUNT-WIDE (all UTA open "
+        "orders on the API key). 0 disables. Default: 30000 (30s).");
     app.add_option("--dead-man-heartbeat-ms", o.dead_man_heartbeat_ms,
         "(futures providers) Heartbeat interval for the dead-man's "
         "switch. Smaller = tighter recovery from server-side timer "
         "expiry; larger = fewer API calls and more tolerance for "
-        "transient network jitter. 0 means use countdown / 3. "
-        "Default: 0.");
+        "transient network jitter. Must stay strictly below countdown "
+        "(Bitget also floors HB at 1000ms for the 1/s rate limit). "
+        "0 means use countdown / 3. Default: 0.");
     app.add_flag("--disarm-deadman", o.disarm_deadman,
         "(futures providers) Don't arm the dead-man's switch for "
         "this run. Equivalent to --dead-man-countdown-ms 0 but "
@@ -882,11 +905,11 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_flag("--dms-attempt-position-close", o.dms_attempt_position_close,
         "(futures providers, Phase 3) When the DMS heartbeat thread "
         "detects persistent failure to refresh the venue countdown, "
-        "invoke a reduceOnly MARKET close of the current position "
-        "in addition to the venue order-cancel countdown. This hardens "
-        "the DMS into a full in-process last-resort flattener. Pairs "
-        "with the external tt_watchdog for total process death. "
-        "Default: false (safe, no behavior change for existing Phase 0 runs).");
+        "attempt a position flatten in addition to the venue "
+        "order-cancel countdown (Binance: reduceOnly MARKET; Bitget: "
+        "close-positions). Hardens DMS into an in-process last-resort "
+        "flattener. Pairs with external tt_watchdog for total process "
+        "death. Default: false.");
 
     app.add_option("--api-key", o.api_key, "API key for exchange");
     app.add_option("--api-secret", o.api_secret, "API secret for exchange");
@@ -1303,7 +1326,7 @@ static int run_dry_run(const cli_options& o)
                      "(this is " << truetest::target_name() << ").\n";
         valid = false;
     }
-    if (!validate_binance_futures_live_phase0(o, std::cerr, std::cout))
+    if (!validate_futures_live_phase0(o, std::cerr, std::cout))
         valid = false;
     if (!o.fee_model.empty() && o.fee_model != "fixed" && o.fee_model != "tiered")
     {
@@ -1670,7 +1693,7 @@ static int run_provider_mode(const cli_options& o)
         return run_monte_carlo_mode(o);
     }
 
-    if (!validate_binance_futures_live_phase0(o, std::cerr, std::cout))
+    if (!validate_futures_live_phase0(o, std::cerr, std::cout))
         return 1;
 
     std::shared_ptr<IProvider> provider;

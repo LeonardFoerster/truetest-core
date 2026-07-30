@@ -326,6 +326,75 @@ TEST(DryRun, LiveBinaryTestnetFuturesAllowsWarningOnlyCaps)
     EXPECT_NE(out.find("Config is VALID"), std::string::npos);
 }
 
+// Bitget UTA mainnet live must get the same Phase-0 refuse as Binance futures
+// (venue caps + daily loss). Demo/sandbox may warn only.
+// These spawn engine_live (built with ENABLE_BITGET); the CLI test binary
+// itself does not need HAS_BITGET.
+TEST(DryRun, LiveBinaryBitgetMainnetRequiresVenueCaps)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider bitget-futures --symbol BTCUSDT "
+        "--mode live --live "
+        "--api-key k --api-secret s --api-passphrase p",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("Refusing mainnet futures live mode without venue risk caps"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryBitgetMainnetRequiresDailyLoss)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider bitget-futures --symbol BTCUSDT "
+        "--mode live --live --max-notional 25 "
+        "--api-key k --api-secret s --api-passphrase p",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("Refusing mainnet futures live mode with --max-daily-loss disabled"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryBitgetMainnetAcceptsCapsAndDailyLoss)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider bitget-futures --symbol BTCUSDT "
+        "--mode live --live --max-notional 25 --max-daily-loss 5 "
+        "--api-key k --api-secret s --api-passphrase p",
+        out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryBitgetDemoAllowsWarningOnlyCaps)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider bitget-futures --symbol BTCUSDT "
+        "--mode live --live --demo "
+        "--api-key k --api-secret s --api-passphrase p",
+        out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("No venue risk caps set"), std::string::npos);
+    EXPECT_NE(out.find("--max-daily-loss is 0"), std::string::npos);
+    EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryBitgetAliasMainnetRequiresVenueCaps)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider bitget --symbol BTCUSDT "
+        "--mode live --live "
+        "--api-key k --api-secret s --api-passphrase p",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("Refusing mainnet futures live mode without venue risk caps"),
+              std::string::npos);
+}
+
 // ─── B4: QuestDB persistence flags ─────────────────────────────────────────
 
 #ifdef HAS_QUESTDB

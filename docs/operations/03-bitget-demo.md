@@ -4,7 +4,7 @@
 
 **Authoritative gates**: `docs/governance/01-prod.md`, root/core `AGENTS.md` safety red lines, plan `upcoming_plattform/bitget.md` §12–§14.
 
-**Last updated**: 2026-07-30 (Task 11 — gate close + demo SOP).
+**Last updated**: 2026-07-30 (safety residuals: Phase-0 CLI gates + DMS wording).
 
 ---
 
@@ -114,6 +114,8 @@ Expect `BitgetFuturesProvider: ws=ws.bitget.com:443/v3/ws/public` and eventual `
 
 Use `engine_live` only when intentionally testing signed demo order paths. Tiny notional, attended, demo keys only.
 
+**Phase-0 CLI gates (parity with Binance futures):** mainnet Bitget live **refuses** without at least one of `--max-notional` / `--max-leverage` / `--min-liq-distance-pct` **and** a positive `--max-daily-loss`. `--demo` / `--testnet` (paptrading) may warn only.
+
 ```bash
 export TRUETEST_BITGET_API_KEY=...
 export TRUETEST_BITGET_API_SECRET=...
@@ -170,7 +172,27 @@ Implications:
 - Multi-strategy / multi-symbol operators must treat DMS expiry as process- and account-wide.
 - Positions are **not** automatically flattened by venue countdown alone (orders only), unless `dms_attempt_position_close` / close-positions path runs while the process is still alive.
 
-Countdown bounds (engine): operator ms → seconds clamped **[5, 60]**; heartbeat floor **1000 ms** (venue 1/s rate limit).
+Countdown bounds (engine): operator ms → seconds clamped **[5, 60]**; heartbeat floor **1000 ms** (venue 1/s rate limit). Heartbeat is always kept **strictly below** clamped countdown.
+
+---
+
+## Dual-channel fills (order vs fill WS)
+
+Bitget private WS uses separate **order** and **fill** channels:
+
+| Channel | Role in TrueTest |
+|---------|------------------|
+| `order` | Lifecycle (ack / cancel / reject). Status `filled` / `partially_filled` with no last-fill qty is demoted so the bridge does **not** invent fills. |
+| `fill` / `fast-fill` | Source of truth for `last_fill_qty` / price. Bridge untracks when cumulative fill qty covers the order. |
+
+**Residual (ops):** if the fill channel is silent while the order channel reports filled, the engine will not invent inventory from order status alone (anti-double-count). Mitigations:
+
+- Private WS disconnect with halt callback → process halt (after engine wires halt_cb).
+- DMS cancels **open orders** account-wide when countdown expires; positions need kill-switch / `dms_attempt_position_close` / manual review.
+- Operator: after any disconnect or ambiguous fill state, reconcile positions in the Bitget UI and do not assume engine lots match venue until a clean re-open/reconcile.
+
+- [ ] After demo drills with kills/disconnects, confirm venue positions flat or expected
+- [ ] Do not restart live on mainnet with unknown residual inventory
 
 ---
 
