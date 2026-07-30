@@ -244,6 +244,9 @@ set(TEST_SOURCES
     tests/test_bitget_futures_reconciler.cpp
     tests/test_bitget_futures_kill_switch.cpp
     tests/test_bitget_futures_dead_mans_switch.cpp
+    tests/test_bitget_backfill.cpp
+    tests/test_bitget_futures_safety.cpp
+    tests/test_bitget_futures_bracket_adapter.cpp
 
     # --- CLI integration (separate binary) ---
     # (see truetest_cli_tests in root)
