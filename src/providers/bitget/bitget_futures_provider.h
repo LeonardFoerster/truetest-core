@@ -696,9 +696,10 @@ private:
         // protected. Account-wide cancel caveat is logged inside DMS ctor.
         if (dead_man_countdown_ms_ > 0)
         {
-            const int64_t hb = dead_man_heartbeat_ms_ > 0
-                ? dead_man_heartbeat_ms_
-                : dead_man_countdown_ms_ / 3;
+            // Pass operator HB as-is (0 = DMS-internal default countdown/3).
+            // DMS ctor owns floor (≥1000) and clamp vs countdown so large
+            // Binance-style ms values cannot leave HB ≥ venue timer.
+            const int64_t hb = dead_man_heartbeat_ms_;
 
             BitgetFuturesDeadMansSwitch::close_position_fn closer = nullptr;
             if (dms_attempt_position_close_)

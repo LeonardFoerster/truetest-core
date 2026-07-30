@@ -54,9 +54,12 @@ public:
     using close_position_fn = std::function<void()>;
 
     // countdown_ms: operator config in ms. Converted to seconds and clamped
-    // to [5, 60]. Values in (0, 5000) WARN and clamp up to 5s.
-    // heartbeat_interval_ms: clamped to ≥ 1000 (1/s rate limit). Prefer
-    // countdown/3 when operator leaves heartbeat unset (0).
+    // to [5, 60]. Values in (0, 5000) WARN+clamp to 5s; > 60000 WARN+clamp
+    // to 60s. heartbeat_interval_ms: ≥ 1000 (1/s rate limit) and must stay
+    // strictly below clamped countdown so heartbeats refresh before the
+    // venue timer expires. Prefer countdown/3 when operator leaves HB
+    // unset (0); oversized HB (e.g. raw Binance-style ms/3 after clamp)
+    // is WARN-reduced to max(1000, countdown_ms_/3).
     BitgetFuturesDeadMansSwitch(post_fn post,
                                 int64_t countdown_ms,
                                 int64_t heartbeat_interval_ms,
@@ -74,6 +77,17 @@ public:
             hb = countdown_ms_ / 3;
         if (hb < 1000)
             hb = 1000;
+        // After countdown clamp, HB must not meet/exceed the venue timer
+        // (e.g. countdown_ms=200000 → 60s, raw hb=66666 would never refresh).
+        if (hb >= countdown_ms_)
+        {
+            const int64_t fixed = std::max<int64_t>(1000, countdown_ms_ / 3);
+            std::cerr << "BitgetFuturesDeadMansSwitch: WARNING — "
+                         "heartbeat_interval_ms=" << hb
+                      << " >= clamped countdown " << countdown_ms_
+                      << "ms; reducing to " << fixed << "ms\n";
+            hb = fixed;
+        }
         heartbeat_interval_ms_ = hb;
 
         // Loud one-shot caveat for operators (account-wide cancel).
@@ -146,7 +160,7 @@ public:
     }
 
     // Pure helper for tests / provider: convert operator ms → seconds [5,60].
-    // Logs WARN when bumping sub-5s configs (ms in (0, 5000)).
+    // Logs WARN when bumping sub-5s or capping above 60s.
     static int64_t clamp_countdown_sec(int64_t countdown_ms)
     {
         if (countdown_ms <= 0)
@@ -162,7 +176,13 @@ public:
 
         int64_t sec = countdown_ms / 1000;
         if (sec < 5) sec = 5;
-        if (sec > 60) sec = 60;
+        if (sec > 60)
+        {
+            std::cerr << "BitgetFuturesDeadMansSwitch: WARNING — "
+                         "dead_man_countdown_ms=" << countdown_ms
+                      << " exceeds venue maximum 60000ms; clamping to 60s\n";
+            return 60;
+        }
         return sec;
     }
 

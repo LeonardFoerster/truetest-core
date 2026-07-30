@@ -72,6 +72,44 @@ TEST(BitgetFuturesDeadMansSwitch, ClampCountdownSec)
     EXPECT_EQ(BitgetFuturesDeadMansSwitch::clamp_countdown_sec(1), 5);
 }
 
+TEST(BitgetFuturesDeadMansSwitch, UpperCountdownClampWarns)
+{
+    SilenceStderr quiet;
+    EXPECT_EQ(BitgetFuturesDeadMansSwitch::clamp_countdown_sec(200000), 60);
+    EXPECT_NE(quiet.sink.str().find("clamping to 60s"), std::string::npos);
+}
+
+// Binance-style large ms: countdown clamps to 60s; raw hb = 200000/3 would
+// exceed the venue timer — ctor must reduce HB below countdown.
+TEST(BitgetFuturesDeadMansSwitch, LargeCountdownClampsHbBelowTimer)
+{
+    SilenceStderr quiet;
+    auto post = std::make_shared<fake_post>();
+    // Simulate provider that still passed raw/3 (pre-fix) or operator
+    // set an oversized heartbeat alongside a large countdown.
+    const int64_t raw_countdown = 200000;
+    const int64_t raw_hb = raw_countdown / 3; // 66666 ≥ 60000 after clamp
+    BitgetFuturesDeadMansSwitch dms(wrap(post), raw_countdown, raw_hb);
+
+    EXPECT_EQ(dms.countdown_sec(), 60);
+    EXPECT_EQ(dms.countdown_ms(), 60000);
+    EXPECT_LT(dms.heartbeat_interval_ms(), 60000);
+    EXPECT_EQ(dms.heartbeat_interval_ms(), 20000); // max(1000, 60000/3)
+    EXPECT_NE(quiet.sink.str().find("clamping to 60s"), std::string::npos);
+    EXPECT_NE(quiet.sink.str().find("reducing to"), std::string::npos);
+}
+
+TEST(BitgetFuturesDeadMansSwitch, ZeroHeartbeatUsesCountdownThird)
+{
+    SilenceStderr quiet;
+    auto post = std::make_shared<fake_post>();
+    BitgetFuturesDeadMansSwitch dms(wrap(post),
+                                    /*countdown_ms=*/30000,
+                                    /*heartbeat_ms=*/0);
+    EXPECT_EQ(dms.countdown_sec(), 30);
+    EXPECT_EQ(dms.heartbeat_interval_ms(), 10000); // 30000/3
+}
+
 TEST(BitgetFuturesDeadMansSwitch, StartArmsCountdown)
 {
     SilenceStderr quiet; // account-wide caveat + arm logs
