@@ -2243,7 +2243,10 @@ void engine::check_pending_stops(double open, double high, double low,
                 if (market_order->get_tif() == time_in_force::day)
                     day_order_ids_.push_back({market_order->get_symbol(), market_order->get_order_id()});
                 if (!process_order(market_order, event_count, halt_requested))
+                {
+                    last_mid_price_ = bar_mid;
                     return;
+                }
             }
             else
             {
@@ -2259,7 +2262,10 @@ void engine::check_pending_stops(double open, double high, double low,
                 if (limit_order->get_tif() == time_in_force::day)
                     day_order_ids_.push_back({limit_order->get_symbol(), limit_order->get_order_id()});
                 if (!process_order(limit_order, event_count, halt_requested))
+                {
+                    last_mid_price_ = bar_mid;
                     return;
+                }
             }
             last_mid_price_ = bar_mid;
             it = pending_stops_.erase(it);

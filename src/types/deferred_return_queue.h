@@ -1,13 +1,18 @@
 #pragma once
 
-#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 // Phase 3: MPSC deferred-return queue. Multiple producer threads (worker
 // shared_ptr deleters) push freed slot pointers; a single consumer (engine
 // event loop) pops and returns them to the pool free list.
+//
+// The slot buffer is heap-allocated: Capacity=65536 × ~16 B ≈ 1 MiB per
+// queue. Embedding std::array<slot, Capacity> in ObjectPool made engine
+// ≈11 MiB and overflowed the default 8 MiB stack when engines were
+// automatic-storage objects (tests, CLI, MC).
 template<std::size_t Capacity = 65536>
 class DeferredReturnQueue
 {
@@ -15,6 +20,11 @@ class DeferredReturnQueue
                   "Capacity must be a power of two");
 
 public:
+    DeferredReturnQueue()
+        : slots_(std::make_unique<slot[]>(Capacity))
+    {
+    }
+
     bool try_push(void* item) noexcept
     {
         std::uint64_t tail = tail_.load(std::memory_order_relaxed);
@@ -28,9 +38,9 @@ public:
                                             std::memory_order_acq_rel,
                                             std::memory_order_relaxed))
             {
-                auto& slot = slots_[tail & mask_];
-                slot.item = item;
-                slot.ready.store(tail + 1, std::memory_order_release);
+                auto& s = slots_[tail & mask_];
+                s.item = item;
+                s.ready.store(tail + 1, std::memory_order_release);
                 return true;
             }
         }
@@ -43,11 +53,11 @@ public:
         if (head >= tail)
             return false;
 
-        auto& slot = slots_[head & mask_];
-        if (slot.ready.load(std::memory_order_acquire) != head + 1)
+        auto& s = slots_[head & mask_];
+        if (s.ready.load(std::memory_order_acquire) != head + 1)
             return false;
 
-        item = slot.item;
+        item = s.item;
         head_.store(head + 1, std::memory_order_release);
         return true;
     }
@@ -69,7 +79,7 @@ private:
     };
 
     static constexpr std::uint64_t mask_ = Capacity - 1;
-    std::array<slot, Capacity> slots_{};
+    std::unique_ptr<slot[]> slots_;
     alignas(64) std::atomic<std::uint64_t> head_{0};
     alignas(64) std::atomic<std::uint64_t> tail_{0};
 };
