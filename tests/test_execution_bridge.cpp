@@ -333,6 +333,39 @@ TEST(ExecutionBridge, UnknownClientIdDropsFill)
     EXPECT_FALSE(h.bridge->poll_fills(fills));
 }
 
+// Dual-channel venues (Bitget order+fill) emit full_fill with last_fill_qty=0
+// for lifecycle untrack. Bridge must untrack without inventing a zero-qty fill.
+TEST(ExecutionBridge, ZeroQtyFullFillUntracksWithoutFillEvent)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+
+    h.bridge->submit_order(make_order(21, "BTCUSDT", 1.0, 50000.0));
+    // Order-channel style: full_fill, qty=0
+    h.ft->deliver("full|tt-21|EX-21|BTCUSDT|buy|0|0");
+
+    std::vector<fill_event> fills;
+    EXPECT_FALSE(h.bridge->poll_fills(fills));
+
+    // Mapping cleared — cancel should miss
+    EXPECT_FALSE(h.bridge->cancel_order(21));
+}
+
+TEST(ExecutionBridge, ZeroQtyPartialFillEmitsNothing)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+
+    h.bridge->submit_order(make_order(22, "BTCUSDT", 1.0, 50000.0));
+    h.ft->deliver("partial|tt-22|EX-22|BTCUSDT|buy|0|0");
+
+    std::vector<fill_event> fills;
+    EXPECT_FALSE(h.bridge->poll_fills(fills));
+
+    // Still tracked (partial is non-terminal) — cancel should find it
+    EXPECT_TRUE(h.bridge->cancel_order(22));
+}
+
 TEST(ExecutionBridge, StatusTransitionsDrainable)
 {
     bridge_harness h;

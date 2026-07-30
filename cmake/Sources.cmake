@@ -241,6 +241,7 @@ set(TEST_SOURCES
     tests/test_bitget_rest_client_time.cpp
     tests/test_bitget_futures_order_encoder.cpp
     tests/test_bitget_futures_user_data_parser.cpp
+    tests/test_bitget_futures_reconciler.cpp
 
     # --- CLI integration (separate binary) ---
     # (see truetest_cli_tests in root)

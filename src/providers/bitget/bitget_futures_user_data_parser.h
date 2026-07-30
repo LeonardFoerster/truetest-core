@@ -104,6 +104,14 @@ public:
         out.last_fill_qty = 0.0;
         out.last_fill_price = 0.0;
 
+        // Dual-channel safety: order-channel partially_filled with no
+        // incremental qty is lifecycle noise — demote to other so the
+        // bridge never sees a zero-qty partial. Keep filled as full_fill
+        // so ExecutionBridge can untrack (it skips zero-qty fill emit).
+        if (out.k == parsed_exec::kind::partial_fill
+            && out.last_fill_qty <= 0.0)
+            out.k = parsed_exec::kind::other;
+
         extract_fee(obj, out);
 
         if (out.k == parsed_exec::kind::rejected

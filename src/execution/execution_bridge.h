@@ -391,6 +391,13 @@ private:
             msg.k != parsed_exec::kind::full_fill)
             return;
 
+        // Venue-agnostic: order-status channels often emit full_fill /
+        // partial_fill with last_fill_qty==0 (lifecycle only). Untrack
+        // already ran above for full_fill; skip zero-qty fill_event so
+        // dual-channel venues (e.g. Bitget order+fill) do not invent fills.
+        if (msg.last_fill_qty <= 0.0)
+            return;
+
         auto ts = (msg.ts.time_since_epoch().count() != 0)
                     ? msg.ts
                     : std::chrono::system_clock::now();

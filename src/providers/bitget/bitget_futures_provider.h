@@ -1,28 +1,119 @@
 #pragma once
 #ifdef HAS_BITGET
 
-// Bitget UTA v3 USDT-M futures provider — Phase 0 non-live.
-// Public market data + HybridExecutor / TradeTapeShadowAdapter.
-// Live order routing is refused until Tasks 6–10 wire REST + private WS.
+// Bitget UTA v3 USDT-M futures provider.
+// Public market data + HybridExecutor / TradeTapeShadowAdapter for non-live.
+// Live: REST clock/instruments/one-way gate + ExecutionBridge + reconciler.
+// Kill-switch / DMS deferred to Task 10 (nullptr → engine Noop).
 
 #include "engine/engine_config.h"
+#include "execution/execution_bridge.h"
+#include "execution/rate_limiter.h"
 #include "execution/trade_tape_shadow_adapter.h"
 #include "orderbook/orderbook.h"
 #include "providers/bitget/bitget_combined_transport.h"
 #include "providers/bitget/bitget_endpoints.h"
+#include "providers/bitget/bitget_futures_order_encoder.h"
+#include "providers/bitget/bitget_futures_reconciler.h"
+#include "providers/bitget/bitget_futures_user_data_parser.h"
 #include "providers/bitget/bitget_hybrid_executor.h"
 #include "providers/bitget/bitget_parser.h"
+#include "providers/bitget/bitget_private_ws_transport.h"
+#include "providers/bitget/bitget_rest_client.h"
+#include "providers/bitget/bitget_rest_order_transport.h"
+#include "providers/bitget/bitget_time_sync.h"
 #include "providers/bitget/bitget_transport.h"
 #include "providers/provider.h"
 #include "risk/futures_risk_check.h"
 #include "risk/maintenance_margin_table.h"
 
+#include <atomic>
 #include <cctype>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+
+namespace bitget {
+
+// Short clientOid minter: Bitget caps at 32 chars and charset
+// ^[.A-Z:/a-z0-9_-]{1,32}$. Stock ClientOrderIdMinter embeds full epoch+seed
+// hex and routinely exceeds 32.
+class ShortClientOidMinter
+{
+public:
+    explicit ShortClientOidMinter(std::uint64_t seed,
+                                  std::int64_t epoch_ms = now_epoch_ms())
+        : seq_(0)
+    {
+        // "tt" + 8 hex (mixed epoch) + 4 hex (seed low) = 14-char prefix.
+        // Counter as up to 8 hex → total ≤ 22 << 32.
+        const auto mix = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(epoch_ms)
+             ^ (static_cast<std::uint64_t>(epoch_ms) >> 32))
+            & 0xffffffffu);
+        const auto s16 = static_cast<std::uint32_t>(seed & 0xffffu);
+        char buf[20];
+        std::snprintf(buf, sizeof(buf), "tt%08x%04x", mix, s16);
+        prefix_ = buf;
+    }
+
+    std::string next()
+    {
+        const std::uint64_t n = ++seq_;
+        char buf[40];
+        std::snprintf(buf, sizeof(buf), "%s%06llx",
+                      prefix_.c_str(),
+                      static_cast<unsigned long long>(n));
+        std::string id(buf);
+        if (id.size() > 32)
+            id.resize(32);
+        return id;
+    }
+
+    const std::string& prefix() const { return prefix_; }
+
+private:
+    static std::int64_t now_epoch_ms()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }
+
+    std::string prefix_;
+    std::atomic<std::uint64_t> seq_;
+};
+
+// Pure hold-mode gate (unit-testable). Returns empty on one-way; error note
+// on hedge / missing / bad envelope.
+inline std::string check_one_way_hold_mode(std::string_view body)
+{
+    if (!is_business_success(200, body))
+    {
+        auto code = extract_business_code(body);
+        std::string note = "account/settings business code ";
+        note.append(code.empty() ? "<missing>" : code);
+        return note;
+    }
+    auto hold = extract_sv_string(body, "holdMode");
+    if (hold.empty())
+        return "account/settings missing holdMode";
+    if (hold == "hedge_mode" || hold == "hedge" || hold == "dual_long_short_mode")
+        return "account is in hedge mode (holdMode=" + std::string(hold)
+             + "). Switch to one_way_mode in the Bitget UI.";
+    if (hold == "one_way_mode" || hold == "oneway" || hold == "one_way"
+        || hold == "net_mode")
+        return {};
+    return "account/settings unknown holdMode '" + std::string(hold) + "'";
+}
+
+} // namespace bitget
 
 class BitgetFuturesProvider : public IProvider
 {
@@ -65,7 +156,8 @@ public:
         api_surface_ = std::move(surface);
     }
 
-    // Operator-set advisory inputs (stored for live Tasks 9+).
+    // Operator-set advisory inputs (margin_type_strict stored; full advisory
+    // helpers not yet ported — strict path skipped with stderr note).
     void set_expected_margin_type(std::string mt)
     {
         expected_margin_type_ = std::move(mt);
@@ -86,7 +178,7 @@ public:
     void set_min_liquidation_distance_pct(double v)  { rc_cfg_.min_liquidation_distance_pct = v; }
     void set_maintenance_margin_pct(double v)        { rc_cfg_.maintenance_margin_pct = v; }
 
-    // DMS knobs stored for Task 10; unused in Phase 0 non-live.
+    // DMS knobs stored for Task 10; live open warns if countdown>0.
     void set_dead_man_countdown_ms(int64_t v)        { dead_man_countdown_ms_ = v; }
     void set_dead_man_heartbeat_ms(int64_t v)        { dead_man_heartbeat_ms_ = v; }
     void set_dms_attempt_position_close(bool v)      { dms_attempt_position_close_ = v; }
@@ -169,7 +261,7 @@ public:
 
         apply_halt_cb_to_transports();
 
-        // Backfill skipped in Phase 0 (BitgetBackfill lands with REST Task 6).
+        // Backfill skipped (BitgetBackfill not yet landed).
         transport_ = live_transport;
 
         paper_exec_ = std::make_shared<BitgetPaperExecutor>();
@@ -179,14 +271,13 @@ public:
         if (fee_model_)
             paper_exec_->set_fee_model(fee_model_);
 
-        // Live + credentials: refuse until Tasks 6–10 wire REST/private WS.
-        // Live without keys falls through to hybrid (match BinanceFuturesProvider).
         if (mode_ == engine_mode::live && !api_key_.empty())
         {
-            std::cerr << "BitgetFuturesProvider: Bitget live path not yet "
-                         "wired (Task 6-10)\n";
-            state_ = lifecycle::error;
-            return false;
+            if (!open_live_path())
+            {
+                state_ = lifecycle::error;
+                return false;
+            }
         }
         else if (mode_ == engine_mode::shadow)
         {
@@ -219,7 +310,12 @@ public:
 
     void close() override
     {
-        if (transport_) transport_->close();
+        if (bridge_)
+            bridge_->close();
+        if (bitget_private_ws_)
+            bitget_private_ws_->close();
+        if (transport_)
+            transport_->close();
         state_ = lifecycle::closed;
     }
 
@@ -243,6 +339,21 @@ public:
 
     std::shared_ptr<IRiskCheck> get_risk_check() override { return risk_check_; }
 
+    std::shared_ptr<IReconciler> get_reconciler() override { return reconciler_; }
+
+    // Task 10: kill-switch + DMS. Engine installs Noop when nullptr.
+    std::shared_ptr<IKillSwitch> get_kill_switch() override { return nullptr; }
+
+    std::optional<instrument_spec>
+    get_instrument(const std::string& symbol) const override
+    {
+        if (!instrument_spec_) return std::nullopt;
+        if (!symbol.empty() && upper(symbol) != upper(instrument_spec_->symbol)
+            && upper(symbol) != upper(symbol_))
+            return std::nullopt;
+        return *instrument_spec_;
+    }
+
     void set_halt_callback(
         std::function<void(std::string_view reason)> cb) override
     {
@@ -262,8 +373,7 @@ public:
     }
 
     // Phase 0: BitgetCombinedParser returns first trade only per publicTrade
-    // frame (multi-trade data[] → see bitget::parse_all_trades). Acceptable
-    // for Phase 0; Task 5+ may batch-emit if needed.
+    // frame (multi-trade data[] → see bitget::parse_all_trades).
     std::shared_ptr<IDataParser<provider::event>> get_event_parser() override
     {
         if (depth_stream_.empty()) return nullptr;
@@ -280,7 +390,7 @@ private:
     std::string stream_type_;
     std::string api_key_;
     std::string api_secret_;
-    std::string api_passphrase_; // stored for live Tasks 6+; unused non-live
+    std::string api_passphrase_;
     std::string host_;
     std::string port_;
     bitget::endpoints endpoints_;
@@ -306,7 +416,16 @@ private:
     std::shared_ptr<BitgetPaperExecutor> paper_exec_;
     std::shared_ptr<BitgetHybridExecutor> hybrid_exec_;
     std::shared_ptr<TradeTapeShadowAdapter> shadow_exec_;
+    std::shared_ptr<ExecutionBridge> bridge_;
     std::shared_ptr<IExecutionAdapter> executor_;
+
+    // Live-only
+    std::shared_ptr<BitgetRestClient> rest_;
+    std::shared_ptr<bitget::ShortClientOidMinter> minter_;
+    std::shared_ptr<TokenBucketRateLimiter> order_rate_limiter_;
+    std::shared_ptr<BitgetFuturesReconciler> reconciler_;
+    std::shared_ptr<BitgetPrivateWsTransport> bitget_private_ws_;
+    std::optional<instrument_spec> instrument_spec_;
 
     std::uint64_t seed_ = 0;
     std::string depth_stream_;
@@ -327,6 +446,159 @@ private:
     std::function<void(std::string_view)> halt_cb_;
     std::function<void(std::shared_ptr<event>)> event_publisher_;
 
+    // Live refuse checklist (plan Phase 2 / Task 9).
+    // Returns false → caller sets state=error.
+    bool open_live_path()
+    {
+        if (api_secret_.empty() || api_passphrase_.empty())
+        {
+            std::cerr << "BitgetFuturesProvider: refusing to go live — "
+                         "api_secret and api_passphrase are required\n";
+            return false;
+        }
+
+        rest_ = std::make_shared<BitgetRestClient>(
+            api_key_, api_secret_, api_passphrase_,
+            endpoints_.rest_host, endpoints_.rest_port,
+            "/api/v2/public/time",
+            /*paptrading=*/endpoints_.is_demo);
+
+        if (!rest_->resync_clock_now())
+        {
+            std::cerr << "BitgetFuturesProvider: refusing to go live — "
+                         "clock resync failed\n";
+            return false;
+        }
+
+        auto check = bitget::verify_clock_skew(*rest_);
+        if (!check.ok)
+        {
+            std::cerr << "BitgetFuturesProvider: refusing to go live — "
+                      << check.note << "\n";
+            return false;
+        }
+
+        // Instruments probe — refuse if not ok OR tick/lot <= 0.
+        {
+            const std::string sym = upper(symbol_);
+            auto info = rest_->get_unsigned(
+                "/api/v3/market/instruments",
+                bitget::instruments_query(category_, sym));
+            if (info.status < 200 || info.status >= 300)
+            {
+                std::cerr << "BitgetFuturesProvider: refusing to go live — "
+                             "instruments HTTP " << info.status << ": "
+                          << bitget::truncate_for_log(info.body) << "\n";
+                return false;
+            }
+            auto probe = bitget::parse_instruments_response(info.body, sym);
+            if (!probe.ok)
+            {
+                std::cerr << "BitgetFuturesProvider: refusing to go live — "
+                          << probe.note << "\n";
+                return false;
+            }
+            if (probe.spec.tick_size <= 0.0 || probe.spec.lot_size <= 0.0)
+            {
+                std::cerr << "BitgetFuturesProvider: refusing to go live — "
+                             "instrument tick_size/lot_size must be > 0 "
+                             "(tick=" << probe.spec.tick_size
+                          << " lot=" << probe.spec.lot_size << ")\n";
+                return false;
+            }
+            instrument_spec_ = probe.spec;
+            if (instrument_spec_->symbol.empty())
+                instrument_spec_->symbol = sym;
+        }
+
+        // One-way mode gate via account settings.
+        {
+            auto resp = rest_->get("/api/v3/account/settings", "");
+            if (resp.status < 200 || resp.status >= 300)
+            {
+                std::cerr << "BitgetFuturesProvider: refusing to go live — "
+                             "/api/v3/account/settings HTTP " << resp.status
+                          << ": " << bitget::truncate_for_log(resp.body)
+                          << "\n";
+                return false;
+            }
+            if (!resp.business_ok
+                && !bitget::is_business_success(resp.status, resp.body))
+            {
+                std::cerr << "BitgetFuturesProvider: refusing to go live — "
+                             "/api/v3/account/settings business failure: "
+                          << bitget::truncate_for_log(resp.body) << "\n";
+                return false;
+            }
+            auto hold_err = bitget::check_one_way_hold_mode(resp.body);
+            if (!hold_err.empty())
+            {
+                std::cerr << "BitgetFuturesProvider: refusing to go live — "
+                          << hold_err << "\n";
+                return false;
+            }
+        }
+
+        // Optional margin_type_strict: no advisory helpers yet (Task 9).
+        if (margin_type_strict_ && !expected_margin_type_.empty())
+        {
+            std::cerr << "  BitgetFuturesProvider: --margin-type-strict set "
+                         "but advisory helpers not yet wired; skipping strict "
+                         "margin gate (expected="
+                      << expected_margin_type_ << ")\n";
+        }
+
+        minter_ = std::make_shared<bitget::ShortClientOidMinter>(seed_);
+
+        // Conservative place-order rate: capacity 10, refill 5/s (~5–10/s).
+        order_rate_limiter_ = std::make_shared<TokenBucketRateLimiter>(
+            /*capacity=*/10.0, /*refill_per_sec=*/5.0);
+
+        reconciler_ = std::make_shared<BitgetFuturesReconciler>(
+            rest_, upper(symbol_), category_, endpoints_.is_demo);
+
+        ExecutionBridge::deps d;
+        d.order_tx = make_bitget_rest_order_transport(rest_);
+        bitget_private_ws_ = std::make_shared<BitgetPrivateWsTransport>(
+            api_key_, api_secret_, api_passphrase_, endpoints_);
+        bitget_private_ws_->set_time_offset_ms(rest_->clock_offset_ms());
+        d.fill_tx = bitget_private_ws_;
+        apply_halt_cb_to_transports();
+
+        d.encoder = std::make_shared<BitgetFuturesOrderEncoder>(
+            symbol_, category_);
+        d.parser = std::make_shared<BitgetFuturesUserDataParser>();
+        d.order_rate_limiter = order_rate_limiter_;
+        d.client_id_fn = [m = minter_](uint64_t) { return m->next(); };
+
+        // Position snapshots: log only (no portfolio snap-to-venue yet).
+        d.position_snapshot_handler =
+            [sym = upper(symbol_)](const parsed_position_snapshot& s) {
+                log_position_snapshot(s, sym);
+            };
+
+        bridge_ = std::make_shared<ExecutionBridge>(std::move(d));
+        if (!bridge_->open())
+        {
+            std::cerr << "BitgetFuturesProvider: ExecutionBridge open "
+                         "failed: " << bridge_->last_error() << "\n";
+            return false;
+        }
+        executor_ = bridge_;
+
+        // Kill-switch / DMS: Task 10. Allow open with loud warning when
+        // countdown is configured so Task 10 can wire arm cleanly.
+        if (dead_man_countdown_ms_ > 0)
+        {
+            std::cerr << "  BitgetFuturesProvider: WARNING — "
+                         "dead_man_countdown_ms=" << dead_man_countdown_ms_
+                      << " but DMS is deferred to Task 10; not armed\n";
+        }
+        std::cerr << "  BitgetFuturesProvider: live path open "
+                     "(kill-switch/DMS = Task 10)\n";
+        return true;
+    }
+
     void apply_halt_cb_to_transports()
     {
         if (!halt_cb_) return;
@@ -334,6 +606,59 @@ private:
             bitget_transport_->set_fatal_disconnect_callback(halt_cb_);
         if (bitget_combined_transport_)
             bitget_combined_transport_->set_fatal_disconnect_callback(halt_cb_);
+        if (bitget_private_ws_)
+            bitget_private_ws_->set_fatal_disconnect_callback(halt_cb_);
+    }
+
+    static std::string upper(const std::string& s)
+    {
+        std::string out(s);
+        for (auto& c : out)
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        return out;
+    }
+
+    static const char* reason_str(parsed_position_snapshot::reason r)
+    {
+        using R = parsed_position_snapshot::reason;
+        switch (r)
+        {
+        case R::order:              return "ORDER";
+        case R::funding_fee:        return "FUNDING_FEE";
+        case R::adjustment:         return "ADJUSTMENT";
+        case R::deposit:            return "DEPOSIT";
+        case R::withdraw:           return "WITHDRAW";
+        case R::margin_transfer:    return "MARGIN_TRANSFER";
+        case R::margin_type_change: return "MARGIN_TYPE_CHANGE";
+        case R::liquidation:        return "LIQUIDATION";
+        case R::admin:              return "ADMIN";
+        case R::unknown:            return "UNKNOWN";
+        case R::other:              return "OTHER";
+        }
+        return "UNKNOWN";
+    }
+
+    static void log_position_snapshot(const parsed_position_snapshot& s,
+                                      const std::string& provider_symbol)
+    {
+        for (const auto& p : s.positions)
+        {
+            if (p.symbol != provider_symbol) continue;
+            if (s.r == parsed_position_snapshot::reason::order)
+                continue;
+            std::fprintf(stderr,
+                "  [POSITION-SNAPSHOT] %s reason=%s qty=%.8f margin=%s side=%s\n",
+                p.symbol.c_str(), reason_str(s.r), p.qty,
+                p.margin_type.c_str(), p.position_side.c_str());
+        }
+        for (const auto& b : s.balances)
+        {
+            if (s.r == parsed_position_snapshot::reason::order) continue;
+            std::fprintf(stderr,
+                "  [POSITION-SNAPSHOT] %s reason=%s balance=%.8f delta=%.8f\n",
+                b.asset.c_str(), reason_str(s.r),
+                b.wallet_balance, b.balance_change);
+        }
     }
 };
 

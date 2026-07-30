@@ -146,9 +146,10 @@ TEST(BitgetFuturesUserDataParser, OrderStatusPartiallyFilled)
     BitgetFuturesUserDataParser p;
     parsed_exec out;
     ASSERT_TRUE(p.parse(order_push("partially_filled", "0.4"), out));
-    EXPECT_EQ(out.k, parsed_exec::kind::partial_fill);
+    // Order channel leaves last_fill_qty=0 → demote to other (fill channel
+    // owns incremental qty; avoids zero-qty partial_fill into the bridge).
+    EXPECT_EQ(out.k, parsed_exec::kind::other);
     EXPECT_DOUBLE_EQ(out.cumulative_qty, 0.4);
-    // last_fill_* reserved for fill channel
     EXPECT_DOUBLE_EQ(out.last_fill_qty, 0.0);
 }
 

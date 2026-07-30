@@ -3,6 +3,7 @@
 #ifdef HAS_BITGET
 
 #include "providers/provider_registry.h"
+#include "providers/bitget/bitget_futures_order_encoder.h"
 #include "providers/bitget/bitget_futures_provider.h"
 
 #include <memory>
@@ -135,14 +136,33 @@ TEST(BitgetFuturesRegister, HasDataAndExecution)
     EXPECT_TRUE(p->has_execution());
 }
 
-// Live + keys refuses before transport->open(), so this is network-free.
-// Trade-only engine smoke (public WS + hybrid) needs Task 5 CLI parser
-// wiring; depth_stream uses the event-parser path already covered above.
-TEST(BitgetFuturesRegister, LiveWithKeysRefusesOpen)
+// Live + key but missing secret/passphrase refuses before any network I/O.
+TEST(BitgetFuturesRegister, LiveWithKeysMissingPassphraseRefusesOpen)
 {
     provider_config cfg;
     cfg["symbol"]  = "BTCUSDT";
     cfg["api_key"] = "not-a-real-key";
+    // no api_secret / api_passphrase
+
+    auto p = create(cfg);
+    ASSERT_NE(p, nullptr);
+
+    engine_config ec;
+    ec.mode = engine_mode::live;
+    p->configure(ec);
+
+    EXPECT_FALSE(p->open());
+    EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
+}
+
+// Missing secret alone also refuses offline.
+TEST(BitgetFuturesRegister, LiveWithKeysMissingSecretRefusesOpen)
+{
+    provider_config cfg;
+    cfg["symbol"]         = "BTCUSDT";
+    cfg["api_key"]        = "not-a-real-key";
+    cfg["api_passphrase"] = "pass";
+    // no api_secret
 
     auto p = create(cfg);
     ASSERT_NE(p, nullptr);
@@ -172,9 +192,40 @@ TEST(BitgetFuturesRegister, RiskCapsInstallRiskCheckOnOpen)
     ec.mode = engine_mode::live;
     p->configure(ec);
 
-    EXPECT_FALSE(p->open()); // live refuse after risk_check construction
+    EXPECT_FALSE(p->open()); // missing secret/passphrase after risk_check
     EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
     EXPECT_NE(p->get_risk_check(), nullptr);
+}
+
+TEST(BitgetOneWayHoldMode, AcceptsOneWay)
+{
+    EXPECT_TRUE(bitget::check_one_way_hold_mode(
+        R"({"code":"00000","data":{"holdMode":"one_way_mode"}})").empty());
+}
+
+TEST(BitgetOneWayHoldMode, RefusesHedge)
+{
+    auto note = bitget::check_one_way_hold_mode(
+        R"({"code":"00000","data":{"holdMode":"hedge_mode"}})");
+    EXPECT_NE(note.find("hedge"), std::string::npos);
+}
+
+TEST(BitgetOneWayHoldMode, RefusesMissing)
+{
+    auto note = bitget::check_one_way_hold_mode(
+        R"({"code":"00000","data":{}})");
+    EXPECT_NE(note.find("holdMode"), std::string::npos);
+}
+
+TEST(BitgetShortClientOidMinter, FitsCharsetAndLength)
+{
+    bitget::ShortClientOidMinter m(/*seed=*/0xdeadbeefull, /*epoch_ms=*/1'700'000'000'000);
+    for (int i = 0; i < 100; ++i)
+    {
+        auto id = m.next();
+        EXPECT_LE(id.size(), 32u) << id;
+        EXPECT_TRUE(BitgetFuturesOrderEncoder::valid_client_oid(id)) << id;
+    }
 }
 
 #endif // HAS_BITGET
