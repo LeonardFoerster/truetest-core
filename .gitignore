@@ -20,6 +20,9 @@ mono_crash.*
 # Build results
 [Dd]ebug/
 !BacktestEngine/src/debug/
+# Real instrumentation module under src/ (not a VS Debug/ build dir)
+!src/debug/
+!src/debug/**
 [Dd]ebugPublic/
 [Rr]elease/
 [Rr]eleases/
@@ -390,9 +393,9 @@ docs/upcoming_skills/
 truetest_debug.log
 truetest_*.log
 
-# Root data dumps only (historical large CSV ignored; small sample kept)
+# Data dumps (historical large CSV ignored; small samples / fixtures kept)
 *.csv
-!market_data.csv
+!data/market_data.csv
 !tests/fixtures/*.csv
 !tests/golden/*.csv
 
@@ -437,4 +440,4 @@ secret*
 !src/bin/**
 
 
-# upcoming_plattform/ is tracked: multi-venue provider implementation guides
+# docs/upcoming_platform/ is tracked: multi-venue provider implementation guides
