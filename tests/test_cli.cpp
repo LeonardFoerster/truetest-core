@@ -226,7 +226,7 @@ TEST(CLI, ImpactKBpsRequiresAdv)
 {
     std::string out;
     int rc = run_truetest(
-        "--provider local --path market_data.csv "
+        "--provider local --path data/market_data.csv "
         "--strategy sma --mode backtest --impact-k-bps 10", out);
     EXPECT_NE(rc, 0);
     EXPECT_NE(out.find("requires --impact-adv"), std::string::npos);
@@ -449,7 +449,7 @@ TEST(CLI, MakerQueueModelAcceptedWithDepth)
 {
     std::string out;
     int rc = run_truetest("--maker-queue-model uniform --depth-stream depth20 "
-                          "--dry-run --strategy sma --provider local --path market_data.csv", out);
+                          "--dry-run --strategy sma --provider local --path data/market_data.csv", out);
     EXPECT_EQ(rc, 0);
     EXPECT_NE(out.find("Config is VALID"), std::string::npos);
 }
