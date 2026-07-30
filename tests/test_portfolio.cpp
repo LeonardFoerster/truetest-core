@@ -71,6 +71,66 @@ TEST(Portfolio, PartialSell)
     EXPECT_EQ(p.get_total_trades(), 0u); // not closed yet
 }
 
+TEST(Portfolio, PartialShortCoverReducesCostBasisTowardZero)
+{
+    portfolio p;
+    const double initial_cash = p.get_cash();
+    fill_event sell(now(), "AAPL", 1, order_side::sell, 10, 100.0, 5.0);
+    fill_event buy(now(), "AAPL", 2, order_side::buy, 5, 90.0, 2.5);
+
+    p.on_fill(sell);
+    p.on_fill(buy);
+
+    const auto& positions = p.get_positions();
+    auto it = positions.find("AAPL");
+    ASSERT_NE(it, positions.end());
+    EXPECT_TRUE(p.position_open("AAPL"));
+    EXPECT_DOUBLE_EQ(it->second.qty, -5.0);
+    // Short open basis uses (notional - commission); half remains after 50% cover.
+    EXPECT_DOUBLE_EQ(it->second.cost_basis, -497.5);
+    EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash + 1000.0 - 5.0 - 450.0 - 2.5);
+    EXPECT_EQ(p.get_total_trades(), 0u);
+}
+
+TEST(Portfolio, BuyFlipFromShortProratesCommissionOnce)
+{
+    portfolio p;
+    const double initial_cash = p.get_cash();
+    fill_event sell(now(), "AAPL", 1, order_side::sell, 5, 100.0, 5.0);
+    fill_event buy(now(), "AAPL", 2, order_side::buy, 8, 90.0, 8.0);
+
+    p.on_fill(sell);
+    p.on_fill(buy);
+
+    const auto& positions = p.get_positions();
+    auto it = positions.find("AAPL");
+    ASSERT_NE(it, positions.end());
+    EXPECT_DOUBLE_EQ(it->second.qty, 3.0);
+    EXPECT_DOUBLE_EQ(it->second.cost_basis, 273.0);
+    EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash + 500.0 - 5.0 - 450.0 - 5.0 - 270.0 - 3.0);
+    EXPECT_EQ(p.get_total_trades(), 1u);
+}
+
+TEST(Portfolio, SellFlipFromLongProratesCommissionOnce)
+{
+    portfolio p;
+    const double initial_cash = p.get_cash();
+    fill_event buy(now(), "AAPL", 1, order_side::buy, 5, 100.0, 5.0);
+    fill_event sell(now(), "AAPL", 2, order_side::sell, 8, 110.0, 8.0);
+
+    p.on_fill(buy);
+    p.on_fill(sell);
+
+    const auto& positions = p.get_positions();
+    auto it = positions.find("AAPL");
+    ASSERT_NE(it, positions.end());
+    EXPECT_DOUBLE_EQ(it->second.qty, -3.0);
+    // Flip residual short: 3 * 110 - prorated commission 3 = 327.
+    EXPECT_DOUBLE_EQ(it->second.cost_basis, -327.0);
+    EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash - 500.0 - 5.0 + 550.0 - 5.0 + 330.0 - 3.0);
+    EXPECT_EQ(p.get_total_trades(), 1u);
+}
+
 TEST(Portfolio, MultipleBuys_AverageEntry)
 {
     portfolio p;
@@ -92,6 +152,23 @@ TEST(Portfolio, BuyWithCommission)
     // total_cost for buy = 10*100 + 10 = 1010
     p.on_fill(f);
     EXPECT_TRUE(p.position_open());
+}
+
+TEST(Portfolio, CanAffordIncludesCommission)
+{
+    portfolio p(1000.0);
+    // qty*price == cash, but fee would push over
+    EXPECT_TRUE(p.can_afford(order_side::buy, 10, 100.0, /*commission=*/0.0));
+    EXPECT_FALSE(p.can_afford(order_side::buy, 10, 100.0, /*commission=*/1.0));
+    EXPECT_TRUE(p.can_afford(order_side::buy, 9, 100.0, /*commission=*/1.0));
+}
+
+TEST(Portfolio, ComputeQuantityAccountsForEntryFee)
+{
+    portfolio p(10000.0);
+    // 2% of cash = 200 notional budget including 10 bps fee
+    const double qty = p.compute_quantity(100.0, 0.02, /*entry_fee_rate=*/0.001);
+    EXPECT_NEAR(qty, 200.0 / 100.1, 1e-9);
 }
 
 TEST(Portfolio, SellWithCommission)

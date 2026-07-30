@@ -46,7 +46,7 @@ void PositionsPanel::draw(int body_y0, int width, int height,
 {
     if (!snap)
     {
-        mvaddstr(body_y0, 2, "(no snapshot yet — engine warming up)");
+        mvaddstr(body_y0, 2, "(no snapshot yet - engine warming up)");
         return;
     }
 
@@ -159,9 +159,9 @@ void PositionsPanel::draw(int body_y0, int width, int height,
             attroff(COLOR_PAIR(qpair));
             mvprintw(y, 25, "%10.4f", p.avg_entry);
             if (p.mark > 0.0) mvprintw(y, 36, "%10.4f", p.mark);
-            else              mvprintw(y, 36, "%10s", "—");
+            else              mvprintw(y, 36, "%10s", "-");
 
-            // Δ% — price drift from entry.
+            // Δ% - price drift from entry.
             if (p.mark > 0.0 && p.avg_entry > 0.0)
             {
                 const double drift = (p.mark - p.avg_entry) / p.avg_entry * 100.0;
@@ -170,14 +170,14 @@ void PositionsPanel::draw(int body_y0, int width, int height,
                 mvprintw(y, 47, "%+7.2f%%", drift);
                 attroff(COLOR_PAIR(dp));
             }
-            else mvprintw(y, 47, "%8s", "—");
+            else mvprintw(y, 47, "%8s", "-");
 
             int upair = signed_pair(p.unrealized);
             attron(COLOR_PAIR(upair));
             mvprintw(y, 56, "%+12.4f", p.unrealized);
             attroff(COLOR_PAIR(upair));
 
-            // uPnL% — unrealized as fraction of cost basis.
+            // uPnL% - unrealized as fraction of cost basis.
             if (std::abs(p.qty) > 0.0 && p.avg_entry > 0.0)
             {
                 const double basis = std::abs(p.qty) * p.avg_entry;
@@ -187,7 +187,7 @@ void PositionsPanel::draw(int body_y0, int width, int height,
                 mvprintw(y, 69, "%+7.2f%%", upct);
                 attroff(COLOR_PAIR(up));
             }
-            else mvprintw(y, 69, "%8s", "—");
+            else mvprintw(y, 69, "%8s", "-");
 
             ++y; ++shown;
         }
@@ -252,7 +252,7 @@ void PositionsPanel::draw(int body_y0, int width, int height,
             attroff(COLOR_PAIR(spair) | A_BOLD);
             mvprintw(y, 10 + xo, "%-12.12s", l.symbol.c_str());
             mvprintw(y, 22 + xo, "%-16.16s",
-                     l.strategy_name.empty() ? "—" : l.strategy_name.c_str());
+                     l.strategy_name.empty() ? "-" : l.strategy_name.c_str());
             mvprintw(y, 38 + xo, "%14.6f", l.qty_open);
             mvprintw(y, 54 + xo, "%14.4f", l.entry_price);
             mvprintw(y, 68 + xo, "%10s", fmt_age(l.age_seconds).c_str());

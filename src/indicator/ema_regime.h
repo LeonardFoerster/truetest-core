@@ -301,8 +301,14 @@ inline void ema_regime_detector::recompute_flags_and_regime()
     expanding_flag_ = false;
     if (dist_pct_history_.size() >= 8)
     {
-        double recent_min = compute_recent_min_dist_pct(6);
-        if (recent_min > 0.0 && last_dist_pct_ > recent_min * expansion_ratio_)
+        auto it = dist_pct_history_.rbegin();
+        const double current = *it;
+        ++it; // exclude the current expanded value from the contraction baseline
+        double recent_min = (it != dist_pct_history_.rend()) ? *it : 0.0;
+        for (; it != dist_pct_history_.rend(); ++it)
+            recent_min = std::min(recent_min, *it);
+
+        if (recent_min > 0.0 && current > recent_min * expansion_ratio_)
         {
             // Only count as Y if we came from a relatively contracted state
             if (recent_min < 1.4)

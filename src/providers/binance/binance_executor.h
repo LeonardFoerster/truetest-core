@@ -6,6 +6,7 @@
 #include "ui/console_dashboard.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <iostream>
 #include <iterator>
@@ -65,6 +66,13 @@ public:
                 last_price_,
                 commission
             );
+            pending_fills_.back().set_recv_ns(o.get_recv_ns());
+            if (o.get_recv_ns() > 0)
+            {
+                const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                pending_fills_.back().set_latency_ns(now_ns - o.get_recv_ns());
+            }
         }
     }
 

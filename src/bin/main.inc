@@ -8,6 +8,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <exception>
 #include <string>
 #include <utility>
 #include <vector>
@@ -54,6 +55,7 @@
 
 #ifdef HAS_QUESTDB
 #include "data/questdb/store.h"
+#include "data/questdb/run_tag.h"
 #endif
 #include "ui/console_dashboard.h"
 #ifdef HAS_RICH_TUI
@@ -71,8 +73,19 @@
 #include "debug/debug_log.h"
 #endif
 
+#ifdef HAS_WEB
+#include "ui/dashboard_snapshot.h"
+#include "web/web_server.h"
+#include "web/report_json.h"
+#endif
+
 static std::atomic<DataBridge<tick_record>*> g_tick_bridge{nullptr};
 static std::atomic<DataBridge<bar_record>*> g_bar_bridge{nullptr};
+#ifdef HAS_WEB
+// Set by SIGINT/SIGTERM so a post-backtest web session can serve the final
+// report until the operator exits.
+static std::atomic<bool> g_web_stop{false};
+#endif
 static void install_shutdown_handler()
 {
     std::signal(SIGINT, [](int) {
@@ -84,6 +97,32 @@ static void install_shutdown_handler()
         if (auto* bb = g_bar_bridge.load(std::memory_order_acquire)) bb->stop();
     });
 }
+
+class provider_close_guard
+{
+public:
+    explicit provider_close_guard(std::shared_ptr<IProvider> provider)
+        : provider_(std::move(provider))
+    {}
+
+    ~provider_close_guard()
+    {
+        if (active_ && provider_)
+        {
+            try { provider_->close(); }
+            catch (...) {}
+        }
+    }
+
+    provider_close_guard(const provider_close_guard&) = delete;
+    provider_close_guard& operator=(const provider_close_guard&) = delete;
+
+    void release() { active_ = false; }
+
+private:
+    std::shared_ptr<IProvider> provider_;
+    bool active_ = true;
+};
 
 // Live-money safety gate. Prints a loud red warning and forces the operator
 // to solve a fresh random addition problem before real orders can be sent.
@@ -104,7 +143,7 @@ static bool confirm_real_money_math()
     std::cout << "\n";
     std::cout << RED << "  ###############################################\n";
     std::cout << "  #                                             #\n";
-    std::cout << "  #   !!!  LIVE TRADING — REAL MONEY  !!!       #\n";
+    std::cout << "  #   !!!  LIVE TRADING - REAL MONEY  !!!       #\n";
     std::cout << "  #                                             #\n";
     std::cout << "  #   Orders submitted from here will execute   #\n";
     std::cout << "  #   on a real exchange against real funds.    #\n";
@@ -160,11 +199,11 @@ static void print_threading_details(std::ostream& os,
     const int         threads = workers + 1;  // +1 = event_loop (main thread)
 
     os << indent << "Threading:  " << BLD << preset_to_string(preset) << OFF
-       << " preset — " << BLD << threads << OFF << " thread"
+       << " preset - " << BLD << threads << OFF << " thread"
        << (threads == 1 ? "" : "s")
        << " on " << phys << " physical core" << (phys == 1 ? "" : "s");
     if (hw > phys)
-        os << " " << DIM << "(" << hw << " logical w/ SMT — siblings left idle)" << OFF;
+        os << " " << DIM << "(" << hw << " logical w/ SMT - siblings left idle)" << OFF;
     os << "\n";
 
     auto cmap = build_core_map();
@@ -344,6 +383,13 @@ struct cli_options
     std::string status_format = "auto";
     bool no_tui = false;
 
+    // Embedded web UI (HAS_WEB). Read-only; off by default.
+    bool web = false;
+    int web_port = 8080;
+    std::string web_bind = "127.0.0.1";
+    std::string web_token;
+    std::string web_assets;
+
     double risk_max_position_value = 1e9;
     double risk_max_drawdown = 0.30;
     double risk_max_loss_per_trade = 10000.0;
@@ -366,6 +412,48 @@ struct cli_options
     bool questdb_strict = false;  // Phase 2: hard-fail on QuestDB problems + local fallback
 #endif
 };
+
+static bool validate_binance_futures_live_phase0(const cli_options& o,
+                                                 std::ostream& errors,
+                                                 std::ostream& warnings)
+{
+    const bool resolved_live = (o.mode == "live" || o.live);
+    if (o.provider_name != "binance-futures" || !resolved_live)
+        return true;
+
+    const bool has_venue_caps =
+        o.max_notional_usdt > 0.0 ||
+        o.max_leverage > 0.0 ||
+        o.min_liquidation_distance_pct > 0.0;
+
+    if (!has_venue_caps)
+    {
+        if (!o.testnet)
+        {
+            errors << "  ! Refusing mainnet futures live mode without venue risk caps.\n"
+                      "    Set at least one of --max-notional, --max-leverage, "
+                      "or --min-liq-distance-pct.\n";
+            return false;
+        }
+        warnings << "  [Phase 0] WARNING: No venue risk caps set "
+                    "(--max-notional / --max-leverage / --min-liq-distance-pct).\n"
+                    "           These are strongly recommended before mainnet validation runs.\n";
+    }
+
+    if (o.risk_max_daily_loss <= 0.0)
+    {
+        if (!o.testnet)
+        {
+            errors << "  ! Refusing mainnet futures live mode with --max-daily-loss disabled.\n"
+                      "    Set a conservative positive --max-daily-loss.\n";
+            return false;
+        }
+        warnings << "  [Phase 0] WARNING: --max-daily-loss is 0 (disabled). "
+                    "Set a conservative daily loss limit before mainnet.\n";
+    }
+
+    return true;
+}
 
 static std::vector<std::string> split_csv(const std::string& s)
 {
@@ -397,6 +485,39 @@ static void apply_strategy_params(IStrategy& strategy,
         std::string key = p.substr(0, eq);
         double value = std::stod(p.substr(eq + 1));
         strategy.set_param(key, value);
+    }
+}
+
+// Push CLI fee / spread realism into strategy sizing params when supported.
+// Market entries and stop exits are treated as taker; half bar-spread is a
+// conservative adverse-slip estimate when no L2 walk is available at size time.
+static void apply_execution_cost_params(IStrategy& strategy, const cli_options& o)
+{
+    auto schema = strategy.get_param_schema();
+    auto has = [&](const char* name) {
+        for (const auto& p : schema)
+            if (p.name == name) return true;
+        return false;
+    };
+    auto set_if = [&](const char* name, double value) {
+        if (value <= 0.0 || !has(name)) return;
+        try { strategy.set_param(name, value); }
+        catch (const std::exception&) { /* schema race / unknown — ignore */ }
+    };
+
+    // Prefer taker for market-style risk; fall back to maker if only that is set.
+    const double entry_fee = (o.taker_rate > 0.0) ? o.taker_rate
+                           : (o.maker_rate > 0.0) ? o.maker_rate : 0.0;
+    const double exit_fee  = entry_fee;
+    set_if("entry_fee_rate", entry_fee);
+    set_if("exit_fee_rate",  exit_fee);
+
+    // Half-spread as per-leg adverse slip when bar-spread realism is enabled.
+    if (o.bar_spread_bps > 0.0)
+    {
+        const double half = o.bar_spread_bps * 0.5;
+        set_if("entry_slip_bps", half);
+        set_if("exit_slip_bps",  half);
     }
 }
 
@@ -836,7 +957,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
         ->default_val(100000);
     app.add_option("--exec-bar-delay", o.exec_bar_delay,
                    "Bars of simulated execution delay for backtest/shadow. "
-                   "1 (default) parks orders until next bar's open — kills same-bar look-ahead. "
+                   "1 (default) parks orders until next bar's open - kills same-bar look-ahead. "
                    "0 disables. Ignored when --mode live or a latency model is configured.")
         ->default_val(1);
     app.add_option("--wire-latency-us", o.wire_latency_us,
@@ -924,7 +1045,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                  "the levels they'd walk instead of mid + --impact-k-bps. Walked depth is "
                  "deterministic for sub-book clips; the parametric model is suppressed for "
                  "those submits. Falls back to mid + impact_model when the symbol has no "
-                 "L2 depth or the qty exceeds the book. Default off — byte-identical until "
+                 "L2 depth or the qty exceeds the book. Default off - byte-identical until "
                  "set. Ignored in --mode live.");
     app.add_option("--queue-model", o.queue_model,
                    "Shadow-mode queue-position estimate. 'none' (default) keeps the "
@@ -966,6 +1087,16 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Live status display: auto, tui, plain, ndjson, off (default: auto)")
         ->default_val("auto");
     app.add_flag("--no-tui", o.no_tui, "Shortcut for --status-format=plain");
+
+#ifdef HAS_WEB
+    app.add_flag("--web", o.web, "Serve the web UI (read-only) for this session");
+    app.add_option("--web-port", o.web_port, "Web UI port (default: 8080)")->default_val(8080);
+    app.add_option("--web-bind", o.web_bind, "Web UI bind address (default: 127.0.0.1)")
+        ->default_val("127.0.0.1");
+    app.add_option("--web-token", o.web_token, "Optional bearer token required for web UI access");
+    app.add_option("--web-assets", o.web_assets,
+                   "Directory of built web UI assets to serve at / (default: API/WS only)");
+#endif
 
 #ifdef HAS_QUESTDB
     app.add_flag("--persist", o.persist,
@@ -1088,7 +1219,7 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
 }
 
 // -----------------------------------------------------------------------------
-// Preset application (P1-01 / P1-02)
+// Preset application (P1-01 / P1-02; see docs/todos/02-P1-freeze.md#P1-01 or docs/governance/03-todo.md)
 // Applies a named bundle only to fields the user did not explicitly supply on
 // the CLI (using the same was_set(app) test as JSON overlay). Establishes:
 //   explicit CLI > --config JSON > --preset bundle > hard defaults.
@@ -1250,6 +1381,7 @@ static int run_dry_run(const cli_options& o)
     std::cout << "  ============================================\n";
 
     bool valid = true;
+    const bool resolved_live = (o.mode == "live" || o.live);
     if (!o.strategy.empty() && !StrategyRegistry::instance().has(o.strategy))
     {
         std::cerr << "  ! Unknown strategy: " << o.strategy << "\n";
@@ -1260,12 +1392,14 @@ static int run_dry_run(const cli_options& o)
         std::cerr << "  ! Unknown mode: " << o.mode << "\n";
         valid = false;
     }
-    if (o.mode == "live" && !truetest::target_allows_live_orders())
+    if (resolved_live && !truetest::target_allows_live_orders())
     {
-        std::cerr << "  ! --mode=live is only permitted on the engine_live binary "
+        std::cerr << "  ! Live mode is only permitted on the engine_live binary "
                      "(this is " << truetest::target_name() << ").\n";
         valid = false;
     }
+    if (!validate_binance_futures_live_phase0(o, std::cerr, std::cout))
+        valid = false;
     if (!o.fee_model.empty() && o.fee_model != "fixed" && o.fee_model != "tiered")
     {
         std::cerr << "  ! Unknown fee model: " << o.fee_model << "\n";
@@ -1290,6 +1424,7 @@ static int run_replay_mode(const cli_options& o)
     std::cout << "  Using Mean Reversion strategy (default) for replay.\n";
 
     auto strategy = std::make_shared<mean_reversion_strategy>(20);
+    apply_execution_cost_params(*strategy, o);
     apply_strategy_params(*strategy, o.params);
 
     engine_config cfg;
@@ -1346,6 +1481,22 @@ static int run_monte_carlo_mode(const cli_options& o)
     mc_cfg.base_seed = o.seed;
     mc_cfg.initial_balance = o.balance;
 
+    // Strategy --param key=value (same contract as single-run backtests)
+    for (const auto& p : o.params) {
+        auto eq = p.find('=');
+        if (eq == std::string::npos) {
+            std::cerr << "  ! Invalid --param format (expected key=value): " << p << "\n";
+            return 1;
+        }
+        try {
+            mc_cfg.strategy_params.emplace_back(
+                p.substr(0, eq), std::stod(p.substr(eq + 1)));
+        } catch (const std::exception& e) {
+            std::cerr << "  ! Invalid --param value for '" << p << "': " << e.what() << "\n";
+            return 1;
+        }
+    }
+
     // Apply some realism from top-level flags (best effort for Phase 3).
     // Passive-side fill pricing is always on; no flag to forward.
     mc_cfg.order_latency_us = o.order_latency_us;
@@ -1360,6 +1511,12 @@ static int run_monte_carlo_mode(const cli_options& o)
     // Phase A object reuse
     mc_cfg.reuse_objects_between_trials = o.mc_reuse_objects;
 
+    if (mc_cfg.parallel_trials && mc_cfg.reuse_objects_between_trials) {
+        std::cerr << "  ! --mc-parallel and --mc-reuse-objects are mutually exclusive "
+                     "(shared strategy/data_handler would race).\n";
+        return 1;
+    }
+
 #ifdef HAS_QUESTDB
     std::unique_ptr<truetest::questdb::QuestdbStore> questdb_store;
     if (o.persist) {
@@ -1368,10 +1525,19 @@ static int run_monte_carlo_mode(const cli_options& o)
         sc.ilp_port = o.questdb_ilp_port ? o.questdb_ilp_port : 9009;
         sc.http_port = o.questdb_http_port ? o.questdb_http_port : 9000;
 
-        std::string base_tag = o.run_tag.empty()
-            ? "mc_" + std::to_string(static_cast<long long>(std::time(nullptr)))
-            : o.run_tag;
-        sc.run_tag = base_tag;
+        try
+        {
+            const std::string base_tag = o.run_tag.empty()
+                ? "mc_" + std::to_string(static_cast<long long>(std::time(nullptr)))
+                : o.run_tag;
+            sc.run_tag = truetest::questdb::make_run_tag(base_tag);
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "  ! Invalid --run-tag for QuestDB persistence: "
+                      << e.what() << "\n";
+            return 1;
+        }
         sc.mode = "backtest";
         sc.binary = "engine_backtest";
         sc.strategy = mc_cfg.strategy_name;
@@ -1391,10 +1557,22 @@ static int run_monte_carlo_mode(const cli_options& o)
     std::cout << "  Trials:   " << mc_cfg.n_trials << "\n";
     std::cout << "  Model:    " << mc_cfg.generator_name << "\n";
     std::cout << "  Strategy: " << mc_cfg.strategy_name << "\n";
-    std::cout << "  Balance:  " << mc_cfg.initial_balance << "\n\n";
+    std::cout << "  Balance:  " << mc_cfg.initial_balance << "\n";
+    std::cout << "  Base seed:" << mc_cfg.base_seed
+              << (mc_cfg.base_seed == 0
+                      ? " (using fixed default " +
+                            std::to_string(truetest::simulation::kMcDefaultBaseSeed) + ")"
+                      : "")
+              << "\n\n";
 
-    truetest::simulation::MonteCarloController controller(mc_cfg);
-    auto results = controller.run();
+    truetest::simulation::McAggregate results;
+    try {
+        truetest::simulation::MonteCarloController controller(mc_cfg);
+        results = controller.run();
+    } catch (const std::exception& e) {
+        std::cerr << "  ! Monte Carlo campaign failed: " << e.what() << "\n";
+        return 1;
+    }
 
     std::string mc_json = truetest::simulation::MonteCarloReporter::render_json(results, mc_cfg);
 
@@ -1468,7 +1646,7 @@ static std::pair<std::string, std::string> resolve_exchange_credentials(
 
     if (!arg_key.empty() && !env_key)
         std::cerr << "  WARNING: --api-key was passed on the command line. "
-                     "Prefer env var TRUETEST_BINANCE_API_KEY — argv is visible "
+                     "Prefer env var TRUETEST_BINANCE_API_KEY - argv is visible "
                      "to other processes and shell history.\n";
     if (!arg_secret.empty() && !env_secret)
         std::cerr << "  WARNING: --api-secret was passed on the command line. "
@@ -1511,7 +1689,7 @@ static int run_provider_mode(const cli_options& o)
     if (o.min_liquidation_distance_pct >= 0.0)
         pcfg["min_liquidation_distance_pct"] =
             std::to_string(o.min_liquidation_distance_pct);
-    // --disarm-deadman wins over --dead-man-countdown-ms — operator
+    // --disarm-deadman wins over --dead-man-countdown-ms - operator
     // intent for "this specific run, no DMS" is unambiguous when both
     // appear on the command line.
     const long effective_countdown = o.disarm_deadman ? 0L
@@ -1526,6 +1704,9 @@ static int run_provider_mode(const cli_options& o)
     if (o.monte_carlo || o.mc_trials > 0) {
         return run_monte_carlo_mode(o);
     }
+
+    if (!validate_binance_futures_live_phase0(o, std::cerr, std::cout))
+        return 1;
 
     std::shared_ptr<IProvider> provider;
     try {
@@ -1566,6 +1747,7 @@ static int run_provider_mode(const cli_options& o)
         if (o.balance != 10000.0) prov_strategy->set_param("equity", o.balance);
         if (o.risk_fraction != 0.02) prov_strategy->set_param("risk_fraction", o.risk_fraction);
     }
+    apply_execution_cost_params(*prov_strategy, o);
     apply_strategy_params(*prov_strategy, o.params);
 
     std::vector<std::pair<std::string, std::shared_ptr<IStrategy>>> extra_strategies;
@@ -1576,6 +1758,7 @@ static int run_provider_mode(const cli_options& o)
             return 1;
         }
         auto extra = StrategyRegistry::instance().create(nm);
+        apply_execution_cost_params(*extra, o);
         apply_strategy_params(*extra, o.params);
         extra_strategies.emplace_back(nm, std::move(extra));
     }
@@ -1668,27 +1851,7 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
     prov_cfg.risk_unwind = o.risk_unwind;
 
-    // Phase 0 soft guidance for live binance-futures (prod.md + futures-phase0-operator-sop.md)
-    if (o.provider_name == "binance-futures" && o.mode == "live")
-    {
-        const bool has_venue_caps =
-            o.max_notional_usdt > 0.0 ||
-            o.max_leverage > 0.0 ||
-            o.min_liquidation_distance_pct > 0.0;
-
-        if (!has_venue_caps)
-        {
-            std::cout << "  [Phase 0] WARNING: No venue risk caps set (--max-notional / --max-leverage / --min-liq-distance-pct).\n"
-                      << "           These are strongly recommended for safe tiny-size mainnet validation runs.\n"
-                      << "           See prod.md (Phase 0) and docs/futures-phase0-operator-sop.md\n";
-        }
-
-        if (o.risk_max_daily_loss <= 0.0)
-        {
-            std::cout << "  [Phase 0] WARNING: --max-daily-loss is 0 (disabled). A conservative daily loss limit is recommended.\n"
-                      << "           See the official Phase 0 command template in prod.md and the Operator SOP.\n";
-        }
-    }
+    const bool resolved_live = (o.mode == "live" || o.live);
 
 #ifdef HAS_QUESTDB
     prov_cfg.persist_enabled = o.persist;
@@ -1732,7 +1895,7 @@ static int run_provider_mode(const cli_options& o)
 
     if (o.mode == "shadow")
         prov_cfg.mode = engine_mode::shadow;
-    else if (o.mode == "live" || o.live)
+    else if (resolved_live)
         prov_cfg.mode = engine_mode::live;
 
     // Ring-buffer drops silently corrupt the shadow portfolio / halt path
@@ -1782,6 +1945,15 @@ static int run_provider_mode(const cli_options& o)
         std::cout << "  [TESTNET] Routing Binance provider to the spot testnet.\n";
     }
 
+#ifdef HAS_WEB
+    if (o.web && prov_cfg.mode != engine_mode::backtest && o.web_token.empty())
+    {
+        std::cerr << "  ! --web in shadow/live mode requires --web-token.\n"
+                     "    Backtest report review can remain tokenless on localhost.\n";
+        return 1;
+    }
+#endif
+
     provider->configure(prov_cfg);
 
     if (provider->has_data_feed() && !provider->open())
@@ -1789,6 +1961,7 @@ static int run_provider_mode(const cli_options& o)
         std::cerr << "  ! Provider failed to open.\n";
         return 1;
     }
+    provider_close_guard opened_provider(provider);
 
     auto transport = provider->get_transport();
     if (!transport)
@@ -1926,6 +2099,31 @@ static int run_provider_mode(const cli_options& o)
         provider->configure(prov_cfg);
     }
 
+#ifdef HAS_WEB
+    // Read-only web UI factory — attaches to an engine via the same
+    // snapshot_dashboard() seam the ncurses TUI uses; never places orders.
+    auto start_web = [&](engine& eng) -> std::unique_ptr<truetest::web::WebServer> {
+        if (!o.web) return nullptr;
+        truetest::web::web_config wc;
+        wc.bind_addr = o.web_bind;
+        wc.port      = o.web_port;
+        wc.token     = o.web_token;
+        wc.asset_dir = o.web_assets;
+        auto snap = [&eng](truetest::ui::dashboard_snapshot& out) {
+            bool ok = eng.snapshot_dashboard(out);
+            if (ok) out.debug.target = truetest::target_name();
+            return ok;
+        };
+        auto report = [&eng]() {
+            return truetest::web::report_to_json(eng.get_analytics().generate_report());
+        };
+        auto srv = std::make_unique<truetest::web::WebServer>(
+            std::move(wc), std::move(snap), std::move(report));
+        srv->start();
+        return srv;
+    };
+#endif
+
     if (is_streaming)
     {
         engine eng(dh, nullptr, prov_strategy, std::move(prov_cfg));
@@ -1935,11 +2133,17 @@ static int run_provider_mode(const cli_options& o)
 
         install_shutdown_handler();
 
+#ifdef HAS_WEB
+        // Streams live snapshots over /stream for the duration of the run;
+        // stopped when web_srv leaves scope at the end of this branch.
+        auto web_srv = start_web(eng);
+#endif
+
 #ifdef HAS_RICH_TUI
         // Rich (ncurses) tabbed dashboard for shadow/live binaries when the
         // resolved status mode is TUI. ncurses takes over the terminal, so
         // we skip render_banner() (it would be cleared on initscr) and skip
-        // the inner ConsoleDashboard render loop — the rich TUI reads from
+        // the inner ConsoleDashboard render loop - the rich TUI reads from
         // the same ConsoleDashboard atomics + recent-event ring, and pulls
         // structured tables (positions, lots, ...) via engine::snapshot_dashboard.
         std::unique_ptr<truetest::ui::TabbedDashboard> rich_tui;
@@ -1956,7 +2160,7 @@ static int run_provider_mode(const cli_options& o)
 
             // Wire operator hotkey actions. Pause/flatten always available;
             // kill switch comes from the provider when one supplies it
-            // (Binance does — backtest does not).
+            // (Binance does - backtest does not).
             truetest::ui::operator_actions ops;
             ops.pause_toggle = [&eng]() {
                 eng.set_pause_all(!eng.is_pause_all());
@@ -1995,7 +2199,7 @@ static int run_provider_mode(const cli_options& o)
             }
         }
 
-        // Unified event-stream path — provider-agnostic. When the provider
+        // Unified event-stream path - provider-agnostic. When the provider
         // advertises it (currently: Binance with --depth-stream set), build
         // a single DataBridge<provider::event>; L2 frames populate the
         // engine's orderbook_registry_ directly so LocalBookAdapter can
@@ -2050,7 +2254,7 @@ static int run_provider_mode(const cli_options& o)
                 dashboard->stop();
         }
 
-        // Skip the multi-line analytics report when the TUI owns stdout —
+        // Skip the multi-line analytics report when the TUI owns stdout -
         // the box on screen is already the report surface, and dumping
         // another fixed-width report below it was the "final analysis
         // windows" complaint. Non-TUI runs still print it. File export
@@ -2058,6 +2262,7 @@ static int run_provider_mode(const cli_options& o)
         if (!dashboard || !dashboard->is_tui())
             eng.print_summary();
         export_results(eng.get_analytics(), o.output, o.output_format);
+        opened_provider.release();
     }
     else
     {
@@ -2134,11 +2339,34 @@ static int run_provider_mode(const cli_options& o)
 
         eng.print_summary();
         export_results(eng.get_analytics(), o.output, o.output_format);
+        opened_provider.release();
+
+#ifdef HAS_WEB
+        // Backtest is blocking and done; keep the server alive so the operator
+        // can review the final report in the browser until they Ctrl-C.
+        if (o.web)
+        {
+            auto web_srv = start_web(eng);
+            if (web_srv && web_srv->running())
+            {
+                std::signal(SIGINT,  [](int) { g_web_stop.store(true, std::memory_order_release); });
+                std::signal(SIGTERM, [](int) { g_web_stop.store(true, std::memory_order_release); });
+                std::cerr << "  web UI serving the backtest report at "
+                          << web_srv->config().url() << " — Ctrl-C to exit\n";
+                while (!g_web_stop.load(std::memory_order_acquire))
+                    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                web_srv->stop();
+            }
+        }
+#endif
     }
     return 0;
 }
 
-static int run_tui_mode(const cli_options& o)
+// Small helper extracted so that the initial frame of run_tui_mode stays tiny.
+// The banner + first cin + preset logic used to contribute to the ~11 MiB frame.
+[[gnu::noinline]]
+static int prompt_quickstart_preset(const cli_options& o, cli_options& effective)
 {
     std::cout << "\n";
     std::cout << "   _____                _____         _   \n";
@@ -2150,7 +2378,7 @@ static int run_tui_mode(const cli_options& o)
     std::cout << "    Backtesting Engine v0.1\n";
     std::cout << "\n";
 
-    // P1-03: lightweight preset-aware entry for the bare invocation.
+    // P1-03: lightweight preset-aware entry for the bare invocation. (see docs/todos/02-P1-freeze.md#P1-03)
     // This makes "just run the binary" discover the new simplification story
     // without forcing the user through dozens of flags for common cases.
     std::cout << "  +-------------------------------------------+\n";
@@ -2166,7 +2394,7 @@ static int run_tui_mode(const cli_options& o)
     int preset_choice = 0;
     std::cin >> preset_choice;
 
-    cli_options effective = o;  // start from passed (may have --param etc.)
+    effective = o;  // start from passed (may have --param etc.)
     if (preset_choice == 1) {
         effective.preset = "backtest-local-l2";
     } else if (preset_choice == 2) {
@@ -2194,6 +2422,27 @@ static int run_tui_mode(const cli_options& o)
             effective.mc_reuse_objects = true;
         }
     }
+    return 0;
+}
+
+// Forward declaration so run_tui_mode can call it (definition appears later in this TU).
+static int run_tui_configured_engine(const cli_options& o,
+                                     const cli_options& effective,
+                                     std::unique_ptr<IDataSource> source,
+                                     std::shared_ptr<IStrategy> strategy,
+                                     int fee_choice);
+
+static int run_tui_mode(const cli_options& o)
+{
+    // NOTE: run_tui_mode is deliberately kept very small (menus only).
+    // The heavy config population, model construction and engine execution
+    // live in run_tui_configured_engine (called at the end) and the first
+    // preset interaction lives in prompt_quickstart_preset. This prevents
+    // the ~11 MiB stack frame that used to crash bare launches on default
+    // 8 MiB ulimit -s.
+    cli_options effective;
+    if (int rc = prompt_quickstart_preset(o, effective); rc != 0)
+        return rc;
 
     std::cout << "\n";
     std::cout << "  +-------------------------------------------+\n";
@@ -2227,6 +2476,7 @@ static int run_tui_mode(const cli_options& o)
     auto strategy = StrategyRegistry::instance().create(tui_strategy_name);
     if (tui_strategy_name == "sma" || tui_strategy_name == "mean-reversion")
         strategy->set_param("period", static_cast<double>(sma_period));
+    apply_execution_cost_params(*strategy, o);
     apply_strategy_params(*strategy, o.params);
 
     std::cout << "\n";
@@ -2273,6 +2523,22 @@ static int run_tui_mode(const cli_options& o)
     std::cout << "  > ";
     int fee_choice;
     std::cin >> fee_choice;
+
+    // Hand off to separate function. This is the main source of the giant
+    // stack frame (long config population + models + engine construction).
+    return run_tui_configured_engine(o, effective, std::move(source), strategy, fee_choice);
+}
+
+// Extracted heavy path. [[gnu::noinline]] + separate frame keeps the
+// entry frame of run_tui_mode (and prompt_quickstart_preset) small.
+[[gnu::noinline]]
+static int run_tui_configured_engine(const cli_options& o,
+                                     const cli_options& effective,
+                                     std::unique_ptr<IDataSource> source,
+                                     std::shared_ptr<IStrategy> strategy,
+                                     int fee_choice)
+{
+    (void)effective; // currently not differing in this path; kept for future
 
     engine_config config;
     config.seed = o.seed;
@@ -2474,7 +2740,7 @@ int main(int argc, char* argv[])
 
     cli_options opts;
 
-    CLI::App app{"TrueTest — modular C++23 backtesting / shadow / live engine"};
+    CLI::App app{"TrueTest - modular C++23 backtesting / shadow / live engine"};
     app.set_help_all_flag("--help-all", "Show all help");
     register_cli_options(app, opts);
 

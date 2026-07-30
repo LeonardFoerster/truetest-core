@@ -173,7 +173,7 @@ TEST(EngineStreaming, BarStreamStrategyGeneratesSignals)
     eng.run_streaming(bridge);
     feeder.join();
 
-    // Strategy buys at bar 3 and sells at bar 6 — should see trades
+    // Strategy buys at bar 3 and sells at bar 6 - should see trades
     EXPECT_GT(strategy->get_call_count(), 5);
 }
 
@@ -215,7 +215,7 @@ TEST(EngineStreaming, BarStreamBatchTransportFallback)
 {
     SilenceOutput silence;
 
-    // Use MockBatchTransport (non-streaming) through run_streaming —
+    // Use MockBatchTransport (non-streaming) through run_streaming -
     // it should still work since DataBridge::run_streaming falls back to read_line()
     auto lines = make_bar_lines(5);
     auto transport = std::make_shared<MockBatchTransport>(lines);

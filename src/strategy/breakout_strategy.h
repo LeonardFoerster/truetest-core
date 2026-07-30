@@ -5,11 +5,11 @@
 #include "../indicator/sma.h"
 #include "exits/exit_intent.h"
 #include "strategy_interface.h"
+#include "symbol_state_store.h"
 
 #include <deque>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 class breakout_strategy : public IStrategy
@@ -45,6 +45,12 @@ private:
     // Config
     double equity_;
     double risk_fraction_;
+    double entry_fee_rate_ = 0.0;
+    double exit_fee_rate_  = 0.0;
+    double entry_slip_bps_ = 0.0;
+    double exit_slip_bps_  = 0.0;
+    double fixed_fee_per_leg_ = 0.0;
+    double max_notional_frac_ = 0.0;
     std::size_t atr_period_;
     std::size_t vol_period_;
     std::size_t lookback_;
@@ -77,11 +83,10 @@ private:
         double atr_at_break = 0.0;
     };
 
-    std::unordered_map<std::string, SymbolState> states_;
+    SymbolStateStore<SymbolState> states_;
     std::vector<truetest::exits::exit_intent> pending_intents_;
 
     // Helpers
-    SymbolState& get_state(const std::string& symbol);
     double compute_quantity(double price, double sl_distance) const;
     bool detect_consolidation(const SymbolState& st, double& out_high, double& out_low) const;
     bool check_breakout_gates(const SymbolState& st, double open, double close, double high, double low,

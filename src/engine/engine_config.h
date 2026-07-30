@@ -51,8 +51,9 @@ struct pool_prewarm_settings
     std::size_t amend_blocks = 1;
     std::size_t funding_blocks = 1;
     // Phase 4: synthetic/MM orderbook depth (~20 orders/bar/tick accumulation).
-    // 18 blocks ≈ 73k slots (covers tick-3600 idle @ ~20 replenishes/tick).
-    std::size_t orderbook_order_blocks = 18;
+    // Default raised to cover full-length synthetic backtests (e.g. default ~5000 records * ~20 GTC MM orders).
+    // 128 blocks ≈ 524k slots is still modest for a backtest tool and keeps forbid_runtime_grow semantics.
+    std::size_t orderbook_order_blocks = 128;
     // 0 = auto (sum of all event-pool capacity slots after prewarm).
     std::size_t control_block_slots = 0;
     bool forbid_runtime_grow = true;
@@ -66,13 +67,13 @@ struct engine_config
     std::shared_ptr<IFillModel> fill_model;
     std::shared_ptr<ILatencyModel> latency_model;
 
-    // Order → venue delay, stacked on top of latency_model (strategy →
+    // Order -> venue delay, stacked on top of latency_model (strategy ->
     // order-ready). Used by TradeTapeShadowAdapter and HybridExecutor so
     // fills wait for the wire-latency window before releasing.
     std::shared_ptr<ILatencyModel> wire_latency_model;
 
     // Slippage model applied by LocalBookAdapter to the reference price
-    // for market orders before aggression markup. Null → ZeroImpactModel
+    // for market orders before aggression markup. Null -> ZeroImpactModel
     // (silent default, current behaviour). Ignored in engine_mode::live
     // (real exchange supplies real impact).
     std::shared_ptr<IImpactModel> impact_model;
@@ -128,7 +129,7 @@ struct engine_config
     std::string questdb_host = "127.0.0.1";
     std::uint16_t questdb_ilp_port = 9009;
     std::uint16_t questdb_http_port = 9000;
-    std::string run_tag;     // empty → auto-generate
+    std::string run_tag;     // empty -> auto-generate
     std::string run_notes;   // optional free-form, goes to runs_meta
 
     // How often to call QuestdbStore::tick() (time-based ILP flush) during long runs.
@@ -166,7 +167,7 @@ struct engine_config
 
     std::unordered_map<std::string, instrument_spec> instrument_overrides;
 
-    // Live-mode only. Null → resolved from provider or safe defaults.
+    // Live-mode only. Null -> resolved from provider or safe defaults.
     std::shared_ptr<IReconciler> reconciler;
     std::shared_ptr<IKillSwitch> kill_switch;
     double reconcile_tolerance_bps = 10.0;
@@ -193,7 +194,7 @@ struct engine_config
     // limit. Spread cost on the synthetic-book path comes from the mm_*
     // calibration above.
 
-    // Shadow-mode queue-position estimate. Null → NoQueueModel default
+    // Shadow-mode queue-position estimate. Null -> NoQueueModel default
     // (legacy fill-on-cross). When set, TradeTapeShadowAdapter holds
     // simulated limits until the real tape has consumed the queue
     // ahead of them. Requires a depth subscription. Ignored in

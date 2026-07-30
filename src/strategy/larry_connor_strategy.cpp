@@ -1,6 +1,7 @@
 #include "larry_connor_strategy.h"
 #include "strategy_registry.h"
 #include "../core/event.h"
+#include "../execution/position_sizing.h"
 
 #include <optional>
 
@@ -20,33 +21,25 @@ larry_connor_strategy::larry_connor_strategy(std::size_t ma_period,
     , atr_period_(atr_period)
     , equity_(equity)
     , risk_fraction_(risk_fraction)
+    , states_([this]() {
+          return SymbolState(ma_period_, entry_period_, exit_period_, atr_period_);
+      })
 {
-}
-
-larry_connor_strategy::SymbolState&
-larry_connor_strategy::get_state(const std::string& symbol)
-{
-    auto it = states_.find(symbol);
-    if (it == states_.end())
-    {
-        auto [ins, _] = states_.emplace(
-            std::piecewise_construct,
-            std::forward_as_tuple(symbol),
-            std::forward_as_tuple(ma_period_, entry_period_, exit_period_, atr_period_));
-        return ins->second;
-    }
-    return it->second;
 }
 
 double larry_connor_strategy::compute_quantity(double price) const
 {
-    if (price <= 0.0) return 0.0;
-    return equity_ * risk_fraction_ / price;
+    // Notional sizing: deploy risk_fraction of equity, net of entry fee/slip.
+    return truetest::risk::compute_notional_quantity(
+        equity_, risk_fraction_, price,
+        entry_fee_rate_, entry_slip_bps_, /*is_long=*/true, fixed_fee_per_leg_);
 }
 
 std::optional<order_event> larry_connor_strategy::on_market(const market_event& mkt)
 {
-    auto& st = get_state(mkt.get_symbol());
+    auto slot = states_.get(mkt.get_symbol());
+    auto& st = slot.state;
+    const std::string& sym = slot.symbol;
 
     const double close = mkt.get_close();
 
@@ -69,7 +62,7 @@ std::optional<order_event> larry_connor_strategy::on_market(const market_event& 
             st.position_open = false;
             st.open_qty = 0.0;
             if (qty <= 0.0) return std::nullopt;
-            return order_event(mkt.get_timestamp(), mkt.get_symbol(),
+            return order_event(mkt.get_timestamp(), sym,
                                order_type::market, order_side::sell, qty, close);
         }
         return std::nullopt;
@@ -82,7 +75,7 @@ std::optional<order_event> larry_connor_strategy::on_market(const market_event& 
         if (qty <= 0.0) return std::nullopt;
         st.position_open = true;
         st.open_qty = qty;
-        return order_event(mkt.get_timestamp(), mkt.get_symbol(),
+        return order_event(mkt.get_timestamp(), sym,
                            order_type::market, order_side::buy, qty, close);
     }
 
@@ -94,7 +87,7 @@ void larry_connor_strategy::set_position_open(const std::string& symbol, bool op
     // Keep our flag in sync with the engine's netted view of the book. The
     // engine flips this when the symbol moves between flat and non-flat after a
     // fill; honouring the flat signal guards against a missed/partial close.
-    auto& st = get_state(symbol);
+    auto& st = states_.get(symbol).state;
     st.position_open = open;
     if (!open)
         st.open_qty = 0.0;
@@ -108,7 +101,10 @@ std::vector<param_def> larry_connor_strategy::get_param_schema() const
         {"exit_period", static_cast<double>(exit_period_), 1, 1000, "Rolling-high lookback for exit (7D_High)"},
         {"atr_period", static_cast<double>(atr_period_), 1, 1000, "Wilder's ATR period"},
         {"equity", equity_, 0, 1e18, "Account equity for position sizing"},
-        {"risk_fraction", risk_fraction_, 0, 1, "Fraction of equity per trade"},
+        {"risk_fraction", risk_fraction_, 0, 1, "Notional as fraction of equity per trade"},
+        {"entry_fee_rate", entry_fee_rate_, 0, 0.05, "Entry fee as fraction of notional"},
+        {"entry_slip_bps", entry_slip_bps_, 0, 500, "Adverse entry slippage (bps)"},
+        {"fixed_fee_per_leg", fixed_fee_per_leg_, 0, 1e6, "Fixed fee per fill leg"},
     };
 }
 
@@ -120,6 +116,9 @@ void larry_connor_strategy::set_param(const std::string& key, double value)
     else if (key == "atr_period") { atr_period_ = static_cast<std::size_t>(value); states_.clear(); }
     else if (key == "equity") equity_ = value;
     else if (key == "risk_fraction") risk_fraction_ = value;
+    else if (key == "entry_fee_rate") entry_fee_rate_ = value;
+    else if (key == "entry_slip_bps") entry_slip_bps_ = value;
+    else if (key == "fixed_fee_per_leg") fixed_fee_per_leg_ = value;
     else throw std::runtime_error("Unknown parameter for larry_connor: " + key);
 }
 
@@ -127,10 +126,10 @@ std::vector<std::pair<std::string, double>>
 larry_connor_strategy::get_indicator_values(const std::string& symbol) const
 {
     std::vector<std::pair<std::string, double>> vals;
-    auto it = states_.find(symbol);
-    if (it == states_.end()) return vals;
+    const auto* st_ptr = states_.find(symbol);
+    if (!st_ptr) return vals;
 
-    const auto& st = it->second;
+    const auto& st = *st_ptr;
     if (st.ma.ready())
         vals.emplace_back("ma_" + std::to_string(ma_period_), st.ma.value());
     if (st.entry_low.ready())

@@ -5,10 +5,12 @@
 #include <chrono>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "overlays.h"  // brings ConfirmKind into truetest::ui
+#include "toast.h"     // for ToastStack (small include, only under HAS_RICH_TUI)
 
 namespace truetest::ui {
 
@@ -25,7 +27,7 @@ using snapshot_fn = std::function<bool(dashboard_snapshot&)>;
 
 // Optional operator-control hooks. The TUI calls these from its input
 // handler in response to hotkeys (`p`, `F`, `K`). Each hook is allowed
-// to be null — the TUI shows a "no-op" toast when the action isn't
+// to be null - the TUI shows a "no-op" toast when the action isn't
 // available (e.g. backtest mode without a kill switch).
 struct operator_actions
 {
@@ -52,7 +54,7 @@ public:
     TabbedDashboard(const TabbedDashboard&) = delete;
     TabbedDashboard& operator=(const TabbedDashboard&) = delete;
 
-    // Optional theme — chooses the color palette installed at start().
+    // Optional theme - chooses the color palette installed at start().
     // Default (`auto`) picks based on whether the terminal advertises
     // dark-on-light vs the standard dark background; `dark` is the
     // existing palette; `light` swaps fg/bg-friendly colors; `hicontrast`
@@ -84,20 +86,20 @@ private:
     // `?`; Esc / `?` / `q` dismisses. Doesn't pause the engine.
     void draw_help_overlay(int width, int height);
 
-    // Bottom-right transient message (2.5s TTL) for non-modal feedback —
+    // Bottom-right transient message (2.5s TTL) for non-modal feedback -
     // pause toggles, "kill fired", "no action wired" etc.
     void draw_toast(int width, int height);
     void set_toast(const std::string& msg);
 
     // Full-width red overlay row painted on top of the chrome row when
     // streaming_stats::halt_flag is set. Drawn last in render_loop so it
-    // covers tabs/status — the halt is the only thing that matters once
+    // covers tabs/status - the halt is the only thing that matters once
     // it fires. Rings the terminal bell once on rising edge.
     void draw_halt_banner(int width);
 
     // Cheap state digest for frame-skip. Captures status-bar atomics +
     // active tab + a few snapshot scalars whose change implies the
-    // visible UI changed. Conservative — when in doubt, re-render.
+    // visible UI changed. Conservative - when in doubt, re-render.
     std::uint64_t compute_render_digest(int active,
                                         const dashboard_snapshot* snap);
 
@@ -117,21 +119,11 @@ private:
 
     operator_actions actions_{};
 
-    // Confirm overlay state. When non-zero, render_loop draws a centered
-    // "y/n" prompt and blocks tab/quit input until resolved. Set by `F`
-    // / `K` hotkeys; cleared by 'y' (run action) or 'n' / Esc / any other.
-    enum class confirm_kind { none, flatten, kill };
-    std::atomic<int> pending_confirm_{static_cast<int>(confirm_kind::none)};
+    // Confirm overlay state. Uses ConfirmKind values (from overlays.h) for storage.
+    std::atomic<int> pending_confirm_{static_cast<int>(ConfirmKind::none)};
 
-    // Toast queue: short ring of recent operator-feedback messages.
-    // Each entry has a timestamp so the panel can fade old ones. Newest
-    // first. Atomic last_toast_ms_ retained as the "most recent" marker
-    // for the frame-skip digest.
-    struct toast_entry { std::string msg; long long ts_ms = 0; };
-    std::atomic<long long>  last_toast_ms_{0};
-    std::vector<toast_entry> toasts_;
-    std::mutex               toast_mu_;
-    static constexpr std::size_t kToastQueueCap = 6;
+    // Extracted toast management (see toast.h). Owns queue, TTL, drawing.
+    ToastStack toasts_;
 
     std::atomic<int>  active_tab_{0};
     std::atomic<bool> running_{false};
@@ -139,7 +131,7 @@ private:
 
     // Rising-edge tracker for the halt-banner bell. Set once when we
     // first observe halt_flag=true; never cleared (halt is terminal in
-    // live mode — even if it weren't, the operator only needs to be
+    // live mode - even if it weren't, the operator only needs to be
     // alerted once per halt event).
     std::atomic<bool> halt_bell_fired_{false};
 

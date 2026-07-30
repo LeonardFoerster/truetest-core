@@ -61,7 +61,7 @@ public:
             auto& lowest = beast::get_lowest_layer(*ws_);
             net::connect(lowest, results);
 
-            // TCP keepalive on the underlying socket — see BinanceTransport
+            // TCP keepalive on the underlying socket - see BinanceTransport
             // for rationale. 1s idle / 1s probe / 2 probes -> kernel-side
             // detection within ~3s. Best-effort.
             {
@@ -210,7 +210,7 @@ public:
         close();
     }
 
-    // Engine wires this in live mode — see BinanceTransport for semantics.
+    // Engine wires this in live mode - see BinanceTransport for semantics.
     void set_fatal_disconnect_callback(
         std::function<void(std::string_view reason)> cb)
     {

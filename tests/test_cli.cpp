@@ -2,13 +2,44 @@
 #include <cstdlib>
 #include <cstdio>
 #include <array>
+#include <ctime>
 #include <string>
 #include <fstream>
+#include <sys/stat.h>
+#include <sys/wait.h>
 
-// Helper: run truetest with args, capture stdout+stderr, return exit code
-static int run_truetest(const std::string& args, std::string& output)
+// Resolve engine binary across common CMake output layouts (ad-hoc
+// ./build and preset out/build/linux-tests). Prefer the newer mtime.
+static std::string resolve_engine_binary(const std::string& binary)
 {
-    std::string cmd = "./build/engine_backtest " + args + " 2>&1";
+    const char* candidates[] = {
+        "./out/build/linux-tests/",
+        "./build/",
+        "./out/build/linux-release-native/",
+    };
+    std::string best;
+    std::time_t best_mtime = 0;
+    for (const char* dir : candidates)
+    {
+        const std::string path = std::string(dir) + binary;
+        struct stat st{};
+        if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+            (st.st_mode & S_IXUSR) && st.st_mtime >= best_mtime)
+        {
+            best = path;
+            best_mtime = st.st_mtime;
+        }
+    }
+    return best.empty() ? (std::string("./build/") + binary) : best;
+}
+
+// Helper: run engine binary with args, capture stdout+stderr, return exit code
+static int run_engine(const std::string& binary,
+                      const std::string& args,
+                      std::string& output)
+{
+    const std::string path = resolve_engine_binary(binary);
+    std::string cmd = path + " " + args + " 2>&1";
     std::array<char, 4096> buf;
     output.clear();
 
@@ -20,7 +51,20 @@ static int run_truetest(const std::string& args, std::string& output)
 
     int status = pclose(pipe);
     // pclose returns the process exit status encoded; extract it
-    return WEXITSTATUS(status);
+    if (status < 0) return -1;
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return status;
+}
+
+static int run_truetest(const std::string& args, std::string& output)
+{
+    return run_engine("engine_backtest", args, output);
+}
+
+static int run_engine_live(const std::string& args, std::string& output)
+{
+    return run_engine("engine_live", args, output);
 }
 
 // ─── B1: CLI11 parsing ─────────────────────────────────────────────────────
@@ -303,6 +347,72 @@ TEST(DryRun, InvalidFeeModelExitsOne)
     int rc = run_truetest("--dry-run --fee badmodel", out);
     EXPECT_EQ(rc, 1);
     EXPECT_NE(out.find("Unknown fee model"), std::string::npos);
+}
+
+TEST(DryRun, LiveFlagRejectedOnBacktestBinary)
+{
+    std::string out;
+    int rc = run_truetest("--dry-run --live", out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("Live mode is only permitted on the engine_live binary"),
+              std::string::npos);
+}
+
+TEST(DryRun, ModeLiveRejectedOnBacktestBinary)
+{
+    std::string out;
+    int rc = run_truetest("--dry-run --mode live", out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("Live mode is only permitted on the engine_live binary"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetFuturesRequiresVenueCaps)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("Refusing mainnet futures live mode without venue risk caps"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetFuturesRequiresDailyLoss)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live --max-notional 25",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("Refusing mainnet futures live mode with --max-daily-loss disabled"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetFuturesAcceptsCapsAndDailyLoss)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live --max-notional 25 --max-daily-loss 5",
+        out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryTestnetFuturesAllowsWarningOnlyCaps)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live --testnet",
+        out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("No venue risk caps set"), std::string::npos);
+    EXPECT_NE(out.find("--max-daily-loss is 0"), std::string::npos);
+    EXPECT_NE(out.find("Config is VALID"), std::string::npos);
 }
 
 // ─── B4: QuestDB persistence flags ─────────────────────────────────────────

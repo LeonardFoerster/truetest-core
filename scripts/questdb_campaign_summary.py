@@ -12,6 +12,8 @@ and basic per-run table counts.
 import argparse
 import sys
 
+from questdb_common import validate_run_tag
+
 try:
     import requests
 except ImportError:
@@ -36,7 +38,7 @@ def main():
     parser.add_argument("--port", type=int, default=9000)
     args = parser.parse_args()
 
-    rt = args.run_tag
+    rt = validate_run_tag(args.run_tag)
 
     print(f"=== QuestDB Campaign Summary: {rt} ===")
 

@@ -22,7 +22,7 @@ TEST(L2SnapshotQueueModel, ReturnsLevelSizeAtOurPrice)
 }
 
 // No level at our price (improving the BBO or sitting alone at a deeper
-// price) → queue_ahead = 0, the legacy fill-on-cross path takes over.
+// price) -> queue_ahead = 0, the legacy fill-on-cross path takes over.
 TEST(L2SnapshotQueueModel, NoLevelMeansZeroQueue)
 {
     L2SnapshotQueueModel m;
@@ -53,14 +53,14 @@ TEST(L2SnapshotQueueModel, StaleSnapshotReturnsZero)
 {
     L2SnapshotQueueModel m(ms(500));
 
-    // Snapshot at t=0 (epoch) — system_clock::now() in on_snapshot is
+    // Snapshot at t=0 (epoch) - system_clock::now() in on_snapshot is
     // wall-clock, not the test's at(...) value. Submit ts also has to
     // be wall-clock to compare against. Use real clock to seed.
     const auto t0 = std::chrono::system_clock::now();
     m.on_snapshot("BTC", {{100.0, 5.0}}, {});
     EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy, 100.0, t0), 5.0);
 
-    // Submit ts 2s ahead — way past 500ms staleness.
+    // Submit ts 2s ahead - way past 500ms staleness.
     EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy, 100.0,
                                    t0 + std::chrono::seconds(2)), 0.0);
 }

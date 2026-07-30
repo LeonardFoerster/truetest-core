@@ -252,8 +252,9 @@ TEST(BinanceFuturesDeadMansSwitch, PersistentFailureInvokesCloseFn)
 
     ASSERT_TRUE(dms.start());
 
-    // Give time for arm + at least two heartbeats + the failure branch.
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    // Give generous time for arm + first heartbeat (20ms) + the 500ms retry_pause in failure path + close.
+    // The retry_pause is a fixed 500ms constant in the implementation for transient tolerance.
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
     dms.stop();
 
     EXPECT_GE(post->call_count(), 3u) << "arm + at least two failed heartbeats";

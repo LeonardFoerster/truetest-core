@@ -4,6 +4,7 @@
 
 #include "console_dashboard.h"
 #include "dashboard_snapshot.h"
+#include "overlays.h"
 #include "panels/overview_panel.h"
 #include "panels/orders_panel.h"
 #include "panels/positions_panel.h"
@@ -13,6 +14,8 @@
 #include "panels/health_panel.h"
 #include "panels/debug_panel.h"
 #include "panels/l2_panel.h"
+#include "toast.h"
+#include "tui_prefs.h"
 #include "tui_style.h"
 
 #include <ncurses.h>
@@ -23,80 +26,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <filesystem>
-#include <fstream>
-#include <utility>
 
 namespace truetest::ui {
-
-namespace {
-
-// Resolve ~/.config/truetest/tui.json (or $XDG_CONFIG_HOME equivalent).
-std::filesystem::path prefs_path()
-{
-    namespace fs = std::filesystem;
-    const char* xdg = std::getenv("XDG_CONFIG_HOME");
-    fs::path base;
-    if (xdg && *xdg) base = fs::path(xdg);
-    else
-    {
-        const char* home = std::getenv("HOME");
-        if (!home || !*home) return {};
-        base = fs::path(home) / ".config";
-    }
-    return base / "truetest" / "tui.json";
-}
-
-struct prefs_state {
-    int active_tab = -1;
-    int theme      = -1;
-    int frozen     = -1;
-};
-
-void load_prefs(prefs_state& out)
-{
-    auto p = prefs_path();
-    if (p.empty()) return;
-    std::ifstream f(p);
-    if (!f.is_open()) return;
-    std::string line;
-    while (std::getline(f, line))
-    {
-        auto colon = line.find(':');
-        if (colon == std::string::npos) continue;
-        std::string k = line.substr(0, colon);
-        std::string v = line.substr(colon + 1);
-        auto trim = [](std::string& s) {
-            while (!s.empty() && (s.front() == ' ' || s.front() == '"')) s.erase(s.begin());
-            while (!s.empty() && (s.back()  == ' ' || s.back()  == '"' ||
-                                   s.back()  == ',' || s.back()  == '}'))   s.pop_back();
-        };
-        trim(k); trim(v);
-        try {
-            if      (k == "active_tab") out.active_tab = std::stoi(v);
-            else if (k == "theme")      out.theme      = std::stoi(v);
-            else if (k == "frozen")     out.frozen     = std::stoi(v);
-        } catch (...) {}
-    }
-}
-
-void save_prefs(const prefs_state& in)
-{
-    namespace fs = std::filesystem;
-    auto p = prefs_path();
-    if (p.empty()) return;
-    std::error_code ec;
-    fs::create_directories(p.parent_path(), ec);
-    std::ofstream f(p, std::ios::trunc);
-    if (!f.is_open()) return;
-    f << "{\n";
-    f << "  \"active_tab\": " << in.active_tab << ",\n";
-    f << "  \"theme\":      " << in.theme      << ",\n";
-    f << "  \"frozen\":     " << in.frozen     << "\n";
-    f << "}\n";
-}
-
-}
 
 TabbedDashboard::TabbedDashboard(std::shared_ptr<ConsoleDashboard> data,
                                  snapshot_fn snap_fn,
@@ -139,7 +70,7 @@ void TabbedDashboard::start()
     nodelay(stdscr, TRUE);
     curs_set(0);
 
-    // Enable mouse — clicks on the tab bar switch tabs. Disabled by
+    // Enable mouse - clicks on the tab bar switch tabs. Disabled by
     // setting an empty mask. ALL_MOUSE_EVENTS covers presses, releases,
     // and scroll wheel; we react only to button-down on the header row.
     mousemask(ALL_MOUSE_EVENTS | REPORT_MOUSE_POSITION, nullptr);
@@ -147,7 +78,7 @@ void TabbedDashboard::start()
     // single-click latency is minimal.
     mouseinterval(0);
 
-    // Terminal-side hints — tiny per-frame savings that compound over
+    // Terminal-side hints - tiny per-frame savings that compound over
     // 10 Hz × N hours. leaveok stops ncurses from emitting a cursor-move
     // escape on every refresh; clearok(false) suppresses any forced
     // full-screen redraw; intrflush stops Ctrl-C from flushing the
@@ -159,7 +90,7 @@ void TabbedDashboard::start()
     {
         start_color();
         use_default_colors();
-        // Theme palette — pair ids 1..5 are referenced everywhere.
+        // Theme palette - pair ids 1..5 are referenced everywhere.
         // dark (default): bright fg on transparent (-1) bg.
         // light: same fg colors but bg=COLOR_WHITE for readability on
         // light terminals; ncurses swaps interpretations.
@@ -202,8 +133,7 @@ void TabbedDashboard::start()
 
     // Load saved preferences. Active tab survives across runs; theme
     // is sticky if it was set before. Anything missing stays at default.
-    prefs_state ps;
-    load_prefs(ps);
+    TuiPrefs ps = load_tui_prefs();
     if (ps.active_tab >= 0 && ps.active_tab < static_cast<int>(panels_.size()))
         active_tab_.store(ps.active_tab, std::memory_order_release);
     if (ps.theme >= 0 && ps.theme <= static_cast<int>(theme::hicontrast))
@@ -228,18 +158,18 @@ void TabbedDashboard::stop()
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
         if (thread_.joinable())
-            thread_.detach();   // last resort — don't hang the caller
+            thread_.detach();   // last resort - don't hang the caller
     }
 
     // Fix #4: Always attempt to restore the terminal, even in bad cases
     endwin();
 
     // Persist user-visible state across runs.
-    prefs_state ps;
+    TuiPrefs ps;
     ps.active_tab = active_tab_.load(std::memory_order_acquire);
     ps.theme      = static_cast<int>(theme_);
     ps.frozen     = ui_frozen_.load(std::memory_order_acquire) ? 1 : 0;
-    save_prefs(ps);
+    save_tui_prefs(ps);
 }
 
 void TabbedDashboard::handle_input()
@@ -258,27 +188,27 @@ void TabbedDashboard::handle_input()
 
         // If a confirm overlay is up, only y/n/Esc/q matter.
         const int pc = pending_confirm_.load(std::memory_order_acquire);
-        if (pc != static_cast<int>(confirm_kind::none))
+        if (pc != static_cast<int>(ConfirmKind::none))
         {
             if (ch == 'y' || ch == 'Y')
             {
-                if (pc == static_cast<int>(confirm_kind::flatten) && actions_.flatten)
+                if (pc == static_cast<int>(ConfirmKind::flatten) && actions_.flatten)
                 {
                     actions_.flatten();
                     set_toast("flatten requested");
                 }
-                else if (pc == static_cast<int>(confirm_kind::kill) && actions_.kill)
+                else if (pc == static_cast<int>(ConfirmKind::kill) && actions_.kill)
                 {
                     bool ok = actions_.kill(std::chrono::milliseconds(2000));
                     set_toast(ok ? "kill switch fired"
                                  : "kill switch returned false");
                 }
-                pending_confirm_.store(static_cast<int>(confirm_kind::none),
+                pending_confirm_.store(static_cast<int>(ConfirmKind::none),
                                        std::memory_order_release);
             }
             else if (ch == 'n' || ch == 'N' || ch == 27)
             {
-                pending_confirm_.store(static_cast<int>(confirm_kind::none),
+                pending_confirm_.store(static_cast<int>(ConfirmKind::none),
                                        std::memory_order_release);
                 set_toast("cancelled");
             }
@@ -365,8 +295,8 @@ void TabbedDashboard::handle_input()
             {
                 actions_.pause_toggle();
                 bool now_paused = actions_.pause_state ? actions_.pause_state() : false;
-                set_toast(now_paused ? "PAUSED — no new orders" : "resumed");
-                // Fix #3: operator action → want fresh data
+                set_toast(now_paused ? "PAUSED - no new orders" : "resumed");
+                // Fix #3: operator action -> want fresh data
                 if (snap_fn_) { truetest::ui::dashboard_snapshot tmp; snap_fn_(tmp); }
             }
             else set_toast("pause not wired");
@@ -374,14 +304,14 @@ void TabbedDashboard::handle_input()
         else if (ch == 'F')
         {
             if (actions_.flatten)
-                pending_confirm_.store(static_cast<int>(confirm_kind::flatten),
+                pending_confirm_.store(static_cast<int>(ConfirmKind::flatten),
                                        std::memory_order_release);
             else set_toast("flatten not wired");
         }
         else if (ch == 'K')
         {
             if (actions_.kill)
-                pending_confirm_.store(static_cast<int>(confirm_kind::kill),
+                pending_confirm_.store(static_cast<int>(ConfirmKind::kill),
                                        std::memory_order_release);
             else set_toast("kill not wired");
         }
@@ -393,7 +323,7 @@ void TabbedDashboard::handle_input()
         {
             const bool was = ui_frozen_.load(std::memory_order_acquire);
             ui_frozen_.store(!was, std::memory_order_release);
-            set_toast(!was ? "UI frozen — engine still running" : "UI live");
+            set_toast(!was ? "UI frozen - engine still running" : "UI live");
             // Fix #3: force fresh snapshot after unfreeze
             if (snap_fn_) { truetest::ui::dashboard_snapshot tmp; snap_fn_(tmp); }
         }
@@ -427,7 +357,7 @@ void TabbedDashboard::handle_input()
             // bottom of the screen, capture chars until Enter/Esc.
             // Keeps the panel rendered behind so the user sees what
             // they're filtering. Uses synchronous getch (we already
-            // own the input loop — no nested loops).
+            // own the input loop - no nested loops).
             std::string buf;
             int h = 0, w = 0;
             getmaxyx(stdscr, h, w);
@@ -448,7 +378,7 @@ void TabbedDashboard::handle_input()
                 if (!running_.load(std::memory_order_acquire))
                 {
                     buf.clear();
-                    break;   // shutdown requested — exit prompt cleanly
+                    break;   // shutdown requested - exit prompt cleanly
                 }
 
                 move(h - 1, 0); clrtoeol();
@@ -461,7 +391,7 @@ void TabbedDashboard::handle_input()
                 int kc = getch();
                 if (kc == ERR)
                 {
-                    // no key — yield a bit so shutdown can be observed quickly
+                    // no key - yield a bit so shutdown can be observed quickly
                     std::this_thread::sleep_for(std::chrono::milliseconds(20));
                     continue;
                 }
@@ -489,177 +419,25 @@ void TabbedDashboard::handle_input()
 
 void TabbedDashboard::set_toast(const std::string& msg)
 {
-    const auto now_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-    {
-        std::lock_guard<std::mutex> lk(toast_mu_);
-        toasts_.insert(toasts_.begin(), toast_entry{msg, now_ms});
-        if (toasts_.size() > kToastQueueCap)
-            toasts_.resize(kToastQueueCap);
-    }
-    last_toast_ms_.store(now_ms, std::memory_order_release);
+    toasts_.set_toast(msg);
 }
 
 void TabbedDashboard::draw_confirm_overlay(int width, int height)
 {
     const int pc = pending_confirm_.load(std::memory_order_acquire);
-    if (pc == static_cast<int>(confirm_kind::none)) return;
-
-    const char* prompt = (pc == static_cast<int>(confirm_kind::flatten))
-        ? "  FLATTEN all open positions?  [y/n]  "
-        : "  KILL: cancel all + halt?     [y/n]  ";
-    const int w = static_cast<int>(std::strlen(prompt)) + 2;
-    const int h = 5;
-    const int x = (width - w) / 2;
-    const int y = (height - h) / 2;
-
-    // Box.
-    constexpr int kPairRed = 2;
-    attron(COLOR_PAIR(kPairRed) | A_BOLD);
-    mvhline(y,         x,           ACS_HLINE,   w);
-    mvhline(y + h - 1, x,           ACS_HLINE,   w);
-    mvvline(y,         x,           ACS_VLINE,   h);
-    mvvline(y,         x + w - 1,   ACS_VLINE,   h);
-    mvaddch(y,         x,           ACS_ULCORNER);
-    mvaddch(y,         x + w - 1,   ACS_URCORNER);
-    mvaddch(y + h - 1, x,           ACS_LLCORNER);
-    mvaddch(y + h - 1, x + w - 1,   ACS_LRCORNER);
-    mvaddstr(y + 2, x + 1, prompt);
-    attroff(COLOR_PAIR(kPairRed) | A_BOLD);
+    ConfirmKind k = static_cast<ConfirmKind>(pc);
+    paint_confirm_overlay(width, height, k);  // free function from overlays module
 }
 
 void TabbedDashboard::draw_help_overlay(int width, int height)
 {
-    if (!show_help_.load(std::memory_order_acquire)) return;
-
-    // Dim the underlying screen by overdrawing a half-width box.
-    constexpr int kPairCyan  = 4;
-    constexpr int kPairWhite = 5;
-
-    struct row { const char* keys; const char* desc; };
-    static constexpr row groups[][8] = {
-        // Navigation
-        {{"1..9",  "switch to tab N"},
-         {"Tab / →","cycle to next tab"},
-         {"⇧Tab / ←","cycle to previous tab"},
-         {"q / Q",   "quit dashboard"},
-         {nullptr,nullptr}, {nullptr,nullptr}, {nullptr,nullptr}, {nullptr,nullptr}},
-        // Operator actions
-        {{"p",      "pause/resume strategy emission"},
-         {"F",      "flatten all open positions (confirm)"},
-         {"K",      "kill switch — cancel-all + halt (confirm)"},
-         {"Space",  "freeze UI updates (engine continues)"},
-         {nullptr,nullptr}, {nullptr,nullptr}, {nullptr,nullptr}, {nullptr,nullptr}},
-        // UI / display
-        {{"?",      "toggle this help"},
-         {"Esc",    "dismiss overlay / cancel confirm"},
-         {nullptr,nullptr}, {nullptr,nullptr},
-         {nullptr,nullptr}, {nullptr,nullptr}, {nullptr,nullptr}, {nullptr,nullptr}},
-    };
-    static constexpr const char* group_names[] = {
-        "Navigation", "Operator actions", "UI / display"
-    };
-
-    const int box_w = std::min(width  - 4, 64);
-    const int box_h = std::min(height - 4, 22);
-    const int box_x = (width  - box_w) / 2;
-    const int box_y = (height - box_h) / 2;
-
-    // Frame.
-    attron(COLOR_PAIR(kPairCyan) | A_BOLD);
-    mvhline(box_y,             box_x, ACS_HLINE, box_w);
-    mvhline(box_y + box_h - 1, box_x, ACS_HLINE, box_w);
-    mvvline(box_y,             box_x,             ACS_VLINE, box_h);
-    mvvline(box_y,             box_x + box_w - 1, ACS_VLINE, box_h);
-    mvaddch(box_y,             box_x,             ACS_ULCORNER);
-    mvaddch(box_y,             box_x + box_w - 1, ACS_URCORNER);
-    mvaddch(box_y + box_h - 1, box_x,             ACS_LLCORNER);
-    mvaddch(box_y + box_h - 1, box_x + box_w - 1, ACS_LRCORNER);
-
-    // Title centered on top border.
-    const char* title = " HOTKEYS ";
-    mvaddstr(box_y, box_x + (box_w - static_cast<int>(std::strlen(title))) / 2, title);
-    attroff(COLOR_PAIR(kPairCyan) | A_BOLD);
-
-    // Body.
-    int yy = box_y + 2;
-    for (std::size_t g = 0; g < sizeof(groups)/sizeof(groups[0]); ++g)
-    {
-        if (yy >= box_y + box_h - 2) break;
-        attron(COLOR_PAIR(kPairCyan) | A_BOLD);
-        mvprintw(yy, box_x + 2, "%s", group_names[g]);
-        attroff(COLOR_PAIR(kPairCyan) | A_BOLD);
-        ++yy;
-        for (const auto& r : groups[g])
-        {
-            if (!r.keys) break;
-            if (yy >= box_y + box_h - 2) break;
-            attron(COLOR_PAIR(kPairWhite) | A_BOLD);
-            mvprintw(yy, box_x + 4,  "%-12s", r.keys);
-            attroff(COLOR_PAIR(kPairWhite) | A_BOLD);
-            attron(A_DIM);
-            mvprintw(yy, box_x + 18, "%s", r.desc);
-            attroff(A_DIM);
-            ++yy;
-        }
-        ++yy;
-    }
-
-    // Footer hint.
-    attron(A_DIM);
-    const char* hint = " press ? or Esc to close ";
-    mvaddstr(box_y + box_h - 1,
-             box_x + (box_w - static_cast<int>(std::strlen(hint))) / 2, hint);
-    attroff(A_DIM);
+    paint_help_overlay(width, height,
+        show_help_.load(std::memory_order_acquire));  // free function from overlays module
 }
 
 void TabbedDashboard::draw_toast(int width, int height)
 {
-    const auto now =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-
-    std::vector<toast_entry> snap;
-    {
-        std::lock_guard<std::mutex> lk(toast_mu_);
-        for (const auto& t : toasts_)
-            if ((now - t.ts_ms) <= 6000) snap.push_back(t);   // 6s ttl
-    }
-    if (snap.empty()) return;
-
-    constexpr int kPairYellow = 3;
-    constexpr int kPairWhite  = 5;
-
-    // Stack from bottom-right upward, newest first.
-    int yy = height - 2;     // one row above the footer hint
-    for (std::size_t i = 0; i < snap.size() && yy >= 0; ++i, --yy)
-    {
-        const auto& t = snap[i];
-        const auto age = now - t.ts_ms;
-        const int x = std::max(1, width - static_cast<int>(t.msg.size()) - 4);
-        if (i == 0)
-        {
-            // Newest: full color, reverse video.
-            attron(COLOR_PAIR(kPairYellow) | A_REVERSE | A_BOLD);
-            mvprintw(yy, x, " %s ", t.msg.c_str());
-            attroff(COLOR_PAIR(kPairYellow) | A_REVERSE | A_BOLD);
-        }
-        else if (age < 4000)
-        {
-            // Mid-age: dimmer, no reverse.
-            attron(COLOR_PAIR(kPairWhite) | A_DIM);
-            mvprintw(yy, x, " %s ", t.msg.c_str());
-            attroff(COLOR_PAIR(kPairWhite) | A_DIM);
-        }
-        else
-        {
-            // Old: very dim text only.
-            attron(A_DIM);
-            mvprintw(yy, x, " %s ", t.msg.c_str());
-            attroff(A_DIM);
-        }
-    }
+    toasts_.draw(width, height);
 }
 
 void TabbedDashboard::draw_chrome(int width, int height, int active)
@@ -710,7 +488,7 @@ void TabbedDashboard::draw_chrome(int width, int height, int active)
         x += 2;
     }
 
-    // Status bar at row 1 — drawn by render_loop after this returns.
+    // Status bar at row 1 - drawn by render_loop after this returns.
     // Top separator at row 2.
     mvhline(2, 0, ACS_HLINE, width);
 
@@ -785,7 +563,7 @@ void TabbedDashboard::draw_status_bar(int width,
     int y = 1;
     move(y, 0); clrtoeol();
 
-    // Pause background — subtle but clear visual signal across the whole bar
+    // Pause background - subtle but clear visual signal across the whole bar
     const bool paused = actions_.pause_state && actions_.pause_state();
     if (paused)
     {
@@ -837,12 +615,12 @@ void TabbedDashboard::draw_status_bar(int width,
     std::snprintf(buf, sizeof(buf), "%.2f", eq);
     put_field("eq:", buf, Color::Neutral);
 
-    // Total PnL — one of the most important numbers on screen
+    // Total PnL - one of the most important numbers on screen
     std::snprintf(buf, sizeof(buf), "%+.2f", pnl + unrl);
     Color pnl_col = (pnl + unrl) > 0 ? Color::Positive : ((pnl + unrl) < 0 ? Color::Negative : Color::Neutral);
     put_field("pnl:", buf, pnl_col, true);
 
-    // Drawdown — critical risk metric
+    // Drawdown - critical risk metric
     std::snprintf(buf, sizeof(buf), "%.2f%%", dd);
     Color dd_col = (dd <= -5.0) ? Color::Danger : (dd <= -1.0 ? Color::Warning : Color::Muted);
     put_field("dd:", buf, dd_col, true);
@@ -1017,7 +795,7 @@ std::uint64_t TabbedDashboard::compute_render_digest(
 
     if (snap)
     {
-        // Sizes only — cheap, and a row count change always implies a
+        // Sizes only - cheap, and a row count change always implies a
         // visible diff. Doesn't catch "same row count but different
         // values"; the status-bar atomics above usually move when that
         // happens (any fill bumps fills_total, etc).
@@ -1082,7 +860,7 @@ void TabbedDashboard::render_loop()
         // Resize / first frame: do a full erase. Otherwise let ncurses'
         // diff send only the cells that actually changed (each panel
         // overwrites with field-padded text, so old content is replaced
-        // in place — no ghost pixels survive).
+        // in place - no ghost pixels survive).
         const bool resized = (w != prev_w || h != prev_h);
         if (resized)
         {
@@ -1101,7 +879,7 @@ void TabbedDashboard::render_loop()
         const bool tab_switched = (active != prev_active);
         if (tab_switched && !resized)
         {
-            // Switching tabs leaves stale rows from the previous panel —
+            // Switching tabs leaves stale rows from the previous panel -
             // wipe just the body region rather than the full screen.
             // Fix #6: be more thorough on resize
             int wipe_start = resized ? 0 : 3;
@@ -1119,15 +897,15 @@ void TabbedDashboard::render_loop()
         // ── Frame-skip via state digest ─────────────────────────────
         // Skip render if nothing visible changed AND no overlay is up
         // AND it's been < 1 s since the last paint (sanity bound). The
-        // digest is conservative — covers status-bar atomics + active
+        // digest is conservative - covers status-bar atomics + active
         // tab + a few snapshot scalars whose change implies *something*
         // worth re-rendering.
         const auto now = std::chrono::steady_clock::now();
         const std::uint64_t digest = compute_render_digest(active, snap_ptr);
         const bool overlay_up =
             pending_confirm_.load(std::memory_order_acquire) !=
-                static_cast<int>(confirm_kind::none);
-        const auto last_toast = last_toast_ms_.load(std::memory_order_acquire);
+                static_cast<int>(ConfirmKind::none);
+        const auto last_toast = toasts_.last_toast_ms();
         const auto now_ms_count =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 now.time_since_epoch()).count();
@@ -1137,7 +915,7 @@ void TabbedDashboard::render_loop()
 
         // Per-panel min interval: even if the digest changed, throttle
         // slow-moving panels (Health, Debug). Doesn't affect status-bar
-        // refresh — that's drawn before the panel and stays at tick rate.
+        // refresh - that's drawn before the panel and stays at tick rate.
         bool below_panel_interval = false;
         if (active >= 0 && active < static_cast<int>(panels_.size()))
         {
@@ -1153,7 +931,7 @@ void TabbedDashboard::render_loop()
             continue;
         }
 
-        // Tab badges — counts shown next to each tab name. Tabs that
+        // Tab badges - counts shown next to each tab name. Tabs that
         // don't have a meaningful count (Overview, Health, Debug, L2)
         // stay 0. Updated each render frame from the snapshot.
         tab_badges_.assign(panels_.size(), 0);

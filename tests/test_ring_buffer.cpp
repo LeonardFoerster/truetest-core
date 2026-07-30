@@ -83,7 +83,7 @@ TEST(RingBuffer, WrapAround)
     rb.try_push(1); rb.try_push(2); rb.try_push(3);
     int v;
     rb.try_pop(v); rb.try_pop(v); rb.try_pop(v);
-    // Now push more — this wraps around
+    // Now push more - this wraps around
     rb.try_push(10); rb.try_push(20); rb.try_push(30);
     rb.try_pop(v); EXPECT_EQ(v, 10);
     rb.try_pop(v); EXPECT_EQ(v, 20);

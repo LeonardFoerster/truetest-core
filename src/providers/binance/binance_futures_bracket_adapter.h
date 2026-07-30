@@ -20,19 +20,19 @@
 // USDT-M futures bracket adapter. Places SL+TP as two SEPARATE conditional
 // orders (STOP_MARKET + TAKE_PROFIT_MARKET), both with closePosition=true
 // and reduceOnly=true. Binance has no /fapi/v1/order/oco endpoint, so
-// placement is NOT atomic — if the second POST fails after the first
+// placement is NOT atomic - if the second POST fails after the first
 // succeeds, we have a hanging leg that cancel() must clean up.
 // Cancel-other-when-fires is delivered by Binance's `closePosition=true`
 // semantics: when a closePosition order triggers and brings the position
 // to zero, the venue automatically cancels every other closePosition
-// order on that symbol. So once both legs are placed, fill-of-one →
+// order on that symbol. So once both legs are placed, fill-of-one ->
 // cancellation-of-other is exchange-side, exactly like spot OCO.
 // Constraint: closePosition=true requires the order to close the entire
 // position. Partial brackets (qty_fraction < 1.0 for TP1/TP2 scale-outs)
 // cannot use closePosition=true without splitting into a different
 // shape; this adapter declines them and the engine-side ExitManager
 // remains the only enforcer for that intent. Single full-position
-// SL+TP brackets are the supported case — same scope as spot OCO.
+// SL+TP brackets are the supported case - same scope as spot OCO.
 class BinanceFuturesBracketAdapter : public truetest::exits::IBracketAdapter
 {
 public:
@@ -80,7 +80,7 @@ public:
         if (!intent.stop_loss || !intent.take_profit)
         {
             std::cerr << "BinanceFuturesBracketAdapter: intent missing SL or TP "
-                         "(opener=" << opener_order_id << ") — declining; "
+                         "(opener=" << opener_order_id << ") - declining; "
                          "engine-side eval remains the only enforcer\n";
             return handles;
         }
@@ -118,7 +118,7 @@ public:
             // The engine will see SL-only handles and rely on its own TP.
             // cancel() on teardown will sweep the SL.
             std::cerr << "BinanceFuturesBracketAdapter: TP leg failed for opener="
-                      << opener_order_id << " — SL is placed (orderId="
+                      << opener_order_id << " - SL is placed (orderId="
                       << sl_id << "), engine-side TP remains the only "
                          "enforcer for that side\n";
             return handles;
@@ -133,7 +133,7 @@ public:
         if (!del_ || handles.empty()) return;
 
         // Per-leg DELETE. We don't try the cancel-orderList endpoint
-        // because there's no list — placement is two independent orders.
+        // because there's no list - placement is two independent orders.
         // -2011 / -2013 ("unknown order" / "order does not exist") arrive
         // when the venue already closed the leg via closePosition=true
         // auto-cancel; treat as success.
@@ -154,15 +154,9 @@ public:
             if (!handles.symbol.empty())
             {
                 params.reserve(handles.symbol.size() + 32);
-                params.append("symbol=", 7);
-                params.append(handles.symbol);
-                params.append("&orderId=", 9);
+                binance::append_param(params, "symbol", handles.symbol);
             }
-            else
-            {
-                params.append("orderId=", 8);
-            }
-            params.append(**l.id);
+            binance::append_param(params, "orderId", **l.id);
             auto resp = del_("/fapi/v1/order", params);
             if (resp.status >= 400 &&
                 resp.body.find("-2011") == std::string::npos &&
@@ -172,7 +166,7 @@ public:
                           << l.tag << " (orderId=" << **l.id
                           << ") for opener=" << opener_order_id
                           << " HTTP " << resp.status << " body="
-                          << resp.body << "\n";
+                          << binance::redact_for_log(resp.body, 240) << "\n";
             }
         }
     }
@@ -190,7 +184,7 @@ public:
         if (resp.status < 200 || resp.status >= 300)
         {
             std::cerr << "BinanceFuturesBracketAdapter: openOrders HTTP "
-                      << resp.status << " — restart recovery skipped\n";
+                      << resp.status << " - restart recovery skipped\n";
             return out;
         }
 
@@ -302,32 +296,28 @@ private:
                           const std::string& client_id,
                           std::uint64_t opener_order_id)
     {
-        char buf[512];
         // closePosition=true means quantity is omitted (Binance derives
         // it from current position size at trigger time). reduceOnly is
         // implied by closePosition but keeping it explicit makes the
         // intent self-documenting and survives if Binance ever loosens
         // the implication.
-        std::snprintf(buf, sizeof(buf),
-            "symbol=%s"
-            "&side=%s"
-            "&type=%s"
-            "&stopPrice=%s"
-            "&closePosition=true"
-            "&reduceOnly=true"
-            "&newClientOrderId=%s",
-            symbol.c_str(),
-            side.c_str(),
-            type,
-            fmt_double(trigger_price).c_str(),
-            client_id.c_str());
+        std::string params;
+        params.reserve(192);
+        binance::append_param(params, "symbol", symbol);
+        binance::append_param(params, "side", side);
+        binance::append_param(params, "type", type);
+        binance::append_param(params, "stopPrice", fmt_double(trigger_price));
+        binance::append_param(params, "closePosition", "true");
+        binance::append_param(params, "reduceOnly", "true");
+        binance::append_param(params, "newClientOrderId", client_id);
 
-        auto resp = post_("/fapi/v1/order", buf);
+        auto resp = post_("/fapi/v1/order", params);
         if (resp.status < 200 || resp.status >= 300)
         {
             std::cerr << "BinanceFuturesBracketAdapter: " << type
                       << " place failed for opener=" << opener_order_id
-                      << " HTTP " << resp.status << " body=" << resp.body
+                      << " HTTP " << resp.status << " body="
+                      << binance::redact_for_log(resp.body, 240)
                       << "\n";
             return {};
         }

@@ -73,7 +73,8 @@ private:
         else
         {
             r.ok = false;
-            r.error = "HTTP " + std::to_string(resp.status) + ": " + resp.body;
+            r.error = "HTTP " + std::to_string(resp.status) + ": "
+                    + binance::redact_for_log(resp.body, 240);
         }
         return r;
     }

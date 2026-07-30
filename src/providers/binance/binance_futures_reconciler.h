@@ -53,25 +53,27 @@ public:
 
         // Both endpoints are signed USER_DATA on futures.
         auto pos_resp = rest_->get(
-            "/fapi/v2/positionRisk", "symbol=" + symbol_);
+            "/fapi/v2/positionRisk", "symbol=" + binance::url_encode(symbol_));
         if (pos_resp.status < 200 || pos_resp.status >= 300)
         {
+            const auto body = binance::redact_for_log(pos_resp.body);
             char buf[256];
             std::snprintf(buf, sizeof(buf),
                 "BinanceFuturesReconciler: /fapi/v2/positionRisk failed "
                 "(HTTP %d): %.160s",
-                pos_resp.status, pos_resp.body.c_str());
+                pos_resp.status, body.c_str());
             return buf;
         }
 
         auto acct_resp = rest_->get("/fapi/v2/account", "");
         if (acct_resp.status < 200 || acct_resp.status >= 300)
         {
+            const auto body = binance::redact_for_log(acct_resp.body);
             char buf[256];
             std::snprintf(buf, sizeof(buf),
                 "BinanceFuturesReconciler: /fapi/v2/account failed "
                 "(HTTP %d): %.160s",
-                acct_resp.status, acct_resp.body.c_str());
+                acct_resp.status, body.c_str());
             return buf;
         }
 

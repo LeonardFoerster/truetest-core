@@ -2,11 +2,35 @@
 
 #include "providers/provider_event.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace truetest::simulation {
+
+// ---------------------------------------------------------------------------
+// Canonical per-trial seed derivation (single source of truth).
+// Used by path generators AND MonteCarloController so report seed_used
+// always matches the seed that produced the market path (drill-down safe).
+// ---------------------------------------------------------------------------
+inline constexpr uint64_t kMcDefaultBaseSeed = 0xA5A5C0DE42ULL;
+inline constexpr uint64_t kMcTrialSeedMix    = 0x9e3779b97f4a7c15ULL;
+
+/** Map CLI/base seed 0 to a fixed default so campaigns stay reproducible. */
+inline uint64_t effective_mc_base_seed(uint64_t base_seed) {
+    return base_seed == 0 ? kMcDefaultBaseSeed : base_seed;
+}
+
+/**
+ * Deterministic per-trial seed from campaign base_seed + trial index.
+ * Formula: effective_base ^ (trial_index * golden_ratio_mix)
+ */
+inline uint64_t derive_mc_trial_seed(uint64_t base_seed, std::size_t trial_index) {
+    const uint64_t base = effective_mc_base_seed(base_seed);
+    return base ^ (static_cast<uint64_t>(trial_index) * kMcTrialSeedMix);
+}
 
 /**
  * Configuration for a Monte Carlo market path generator.
@@ -127,9 +151,14 @@ struct McRunConfig {
     McGeneratorConfig generator_config;
 
     std::size_t n_trials = 100;
-    uint64_t base_seed = 0;           // 0 = derive from time or fixed default
+    // 0 = use kMcDefaultBaseSeed (fixed, reproducible — never wall-clock).
+    uint64_t base_seed = 0;
 
     std::string strategy_name = "mean-reversion";
+
+    // Strategy set_param() pairs applied once when a strategy is constructed
+    // (and preserved across reuse resets). Mirrors CLI --param key=value.
+    std::vector<std::pair<std::string, double>> strategy_params;
 
     // Initial equity for each trial (passed through to engine_config and reports)
     double initial_balance = 10000.0;
@@ -140,14 +169,15 @@ struct McRunConfig {
 
     bool keep_full_reports = false;   // if true, TrialResult can carry more data
 
-    // Phase A (MC object reuse): if true, reuse data_handler / portfolio / Analytics / ExitManager
-    // between trials instead of allocating fresh ones each time.
+    // Phase A (MC object reuse): if true, reuse data_handler / strategy between
+    // trials. Mutually exclusive with parallel_trials (shared mutable state).
     bool reuse_objects_between_trials = false;
 
     // Phase 5: Experimental parallel execution.
     // WARNING: Conflicts with engine core pinning and threading presets.
     // Only safe with --thread-preset inline and no --no-pin overrides in some cases.
     // Results collection is thread-safe but final order may not be deterministic.
+    // Mutually exclusive with reuse_objects_between_trials.
     bool parallel_trials = false;
     unsigned max_parallel_threads = 0; // 0 = hardware_concurrency()
 };

@@ -218,7 +218,7 @@ public:
             try
             {
                 rest_->del(listen_key_path_,
-                           "listenKey=" + key_to_delete);
+                           "listenKey=" + binance::url_encode(key_to_delete));
             }
             catch (...) {}
         }
@@ -237,7 +237,7 @@ public:
 
     // Engine wires this in live mode. When set, a fatal user-data
     // disconnect (network_error / handshake_error past retry budget)
-    // calls back here and the run() loop returns immediately — bypasses
+    // calls back here and the run() loop returns immediately - bypasses
     // the up-to-10-attempt reconnect schedule. Default unset preserves
     // the original behaviour for unit tests / non-live paths.
     void set_fatal_disconnect_callback(
@@ -335,7 +335,7 @@ private:
             auto& lowest = beast::get_lowest_layer(*ws_);
             net::connect(lowest, results);
 
-            // TCP keepalive on the underlying socket — see BinanceTransport
+            // TCP keepalive on the underlying socket - see BinanceTransport
             // for rationale. 1s idle / 1s probe / 2 probes -> kernel-side
             // detection within ~3s when WS pings themselves are wedged.
             // Best-effort.
@@ -363,9 +363,9 @@ private:
 
             // WS idle/handshake timeout: dead user-data stream errors out
             // within idle_timeout (Beast pings on idle, treats no-pong as
-            // failure). The user-data stream is normally quiet — fills
-            // are bursty, listenKey keepalive is server→client every
-            // ~30 min — so without this, an unplugged cable would only
+            // failure). The user-data stream is normally quiet - fills
+            // are bursty, listenKey keepalive is server->client every
+            // ~30 min - so without this, an unplugged cable would only
             // be detected when the next REST listenKey refresh fails.
             {
                 websocket::stream_base::timeout opt;
@@ -462,7 +462,7 @@ private:
             if (r == run_result::stopped) return;
 
             // In live mode the engine cannot tolerate a multi-second
-            // reconnect schedule on this stream — fills would arrive
+            // reconnect schedule on this stream - fills would arrive
             // late or not at all. Fire the halt callback on the first
             // network/handshake error and exit the loop immediately.
             if (fatal_cb_)
@@ -481,7 +481,7 @@ private:
             if (r == run_result::network_error &&
                 (open_end_ms - open_start_ms) > k_reset_threshold_ms)
             {
-                // Long-running stream hiccuped — reset backoff.
+                // Long-running stream hiccuped - reset backoff.
                 attempt = 0;
                 delay = initial;
                 last_open_ms = open_end_ms;
@@ -514,7 +514,7 @@ private:
         try
         {
             auto r = rest_->put_unsigned(
-                listen_key_path_, "listenKey=" + current);
+                listen_key_path_, "listenKey=" + binance::url_encode(current));
             if (r.status < 200 || r.status >= 300)
             {
                 auto post = rest_->post_unsigned(listen_key_path_);
@@ -555,7 +555,7 @@ private:
             using binance_keepalive_detail::ka_response;
             auto put_call = [this](const std::string& key) {
                 auto r = rest_->put_unsigned(
-                    listen_key_path_, "listenKey=" + key);
+                    listen_key_path_, "listenKey=" + binance::url_encode(key));
                 return ka_response{r.status};
             };
             auto post_call = [this](std::string& out_key) {

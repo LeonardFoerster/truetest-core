@@ -49,11 +49,62 @@ TEST(RiskManager, MaxPositionValue_Reject)
     port.on_fill(fill);
     // Now position: 40 shares at 100 = $4000 notional
 
-    // Try to buy 20 more at 100 = $2000 additional → total $6000 > $5000 limit
+    // Try to buy 20 more at 100 = $2000 additional -> total $6000 > $5000 limit
     order_event ord(epoch_ms(1), "AAPL", order_type::limit, order_side::buy, 20, 100.0);
     auto snap = make_snap(0.0, 1, 1);
 
     EXPECT_EQ(rm.check_order(ord, port, snap), risk_action::reject);
+}
+
+TEST(RiskManager, MaxPositionValue_AllowsLongReductionNearLimit)
+{
+    risk_limits lim;
+    lim.max_position_value = 5000.0;
+    lim.max_portfolio_exposure = 5000.0;
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    fill_event fill(epoch_ms(0), "AAPL", 1, order_side::buy, 40, 100.0, 0.0);
+    port.on_fill(fill);
+
+    order_event reduce(epoch_ms(1), "AAPL", order_type::limit, order_side::sell, 10, 100.0);
+    auto snap = make_snap(0.0, 1, 1);
+
+    EXPECT_EQ(rm.check_order(reduce, port, snap), risk_action::pass);
+}
+
+TEST(RiskManager, MaxPositionValue_RejectsShortIncrease)
+{
+    risk_limits lim;
+    lim.max_position_value = 5000.0;
+    lim.max_portfolio_exposure = 5000.0;
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    order_event short_open(epoch_ms(1), "AAPL", order_type::limit, order_side::sell, 60, 100.0);
+    auto snap = make_snap(0.0, 0, 0);
+
+    EXPECT_EQ(rm.check_order(short_open, port, snap), risk_action::reject);
+}
+
+TEST(RiskManager, MaxPositionValue_AllowsShortReductionNearLimit)
+{
+    risk_limits lim;
+    lim.max_position_value = 5000.0;
+    lim.max_portfolio_exposure = 5000.0;
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    fill_event fill(epoch_ms(0), "AAPL", 1, order_side::sell, 40, 100.0, 0.0);
+    port.on_fill(fill);
+
+    order_event reduce(epoch_ms(1), "AAPL", order_type::limit, order_side::buy, 10, 100.0);
+    auto snap = make_snap(0.0, 1, 1);
+
+    EXPECT_EQ(rm.check_order(reduce, port, snap), risk_action::pass);
 }
 
 TEST(RiskManager, DrawdownExceeded_Halt)
@@ -65,7 +116,7 @@ TEST(RiskManager, DrawdownExceeded_Halt)
     portfolio port;
 
     order_event ord(epoch_ms(0), "AAPL", order_type::limit, order_side::buy, 10, 100.0);
-    // Snap shows 15% drawdown (in percent) → 0.15 >= 0.10 limit
+    // Snap shows 15% drawdown (in percent) -> 0.15 >= 0.10 limit
     auto snap = make_snap(15.0, 0, 0);
 
     EXPECT_EQ(rm.check_order(ord, port, snap), risk_action::halt);
@@ -98,6 +149,31 @@ TEST(RiskManager, PostFillLossExceeded_Halt)
     EXPECT_EQ(rm.check_post_fill(fill, port, snap), risk_action::halt);
 }
 
+TEST(RiskManager, DailyLossCountsEqualPnLLossesAsSeparateTrades)
+{
+    risk_limits lim;
+    lim.max_daily_loss = 150.0;
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    fill_event fill1(epoch_ms(0), "AAPL", 1, order_side::sell, 10, 90.0, 0.0);
+    risk_snapshot snap1;
+    snap1.has_last_trade = true;
+    snap1.last_trade_pnl = -100.0;
+    snap1.last_trade_seq = 1;
+
+    EXPECT_EQ(rm.check_post_fill(fill1, port, snap1), risk_action::pass);
+
+    fill_event fill2(epoch_ms(1), "AAPL", 2, order_side::sell, 10, 90.0, 0.0);
+    risk_snapshot snap2;
+    snap2.has_last_trade = true;
+    snap2.last_trade_pnl = -100.0;
+    snap2.last_trade_seq = 2;
+
+    EXPECT_EQ(rm.check_post_fill(fill2, port, snap2), risk_action::halt);
+}
+
 TEST(RiskManager, MaxOpenOrders_Reject)
 {
     risk_limits lim;
@@ -107,7 +183,7 @@ TEST(RiskManager, MaxOpenOrders_Reject)
     portfolio port;
 
     order_event ord(epoch_ms(0), "AAPL", order_type::limit, order_side::buy, 10, 100.0);
-    // 10 orders sent, 5 filled → 5 open = at limit
+    // 10 orders sent, 5 filled -> 5 open = at limit
     auto snap = make_snap(0.0, 10, 5);
 
     EXPECT_EQ(rm.check_order(ord, port, snap), risk_action::reject);

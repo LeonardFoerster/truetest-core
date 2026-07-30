@@ -125,7 +125,7 @@ private:
 
     // Internal helpers
     bool try_confirm_pivot();
-    void update_structure_after_new_pivot(const swing_point& new_pivot);
+    void update_structure_after_new_pivot(const swing_point& new_pivot, bool is_high);
     void trim_history();
 
     static bool is_strictly_higher(const std::deque<double>& window, std::size_t center, std::size_t strength);
@@ -290,7 +290,7 @@ inline bool swing_detector::try_confirm_pivot()
         p.strength  = static_cast<int>(strength_);
 
         confirmed_pivots_.push_back(p);
-        update_structure_after_new_pivot(p);
+        update_structure_after_new_pivot(p, true);
         state_.last_swing_high = p;
         state_.bars_since_last_swing_high = 0;
         made_high = true;
@@ -304,7 +304,7 @@ inline bool swing_detector::try_confirm_pivot()
         p.strength  = static_cast<int>(strength_);
 
         confirmed_pivots_.push_back(p);
-        update_structure_after_new_pivot(p);
+        update_structure_after_new_pivot(p, false);
         state_.last_swing_low = p;
         state_.bars_since_last_swing_low = 0;
         made_low = true;
@@ -313,15 +313,14 @@ inline bool swing_detector::try_confirm_pivot()
     return made_high || made_low;
 }
 
-inline void swing_detector::update_structure_after_new_pivot(const swing_point& new_pivot)
+inline void swing_detector::update_structure_after_new_pivot(const swing_point& new_pivot,
+                                                             bool is_high)
 {
-    const bool is_high = state_.last_swing_high.has_value() &&
-                         (std::abs(new_pivot.price - state_.last_swing_high->price) < 1e-12);
-
     if (is_high)
     {
         // We just confirmed a new swing high
         bool is_higher = false;
+        const bool had_prior_structure_high = state_.last_higher_high.has_value();
         if (state_.last_higher_high.has_value())
         {
             if (new_pivot.price > *state_.last_higher_high)
@@ -336,9 +335,9 @@ inline void swing_detector::update_structure_after_new_pivot(const swing_point& 
         {
             state_.last_higher_high = new_pivot.price;
 
-            // If we were in downtrend or ranging and this breaks the previous structure high,
-            // we have a BOS in the bullish direction.
-            if (state_.phase == structure_phase::downtrend || state_.phase == structure_phase::ranging)
+            if (had_prior_structure_high ||
+                state_.phase == structure_phase::downtrend ||
+                state_.phase == structure_phase::ranging)
             {
                 ++state_.bos_count;
                 state_.bars_since_last_bos = 0;
@@ -356,6 +355,8 @@ inline void swing_detector::update_structure_after_new_pivot(const swing_point& 
     {
         // We just confirmed a new swing low
         bool is_lower = false;
+        const bool had_prior_structure_low =
+            state_.last_lower_low.has_value() || state_.last_swing_low.has_value();
         if (state_.last_lower_low.has_value())
         {
             if (new_pivot.price < *state_.last_lower_low)
@@ -380,7 +381,9 @@ inline void swing_detector::update_structure_after_new_pivot(const swing_point& 
         {
             state_.last_lower_low = new_pivot.price;
 
-            if (state_.phase == structure_phase::uptrend || state_.phase == structure_phase::ranging)
+            if (had_prior_structure_low ||
+                state_.phase == structure_phase::uptrend ||
+                state_.phase == structure_phase::ranging)
             {
                 ++state_.bos_count;
                 state_.bars_since_last_bos = 0;

@@ -25,7 +25,7 @@ public:
 };
 
 // impact_bps = k * sqrt(qty/adv). Typical crypto k ~ O(10) bps for qty
-// ≈ 1% of ADV. adv=0 disables (returns reference). Coarse model — real
+// ≈ 1% of ADV. adv=0 disables (returns reference). Coarse model - real
 // Almgren-Chriss is more, but this captures sub-linear impact growth.
 class SquareRootImpactModel : public IImpactModel
 {

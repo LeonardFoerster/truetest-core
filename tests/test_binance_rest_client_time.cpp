@@ -95,7 +95,7 @@ TEST(BinanceClockSkew, VerifyReportsFetchFailure)
 
 TEST(BinanceClockResyncDue, NeverSyncedReturnsTrue)
 {
-    // last_sync <= 0 means "never synced" — always due regardless of elapsed.
+    // last_sync <= 0 means "never synced" - always due regardless of elapsed.
     EXPECT_TRUE(BinanceRestClient::resync_due(
         /*now=*/0, /*last=*/0, /*interval=*/300'000));
     EXPECT_TRUE(BinanceRestClient::resync_due(
@@ -106,14 +106,14 @@ TEST(BinanceClockResyncDue, NeverSyncedReturnsTrue)
 
 TEST(BinanceClockResyncDue, WithinIntervalReturnsFalse)
 {
-    // Last sync 60s ago, interval 300s → not due.
+    // Last sync 60s ago, interval 300s -> not due.
     EXPECT_FALSE(BinanceRestClient::resync_due(
         /*now=*/360'000, /*last=*/300'000, /*interval=*/300'000));
 }
 
 TEST(BinanceClockResyncDue, AtIntervalBoundaryIsDue)
 {
-    // Exactly at the interval → due (>= comparison).
+    // Exactly at the interval -> due (>= comparison).
     EXPECT_TRUE(BinanceRestClient::resync_due(
         /*now=*/600'000, /*last=*/300'000, /*interval=*/300'000));
 }
@@ -126,8 +126,8 @@ TEST(BinanceClockResyncDue, PastIntervalIsDue)
 
 TEST(BinanceClockResyncDue, NonPositiveIntervalDisablesLazySync)
 {
-    // interval == 0 or negative → never "due" by elapsed rule (but
-    // never-synced sentinel still forces a first sync — that path is
+    // interval == 0 or negative -> never "due" by elapsed rule (but
+    // never-synced sentinel still forces a first sync - that path is
     // covered by NeverSyncedReturnsTrue above).
     EXPECT_FALSE(BinanceRestClient::resync_due(
         /*now=*/10'000'000, /*last=*/1, /*interval=*/0));

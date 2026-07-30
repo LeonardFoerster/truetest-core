@@ -50,7 +50,7 @@ void DebugReport::log_thread_utilization(
         {
             util->log(name);
             if (util->busy_pct() > 80.0)
-                DBG_WARN("  %s busy%% exceeds 80%% — consider load balancing", name);
+                DBG_WARN("  %s busy%% exceeds 80%% - consider load balancing", name);
         }
     }
 }

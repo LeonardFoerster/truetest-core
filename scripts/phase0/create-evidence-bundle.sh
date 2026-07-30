@@ -69,7 +69,7 @@ find reports/phase0 -name session-note.md | wc -l
 
 ## Next Steps After Bundle
 1. Attach this tarball + the signed final batch review to the Phase 0 exit declaration.
-2. Update prod.md / todo.md / prerequisites.md with Phase 0 complete.
+2. Update docs/governance/01-prod.md / docs/governance/03-todo.md (thin) + relevant docs/todos/ (e.g. 01-P0-phase0.md) / docs/governance/02-prerequisites.md with Phase 0 complete. (See docs/todos/00-OVERVIEW.md)
 3. Proceed to the 8-hour mainnet shadow for Phase 1 sign-off.
 
 *This bundle + the git history of reports/phase0/ is the authoritative evidence package.*

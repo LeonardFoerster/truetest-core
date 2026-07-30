@@ -1,6 +1,6 @@
 #pragma once
 
-// Minimal ANSI escape helpers. String literals only — compile-time constants,
+// Minimal ANSI escape helpers. String literals only - compile-time constants,
 // no allocations, no runtime branches. The ConsoleDashboard picks between
 // colored and plain output by gating on supports_color() at construction; at
 // render time it just concatenates these into a pre-sized buffer.
@@ -27,7 +27,7 @@ inline constexpr const char* fg_br_yel   = "\x1b[93m";
 
 // Halt-banner palette: bright white text on a red background, bold +
 // blink. The blink degrades to plain bold on terminals that drop the
-// SGR-5 attribute, which is fine — the bg color is the load-bearing
+// SGR-5 attribute, which is fine - the bg color is the load-bearing
 // alarm signal.
 inline constexpr const char* alarm_on    = "\x1b[1;5;97;41m";
 inline constexpr const char* bell        = "\a";

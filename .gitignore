@@ -368,16 +368,33 @@ MigrationBackup/
 FodyWeavers.xsd
 
 
-# To-do file
+# Root-level junk docs (docs/ subtree is always tracked and wanted)
 to_do.md
-CLAUDE.MD
 features.md
-*.md
-*.csv
-# Project documentation under docs/ is intentionally tracked.
-!docs/*.md
+CLAUDE.md
 .claude/
-upcmoing/
+upcoming/
+
+# Planning documents for future Grok skills (detailed proposals only — not yet implemented)
+# These live under docs/ for visibility during planning but are gitignored per request
+# until the actual skills are created and moved to .grok/skills/
+docs/upcoming_skills/
+
+# IDE metadata (JetBrains; was accidentally tracked)
+.idea/
+
+# Volatile logs and large temp data. Narrow rules so intentional small
+# samples, golden data and fixtures under tests/ stay trackable.
+*.ttlog
+*.ttcache
+truetest_debug.log
+truetest_*.log
+
+# Root data dumps only (historical large CSV ignored; small sample kept)
+*.csv
+!market_data.csv
+!tests/fixtures/*.csv
+!tests/golden/*.csv
 
 # CMake build directory — single canonical build dir only
 build/
@@ -418,3 +435,6 @@ secret*
 # otherwise swallow the per-binary entry wrappers added in Step 10.
 !src/bin/
 !src/bin/**
+
+
+upcoming_plattform/

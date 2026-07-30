@@ -1,5 +1,6 @@
 #include "structure_continuation_strategy.h"
 #include "strategy_registry.h"
+#include "../execution/position_sizing.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,40 +25,39 @@ structure_continuation_strategy::structure_continuation_strategy(
     : risk_fraction_(risk_fraction)
     , swing_strength_(swing_strength)
     , swing_history_(swing_history)
+    , states_([this]() {
+          SymbolState st;
+          st.swing = swing_detector(swing_strength_, swing_history_);
+          return st;
+      })
 {
-}
-
-structure_continuation_strategy::SymbolState&
-structure_continuation_strategy::get_state(const std::string& symbol)
-{
-    auto it = states_.find(symbol);
-    if (it == states_.end())
-    {
-        SymbolState st;
-        st.swing = swing_detector(swing_strength_, swing_history_);
-        auto [ins, _] = states_.emplace(symbol, std::move(st));
-        return ins->second;
-    }
-    return it->second;
 }
 
 void structure_continuation_strategy::update_all_indicators(
     SymbolState& st,
     double /*open*/, double high, double low, double close)
 {
-    // Order is important
-    auto atr_opt = st.atr.update(high, low, close);
+    // Always keep trend/ATR/structure warm so the next setup after flat is valid.
+    (void)st.atr.update(high, low, close);
     (void)st.ema50.update(close);
     (void)st.ema100.update(close);
-    (void)st.stoch.update(high, low, close);
     st.swing.update(high, low, close);
+    st.last_close = close;
 
-    if (st.ema50.ready() && st.ema100.ready() && st.stoch.ready() && st.swing.ready() && st.atr.ready())
+    // Stoch + regime are only consumed by setup filters / FSM outside of an
+    // active trade. Skip them in IN_TRADE / COOLDOWN — largest per-bar win on
+    // the structure path (stoch walks 3 deques + 2 SMAs; regime scans swings).
+    using Phase = SymbolState::ContinuationPhase;
+    if (st.phase == Phase::IN_TRADE || st.phase == Phase::COOLDOWN)
+        return;
+
+    (void)st.stoch.update(high, low, close);
+
+    if (st.ema50.ready() && st.ema100.ready() && st.stoch.ready() &&
+        st.swing.ready() && st.atr.ready())
     {
         st.regime.update(st.ema50.value(), st.ema100.value(), st.swing, st.atr);
     }
-
-    st.last_close = close;
 }
 
 bool structure_continuation_strategy::is_valid_long_setup(const SymbolState& st) const
@@ -192,16 +192,27 @@ void structure_continuation_strategy::advance_continuation_fsm(
 }
 
 double structure_continuation_strategy::compute_quantity(
-    double price, double sl_distance, double /*equity*/) const
+    double price, double sl_distance, double equity, bool is_long) const
 {
-    // TEMPORARY sizing — clearly marked for later replacement by proper risk layer.
-    // Current behavior: use risk_fraction_ of a nominal 10k equity for backtest convenience.
-    // TODO: Replace with real risk-layer sizing that receives suggested SL from the strategy.
-    if (sl_distance <= 0.0) return 0.0;
+    // Sizing uses provided equity (or 10k fallback for backtests/demos).
+    // Structure SL levels are absolute (no reference_entry rebase); expected
+    // entry/exit slip and fees are folded into the per-unit risk budget.
+    if (!(price > 0.0) || sl_distance <= 0.0) return 0.0;
+    if (equity <= 0.0) equity = 10000.0;
 
-    const double nominal_equity = 10000.0; // temporary
-    const double risk_amount = nominal_equity * risk_fraction_;
-    return risk_amount / sl_distance;
+    truetest::risk::risk_size_inputs in;
+    in.equity            = equity;
+    in.risk_fraction     = risk_fraction_;
+    in.entry_price       = price;
+    in.stop_price        = is_long ? (price - sl_distance) : (price + sl_distance);
+    in.is_long           = is_long;
+    in.entry_fee_rate    = entry_fee_rate_;
+    in.exit_fee_rate     = exit_fee_rate_;
+    in.entry_slip_bps    = entry_slip_bps_;
+    in.exit_slip_bps     = exit_slip_bps_;
+    in.fixed_fee_per_leg = fixed_fee_per_leg_;
+    in.max_notional_frac = max_notional_frac_;
+    return truetest::risk::compute_risk_quantity(in);
 }
 
 void structure_continuation_strategy::create_exit_intents(
@@ -289,12 +300,20 @@ std::optional<order_event> structure_continuation_strategy::on_market(const mark
     double l = mkt.get_low();
     double c = mkt.get_close();
 
-    auto& st = get_state(sym);
+    auto slot = states_.get(sym);
+    auto& st = slot.state;
+    const std::string& interned = slot.symbol;
 
     update_all_indicators(st, o, h, l, c);
 
-    bool long_sig  = is_valid_long_setup(st);
-    bool short_sig = is_valid_short_setup(st);
+    // Skip setup evaluation while in trade/cooldown — FSM only needs bar
+    // counters there, and is_valid_* walks swing/stoch/regime every call.
+    using Phase = SymbolState::ContinuationPhase;
+    const bool need_signals =
+        st.phase != Phase::IN_TRADE && st.phase != Phase::COOLDOWN;
+
+    bool long_sig  = need_signals && is_valid_long_setup(st);
+    bool short_sig = need_signals && is_valid_short_setup(st);
 
     advance_continuation_fsm(st, long_sig, short_sig);
 
@@ -312,8 +331,8 @@ std::optional<order_event> structure_continuation_strategy::on_market(const mark
                 ? (c - std::min(st.ema100.value(), c * 0.98))
                 : (std::max(st.ema100.value(), c * 1.02) - c);
 
-            double qty = compute_quantity(c, std::max(sl_dist, c * 0.005), 10000.0);
-            if (qty <= 0.0) qty = 1.0; // fallback for backtests
+            double qty = compute_quantity(c, std::max(sl_dist, c * 0.005), 10000.0, go_long);
+            if (qty <= 0.0) qty = 1.0; // fallback for backtests / tiny equity
 
             order_side side = go_long ? order_side::buy : order_side::sell;
 
@@ -324,9 +343,9 @@ std::optional<order_event> structure_continuation_strategy::on_market(const mark
             // SL = min(EMA100, previous swing) + buffer (conservative)
             // TP = previous opposing swing, with range heuristic for wig vs close
             // Scale-out + trailing; no BE at entry
-            create_exit_intents(sym, st, c, qty, go_long);
+            create_exit_intents(interned, st, c, qty, go_long);
 
-            return order_event(mkt.get_timestamp(), sym,
+            return order_event(mkt.get_timestamp(), interned,
                                order_type::market, side, qty, c);
         }
     }
@@ -336,7 +355,7 @@ std::optional<order_event> structure_continuation_strategy::on_market(const mark
 
 void structure_continuation_strategy::set_position_open(const std::string& symbol, bool open)
 {
-    auto& st = get_state(symbol);
+    auto& st = states_.get(symbol).state;
     st.position_open = open;
     if (!open)
     {
@@ -360,7 +379,7 @@ structure_continuation_strategy::take_pending_exit_intents()
 
 void structure_continuation_strategy::on_fill(const fill_event& fill, std::uint64_t opener_order_id)
 {
-    auto& st = get_state(fill.get_symbol());
+    auto& st = states_.get(fill.get_symbol()).state;
 
     if (opener_order_id != 0)
     {
@@ -388,7 +407,13 @@ void structure_continuation_strategy::on_fill(const fill_event& fill, std::uint6
 std::vector<param_def> structure_continuation_strategy::get_param_schema() const
 {
     return {
-        {"risk_fraction", risk_fraction_, 0.001, 0.05, "Temporary risk per trade (will be replaced)"},
+        {"risk_fraction", risk_fraction_, 0.001, 0.05, "Stop-risk budget as fraction of equity"},
+        {"entry_fee_rate", entry_fee_rate_, 0, 0.05, "Entry fee as fraction of notional"},
+        {"exit_fee_rate", exit_fee_rate_, 0, 0.05, "Exit fee as fraction of notional"},
+        {"entry_slip_bps", entry_slip_bps_, 0, 500, "Adverse entry slippage (bps)"},
+        {"exit_slip_bps", exit_slip_bps_, 0, 500, "Adverse exit/stop slippage (bps)"},
+        {"fixed_fee_per_leg", fixed_fee_per_leg_, 0, 1e6, "Fixed fee per fill leg"},
+        {"max_notional_frac", max_notional_frac_, 0, 10, "Optional max position notional / equity (0=off)"},
         {"swing_strength", static_cast<double>(swing_strength_), 1.0, 5.0, "Pivot strength (bars each side)"},
     };
 }
@@ -396,6 +421,12 @@ std::vector<param_def> structure_continuation_strategy::get_param_schema() const
 void structure_continuation_strategy::set_param(const std::string& key, double value)
 {
     if (key == "risk_fraction") risk_fraction_ = value;
+    else if (key == "entry_fee_rate") entry_fee_rate_ = value;
+    else if (key == "exit_fee_rate") exit_fee_rate_ = value;
+    else if (key == "entry_slip_bps") entry_slip_bps_ = value;
+    else if (key == "exit_slip_bps") exit_slip_bps_ = value;
+    else if (key == "fixed_fee_per_leg") fixed_fee_per_leg_ = value;
+    else if (key == "max_notional_frac") max_notional_frac_ = value;
     else if (key == "swing_strength") swing_strength_ = static_cast<std::size_t>(value);
     else throw std::runtime_error("Unknown parameter: " + key);
 }
@@ -403,10 +434,10 @@ void structure_continuation_strategy::set_param(const std::string& key, double v
 std::vector<std::pair<std::string, double>>
 structure_continuation_strategy::get_indicator_values(const std::string& symbol) const
 {
-    auto it = states_.find(symbol);
-    if (it == states_.end()) return {};
+    const auto* st_ptr = states_.find(symbol);
+    if (!st_ptr) return {};
 
-    const auto& st = it->second;
+    const auto& st = *st_ptr;
     std::vector<std::pair<std::string, double>> vals;
 
     if (st.ema50.ready())  vals.emplace_back("ema50", st.ema50.value());
@@ -430,26 +461,7 @@ structure_continuation_strategy::get_indicator_values(const std::string& symbol)
 
 void structure_continuation_strategy::reset(uint64_t /*seed*/)
 {
-    for (auto& [sym, st] : states_)
-    {
-        // Reconstruct indicators (they do not all have reset() yet)
-        st.ema50  = exponential_moving_average(50);
-        st.ema100 = exponential_moving_average(100);
-        st.stoch  = stochastic_oscillator(5, 3, 3);
-        st.swing  = swing_detector(swing_strength_, swing_history_);
-        st.atr    = average_true_range(14);
-        st.regime = ema_regime_detector(14, 48, 1.65, 2.8, 1.9);
-
-        st.phase = SymbolState::ContinuationPhase::NORMAL;
-        st.orientation_bias = 0;
-        st.bars_since_sideways_exit = 0;
-        st.signals_since_orientation = 0;
-        st.bars_in_cooldown = 0;
-        st.position_open = false;
-        st.open_lots = 0;
-        st.last_opener_id = 0;
-    }
-
-    // Clear strategy-level pending exit intents (MC safety)
+    // Drop all dense slots; factory rebuilds swing with current strength/history.
+    states_.clear();
     pending_intents_.clear();
 }

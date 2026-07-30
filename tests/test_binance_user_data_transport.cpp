@@ -32,7 +32,7 @@ TEST(BinanceUserDataTransport, OpenWithoutRestReportsError)
 TEST(BinanceUserDataTransport, DestructorWithNoOpenIsClean)
 {
     // just making sure the destructor doesn't deadlock when open() was never
-    // successful — regressing this would hang the whole test binary.
+    // successful - regressing this would hang the whole test binary.
     BinanceUserDataTransport tx(nullptr);
     (void)tx.open();
 }

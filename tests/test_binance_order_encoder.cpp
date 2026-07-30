@@ -134,4 +134,46 @@ TEST(BinanceOrderEncoder, CancelUsesDefaultSymbolWhenEmpty)
     EXPECT_NE(e.wire_payload.find("symbol=BTCUSDT"), std::string::npos);
 }
 
+TEST(BinanceOrderEncoder, EncodesParameterValues)
+{
+    BinanceOrderEncoder enc;
+    auto o = make_order("btc&usdt", order_type::limit, order_side::buy,
+                        1.0, 10.0);
+
+    auto submit = enc.encode_submit(o, "tt&x=y");
+    EXPECT_NE(submit.wire_payload.find("symbol=BTC%26USDT"), std::string::npos);
+    EXPECT_NE(submit.wire_payload.find("newClientOrderId=tt%26x%3d"), std::string::npos);
+    EXPECT_EQ(submit.wire_payload.find("newClientOrderId=tt&x=y"), std::string::npos);
+
+    auto cancel = enc.encode_cancel("btc&usdt", "", "tt&x=y");
+    EXPECT_NE(cancel.wire_payload.find("symbol=BTC%26USDT"), std::string::npos);
+    EXPECT_NE(cancel.wire_payload.find("origClientOrderId=tt%26x%3d"), std::string::npos);
+}
+
+TEST(BinanceLogRedaction, RedactsSensitiveJsonFields)
+{
+    const std::string body =
+        R"({"code":-1,"listenKey":"abc123","signature":"deadbeef","msg":"bad"})";
+
+    const auto redacted = binance::redact_for_log(body, 240);
+    EXPECT_EQ(redacted.find("abc123"), std::string::npos);
+    EXPECT_EQ(redacted.find("deadbeef"), std::string::npos);
+    EXPECT_NE(redacted.find("listenKey"), std::string::npos);
+    EXPECT_NE(redacted.find("signature"), std::string::npos);
+    EXPECT_NE(redacted.find("<redacted>"), std::string::npos);
+}
+
+TEST(BinanceLogRedaction, RedactsSensitiveParamsAndBearer)
+{
+    const std::string body =
+        "listenKey=abc123&symbol=BTCUSDT&signature=deadbeef "
+        "Authorization: Bearer topsecret";
+
+    const auto redacted = binance::redact_for_log(body, 240);
+    EXPECT_EQ(redacted.find("abc123"), std::string::npos);
+    EXPECT_EQ(redacted.find("deadbeef"), std::string::npos);
+    EXPECT_EQ(redacted.find("topsecret"), std::string::npos);
+    EXPECT_NE(redacted.find("symbol=BTCUSDT"), std::string::npos);
+}
+
 #endif // HAS_BINANCE

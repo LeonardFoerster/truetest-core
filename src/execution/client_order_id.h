@@ -1,8 +1,8 @@
 #pragma once
 
 // Idempotent clientOrderId minter. Prefix = run_prefix + wall_clock + seed,
-// id = prefix + counter. Same (seed, start) → same sequence (replay
-// idempotency); different wall-clock → no cross-run collision. Capped at
+// id = prefix + counter. Same (seed, start) -> same sequence (replay
+// idempotency); different wall-clock -> no cross-run collision. Capped at
 // ~30 chars for Binance's 36-char limit.
 
 #include <atomic>

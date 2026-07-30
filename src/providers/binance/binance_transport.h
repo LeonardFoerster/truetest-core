@@ -69,7 +69,7 @@ public:
             // never retransmits and a cable-pull goes undetected for
             // ~indefinitely). Aggressive thresholds (1s idle / 1s probe
             // interval / 2 probes) bound kernel-side detection to ~3s.
-            // Best-effort: setsockopt failures are non-fatal — the WS
+            // Best-effort: setsockopt failures are non-fatal - the WS
             // idle_timeout below is the primary detector regardless.
             {
                 const int yes = 1;
@@ -92,7 +92,7 @@ public:
 
             // Idle / handshake timeout: a dead stream errors out within
             // idle_timeout. keep_alive_pings=true makes Beast send WS
-            // pings on idle and treat absence of pong as failure — the
+            // pings on idle and treat absence of pong as failure - the
             // primary detector for a silent cable-pull. handshake_timeout
             // bounds the WS upgrade so a hung server can't stall startup.
             {
@@ -261,7 +261,7 @@ public:
     }
 
     // Engine wires this in live mode. When set, a read/handshake error
-    // routes here directly and the transport STOPS — no reconnect loop.
+    // routes here directly and the transport STOPS - no reconnect loop.
     // When unset (backtest/shadow paths), the existing reconnect-on-error
     // behaviour stands. The reason string is published verbatim through
     // engine::trigger_halt to the dashboard banner.

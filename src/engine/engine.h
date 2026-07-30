@@ -44,6 +44,12 @@ namespace truetest::ui { struct streaming_stats; }
 
 #include "debug/stage_timer.h"
 
+#include "order_audit_sink.h"
+#include "execution_router.h"
+#include "instrument_spec_cache.h"
+#include "checkpoint.h"
+#include "dashboard_snapshot_builder.h"
+
 #ifdef HAS_QUESTDB
 #include "data/questdb/store.h"
 #endif
@@ -100,16 +106,20 @@ private:
     // provider doesn't supply one (spot, backtest providers, etc.).
     std::shared_ptr<IRiskCheck> risk_check_;
     // Optional liveness watchdog. Created in the constructor only if
-    // the provider returns at least one liveness_source — currently
+    // the provider returns at least one liveness_source - currently
     // only the futures dead-man's switch heartbeat opts in.
     std::unique_ptr<WorkerWatchdog> worker_watchdog_;
     MarketMaker market_maker_;
-    double last_mid_price_ = 0.0;
+    // Written from event processing thread(s), read by cold snapshot builder,
+    // risk checks, adapters, logging. Atomic for price to avoid data race
+    // surface on plain double& held by builder (see memory check 2026-07-18).
+    alignas(64) std::atomic<double> last_mid_price_{0.0};
     std::string last_mark_symbol_;
 
-    std::unordered_map<std::string, std::optional<instrument_spec>> instrument_cache_;
+    // Instrument spec cache (moved out; engine delegates). Cold path.
+    std::unique_ptr<InstrumentSpecCache> instrument_spec_cache_;
 
-    // Symbols already carrying real L2 depth — MarketMaker::replenish is
+    // Symbols already carrying real L2 depth - MarketMaker::replenish is
     // suppressed here so paper liquidity can't corrupt the fill sim.
     std::unordered_set<std::string> l2_seeded_symbols_;
     const instrument_spec* resolve_instrument_spec(const std::string& symbol);
@@ -161,59 +171,37 @@ private:
 #ifdef HAS_QUESTDB
     std::shared_ptr<truetest::questdb::QuestdbStore> questdb_store_;
     bool questdb_active_ = false;  // true only after successful begin()
-    std::size_t questdb_total_rejections_ = 0;
 
     // Last time we called tick() for time-based ILP flushing (Phase 1 hardening).
     std::chrono::steady_clock::time_point last_questdb_flush_{};
 
     void questdb_begin();
     void questdb_end();
-
-    // Cheap periodic call (intended to be invoked from the 200ms reporting blocks).
-    // Does nothing if persist is not active. Calls QuestdbStore::tick() at most
-    // once per config_.questdb_flush_cadence.
-    void maybe_questdb_tick();
 #endif
 
-    // Dashboard view: read from the rich (ncurses) TUI render thread.
-    // Filled on the event loop (no contention with the hot path) and
-    // swapped into the slot under a mutex; readers take a quick lock to
-    // copy. Refresh is debounced to ~100 ms aligned with the render tick.
-    mutable std::mutex                    dashboard_view_mu_;
-    truetest::ui::dashboard_snapshot      dashboard_view_;
-    bool                                  dashboard_view_initialised_ = false;
-    std::chrono::steady_clock::time_point dashboard_view_last_{};
-    bool                                  dashboard_view_force_ = false;  // set by request_dashboard_refresh (Fix #3)
+    // Declared unconditionally (guarded impl) to eliminate #ifdef guards from hot paths.
+    // Does nothing if persist is not active.
+    void maybe_questdb_tick();
 
-    // Memory-view cache. /proc/self/* parsing was the dominant cost of
-    // the snapshot path; refresh at ~1 Hz instead of every snapshot.
-    // mutable so build_dashboard_view (const) can update it.
-    mutable truetest::ui::dashboard_snapshot::memory_view memory_cache_{};
-    mutable std::chrono::steady_clock::time_point         memory_cache_last_{};
-    mutable bool                                          memory_cache_initialised_ = false;
-    std::chrono::milliseconds             dashboard_view_interval_{100};
-    void refresh_dashboard_view_if_due();
-    void build_dashboard_view(truetest::ui::dashboard_snapshot& out) const;
+    // New seams from engine-decomposition (PR-03 wiring).
+    // See core/docs/engine.md Phase 2 (E-20/E-21) + ~/.grok/skills/engine-decomposition/SKILL.md.
+    // - audit_sink_: single seam for *all* order/fill/reject/cancel/amend/funding/event recording.
+    //   Engine calls ONLY record_* methods. No questdb_store_ inspection for decisions.
+    // - router_: adapter resolution, submit/poll_fills, L2 forwarding, advance.
+    //   No direct execution_adapters_ bypass for submit/poll in hot paths.
+    std::unique_ptr<IOrderAuditSink> audit_sink_;
+    std::unique_ptr<ExecutionRouter> router_;
 
-    // Side caches for the rich TUI's Orders & Fills pane. Mutated on the
-    // event-loop thread alongside order_tracker_/portfolio_; copied into
-    // the snapshot during build_dashboard_view().
-    struct open_order_cache_entry
-    {
-        truetest::ui::dashboard_snapshot::open_order_row row{};
-        std::chrono::system_clock::time_point            ts{};
-    };
-    std::unordered_map<std::uint64_t, open_order_cache_entry> open_orders_cache_;
-    std::deque<truetest::ui::dashboard_snapshot::fill_row>    recent_fills_cache_;
-    static constexpr std::size_t kRecentFillsCap = 64;
-
-    void cache_open_order(const order_event& o);
-    void update_open_order_status(std::uint64_t id, const char* status);
-    void erase_open_order(std::uint64_t id);
-    void cache_fill(const fill_event& f);
+    // Dashboard logic extracted to cold collaborator (Wave 1).
+    // See core/docs/engine.md (E-30..) + engine-decomposition skill.
+    // Engine delegates public snapshot API and the refresh tick from publish_event.
+    // Cache mutations from hot paths (fills, orders) now go through the builder.
+    std::unique_ptr<DashboardSnapshotBuilder> dashboard_builder_;
 
     void write_checkpoint_if_due(std::size_t event_count);
     void restore_from_checkpoint();
+
+    std::unique_ptr<CheckpointManager> checkpoint_mgr_;
 
     std::unique_ptr<EventLogger> event_logger_;
 
@@ -228,8 +216,9 @@ private:
     // Invoked by the engine on each fill-poll cycle to register any
     // venue-bracket-leg metadata produced by the unknown_fill_handler
     // installed on the provider's ExecutionBridge. Safe to call when
-    // there is no bridge — it just no-ops.
+    // there is no bridge - it just no-ops.
     void drain_venue_bracket_meta();
+    void drain_async_submit_results(IExecutionAdapter* adapter);
 
     // Stamp per-lot attribution (opener_order_id + strategy_name) onto a
     // fill_event if not already present. Uses order_meta_ lookup as fallback.
@@ -237,6 +226,28 @@ private:
     // creation for paper/shadow fills). Part of Phase 1 deepdive per-lot
     // consolidation.
     void stamp_fill_attribution(fill_event& f);
+
+    // Canonical engine-book fill pipeline (tracker, portfolio, strategy,
+    // exits, risk, audit, analytics, publish). Used by process_order,
+    // provider async drain, and unwind so no path can skip post-fill risk.
+    // Returns false if post-fill risk triggered a terminal halt.
+    // run_post_fill_risk: false for risk_unwind fills (already halting).
+    // mark_shadow_sim: true for paper/sim fills in shadow dual-track mode.
+    // status_reason: optional audit reason (e.g. "risk_unwind").
+    bool handle_engine_fill(fill_event& f,
+                            std::size_t& event_count,
+                            bool& halt_requested,
+                            bool run_post_fill_risk = true,
+                            bool mark_shadow_sim = false,
+                            const char* status_reason = nullptr);
+
+    // After strategy on_* + route_order: arm exit intents only when the
+    // order was accepted; drain intents + resync position gates on
+    // pause/reject so optimistic strategy locks cannot stick forever.
+    void finalize_strategy_route(IStrategy& strategy,
+                                 const std::string& strategy_name,
+                                 const order_event& order,
+                                 bool halted);
 
     // Returns true if an exit fire caused the engine to halt.
     bool evaluate_exits(const std::string& symbol, double px,
@@ -254,8 +265,6 @@ private:
                         std::int64_t recv_ns);
 
     void log_event(const event& ev);
-
-    std::shared_ptr<IExecutionAdapter> get_adapter(const std::string& symbol);
 
     bool process_order(const std::shared_ptr<order_event>& o,
                        std::size_t& event_count,
@@ -316,6 +325,9 @@ private:
 
     std::vector<std::shared_ptr<order_event>> pending_stops_;
 
+    // Pending order scheduling state.
+    // Planned extraction Wave 3 (PendingOrderScheduler) per core/docs/engine.md#E-50
+    // + engine-decomposition skill. Must preserve exact determinism for MC/golden.
     struct pending_entry
     {
         std::shared_ptr<order_event> order;
@@ -333,14 +345,9 @@ private:
 
     std::vector<std::pair<std::string, uint64_t>> day_order_ids_;
 
-    // Per-order metadata recorded at route time. Used when fills come back
-    // to route them to the right lot (opener_order_id) and to tag the lot
-    // with its owning strategy.
-    struct order_meta
-    {
-        uint64_t opener_order_id = 0;
-        std::string strategy_name;
-    };
+    // Types and maps now owned/co-owned via ExecutionRouter (structs declared in execution_router.h for shared use).
+    // Engine keeps the maps for reset/attribution compatibility; router receives non-owning refs.
+    std::unordered_map<uint64_t, pending_cancel_meta> pending_cancels_;
     std::unordered_map<uint64_t, order_meta> order_meta_;
 
     void register_order_meta(const order_event& o);
@@ -352,6 +359,23 @@ private:
     void dispatch_fill_to_strategy(const fill_event& f);
 
     std::atomic<bool> halt_flag_{false};
+
+    // Heap-allocated armed flag for provider callbacks.
+    // Callbacks (which may fire after engine destruction) capture a
+    // shared_ptr copy of this token so the "still armed?" check itself
+    // is never a use-after-destruction of the engine object.
+    //
+    // Lifetime contract (see 2026-07-18 memory check): this flag + the
+    // lifetime_ tokens in ObjectPools + explicit revoke/close/drain order
+    // in stop_workers protect against in-flight callbacks touching
+    // destroyed members. In-flight bodies that passed the load may still
+    // execute; they must only touch things with independent lifetime
+    // (shared rings) or guarded pools.
+    std::shared_ptr<std::atomic<bool>> callbacks_armed_flag_ = std::make_shared<std::atomic<bool>>(true);
+
+    // (kept for compatibility with some internal reads; the real authority is the flag above)
+    std::atomic<bool> provider_callbacks_armed_{true};
+
     std::atomic<bool> worker_failed_{false};
     std::atomic<bool> pause_all_{false};
     std::atomic<bool> flatten_request_{false};
@@ -381,6 +405,9 @@ private:
     std::unique_ptr<RiskStatsWorker> risk_stats_worker_;
     std::unique_ptr<MarketMakerWorker> mm_worker_;
 
+    // Worker/ring lifecycle state.
+    // Planned extraction Wave 4 (WorkerOrchestrator) per core/docs/engine.md#E-60
+    // + engine-decomposition skill. Keep public getters for compat.
     std::mutex switch_mu_;
     std::string pending_symbol_;
     std::string pending_strategy_;
@@ -392,13 +419,32 @@ private:
     void start_workers();
     void stop_workers();
 
+    // Centralize revocation of all [this]-capturing callbacks we installed on
+    // the provider / async adapter. Called from stop paths to reduce the
+    // window where in-flight callbacks can observe partially destroyed state.
+    // Safe to call multiple times.
+    void revoke_provider_callbacks();
+
     std::unique_ptr<LoggingWorker> make_logging_worker();
+
+    // Wave 2 helpers: common skeleton for run* methods (E-40..E-44)
+    // See core/docs/engine.md + engine-decomposition skill.
+    // Extracted as private methods first (minimal surface on frozen file).
+    // Later waves will delegate pending (W3), workers (W4).
+    void clear_pending_state();
+    void setup_event_loop_infra();
+    void teardown_event_loop_infra();
+    void drain_final_pending(std::size_t& event_count, bool& halt_requested);
+    void cancel_day_orders();
+    void report_run_summary(std::size_t event_count, std::chrono::high_resolution_clock::time_point start_time);
 
 public:
     engine(std::shared_ptr<data_handler> dh,
            std::shared_ptr<orderbook> ob,
            std::shared_ptr<IStrategy> strategy,
            engine_config config = {});
+
+    ~engine();
 
     OrderbookRegistry& get_orderbook_registry() { return orderbook_registry_; }
     void run();
@@ -410,7 +456,7 @@ public:
     void run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge);
 
     // Unified-event streaming (bar/tick/l2_snapshot/l2_update). L2 events
-    // populate orderbook_registry_ directly — this is how LocalBookAdapter
+    // populate orderbook_registry_ directly - this is how LocalBookAdapter
     // sees real exchange depth in shadow mode.
     void run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge);
     void set_strategy(std::shared_ptr<IStrategy> strategy);

@@ -113,7 +113,7 @@ std::optional<HttpResponse> query_exec(const std::string& host,
     }
     else if (content_length == 0)
     {
-        // No Content-Length — drain until close.
+        // No Content-Length - drain until close.
         while (true)
         {
             const auto chunk = tcp.read_n(4096, timeout_ms);

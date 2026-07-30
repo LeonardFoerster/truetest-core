@@ -66,7 +66,7 @@ public:
         }
 
         // Partial-book streams (@depth{5|10|20}@...) have no "e"/"s",
-        // just {lastUpdateId, bids, asks} — detect by stream-name suffix.
+        // just {lastUpdateId, bids, asks} - detect by stream-name suffix.
         if (is_partial_book_stream(stream_name))
         {
             auto snap = binance::parse_depth_snapshot(data_json);

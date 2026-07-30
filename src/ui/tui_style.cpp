@@ -13,7 +13,7 @@ namespace truetest::ui {
 
 namespace {
 
-// Internal color pair indices — start at 10 to avoid collision
+// Internal color pair indices - start at 10 to avoid collision
 // with the existing pairs (1-6) used in tabbed_dashboard.cpp
 constexpr int PAIR_POSITIVE   = 10;
 constexpr int PAIR_NEGATIVE   = 11;

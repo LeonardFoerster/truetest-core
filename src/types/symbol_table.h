@@ -6,26 +6,33 @@
 #include <unordered_map>
 #include <vector>
 
-// Phase 4: canonical symbol strings (one heap alloc per distinct symbol).
-// Events still carry std::string today; registry and hot-path lookups use
-// interned references to avoid duplicate allocations across sources.
+// Canonical symbol strings + dense uint16 ids (one heap alloc per distinct symbol).
+// Hot-path state should index by id (vector slot) after a single intern_id() call,
+// not re-hash std::string on every bar.
 class SymbolTable
 {
 public:
     static constexpr std::uint16_t kInvalidId = 0xFFFF;
     static constexpr std::size_t kMaxSymbols = 256;
 
-    const std::string& intern(const std::string& sym)
+    // Intern and return dense id. O(1) average; allocates only on first sighting.
+    std::uint16_t intern_id(const std::string& sym)
     {
         auto it = index_.find(sym);
         if (it != index_.end())
-            return symbols_[it->second];
+            return it->second;
         if (symbols_.size() >= kMaxSymbols)
             throw std::runtime_error("symbol table full");
         const std::uint16_t id = static_cast<std::uint16_t>(symbols_.size());
         symbols_.push_back(sym);
         index_.emplace(symbols_.back(), id);
-        return symbols_.back();
+        return id;
+    }
+
+    // Intern and return stable reference into the table (valid until clear()).
+    const std::string& intern(const std::string& sym)
+    {
+        return symbols_[intern_id(sym)];
     }
 
     const std::string& resolve(std::uint16_t id) const

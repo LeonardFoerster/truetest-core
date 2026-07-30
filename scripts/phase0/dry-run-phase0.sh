@@ -59,8 +59,9 @@ Watch for in the TUI / logs:
 When satisfied, stop the shadow run (Ctrl-C) and record the artifacts under
 reports/phase0/ops/dry-run-${RUN_TAG}/ if desired.
 
-This dry-run satisfies the "infrastructure ready" gate in PHASE0_COMPLETION_PLAN.md
-before scheduling real Session #1 with engine_live + math-captcha.
+This dry-run is a non-qualifying infrastructure rehearsal before scheduling
+real Session #1 with engine_live + math-captcha. Current Phase 0 gates live in
+docs/governance/01-prod.md, docs/todos/01-P0-phase0.md, and reports/phase0/.
 
 ==================================================================
 EOF

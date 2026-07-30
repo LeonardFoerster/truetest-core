@@ -35,6 +35,8 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
+from questdb_common import validate_run_tag
+
 try:
     import requests
 except ImportError:
@@ -97,8 +99,10 @@ def main():
     parser.add_argument("--rows-per-second", type=int, default=20)
     args = parser.parse_args()
 
+    run_tag = validate_run_tag(args.run_tag)
+
     print(f"=== QuestDB Phase 5 Soak Test ===")
-    print(f"Run tag: {args.run_tag}")
+    print(f"Run tag: {run_tag}")
     print(f"Duration: {args.duration_minutes} minutes")
     print(f"Blip every {args.blip_every_minutes} min for {args.blip_duration_seconds}s")
     print(f"Target rate: ~{args.rows_per_second} rows/sec")
@@ -118,7 +122,7 @@ def main():
     def make_line(i: int) -> str:
         ts = int(time.time() * 1_000_000_000)
         return (
-            f"{args.run_tag}_events,"
+            f"{run_tag}_events,"
             f"event_type=soak_test,symbol=TEST{i%10},strategy=soak_test,severity=info "
             f"order_id={100000 + i}i,message=\"soak iteration {i}\" {ts}"
         )
@@ -149,8 +153,8 @@ def main():
     print(f"Failed (expected during blips): {failed_during_blip}")
 
     print("\nNext steps for operator:")
-    print(f"  1. Run: python scripts/questdb_health_check.py --run-tag {args.run_tag} --require-activity")
-    print(f"  2. Run: python scripts/questdb_campaign_summary.py --run-tag {args.run_tag}")
+    print(f"  1. Run: python scripts/questdb_health_check.py --run-tag {run_tag} --require-activity")
+    print(f"  2. Run: python scripts/questdb_campaign_summary.py --run-tag {run_tag}")
     print("  3. Manually verify fallback file (if strict mode was used) was written during blips.")
     print("  4. Reconcile against binary log (future tool).")
 

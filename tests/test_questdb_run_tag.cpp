@@ -33,7 +33,7 @@ TEST(QuestdbRunTag, InvalidOverrideThrows)
 
 TEST(QuestdbRunTag, EmptyOverrideWithSameSeedIsDeterministicSuffix)
 {
-    // Same seed → same hex suffix (last 6 chars). Wall-clock prefix may
+    // Same seed -> same hex suffix (last 6 chars). Wall-clock prefix may
     // tick between calls but typically does not.
     const std::string a = make_run_tag("", /*test_seed=*/42);
     const std::string b = make_run_tag("", /*test_seed=*/42);

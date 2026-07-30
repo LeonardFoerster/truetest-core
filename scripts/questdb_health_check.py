@@ -16,6 +16,8 @@ import argparse
 import sys
 from datetime import datetime, timedelta
 
+from questdb_common import validate_run_tag
+
 try:
     import requests
 except ImportError:
@@ -70,6 +72,7 @@ def main():
                         help="Fail if no recent rows found in key tables")
     args = parser.parse_args()
 
+    run_tag = validate_run_tag(args.run_tag) if args.run_tag else None
     print(f"QuestDB Health Check @ {args.host}:{args.port}")
 
     healthy = ping_questdb(args.host, args.port)
@@ -79,9 +82,9 @@ def main():
 
     print("✅ QuestDB is reachable")
 
-    if args.run_tag:
-        print(f"\nChecking recent activity for run_tag={args.run_tag} (last {args.recent_minutes} min)")
-        counts = has_recent_rows(args.host, args.port, args.run_tag, args.recent_minutes)
+    if run_tag:
+        print(f"\nChecking recent activity for run_tag={run_tag} (last {args.recent_minutes} min)")
+        counts = has_recent_rows(args.host, args.port, run_tag, args.recent_minutes)
 
         total_recent = 0
         for table, count in counts.items():

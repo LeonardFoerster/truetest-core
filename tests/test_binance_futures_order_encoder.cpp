@@ -63,7 +63,7 @@ TEST(BinanceFuturesOrderEncoder, SubmitMarketOmitsPriceAndTif)
     EXPECT_EQ(p.find("stopPrice="),   std::string::npos);
 }
 
-// Futures `STOP_MARKET` is a triggered MARKET — no price, no TIF.
+// Futures `STOP_MARKET` is a triggered MARKET - no price, no TIF.
 TEST(BinanceFuturesOrderEncoder, SubmitStopMapsToStopMarketWithoutPriceOrTif)
 {
     BinanceFuturesOrderEncoder enc;
@@ -79,7 +79,7 @@ TEST(BinanceFuturesOrderEncoder, SubmitStopMapsToStopMarketWithoutPriceOrTif)
     EXPECT_EQ(p.find("timeInForce="),     std::string::npos);
 }
 
-// Futures `STOP` is a triggered LIMIT — carries both price and stopPrice + TIF.
+// Futures `STOP` is a triggered LIMIT - carries both price and stopPrice + TIF.
 TEST(BinanceFuturesOrderEncoder, SubmitStopLimitMapsToStopWithPriceAndTif)
 {
     BinanceFuturesOrderEncoder enc;
@@ -144,6 +144,22 @@ TEST(BinanceFuturesOrderEncoder, CancelFallsBackToClientIdWhenExchangeEmpty)
     const auto& p = e.wire_payload;
     EXPECT_NE(p.find("origClientOrderId=tt-5"), std::string::npos);
     EXPECT_EQ(p.find("orderId="), std::string::npos);
+}
+
+TEST(BinanceFuturesOrderEncoder, EncodesParameterValues)
+{
+    BinanceFuturesOrderEncoder enc;
+    auto o = make_order("btc&usdt", order_type::limit, order_side::buy,
+                        1.0, 10.0);
+
+    auto submit = enc.encode_submit(o, "tt&x=y");
+    EXPECT_NE(submit.wire_payload.find("symbol=BTC%26USDT"), std::string::npos);
+    EXPECT_NE(submit.wire_payload.find("newClientOrderId=tt%26x%3d"), std::string::npos);
+    EXPECT_EQ(submit.wire_payload.find("newClientOrderId=tt&x=y"), std::string::npos);
+
+    auto cancel = enc.encode_cancel("btc&usdt", "", "tt&x=y");
+    EXPECT_NE(cancel.wire_payload.find("symbol=BTC%26USDT"), std::string::npos);
+    EXPECT_NE(cancel.wire_payload.find("origClientOrderId=tt%26x%3d"), std::string::npos);
 }
 
 #endif // HAS_BINANCE

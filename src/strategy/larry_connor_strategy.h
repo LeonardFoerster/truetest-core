@@ -4,10 +4,10 @@
 #include "../indicator/rolling_extreme.h"
 #include "../indicator/sma.h"
 #include "strategy_interface.h"
+#include "symbol_state_store.h"
 
 #include <optional>
 #include <string>
-#include <unordered_map>
 
 // Larry Connors style long-only swing strategy.
 //
@@ -67,7 +67,6 @@ private:
             : ma(ma_p), entry_low(entry_p), exit_high(exit_p), atr(atr_p) {}
     };
 
-    SymbolState& get_state(const std::string& symbol);
     double compute_quantity(double price) const;
 
     std::size_t ma_period_;
@@ -76,6 +75,9 @@ private:
     std::size_t atr_period_;
     double      equity_;
     double      risk_fraction_;
+    double      entry_fee_rate_ = 0.0;
+    double      entry_slip_bps_ = 0.0;
+    double      fixed_fee_per_leg_ = 0.0;
 
-    std::unordered_map<std::string, SymbolState> states_;
+    SymbolStateStore<SymbolState> states_;
 };

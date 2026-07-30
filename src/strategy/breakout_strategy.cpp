@@ -1,4 +1,5 @@
 #include "breakout_strategy.h"
+#include "../execution/position_sizing.h"
 #include "strategy_registry.h"
 #include "../core/event.h"
 
@@ -33,21 +34,13 @@ breakout_strategy::breakout_strategy(double equity,
     , atr_expansion_(atr_expansion)
     , vol_mult_(vol_mult)
     , min_rr_(min_rr)
+    , states_([this]() {
+          SymbolState st;
+          st.atr = average_true_range(atr_period_);
+          st.vol_sma = simple_moving_average(vol_period_);
+          return st;
+      })
 {
-}
-
-breakout_strategy::SymbolState& breakout_strategy::get_state(const std::string& symbol)
-{
-    auto it = states_.find(symbol);
-    if (it == states_.end())
-    {
-        SymbolState st;
-        st.atr = average_true_range(atr_period_);
-        st.vol_sma = simple_moving_average(vol_period_);
-        auto [ins, _] = states_.emplace(symbol, std::move(st));
-        return ins->second;
-    }
-    return it->second;
 }
 
 void breakout_strategy::trim_deques(SymbolState& st)
@@ -150,20 +143,33 @@ bool breakout_strategy::check_breakout_gates(const SymbolState& st,
 double breakout_strategy::compute_quantity(double price, double sl_distance) const
 {
     if (price <= 0.0 || sl_distance <= 0.0) return 0.0;
-    double risk_eur = equity_ * risk_fraction_;
-    return risk_eur / sl_distance;
+    // Breakout SL is an absolute level below entry (long-only entries).
+    truetest::risk::risk_size_inputs in;
+    in.equity            = equity_;
+    in.risk_fraction     = risk_fraction_;
+    in.entry_price       = price;
+    in.stop_price        = price - sl_distance;
+    in.is_long           = true;
+    in.entry_fee_rate    = entry_fee_rate_;
+    in.exit_fee_rate     = exit_fee_rate_;
+    in.entry_slip_bps    = entry_slip_bps_;
+    in.exit_slip_bps     = exit_slip_bps_;
+    in.fixed_fee_per_leg = fixed_fee_per_leg_;
+    in.max_notional_frac = max_notional_frac_;
+    return truetest::risk::compute_risk_quantity(in);
 }
 
 std::optional<order_event> breakout_strategy::on_market(const market_event& mkt)
 {
-    const std::string& sym = mkt.get_symbol();
     double o = mkt.get_open();
     double h = mkt.get_high();
     double l = mkt.get_low();
     double c = mkt.get_close();
     int64_t v = mkt.get_volume();
 
-    auto& st = get_state(sym);
+    auto slot = states_.get(mkt.get_symbol());
+    auto& st = slot.state;
+    const std::string& sym = slot.symbol;
 
     // Update indicators
     auto atr_opt = st.atr.update(h, l, c);
@@ -321,8 +327,7 @@ breakout_strategy::take_pending_exit_intents()
 void breakout_strategy::on_fill(const fill_event& fill, std::uint64_t opener_order_id)
 {
     // Track lots so we know when flat (for re-entry permission)
-    const std::string& sym = fill.get_symbol();
-    auto& st = get_state(sym);
+    auto& st = states_.get(fill.get_symbol()).state;
 
     const bool is_opener = (opener_order_id == fill.get_order_id());
     if (is_opener)
@@ -348,7 +353,7 @@ void breakout_strategy::on_fill(const fill_event& fill, std::uint64_t opener_ord
 
 void breakout_strategy::set_position_open(const std::string& symbol, bool open)
 {
-    auto& st = get_state(symbol);
+    auto& st = states_.get(symbol).state;
     st.position_open = open;
     if (!open && st.open_lots > 0)
         st.open_lots = 0;
@@ -358,7 +363,13 @@ std::vector<param_def> breakout_strategy::get_param_schema() const
 {
     return {
         {"equity", equity_, 1.0, 1e12, "Account equity for 0.5% risk sizing"},
-        {"risk_fraction", risk_fraction_, 0.0001, 0.05, "Risk per trade (0.005 = 0.5%)"},
+        {"risk_fraction", risk_fraction_, 0.0001, 0.05, "Stop-risk budget as fraction of equity"},
+        {"entry_fee_rate", entry_fee_rate_, 0, 0.05, "Entry fee as fraction of notional"},
+        {"exit_fee_rate", exit_fee_rate_, 0, 0.05, "Exit fee as fraction of notional"},
+        {"entry_slip_bps", entry_slip_bps_, 0, 500, "Adverse entry slippage (bps)"},
+        {"exit_slip_bps", exit_slip_bps_, 0, 500, "Adverse exit/stop slippage (bps)"},
+        {"fixed_fee_per_leg", fixed_fee_per_leg_, 0, 1e6, "Fixed fee per fill leg"},
+        {"max_notional_frac", max_notional_frac_, 0, 10, "Optional max position notional / equity (0=off)"},
         {"atr_period", static_cast<double>(atr_period_), 5, 100, "ATR period"},
         {"vol_period", static_cast<double>(vol_period_), 5, 100, "Volume SMA period"},
         {"lookback", static_cast<double>(lookback_), 5, 200, "Consolidation lookback bars"},
@@ -373,6 +384,12 @@ void breakout_strategy::set_param(const std::string& key, double value)
 {
     if (key == "equity") equity_ = value;
     else if (key == "risk_fraction") risk_fraction_ = value;
+    else if (key == "entry_fee_rate") entry_fee_rate_ = value;
+    else if (key == "exit_fee_rate") exit_fee_rate_ = value;
+    else if (key == "entry_slip_bps") entry_slip_bps_ = value;
+    else if (key == "exit_slip_bps") exit_slip_bps_ = value;
+    else if (key == "fixed_fee_per_leg") fixed_fee_per_leg_ = value;
+    else if (key == "max_notional_frac") max_notional_frac_ = value;
     else if (key == "atr_period") { atr_period_ = static_cast<std::size_t>(value); states_.clear(); }
     else if (key == "vol_period") { vol_period_ = static_cast<std::size_t>(value); states_.clear(); }
     else if (key == "lookback") lookback_ = static_cast<std::size_t>(value);
@@ -387,10 +404,10 @@ std::vector<std::pair<std::string, double>> breakout_strategy::get_indicator_val
     const std::string& symbol) const
 {
     std::vector<std::pair<std::string, double>> vals;
-    auto it = states_.find(symbol);
-    if (it == states_.end()) return vals;
+    const auto* st_ptr = states_.find(symbol);
+    if (!st_ptr) return vals;
 
-    const auto& st = it->second;
+    const auto& st = *st_ptr;
     if (st.atr.ready())
         vals.emplace_back("atr_" + std::to_string(atr_period_), st.atr.value());
     if (st.vol_sma.ready())

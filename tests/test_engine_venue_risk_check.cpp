@@ -123,7 +123,7 @@ std::shared_ptr<data_handler> make_bars(int n)
 }
 
 // Without a venue risk check, the engine emits and fills both legs
-// — establishes the baseline so the rejection test below has a clean
+// - establishes the baseline so the rejection test below has a clean
 // "before" state to compare against.
 TEST(EngineVenueRiskCheck, BaselineWithoutRiskCheckFills)
 {
@@ -134,13 +134,13 @@ TEST(EngineVenueRiskCheck, BaselineWithoutRiskCheckFills)
     auto strat = std::make_shared<BuyAtBarThreeStrategy>();
 
     engine_config cfg;
-    // No provider → engine.risk_check_ stays null, normal path runs.
+    // No provider -> engine.risk_check_ stays null, normal path runs.
 
     engine eng(dh, ob, strat, cfg);
     eng.run();
 
     EXPECT_GT(eng.get_analytics().snapshot().total_fills, 0u)
-        << "baseline run must produce fills — strategy or harness broke";
+        << "baseline run must produce fills - strategy or harness broke";
 }
 
 TEST(EngineVenueRiskCheck, RejectsOrderWhenCheckRefuses)
@@ -160,7 +160,7 @@ TEST(EngineVenueRiskCheck, RejectsOrderWhenCheckRefuses)
 
     EXPECT_GT(rc->call_count(), 0)
         << "engine must invoke provider->get_risk_check() per order";
-    // BUY rejected → no position → SELL never emitted → zero fills.
+    // BUY rejected -> no position -> SELL never emitted -> zero fills.
     // Cleanest end-to-end signal that the rejection path is wired.
     EXPECT_EQ(eng.get_analytics().snapshot().total_fills, 0u)
         << "rejected orders must not produce fills";

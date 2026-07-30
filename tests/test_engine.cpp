@@ -265,7 +265,7 @@ TEST(Engine, HaltChannel_StopsEngine)
     auto dh = make_bar_data(100000);
     auto ob = std::make_shared<orderbook>();
 
-    // Strategy that buys on bar 3 and never sells — we'll inject halt externally
+    // Strategy that buys on bar 3 and never sells - we'll inject halt externally
     auto strat = std::make_shared<TestStrategy>();
 
     MarketMaker mm;

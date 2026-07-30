@@ -70,7 +70,7 @@ public:
         }
 
         {
-            const std::string params = "symbol=" + symbol_;
+            const std::string params = "symbol=" + binance::url_encode(symbol_);
             auto resp = rest_->del("/fapi/v1/allOpenOrders", params);
             if (resp.status < 200 || resp.status >= 300)
             {
@@ -78,7 +78,9 @@ public:
                 if (resp.body.find("-2011") == std::string::npos)
                 {
                     std::cerr << "BinanceFuturesKillSwitch: cancel_all HTTP "
-                              << resp.status << " - " << resp.body << "\n";
+                              << resp.status << " - "
+                              << binance::redact_for_log(resp.body, 240)
+                              << "\n";
                     return false;
                 }
             }
@@ -94,11 +96,12 @@ public:
         double position_amt = 0.0;
         {
             auto pr = rest_->get("/fapi/v2/positionRisk",
-                                 "symbol=" + symbol_);
+                                 "symbol=" + binance::url_encode(symbol_));
             if (pr.status < 200 || pr.status >= 300)
             {
                 std::cerr << "BinanceFuturesKillSwitch: /fapi/v2/positionRisk "
-                             "HTTP " << pr.status << " - " << pr.body << "\n";
+                             "HTTP " << pr.status << " - "
+                          << binance::redact_for_log(pr.body, 240) << "\n";
                 return false;
             }
             if (!BinanceFuturesReconciler::extract_position_amt(
@@ -122,18 +125,21 @@ public:
 
         // Long → SELL to close, short → BUY to close.
         const char* close_side = position_amt > 0.0 ? "SELL" : "BUY";
-        std::string params = "symbol=" + symbol_
-            + "&side=" + close_side
-            + "&type=MARKET&reduceOnly=true&quantity="
-            + format_qty(std::abs(position_amt));
+        std::string params;
+        binance::append_param(params, "symbol", symbol_);
+        binance::append_param(params, "side", close_side);
+        binance::append_param(params, "type", "MARKET");
+        binance::append_param(params, "reduceOnly", "true");
+        binance::append_param(params, "quantity", format_qty(std::abs(position_amt)));
         if (minter_)
-            params += "&newClientOrderId=" + minter_->next();
+            binance::append_param(params, "newClientOrderId", minter_->next());
 
         auto close = rest_->post("/fapi/v1/order", params);
         if (close.status < 200 || close.status >= 300)
         {
             std::cerr << "BinanceFuturesKillSwitch: flatten order HTTP "
-                      << close.status << " - " << close.body << "\n";
+                      << close.status << " - "
+                      << binance::redact_for_log(close.body, 240) << "\n";
             return false;
         }
 

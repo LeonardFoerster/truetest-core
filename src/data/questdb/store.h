@@ -90,6 +90,13 @@ public:
     virtual void record_rejection(const order_event& o,
                                   const std::string& reason_category,
                                   const std::string& reason_detail);
+    // Kept for direct test usage and internal completeness. Engine callers go
+    // through the audit sink which uses the rich shape (sparse resolved by
+    // minimal event synthesis where needed).
+    virtual void record_rejection(std::uint64_t order_id,
+                                  const std::string& symbol,
+                                  const std::string& reason_category,
+                                  const std::string& reason_detail);
     virtual void record_cancellation(std::uint64_t order_id,
                                      const std::string& symbol,
                                      const std::string& strategy_name,
@@ -150,6 +157,17 @@ private:
     static const char* type_str(order_type t);
     static const char* tif_str(time_in_force t);
     static const char* status_str(order_status s);
+
+    // Internal dedup for rich + sparse rejection paths. All string work here.
+    void write_rejection_line(const std::string& symbol,
+                              const std::string& side,
+                              const std::string& strategy,
+                              std::uint64_t order_id,
+                              double qty,
+                              double price,
+                              const std::string& reason,
+                              const std::string& detail,
+                              std::int64_t ts_ns);
 };
 
 }

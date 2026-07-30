@@ -29,7 +29,7 @@ public:
 
     // Optional. When set, a fatal stream-loss event (network/handshake
     // error past the transport's own retry budget) fires this callback
-    // with a short reason string and the transport stops — the engine's
+    // with a short reason string and the transport stops - the engine's
     // halt path takes over. Default no-op preserves the legacy reconnect
     // behaviour for non-live tests.
     virtual void set_fatal_disconnect_callback(

@@ -11,6 +11,8 @@ For now it prints counts from key tables and suggests the manual step.
 import argparse
 import sys
 
+from questdb_common import validate_run_tag
+
 try:
     import requests
 except ImportError:
@@ -35,7 +37,7 @@ def main():
     parser.add_argument("--port", type=int, default=9000)
     args = parser.parse_args()
 
-    rt = args.run_tag
+    rt = validate_run_tag(args.run_tag)
     print(f"=== QuestDB vs Binary Log Reconciliation ===")
     print(f"Run tag: {rt}\n")
 

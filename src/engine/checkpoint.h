@@ -104,3 +104,19 @@ inline CheckpointData read_file(const std::string& path)
 }
 
 }
+
+class engine_config;  // fwd
+class portfolio;
+
+// CheckpointManager (final extraction). Encapsulates due-check + restore.
+// Uses the low-level write/read in namespace above. Cold path.
+class CheckpointManager {
+public:
+    explicit CheckpointManager(const engine_config& cfg);
+
+    void write_if_due(const portfolio& p, std::size_t event_count);
+    void restore(portfolio& p);
+
+private:
+    const engine_config& cfg_;
+};

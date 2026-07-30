@@ -23,7 +23,7 @@
 // the trade tape consumes the front of each level, and fires a fill once
 // a trade overflows size_ahead. Cancel attribution on L2 shrinkage beyond
 // observed trade volume is delegated to a pluggable IQueueModel.
-// Requires a trade tape (no trades → no fills, by design). Without L2,
+// Requires a trade tape (no trades -> no fills, by design). Without L2,
 // every order starts at the front (over-optimistic).
 // V1 limitations: trade side ignored (correct when at top-of-book, approx
 // otherwise); market orders rejected; modify = cancel + submit.
@@ -52,13 +52,14 @@ public:
         po.qty_remaining = o.get_quantity();
 
         // Join back of queue: size_ahead = current aggregate depth.
-        // Unknown level → front (optimistic "no L2 data" degradation).
+        // Unknown level -> front (optimistic "no L2 data" degradation).
         const auto key = make_key(po.symbol, po.side, po.price);
         auto it = levels_.find(key);
         po.size_ahead = (it != levels_.end()) ? it->second.aggregate_size : 0.0;
         po.submit_ts = o.get_earliest_eligible_ts();
         po.strategy_name = o.get_strategy_name();
         po.opener_order_id = o.get_opener_order_id();
+        po.recv_ns = o.get_recv_ns();
         orders_[po.order_id] = std::move(po);
     }
 
@@ -106,7 +107,7 @@ public:
     }
 
     // Levels tracked locally but missing from the snapshot are not
-    // zeroed here — the next update stream reconciles them.
+    // zeroed here - the next update stream reconciles them.
     void on_l2_snapshot(const std::string& symbol,
                         const std::vector<std::pair<double, double>>& bids,
                         const std::vector<std::pair<double, double>>& asks) override
@@ -149,7 +150,7 @@ public:
                 }
             }
         }
-        // delta > 0: additions join the back → size_ahead unchanged.
+        // delta > 0: additions join the back -> size_ahead unchanged.
         lv.aggregate_size       = new_size;
         lv.trades_since_update  = 0.0;
     }
@@ -190,6 +191,13 @@ public:
                              po.side, fill_qty, trade_price, commission);
                 if (!po.strategy_name.empty()) f.set_strategy_name(po.strategy_name);
                 if (po.opener_order_id != 0) f.set_opener_order_id(po.opener_order_id);
+                f.set_recv_ns(po.recv_ns);
+                if (po.recv_ns > 0)
+                {
+                    const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                    f.set_latency_ns(now_ns - po.recv_ns);
+                }
                 pending_fills_.push_back(std::move(f));
 
                 po.qty_remaining -= fill_qty;
@@ -205,7 +213,7 @@ public:
         }
 
         // Record trade volume for (old - new - trades = cancels) inference.
-        // Do NOT decrement aggregate_size — venue already did. Mark both
+        // Do NOT decrement aggregate_size - venue already did. Mark both
         // sides in V1; mismatched side's accumulator drains on its next L2.
         auto mark = [&](order_side s) {
             const auto key = make_key(symbol, s, trade_price);
@@ -249,6 +257,7 @@ private:
         // Per-lot attribution captured at submit time (Phase 1 deepdive).
         std::string   strategy_name;
         std::uint64_t opener_order_id = 0;
+        int64_t       recv_ns = 0;  // tick ingress for tick-to-trade samples
     };
     struct level_state
     {

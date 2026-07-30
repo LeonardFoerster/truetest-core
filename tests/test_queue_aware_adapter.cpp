@@ -32,7 +32,7 @@ TEST(QueueAwareBookAdapter, FreshLevel_SubmitPutsUsAtFront)
     auto qm = std::make_shared<BackCancelModel>();
     QueueAwareBookAdapter a(qm);
 
-    // No L2 observations yet — aggregate at 100 is unknown → assume 0.
+    // No L2 observations yet - aggregate at 100 is unknown -> assume 0.
     a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 5.0));
     EXPECT_EQ(a.live_order_count(), 1u);
     EXPECT_EQ(a.avg_queue_position_bps(), 0u);
@@ -47,7 +47,7 @@ TEST(QueueAwareBookAdapter, SubmitAfterL2_JoinsBackOfQueue)
     a.on_l2_update("X", order_side::buy, 100.0, 20.0);
     a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 5.0));
 
-    // Expected: size_ahead = 20, aggregate = 20 → we're at 100% of the
+    // Expected: size_ahead = 20, aggregate = 20 -> we're at 100% of the
     // queue (fully at the back).
     EXPECT_EQ(a.avg_queue_position_bps(), 10000u);
 }
@@ -62,7 +62,7 @@ TEST(QueueAwareBookAdapter, TradeConsumesAheadFirst_NoFill)
     a.on_l2_update("X", order_side::buy, 100.0, 20.0);
     a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 5.0));
 
-    // Trade of 10 at 100 → consumes 10 from the front; size_ahead: 20 → 10.
+    // Trade of 10 at 100 -> consumes 10 from the front; size_ahead: 20 -> 10.
     // We shouldn't fill yet.
     a.on_trade("X", 100.0, 10.0, t_at(100));
 
@@ -80,7 +80,7 @@ TEST(QueueAwareBookAdapter, TradeExceedsAhead_FillsTheExcess)
     a.on_l2_update("X", order_side::buy, 100.0, 20.0);
     a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 5.0));
 
-    // Trade of 25 at 100 → eats the 20 ahead, reaches us with 5 left →
+    // Trade of 25 at 100 -> eats the 20 ahead, reaches us with 5 left ->
     // we fill 5 at 100.
     a.on_trade("X", 100.0, 25.0, t_at(100));
 
@@ -101,7 +101,7 @@ TEST(QueueAwareBookAdapter, PartialFill_OrderStaysLive)
     a.on_l2_update("X", order_side::buy, 100.0, 20.0);
     a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 10.0));
 
-    // Trade of 23 at 100 → 20 ahead consumed, 3 reaches us; we have 10
+    // Trade of 23 at 100 -> 20 ahead consumed, 3 reaches us; we have 10
     // to fill so we take 3 and keep 7 qty_remaining.
     a.on_trade("X", 100.0, 23.0, t_at(100));
 
@@ -138,7 +138,7 @@ TEST(QueueAwareBookAdapter, FrontCancel_AdvancesQueueOnShrinkage)
     a.on_l2_update("X", order_side::buy, 100.0, 20.0);
     a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 5.0));
 
-    // Level shrinks from 20 → 12 with NO trades observed → 8 cancels.
+    // Level shrinks from 20 -> 12 with NO trades observed -> 8 cancels.
     // FrontCancelModel: size_ahead = 20 - 8 = 12.
     a.on_l2_update("X", order_side::buy, 100.0, 12.0);
 
@@ -158,7 +158,7 @@ TEST(QueueAwareBookAdapter, BackCancel_NeverAdvances)
     a.on_l2_update("X", order_side::buy, 100.0, 20.0);
     a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 5.0));
 
-    // Level shrinks from 20 → 12 with NO trades observed → 8 cancels.
+    // Level shrinks from 20 -> 12 with NO trades observed -> 8 cancels.
     // BackCancelModel: size_ahead remains 20.
     a.on_l2_update("X", order_side::buy, 100.0, 12.0);
 
@@ -177,7 +177,7 @@ TEST(QueueAwareBookAdapter, L2Growth_DoesNotChangeQueuePosition)
     a.on_l2_update("X", order_side::buy, 100.0, 20.0);
     a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 5.0));
 
-    // Level grows 20 → 30 (someone joined the back). Our queue position
+    // Level grows 20 -> 30 (someone joined the back). Our queue position
     // is unchanged (size_ahead still 20).
     a.on_l2_update("X", order_side::buy, 100.0, 30.0);
 
@@ -200,7 +200,7 @@ TEST(QueueAwareBookAdapter, TradesAttributedBeforeCancelInference)
     a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 5.0));
 
     // A trade of 5 at 100 advances our queue to 15. Then L2 shows the
-    // aggregate is now 12 — i.e. 20 → 12 = 8 reduction, of which 5 was
+    // aggregate is now 12 - i.e. 20 -> 12 = 8 reduction, of which 5 was
     // the trade. Only 3 units are cancels. FrontCancel: 15 - 3 = 12.
     a.on_trade("X", 100.0, 5.0, t_at(100));
     a.on_l2_update("X", order_side::buy, 100.0, 12.0);
@@ -242,7 +242,7 @@ TEST(QueueAwareBookAdapter, CancelWithLatency_DefersUntilAdvanceTime)
     EXPECT_TRUE(a.cancel_order(1));
     EXPECT_EQ(a.live_order_count(), 1u);
 
-    // T=80ms: within window → trade crossing us still fills.
+    // T=80ms: within window -> trade crossing us still fills.
     a.advance_time(t_at(80));
     a.on_trade("X", 100.0, 25.0, t_at(80));
     std::vector<fill_event> fills;
@@ -269,7 +269,7 @@ TEST(QueueAwareBookAdapter, SnapshotSeedsBothSides)
 
     // Buy  at 100: size_ahead = 5 (from bids).
     // Sell at 101: size_ahead = 7 (from asks).
-    // Both orders fully at the back → avg 100% (10000 bps).
+    // Both orders fully at the back -> avg 100% (10000 bps).
     EXPECT_EQ(a.avg_queue_position_bps(), 10000u);
 }
 
@@ -281,15 +281,15 @@ TEST(QueueAwareBookAdapter, AvgQueuePositionReflectsOrderMix)
     QueueAwareBookAdapter a(qm);
 
     a.on_l2_update("X", order_side::buy, 100.0, 20.0);
-    // Order 1: submit when aggregate = 20 → size_ahead = 20.
+    // Order 1: submit when aggregate = 20 -> size_ahead = 20.
     a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 1.0));
 
-    // Trade of 10 advances order 1's queue (size_ahead: 20 → 10) without
-    // touching aggregate_size — aggregate reflects the last L2 snapshot,
+    // Trade of 10 advances order 1's queue (size_ahead: 20 -> 10) without
+    // touching aggregate_size - aggregate reflects the last L2 snapshot,
     // and the next L2 update will bring the venue's new truth.
     a.on_trade("X", 100.0, 10.0, t_at(100));
 
-    // Order 2 submitted before any new L2 update → uses stale aggregate
+    // Order 2 submitted before any new L2 update -> uses stale aggregate
     // (still 20), so size_ahead = 20.
     a.submit_order(make_limit(2, "X", order_side::buy, 100.0, 1.0));
 

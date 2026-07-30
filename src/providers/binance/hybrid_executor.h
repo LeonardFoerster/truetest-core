@@ -80,7 +80,7 @@ public:
         paper_->poll_fills(inner);
         book_adapter_->poll_fills(inner);
 
-        // Fast path — no latency configured, pass fills through.
+        // Fast path - no latency configured, pass fills through.
         if (!latency_model_) {
             if (inner.empty()) return false;
             for (auto& f : inner) out.push_back(std::move(f));
@@ -89,7 +89,7 @@ public:
 
         // Buffer each fill with its release_ts = fill_ts + per-order
         // latency sampled at submit time. The fill's own timestamp is
-        // left alone — it records when the book matched; release_ts
+        // left alone - it records when the book matched; release_ts
         // records when the engine can see it.
         for (auto& f : inner) {
             auto it = order_latencies_.find(f.get_order_id());
@@ -190,6 +190,11 @@ public:
 
         book_adapter_->set_mid_price(mid);
         paper_->set_last_price(mid);
+    }
+
+    void set_l2_seeded(bool seeded) override
+    {
+        if (book_adapter_) book_adapter_->set_l2_seeded(seeded);
     }
 
 private:

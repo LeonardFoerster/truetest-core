@@ -19,12 +19,12 @@ bool BinaryCacheSource::load_data(std::shared_ptr<data_handler> handler) {
         ifs.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
         if (!ifs || hdr.magic[0] != 'T' || hdr.magic[1] != 'T' ||
             hdr.magic[2] != 'B' || hdr.magic[3] != 'C') {
-            std::cerr << "Cache file has invalid magic — deleting stale cache.\n";
+            std::cerr << "Cache file has invalid magic - deleting stale cache.\n";
             ifs.close();
             std::filesystem::remove(cache_path_);
         } else if (hdr.version != 1) {
             std::cerr << "Cache file version " << hdr.version
-                      << " is not supported (expected 1) — deleting stale cache.\n";
+                      << " is not supported (expected 1) - deleting stale cache.\n";
             ifs.close();
             std::filesystem::remove(cache_path_);
         } else {
@@ -34,7 +34,7 @@ bool BinaryCacheSource::load_data(std::shared_ptr<data_handler> handler) {
 
             uint64_t computed_crc = crc64_update(0, payload_str.data(), payload_str.size());
             if (computed_crc != hdr.crc64) {
-                std::cerr << "Cache file checksum mismatch — deleting corrupt cache.\n";
+                std::cerr << "Cache file checksum mismatch - deleting corrupt cache.\n";
                 ifs.close();
                 std::filesystem::remove(cache_path_);
             } else {

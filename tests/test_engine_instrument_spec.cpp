@@ -59,7 +59,7 @@ TEST(EngineInstrumentSpec, QuantizesLimitPriceAndQty)
     SilenceCout quiet;
     auto dh = make_flat_bars(10);
     auto ob = std::make_shared<orderbook>();
-    // Strategy asks for price 100.1234 qty 0.00017 — both off-grid.
+    // Strategy asks for price 100.1234 qty 0.00017 - both off-grid.
     auto strat = std::make_shared<OneShotLimitStrategy>(100.1234, 0.00017);
 
     MarketMaker mm;
@@ -87,7 +87,7 @@ TEST(EngineInstrumentSpec, QuantizesLimitPriceAndQty)
     // Recover the filter outcome from trades (if fill occurred) or via slippage.
     // The check: quantize_price_to_tick(100.1234, 0.05) = 100.10; floor qty to 0.0001
     // Nothing may have matched at 100.10 (MM seeds around 100), but order should
-    // not be rejected — total_orders == 1 above proves routing happened.
+    // not be rejected - total_orders == 1 above proves routing happened.
     SUCCEED();
 }
 
@@ -96,7 +96,7 @@ TEST(EngineInstrumentSpec, RejectsBelowMinQty)
     SilenceCout quiet;
     auto dh = make_flat_bars(10);
     auto ob = std::make_shared<orderbook>();
-    // Ask for qty 0.0005 — will floor to 0 under lot=0.001.
+    // Ask for qty 0.0005 - will floor to 0 under lot=0.001.
     auto strat = std::make_shared<OneShotLimitStrategy>(100.0, 0.0005);
 
     MarketMaker mm;
@@ -128,7 +128,7 @@ TEST(EngineInstrumentSpec, RejectsBelowMinNotional)
     SilenceCout quiet;
     auto dh = make_flat_bars(10);
     auto ob = std::make_shared<orderbook>();
-    // qty 0.01 * price 100 = 1 < min_notional 5 → reject.
+    // qty 0.01 * price 100 = 1 < min_notional 5 -> reject.
     auto strat = std::make_shared<OneShotLimitStrategy>(100.0, 0.01);
 
     MarketMaker mm;

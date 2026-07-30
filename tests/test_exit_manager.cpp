@@ -51,7 +51,7 @@ TEST(ExitManager, PendingOnlyFiresAfterOpenerFill)
     ExitManager m;
     m.register_pending(make_long_intent("s", "X", 42, /*sl=*/90.0, /*tp=*/110.0));
 
-    // Before the opener fills, no price event can trigger — the intent
+    // Before the opener fills, no price event can trigger - the intent
     // is pending, not armed.
     auto r = m.on_price("X", 80.0, t0);
     EXPECT_TRUE(r.empty());
@@ -69,17 +69,17 @@ TEST(ExitManager, StopLossFiresAtOrBelowThresholdAndDisarms)
     m.register_pending(make_long_intent("s", "X", 1, /*sl=*/95.0, /*tp=*/110.0));
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 2.0, 100.0));
 
-    // Above SL — no fire.
+    // Above SL - no fire.
     EXPECT_TRUE(m.on_price("X", 96.0, t0).empty());
 
-    // At SL — fire, market sell, correct qty.
+    // At SL - fire, market sell, correct qty.
     auto r = m.on_price("X", 95.0, t0);
     ASSERT_FALSE(r.empty());
     EXPECT_EQ(r[0].get_symbol(), "X");
     EXPECT_EQ(r[0].get_side(), order_side::sell);
     EXPECT_EQ(r[0].get_order_type(), order_type::market);
     EXPECT_DOUBLE_EQ(r[0].get_quantity(), 2.0);  // from opener fill qty, not intent qty
-    // Second tick at the same price shouldn't re-fire — the intent is
+    // Second tick at the same price shouldn't re-fire - the intent is
     // gone after trigger.
     EXPECT_TRUE(m.on_price("X", 95.0, t0).empty());
     EXPECT_EQ(m.armed_count(), 0u);
@@ -114,8 +114,8 @@ TEST(ExitManager, GapPastSlFillsAtNextObservedPriceNotAtSl)
 
 TEST(ExitManager, TrailingStopRaisesSlOnFavorableTicks)
 {
-    // 1% trailing: entry 100, best=105 → trailed SL = 103.95.
-    // Then price drops to 103.9 → SL fires at 103.9, not original 95.
+    // 1% trailing: entry 100, best=105 -> trailed SL = 103.95.
+    // Then price drops to 103.9 -> SL fires at 103.9, not original 95.
     ExitManager m;
     exit_intent ei = make_long_intent("s", "X", 1, /*sl=*/95.0, std::nullopt);
     ei.trailing_pct = 0.01;
@@ -174,6 +174,42 @@ TEST(ExitManager, FillBindsToActualOpenerPriceAndQty)
     EXPECT_DOUBLE_EQ(r[0].get_quantity(), 0.6);
 }
 
+TEST(ExitManager, EntryRelativeBracketsRebaseOnFillSlippage)
+{
+    // Intended entry 100, SL 98 ($2 risk), TP 106. Fill at 100.5 must
+    // shift both levels by +0.5 → SL 98.5, TP 106.5.
+    ExitManager m;
+    exit_intent ei = make_long_intent("s", "X", 1, /*sl=*/98.0, /*tp=*/106.0, /*qty=*/1.0);
+    ei.reference_entry = 100.0;
+    m.register_pending(std::move(ei));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.5));
+
+    // Above rebased SL (98.5): still armed.
+    auto miss = m.on_price("X", 98.6, t0);
+    EXPECT_TRUE(miss.empty());
+    EXPECT_EQ(m.armed_count(), 1u);
+
+    // At rebased SL: long fires when px <= stop.
+    // Without rebase this would still be above the old SL of 98.0.
+    auto hit = m.on_price("X", 98.5, t0);
+    ASSERT_FALSE(hit.empty());
+    EXPECT_EQ(m.armed_count(), 0u);
+}
+
+TEST(ExitManager, AbsoluteStructureStopDoesNotRebaseWithoutReference)
+{
+    // Absolute structure SL stays put when reference_entry is unset —
+    // used for consol-low / swing stops that are market levels.
+    ExitManager m;
+    exit_intent ei = make_long_intent("s", "X", 1, /*sl=*/98.0, std::nullopt, /*qty=*/1.0);
+    // reference_entry deliberately left unset
+    m.register_pending(std::move(ei));
+    m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.5));
+
+    auto hit = m.on_price("X", 98.0, t0);
+    ASSERT_FALSE(hit.empty());
+}
+
 TEST(ExitManager, MultipleStrategiesOnSameSymbolKeyIndependently)
 {
     // Two strategies both long X with different stops; canceling one
@@ -185,7 +221,7 @@ TEST(ExitManager, MultipleStrategiesOnSameSymbolKeyIndependently)
     m.on_fill(make_opener_fill(2, "X", order_side::buy, 1.0, 100.0));
     EXPECT_EQ(m.armed_count(), 2u);
 
-    // 93: between a.sl and b.sl — only a should fire.
+    // 93: between a.sl and b.sl - only a should fire.
     auto r = m.on_price("X", 93.0, t0);
     ASSERT_FALSE(r.empty());
     EXPECT_EQ(m.armed_count(), 1u);
@@ -244,29 +280,34 @@ TEST(ExitManager, PartialExit_TP1FiresWithoutAffectingTP2OrSL)
     m.register_pending(make(1.0, 90.0, std::nullopt));    // SL
     m.on_fill(make_opener_fill(42, "X", order_side::buy, 10.0, 100.0));
 
-    // Touch 110 — TP1 fires, closing 5 units. TP2 and SL remain armed.
+    // Touch 110 - TP1 fires, closing 5 units. TP2 and SL remain armed.
     auto r1 = m.on_price("X", 110.0, t0);
     ASSERT_FALSE(r1.empty());
     EXPECT_NEAR(r1[0].get_quantity(), 5.0, 1e-9);
     EXPECT_EQ(m.armed_count(), 2u);
 
-    // Touch 120 — TP2 fires, closing 3 units. SL remains.
+    fill_event tp1_fill(t0, "X", 900, order_side::sell, 5.0, 110.0,
+                        /*commission=*/0.0, /*remaining=*/0.0,
+                        /*fill_id=*/1, "s", 42);
+    m.on_fill(tp1_fill, 42);
+    EXPECT_EQ(m.armed_count(), 2u);
+
+    // Touch 120 - TP2 fires, closing 3 units. SL remains.
     auto r2 = m.on_price("X", 120.0, t0);
     ASSERT_FALSE(r2.empty());
     EXPECT_NEAR(r2[0].get_quantity(), 3.0, 1e-9);
     EXPECT_EQ(m.armed_count(), 1u);
 
-    // Crash to 89 — SL fires for the full 10 units (its own fraction=1.0
-    // binds to opener_qty, independent of earlier fires).
+    // Crash to 89 - SL can only close the remaining 2 units after TP1 and TP2.
     auto r3 = m.on_price("X", 89.0, t0);
     ASSERT_FALSE(r3.empty());
-    EXPECT_NEAR(r3[0].get_quantity(), 10.0, 1e-9);
+    EXPECT_NEAR(r3[0].get_quantity(), 2.0, 1e-9);
     EXPECT_EQ(m.armed_count(), 0u);
 }
 
 TEST(ExitManager, PartialExit_DefaultFractionIsFullClose)
 {
-    // No qty_fraction set → default 1.0 → close_qty = opener_qty.
+    // No qty_fraction set -> default 1.0 -> close_qty = opener_qty.
     ExitManager m;
     m.register_pending(make_long_intent("s", "X", 1, 90.0, 110.0, /*qty=*/10.0));
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 10.0, 100.0));
@@ -280,11 +321,11 @@ TEST(ExitManager, PartialExit_ClampsNegativeAndOutOfRangeFractions)
 {
     ExitManager m;
     auto bad = make_long_intent("s", "X", 1, 90.0, 110.0, 10.0);
-    bad.qty_fraction = -0.5;                   // nonsensical → treated as 1.0
+    bad.qty_fraction = -0.5;                   // nonsensical -> treated as 1.0
     m.register_pending(std::move(bad));
 
     auto too_big = make_long_intent("s", "Y", 2, 90.0, 110.0, 10.0);
-    too_big.qty_fraction = 1.5;                // > 1.0 → clamped to 1.0
+    too_big.qty_fraction = 1.5;                // > 1.0 -> clamped to 1.0
     m.register_pending(std::move(too_big));
 
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 10.0, 100.0));
@@ -321,7 +362,7 @@ TEST(ExitManager, PartialExit_CancelRemovesAllIntentsForKey)
 
 TEST(ExitManager, OnBar_LongSlFiresOnLowEvenWhenCloseRecovers)
 {
-    // Bar wicks below SL but closes above — on_price(close) would miss it,
+    // Bar wicks below SL but closes above - on_price(close) would miss it,
     // on_bar must catch it.
     ExitManager m;
     m.register_pending(make_long_intent("s", "X", 1, /*sl=*/95.0, /*tp=*/110.0));
@@ -507,7 +548,7 @@ TEST(ExitManagerAdapter, EmptyHandlesSkipsExchangeMap)
 {
     ExitManager m;
     auto fake = std::make_shared<FakeAdapter>();
-    // place returns empty handles → adapter declined (e.g. only stop_market
+    // place returns empty handles -> adapter declined (e.g. only stop_market
     // available but intent had both SL+TP). Engine-side eval still runs.
     m.set_bracket_adapter(fake);
 
@@ -594,7 +635,7 @@ TEST(ExitManagerAdapter, RehydrateInstallsArmedAndVenueState)
     EXPECT_EQ(m.opener_for_exchange_order("sl-r"), 555u);
     EXPECT_EQ(m.opener_for_exchange_order("tp-r"), 555u);
 
-    // Now a price tick crosses SL → ExitManager fires AND cancels
+    // Now a price tick crosses SL -> ExitManager fires AND cancels
     // venue-side via the adapter (defense in depth: even if Binance
     // already filled the OCO, our DELETE is idempotent).
     auto r = m.on_price("X", 94.0, t0);
@@ -614,7 +655,7 @@ TEST(ExitManagerAdapter, RehydrateRejectsEmptyHandlesOrZeroOpener)
     EXPECT_EQ(m.armed_count(), 0u);
 
     bad.opener_order_id = 1;
-    bad.handles = {};                  // empty handles → adapter declined
+    bad.handles = {};                  // empty handles -> adapter declined
     m.rehydrate(bad);
     EXPECT_EQ(m.armed_count(), 0u);
 }
@@ -647,7 +688,7 @@ TEST(ExitManager, OpenersFor_TracksPendingAndArmed)
     m.on_fill(make_opener_fill(1, "X", order_side::buy, 1.0, 100.0));
     EXPECT_EQ(m.openers_for("s", "X"), 2u);  // promoted, still live
 
-    // Trigger — opener 1's intent fires and is untracked.
+    // Trigger - opener 1's intent fires and is untracked.
     auto r = m.on_price("X", 95.0, t0);
     ASSERT_FALSE(r.empty());
     EXPECT_EQ(m.openers_for("s", "X"), 1u);

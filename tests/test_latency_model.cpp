@@ -13,7 +13,7 @@ TEST(FixedLatencyModel, ReturnsConstant)
     FixedLatencyModel m(latency_duration(500), latency_duration(100));
     EXPECT_EQ(m.get_order_latency().count(), 500);
     EXPECT_EQ(m.get_market_data_latency().count(), 100);
-    // Call again — should be identical
+    // Call again - should be identical
     EXPECT_EQ(m.get_order_latency().count(), 500);
     EXPECT_EQ(m.get_market_data_latency().count(), 100);
 }

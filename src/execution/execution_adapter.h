@@ -6,6 +6,7 @@
 #include "fee_model.h"
 #include "impact_model.h"
 #include "latency_model.h"
+#include "async_support.h"
 
 #include <chrono>
 #include <cmath>
@@ -63,6 +64,30 @@ public:
     virtual std::size_t queue_submitted_with_queue() const { return 0; }
     virtual std::size_t queue_filled_after_drain()   const { return 0; }
     virtual std::size_t queue_blocked_at_eos()       const { return 0; }
+
+    // --- Capability / adapter kind queries (added to eliminate ad-hoc
+    // dynamic_cast<ConcreteAdapter*> proliferation in engine/router).
+    // All have cheap default implementations.
+
+    // True for live ExecutionBridge adapters that perform async submit/cancel
+    // over the wire and report results via poll_submit_results + synth meta.
+    virtual bool supports_async_submit() const { return false; }
+
+    // Optional hook for LocalBookAdapter (and QueueAware in hybrid) when the
+    // symbol carries real L2 depth from the venue (shadow mode). Default no-op.
+    // Used to suppress bar-spread adjustments and mark seeded state.
+    virtual void set_l2_seeded(bool /*seeded*/) {}
+
+    // Last transient error string. Used by dashboard for the "bridge" row.
+    // Bridge overrides to surface transport / rate-limiter / submit errors.
+    // Return by const ref to be compatible with existing implementations
+    // (e.g. BinanceExecutor).
+    virtual const std::string& last_error() const { static const std::string empty{}; return empty; }
+
+    // Capability query returning the narrow async support interface when
+    // present. Preferred over dynamic_cast<IAsyncSubmitSupport*>.
+    // Callers: engine ctor wiring for unknown-fill handler, drain paths.
+    virtual IAsyncSubmitSupport* get_async_support() { return nullptr; }
 };
 
 class LocalBookAdapter : public IExecutionAdapter
@@ -88,10 +113,10 @@ public:
         , impact_model_(std::move(impact_model))
         , walked_book_impact_(walked_book_impact) {}
 
-    void set_mid_price(double price) { mid_price_ = price; }
+    void set_mid_price(double price) override { mid_price_ = price; }
     // Symbol carries real L2 depth — enables the walked-book VWAP
     // reference for market orders (walked_book_impact).
-    void set_l2_seeded(bool seeded) { l2_seeded_ = seeded; }
+    void set_l2_seeded(bool seeded) override { l2_seeded_ = seeded; }
 
     void set_debug_fills(bool enabled, int budget = 20)
     {
@@ -130,7 +155,7 @@ public:
             // Walked-book impact: when L2 depth is real, the actual VWAP
             // of the levels we'd consume IS the honest reference price.
             // Suppresses bar-spread (already does on l2_seeded_) AND the
-            // parametric impact model — the walk doesn't compose with a
+            // parametric impact model - the walk doesn't compose with a
             // square-root guess on top of the same depth.
             if (walked_book_impact_ && l2_seeded_)
             {
@@ -139,7 +164,7 @@ public:
                     ref_price = vwap;
                     walked_used = true;
                 }
-                // vwap == 0 → insufficient depth, fall through to mid +
+                // vwap == 0 -> insufficient depth, fall through to mid +
                 // impact_model. Underpricing impact for a sweep is worse
                 // than admitting the parametric estimate.
             }
@@ -409,7 +434,7 @@ private:
     int debug_fills_left_ = 0;
     // Volume-weighted average price for walking `qty` through the
     // passive side of the book. Returns 0 when the book has fewer
-    // resting units than requested — the caller falls back to its
+    // resting units than requested - the caller falls back to its
     // parametric path because partial-walk VWAP systematically
     // understates impact for sweeps. Cost: a single
     // ob_->get_order_infos() snapshot per call; only invoked from

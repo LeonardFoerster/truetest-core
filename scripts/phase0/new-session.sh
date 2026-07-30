@@ -14,7 +14,8 @@
 #   3. A short pre-filled SOP checklist header you can print/sign
 #
 # This is the single source of truth for the Phase 0 command template
-# (see prod.md for the current ritual + command template; printable SOP planned in docs/operations/futures-phase0-operator-sop.md).
+# (see docs/governance/01-prod.md for the current ritual + command template;
+# printable SOP: docs/operations/01-futures-phase0-operator-sop.md).
 
 set -euo pipefail
 
@@ -109,6 +110,6 @@ EOP
 echo "=================================================================="
 echo "Next steps:"
 echo "  1. Copy the command above"
-echo "  2. Print/sign the SOP checklist (planned in docs/operations/futures-phase0-operator-sop.md; current details in prod.md)"
+echo "  2. Print/sign the SOP checklist: docs/operations/01-futures-phase0-operator-sop.md"
 echo "  3. After the run, run:  ./scripts/phase0/post-session.sh ${RUN_TAG}"
 echo "=================================================================="
