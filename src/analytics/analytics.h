@@ -252,12 +252,23 @@ private:
     void on_l2_snapshot(const l2_snapshot_event& ev);
     void on_l2_update(const l2_update_event& ev);
 
+    // Per-symbol inventory (multi-symbol books must not net across symbols).
+    struct symbol_book
+    {
+        double qty = 0.0;
+        double avg_entry = 0.0;
+        double open_commission = 0.0;
+        double last_mark = 0.0;
+        std::chrono::system_clock::time_point entry_time{};
+    };
+
+    double mark_to_market_equity() const;
+    bool any_position_open() const;
+    void update_peak_drawdown(double equity);
+
     double initial_cash_;
     double cash_;
-    double position_qty_ = 0.0;
-    double avg_entry_price_ = 0.0;
-    double total_open_commission_ = 0.0;
-    std::chrono::system_clock::time_point entry_time_;
+    std::unordered_map<std::string, symbol_book> books_;
 
     std::size_t rolling_window_;
     double risk_free_rate_;
@@ -274,6 +285,7 @@ private:
                              std::size_t& counter,
                              const equity_point& pt);
 
+    // Last observed price overall (buy-and-hold benchmark only).
     double last_close_ = 0.0;
     std::vector<equity_point> equity_curve_;
 
