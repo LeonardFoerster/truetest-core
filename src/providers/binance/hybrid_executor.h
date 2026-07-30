@@ -44,13 +44,11 @@ public:
         }
         else
         {
-            auto local = std::make_unique<LocalBookAdapter>(
+            book_adapter_ = std::make_unique<LocalBookAdapter>(
                 book_,
                 fee_model ? std::move(fee_model) : std::make_shared<ZeroFeeModel>(),
                 fill_model ? std::move(fill_model)
                            : std::make_shared<RealisticFillModel>(0.05, 0.8, 5.0));
-            local_book_adapter_ = local.get();
-            book_adapter_ = std::move(local);
         }
     }
 
@@ -184,9 +182,9 @@ public:
         }
 
         // Quotes that crossed a resting strategy limit are real maker fills
-        // for it — surface them instead of dropping the trade list.
-        if (local_book_adapter_ && !crossed.empty())
-            local_book_adapter_->on_book_trades(crossed, now_proxy_);
+        // for it — surface them via the inner adapter (LocalBookAdapter).
+        if (book_adapter_ && !crossed.empty())
+            book_adapter_->on_book_trades(crossed, now_proxy_);
 
         book_adapter_->set_mid_price(mid);
         paper_->set_last_price(mid);
@@ -195,6 +193,25 @@ public:
     void set_l2_seeded(bool seeded) override
     {
         if (book_adapter_) book_adapter_->set_l2_seeded(seeded);
+    }
+
+    // Engine deliver_mm / bar-sweep paths call these via IExecutionAdapter
+    // (no dynamic_cast to LocalBookAdapter). Forward to the inner paper
+    // book adapter so hybrid-registered symbols get the same maker fills.
+    void on_book_trades(const trades& trs,
+                        std::chrono::system_clock::time_point ts) override
+    {
+        if (book_adapter_)
+            book_adapter_->on_book_trades(trs, ts);
+    }
+
+    bool sweep_resting_range(const std::string& symbol,
+                             double low, double high,
+                             std::chrono::system_clock::time_point ts) override
+    {
+        return book_adapter_
+            ? book_adapter_->sweep_resting_range(symbol, low, high, ts)
+            : false;
     }
 
 private:
@@ -206,9 +223,6 @@ private:
     std::shared_ptr<BinanceExecutor> paper_;
     std::shared_ptr<orderbook> book_;
     std::unique_ptr<IExecutionAdapter> book_adapter_;
-    // Non-owning view of book_adapter_ when it is a LocalBookAdapter —
-    // needed to route re-seed crossings to its resting-order tracking.
-    LocalBookAdapter* local_book_adapter_ = nullptr;
     // Our own synthetic quote ids, so re-seeding cancels only these.
     std::vector<uint64_t> quote_ids_;
     double qty_scale_ = 1e8;
