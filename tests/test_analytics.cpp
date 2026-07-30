@@ -663,10 +663,13 @@ TEST(Analytics, MultiSymbol_IndependentInventoryAndEquity)
 
 // risk_view().equity must be usable for max_position_pct_of_equity from t0,
 // not only after a funding event (was stuck at 0 and fail-opened).
+// risk_view equity stays 0 until the first mark (market/tick/fill), then
+// tracks cash + multi-symbol mark-to-market. Matches master residual-risks
+// semantics so pre-market risk does not pretend MTM already ran.
 TEST(Analytics, RiskViewEquity_SeededAndUpdatedOnMarket)
 {
     Analytics a(100000.0);
-    EXPECT_NEAR(a.risk_view().equity, 100000.0, 1e-9);
+    EXPECT_NEAR(a.risk_view().equity, 0.0, 1e-9);
 
     auto m = std::make_shared<market_event>(epoch_ms(1), "X",
                                             100.0, 100.0, 100.0, 100.0);
@@ -685,5 +688,5 @@ TEST(Analytics, RiskViewEquity_SeededAndUpdatedOnMarket)
     EXPECT_NEAR(a.risk_view().equity, 100100.0, 1e-6);
 
     a.reset(50000.0);
-    EXPECT_NEAR(a.risk_view().equity, 50000.0, 1e-9);
+    EXPECT_NEAR(a.risk_view().equity, 0.0, 1e-9);
 }

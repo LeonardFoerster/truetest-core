@@ -13,9 +13,14 @@
 static std::string resolve_engine_binary(const std::string& binary)
 {
     const char* candidates[] = {
+        "./out/build/linux-providers-questdb/",
         "./out/build/linux-tests/",
-        "./build/",
+        "./out/build/linux-bitget/",
+        "./out/build/linux-bybit/",
+        "./out/build/linux-gate/",
+        "./out/build/linux-binance-questdb/",
         "./out/build/linux-release-native/",
+        "./build/",
     };
     std::string best;
     std::time_t best_mtime = 0;
@@ -293,7 +298,7 @@ TEST(CLI, FillFadeRequiresFillProb)
 {
     std::string out;
     int rc = run_truetest(
-        "--provider local --path market_data.csv "
+        "--provider local --path data/market_data.csv "
         "--strategy sma --mode backtest --fill-fade 0.1", out);
     EXPECT_NE(rc, 0);
     EXPECT_NE(out.find("requires --fill-prob"), std::string::npos);
@@ -305,8 +310,8 @@ TEST(CLI, RealisticFillsDeprecationWarning)
 {
     std::string out;
     int rc = run_truetest(
-        "--provider local --path market_data.csv --strategy sma "
-        "--mode backtest --realistic-fills --status-format off", out);
+        "--provider local --path data/market_data.csv --strategy sma "
+        "--mode backtest --realistic-fills --status-format off --no-tui", out);
     EXPECT_EQ(rc, 0);
     EXPECT_NE(out.find("deprecated"), std::string::npos);
 }
@@ -315,8 +320,8 @@ TEST(CLI, BarSpreadBpsDeprecationWarning)
 {
     std::string out;
     int rc = run_truetest(
-        "--provider local --path market_data.csv --strategy sma "
-        "--mode backtest --bar-spread-bps 10 --status-format off", out);
+        "--provider local --path data/market_data.csv --strategy sma "
+        "--mode backtest --bar-spread-bps 10 --status-format off --no-tui", out);
     EXPECT_EQ(rc, 0);
     EXPECT_NE(out.find("no longer affects recorded fill prices"), std::string::npos);
 }
