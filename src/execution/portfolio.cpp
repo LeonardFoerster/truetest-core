@@ -225,6 +225,21 @@ double portfolio::get_equity(double last_price) const
     return equity;
 }
 
+double portfolio::get_equity(
+    const std::unordered_map<std::string, double>& marks_by_symbol) const
+{
+    double equity = cash_;
+    for (const auto& [sym, pos] : positions_)
+    {
+        if (std::abs(pos.qty) <= 1e-12)
+            continue;
+        auto it = marks_by_symbol.find(sym);
+        if (it != marks_by_symbol.end())
+            equity += pos.qty * it->second;
+    }
+    return equity;
+}
+
 void portfolio::print_summary() const
 {
     std::cout << "Starting Balance: " << initial_balance_ << std::endl;

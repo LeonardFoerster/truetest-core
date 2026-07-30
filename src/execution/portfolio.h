@@ -73,7 +73,11 @@ public:
     std::size_t get_total_fills() const { return total_fills_; }
     double get_cash() const { return cash_; }
     double get_initial_balance() const { return initial_balance_; }
+    // Marks every open symbol with the same last_price (single-symbol path).
     double get_equity(double last_price) const;
+    // Per-symbol marks. Missing marks contribute 0 MTM for that symbol
+    // (cash still included). Prefer this for multi-symbol books.
+    double get_equity(const std::unordered_map<std::string, double>& marks_by_symbol) const;
     double get_total_funding_pnl() const { return total_funding_pnl_; }
 
     const std::unordered_map<std::string, position>& get_positions() const { return positions_; }
