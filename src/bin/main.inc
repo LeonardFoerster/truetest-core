@@ -1707,7 +1707,7 @@ static int run_provider_mode(const cli_options& o)
             std::cerr << "    Example: --provider bitget-futures --symbol BTCUSDT "
                          "--stream trade\n";
         else if (o.provider_name == "local")
-            std::cerr << "    Example: --provider local --path market_data.csv\n";
+            std::cerr << "    Example: --provider local --path data/market_data.csv\n";
         else if (o.provider_name == "synthetic" || o.provider_name == "montecarlo")
             std::cerr << "    Example: --provider synthetic --mc-params \"mu=0.0,sigma=0.65,n_steps=2000\"\n";
         else
