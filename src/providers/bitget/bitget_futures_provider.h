@@ -3,8 +3,8 @@
 
 // Bitget UTA v3 USDT-M futures provider.
 // Public market data + HybridExecutor / TradeTapeShadowAdapter for non-live.
-// Live: REST clock/instruments/one-way gate + ExecutionBridge + reconciler.
-// Kill-switch / DMS deferred to Task 10 (nullptr → engine Noop).
+// Live: REST clock/instruments/one-way gate + ExecutionBridge + reconciler
+// + kill-switch (cancel-symbol-order + close-positions) + optional DMS.
 
 #include "engine/engine_config.h"
 #include "execution/execution_bridge.h"
@@ -13,6 +13,8 @@
 #include "orderbook/orderbook.h"
 #include "providers/bitget/bitget_combined_transport.h"
 #include "providers/bitget/bitget_endpoints.h"
+#include "providers/bitget/bitget_futures_dead_mans_switch.h"
+#include "providers/bitget/bitget_futures_kill_switch.h"
 #include "providers/bitget/bitget_futures_order_encoder.h"
 #include "providers/bitget/bitget_futures_reconciler.h"
 #include "providers/bitget/bitget_futures_user_data_parser.h"
@@ -246,7 +248,7 @@ public:
     void set_min_liquidation_distance_pct(double v)  { rc_cfg_.min_liquidation_distance_pct = v; }
     void set_maintenance_margin_pct(double v)        { rc_cfg_.maintenance_margin_pct = v; }
 
-    // DMS knobs stored for Task 10; live open warns if countdown>0.
+    // DMS knobs: countdown_ms > 0 arms UTA countdown-cancel-all on live open.
     void set_dead_man_countdown_ms(int64_t v)        { dead_man_countdown_ms_ = v; }
     void set_dead_man_heartbeat_ms(int64_t v)        { dead_man_heartbeat_ms_ = v; }
     void set_dms_attempt_position_close(bool v)      { dms_attempt_position_close_ = v; }
@@ -378,6 +380,16 @@ public:
 
     void close() override
     {
+        // Stop heartbeat first so it cannot refresh while we disarm.
+        // Disarm is best-effort; failure leaves the server timer to expire.
+        if (dms_)
+        {
+            dms_->stop();
+            if (!dms_->disarm())
+                std::cerr << "BitgetFuturesProvider: dead-man's-switch "
+                             "disarm failed; relying on countdown to "
+                             "expire server-side.\n";
+        }
         if (bridge_)
             bridge_->close();
         if (bitget_private_ws_)
@@ -409,8 +421,23 @@ public:
 
     std::shared_ptr<IReconciler> get_reconciler() override { return reconciler_; }
 
-    // Task 10: kill-switch + DMS. Engine installs Noop when nullptr.
-    std::shared_ptr<IKillSwitch> get_kill_switch() override { return nullptr; }
+    std::shared_ptr<IKillSwitch> get_kill_switch() override { return kill_switch_; }
+
+    std::vector<liveness_source> get_liveness_sources() override
+    {
+        std::vector<liveness_source> out;
+        if (dms_)
+        {
+            // Deadline = 3 × heartbeat: tolerate one missed cycle before
+            // halt. Matches Binance futures DMS wiring.
+            liveness_source s;
+            s.name = "bitget-futures-dms-heartbeat";
+            s.last_alive_ms = &dms_->liveness_ts();
+            s.deadline_ms = dms_->heartbeat_interval_ms() * 3;
+            out.push_back(std::move(s));
+        }
+        return out;
+    }
 
     std::optional<instrument_spec>
     get_instrument(const std::string& symbol) const override
@@ -492,6 +519,8 @@ private:
     std::shared_ptr<bitget::ShortClientOidMinter> minter_;
     std::shared_ptr<TokenBucketRateLimiter> order_rate_limiter_;
     std::shared_ptr<BitgetFuturesReconciler> reconciler_;
+    std::shared_ptr<BitgetFuturesKillSwitch> kill_switch_;
+    std::shared_ptr<BitgetFuturesDeadMansSwitch> dms_;
     std::shared_ptr<BitgetPrivateWsTransport> bitget_private_ws_;
     std::optional<instrument_spec> instrument_spec_;
 
@@ -630,6 +659,9 @@ private:
         reconciler_ = std::make_shared<BitgetFuturesReconciler>(
             rest_, upper(symbol_), category_, endpoints_.is_demo);
 
+        kill_switch_ = make_bitget_futures_kill_switch(
+            rest_, category_, upper(symbol_));
+
         ExecutionBridge::deps d;
         d.order_tx = make_bitget_rest_order_transport(rest_);
         bitget_private_ws_ = std::make_shared<BitgetPrivateWsTransport>(
@@ -659,16 +691,71 @@ private:
         }
         executor_ = bridge_;
 
-        // Kill-switch / DMS: Task 10. Allow open with loud warning when
-        // countdown is configured so Task 10 can wire arm cleanly.
+        // Dead-man's switch — last to arm, first to disarm. Venue countdown
+        // brackets live order routing so a crash after bridge open is still
+        // protected. Account-wide cancel caveat is logged inside DMS ctor.
         if (dead_man_countdown_ms_ > 0)
         {
-            std::cerr << "  BitgetFuturesProvider: WARNING — "
-                         "dead_man_countdown_ms=" << dead_man_countdown_ms_
-                      << " but DMS is deferred to Task 10; not armed\n";
+            const int64_t hb = dead_man_heartbeat_ms_ > 0
+                ? dead_man_heartbeat_ms_
+                : dead_man_countdown_ms_ / 3;
+
+            BitgetFuturesDeadMansSwitch::close_position_fn closer = nullptr;
+            if (dms_attempt_position_close_)
+            {
+                closer = [rest = rest_,
+                          cat = category_,
+                          sym = upper(symbol_)]()
+                {
+                    if (!rest) return;
+                    std::string body = "{\"category\":\"";
+                    body.append(cat);
+                    body.append("\",\"symbol\":\"");
+                    body.append(sym);
+                    body.append("\"}");
+                    auto r = rest->post_json(
+                        "/api/v3/trade/close-positions", body);
+                    if (r.status >= 200 && r.status < 300
+                        && (r.business_ok
+                            || BitgetFuturesKillSwitch::is_close_noop_code(
+                                   bitget::extract_business_code(r.body))))
+                    {
+                        std::cerr << "  [DMS-CLOSE] close-positions OK "
+                                  << sym << " category=" << cat << "\n";
+                    }
+                    else
+                    {
+                        std::cerr << "  [DMS-CLOSE] close-positions failed HTTP "
+                                  << r.status << " "
+                                  << bitget::truncate_for_log(r.body, 120)
+                                  << "\n";
+                    }
+                };
+            }
+
+            dms_ = make_bitget_futures_dead_mans_switch(
+                rest_, dead_man_countdown_ms_, hb,
+                /*attempt_close=*/dms_attempt_position_close_,
+                /*closer=*/std::move(closer));
+            if (!dms_->start())
+            {
+                std::cerr << "BitgetFuturesProvider: dead-man's switch "
+                             "failed to arm — refusing to go live.\n";
+                bridge_->close();
+                return false;
+            }
+            std::cerr << "  BitgetFuturesProvider: dead-man's switch armed "
+                         "(countdown=" << dms_->countdown_sec()
+                      << "s, heartbeat=" << dms_->heartbeat_interval_ms()
+                      << "ms";
+            if (dms_attempt_position_close_)
+                std::cerr << ", position-close=ON";
+            std::cerr << ")\n";
         }
+
         std::cerr << "  BitgetFuturesProvider: live path open "
-                     "(kill-switch/DMS = Task 10)\n";
+                     "(kill-switch ready"
+                  << (dms_ ? ", DMS armed" : ", DMS off") << ")\n";
         return true;
     }
 
