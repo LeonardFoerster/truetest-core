@@ -172,6 +172,11 @@ public:
     std::size_t size() const;
     orderbook_lvl_infos get_order_infos() const;
 
+    // Zero-alloc top-of-book peek. Returns true only when both sides have a
+    // non-empty front level with total_qty > 0. Matches the first levels that
+    // get_order_infos() would expose without building vectors (hot path).
+    bool best_bid_ask(Price& bid, Price& ask) const;
+
     void apply_l2_snapshot(const std::pair<Price, quantity>* bids, std::size_t bid_count,
                            const std::pair<Price, quantity>* asks, std::size_t ask_count);
 

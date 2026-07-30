@@ -1915,14 +1915,14 @@ void engine::apply_l2_update(const std::string& symbol,
     refresh_top_of_book_atomics(*ob);
 
     // Keep mark warm from L2 book BBO after incremental updates.
+    // Zero-alloc: do NOT call get_order_infos() here — that builds full
+    // level vectors per update and blows hotpath L2 burst baselines.
     {
-        const auto infos = ob->get_order_infos();
-        const auto& bb = infos.get_bids();
-        const auto& ba = infos.get_asks();
-        if (!bb.empty() && !ba.empty())
+        Price bid_px{}, ask_px{};
+        if (ob->best_bid_ask(bid_px, ask_px))
         {
-            const double bid = bb.front().price_.to_double();
-            const double ask = ba.front().price_.to_double();
+            const double bid = bid_px.to_double();
+            const double ask = ask_px.to_double();
             if (bid > 0.0 && ask > bid)
                 note_mark_price(symbol, 0.5 * (bid + ask));
         }

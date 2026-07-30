@@ -388,6 +388,35 @@ orderbook_lvl_infos orderbook::get_order_infos() const
     return orderbook_lvl_infos{bid_infos, ask_infos};
 }
 
+bool orderbook::best_bid_ask(Price& bid, Price& ask) const
+{
+    // bid_levels_ are sorted descending, ask_levels_ ascending — front is BBO.
+    // Skip empty (zero-qty) shells at the front so we match get_order_infos().
+    const price_level* best_bid = nullptr;
+    for (const auto& lvl : bid_levels_)
+    {
+        if (lvl.total_qty > 0)
+        {
+            best_bid = &lvl;
+            break;
+        }
+    }
+    const price_level* best_ask = nullptr;
+    for (const auto& lvl : ask_levels_)
+    {
+        if (lvl.total_qty > 0)
+        {
+            best_ask = &lvl;
+            break;
+        }
+    }
+    if (!best_bid || !best_ask)
+        return false;
+    bid = best_bid->price;
+    ask = best_ask->price;
+    return true;
+}
+
 void orderbook::clear()
 {
     for (auto& [id, n] : order_map_)
