@@ -233,29 +233,13 @@ std::vector<order_event> ExitManager::on_bar(
         const double favorable = is_long ? high : low;
         const double adverse   = is_long ? low  : high;
 
-        if (is_long  && favorable > ai.best_price) ai.best_price = favorable;
-        if (!is_long && favorable < ai.best_price) ai.best_price = favorable;
-
-        if (ai.intent.trailing_pct)
-        {
-            double pct = *ai.intent.trailing_pct;
-            if (is_long)
-            {
-                double trailed = ai.best_price * (1.0 - pct);
-                double cur = ai.intent.stop_loss.value_or(0.0);
-                if (trailed > cur) ai.intent.stop_loss = trailed;
-            }
-            else
-            {
-                double trailed = ai.best_price * (1.0 + pct);
-                double cur = ai.intent.stop_loss.value_or(std::numeric_limits<double>::infinity());
-                if (trailed < cur) ai.intent.stop_loss = trailed;
-            }
-        }
-
         double fire_px = 0.0;
         bool fired = false;
 
+        // Evaluate SL/TP against levels armed BEFORE this bar's trail update.
+        // Updating trail from the same-bar high then firing SL on the low is
+        // look-ahead (assumes high preceded low). Tick path (on_price) still
+        // trails then checks — sequential prints are ordered.
         // SL takes precedence when both extremes cross in one bar - we can't
         // know intra-bar order so the worst case wins.
         if (ai.intent.stop_loss &&
@@ -278,7 +262,31 @@ std::vector<order_event> ExitManager::on_bar(
             fired = true;
         }
 
-        if (!fired) { ++it; continue; }
+        if (!fired)
+        {
+            // No fire this bar: advance MFE + trailing for the *next* bar only.
+            if (is_long  && favorable > ai.best_price) ai.best_price = favorable;
+            if (!is_long && favorable < ai.best_price) ai.best_price = favorable;
+
+            if (ai.intent.trailing_pct)
+            {
+                double pct = *ai.intent.trailing_pct;
+                if (is_long)
+                {
+                    double trailed = ai.best_price * (1.0 - pct);
+                    double cur = ai.intent.stop_loss.value_or(0.0);
+                    if (trailed > cur) ai.intent.stop_loss = trailed;
+                }
+                else
+                {
+                    double trailed = ai.best_price * (1.0 + pct);
+                    double cur = ai.intent.stop_loss.value_or(std::numeric_limits<double>::infinity());
+                    if (trailed < cur) ai.intent.stop_loss = trailed;
+                }
+            }
+            ++it;
+            continue;
+        }
 
         const double close_qty = consume_opener_qty(it->first, ai.intent.qty);
         if (!(close_qty > 0.0))
