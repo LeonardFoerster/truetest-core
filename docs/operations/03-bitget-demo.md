@@ -134,7 +134,7 @@ export TRUETEST_BITGET_API_PASSPHRASE=...
   --reconcile-tolerance-bps 5 \
   --dead-man-countdown-ms 30000 \
   --dead-man-heartbeat-ms 8000 \
-  --max-notional 50 --max-leverage 2 --min-liq-distance-pct 7 \
+  --max-notional 50 --max-leverage 2 --min-liq-distance-pct 0.07 \
   --max-daily-loss 5
 ```
 

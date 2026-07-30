@@ -69,7 +69,7 @@ Full authoritative details, Phase 0/1 gates, exact ritual, Go-Live table (9 rows
   --persist --run-tag p0_$(date +%Y%m%d_%H%M) \
   --reconcile-tolerance-bps 3 \
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
-  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \
+  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 0.07 \
   --max-daily-loss 80 --risk-unwind 0.4
 ```
 Status: 0/15 qualifying (see reports/phase0/PROGRESS.md + docs/governance/03-todo.md).

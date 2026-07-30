@@ -923,7 +923,7 @@ export KRAKEN_FUTURES_DEMO_SECRET=...
   --dead-man-heartbeat-ms 15000 \
   --max-notional 150 \
   --max-leverage 2.5 \
-  --min-liq-distance-pct 7 \
+  --min-liq-distance-pct 0.07 \
   --reconcile-tolerance-bps 3
 ```
 

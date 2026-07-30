@@ -751,7 +751,7 @@ Aktueller Freeze-Script-Pfad listet primär Binance-Dateien — bei Merge:
 | `host` / `port` / `rest_host` | nein | override | |
 | `max_notional_usdt` | nein | `150` | FuturesRiskCheck |
 | `max_leverage` | nein | `2.5` | |
-| `min_liquidation_distance_pct` | nein | `7` | |
+| `min_liquidation_distance_pct` | nein | `0.07` | |
 | `maintenance_margin_pct` | nein | | flat fallback |
 | `dead_man_countdown_ms` | live emp. | `30000` | → timeout_s |
 | `dead_man_heartbeat_ms` | nein | `8000` | |
@@ -899,7 +899,7 @@ export GATE_USER_ID=...
   --api-secret "$GATE_FUTURES_TESTNET_SECRET" \
   # user_id via config file or extended flag → provider_config["user_id"]
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
-  --max-notional 150 --max-leverage 2.5 --min-liq-distance-pct 7
+  --max-notional 150 --max-leverage 2.5 --min-liq-distance-pct 0.07
 ```
 
 ---

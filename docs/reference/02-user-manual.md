@@ -275,7 +275,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
     --api-secret $BINANCE_API_SECRET \
     --dead-man-countdown-ms 15000 \
     --max-notional 5000 \
-    --min-liq-distance-pct 1.5 \
+    --min-liq-distance-pct 0.015 \
     --initial-balance 5000 \
     --risk-unwind
 ```

@@ -61,7 +61,7 @@ Use `engine_live` only when intentionally testing signed testnet order paths. Us
   --persist --run-tag testnet_$(date -u +%Y%m%d_%H%M) \
   --reconcile-tolerance-bps 3 \
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
-  --max-notional 150 --max-leverage 2.5 --min-liq-distance-pct 7 \
+  --max-notional 150 --max-leverage 2.5 --min-liq-distance-pct 0.07 \
   --max-daily-loss 5 --risk-unwind 0.4
 ```
 
