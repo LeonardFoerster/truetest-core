@@ -275,8 +275,9 @@ private:
 
     // Bar variant: probes the bar's low/high so an intra-bar wick through
     // SL/TP fires the bracket. Tick paths keep the price-only overload.
+    // The open is needed for gap-aware anchored fire prices.
     bool evaluate_exits(const std::string& symbol,
-                        double low, double high, double close,
+                        double open, double low, double high, double close,
                         std::chrono::system_clock::time_point ts,
                         std::size_t& event_count,
                         std::int64_t recv_ns);
@@ -289,13 +290,44 @@ private:
 
     void unwind_positions(std::size_t& event_count);
 
+    // anchor_immediate: bracket fires (ExitManager closes) execute now
+    // against a book re-centered at order.get_price() — the SL/TP level or
+    // gap open computed within the trigger bar — instead of being deferred
+    // by execution_bar_delay to the next bar's open. Mirror of the native
+    // stop anchoring in check_pending_stops.
     bool route_order(order_event& order,
                      const std::chrono::system_clock::time_point& sim_time,
-                     std::size_t& event_count, bool& halt_requested);
+                     std::size_t& event_count, bool& halt_requested,
+                     bool anchor_immediate = false);
 
-    void check_pending_stops(double high, double low,
+    // Bar-mode traversal fills for resting strategy limits: a limit whose
+    // level lies inside the bar's [low, high] traded through intrabar even
+    // if the MM re-quote anchors (open/close/stop refs) never crossed it.
+    void sweep_resting_limits(const std::string& symbol,
+                              double low, double high,
+                              const std::chrono::system_clock::time_point& ts,
+                              std::size_t& event_count, bool& halt_requested);
+
+    // Stops trigger on the bar's high/low and fill anchored at the stop
+    // price (or the open when the bar gaps through). Tick callers pass
+    // open == high == low == tick price.
+    void check_pending_stops(double open, double high, double low,
                              const std::chrono::system_clock::time_point& sim_time,
                              std::size_t& event_count, bool& halt_requested);
+
+    // Canonical fill pipeline for one adapter's pending fills (poll +
+    // portfolio/analytics/exits/risk + publish). Returns false on a
+    // post-fill risk halt.
+    bool process_adapter_fills(const std::shared_ptr<IExecutionAdapter>& adapter,
+                               std::size_t& event_count, bool& halt_requested);
+
+    // Routes MarketMaker quote-update crossings via IExecutionAdapter::
+    // on_book_trades (LocalBookAdapter records fills; HybridExecutor
+    // forwards; live bridges no-op) so resting strategy limits fill when
+    // the seeded book moves through their level.
+    void deliver_mm_book_trades(const std::string& symbol, const trades& trs,
+                                const std::chrono::system_clock::time_point& ts,
+                                std::size_t& event_count, bool& halt_requested);
 
     void dispatch_extras_on_market(const market_event& mkt,
                                    const std::chrono::system_clock::time_point& ts,
@@ -465,9 +497,10 @@ public:
         return pause_all_.load(std::memory_order_acquire);
     }
 
-    // Flatten on demand: drains all open positions through the unwind
-    // path. Halts the engine afterwards (operator can resume by clearing
-    // the halt flag separately if desired).
+    // Flatten on demand: sets a one-shot flag; on the next market/tick
+    // event the engine drains open positions via unwind_positions.
+    // Does NOT call trigger_halt and does NOT clear halt_flag_ — halt
+    // remains write-once terminal (S3); recovery is process restart only.
     void request_flatten()
     {
         flatten_request_.store(true, std::memory_order_release);
@@ -539,6 +572,12 @@ public:
 
     const OrderTracker& get_order_tracker() const { return order_tracker_; }
 
+    // Prefer is_halted() for production reads. Mutable ref is retained for
+    // tests; production code must never clear halt mid-run (S3 terminal).
+    bool is_halted() const
+    {
+        return halt_flag_.load(std::memory_order_acquire);
+    }
     std::atomic<bool>& get_halt_flag() { return halt_flag_; }
 
     // Single thread-safe halt entry-point. Use this everywhere a halt is

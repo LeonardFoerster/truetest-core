@@ -27,6 +27,7 @@
 #include "data/tick_csv_data_source.h"
 #include "execution/fee_model.h"
 #include "execution/latency_model.h"
+#include "orderbook/fill_model.h"
 #include "execution/queue_position_model.h"
 #include "execution/queue_model.h"
 #include "execution/impact_model.h"
@@ -365,9 +366,17 @@ struct cli_options
     int order_latency_stddev_us = 0;
     double impact_k_bps = 0.0;
     double impact_adv = 0.0;
-    bool realistic_fills = false;
-    double bar_spread_bps = 0.0;
+    bool realistic_fills = false;     // deprecated, warn-noop
+    double bar_spread_bps = 0.0;      // deprecated, warn-noop
     bool walked_book_impact = false;
+    double fill_prob = 0.0;           // 0 = fill model off
+    double fill_fade = 0.0;
+    double fill_decay = 10.0;
+    int mm_levels = 10;
+    int mm_base_depth = 100;
+    double mm_spread_pct = 0.002;
+    double mm_vol_mult = 0.25;
+    double mm_max_spread_pct = 0.05;
     std::string queue_model = "none";
     std::string maker_queue_model = "none";
     std::vector<std::string> instrument_specs;
@@ -726,6 +735,14 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_bool("realistic_fills", o.realistic_fills);
     get_double("bar_spread_bps", o.bar_spread_bps);
     get_bool("walked_book_impact", o.walked_book_impact);
+    get_double("fill_prob", o.fill_prob);
+    get_double("fill_fade", o.fill_fade);
+    get_double("fill_decay", o.fill_decay);
+    get_int("mm_levels", o.mm_levels);
+    get_int("mm_base_depth", o.mm_base_depth);
+    get_double("mm_spread_pct", o.mm_spread_pct);
+    get_double("mm_vol_mult", o.mm_vol_mult);
+    get_double("mm_max_spread_pct", o.mm_max_spread_pct);
     get_str("queue_model", o.queue_model);
     get_str("maker_queue_model", o.maker_queue_model);
     get_str("output", o.output);
@@ -790,6 +807,14 @@ static void dump_config(const cli_options& o)
     j["realistic_fills"] = o.realistic_fills;
     j["bar_spread_bps"] = o.bar_spread_bps;
     j["walked_book_impact"] = o.walked_book_impact;
+    j["fill_prob"] = o.fill_prob;
+    j["fill_fade"] = o.fill_fade;
+    j["fill_decay"] = o.fill_decay;
+    j["mm_levels"] = o.mm_levels;
+    j["mm_base_depth"] = o.mm_base_depth;
+    j["mm_spread_pct"] = o.mm_spread_pct;
+    j["mm_vol_mult"] = o.mm_vol_mult;
+    j["mm_max_spread_pct"] = o.mm_max_spread_pct;
     j["queue_model"] = o.queue_model;
     j["maker_queue_model"] = o.maker_queue_model;
     j["risk"] = {
@@ -833,7 +858,8 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--spin-policy", o.spin_policy_str, "Worker spin policy: spin, yield, adaptive (default: adaptive)");
     app.add_option("--provider", o.provider_name,
                    "Provider name: local, binance, binance-futures, bitget, "
-                   "bitget-futures, synthetic");
+                   "bitget-futures, bybit, bybit-futures, gate, gate-futures, "
+                   "synthetic");
     app.add_option("--path", o.provider_path, "Data file path (for local provider)");
     app.add_option("--mc-params", o.mc_params, "Synthetic/Monte-Carlo params (e.g. \"mu=0.0,sigma=0.65,n_steps=5000\")");
     app.add_flag("--monte-carlo", o.monte_carlo, "Run Monte Carlo campaign (use with --mc-trials)");
@@ -1004,16 +1030,54 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "is set; 0 (default) disables.")
         ->default_val(0.0);
     app.add_flag("--realistic-fills", o.realistic_fills,
-                 "Record fills at the resting counterparty's price (one event per walked "
-                 "level) instead of the aggressor's mid×aggression markup. Auto-suppresses "
-                 "--bar-spread-bps. Default off - backtests stay byte-identical until set. "
-                 "Ignored in --mode live.");
+                 "DEPRECATED, no effect: passive-side fill pricing is always on — fills "
+                 "record the resting counterparty's price, one event per walked level. "
+                 "The flag is accepted with a warning so existing scripts keep running.");
     app.add_option("--bar-spread-bps", o.bar_spread_bps,
-                   "Calibrated full bid-ask in basis points charged to bar-mode market "
-                   "orders: reference price is shifted by ±half-spread before impact and "
-                   "aggression. Suppressed for symbols with real L2 depth and under "
-                   "--realistic-fills. 0 (default) = no shift. Ignored in --mode live.")
+                   "DEPRECATED, no effect: recorded fill prices always come from the "
+                   "resting book, so a parametric spread shift no longer applies. "
+                   "Calibrate --mm-spread-pct instead. Accepted with a warning.")
         ->default_val(0.0);
+    app.add_option("--fill-prob", o.fill_prob,
+                   "Base fill probability for limit orders at the mid (RealisticFillModel). "
+                   "Each limit submit is accepted with probability prob × exp(-decay × "
+                   "distance-from-mid); rejected submits never reach the book — models "
+                   "adverse selection / being skipped in the queue. 0 (default) = model "
+                   "off, perfect fills. Ignored in --mode live.")
+        ->default_val(0.0);
+    app.add_option("--fill-fade", o.fill_fade,
+                   "Fade rate: fraction shaved off every fill's quantity (applies to "
+                   "market fills too). Requires --fill-prob > 0. 0 (default) = no fade.")
+        ->default_val(0.0);
+    app.add_option("--fill-decay", o.fill_decay,
+                   "Exponential decay of fill probability with relative distance from "
+                   "mid. Only meaningful with --fill-prob > 0.")
+        ->default_val(10.0);
+    app.add_option("--mm-levels", o.mm_levels,
+                   "Synthetic MarketMaker book: price levels seeded per side in bar-mode "
+                   "backtests. The seeded book is the sole source of spread cost for "
+                   "taker fills — calibrate to the target market.")
+        ->default_val(10);
+    app.add_option("--mm-base-depth", o.mm_base_depth,
+                   "Synthetic MarketMaker book: depth at level 1 (base units); level i "
+                   "rests base_depth × i.")
+        ->default_val(100);
+    app.add_option("--mm-spread-pct", o.mm_spread_pct,
+                   "Synthetic MarketMaker book: per-level half-spread as a fraction "
+                   "(0.002 = 20 bps); level i rests at mid × (1 ± i × (spread_pct + "
+                   "vol × --mm-vol-mult)).")
+        ->default_val(0.002);
+    app.add_option("--mm-vol-mult", o.mm_vol_mult,
+                   "Synthetic MarketMaker book: multiplier widening the seeded spread "
+                   "with realized volatility over the trailing window. Real spreads run "
+                   "at a few percent OF bar vol; values > 1 inflate the book until "
+                   "nothing fills.")
+        ->default_val(0.25);
+    app.add_option("--mm-max-spread-pct", o.mm_max_spread_pct,
+                   "Cap on the vol-widened per-level half-spread (fraction). Prevents "
+                   "one large bar return (gap) from widening the seeded book beyond "
+                   "every crossing limit.")
+        ->default_val(0.05);
     app.add_flag("--walked-book-impact", o.walked_book_impact,
                  "On L2-seeded symbols, price market orders against the actual VWAP of "
                  "the levels they'd walk instead of mid + --impact-k-bps. Walked depth is "
@@ -1159,6 +1223,15 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--bar-spread-bps")) opts.bar_spread_bps = file_opts.bar_spread_bps;
     if (!was_set("--walked-book-impact"))
         opts.walked_book_impact = file_opts.walked_book_impact;
+    if (!was_set("--fill-prob")) opts.fill_prob = file_opts.fill_prob;
+    if (!was_set("--fill-fade")) opts.fill_fade = file_opts.fill_fade;
+    if (!was_set("--fill-decay")) opts.fill_decay = file_opts.fill_decay;
+    if (!was_set("--mm-levels")) opts.mm_levels = file_opts.mm_levels;
+    if (!was_set("--mm-base-depth")) opts.mm_base_depth = file_opts.mm_base_depth;
+    if (!was_set("--mm-spread-pct")) opts.mm_spread_pct = file_opts.mm_spread_pct;
+    if (!was_set("--mm-vol-mult")) opts.mm_vol_mult = file_opts.mm_vol_mult;
+    if (!was_set("--mm-max-spread-pct"))
+        opts.mm_max_spread_pct = file_opts.mm_max_spread_pct;
     if (!was_set("--queue-model")) opts.queue_model = file_opts.queue_model;
     if (!was_set("--maker-queue-model")) opts.maker_queue_model = file_opts.maker_queue_model;
     if (!was_set("--output")) opts.output = file_opts.output;
@@ -1230,7 +1303,7 @@ static void apply_preset_with_precedence(CLI::App& app, cli_options& opts)
     // backtest-local-l2: L2-aware realism bundle for local (tick) data when
     // depth is also supplied or synthesized.
     if (name == "backtest-local-l2" || name == "backtest-l2" || name == "local-l2") {
-        if (!was_set("--realistic-fills"))    opts.realistic_fills = true;
+        // (passive-side fill pricing is always on; no flag needed anymore)
         if (!was_set("--queue-model"))        opts.queue_model = "l2-snapshot";
         if (!was_set("--maker-queue-model"))  opts.maker_queue_model = "uniform";
         if (!was_set("--walked-book-impact")) opts.walked_book_impact = true;
@@ -1246,6 +1319,45 @@ static void apply_preset_with_precedence(CLI::App& app, cli_options& opts)
     // Unknown / future preset names are tolerated (run continues with
     // whatever other flags were given). A warning can be added at call site
     // or in dry-run if desired.
+}
+
+// Shared by the provider-config and plain-config paths: fill-model wiring,
+// synthetic-MM calibration, and deprecation warnings for the retired
+// fill-pricing flags. Returns non-zero on validation failure.
+static int apply_sim_realism(engine_config& cfg, const cli_options& o, bool is_live)
+{
+    if (o.realistic_fills)
+        std::cerr << "[warn] --realistic-fills is deprecated and has no effect: "
+                     "passive-side fill pricing is always on\n";
+    if (o.bar_spread_bps > 0.0)
+        std::cerr << "[warn] --bar-spread-bps no longer affects recorded fill "
+                     "prices; calibrate --mm-spread-pct instead\n";
+
+    if (o.fill_fade > 0.0 && !(o.fill_prob > 0.0)) {
+        std::cerr << "[error] --fill-fade requires --fill-prob > 0\n";
+        return 1;
+    }
+    if (o.fill_prob > 0.0) {
+        if (is_live) {
+            std::cerr << "[warn] --fill-prob ignored in live mode\n";
+        } else {
+            cfg.fill_model = std::make_shared<RealisticFillModel>(
+                o.fill_fade, o.fill_prob, o.fill_decay);
+        }
+    }
+
+    if (o.mm_levels <= 0 || o.mm_base_depth <= 0 || !(o.mm_spread_pct > 0.0) ||
+        !(o.mm_max_spread_pct > 0.0)) {
+        std::cerr << "[error] --mm-levels, --mm-base-depth, --mm-spread-pct and "
+                     "--mm-max-spread-pct must be > 0\n";
+        return 1;
+    }
+    cfg.mm_levels_per_side = o.mm_levels;
+    cfg.mm_base_depth = o.mm_base_depth;
+    cfg.mm_base_spread_pct = o.mm_spread_pct;
+    cfg.mm_vol_spread_mult = o.mm_vol_mult;
+    cfg.mm_max_half_spread_pct = o.mm_max_spread_pct;
+    return 0;
 }
 
 static int run_dry_run(const cli_options& o)
@@ -1427,8 +1539,8 @@ static int run_monte_carlo_mode(const cli_options& o)
         }
     }
 
-    // Apply some realism from top-level flags (best effort for Phase 3)
-    mc_cfg.realistic_fills = o.realistic_fills;
+    // Apply some realism from top-level flags (best effort for Phase 3).
+    // Passive-side fill pricing is always on; no flag to forward.
     mc_cfg.order_latency_us = o.order_latency_us;
     mc_cfg.impact_k_bps = o.impact_k_bps;
 
@@ -1518,7 +1630,6 @@ static int run_monte_carlo_mode(const cli_options& o)
         nlohmann::json rich = nlohmann::json::parse(mc_json);
 
         rich["initial_balance"] = mc_cfg.initial_balance;
-        rich["realistic_fills"] = mc_cfg.realistic_fills;
         rich["order_latency_us"] = mc_cfg.order_latency_us;
         rich["impact_k_bps"] = mc_cfg.impact_k_bps;
         rich["keep_full_reports"] = mc_cfg.keep_full_reports;
@@ -1568,6 +1679,7 @@ static int run_monte_carlo_mode(const cli_options& o)
 // history. Env prefix is provider-aware:
 //   bitget* → TRUETEST_BITGET_*
 //   bybit*  → TRUETEST_BYBIT_*
+//   gate*   → TRUETEST_GATE_*
 //   else    → TRUETEST_BINANCE_* (historical default for binance / binance-futures)
 struct exchange_credentials {
     std::string key;
@@ -1585,6 +1697,11 @@ static bool provider_is_bybit(const std::string& name)
     return name.rfind("bybit", 0) == 0;
 }
 
+static bool provider_is_gate(const std::string& name)
+{
+    return name.rfind("gate", 0) == 0;
+}
+
 static exchange_credentials resolve_exchange_credentials(
     const std::string& provider_name,
     const std::string& arg_key,
@@ -1593,6 +1710,7 @@ static exchange_credentials resolve_exchange_credentials(
 {
     const bool is_bitget = provider_is_bitget(provider_name);
     const bool is_bybit  = provider_is_bybit(provider_name);
+    const bool is_gate   = provider_is_gate(provider_name);
 
     const char* env_key = nullptr;
     const char* env_secret = nullptr;
@@ -1614,6 +1732,13 @@ static exchange_credentials resolve_exchange_credentials(
         env_secret = std::getenv("TRUETEST_BYBIT_API_SECRET");
         key_hint = "TRUETEST_BYBIT_API_KEY";
         secret_hint = "TRUETEST_BYBIT_API_SECRET";
+    }
+    else if (is_gate)
+    {
+        env_key    = std::getenv("TRUETEST_GATE_API_KEY");
+        env_secret = std::getenv("TRUETEST_GATE_API_SECRET");
+        key_hint = "TRUETEST_GATE_API_KEY";
+        secret_hint = "TRUETEST_GATE_API_SECRET";
     }
     else
     {
@@ -1745,6 +1870,9 @@ static int run_provider_mode(const cli_options& o)
         else if (provider_is_bybit(o.provider_name))
             std::cerr << "    Example: --provider bybit-futures --symbol BTCUSDT "
                          "--stream trade --testnet\n";
+        else if (provider_is_gate(o.provider_name))
+            std::cerr << "    Example: --provider gate-futures --symbol BTC_USDT "
+                         "--stream trade  (MD/shadow; live orders not wired)\n";
         else if (o.provider_name == "local")
             std::cerr << "    Example: --provider local --path data/market_data.csv\n";
         else if (o.provider_name == "synthetic" || o.provider_name == "montecarlo")
@@ -1811,6 +1939,8 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.qty_scale = o.qty_scale;
     prov_cfg.fill_rng_seed = o.fill_rng_seed;
     prov_cfg.spread_step_factor = o.spread_step;
+    prov_cfg.debug_fills = o.debug_fills;
+    prov_cfg.debug_fills_budget = o.debug_fills_budget;
     prov_cfg.rolling_window = o.rolling_window;
     prov_cfg.risk_free_rate = o.risk_free_rate;
     prov_cfg.periods_per_year = o.periods_per_year;
@@ -1839,9 +1969,9 @@ static int run_provider_mode(const cli_options& o)
         prov_cfg.impact_model = std::make_shared<SquareRootImpactModel>(
             o.impact_k_bps, o.impact_adv);
     }
+    if (apply_sim_realism(prov_cfg, o, o.mode == "live" || o.live) != 0)
+        return 1;
     if (o.mode != "live" && !o.live) {
-        prov_cfg.realistic_fills    = o.realistic_fills;
-        prov_cfg.bar_spread_bps     = o.bar_spread_bps;
         prov_cfg.walked_book_impact = o.walked_book_impact;
         if (o.queue_model == "l2-snapshot") {
             if (o.depth_stream.empty()) {
@@ -1931,8 +2061,10 @@ static int run_provider_mode(const cli_options& o)
         prov_cfg.mode = engine_mode::live;
 
     // Ring-buffer drops silently corrupt the shadow portfolio / halt path
-    // - unacceptable when real money or real dry-run validation is on the
-    // line. Backtest keeps the lenient default (allow).
+    // — unacceptable when real money or real dry-run validation is on the
+    // line. Backtest keeps the default (block: deterministic backpressure,
+    // no event loss); blocking the hot path against a live feed is worse
+    // than halting, so shadow/live escalate drops instead.
     if (prov_cfg.mode != engine_mode::backtest)
         prov_cfg.drop_policy = ring_drop_policy::halt_on_drop;
 
@@ -2499,7 +2631,7 @@ static int prompt_quickstart_preset(const cli_options& o, cli_options& effective
         // unconditionally for the chosen preset (user chose it here).
         // The known bundles only touch the realism/MC fields we care about.
         if (effective.preset == "backtest-local-l2") {
-            effective.realistic_fills = true;
+            // (passive-side fill pricing is always on; no flag needed)
             effective.queue_model = "l2-snapshot";
             effective.maker_queue_model = "uniform";
             effective.walked_book_impact = true;
@@ -2674,9 +2806,9 @@ static int run_tui_configured_engine(const cli_options& o,
     } else if (o.impact_k_bps > 0.0 && (o.mode == "live" || o.live)) {
         std::cerr << "[warn] --impact-k-bps ignored in live mode\n";
     }
+    if (apply_sim_realism(config, o, o.mode == "live" || o.live) != 0)
+        return 1;
     if (o.mode != "live" && !o.live) {
-        config.realistic_fills    = o.realistic_fills;
-        config.bar_spread_bps     = o.bar_spread_bps;
         config.walked_book_impact = o.walked_book_impact;
         if (o.queue_model == "l2-snapshot") {
             if (o.depth_stream.empty()) {
@@ -2698,10 +2830,10 @@ static int run_tui_configured_engine(const cli_options& o,
             else if (o.maker_queue_model == "back")
                 config.maker_queue_model = std::make_shared<BackCancelModel>();
         }
-    } else if (o.realistic_fills || o.bar_spread_bps > 0.0 || o.walked_book_impact ||
+    } else if (o.walked_book_impact ||
                o.queue_model != "none" || o.maker_queue_model != "none") {
-        std::cerr << "[warn] --realistic-fills / --bar-spread-bps / --walked-book-impact "
-                     "/ --queue-model / --maker-queue-model ignored in live mode\n";
+        std::cerr << "[warn] --walked-book-impact / --queue-model / "
+                     "--maker-queue-model ignored in live mode\n";
     }
     // General validation for maker queue model (works for local + binance providers)
     if (o.maker_queue_model != "none" && o.depth_stream.empty()) {

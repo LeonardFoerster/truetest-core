@@ -1,10 +1,14 @@
 # Upcoming Platforms — Multi-Venue Provider Integration
 
-**Status:** Design guides for remaining venues; **Bitget UTA futures is implemented** under `src/providers/bitget/`  
+**Status:** Bitget + Bybit full Phase 0–4; Gate MD + REST + safety (live orders not wired).  
 **Date:** 2026-07-30  
 **Audience:** Grok Build agents implementing new CEX providers for TrueTest `core/`
 
-This folder holds **actionable build instructions** for additional centralized exchanges beyond Binance Spot / Binance USDT-M Futures. **Bitget** has landed (Phases 0–4 code + freeze surface + demo SOP); keep [bitget.md](./bitget.md) as the design/DoD reference and use [docs/operations/03-bitget-demo.md](../operations/03-bitget-demo.md) for current ops.
+This folder holds **actionable build instructions** for additional centralized exchanges beyond Binance Spot / Binance USDT-M Futures.
+
+- **Bitget** — Phases 0–4 code + freeze surface + demo SOP. Design/DoD: [bitget.md](./bitget.md); ops: [docs/operations/03-bitget-demo.md](../operations/03-bitget-demo.md).
+- **Bybit** — Phases 0–4 (MD, REST, safety, ExecutionBridge, brackets). Design/DoD: [bybit.md](./bybit.md); ops: [docs/operations/04-bybit-testnet.md](../operations/04-bybit-testnet.md).
+- **Gate.io** — Phases 0–2 + safety stack (reconciler/kill/DMS). **Live order path not wired** (no encoder / user-data / ExecutionBridge). Shadow/MD + dual-mode refuse only. Design: [gateio.md](./gateio.md).
 
 ---
 
@@ -12,9 +16,9 @@ This folder holds **actionable build instructions** for additional centralized e
 
 | File | Venue | Registry names | Product focus (v1) | Code status |
 |------|-------|----------------|--------------------|-------------|
-| [bybit.md](./bybit.md) | **Bybit** | `bybit-futures`, `bybit` | Linear USDT perps (`BTCUSDT`) | Not started (guide only) |
+| [bybit.md](./bybit.md) | **Bybit** | `bybit-futures`, `bybit` | Linear USDT perps (`BTCUSDT`) | **Landed** Phases 0–4 in `src/providers/bybit/` |
 | [okx.md](./okx.md) | **OKX** | `okx-futures`, `okx` | USDT-M SWAP (`BTC-USDT-SWAP`) | Not started (guide only) |
-| [gateio.md](./gateio.md) | **Gate.io** | `gate-futures`, `gate` | USDT perps (`BTC_USDT`) | Not started (guide only) |
+| [gateio.md](./gateio.md) | **Gate.io** | `gate-futures`, `gate` | USDT perps (`BTC_USDT`) | **Partial** — MD/REST/safety; live orders deferred |
 | [bitget.md](./bitget.md) | **Bitget** | `bitget-futures`, `bitget` | UTA USDT-M (`BTCUSDT`) | **Landed** in `src/providers/bitget/` |
 | [kraken.md](./kraken.md) | **Kraken Futures** | `kraken-futures`, `kraken` | Linear multi-collateral (`PF_XBTUSD`) | Not started (guide only) |
 
@@ -29,13 +33,12 @@ Each guide was produced by a dedicated subagent that:
 ## Recommended implementation order (remaining venues)
 
 ```
-1. Bybit   — closest to Binance (symbols, V5 linear, testnet)
-2. OKX     — best retail DMS (cancel-all-after) + deep liquidity + demo
-3. Gate.io — countdown DMS + testnet + alt breadth
-4. Kraken  — regulated/EU fit; different auth (challenge + HMAC-SHA512)
+1. Gate.io Phase 3–4 — order encoder, user-data, ExecutionBridge, brackets
+2. OKX               — best retail DMS (cancel-all-after) + deep liquidity + demo
+3. Kraken            — regulated/EU fit; different auth (challenge + HMAC-SHA512)
 ```
 
-**Bitget is done** for the UTA futures path (not “next to implement”). Prefer it as a second golden reference beside Binance when wiring new venues.
+**Bitget and Bybit are done** for the UTA/linear futures path. Prefer them as golden references beside Binance when wiring new venues.
 
 Do **not** start multiple remaining venues in parallel on the same branch without isolation (worktrees).  
 Shared scaffolding (HMAC helpers, depth-sync, CLI credential resolve) may be extracted after the next venue lands.

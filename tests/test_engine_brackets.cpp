@@ -197,3 +197,54 @@ TEST(EngineBrackets, NetFlatSweepCancelsLeftoverBracket)
     EXPECT_EQ(strat->fills_seen, 2)
         << "Phantom bracket fire - net-flat sweep did not cancel the leftover intent";
 }
+
+// The SL closer must fill anchored at the SL level (book re-centered at
+// 99 → bid 99 × 0.998), not against the next bar's open-centered book
+// (≈ 100 × 0.998) — the pre-anchoring behavior deferred the fire through
+// execution_bar_delay and discarded the fire price.
+TEST(EngineBrackets, SlCloserFillsAnchoredAtSlLevelNotNextOpen)
+{
+    SilenceCout quiet;
+    auto dh = make_data({
+        {100, 100.5,  99.5, 100},
+        {100, 100.5,  99.5, 100},
+        {100, 100.5,  99.5, 100},   // entry signal on bar 3 (close=100, SL=99)
+        {100, 100.5,  99.5, 100},   // entry fills on bar 4 open; bracket arms
+        {100, 100.5,  98.0, 100},   // wick to 98 — SL 99 fires, anchored
+        {100, 100.5,  99.5, 100},
+    });
+    auto strat = std::make_shared<BracketEntryStrategy>();
+
+    engine_config cfg;
+    cfg.seed = 1;
+    // One deterministic level per side at ref × (1 ± 0.002).
+    cfg.mm_levels_per_side  = 1;
+    cfg.mm_base_spread_pct  = 0.002;
+    cfg.mm_vol_spread_mult  = 0.0;
+
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.set_primary_strategy_name("bracket");
+    eng.run();
+
+    auto report = eng.get_analytics().generate_report();
+    double buy_px = 0.0;
+    double sell_px = 0.0;
+    for (const auto& t : report.trades)
+    {
+        if (t.side == order_side::buy && buy_px == 0.0)
+            buy_px = t.fill_price;
+        if (t.side == order_side::sell && sell_px == 0.0)
+            sell_px = t.fill_price;
+    }
+
+    ASSERT_GT(buy_px, 0.0) << "entry must fill";
+    ASSERT_GT(sell_px, 0.0) << "SL closer must fill";
+    // Entry-relative brackets preserve absolute |entry − SL| distance when the
+    // opener fills away from the signal mid (resting ask). Signal mid=100,
+    // sl_pct=1% → designed distance 1.0; actual SL = buy_fill − 1.0.
+    // Book re-centered at that SL → bid = SL × 0.998.
+    const double sl = buy_px - 1.0;
+    EXPECT_NEAR(sell_px, sl * 0.998, 1e-3)
+        << "SL closer anchored at the entry-relative SL level, not the next bar's open"
+        << " (buy=" << buy_px << " sl=" << sl << " sell=" << sell_px << ")";
+}

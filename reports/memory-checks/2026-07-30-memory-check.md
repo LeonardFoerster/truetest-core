@@ -1,102 +1,82 @@
 # Memory Safety Check – 2026-07-30
 
-**Modus:** PR / Ad-hoc Feature (Bitget Futures Provider branch `provider`)  
-**Analysierter Pfad:** Branch `provider` @ `ee17a89` vs merge-base `master` `73fb4ed`  
+**Modus:** PR / Feature (post-merge of `feature/backtest-accuracy` + residual-risks on `master`)  
+**Analysierter Pfad:** `/home/leonard/work/projects/truetest/core` (tip `060abdc`)  
 **Projekt-Root:** `/home/leonard/work/projects/truetest/core`  
-**Report-Ziel:** `reports/memory-checks/2026-07-30-memory-check.md`  
-**Skill:** `/memory-checks` — strikt read-only (nur dieser Report geschrieben)
-
----
+**Report-Ziel:** `check-ups/` (user path `@check-ups`)  
+**Skill:** memory-checks (read-only; only this file written)
 
 ## Zusammenfassung
 
 | Severity | Count | Notes |
-|----------|-------|-------|
-| **HIGH** | 2 | WS cross-thread `ws_` access; private-WS re-open without join (Binance-parity patterns) |
-| **MEDIUM** | 5 | Liveness raw pointer contract; bridge callbacks uncleared; shared REST serialization; halt-cb window; double-close opacity |
-| **LOW / Info** | 6 | Test-harness LSan 17 B; clang-tidy naming; TSan not run; cppcheck missing; multi-trade defer; etc. |
+|----------|------:|-------|
+| **HIGH** | 2 | Live funding dual-producer on SPSC rings + DRQ; ControlBlockPool lacks lifetime token |
+| **MEDIUM** | 4 | Hybrid quote `make_shared`; `in_use` on intentional leak; fill vectors; halt API footgun |
+| **LOW** | 4 | ASan alloc-ceiling flake; DRQ overflow mutex; watermark callback; intentional late-drop LSan |
+| **FIXED (prior)** | 3 | DRQ heap slots; ASAN Binance preset; Hybrid raw `LocalBookAdapter*` removed |
 
-**Gesamteinschätzung:**  
-Unter **ASan+UBSan** sind die **Bitget-Unit-Tests (195/195) clean** (kein LSan). ExecutionBridge/Risk-Fokus (38/38) clean. Der einzige LSan-Hit (17 Bytes) stammt aus **`tests/helpers/alloc_counter.cpp`** (Hotpath-Filter) und ist **kein Bitget-Produktions-Leak**.
-
-Ownership-/Lifetime-Analyse zeigt **keine Bitget-spezifische UAF-Katastrophe**; Thread-Join auf Happy Path ist solid. Die ernstesten Lifetime-Themen (**H1/H2**) sind **systemische Beast-Sync-Muster** (auch Binance), die Bitget 1:1 portiert. Vor Live-Kapital: **TSan** auf DMS/private WS + billige Hardening-Fixes (join-before-reopen, callback clear).
-
-**Hot-path / pools:** ObjectPool `forbid_runtime_grow` und Hotpath-Alloc-Suite unter ASan grün. Bitget berührt Engine-Rings/QuestDB nicht.
+**Gesamteinschätzung:** Accuracy-merge memory crash class (engine stack overflow via inline DRQ) is **closed**. Focused ASan suites show **no UAF / OOB / stack-overflow**. Remaining HIGH items are **structural concurrency/lifetime** on the **live funding** path and **control-block** late-drop asymmetry — not introduced as regressions of fill-realism, but open for remediation. Non-ASan hotpath alloc tests pass; under ASan, absolute alloc ceiling for L2Burst is tight due to wall-clock dashboard refresh.
 
 ---
 
 ## Tool-Ergebnisse
 
-### Build (Sanitizer)
-
-```bash
-cmake -B build-asan \
-  -DBUILD_TESTS=ON \
-  -DENABLE_ASAN=ON \
-  -DENABLE_UBSAN=ON \
-  -DENABLE_BITGET=ON \
-  -DENABLE_BINANCE=ON \
-  -DENABLE_DEBUG=ON \
-  -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build-asan -j"$(nproc)" --target truetest_tests
-# → Built target truetest_tests (exit 0)
-```
-
 ### clang-tidy
-
-```bash
-clang-tidy -p build-asan src/providers/bitget/bitget_futures_register.cpp --quiet
-```
-
-| Finding | Severity |
-|---------|----------|
-| `readability-identifier-naming` on `_reg_bitget_futures` (line 152) | LOW style |
-
-Kein Memory-/UB-Signal.
+- `compile_commands.json` **absent** under `out/build/linux-tests` and `out/build/linux-asan`.
+- clang-tidy present (`/usr/bin/clang-tidy`) but **not productively runnable** without compile DB.
+- **Action:** export compile commands on next configure (`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`).
 
 ### cppcheck
+- **Not installed** on host.
 
-**Not installed** on this host (`command -v cppcheck` empty). Coverage gap only.
+### AddressSanitizer + LeakSanitizer (+ UBSan via linux-asan preset)
 
-### AddressSanitizer + LeakSanitizer
+Build:
 
-| Filter | Result | LSan |
-|--------|--------|------|
-| `*Bitget*` | **195/195 PASSED** | **No report** |
-| `*Hotpath*:*ObjectPool*` | **26/26 PASSED** | **17-byte direct leak** → `tests/helpers/alloc_counter.cpp:39` `operator new` |
-| `*ExecutionBridge*:*RiskManager*:*EngineVenue*` | **38/38 PASSED** | No LSan in tail |
-| Combined Bitget+Hotpath+Bridge | All listed tests ok | Same 17-byte harness leak at process exit |
-
-**LSan detail (Hotpath only):**
-```
-Direct leak of 17 byte(s) in 1 object(s) allocated from:
-  #0 malloc (libasan)
-  #1 operator new in tests/helpers/alloc_counter.cpp:39
-SUMMARY: AddressSanitizer: 17 byte(s) leaked in 1 allocation(s).
+```bash
+cmake --build out/build/linux-asan -j"$(nproc)" --target truetest_tests
+# Binary rebuilt after residual fixes (engine.cpp / execution_adapter.h newer)
 ```
 
-**Interpretation:** Intentional alloc-counter override for hotpath tests. Reproduces **without** Bitget filter. **False positive w.r.t. Bitget production code.**
+Focused filter:
+
+```text
+*HotpathAllocs*:*HotpathPoolPrewarm*:*StopFillPricing*:*HybridExecutor*:
+*EngineBrackets*:*TickToTradeSafety*:*DeferredReturn*:*ObjectPool*:*Ring*
+```
+
+| Result | Detail |
+|--------|--------|
+| ObjectPool (15) | PASS (including LateDrop*) |
+| DeferredReturnQueue (2) | PASS |
+| RingBuffer (12) | PASS |
+| StopFillPricing (6) | PASS |
+| EngineBrackets (3) | PASS |
+| TickToTradeSafety (7) | PASS |
+| HotpathAllocs (2) | PASS |
+| HybridExecutor (7) | PASS |
+| HotpathPoolPrewarm | 2/3 PASS; **FAIL** `L2Burst_NoControlBlockHeapAllocs` |
+| **UAF / heap-buffer / stack-overflow** | **None** |
+| LSan at exit | **17 B** intentional late-drop (see F2) |
+
+**FAIL detail:**
+
+```text
+HotpathPoolPrewarm.L2Burst_NoControlBlockHeapAllocs
+  Expected: (snap.count) <= (9000u), actual: 9630 vs 9000   # first ASan run
+  Expected: (snap.count) <= (9000u), actual: 9598 vs 9000   # clean re-run
+```
+
+Sibling under ASan: `L2BurstUsesPooledEvents_NoRuntimeGrow` **PASS** (`grow_count == 0`).
+
+Non-ASan (`out/build/linux-tests`): HotpathAllocs + HotpathPoolPrewarm **5/5 PASS**.
 
 ### ThreadSanitizer
+Not run (PR mode). **Recommended** after fixing dual-producer funding path (Phase 4).
 
-**Not run** (PR mode). Ownership panel flags DMS + private/public WS multi-thread surfaces as TSan-priority.
-
-### Weitere (Valgrind etc.)
-
-Not run. ASan+LSan sufficient for unit-scope; Valgrind optional for long-run cold path.
-
-### Hotpath / alloc_counter
-
-- `*HotpathAllocs*`, `*HotpathAllocMatrix*`, `*HotpathPoolPrewarm*`, `*ObjectPool*` under ASan: **PASS**
-- `ForbidRuntimeGrowThrowsWithoutGrowing` green
-- Re-baseline note: `TRUETEST_REBASELINE_ALLOCS=1` exists for intentional alloc baseline updates (not used this run)
-
-### Ownership greps (Bitget + bridge)
-
-- Threads: DMS `[this]` + `join` on `stop()`; private WS `reader_` + `join` on `close()`
-- Bridge: `fill_tx->set_on_message([this]...)` — not cleared on close
-- Parser: `string_view` into caller buffers; results `.assign` into owned strings
-- No raw `new`/`delete` in Bitget production paths (only OpenSSL free / `= delete`)
+### Weitere
+- Prior report content (same-day earlier draft) retained as history for DRQ fix evidence.
+- Residual-risks disposition: `check-ups/2026-07-30-residual-risks-resolution.md`.
 
 ---
 
@@ -104,424 +84,382 @@ Not run. ASan+LSan sufficient for unit-scope; Valgrind optional for long-run col
 
 ### Subagent 1 – Tooling & Evidence
 
-**ID:** `019fb2eb-6f7d-78d1-ae02-52c62597a5e4` (fresh)
+- **No crash-class ASan findings** on accuracy/hotpath/object-pool/ring filters.
+- **F1 LOW:** ASan L2Burst alloc count exceeds 9000 because `publish_event` → wall-clock `dashboard_builder_->refresh_if_due()` (~100 ms) runs many times under ASan slowdown (~5 s for 4000 L2 updates ≈ 50 rebuilds). Non-ASan finishes faster → under ceiling. **Not** control-block heap grow.
+- **F2 intentional:** LSan 17 B = `StringWidget` string body for `"late-drop-target"` when ObjectPool Returner skips `~T` after dtor (documented safe leak).
+- Prior HIGH DRQ stack overflow **FIXED** (`unique_ptr<slot[]>`).
+- Hybrid raw pointer residual **FIXED** (virtual dispatch).
+- Static analysis gap (no compile DB / no cppcheck).
 
-- **No HIGH/MEDIUM sanitizer defects** in production Bitget from evidence.
-- 17-byte leak = **test harness noise** (false positive for Bitget).
-- clang-tidy naming only.
-- **Production Bitget clean under ASan for unit tests: YES** (with residual: TSan/full suite/live E2E not run).
-- Priority next: **TSan on DMS/private WS**, not ASan remediations on provider.
+**Tooling risk rating for tip:** **LOW** for crash/UAF; open work is test budget + intentional-leak LSAN hygiene.
 
 ### Subagent 2 – Ownership & Architectural Lifetime
 
-**ID:** `019fb2eb-6f7d-78d1-ae02-52d994fdf619` (fresh)
+**Event ownership map (solid core path):**
 
-| ID | Severity | Summary |
-|----|----------|---------|
-| H1 | HIGH | Cross-thread `ws_` access (close vs reader) — Binance parity |
-| H2 | HIGH | Private WS `open()` after error without join → `std::thread` assign can `terminate` |
-| M1 | MEDIUM | Liveness raw `atomic*` into `dms_` — engine stop order protects; fragile contract |
-| M2 | MEDIUM | Bridge `[this]` callbacks never revoked on close |
-| M3 | MEDIUM | Double-close private WS (idempotent) |
-| M4 | MEDIUM | Shared REST mutex can block DMS/kill behind long I/O |
-| M5 | LOW–MED | Frame `string_view` valid only until next read (consumer OK today) |
-| M6 | MEDIUM | Halt-cb wired after `open()` — reconnect window before halt |
+```
+engine acquire_pooled → placement new + shared_ptr(Returner{lifetime,epoch})
+  → publish_event → EventRing try_push (shared_ptr copy)
+  → worker try_pop → on_event → drop → Returner: ~T + defer_release(DRQ)
+  → engine drain_deferred_returns / next acquire → free list
+```
 
-**Verdict:** Bitget **not worse than Binance**; happy-path joins solid; systemic Beast/callback debts remain.
+**Solid:**
+- ObjectPool lifetime token + epoch; intentional late-drop vs UAF
+- DRQ heap slots (stack overflow fixed)
+- Ordered stop_workers / dtor (disarm → drain → join)
+- `callbacks_armed_flag_` heap token for provider callbacks
+- LocalBook `create_order` pool; Hybrid virtual `on_book_trades` / `sweep`
+- QuestDB `unique_ptr` chain cold-path
+- Parser `string_view` ephemeral into owned fields
+
+**Structural cracks:**
+1. **Funding dual-producer:** user-data thread calls `funding_event_factory_` → `acquire_pooled(funding_pool_)` and `event_publisher_` → `publish_event` while engine thread also publishes → violates EventRing SPSC and DRQ single-consumer.
+2. **ControlBlockPool** deallocate uses raw pool pointer without lifetime/epoch (asymmetric vs ObjectPool).
+3. **`in_use` not decremented** on intentional late-drop → MC rearm accounting risk.
+4. Hybrid quote ladder still `make_shared<order>`.
+5. `get_halt_flag()` mutable ref footgun (documented; `is_halted()` preferred).
 
 ---
 
 ## Detaillierte Findings
 
-### HIGH-01 — Cross-thread WebSocket stream access
-- **Datei:** `src/providers/bitget/bitget_private_ws_transport.h:188–212` (close); reader uses `ws_` concurrently  
-- **Auch:** `src/providers/bitget/bitget_transport.h` close vs `read_frame_blocking`  
-- **Beschreibung:** `close()` may call `ws_->close()` while reader thread reads; concurrent stream access is UB.  
-- **Quelle:** Ownership subagent H1; pattern matches Binance user-data transport.  
-- **Schwere:** HIGH (data race / crash potential under concurrent close)
-
-### HIGH-02 — Re-`open()` after error without joining prior reader
-- **Datei:** `src/providers/bitget/bitget_private_ws_transport.h:168–185`  
-- **Beschreibung:** After fatal path, `reader_` may still be joinable; `reader_ = std::thread(...)` invokes `std::terminate` if prior thread not joined.  
-- **Quelle:** Ownership H2  
-- **Schwere:** HIGH for recovery/tests; production often process-restart after halt
-
-### MEDIUM-01 — Liveness raw pointer into DMS object
-- **Datei:** `src/providers/bitget/bitget_futures_provider.h:447–460`; consumer `src/engine/engine.cpp:116–124`  
-- **Beschreibung:** `last_alive_ms` points at atomic owned by `dms_`. Safe if engine always stops watchdog before provider close (current order). UAF if that invariant breaks.  
-- **Quelle:** Ownership M1  
-- **Parität:** Binance futures DMS
-
-### MEDIUM-02 — ExecutionBridge fill callbacks hold `[this]` without clear
-- **Datei:** `src/execution/execution_bridge.h:122–130`, `164–177`  
-- **Beschreibung:** Callbacks set in ctor; `close()` joins transport but does not clear `set_on_message`/`set_on_status`. Safe today due to join order; fragile if fill_tx reused.  
-- **Quelle:** Ownership M2; bridge modified this branch for dual-channel correctness
-
-### MEDIUM-03 — Shared REST client can stall DMS/kill
-- **Datei:** `src/providers/bitget/bitget_rest_client.h` (`connection_mu_`); DMS/kill/order share client  
-- **Beschreibung:** Long/unbounded REST holds mutex; heartbeat/kill serialize behind it. Lifetime of client OK (shared_ptr); liveness risk.  
-- **Quelle:** Ownership M4
-
-### MEDIUM-04 — Halt callback installed after provider open
-- **Datei:** Engine wiring after `provider->open()`; private WS reconnects until `fatal_cb_` set  
-- **Beschreibung:** Window where disconnect reconnects instead of halt. Safety residual, not classic UAF.  
-- **Quelle:** Ownership M6; pre-existing multi-venue pattern
-
-### LOW-01 — Test harness LSan 17-byte leak
-- **Datei:** `tests/helpers/alloc_counter.cpp:39`  
-- **Beschreibung:** Hotpath suite under ASan reports 1 allocation leaked. Not Bitget production.  
-- **Quelle:** Tooling subagent F1
-
-### LOW-02 — clang-tidy register symbol naming
-- **Datei:** `src/providers/bitget/bitget_futures_register.cpp:152`  
-- **Beschreibung:** `_reg_bitget_futures` naming style.  
-- **Quelle:** clang-tidy
-
-### LOW-03 — TSan / full ASan suite / Valgrind / cppcheck not run
-- Coverage gaps only.
-
-### LOW-04 — Frame buffer `string_view` contract
-- **Datei:** `bitget_transport.h` / `data_bridge` sync parse  
-- **Beschreibung:** Views valid until next read; current consumers copy. Document/assert.
+| ID | Sev | Location | Description | Source |
+|----|-----|----------|-------------|--------|
+| **H1** | HIGH | `engine.cpp:99-104`, `binance_futures_provider.h:412-432` | Live funding path: off-thread `acquire_pooled` + `publish_event` dual-produces SPSC EventRings and dual-drains DRQ | Arch agent + code verify |
+| **H2** | HIGH | `control_block_pool.h:230-234` | CB `deallocate` always `release_slot` via raw `pool*`; no lifetime token — late drop after engine dtor can UAF CB free-list | Arch agent |
+| **M1** | MEDIUM | `object_pool.h:163-170` | Intentional leak path skips `in_use_atomic_` decrement → false exhaustion under MC reuse | Arch agent |
+| **M2** | MEDIUM | `hybrid_executor.h:171-179` | Synthetic quote reseed still `std::make_shared<order>` (strategy path uses pool) | Both agents |
+| **M3** | MEDIUM | `engine.cpp:1718-1719`, adapters | Transient `vector<fill_event>` on every `process_adapter_fills` / poll | Arch agent |
+| **M4** | MEDIUM | `engine.h:557-563` | Mutable `get_halt_flag()` still public; mid-run clear possible | Arch agent |
+| **L1** | LOW | `test_hotpath_pool_prewarm.cpp:60` | ASan alloc ceiling 9000 flaky under dashboard wall-clock refresh | Tooling agent |
+| **L2** | LOW | `object_pool.h:114-117` | DRQ full → mutex `push()` from workers (jitter) | Arch agent |
+| **L3** | LOW | ObjectPool LateDrop* + LSan | 17 B intentional process-exit leak | Tooling agent |
+| **L4** | LOW | Streaming `[&]` in `engine.cpp` | Safe while `run_streaming` synchronous; fragile if async | Arch agent |
+| ~~H-prior~~ | FIXED | `deferred_return_queue.h` | Heap slots for DRQ | Prior check + code |
+| ~~M-prior~~ | FIXED | Hybrid raw LocalBook ptr | Removed; virtual IExecutionAdapter | Residual PR |
 
 ---
 
 ## Phasenbasierter Remediation-Plan
 
-**WICHTIG:** Für einen späteren Grok-Build-Agenten **mit Schreibrechten**. Dieser Memory-Check-Run hat **keinen** Source-Code geändert.
+**WICHTIG:** Für einen späteren Grok Build Agent **mit Schreibrechten**. Dieses memory-checks Run hat **keinen** Quellcode geändert.
 
 ### Phase 1: Vorbereitung & Setup
 
-**Ziel:** Reproduzierbare Sanitizer-Umgebung und Baseline.
+**Ziel:** Reproduzierbare Analyseumgebung und Baselines.
 
-1. Projekt-Root: `/home/leonard/work/projects/truetest/core`
-2. Branch: `provider` (oder PR-Branch mit Bitget)
-3. Configure:
-   ```bash
-   cmake -B build-asan \
-     -DBUILD_TESTS=ON \
-     -DENABLE_ASAN=ON \
-     -DENABLE_UBSAN=ON \
-     -DENABLE_BITGET=ON \
-     -DENABLE_BINANCE=ON \
-     -DENABLE_DEBUG=ON \
-     -DCMAKE_BUILD_TYPE=RelWithDebInfo
-   cmake --build build-asan -j"$(nproc)" --target truetest_tests
-   ```
-4. Baseline (sollte grün bleiben):
-   ```bash
-   ASAN_OPTIONS=detect_leaks=1:halt_on_error=0 \
-     ./build-asan/truetest_tests --gtest_filter='*Bitget*'
-   ASAN_OPTIONS=detect_leaks=1:halt_on_error=0 \
-     ./build-asan/truetest_tests --gtest_filter='*Hotpath*|*ObjectPool*'
-   ```
-5. Optional TSan-Build (separates Build-Dir, mutually exclusive with ASan in many setups):
-   ```bash
-   cmake -B build-tsan -DBUILD_TESTS=ON -DENABLE_TSAN=ON \
-     -DENABLE_BITGET=ON -DENABLE_BINANCE=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-   cmake --build build-tsan -j"$(nproc)" --target truetest_tests
-   ```
-
-**Abhängigkeiten:** Keine.  
-**Verify:** Bitget 195 pass; note any LSan only from alloc_counter on hotpath filter.
-
----
-
-### Phase 2: Kritische Sofort-Fixes (UAF / terminate / races)
-
-**Ziel:** HIGH-01 und HIGH-02 beheben (Bitget private + public WS; optional mirror Binance later).
-
-#### Schritt 2.1 – HIGH-02: join before re-open (private WS)
-
-**Datei:** `src/providers/bitget/bitget_private_ws_transport.h`
-
-**Problem:** Assign to joinable `std::thread` after error path.
-
-**Konkrete Schritte:**
-
-1. Öffne `src/providers/bitget/bitget_private_ws_transport.h`
-2. Am Anfang von `open()`, nach dem early-return für already-open, **vor** dem Spawn:
-
-```cpp
-// Ensure previous reader is fully reaped (error/fatal paths leave joinable threads).
-if (reader_.joinable())
-    reader_.join();
-```
-
-3. In `close()`, `ws_->close()` unter `ws_mu_` halten (siehe Schritt 2.2).
-4. Nach join: Callbacks optional clearen:
-```cpp
-message_cb_ = {};
-status_cb_ = {};
-```
-
-5. Test: Unit-Test der `open()` nach simulated error state (force `state_=error` with joinable thread) — or extend existing transport tests if inject seam exists.
-6. Verifizieren:
-   ```bash
-   cmake --build build-asan -j --target truetest_tests
-   ASAN_OPTIONS=detect_leaks=1 ./build-asan/truetest_tests --gtest_filter='*Bitget*'
-   ```
-
-#### Schritt 2.2 – HIGH-01: serialize `ws_` access
-
-**Datei:** `src/providers/bitget/bitget_private_ws_transport.h` (+ analog public `bitget_transport.h` wenn foreign-thread close)
-
-**Empfohlene Policy (minimal):**
-
-1. Alle Zugriffe auf `ws_` (read, write, close, reset) unter demselben Mutex **oder**
-2. Close-from-other-thread nur: `stop_flag_` + `shutdown()` auf native socket, Reader-Thread allein `ws_.reset()`.
-
-**Beispiel-Skizze `close()`:**
-
-```cpp
-void close() override
-{
-    stop_flag_.store(true);
-    cv_.notify_all();
-    {
-        std::lock_guard<std::mutex> lk(ws_mu_);
-        if (ws_) {
-            beast::error_code ec;
-            try { ws_->close(websocket::close_code::normal, ec); } catch (...) {}
-        }
-    }
-    if (reader_.joinable())
-        reader_.join();
-    {
-        std::lock_guard<std::mutex> lk(ws_mu_);
-        ws_.reset();
-        ioc_.restart();
-    }
-    set_state(lifecycle::closed, "closed");
-}
-```
-
-3. Reader-Pfade, die `ws_` nutzen, müssen denselben Lock halten **oder** document that only reader owns stream after open and close only interrupts via flag+socket shutdown.
-
-4. TSan:
-   ```bash
-   ./build-tsan/truetest_tests --gtest_filter='*BitgetFuturesDeadMans*:*Bitget*Transport*'
-   ```
-
-**Abhängigkeiten:** Phase 1.  
-**Verify:** ASan green; TSan no race on private WS close-vs-read.
-
----
-
-### Phase 3: Ownership & Lifetime Modernisierung
-
-**Ziel:** MEDIUM callback/liveness hardening ohne API-Bruch wo möglich.
-
-#### 3.1 – ExecutionBridge: revoke fill callbacks on close
-
-**Datei:** `src/execution/execution_bridge.h`
-
-In `close()`, vor/nach `fill_tx->close()`:
-
-```cpp
-if (d_.fill_tx) {
-    d_.fill_tx->set_on_message({});
-    d_.fill_tx->set_on_status({});
-    d_.fill_tx->close();
-}
-```
-
-**Tests:** Existing `ExecutionBridge` suite + `CloseClearsHandler` patterns; ensure no UAF if fill_tx shared.
-
-**Note:** `execution_bridge.h` is freeze-**adjacent** (not freeze-10). Still review carefully; no `LIVE_SAFETY_CCB_APPROVED` required by freeze script unless freeze list later expands.
-
-#### 3.2 – Document / enforce liveness lifetime
-
-**Dateien:** `src/providers/provider.h` comment; `bitget_futures_provider.h` `get_liveness_sources`
-
-1. Correct comment: atomic lives **inside** provider/DMS; **Watchdog must stop before provider destruction** (engine already does this at `engine.cpp` shutdown).
-2. Optional future API: `shared_ptr<atomic<int64_t>>` beat cell (larger change).
-
-#### 3.3 – REST per-call timeout default for live
-
-**Datei:** `bitget_futures_provider.h` `open_live_path` after `rest_` create:
-
-```cpp
-rest_->set_per_call_timeout(std::chrono::milliseconds(3000));
-```
-
-So DMS/kill cannot block forever behind unbounded I/O (kill-switch already sets timeout per call).
-
-**Abhängigkeiten:** Phase 2 preferred first.  
-**Verify:** Bitget + ExecutionBridge ASan tests.
-
----
-
-### Phase 4: Concurrency & Atomics (TSan)
-
-**Ziel:** Data races formal beweisen/widerlegen.
-
-1. Build `build-tsan` as in Phase 1.
-2. Run:
-   ```bash
-   ./build-tsan/truetest_tests --gtest_filter='*BitgetFuturesDeadMans*:*BitgetFuturesKill*:*ExecutionBridge*'
-   ```
-3. If races on `ws_`: complete Phase 2.2.
-4. DMS `last_beat_ms_` should be race-free (atomic). Confirm no non-atomic shared mutable without lock.
-
-**Optional:** Concurrent stress test: open private WS mock + close from main thread while reader loops (injectable).
-
----
-
-### Phase 5: Hot-path alloc / pool verification
-
-**Ziel:** Keine Regression an Engine-Hotpath durch Bitget (Bitget sollte hier unberührt bleiben).
+1. Cwd: `/home/leonard/work/projects/truetest/core`, branch from current `master`.
+2. Configure with compile commands + sanitizers:
 
 ```bash
-./build-asan/truetest_tests --gtest_filter='*HotpathAllocs*'
-./build-asan/truetest_tests --gtest_filter='*HotpathAllocMatrix*'
-./build-asan/truetest_tests --gtest_filter='*HotpathPoolPrewarm*'
+cmake --preset linux-asan   # ENABLE_BINANCE should be ON
+# or:
+cmake -B out/build/linux-asan -DBUILD_TESTS=ON -DENABLE_ASAN=ON -DENABLE_UBSAN=ON \
+  -DENABLE_BINANCE=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build out/build/linux-asan -j"$(nproc)" --target truetest_tests
+```
+
+3. Baseline (expect: L2Burst absolute-count may fail under ASan; grow test must pass):
+
+```bash
+./out/build/linux-asan/truetest_tests \
+  --gtest_filter='HotpathPoolPrewarm.*:HotpathAllocs.*:ObjectPool.*:DeferredReturnQueue.*:TickToTradeSafety.*'
+./out/build/linux-tests/truetest_tests \
+  --gtest_filter='HotpathPoolPrewarm.*:HotpathAllocs.*'
 ./scripts/check-hotpath-json.sh
 ./scripts/check-layer-deps.sh
 ./scripts/check-live-safety-freeze.sh
 ```
 
-If alloc baselines intentionally change: `TRUETEST_REBASELINE_ALLOCS=1` only with human review.
+4. Optional static:
 
-**Bitget-specific:** Market parse uses needle-scan + `symbol.assign` (Binance parity). No nlohmann. Multi-trade batch (`parse_all_trades`) not on production combined path — keep off hot path until pre-sized buffers exist.
+```bash
+clang-tidy -p out/build/linux-asan src/engine/engine.cpp src/types/object_pool.h
+```
+
+**Abhängigkeiten:** none.  
+**Verify:** binaries build; non-ASan hotpath 5/5 green.
+
+---
+
+### Phase 2: Kritische Sofort-Fixes (H1 dual-producer, H2 CB lifetime)
+
+**Ziel:** Eliminieren direkter UAF / ring-corruption Potenziale.
+
+#### Schritt 2.1 – H1: Funding / custom events fan-in to engine thread
+
+**Problem:** User-data thread calls `publish_event` and `acquire_pooled` (`engine.cpp` wiring + `binance_futures_provider.h` funding handler).
+
+**Konkrete Schritte:**
+
+1. Introduce a sole-engine-thread ingress, e.g. SPSC or mutex-protected queue of `shared_ptr<event>` (or non-pooled funding DTO) owned by `engine`.
+2. Change provider wiring so `set_event_publisher` **only enqueues**; engine loop drains before/after market handling and then calls existing `publish_event` / portfolio apply.
+3. Change `set_funding_event_factory` so off-thread path does **not** call `acquire_pooled` — either:
+   - construct a value DTO and let engine `acquire_pooled` when draining, or
+   - enqueue prebuilt heap `funding_event` (cold path OK) without touching ObjectPool free-list from the WS thread.
+4. Audit all other `set_event_publisher` / callback sites for the same pattern.
+
+**Sketch (engine side):**
+
+```cpp
+// engine.h (illustrative)
+std::mutex ingress_mu_;
+std::vector<std::shared_ptr<event>> ingress_events_;
+
+void enqueue_external_event(std::shared_ptr<event> ev) {
+    std::lock_guard lock(ingress_mu_);
+    ingress_events_.push_back(std::move(ev));
+}
+
+void drain_external_events(std::size_t& event_count) {
+    std::vector<std::shared_ptr<event>> local;
+    {
+        std::lock_guard lock(ingress_mu_);
+        local.swap(ingress_events_);
+    }
+    for (auto& ev : local) {
+        // portfolio side-effects for funding, then publish_event on engine thread only
+        publish_event(ev);
+    }
+}
+```
+
+**Publisher lambda becomes:**
+
+```cpp
+config_.provider->set_event_publisher(
+    [this, armed_for_pub](std::shared_ptr<event> ev) {
+        if (!armed_for_pub || !armed_for_pub->load(std::memory_order_acquire)) return;
+        enqueue_external_event(std::move(ev));
+    });
+```
+
+5. Call `drain_external_events` from streaming/history loops (same places as other drains).
+6. Freeze-touching `engine.cpp` commits need:
+
+```
+LIVE_SAFETY_CCB_APPROVED
+```
+
+7. Verify:
+
+```bash
+# Prefer TSan after this change:
+# cmake TSAN preset if available, or -DENABLE_TSAN=ON
+./out/build/linux-asan/truetest_tests --gtest_filter='*TickToTradeSafety*:*LiveSafety*:*Funding*'
+```
+
+#### Schritt 2.2 – H2: ControlBlockPool lifetime token
+
+**Problem:** `control_block_allocator::deallocate` always touches `pool_` (`control_block_pool.h`).
+
+**Konkrete Schritte:**
+
+1. Open `src/types/control_block_pool.h`.
+2. Mirror ObjectPool: heap `std::shared_ptr<std::atomic<bool>> lifetime_` disarmed in dtor; optional epoch.
+3. Allocator holds a **copy** of the lifetime token (shared_ptr).
+4. In `deallocate`:
+
+```cpp
+void deallocate(T* p, std::size_t n) noexcept {
+    (void)n;
+    if (!lifetime_ || !lifetime_->load(std::memory_order_acquire) || !pool_) {
+        // intentional leak of CB slot — prefer over UAF
+        return;
+    }
+    pool_->release_slot(p);
+}
+```
+
+5. Tests: extend `tests/test_*control*block*` or ObjectPool-style late-drop holding a ring `shared_ptr<event>` across engine destruction; expect no ASan UAF.
+6. Rebuild ASan + full focused suite.
+
+**Abhängigkeiten:** Phase 1. H1 and H2 independent; do H1 first if live funding is in use.
+
+---
+
+### Phase 3: Ownership & Lifetime Modernisierung (M1–M3)
+
+**Ziel:** Accounting + pool hygiene; no hot-path inventiveness.
+
+#### 3.1 – M1 `in_use` on intentional leak
+
+In `object_pool.h` Returner else-branch, either:
+
+```cpp
+} else {
+    // Still drop in_use so MC rearm accounting stays honest.
+    if (pool)
+        pool->in_use_atomic_.fetch_sub(1, std::memory_order_relaxed);
+    // slot intentionally abandoned
+}
+```
+
+**or** reset `in_use` inside `rearm_for_reuse` after documenting orphans, plus debug assert `in_use==0` after full drain before rearm.
+
+Verify:
+
+```bash
+./out/build/linux-asan/truetest_tests --gtest_filter='ObjectPool.*'
+```
+
+#### 3.2 – M2 Hybrid quote pooling
+
+In `hybrid_executor.h` `on_mid_price`, replace:
+
+```cpp
+auto t1 = book_->add_order(std::make_shared<order>(...));
+```
+
+with:
+
+```cpp
+auto t1 = book_->add_order(book_->create_order(
+    ob_order_type::good_till_cancel, bid_id, side::buy,
+    Price::from_double(bid_px), qty));
+```
+
+Keep `quote_ids_` cancel-only reseed. Run:
+
+```bash
+./out/build/linux-tests/truetest_tests --gtest_filter='HybridExecutor.*'
+```
+
+#### 3.3 – M3 fill staging (optional, measured)
+
+- Member `std::vector<fill_event> fill_scratch_` on engine, cleared each poll; or
+- Pre-reserve adapter `pending_fills_` capacity at startup.
+- Measure with HotpathAllocs before claiming win.
+
+---
+
+### Phase 4: Concurrency & Atomics
+
+**Ziel:** Prove sole-producer after Phase 2.
+
+1. Build with TSan if preset exists; otherwise document gap.
+2. Run worker/ring/funding-adjacent tests under TSan.
+3. Grep audit: no second writer to EventRings.
+
+```bash
+rg -n "try_push|publish_event" src/engine/ src/providers/ --glob '*.{h,cpp}'
+```
+
+4. M4 halt API (optional, freeze-adjacent):
+
+- Prefer production API: `is_halted()` + `trigger_halt` only.
+- Tests: friend or `force_halt_for_test()`.
+- Do not remove `start_workers` clear without redesigning multi-run.
+
+---
+
+### Phase 5: Hot-path alloc / test harness (L1, L3)
+
+**Ziel:** Stable CI under ASan without greenwashing grow discipline.
+
+#### 5.1 – L1 ceiling under ASan
+
+Pick one:
+
+**A)** Raise ceiling with comment (dashboard wall-clock under ASan):
+
+```cpp
+// tests/test_hotpath_pool_prewarm.cpp
+EXPECT_LE(snap.count, 12000u) << "allocs=" << snap.count;  // ASan dashboard noise
+```
+
+**B)** Better: disable dashboard refresh during measure window (test-only hook / null builder).
+
+**C)** Assert only `grow_count` / pool in_use (already partially done in same test for control_block_pool).
+
+Keep sibling `L2BurstUsesPooledEvents_NoRuntimeGrow` as the **hard** zero-grow gate.
+
+#### 5.2 – L3 intentional LSan
+
+```bash
+# tests-only suppressions file (example)
+# leak:ObjectPool_LateDropNonTrivialAfterDtorIsSafe
+# ASAN_OPTIONS=detect_leaks=1:suppressions=tests/lsan.supp
+```
+
+Do **not** call `~T` after pool death to silence LSan.
+
+#### 5.3 – Hotpath verification commands (repo-canonical)
+
+```bash
+./out/build/linux-tests/truetest_tests --gtest_filter='*HotpathAllocs*:*HotpathPoolPrewarm*'
+./out/build/linux-asan/truetest_tests --gtest_filter='*HotpathAllocs*:*HotpathPoolPrewarm*'
+# Optional rebaseline when intentional cold-path changes:
+# TRUETEST_REBASELINE_ALLOCS=1 ./out/build/linux-tests/truetest_tests --gtest_filter='*HotpathAllocs*'
+```
 
 ---
 
 ### Phase 6: Verification & Re-Check
 
-1. Rebuild ASan+UBSan full relevant suite:
-   ```bash
-   cmake --build build-asan -j --target truetest_tests
-   ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 \
-     ./build-asan/truetest_tests --gtest_filter='*Bitget*:*Hotpath*:*ExecutionBridge*:*ObjectPool*'
-   ```
-2. TSan suite (Phase 4).
-3. Gate scripts (Phase 5).
+1. Full gates:
+
+```bash
+./scripts/check-hotpath-json.sh
+./scripts/check-layer-deps.sh
+./scripts/check-live-safety-freeze.sh
+```
+
+2. Full unit suite non-ASan + focused ASan.
+3. Synthetic shadow smoke:
+
+```bash
+./out/build/linux-tests/engine_shadow \
+  --provider synthetic --strategy sma --seed 424242 \
+  --no-pin --status-format off --no-tui --output /tmp/shadow-mc.json
+```
+
 4. Re-run this skill:
-   ```text
-   /memory-checks reports/memory-checks
-   ```
-5. Compare new report to `reports/memory-checks/2026-07-30-memory-check.md`.
-6. Exit criteria: **no HIGH findings**; MEDIUM either fixed or explicitly accepted with owner.
+
+```text
+/memory-checks check-ups
+```
+
+5. Compare new dated report: **no open HIGH** for dual-producer / CB lifetime.
+6. Freeze commits: `LIVE_SAFETY_CCB_APPROVED` on any `engine.cpp` / freeze-list touch.
+7. Do **not** claim unattended live readiness solely from this check.
 
 ---
 
 ### Phase 7: Dokumentation & Suppression Management
 
-1. If LSan noise from `alloc_counter` pollutes CI: document suppression **only** for `tests/helpers/alloc_counter.cpp` (never production).
-2. Ops: dual-channel residual already in `docs/operations/03-bitget-demo.md` — keep after disconnect drills.
-3. Optional: install cppcheck for weekly runs.
-4. **Do not** claim TSan-clean or mainnet memory-proven until Phase 4–6 complete.
-5. Freeze-10: Bitget files not frozen; if `execution_bridge.h` callback clear lands, treat as freeze-adjacent review.
+1. Update `check-ups/` with delta after Phase 2–5.
+2. Document intentional late-drop leak contract next to ObjectPool tests.
+3. Document EventRing sole-producer policy in `docs/architecture/` or engine comments (funding fan-in).
+4. If LSAN suppressions added: keep them **test-only**, never production binaries.
+5. Note residual: 4h mainnet shadow soak still operator-owned (`2026-07-30-residual-risks-resolution.md`).
 
 ---
 
-### Phase 8: QuestDB / Engine workers (repo-critical, not Bitget-touched)
+## Repo-critical areas coverage checklist
 
-**Ziel:** Weekly-style residual for areas Bitget did not modify but skill requires coverage note.
-
-| Area | Status this PR |
-|------|----------------|
-| `src/engine/*worker*` | Unchanged; no new findings from Bitget |
-| `src/threading/ring_buffer.h` | Unchanged; SPSC sole-producer intact |
-| `src/types/object_pool.h` | Unchanged; hotpath ForbidRuntimeGrow green under ASan |
-| `src/data/questdb/*` | Unchanged / not linked by Bitget |
-| `src/risk/*` + Binance freeze safety | Unchanged |
-
-**No remediation required for Bitget PR** on these unless weekly full-repo audit finds separate issues.
-
----
-
-## Appendix A — Changed files (merge-base..HEAD)
-
-```
-src/providers/bitget/* (new)
-src/execution/execution_bridge.h
-src/bin/main.inc
-cmake/*, CMakeLists.txt
-docs/operations/03-bitget-demo.md
-tests/providers/bitget/test_bitget_*.cpp, test_cli.cpp, test_execution_bridge.cpp
-```
-
-## Appendix B — Commands used this run
-
-```bash
-date +%Y-%m-%d   # 2026-07-30
-cmake -B build-asan -DENABLE_ASAN=ON -DENABLE_UBSAN=ON -DENABLE_BITGET=ON -DENABLE_BINANCE=ON -DBUILD_TESTS=ON -DENABLE_DEBUG=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build-asan -j --target truetest_tests
-ASAN_OPTIONS=detect_leaks=1:halt_on_error=0 ./build-asan/truetest_tests --gtest_filter='*Bitget*'
-ASAN_OPTIONS=detect_leaks=1:halt_on_error=0 ./build-asan/truetest_tests --gtest_filter='*Hotpath*:*ObjectPool*'
-ASAN_OPTIONS=detect_leaks=1:halt_on_error=0 ./build-asan/truetest_tests --gtest_filter='*ExecutionBridge*:*RiskManager*:*EngineVenue*'
-clang-tidy -p build-asan src/providers/bitget/bitget_futures_register.cpp --quiet
-```
-
-## Appendix C — Git hygiene (skill constraint)
-
-This skill run writes **only** this report file. No source edits, no commits.
-
-Verify after write:
-
-```bash
-git status --porcelain | head
-# Expect report under reports/memory-checks/ as untracked or intended artifact only
-```
+| Area | Covered |
+|------|---------|
+| `engine.cpp` / workers / halt | Yes |
+| `ring_buffer` SPSC + sole-producer policy | Yes (H1) |
+| `object_pool` + `deferred_return_queue` | Yes |
+| `control_block_pool` | Yes (H2) |
+| execution / LocalBook / Hybrid | Yes |
+| QuestDB ownership | Yes (solid) |
+| risk / binance futures funding | Yes (H1) |
+| string_view / callback captures | Yes (L4, parsers OK) |
+| HotpathAllocs / prewarm | Yes |
 
 ---
 
-## Remediation Status (2026-07-30 — implemented)
+## Explicit non-claims
 
-All HIGH/MEDIUM findings from this report were addressed on branch `provider`. Parallel implementers + integrated verification.
-
-| ID | Status | Fix summary |
-|----|--------|-------------|
-| **HIGH-01** | **FIXED** | Private/public/combined WS: foreign-thread `close()` interrupts via lowest-layer `cancel`+`close` only; protocol `ws_->close()` only after reader join (private) or omitted on foreign close (public/combined) |
-| **HIGH-02** | **FIXED** | `BitgetPrivateWsTransport::open()` joins joinable `reader_` before re-spawn; avoids `std::terminate` |
-| **MEDIUM-01** | **FIXED** (docs) | `provider.h` + Bitget `get_liveness_sources()` document raw-pointer lifetime; watchdog must stop before provider teardown |
-| **MEDIUM-02** | **FIXED** | `ExecutionBridge::close()` clears `set_on_message`/`set_on_status` before `fill_tx->close()`; test `CloseClearsFillCallbacks` |
-| **MEDIUM-03** | **FIXED** | Live `open_live_path()` sets `rest_->set_per_call_timeout(3s)` after REST create |
-| **MEDIUM-04** | **FIXED** | Live `apply_halt_cb_to_transports()` installs provisional fail-closed fatal (log-only) when engine halt not yet wired; paper/shadow leave unset for reconnect |
-| **LOW-01** | **ACCEPTED** | 17 B LSan = harness `alloc_counter` override; comment only, no production suppression |
-| **LOW-02** | **FIXED** | `_reg_bitget_futures` → `k_reg_bitget_futures` |
-| **LOW-03** | **PARTIAL** | TSan suite run on Bitget+bridge (see below); Valgrind/cppcheck still optional |
-| **LOW-04** | **FIXED** | Frame `string_view` lifetime documented on private/public/combined read paths |
-
-### Files touched (remediation)
-
-```
-src/providers/bitget/bitget_private_ws_transport.h
-src/providers/bitget/bitget_transport.h
-src/providers/bitget/bitget_combined_transport.h
-src/providers/bitget/bitget_futures_provider.h
-src/providers/bitget/bitget_futures_register.cpp
-src/execution/execution_bridge.h
-src/providers/provider.h
-tests/test_execution_bridge.cpp
-tests/helpers/alloc_counter.cpp
-```
-
-### Verification evidence (post-fix)
-
-| Check | Result |
-|-------|--------|
-| `check-hotpath-json.sh` | OK |
-| `check-layer-deps.sh` | OK |
-| `check-live-safety-freeze.sh` | OK (no freeze-list edits) |
-| ASan `*Bitget*:*Hotpath*:*ExecutionBridge*:*ObjectPool*` | **248 PASSED** (17 B LSan harness only) |
-| ASan `*HotpathAllocs*:*HotpathAllocMatrix*:*HotpathPoolPrewarm*` | **11 PASSED** |
-| TSan `*Bitget*` | **195 PASSED**, no TSan report |
-| TSan `*BitgetFuturesDeadMans*:*BitgetFuturesKill*:*ExecutionBridge*:*Bitget*Transport*` | **83 PASSED**, no TSan report |
-
-### Residual (accepted / out of scope)
-
-1. **Provisional halt is log-only** until engine wires real `set_halt_callback` — fail-closed (no reconnect), not full kill-switch path.
-2. **Shared REST mutex** still serializes DMS/kill behind other calls; bound is now ~3s not unbounded.
-3. **Liveness raw pointer** remains contract-based (documented); no `shared_ptr` beat cell.
-4. **Binance parity** for Beast close-vs-read / join-before-reopen / 3s REST default not applied in this pass (Bitget-scoped).
-5. **cppcheck / Valgrind** not installed/run.
-
-**Exit criteria:** no open HIGH findings; MEDIUMs fixed or documented-accepted. Remediation complete for this report's action items.
+- This report does **not** claim TSan-clean production.
+- This report does **not** claim 4h mainnet shadow soak.
+- This report does **not** claim unattended live readiness.
+- Intentional ObjectPool late-drop leaks are **by design** (prefer leak over UAF).
 
 ---
 
-*End of report — 2026-07-30 memory-check (Bitget provider PR mode).*
-*Remediation implemented and verified same day.*
+*Generated by memory-checks skill. Subagents: Tooling & Evidence + Ownership & Architectural Lifetime. No source files modified except this report.*

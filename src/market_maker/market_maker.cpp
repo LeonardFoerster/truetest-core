@@ -11,6 +11,16 @@ MarketMaker::MarketMaker(unsigned rng_seed)
     : gen_(rng_seed)
     , dis_(0.0, 0.005) {}
 
+// Calibration survives reset(): it is configuration, not per-trial state.
+void MarketMaker::set_calibration(const mm_calibration& c)
+{
+    levels_per_side_ = c.levels_per_side;
+    base_depth_ = c.base_depth;
+    base_spread_pct_ = c.base_spread_pct;
+    vol_spread_mult_ = c.vol_spread_mult;
+    max_half_spread_pct_ = c.max_half_spread_pct;
+}
+
 void MarketMaker::add_orders(std::shared_ptr<orderbook> ob, double current_price, int num_orders)
 {
     for (int i = 0; i < num_orders; ++i)
@@ -56,19 +66,26 @@ double MarketMaker::compute_volatility() const
     return std::sqrt(sq_sum / static_cast<double>(returns.size()));
 }
 
-std::vector<mm_order> MarketMaker::compute_replenish(double current_price)
+std::vector<mm_order> MarketMaker::compute_replenish(double current_price,
+                                                     bool update_history)
 {
     std::vector<mm_order> orders;
 
     if (current_price <= 0.0)
         return orders;
 
-    price_history_.push_back(current_price);
-    if (price_history_.size() > volatility_window_)
-        price_history_.pop_front();
+    if (update_history)
+    {
+        price_history_.push_back(current_price);
+        if (price_history_.size() > volatility_window_)
+            price_history_.pop_front();
+    }
 
     double vol = compute_volatility();
-    double half_spread = base_spread_pct_ + vol * vol_spread_mult_;
+    // Capped: one large bar return (gap) would otherwise widen the book
+    // beyond every crossing limit and silently stop taker fills.
+    double half_spread = std::min(base_spread_pct_ + vol * vol_spread_mult_,
+                                  max_half_spread_pct_);
 
     for (int i = 1; i <= levels_per_side_; ++i)
     {
@@ -89,18 +106,31 @@ std::vector<mm_order> MarketMaker::compute_replenish(double current_price)
     return orders;
 }
 
-void MarketMaker::replenish(std::shared_ptr<orderbook> ob, double current_price)
+trades MarketMaker::replenish(std::shared_ptr<orderbook> ob, double current_price,
+                              bool update_history)
 {
-    auto orders = compute_replenish(current_price);
+    // Pull our previous quotes first (no-op for ids already filled or
+    // cancelled), so the book carries exactly one calibrated ladder.
+    auto& live = live_quotes_[ob.get()];
+    for (order_id id : live)
+        ob->cancel_order(id);
+    live.clear();
+
+    trades crossings;
+    auto orders = compute_replenish(current_price, update_history);
     for (const auto& mo : orders)
     {
         Price p = Price::from_double(mo.price);
         auto ob_side = (mo.side == order_side::buy) ? side::buy : side::sell;
+        const order_id id = OrderIdGenerator::next();
         auto ob_order = ob->create_order(
-            ob_order_type::good_till_cancel, OrderIdGenerator::next(),
+            ob_order_type::good_till_cancel, id,
             ob_side, p, static_cast<quantity>(std::round(mo.quantity * 1e8)));
-        ob->add_order(ob_order);
+        auto trs = ob->add_order(ob_order);
+        crossings.insert(crossings.end(), trs.begin(), trs.end());
+        live.push_back(id);
     }
+    return crossings;
 }
 
 // Phase B (MC reuse)
@@ -112,4 +142,5 @@ void MarketMaker::reset(unsigned rng_seed)
         gen_.seed(static_cast<unsigned>(std::chrono::system_clock::now().time_since_epoch().count()));
 
     price_history_.clear();
+    live_quotes_.clear();
 }

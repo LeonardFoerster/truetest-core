@@ -55,7 +55,35 @@ void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
 
     // Opener fill: promote pending -> armed.
     auto range = pending_.equal_range(f.get_order_id());
-    if (range.first == range.second) return;
+    if (range.first == range.second)
+    {
+        // No pending intents left: this is a subsequent partial fill of an
+        // opener whose bracket is already armed (the book can emit one fill
+        // per walked level). Grow the armed qty so the exit covers the whole
+        // position — anchoring it to the first partial only would leave the
+        // residual silently unprotected — and roll the entry to the VWAP
+        // across opener fills. (A venue-side bracket placed on the first
+        // fill keeps its original qty; engine-side eval covers the rest.)
+        auto arange = armed_.equal_range(f.get_order_id());
+        for (auto it = arange.first; it != arange.second; ++it)
+        {
+            auto& ai = it->second;
+            double frac = ai.intent.qty_fraction;
+            if (frac <= 0.0) frac = 1.0;
+            if (frac > 1.0)  frac = 1.0;
+            const double add = f.get_filled_quantity() * frac;
+            if (add <= 0.0) continue;
+            const double prev = ai.intent.qty;
+            if (prev + add > 0.0)
+                ai.entry_price = (ai.entry_price * prev +
+                                  f.get_fill_price() * add) / (prev + add);
+            ai.intent.qty = prev + add;
+        }
+        // Keep remaining-qty in lockstep with armed size so consume_opener_qty
+        // can cover the full position across multi-level opener fills.
+        opener_remaining_qty_[f.get_order_id()] += f.get_filled_quantity();
+        return;
+    }
 
     // Snapshot intents before we move them so we can hand the adapter
     // a stable copy (the in-process armed copy stays as watchdog).
@@ -216,13 +244,15 @@ std::vector<order_event> ExitManager::on_price(
 }
 
 std::vector<order_event> ExitManager::on_bar(
-    const std::string& symbol, double low, double high, double close,
+    const std::string& symbol, double open, double low, double high,
+    double close,
     std::chrono::system_clock::time_point ts)
 {
     std::vector<order_event> closes;
     if (armed_.empty()) return closes;
     if (!(low > 0.0) || !(high > 0.0) || !(close > 0.0)) return closes;
     if (low > high) std::swap(low, high);
+    if (!(open > 0.0)) open = close;
 
     for (auto it = armed_.begin(); it != armed_.end(); )
     {
@@ -240,20 +270,27 @@ std::vector<order_event> ExitManager::on_bar(
         // Updating trail from the same-bar high then firing SL on the low is
         // look-ahead (assumes high preceded low). Tick path (on_price) still
         // trails then checks — sequential prints are ordered.
-        // SL takes precedence when both extremes cross in one bar - we can't
+        // SL takes precedence when both extremes cross in one bar — we can't
         // know intra-bar order so the worst case wins.
         if (ai.intent.stop_loss &&
             ((is_long  && adverse <= *ai.intent.stop_loss) ||
              (!is_long && adverse >= *ai.intent.stop_loss)))
         {
-            fire_px = adverse;
+            // Anchored fill price: the stop level, or the open when the bar
+            // gapped through it. Never the bar extreme — that overstates
+            // slippage for an ordinary intra-bar trigger.
+            const double sl = *ai.intent.stop_loss;
+            fire_px = (is_long ? (open <= sl) : (open >= sl)) ? open : sl;
             fired = true;
         }
         else if (ai.intent.take_profit &&
                  ((is_long  && favorable >= *ai.intent.take_profit) ||
                   (!is_long && favorable <= *ai.intent.take_profit)))
         {
-            fire_px = favorable;
+            // A TP is a resting limit in reality: it fills at the TP level,
+            // or better at the open when the bar gapped through it.
+            const double tp = *ai.intent.take_profit;
+            fire_px = (is_long ? (open >= tp) : (open <= tp)) ? open : tp;
             fired = true;
         }
         else if (ai.intent.deadline && ts >= *ai.intent.deadline)

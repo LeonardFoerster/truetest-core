@@ -15,8 +15,14 @@ using MMRing = RingBuffer<event_pointer, MM_RING_SIZE>;
 class MarketMakerWorker : public Worker
 {
 public:
-    MarketMakerWorker(unsigned seed, MMRing& order_ring)
-        : mm_(seed), order_ring_(order_ring) {}
+    // Default-constructed calibration keeps the frozen engine.cpp callsite
+    // source-compatible until the CCB commit passes the configured values.
+    MarketMakerWorker(unsigned seed, MMRing& order_ring,
+                      const mm_calibration& cal = {})
+        : mm_(seed), order_ring_(order_ring)
+    {
+        mm_.set_calibration(cal);
+    }
 
     const char* worker_name() const override { return "market_maker"; }
 

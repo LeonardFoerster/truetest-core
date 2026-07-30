@@ -63,8 +63,9 @@ TEST(HotpathAllocs, SmaGolden_30Bars_PostWarmupUpperBound)
     const snapshot delta = window.total();
     maybe_print_baseline("SmaGolden_30Bars", delta);
 
-    // Baseline Phase 5/6 (dashboard extraction + lifetime token safety): ~27M bytes observed
-    EXPECT_LE(delta.count, 2200u);
+    // Resting-fill mechanism + master dashboard/lifetime work raise
+    // one-time setup cost; 1000-bar steady-state stays flat.
+    EXPECT_LE(delta.count, 3000u);
     EXPECT_LE(delta.bytes, 30000000u);
     EXPECT_EQ(read_pool_grows(eng).total(), 0u);
 }

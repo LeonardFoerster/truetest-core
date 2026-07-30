@@ -141,10 +141,7 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
     ecfg.seed = result.seed_used;     // important for any internal RNGs
     ecfg.show_progress = false;       // MC campaigns: avoid progress spam
 
-    // Apply realism settings from McRunConfig (Phase 2 keeps this lightweight)
-    if (config_.realistic_fills) {
-        ecfg.realistic_fills = true;
-    }
+    // Passive-side fill pricing is always on; nothing to forward here.
     // Latency / impact can be wired here in later phases using the existing model classes
     // when McRunConfig exposes more detailed realism knobs.
 

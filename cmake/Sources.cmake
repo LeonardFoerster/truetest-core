@@ -119,6 +119,7 @@ set(TEST_SOURCES
     tests/test_queue_position_model.cpp
     tests/test_walked_book_impact.cpp
     tests/test_realistic_fills.cpp
+    tests/test_stop_fill_pricing.cpp
     tests/test_bridge_unknown_fill.cpp
 
     # --- Events, engine, streaming ---

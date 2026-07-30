@@ -56,7 +56,6 @@ std::shared_ptr<IExecutionAdapter> ExecutionRouter::resolve_adapter(const std::s
                 cfg_.seed != 0 ? static_cast<unsigned>(cfg_.seed + 2) : cfg_.fill_rng_seed,
                 cfg_.market_aggression, cfg_.qty_scale,
                 cfg_.latency_model, cfg_.impact_model,
-                cfg_.realistic_fills, cfg_.bar_spread_bps,
                 cfg_.walked_book_impact);
             if (cfg_.debug_fills)
                 local->set_debug_fills(true, cfg_.debug_fills_budget);
