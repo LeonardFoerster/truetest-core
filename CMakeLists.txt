@@ -14,7 +14,7 @@ option(ENABLE_QUESTDB    "Build with QuestDB persistence backend"               
 option(ENABLE_TSAN       "Enable ThreadSanitizer"                                     OFF)
 option(ENABLE_ASAN       "Enable AddressSanitizer (mutually exclusive with TSAN)"     OFF)
 option(ENABLE_UBSAN      "Enable UndefinedBehaviorSanitizer (mutex with TSAN)"        OFF)
-option(ENABLE_NATIVE_OPT "Enable -march=native + unroll/omit-fp on engine_live only"  OFF)
+option(ENABLE_NATIVE_OPT "Enable -march=native + unroll/omit-fp on all three engines (Release)" OFF)
 option(BUILD_SHARED_LIB  "Build libtruetest shared library with C API for embedding"  OFF)
 option(BUILD_TESTS       "Build unit tests"                                           OFF)
 option(ENABLE_BENCHMARKS "Build performance benchmarks (Google Benchmark)"            OFF)
@@ -62,6 +62,9 @@ configure_file(
 # Source list lives in cmake/Sources.cmake (ENGINE_CORE_SOURCES).
 # This keeps the one obvious registration point for core code.
 add_library(engine_core OBJECT ${ENGINE_CORE_SOURCES})
+# PIC required when the same objects link into truetest_shared (BUILD_SHARED_LIB).
+# Harmless for the three engine executables; avoids R_X86_64_PC32 link failures.
+set_target_properties(engine_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(engine_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_BINARY_DIR}/generated")
@@ -96,9 +99,9 @@ _tt_add_engine_binary(engine_live     TT_TARGET_LIVE     src/bin/engine_live/mai
 tt_wire_rich_tui(engine_shadow)
 tt_wire_rich_tui(engine_live)
 
-# Native microarchitecture tuning. Gated on ENABLE_NATIVE_OPT (default off);
-# when the user opts in they want it across the board, not just on live.
-# CI and portable builds keep ENABLE_NATIVE_OPT=OFF and are unaffected.
+# Native microarchitecture tuning (ENABLE_NATIVE_OPT, default off).
+# Applied to all three engines when opted in so Release perf builds are
+# consistent; CI/portable builds leave the flag OFF.
 tt_apply_live_flags(engine_backtest)
 tt_apply_live_flags(engine_shadow)
 tt_apply_live_flags(engine_live)

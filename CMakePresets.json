@@ -35,7 +35,6 @@
         "CMAKE_BUILD_TYPE": "Debug"
       }
     },
-
     {
       "name": "linux-tests",
       "displayName": "Linux + Tests (Debug)",
@@ -58,6 +57,34 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "ENABLE_BINANCE": "ON",
+        "ENABLE_QUESTDB": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-bitget",
+      "displayName": "Linux + Bitget + Tests",
+      "description": "Bitget UTA futures provider + unit tests",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_BITGET": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-providers-questdb",
+      "displayName": "Linux + Binance + Bitget + QuestDB + Tests",
+      "description": "Both exchange providers + QuestDB + tests (phase0 / multi-venue dev)",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_BINANCE": "ON",
+        "ENABLE_BITGET": "ON",
         "ENABLE_QUESTDB": "ON",
         "BUILD_TESTS": "ON"
       }
@@ -118,8 +145,8 @@
     },
     {
       "name": "linux-release-native",
-      "displayName": "Linux Release + Native Opt (live tuning)",
-      "description": "Release with -march=native etc. (affects all three engines)",
+      "displayName": "Linux Release + Native Opt",
+      "description": "Release with -march=native on all three engines (ENABLE_NATIVE_OPT)",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
@@ -128,5 +155,17 @@
         "ENABLE_NATIVE_OPT": "ON"
       }
     }
+  ],
+  "buildPresets": [
+    { "name": "linux-default", "configurePreset": "linux-default" },
+    { "name": "linux-tests", "configurePreset": "linux-tests" },
+    { "name": "linux-binance-questdb", "configurePreset": "linux-binance-questdb" },
+    { "name": "linux-bitget", "configurePreset": "linux-bitget" },
+    { "name": "linux-providers-questdb", "configurePreset": "linux-providers-questdb" },
+    { "name": "linux-web", "configurePreset": "linux-web" },
+    { "name": "linux-asan", "configurePreset": "linux-asan" },
+    { "name": "linux-tsan", "configurePreset": "linux-tsan" },
+    { "name": "linux-benchmarks", "configurePreset": "linux-benchmarks" },
+    { "name": "linux-release-native", "configurePreset": "linux-release-native" }
   ]
 }

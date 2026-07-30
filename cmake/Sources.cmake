@@ -277,7 +277,7 @@ endif()
 # under BUILD_TESTS) while preserving the core failure behavior and limit.
 file(STRINGS src/engine/engine.cpp _engine_lines)
 list(LENGTH _engine_lines _engine_loc)
-set(ENGINE_LOC_MAX 4300)  # current ~4272 + buffer; tighten after further cleanup
+set(ENGINE_LOC_MAX 4300)  # ~3950 LOC after dashboard extract; tighten in engine decomp Wave 5
 if(_engine_loc GREATER ENGINE_LOC_MAX)
     file(STRINGS src/engine/engine.cpp _waiver_lines REGEX "ENGINE_LOC_WAIVER:")
     if(NOT _waiver_lines)
