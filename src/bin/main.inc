@@ -1565,8 +1565,10 @@ static int run_monte_carlo_mode(const cli_options& o)
 
 // Resolve exchange credentials. Environment variables win over CLI arguments;
 // argv-supplied secrets trigger a warning because they leak via `ps` and shell
-// history. Env prefix is provider-aware: bitget* → TRUETEST_BITGET_*, else
-// TRUETEST_BINANCE_* (historical default for binance / binance-futures).
+// history. Env prefix is provider-aware:
+//   bitget* → TRUETEST_BITGET_*
+//   bybit*  → TRUETEST_BYBIT_*
+//   else    → TRUETEST_BINANCE_* (historical default for binance / binance-futures)
 struct exchange_credentials {
     std::string key;
     std::string secret;
@@ -1578,6 +1580,11 @@ static bool provider_is_bitget(const std::string& name)
     return name.rfind("bitget", 0) == 0;
 }
 
+static bool provider_is_bybit(const std::string& name)
+{
+    return name.rfind("bybit", 0) == 0;
+}
+
 static exchange_credentials resolve_exchange_credentials(
     const std::string& provider_name,
     const std::string& arg_key,
@@ -1585,24 +1592,39 @@ static exchange_credentials resolve_exchange_credentials(
     const std::string& arg_passphrase)
 {
     const bool is_bitget = provider_is_bitget(provider_name);
+    const bool is_bybit  = provider_is_bybit(provider_name);
 
-    const char* env_key    = std::getenv(
-        is_bitget ? "TRUETEST_BITGET_API_KEY" : "TRUETEST_BINANCE_API_KEY");
-    const char* env_secret = std::getenv(
-        is_bitget ? "TRUETEST_BITGET_API_SECRET" : "TRUETEST_BINANCE_API_SECRET");
-    const char* env_pass   = is_bitget
-        ? std::getenv("TRUETEST_BITGET_API_PASSPHRASE")
-        : nullptr;
+    const char* env_key = nullptr;
+    const char* env_secret = nullptr;
+    const char* env_pass = nullptr;
+    const char* key_hint = "TRUETEST_BINANCE_API_KEY";
+    const char* secret_hint = "TRUETEST_BINANCE_API_SECRET";
+
+    if (is_bitget)
+    {
+        env_key    = std::getenv("TRUETEST_BITGET_API_KEY");
+        env_secret = std::getenv("TRUETEST_BITGET_API_SECRET");
+        env_pass   = std::getenv("TRUETEST_BITGET_API_PASSPHRASE");
+        key_hint = "TRUETEST_BITGET_API_KEY";
+        secret_hint = "TRUETEST_BITGET_API_SECRET";
+    }
+    else if (is_bybit)
+    {
+        env_key    = std::getenv("TRUETEST_BYBIT_API_KEY");
+        env_secret = std::getenv("TRUETEST_BYBIT_API_SECRET");
+        key_hint = "TRUETEST_BYBIT_API_KEY";
+        secret_hint = "TRUETEST_BYBIT_API_SECRET";
+    }
+    else
+    {
+        env_key    = std::getenv("TRUETEST_BINANCE_API_KEY");
+        env_secret = std::getenv("TRUETEST_BINANCE_API_SECRET");
+    }
 
     exchange_credentials out;
     out.key        = env_key    ? env_key    : arg_key;
     out.secret     = env_secret ? env_secret : arg_secret;
     out.passphrase = env_pass   ? env_pass   : arg_passphrase;
-
-    const char* key_hint = is_bitget
-        ? "TRUETEST_BITGET_API_KEY" : "TRUETEST_BINANCE_API_KEY";
-    const char* secret_hint = is_bitget
-        ? "TRUETEST_BITGET_API_SECRET" : "TRUETEST_BINANCE_API_SECRET";
 
     if (!arg_key.empty() && !env_key)
         std::cerr << "  WARNING: --api-key was passed on the command line. "
@@ -1633,14 +1655,18 @@ static int run_provider_mode(const cli_options& o)
     const std::string& resolved_secret     = creds.secret;
     const std::string& resolved_passphrase = creds.passphrase;
     const bool is_bitget = provider_is_bitget(o.provider_name);
-    // Sandbox routing must match pcfg: bitget accepts --demo|--testnet as
-    // demo/paptrading; Binance (and others) only --testnet. Never let --demo
-    // alone skip the live real-money captcha on non-bitget mainnet.
-    const bool sandbox = is_bitget ? (o.demo || o.testnet) : o.testnet;
+    const bool is_bybit  = provider_is_bybit(o.provider_name);
+    // Sandbox routing must match pcfg:
+    //   bitget: --demo|--testnet → paptrading demo
+    //   bybit:  --demo → demo trading hosts; --testnet → testnet hosts
+    //   else:   --testnet only (never let --demo alone skip mainnet captcha)
+    const bool sandbox = is_bitget ? (o.demo || o.testnet)
+                       : is_bybit  ? (o.demo || o.testnet)
+                                   : o.testnet;
 
-    if (o.demo && !is_bitget)
+    if (o.demo && !is_bitget && !is_bybit)
     {
-        std::cerr << "  WARNING: --demo is Bitget-specific (paptrading). "
+        std::cerr << "  WARNING: --demo is Bitget/Bybit-specific. "
                      "Ignored for provider '" << o.provider_name
                   << "'; use --testnet for Binance sandbox.\n";
     }
@@ -1656,11 +1682,19 @@ static int run_provider_mode(const cli_options& o)
     if (!o.host.empty())        pcfg["host"] = o.host;
     if (!o.port.empty())        pcfg["port"] = o.port;
     // Bitget demo/paptrading: --demo or --testnet → pcfg["demo"].
+    // Bybit: --demo → demo hosts; --testnet → testnet (distinct environments).
     // Binance keeps pcfg["testnet"] for its testnet hosts.
     if (is_bitget)
     {
         if (o.demo || o.testnet)
             pcfg["demo"] = "1";
+    }
+    else if (is_bybit)
+    {
+        if (o.demo)
+            pcfg["demo"] = "1";
+        else if (o.testnet)
+            pcfg["testnet"] = "1";
     }
     else if (o.testnet)
     {
@@ -1708,6 +1742,9 @@ static int run_provider_mode(const cli_options& o)
         else if (provider_is_bitget(o.provider_name))
             std::cerr << "    Example: --provider bitget-futures --symbol BTCUSDT "
                          "--stream trade\n";
+        else if (provider_is_bybit(o.provider_name))
+            std::cerr << "    Example: --provider bybit-futures --symbol BTCUSDT "
+                         "--stream trade --testnet\n";
         else if (o.provider_name == "local")
             std::cerr << "    Example: --provider local --path data/market_data.csv\n";
         else if (o.provider_name == "synthetic" || o.provider_name == "montecarlo")
@@ -1908,7 +1945,7 @@ static int run_provider_mode(const cli_options& o)
             if (sandbox)
                 std::cerr << "    Sandbox still uses the live order code path; "
                              "build and run engine_live with --testnet"
-                             << (is_bitget ? "/--demo" : "")
+                             << ((is_bitget || is_bybit) ? "/--demo" : "")
                              << " to trade on the venue sandbox.\n";
             return 1;
         }
@@ -1928,6 +1965,12 @@ static int run_provider_mode(const cli_options& o)
                              "(or as a fallback, --api-key / --api-secret / "
                              "--api-passphrase).\n";
             }
+            else if (is_bybit)
+            {
+                std::cerr << "  ! Live mode requires credentials via env vars "
+                             "TRUETEST_BYBIT_API_KEY / TRUETEST_BYBIT_API_SECRET "
+                             "(or as a fallback, --api-key / --api-secret).\n";
+            }
             else
             {
                 std::cerr << "  ! Live mode requires credentials via env vars "
@@ -1941,6 +1984,12 @@ static int run_provider_mode(const cli_options& o)
             if (is_bitget)
                 std::cout << "  [DEMO] Live mode will submit orders to Bitget "
                              "demo/paptrading.\n";
+            else if (is_bybit && o.demo)
+                std::cout << "  [DEMO] Live mode will submit orders to Bybit "
+                             "Demo Trading (api-demo.bybit.com).\n";
+            else if (is_bybit)
+                std::cout << "  [TESTNET] Live mode will submit orders to Bybit "
+                             "testnet (api-testnet.bybit.com).\n";
             else
                 std::cout << "  [TESTNET] Live mode will submit orders to the "
                              "Binance spot testnet.\n";
