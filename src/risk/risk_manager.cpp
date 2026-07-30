@@ -97,7 +97,16 @@ risk_action RiskManager::check_order(const order_event& order,
     const auto it = positions.find(order.get_symbol());
     const position* current_pos = (it != positions.end()) ? &it->second : nullptr;
     const bool reducing_exposure = reduces_position_exposure(order, current_pos);
+    const double price = valuation_price(order, current_pos);
     const double projected_notional = projected_position_notional(order, current_pos);
+
+    // Fail closed: non-reducing orders with no usable valuation price yield
+    // projected_notional == 0 and would otherwise bypass all notional / equity
+    // caps (typical for market opens with price==0 and no prior position).
+    if (!reducing_exposure &&
+        order.get_quantity() > kQtyEps &&
+        price <= 0.0)
+        return risk_action::reject;
 
     if (!reducing_exposure &&
         projected_notional > limits_.max_position_value)

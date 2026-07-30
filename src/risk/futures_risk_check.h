@@ -63,12 +63,12 @@ public:
 // USDT-M futures pre-trade risk: notional cap, leverage cap, projected
 // post-trade liquidation distance.
 // Important caveats encoded here (read before tuning the caps):
-//  - Cash proxy. The check uses portfolio.get_cash() as the available
-//    margin. For isolated positions on a single symbol that's accurate;
-//    for cross-margin or multi-symbol setups it's a coarse proxy.
-//    Conservative when local cash < venue available_balance; optimistic
-//    when it's higher. Operators with cross-margin risk should set
-//    caps tighter than the strictly-necessary venue limits.
+//  - Margin base is mark equity for the checked book, not raw cash.
+//    portfolio cash uses spot double-entry (short opens credit full
+//    notional proceeds). Using cash alone understates leverage after
+//    shorts. We use: cash + existing_qty * mark_price for this symbol.
+//    Multi-symbol MTM for other symbols is not included (coarse when
+//    cross-margin multi-book); operators should still set caps tight.
 //  - Maintenance margin tiers. Binance USDT-M uses notional-tiered MM
 //    rates (BTCUSDT: 0.5% up to 1M, then 0.65%, then …). This impl
 //    uses a flat default (0.5%); raise via config for higher-notional
@@ -87,7 +87,7 @@ public:
         // Maximum |post_qty| × mark_price in USDT terms. 0 disables.
         double max_notional_usdt = 0.0;
 
-        // Maximum implied leverage = post_notional / cash. 0 disables.
+        // Maximum implied leverage = post_notional / mark_equity. 0 disables.
         double max_leverage = 0.0;
 
         // Minimum projected post-trade liquidation buffer, as a
@@ -143,24 +143,28 @@ public:
             return out;
         }
 
-        const double cash = port.get_cash();
+        // Mark equity for this symbol's book. Spot-style cash credits
+        // short proceeds; equity = cash + qty*mark is the consistent
+        // single-symbol margin proxy (longs and shorts).
+        const double margin_base =
+            port.get_cash() + existing_qty * mark_price;
 
-        // Skip leverage / liquidation checks when cash <= 0 (no margin
+        // Skip leverage / liquidation when margin_base <= 0 (no margin
         // base to compute against) or post_notional == 0 (closing to
         // flat is always safe for a leverage check).
-        if (cash > 0.0 && post_notional > 0.0)
+        if (margin_base > 0.0 && post_notional > 0.0)
         {
             if (c_.max_leverage > 0.0)
             {
-                const double implied_leverage = post_notional / cash;
+                const double implied_leverage = post_notional / margin_base;
                 if (implied_leverage > c_.max_leverage)
                 {
                     char buf[192];
                     std::snprintf(buf, sizeof(buf),
                         "FuturesRiskCheck: implied leverage %.2fx "
-                        "exceeds cap %.2fx (notional=%.2f cash=%.2f)",
+                        "exceeds cap %.2fx (notional=%.2f equity=%.2f)",
                         implied_leverage, c_.max_leverage,
-                        post_notional, cash);
+                        post_notional, margin_base);
                     out.allow = false;
                     out.reason = buf;
                     return out;
@@ -169,7 +173,7 @@ public:
 
             if (c_.min_liquidation_distance_pct > 0.0)
             {
-                // Approx: distance ≈ cash / notional − maintenance_margin.
+                // Approx: distance ≈ equity / notional − maintenance_margin.
                 // Equivalent to 1/L − mm. Used as the post-trade buffer
                 // measured in units of mark price.
                 double mm_rate = c_.maintenance_margin_pct;
@@ -177,7 +181,7 @@ public:
                     mm_rate = mm_table_->maintenance_margin_rate_for_notional(post_notional);
                 }
 
-                const double margin_ratio = cash / post_notional;
+                const double margin_ratio = margin_base / post_notional;
                 const double distance = margin_ratio - mm_rate;
 
                 if (distance < c_.min_liquidation_distance_pct)
@@ -186,10 +190,10 @@ public:
                     std::snprintf(buf, sizeof(buf),
                         "FuturesRiskCheck: post-trade liquidation "
                         "distance %.2f%% < minimum %.2f%% "
-                        "(cash=%.2f notional=%.2f mm=%.2f%%)",
+                        "(equity=%.2f notional=%.2f mm=%.2f%%)",
                         distance * 100.0,
                         c_.min_liquidation_distance_pct * 100.0,
-                        cash, post_notional,
+                        margin_base, post_notional,
                         mm_rate * 100.0);
                     out.allow = false;
                     out.reason = buf;
