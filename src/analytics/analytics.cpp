@@ -22,7 +22,7 @@ Analytics::Analytics(double initial_cash, std::size_t rolling_window, double ris
       rolling_window_(rolling_window), risk_free_rate_(risk_free_rate),
       periods_per_year_(periods_per_year > 0 ? periods_per_year : 252),
       max_equity_points_(max_equity_points > 4 ? max_equity_points : 4),
-      prev_equity_(initial_cash), peak_equity_(initial_cash) {}
+      prev_equity_(initial_cash), last_equity_(initial_cash), peak_equity_(initial_cash) {}
 
 void Analytics::reserve_hint(std::size_t expected_bars)
 {
@@ -66,7 +66,9 @@ void Analytics::reset(double initial_cash)
     trades_.clear();
     trade_returns_.clear();
 
-    last_equity_ = 0.0;
+    // Seed equity so risk_view() / max_position_pct_of_equity work before the
+    // first market or funding event (previously stayed 0 and fail-opened).
+    last_equity_ = initial_cash;
     realized_vol_1h_ = 0.0;
     last_mid_price_ = 0.0;
     current_spread_bps_ = 0.0;
@@ -214,6 +216,9 @@ void Analytics::on_market(const market_event& m)
     if (has_position)
         equity += position_qty_ * last_close_;
 
+    // Keep risk_view().equity current on every bar (not only funding).
+    last_equity_ = equity;
+
     record_equity_point(equity_curve_, equity_stride_, equity_counter_,
                         {m.get_timestamp(), equity});
 
@@ -280,6 +285,12 @@ void Analytics::on_tick(const tick_event& t)
         first_price_ = t.get_price();
         first_price_set_ = true;
     }
+
+    // Tick-only sessions never see on_market; still feed risk_view equity.
+    double equity = cash_;
+    if (std::abs(position_qty_) > 1e-12)
+        equity += position_qty_ * last_close_;
+    last_equity_ = equity;
 }
 
 void Analytics::on_order(const order_event& o)
@@ -439,6 +450,16 @@ void Analytics::on_fill(const fill_event& f)
             entry_time_ = f.get_timestamp();
 
         cash_ -= side_sign * qty_left * fill_price + open_comm;
+    }
+
+    // Post-fill cash/position change must refresh risk equity immediately
+    // (next pre-trade check may happen before the next bar/tick).
+    {
+        const double mark = (last_close_ > 0.0) ? last_close_ : fill_price;
+        double equity = cash_;
+        if (std::abs(position_qty_) > 1e-12)
+            equity += position_qty_ * mark;
+        last_equity_ = equity;
     }
 
     trades_.push_back(rec);
