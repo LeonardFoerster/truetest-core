@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "test_ui.h"
+#include "helpers/test_ui.h"
 
 int main(int argc, char** argv)
 {

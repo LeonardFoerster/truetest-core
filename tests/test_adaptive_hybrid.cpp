@@ -1,6 +1,6 @@
 #include "strategy/adaptive_hybrid_strategy.h"
 #include "strategy/strategy_registry.h"
-#include "../src/core/event.h"
+#include "core/event.h"
 
 #include <gtest/gtest.h>
 #include <chrono>
