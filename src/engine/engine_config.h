@@ -25,10 +25,15 @@ namespace truetest::ui { class ConsoleDashboard; }
 
 enum class engine_mode { backtest, shadow, live };
 
+// block (default, backtest): the event loop applies backpressure — it
+// spins until the worker drains the ring, so no event is ever lost and
+// threaded-preset results are deterministic and identical to inline.
 // halt_on_drop: a drop from risk/observer/risk_stats (rings that feed
 // halt+shadow) sets halt_flag_. Non-safety rings still drop silently.
-// main.inc forces halt_on_drop when mode ∈ {shadow, live}.
-enum class ring_drop_policy { allow, halt_on_drop };
+// main.inc forces halt_on_drop when mode ∈ {shadow, live} (blocking the
+// hot path against a live feed is worse than halting).
+// allow: legacy lossy behavior — drops are counted but otherwise ignored.
+enum class ring_drop_policy { allow, halt_on_drop, block };
 
 // Phase 1 hot-path: pre-reserve object-pool blocks at engine startup so
 // runtime grow() never hits the heap on the event loop. When
@@ -173,20 +178,21 @@ struct engine_config
     unsigned fill_rng_seed = 42;
     double spread_step_factor = 0.0001;
 
-    // Opt into passive-side fill pricing. Default off for byte-identical
-    // backtest output. When on, market and marketable-limit orders record
-    // each fill at the resting counterparty's price (one fill_event per
-    // walked level) instead of the aggressor's marked-up book price.
-    // Auto-suppresses bar_spread_bps to avoid double-counting the seeded
-    // book's spread. Ignored in engine_mode::live.
-    bool realistic_fills = false;
+    // Synthetic MarketMaker calibration for bar-mode backtests. The seeded
+    // book is the sole source of spread cost for taker fills, so tune
+    // these to the target market. Mirrors mm_calibration (kept as scalars
+    // so this header stays free of market_maker.h).
+    int mm_levels_per_side = 10;
+    int mm_base_depth = 100;
+    double mm_base_spread_pct = 0.002;
+    double mm_vol_spread_mult = 0.25;
+    double mm_max_half_spread_pct = 0.05;
 
-    // Calibrated full bid-ask charged to bar-mode market orders. The
-    // reference price is shifted by ±(bar_spread_bps/2)/1e4 × mid before
-    // impact and aggression. Suppressed for symbols carrying real L2
-    // depth, and suppressed under realistic_fills (the seeded MM spread
-    // already drives the fill price). Ignored in engine_mode::live.
-    double bar_spread_bps = 0.0;
+    // Note: fills always record the resting counterparty's price, one
+    // fill_event per walked level (passive-side pricing). The aggressor's
+    // marked-up book price (mid × market_aggression) is only a crossing
+    // limit. Spread cost on the synthetic-book path comes from the mm_*
+    // calibration above.
 
     // Shadow-mode queue-position estimate. Null -> NoQueueModel default
     // (legacy fill-on-cross). When set, TradeTapeShadowAdapter holds
@@ -207,7 +213,9 @@ struct engine_config
 
     unsigned max_consecutive_worker_errors = 5;
 
-    ring_drop_policy drop_policy = ring_drop_policy::allow;
+    // Default block: backtests must not silently lose events to full rings
+    // (lossy stats made reported metrics depend on scheduling/preset).
+    ring_drop_policy drop_policy = ring_drop_policy::block;
 
     pool_prewarm_settings pool_prewarm{};
 

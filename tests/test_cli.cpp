@@ -2,15 +2,44 @@
 #include <cstdlib>
 #include <cstdio>
 #include <array>
+#include <ctime>
 #include <string>
 #include <fstream>
+#include <sys/stat.h>
+#include <sys/wait.h>
+
+// Resolve engine binary across common CMake output layouts (ad-hoc
+// ./build and preset out/build/linux-tests). Prefer the newer mtime.
+static std::string resolve_engine_binary(const std::string& binary)
+{
+    const char* candidates[] = {
+        "./out/build/linux-tests/",
+        "./build/",
+        "./out/build/linux-release-native/",
+    };
+    std::string best;
+    std::time_t best_mtime = 0;
+    for (const char* dir : candidates)
+    {
+        const std::string path = std::string(dir) + binary;
+        struct stat st{};
+        if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+            (st.st_mode & S_IXUSR) && st.st_mtime >= best_mtime)
+        {
+            best = path;
+            best_mtime = st.st_mtime;
+        }
+    }
+    return best.empty() ? (std::string("./build/") + binary) : best;
+}
 
 // Helper: run engine binary with args, capture stdout+stderr, return exit code
 static int run_engine(const std::string& binary,
                       const std::string& args,
                       std::string& output)
 {
-    std::string cmd = "./build/" + binary + " " + args + " 2>&1";
+    const std::string path = resolve_engine_binary(binary);
+    std::string cmd = path + " " + args + " 2>&1";
     std::array<char, 4096> buf;
     output.clear();
 
@@ -22,7 +51,10 @@ static int run_engine(const std::string& binary,
 
     int status = pclose(pipe);
     // pclose returns the process exit status encoded; extract it
-    return WEXITSTATUS(status);
+    if (status < 0) return -1;
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return status;
 }
 
 static int run_truetest(const std::string& args, std::string& output)
@@ -230,6 +262,63 @@ TEST(CLI, ImpactKBpsRequiresAdv)
         "--strategy sma --mode backtest --impact-k-bps 10", out);
     EXPECT_NE(rc, 0);
     EXPECT_NE(out.find("requires --impact-adv"), std::string::npos);
+}
+
+TEST(DumpConfig, ReflectsFillModel)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--dump-config --fill-prob 0.9 --fill-fade 0.05 --fill-decay 12", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("\"fill_prob\": 0.9"), std::string::npos);
+    EXPECT_NE(out.find("\"fill_fade\": 0.05"), std::string::npos);
+    EXPECT_NE(out.find("\"fill_decay\": 12.0"), std::string::npos);
+}
+
+TEST(DumpConfig, ReflectsMmCalibration)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--dump-config --mm-levels 5 --mm-base-depth 50 "
+        "--mm-spread-pct 0.001 --mm-vol-mult 2", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("\"mm_levels\": 5"), std::string::npos);
+    EXPECT_NE(out.find("\"mm_base_depth\": 50"), std::string::npos);
+    EXPECT_NE(out.find("\"mm_spread_pct\": 0.001"), std::string::npos);
+    EXPECT_NE(out.find("\"mm_vol_mult\": 2.0"), std::string::npos);
+}
+
+// --fill-fade without --fill-prob is a silent no-op model — hard-fail.
+TEST(CLI, FillFadeRequiresFillProb)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--provider local --path market_data.csv "
+        "--strategy sma --mode backtest --fill-fade 0.1", out);
+    EXPECT_NE(rc, 0);
+    EXPECT_NE(out.find("requires --fill-prob"), std::string::npos);
+}
+
+// Deprecated fill-pricing flags stay accepted (scripts keep running) but
+// must announce that they no longer do anything.
+TEST(CLI, RealisticFillsDeprecationWarning)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--provider local --path market_data.csv --strategy sma "
+        "--mode backtest --realistic-fills --status-format off", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("deprecated"), std::string::npos);
+}
+
+TEST(CLI, BarSpreadBpsDeprecationWarning)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--provider local --path market_data.csv --strategy sma "
+        "--mode backtest --bar-spread-bps 10 --status-format off", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("no longer affects recorded fill prices"), std::string::npos);
 }
 
 // ─── B3: --dry-run ─────────────────────────────────────────────────────────

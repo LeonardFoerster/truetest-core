@@ -91,8 +91,9 @@ TEST(EngineLookahead, Default_OrderFillsAtNextBarOpen)
     EXPECT_GT(t.timestamp, trigger_ts)
         << "order emitted on bar 3 must not fill within bar 3 under default bar-delay";
 
-    // Fill price must reflect bar 4's open (~200), not bar 3's close (~100).
-    // LocalBookAdapter adds a small aggression markup on market orders.
+    // Fill price must reflect bar 4's open (~200), not bar 3's close
+    // (~100): the engine re-seeds the synthetic book at the open before
+    // draining pending orders, and fills record resting book prices.
     EXPECT_GT(t.fill_price, 150.0)
         << "fill price should track bar 4's open (~200), not bar 3's close (~100)";
 }

@@ -59,6 +59,11 @@ engine::engine(std::shared_ptr<data_handler> dh,
       market_maker_(config_.seed != 0 ? MarketMaker(static_cast<unsigned>(config_.seed + 1))
                                       : MarketMaker())
 {
+    market_maker_.set_calibration({config_.mm_levels_per_side,
+                                   config_.mm_base_depth,
+                                   config_.mm_base_spread_pct,
+                                   config_.mm_vol_spread_mult,
+                                   config_.mm_max_half_spread_pct});
     // Checkpoint mgr early (used by restore path in ctor).
     checkpoint_mgr_ = std::make_unique<CheckpointManager>(config_);
 
@@ -457,6 +462,27 @@ void engine::publish_event(const event_pointer& ev)
         if (!ring) return;
         if (!ring->try_push(ev))
         {
+            if (config_.drop_policy == ring_drop_policy::block)
+            {
+                // Deterministic backpressure: never lose an event — wait for
+                // the worker to drain the ring. Bail out (and count a drop)
+                // only when blocking can no longer terminate: a worker died
+                // or the engine is halting.
+                for (;;)
+                {
+                    if (worker_failed_.load(std::memory_order_acquire) ||
+                        halt_flag_.load(std::memory_order_acquire))
+                        break;
+                    std::this_thread::yield();
+                    if (ring->try_push(ev))
+                    {
+#ifdef HAS_DEBUG
+                        diag.on_push(ring->occupancy());
+#endif
+                        return;
+                    }
+                }
+            }
             ++drops;
 #ifdef HAS_DEBUG
             diag.on_drop();
@@ -778,8 +804,18 @@ void engine::start_workers()
         logging_ring_ = std::make_shared<EventRing>();
         risk_ring_ = std::make_shared<EventRing>();
         stats_ring_ = std::make_shared<EventRing>();
-        mm_ring_ = std::make_shared<EventRing>();
-        mm_order_ring_ = std::make_shared<MMRing>();
+
+        // Backtest determinism: the async MM worker replenishes the book on
+        // its own schedule, so the book state at any bar — and therefore
+        // fill prices — would depend on thread scheduling. Backtests use
+        // the inline replenish path instead (same as the other presets);
+        // the async worker stays available for shadow/live.
+        const bool async_mm = (config_.mode != engine_mode::backtest);
+        if (async_mm)
+        {
+            mm_ring_ = std::make_shared<EventRing>();
+            mm_order_ring_ = std::make_shared<MMRing>();
+        }
 
         logging_worker_ = make_logging_worker();
         risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_,
@@ -788,13 +824,19 @@ void engine::start_workers()
         stats_worker_ = std::make_unique<StatsWorker>(config_.initial_balance, 1000,
             config_.rolling_window, config_.risk_free_rate,
             config_.periods_per_year, config_.max_equity_points);
-        mm_worker_ = std::make_unique<MarketMakerWorker>(
-            config_.seed != 0 ? static_cast<unsigned>(config_.seed + 3) : 42u,
-            *mm_order_ring_);
+        if (async_mm)
+            mm_worker_ = std::make_unique<MarketMakerWorker>(
+                config_.seed != 0 ? static_cast<unsigned>(config_.seed + 3) : 42u,
+                *mm_order_ring_,
+                mm_calibration{config_.mm_levels_per_side,
+                               config_.mm_base_depth,
+                               config_.mm_base_spread_pct,
+                               config_.mm_vol_spread_mult,
+                               config_.mm_max_half_spread_pct});
         wire_failure(*logging_worker_);
         wire_failure(*risk_worker_);
         wire_failure(*stats_worker_);
-        wire_failure(*mm_worker_);
+        if (mm_worker_) wire_failure(*mm_worker_);
 
         worker_threads_.emplace_back([this]() {
             logging_worker_->run(*logging_ring_);
@@ -811,10 +853,13 @@ void engine::start_workers()
         });
         pin_to_core(worker_threads_.back(), find_core(core_role::stats));
 
-        worker_threads_.emplace_back([this]() {
-            mm_worker_->run(*mm_ring_);
-        });
-        pin_to_core(worker_threads_.back(), find_core(core_role::market_maker));
+        if (mm_worker_)
+        {
+            worker_threads_.emplace_back([this]() {
+                mm_worker_->run(*mm_ring_);
+            });
+            pin_to_core(worker_threads_.back(), find_core(core_role::market_maker));
+        }
         break;
     }
     }
@@ -1629,19 +1674,8 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         }
     }
 
-    std::vector<fill_event> fills;
-    if (router_->poll_fills(adapter.get(), fills))
-    {
-        DEBUG_STAGE(stage_timer_, fill_processing);
-        const bool mark_sim = (config_.mode == engine_mode::shadow);
-        for (auto& f : fills)
-        {
-            if (!handle_engine_fill(f, event_count, halt_requested,
-                                    /*run_post_fill_risk=*/true,
-                                    /*mark_shadow_sim=*/mark_sim))
-                return false;
-        }
-    }
+    if (!process_adapter_fills(adapter, event_count, halt_requested))
+        return false;
 
     if (config_.mode == engine_mode::shadow && config_.provider)
     {
@@ -1673,6 +1707,46 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 
     event_count++;
     return true;
+}
+
+bool engine::process_adapter_fills(const std::shared_ptr<IExecutionAdapter>& adapter,
+                                   std::size_t& event_count, bool& halt_requested)
+{
+    if (!adapter)
+        return true;
+
+    std::vector<fill_event> fills;
+    if (!router_->poll_fills(adapter.get(), fills))
+        return true;
+
+    DEBUG_STAGE(stage_timer_, fill_processing);
+    const bool mark_sim = (config_.mode == engine_mode::shadow);
+    for (auto& f : fills)
+    {
+        if (!handle_engine_fill(f, event_count, halt_requested,
+                                /*run_post_fill_risk=*/true,
+                                /*mark_shadow_sim=*/mark_sim))
+            return false;
+    }
+    return true;
+}
+
+void engine::deliver_mm_book_trades(const std::string& symbol, const trades& trs,
+                                    const std::chrono::system_clock::time_point& ts,
+                                    std::size_t& event_count, bool& halt_requested)
+{
+    if (trs.empty())
+        return;
+    // Only adapters that already exist can hold resting strategy orders;
+    // don't create one just to deliver MM-vs-MM crossings.
+    auto it = execution_adapters_.find(symbol);
+    if (it == execution_adapters_.end() || !it->second)
+        return;
+    auto* local = dynamic_cast<LocalBookAdapter*>(it->second.get());
+    if (!local)
+        return;
+    local->on_book_trades(trs, ts);
+    process_adapter_fills(it->second, event_count, halt_requested);
 }
 
 bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
@@ -1993,7 +2067,8 @@ bool engine::apply_instrument_spec(order_event& o, const instrument_spec& spec) 
 
 bool engine::route_order(order_event& order,
                          const std::chrono::system_clock::time_point& sim_time,
-                         std::size_t& event_count, bool& halt_requested)
+                         std::size_t& event_count, bool& halt_requested,
+                         bool anchor_immediate)
 {
     // Terminal halt gate: refuse new submits even if a call site forgot to
     // re-check halt_flag_ (e.g. L2 multi-strategy loop after primary halt).
@@ -2048,6 +2123,38 @@ bool engine::route_order(order_event& order,
         return true;
     }
 
+    if (anchor_immediate)
+    {
+        // Bracket fire: fill where it triggered. Re-center the synthetic
+        // book at the anchored fire price (SL/TP level or gap open) within
+        // the trigger bar and execute immediately — deferring through
+        // execution_bar_delay would discard the fire price and fill at
+        // wherever the next bar happens to open. Same convention as the
+        // native stop path in check_pending_stops.
+        const double ref = order.get_price();
+        const double bar_mid = last_mid_price_;
+        if (ref > 0.0 && ref != bar_mid)
+        {
+            auto ob = orderbook_registry_.get_or_create(order.get_symbol());
+            if (!mm_worker_ &&
+                !l2_seeded_symbols_.count(order.get_symbol()))
+            {
+                auto mm_trades = market_maker_.replenish(
+                    ob, ref, /*update_history=*/false);
+                deliver_mm_book_trades(order.get_symbol(), mm_trades,
+                                       sim_time, event_count, halt_requested);
+            }
+            last_mid_price_ = ref;
+        }
+        order.set_earliest_eligible_ts(sim_time);
+        auto order_ptr = acquire_pooled(order_pool_,order);
+        if (order.get_tif() == time_in_force::day)
+            day_order_ids_.push_back({order.get_symbol(), order.get_order_id()});
+        const bool ok = process_order(order_ptr, event_count, halt_requested);
+        last_mid_price_ = bar_mid;
+        return ok;
+    }
+
     if (config_.latency_model)
     {
         auto latency = config_.latency_model->get_order_latency();
@@ -2070,10 +2177,16 @@ bool engine::route_order(order_event& order,
     return process_order(order_ptr, event_count, halt_requested);
 }
 
-void engine::check_pending_stops(double high, double low,
+void engine::check_pending_stops(double open, double high, double low,
                                  const std::chrono::system_clock::time_point& sim_time,
                                  std::size_t& event_count, bool& halt_requested)
 {
+    // last_mid_price_ is the bar close when this runs in the bar loops;
+    // restored after each anchored fill so subsequent processing keeps
+    // the close reference. Tick callers pass open == high == low ==
+    // last_mid_price_, making the anchor a no-op there.
+    const double bar_mid = last_mid_price_;
+
     auto it = pending_stops_.begin();
     while (it != pending_stops_.end() &&
            !halt_requested &&
@@ -2089,6 +2202,33 @@ void engine::check_pending_stops(double high, double low,
 
         if (triggered)
         {
+            // Fill reference: the stop price, or the bar open when the
+            // bar gapped through the stop. Never the close — that is
+            // intra-bar look-ahead and deviates from the convention of
+            // filling where the stop was hit.
+            const double ref = (stop->get_side() == order_side::buy)
+                ? ((open >= stop->get_stop_price()) ? open : stop->get_stop_price())
+                : ((open <= stop->get_stop_price()) ? open : stop->get_stop_price());
+
+            last_mid_price_ = ref;
+            if (ref != bar_mid)
+            {
+                // Re-center the synthetic book at the trigger so the
+                // converted order walks depth priced around ref, not
+                // around the previous close. Skipped for real L2 depth
+                // and under the threaded MM preset (the worker owns the
+                // book there).
+                auto ob = orderbook_registry_.get_or_create(stop->get_symbol());
+                if (!mm_worker_ &&
+                    !l2_seeded_symbols_.count(stop->get_symbol()))
+                {
+                    auto mm_trades = market_maker_.replenish(
+                        ob, ref, /*update_history=*/false);
+                    deliver_mm_book_trades(stop->get_symbol(), mm_trades,
+                                           sim_time, event_count, halt_requested);
+                }
+            }
+
             if (stop->get_order_type() == order_type::stop)
             {
                 auto market_order = acquire_pooled(order_pool_,
@@ -2103,7 +2243,10 @@ void engine::check_pending_stops(double high, double low,
                 if (market_order->get_tif() == time_in_force::day)
                     day_order_ids_.push_back({market_order->get_symbol(), market_order->get_order_id()});
                 if (!process_order(market_order, event_count, halt_requested))
+                {
+                    last_mid_price_ = bar_mid;
                     return;
+                }
             }
             else
             {
@@ -2119,8 +2262,12 @@ void engine::check_pending_stops(double high, double low,
                 if (limit_order->get_tif() == time_in_force::day)
                     day_order_ids_.push_back({limit_order->get_symbol(), limit_order->get_order_id()});
                 if (!process_order(limit_order, event_count, halt_requested))
+                {
+                    last_mid_price_ = bar_mid;
                     return;
+                }
             }
+            last_mid_price_ = bar_mid;
             it = pending_stops_.erase(it);
         }
         else
@@ -2471,30 +2618,46 @@ bool engine::evaluate_exits(const std::string& symbol, double px,
     {
         close.set_recv_ns(recv_ns);
         bool halt = false;
-        route_order(close, ts, event_count, halt);
+        route_order(close, ts, event_count, halt, /*anchor_immediate=*/true);
         if (halt) return true;
     }
     return false;
 }
 
 bool engine::evaluate_exits(const std::string& symbol,
-                            double low, double high, double close,
+                            double open, double low, double high, double close,
                             std::chrono::system_clock::time_point ts,
                             std::size_t& event_count,
                             std::int64_t recv_ns)
 {
     // See canonical sequence comment in process_order. Bar fires go through
-    // route_order for consistent meta registration and full propagation.
-    auto fires = exit_manager_.on_bar(symbol, low, high, close, ts);
+    // route_order for consistent meta registration and full propagation,
+    // anchored at the fire price computed within the trigger bar.
+    auto fires = exit_manager_.on_bar(symbol, open, low, high, close, ts);
     if (fires.empty()) return false;
     for (auto& c : fires)
     {
         c.set_recv_ns(recv_ns);
         bool halt = false;
-        route_order(c, ts, event_count, halt);
+        route_order(c, ts, event_count, halt, /*anchor_immediate=*/true);
         if (halt) return true;
     }
     return false;
+}
+
+void engine::sweep_resting_limits(const std::string& symbol,
+                                  double low, double high,
+                                  const std::chrono::system_clock::time_point& ts,
+                                  std::size_t& event_count, bool& halt_requested)
+{
+    auto it = execution_adapters_.find(symbol);
+    if (it == execution_adapters_.end() || !it->second)
+        return;
+    auto* local = dynamic_cast<LocalBookAdapter*>(it->second.get());
+    if (!local)
+        return;
+    if (local->sweep_resting_range(symbol, low, high, ts))
+        process_adapter_fills(it->second, event_count, halt_requested);
 }
 
 void engine::dispatch_extras_on_market(const market_event& mkt,
@@ -2509,7 +2672,7 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
         if (!s) continue;
 
         if (evaluate_exits(mkt.get_symbol(),
-                           mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                           mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
                            ts, event_count, mkt.get_recv_ns()))
             return;
 
@@ -2610,6 +2773,25 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     last_mid_price_.store(mkt.get_open(), std::memory_order_release);
     last_mark_symbol_ = mkt.get_symbol();
 
+    // Re-center the synthetic book at the open before draining pending
+    // orders: next-bar-open fills must walk depth priced at the open,
+    // not at the previous close (visible on gap bars).
+    if (!pending_orders_.empty() &&
+        pending_orders_.top().order->get_earliest_eligible_ts() <= timestamp)
+    {
+        auto ob_open = orderbook_registry_.get_or_create(mkt.get_symbol());
+        if (!mm_worker_ &&
+            !l2_seeded_symbols_.count(mkt.get_symbol()))
+        {
+            auto mm_trades = market_maker_.replenish(
+                ob_open, last_mid_price_.load(std::memory_order_relaxed),
+                /*update_history=*/false);
+            bool halt = false;
+            deliver_mm_book_trades(mkt.get_symbol(), mm_trades,
+                                   timestamp, event_count, halt);
+        }
+    }
+
     bool halt = false;
     while (!pending_orders_.empty() &&
            pending_orders_.top().order->get_earliest_eligible_ts() <= timestamp &&
@@ -2630,10 +2812,31 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     last_mid_price_.store(mkt.get_close(), std::memory_order_release);
     last_mark_symbol_ = mkt.get_symbol();
 
+    {
+        // Stops were previously never evaluated in streaming bar mode —
+        // they silently never triggered. Local halt mirrors the pending
+        // drain above; risk halts propagate via halt_flag_.
+        bool halt = false;
+        check_pending_stops(mkt.get_open(), mkt.get_high(), mkt.get_low(),
+                            timestamp, event_count, halt);
+        sweep_resting_limits(mkt.get_symbol(), mkt.get_low(), mkt.get_high(),
+                             timestamp, event_count, halt);
+        // Match tick/history paths: do not generate new MM/provider fills
+        // after a terminal halt on this bar.
+        if (halt || halt_flag_.load(std::memory_order_acquire))
+            return;
+    }
+
     auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
-    if (!preset_has_mm_worker(config_.threading) &&
+    if (!mm_worker_ &&
         !l2_seeded_symbols_.count(mkt.get_symbol()))
-        market_maker_.replenish(ob, last_mid_price_.load(std::memory_order_relaxed));
+    {
+        auto mm_trades = market_maker_.replenish(
+            ob, last_mid_price_.load(std::memory_order_relaxed));
+        bool halt = false;
+        deliver_mm_book_trades(mkt.get_symbol(), mm_trades,
+                               timestamp, event_count, halt);
+    }
 
     if (config_.provider && config_.provider->has_execution())
     {
@@ -2686,7 +2889,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     // Canonical order: pending stops → exits → strategy → route (matches tick path).
     {
         bool stop_halt = false;
-        check_pending_stops(mkt.get_high(), mkt.get_low(), timestamp,
+        check_pending_stops(mkt.get_open(), mkt.get_high(), mkt.get_low(), timestamp,
                             event_count, stop_halt);
         if (stop_halt || halt_flag_.load(std::memory_order_acquire))
             return;
@@ -2697,10 +2900,12 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     publish_event(mkt_ptr);
     if (!config_.is_threaded())
         analytics_.on_event(mkt_ptr);
+    else
+        analytics_.on_mark(mkt.get_symbol(), mkt.get_close());
     event_count++;
 
     if (evaluate_exits(mkt.get_symbol(),
-                       mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                       mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
                        timestamp, event_count, mkt.get_recv_ns()))
         return;
 
@@ -2748,7 +2953,13 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         DEBUG_STAGE(stage_timer_, mm_replenish);
         auto ob = orderbook_registry_.get_or_create(rec.symbol);
         if (!l2_seeded_symbols_.count(rec.symbol))
-            market_maker_.replenish(ob, last_mid_price_.load(std::memory_order_relaxed));
+        {
+            auto mm_trades = market_maker_.replenish(
+                ob, last_mid_price_.load(std::memory_order_relaxed));
+            bool halt = false;
+            deliver_mm_book_trades(rec.symbol, mm_trades,
+                                   rec.timestamp, event_count, halt);
+        }
     }
 
     if (config_.provider && config_.provider->has_execution())
@@ -2818,7 +3029,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 
     {
         DEBUG_STAGE(stage_timer_, stop_check);
-        check_pending_stops(rec.price, rec.price, rec.timestamp, event_count, halt);
+        check_pending_stops(rec.price, rec.price, rec.price, rec.timestamp, event_count, halt);
     }
     if (halt || halt_flag_.load(std::memory_order_acquire)) return;
 
@@ -2830,6 +3041,8 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     }
     if (!config_.is_threaded())
         analytics_.on_event(tick_ptr);
+    else
+        analytics_.on_mark(rec.symbol, rec.price);
     event_count++;
 
     if (evaluate_exits(rec.symbol, rec.price, rec.timestamp,
@@ -3424,6 +3637,22 @@ void engine::run()
 
         {
             DEBUG_STAGE(stage_timer_, pending_drain);
+            // Re-center the synthetic book at the open before draining:
+            // next-bar-open fills must walk depth priced at the open, not
+            // at the previous close (visible on gap bars).
+            if (!pending_orders_.empty() &&
+                pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time)
+            {
+                auto ob_open = orderbook_registry_.get_or_create(symbol);
+                if (!mm_worker_ &&
+                    !l2_seeded_symbols_.count(symbol))
+                {
+                    auto mm_trades = market_maker_.replenish(
+                        ob_open, last_mid_price_, /*update_history=*/false);
+                    deliver_mm_book_trades(symbol, mm_trades, sim_time,
+                                           event_count, halt_requested);
+                }
+            }
             while (!pending_orders_.empty() &&
                    pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time &&
                    !halt_requested &&
@@ -3442,8 +3671,11 @@ void engine::run()
 
         {
             DEBUG_STAGE(stage_timer_, stop_check);
-            check_pending_stops(mkt.get_high(), mkt.get_low(), sim_time, event_count, halt_requested);
+            check_pending_stops(mkt.get_open(), mkt.get_high(), mkt.get_low(), sim_time, event_count, halt_requested);
         }
+        sweep_resting_limits(symbol, mkt.get_low(), mkt.get_high(),
+                             sim_time, event_count, halt_requested);
+
         if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
         // Drain async venue fills that arrived after a prior submit's
@@ -3488,9 +3720,14 @@ void engine::run()
         {
             DEBUG_STAGE(stage_timer_, mm_replenish);
             auto ob = orderbook_registry_.get_or_create(symbol);
-            if (!preset_has_mm_worker(config_.threading) &&
+            if (!mm_worker_ &&
                 !l2_seeded_symbols_.count(symbol))
-                market_maker_.replenish(ob, last_mid_price_.load(std::memory_order_relaxed));
+            {
+                auto mm_trades = market_maker_.replenish(
+                    ob, last_mid_price_.load(std::memory_order_relaxed));
+                deliver_mm_book_trades(symbol, mm_trades, sim_time,
+                                       event_count, halt_requested);
+            }
         }
 
         if (mm_order_ring_)
@@ -3507,7 +3744,9 @@ void engine::run()
                         ob_order_type::good_till_cancel, mm_order.get_order_id(),
                         mm_side, Price::from_double(mm_order.get_price()),
                         static_cast<quantity>(std::round(mm_order.get_quantity() * 1e8)));
-                    mm_ob->add_order(mm_ob_order);
+                    auto mm_trades = mm_ob->add_order(mm_ob_order);
+                    deliver_mm_book_trades(mm_order.get_symbol(), mm_trades,
+                                           sim_time, event_count, halt_requested);
                 }
             }
         }
@@ -3520,11 +3759,13 @@ void engine::run()
         }
         if (!config_.is_threaded())
             analytics_.on_event(mkt_ptr);
+        else
+            analytics_.on_mark(symbol, mkt.get_close());
         event_count++;
 
         // Canonical: exits before strategy decision (matches tick path).
         if (evaluate_exits(symbol,
-                           mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                           mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
                            sim_time, event_count, mkt.get_recv_ns()))
             break;
 
@@ -3642,10 +3883,12 @@ void engine::run_tick_data()
         publish_event(bar_ptr);
         if (!config_.is_threaded())
             analytics_.on_event(bar_ptr);
+        else
+            analytics_.on_mark(bar.get_symbol(), bar.get_close());
 
         // Canonical: exits before strategy decision (matches tick path).
         if (evaluate_exits(bar.get_symbol(),
-                           bar.get_low(), bar.get_high(), bar.get_close(),
+                           bar.get_open(), bar.get_low(), bar.get_high(), bar.get_close(),
                            bar.get_timestamp(), event_count, bar_recv_ns))
             return;
 
@@ -3678,7 +3921,12 @@ void engine::run_tick_data()
             DEBUG_STAGE(stage_timer_, mm_replenish);
             auto ob = orderbook_registry_.get_or_create(tick.symbol);
             if (!l2_seeded_symbols_.count(tick.symbol))
-                market_maker_.replenish(ob, last_mid_price_.load(std::memory_order_relaxed));
+            {
+                auto mm_trades = market_maker_.replenish(
+                    ob, last_mid_price_.load(std::memory_order_relaxed));
+                deliver_mm_book_trades(tick.symbol, mm_trades, tick.timestamp,
+                                       event_count, halt_requested);
+            }
         }
 
         {
@@ -3699,7 +3947,7 @@ void engine::run_tick_data()
 
         {
             DEBUG_STAGE(stage_timer_, stop_check);
-            check_pending_stops(tick.price, tick.price, tick.timestamp, event_count, halt_requested);
+            check_pending_stops(tick.price, tick.price, tick.price, tick.timestamp, event_count, halt_requested);
         }
         if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
@@ -3719,6 +3967,8 @@ void engine::run_tick_data()
         }
         if (!config_.is_threaded())
             analytics_.on_event(tick_ptr);
+        else
+            analytics_.on_mark(tick.symbol, tick.price);
         event_count++;
 
         if (evaluate_exits(tick.symbol, tick.price, tick.timestamp,
@@ -3826,6 +4076,20 @@ void engine::run_replay(const std::string& log_path,
 
             last_mid_price_.store(mkt.get_open(), std::memory_order_release);
 
+            // Re-center the synthetic book at the open before draining
+            // (next-bar-open fills walk open-priced depth; see bar loop).
+            if (!pending_orders_.empty() &&
+                pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time)
+            {
+                auto ob_open = orderbook_registry_.get_or_create(mkt.get_symbol());
+                if (!l2_seeded_symbols_.count(mkt.get_symbol()))
+                {
+                    auto mm_trades = market_maker_.replenish(
+                        ob_open, last_mid_price_, /*update_history=*/false);
+                    deliver_mm_book_trades(mkt.get_symbol(), mm_trades, sim_time,
+                                           event_count, halt_requested);
+                }
+            }
             while (!pending_orders_.empty() &&
                    pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time &&
                    !halt_requested &&
@@ -3841,21 +4105,31 @@ void engine::run_replay(const std::string& log_path,
 
             last_mid_price_.store(mkt.get_close(), std::memory_order_release);
 
-            check_pending_stops(mkt.get_high(), mkt.get_low(), sim_time,
+            check_pending_stops(mkt.get_open(), mkt.get_high(), mkt.get_low(), sim_time,
                                 event_count, halt_requested);
+            if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
+            sweep_resting_limits(mkt.get_symbol(), mkt.get_low(), mkt.get_high(),
+                                 sim_time, event_count, halt_requested);
             if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
             auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
             if (!l2_seeded_symbols_.count(mkt.get_symbol()))
-                market_maker_.replenish(ob, last_mid_price_.load(std::memory_order_relaxed));
+            {
+                auto mm_trades = market_maker_.replenish(
+                    ob, last_mid_price_.load(std::memory_order_relaxed));
+                deliver_mm_book_trades(mkt.get_symbol(), mm_trades, sim_time,
+                                       event_count, halt_requested);
+            }
 
             publish_event(ev);
             if (!config_.is_threaded())
                 analytics_.on_event(ev);
+            else
+                analytics_.on_mark(mkt.get_symbol(), mkt.get_close());
 
             // Canonical: exits before strategy decision (matches tick path).
             if (evaluate_exits(mkt.get_symbol(),
-                               mkt.get_low(), mkt.get_high(), mkt.get_close(),
+                               mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
                                sim_time, event_count, mkt.get_recv_ns()))
                 break;
 
@@ -3895,13 +4169,15 @@ void engine::run_replay(const std::string& log_path,
             }
             if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
-            check_pending_stops(te.get_price(), te.get_price(), sim_time,
+            check_pending_stops(te.get_price(), te.get_price(), te.get_price(), sim_time,
                                 event_count, halt_requested);
             if (halt_requested) break;
 
             publish_event(ev);
             if (!config_.is_threaded())
                 analytics_.on_event(ev);
+            else
+                analytics_.on_mark(te.get_symbol(), te.get_price());
 
             if (evaluate_exits(te.get_symbol(), te.get_price(), sim_time,
                                event_count, te.get_recv_ns()))

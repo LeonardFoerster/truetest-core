@@ -64,3 +64,71 @@ TEST(MarketMaker, OrderId_NoCollision)
     // Both calls should add orders without duplicate ID issues
     EXPECT_GT(ob->size(), after_add);
 }
+
+TEST(MarketMaker, Calibration_ReflectedInReplenish)
+{
+    MarketMaker mm(42);
+    mm.set_calibration({/*levels_per_side=*/3, /*base_depth=*/7,
+                        /*base_spread_pct=*/0.01, /*vol_spread_mult=*/5.0});
+
+    // First call: no price history yet → vol = 0 → half_spread = 0.01.
+    auto orders = mm.compute_replenish(100.0);
+
+    // 3 bid + 3 ask levels.
+    ASSERT_EQ(orders.size(), 6u);
+
+    // Level i rests at mid × (1 ± i × 0.01) with depth 7 × i.
+    int bid_i = 0, ask_i = 0;
+    for (const auto& mo : orders)
+    {
+        if (mo.side == order_side::buy)
+        {
+            ++bid_i;
+            EXPECT_NEAR(mo.price, 100.0 * (1.0 - 0.01 * bid_i), 1e-9);
+            EXPECT_NEAR(mo.quantity, 7.0 * bid_i, 1e-9);
+        }
+        else
+        {
+            ++ask_i;
+            EXPECT_NEAR(mo.price, 100.0 * (1.0 + 0.01 * ask_i), 1e-9);
+            EXPECT_NEAR(mo.quantity, 7.0 * ask_i, 1e-9);
+        }
+    }
+    EXPECT_EQ(bid_i, 3);
+    EXPECT_EQ(ask_i, 3);
+}
+
+TEST(MarketMaker, Calibration_SurvivesReset)
+{
+    MarketMaker mm(42);
+    mm.set_calibration({2, 5, 0.005, 5.0});
+    mm.reset(43);
+
+    auto orders = mm.compute_replenish(100.0);
+    ASSERT_EQ(orders.size(), 4u) << "calibration is config, not trial state";
+}
+
+TEST(MarketMaker, Calibration_VolMultWidensSpread)
+{
+    // vol_mult = 0 keeps the seeded spread at base_spread_pct regardless
+    // of realized volatility; a large vol_mult must widen it.
+    MarketMaker mm_flat(42), mm_vol(42);
+    mm_flat.set_calibration({1, 100, 0.002, 0.0});
+    mm_vol.set_calibration({1, 100, 0.002, 50.0});
+
+    std::vector<mm_order> flat_orders, vol_orders;
+    for (int i = 0; i < 20; ++i)
+    {
+        const double px = (i % 2 == 0) ? 100.0 : 110.0;
+        flat_orders = mm_flat.compute_replenish(px);
+        vol_orders = mm_vol.compute_replenish(px);
+    }
+
+    auto ask_price = [](const std::vector<mm_order>& v) {
+        for (const auto& mo : v)
+            if (mo.side == order_side::sell) return mo.price;
+        return 0.0;
+    };
+    EXPECT_GT(ask_price(vol_orders), ask_price(flat_orders))
+        << "vol_spread_mult must widen the seeded spread under volatility";
+}

@@ -147,8 +147,25 @@ public:
     void on_event(const event_pointer& ev) override;
     void on_funding(const funding_event& fe);   // Phase 2.1
 
-    // Phase 2.4 - allow external update of the current 8h funding rate
-    // (called from provider when better funding rate data is available)
+    // Lightweight synchronous mark-to-market for the engine's hot path when
+    // full analytics runs on a worker thread: keeps risk_view()'s equity and
+    // drawdown current (and identical to inline mode) without the per-event
+    // heavy work (equity curve, return stats, benchmark) the worker does.
+    void on_mark(const std::string& symbol, double price)
+    {
+        open_positions_[symbol].last_price = price;
+        last_close_ = price;
+        const double equity = cash_ + position_value();
+        last_equity_ = equity;
+        if (equity > peak_equity_) peak_equity_ = equity;
+        if (peak_equity_ > 0.0)
+        {
+            const double dd = (peak_equity_ - equity) / peak_equity_;
+            if (dd > max_drawdown_) max_drawdown_ = dd;
+        }
+    }
+
+    // Phase 2.4 — allow external update of the current 8h funding rate    // (called from provider when better funding rate data is available)
     void set_current_funding_rate_8h(double rate) { current_funding_8h_rate_ = rate; }
 
     // Phase 2.1 - cumulative funding P&L (cash deltas from funding events)
@@ -254,10 +271,34 @@ private:
 
     double initial_cash_;
     double cash_;
-    double position_qty_ = 0.0;
-    double avg_entry_price_ = 0.0;
-    double total_open_commission_ = 0.0;
-    std::chrono::system_clock::time_point entry_time_;
+
+    // Per-symbol open-position state. A single global position would net
+    // unrelated instruments against each other and mark them at the wrong
+    // price in multi-symbol runs.
+    struct open_position
+    {
+        double qty = 0.0;
+        double avg_entry = 0.0;
+        double open_commission = 0.0;
+        double last_price = 0.0;   // last seen close/tick/fill price for this symbol
+        std::chrono::system_clock::time_point entry_time{};
+    };
+    std::unordered_map<std::string, open_position> open_positions_;
+
+    // Sum of qty * last_price across symbols (mark-to-market value).
+    double position_value() const
+    {
+        double v = 0.0;
+        for (const auto& [_, p] : open_positions_)
+            if (std::abs(p.qty) > 1e-12) v += p.qty * p.last_price;
+        return v;
+    }
+    bool any_position_open() const
+    {
+        for (const auto& [_, p] : open_positions_)
+            if (std::abs(p.qty) > 1e-12) return true;
+        return false;
+    }
 
     std::size_t rolling_window_;
     double risk_free_rate_;
@@ -327,7 +368,11 @@ private:
 
     welford_state return_stats_;
 
-    welford_state downside_stats_;
+    // Sum over ALL return periods of min(r - MAR, 0)^2; downside deviation
+    // for Sortino is sqrt(downside_sq_sum_ / return_stats_.n). (A Welford
+    // stddev over only the negative returns ignores the loss level and uses
+    // the wrong observation count.)
+    double downside_sq_sum_ = 0.0;
 
     double peak_equity_ = 0.0;
     double max_drawdown_ = 0.0;

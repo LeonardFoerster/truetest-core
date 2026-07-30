@@ -1,13 +1,13 @@
 {
   "buy_and_hold_return": 0.0475247524752475,
-  "cumulative_return": 0.011,
-  "final_equity": 10110.0,
-  "max_drawdown": 3.3696729435084243,
-  "profit_factor": 0.0,
-  "sharpe_ratio": 0.9890698005449909,
-  "sortino_ratio": 2.885360563887802,
-  "total_fills": 3,
-  "total_orders": 12,
-  "total_trades": 1,
-  "win_rate": 0.0
+  "cumulative_return": 0.035,
+  "final_equity": 10350.0,
+  "max_drawdown": 1.7458777885548011,
+  "profit_factor": 3.7142857142857113,
+  "sharpe_ratio": 3.3989413091789658,
+  "sortino_ratio": 6.656844701248723,
+  "total_fills": 7,
+  "total_orders": 7,
+  "total_trades": 3,
+  "win_rate": 66.66666666666666
 }

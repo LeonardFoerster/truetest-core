@@ -101,8 +101,6 @@ public:
                      double qty_scale = 1e8,
                      std::shared_ptr<ILatencyModel> latency_model = nullptr,
                      std::shared_ptr<IImpactModel>  impact_model  = nullptr,
-                     bool realistic_fills = false,
-                     double bar_spread_bps = 0.0,
                      bool walked_book_impact = false)
         : ob_(std::move(ob))
         , fee_model_(std::move(fee_model))
@@ -113,13 +111,11 @@ public:
         , qty_scale_(qty_scale)
         , latency_model_(std::move(latency_model))
         , impact_model_(std::move(impact_model))
-        , realistic_fills_(realistic_fills)
-        , bar_spread_bps_(bar_spread_bps)
         , walked_book_impact_(walked_book_impact) {}
 
     void set_mid_price(double price) override { mid_price_ = price; }
-    // Symbol carries real L2 depth - bar_spread shift is suppressed
-    // because the seeded book's spread already prices the fill correctly.
+    // Symbol carries real L2 depth — enables the walked-book VWAP
+    // reference for market orders (walked_book_impact).
     void set_l2_seeded(bool seeded) override { l2_seeded_ = seeded; }
 
     void set_debug_fills(bool enabled, int budget = 20)
@@ -175,15 +171,6 @@ public:
 
             if (!walked_used)
             {
-                // Bar-spread shift: lift mid to the BBO before impact. Skipped
-                // when realistic_fills is on (resting walk already incorporates
-                // the seeded spread) and when symbol carries real L2 depth.
-                if (bar_spread_bps_ > 0.0 && !realistic_fills_ && !l2_seeded_)
-                {
-                    const double half = bar_spread_bps_ * 0.5 * 1e-4;
-                    ref_price *= (o.get_side() == order_side::buy) ? (1.0 + half) : (1.0 - half);
-                }
-
                 // Impact BEFORE aggression so aggression still guarantees an
                 // immediate cross. ZeroImpactModel (default) is a pass-through.
                 if (impact_model_)
@@ -215,6 +202,17 @@ public:
 
         trades resulting_trades = ob_->add_order(book_order);
 
+        // GTC remainder rests on the book. Track it so later quote
+        // updates that cross its level (delivered via on_book_trades)
+        // surface as maker fills — without this, resting limits never
+        // fill against the synthetic book.
+        if (book_order_type == ob_order_type::good_till_cancel &&
+            book_order->get_remaining_quantity() > 0)
+        {
+            resting_[o.get_order_id()] =
+                resting_info{book_order, o.get_symbol(), o.get_side()};
+        }
+
         double fade_rate = fill_model_ ? fill_model_->get_fade_rate() : 0.0;
 
         for (const auto& trade : resulting_trades)
@@ -223,15 +221,19 @@ public:
             const auto& our_trade_info  = we_are_bid ? trade.get_bid_trade() : trade.get_ask_trade();
             const auto& counter_trade   = we_are_bid ? trade.get_ask_trade() : trade.get_bid_trade();
 
+            // The resting counterparty may itself be a tracked strategy
+            // order (strategy-vs-strategy crossing) — surface its maker
+            // fill too, not just the aggressor's.
+            if (counter_trade.orderId_ != o.get_order_id())
+                record_resting_fill(counter_trade, o.get_earliest_eligible_ts());
+
             if (our_trade_info.orderId_ == o.get_order_id())
             {
-                // Legacy: fill at the aggressor's submitted book price
-                // (mid × aggression for market, our limit otherwise).
-                // Realistic: fill at the resting counterparty's price -
-                // honest passive-side pricing, one event per walked level.
-                double fill_price = realistic_fills_
-                    ? counter_trade.price_.to_double()
-                    : our_trade_info.price_.to_double();
+                // Fill at the resting counterparty's price — honest
+                // passive-side pricing, one event per walked level. The
+                // aggressor's book price (mid × aggression for market) is
+                // only a crossing limit, never a recorded fill price.
+                double fill_price = counter_trade.price_.to_double();
                 double fill_qty = static_cast<double>(our_trade_info.quantity_) / qty_scale_;
 
                 if (fade_rate > 0.0)
@@ -315,11 +317,16 @@ public:
             return true;
         }
         ob_->cancel_order(order_id);
+        resting_.erase(order_id);
         return true;
     }
 
     bool modify_order(uint64_t order_id, double new_price, double new_qty) override
     {
+        // The book replaces the order object on modify; the tracked
+        // pointer would go stale, so the modified order leaves the
+        // resting set (it still matches normally at submit-time crossings).
+        resting_.erase(order_id);
         Price book_price = Price::from_double(new_price);
         quantity book_qty = static_cast<quantity>(std::round(new_qty * qty_scale_));
         return ob_->modify_order(order_id, book_price, book_qty);
@@ -333,6 +340,7 @@ public:
             if (it->second <= ts)
             {
                 ob_->cancel_order(it->first);
+                resting_.erase(it->first);
                 it = pending_cancels_.erase(it);
             }
             else
@@ -340,6 +348,75 @@ public:
                 ++it;
             }
         }
+    }
+
+    // Trades produced by external book activity (MarketMaker quote
+    // updates crossing our resting orders). Each trade whose maker side
+    // is a tracked resting order becomes a maker fill at that order's
+    // own limit price.
+    void on_book_trades(const trades& trs,
+                        std::chrono::system_clock::time_point ts)
+    {
+        for (const auto& tr : trs)
+        {
+            record_resting_fill(tr.get_bid_trade(), ts);
+            record_resting_fill(tr.get_ask_trade(), ts);
+        }
+    }
+
+    // Bar-mode traversal fills: a resting limit whose level lies inside the
+    // bar's [low, high] range was traded through intrabar even when the MM
+    // re-quote anchors (open/close/stop refs) never crossed it — without
+    // this, a buy limit at 99 misses a bar with low 98 / close 101 entirely.
+    // Fills the full remaining quantity at the order's own limit price
+    // (maker) and removes it from the book. Returns true if anything filled.
+    bool sweep_resting_range(const std::string& symbol,
+                             double low, double high,
+                             std::chrono::system_clock::time_point ts)
+    {
+        if (resting_.empty() || !(low > 0.0) || !(high > 0.0))
+            return false;
+        if (low > high) std::swap(low, high);
+
+        bool any = false;
+        for (auto it = resting_.begin(); it != resting_.end(); )
+        {
+            auto& ri = it->second;
+            if (ri.symbol != symbol) { ++it; continue; }
+            // Skip orders with a cancel in flight — "too slow to pull"
+            // is modeled at the crossing paths, but a traversal fill
+            // during the cancel window would be generous, not adverse.
+            if (pending_cancels_.count(it->first)) { ++it; continue; }
+
+            const double px = ri.book_order->get_price().to_double();
+            const bool traversed = (ri.side == order_side::buy)
+                ? (low <= px) : (high >= px);
+            if (!traversed) { ++it; continue; }
+
+            const double fill_qty =
+                static_cast<double>(ri.book_order->get_remaining_quantity())
+                / qty_scale_;
+            if (fill_qty <= 0.0)
+            {
+                it = resting_.erase(it);
+                continue;
+            }
+
+            double commission = 0.0;
+            if (fee_model_)
+                commission = fee_model_->compute_commission(
+                    ri.side, fill_qty, px, /*is_taker=*/false);
+
+            pending_fills_.emplace_back(
+                ts, ri.symbol, it->first, ri.side,
+                fill_qty, px, commission,
+                /*remaining=*/0.0, next_fill_id_++);
+            any = true;
+
+            ob_->cancel_order(it->first);
+            it = resting_.erase(it);
+        }
+        return any;
     }
 
 private:
@@ -381,10 +458,50 @@ private:
         return cost / consumed;
     }
 
+    struct resting_info
+    {
+        order_pointer book_order;   // live book object; remaining qty stays current
+        std::string symbol;
+        order_side side;
+    };
+
+    void record_resting_fill(const trade_info& ti,
+                             std::chrono::system_clock::time_point ts)
+    {
+        auto it = resting_.find(ti.orderId_);
+        if (it == resting_.end())
+            return;
+
+        const double fill_qty = static_cast<double>(ti.quantity_) / qty_scale_;
+        const double fill_price = ti.price_.to_double();  // our own limit price
+        double commission = 0.0;
+        if (fee_model_)
+            commission = fee_model_->compute_commission(
+                it->second.side, fill_qty, fill_price, /*is_taker=*/false);
+
+        const double remaining =
+            static_cast<double>(it->second.book_order->get_remaining_quantity())
+            / qty_scale_;
+
+        pending_fills_.emplace_back(
+            ts,
+            it->second.symbol,
+            ti.orderId_,
+            it->second.side,
+            fill_qty,
+            fill_price,
+            commission,
+            remaining,
+            next_fill_id_++);
+
+        if (it->second.book_order->is_filled())
+            resting_.erase(it);
+    }
+
+    std::unordered_map<uint64_t, resting_info> resting_;
+
     std::shared_ptr<ILatencyModel> latency_model_;
     std::shared_ptr<IImpactModel>  impact_model_;
-    bool realistic_fills_ = false;
-    double bar_spread_bps_ = 0.0;
     bool l2_seeded_ = false;
     bool walked_book_impact_ = false;
     std::unordered_map<uint64_t, std::chrono::system_clock::time_point> pending_cancels_;

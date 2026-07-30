@@ -164,7 +164,7 @@ cmake --preset linux-release-native
 - Credentials: env `TRUETEST_BINANCE_*` (preferred; argv leaks to ps), `--api-key/--api-secret` (warns).
 - Strategy: `--strategy sma,mean-reversion`, `--param key=value` (multi-strategy comma-separated).
 - Risk/portfolio: `--initial-cash`, `--risk-fraction`, `--sl-atr`, `--tp-atr`, `--max-daily-loss`, `--max-trades-per-hour`, `--risk-unwind 0.4`, `--reconcile-tolerance-bps`.
-- Realism (backtest/shadow only; bypassed in live): `--realistic-fills`, `--order-latency-us N --order-latency-stddev-us M`, `--impact-k-bps`, `--bar-spread-bps`, `--queue-model l2-snapshot` (shadow + depth-stream), `--maker-queue-model uniform|front|back` (paper + depth-stream; uniform recommended default).
+- Realism (backtest/shadow only; bypassed in live): `--order-latency-us N --order-latency-stddev-us M`, `--impact-k-bps --impact-adv`, `--walked-book-impact`, `--fill-prob/--fill-fade/--fill-decay` (probabilistic limit-fill model, default off), `--mm-levels/--mm-base-depth/--mm-spread-pct/--mm-vol-mult/--mm-max-spread-pct` (synthetic-book calibration — the seeded book is the sole source of spread cost), `--queue-model l2-snapshot` (shadow + depth-stream), `--maker-queue-model uniform|front|back` (paper + depth-stream; uniform recommended default). Deprecated warn-noops: `--realistic-fills` (passive-side fill pricing is always on), `--bar-spread-bps` (calibrate `--mm-spread-pct` instead).
 - Threading: `--thread-preset inline|light|standard|full|extended` (auto from cores), `--spin-policy adaptive|spin|yield`, `--no-pin`, `--seed`.
 - Persistence: `--persist --run-tag myrun_YYYYMMDD_HHMM` (QuestDB), `--checkpoint path`.
 - Replay/Record: `--replay events.bin --replay-from/--to`, `--record`, `--replay-data`.
@@ -191,12 +191,16 @@ cmake --preset linux-release-native
 
 **Data validation + formats**: Strict schema checks; see instructions §19.
 
-**Realism models** ([../architecture/realism.md](../architecture/realism.md) - all default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
-- `--realistic-fills`: passive/resting prices, one fill_event per level walked.
+**Realism models** ([../architecture/realism.md](../architecture/realism.md) planned — current summary: opt-in models default off, require `--depth-stream` for L2-dependent, **completely bypassed in live**; live venue supplies truth):
+- **Fill pricing (always on, no flag)**: every fill records the resting counterparty's price, one fill_event per level walked. `market_aggression` (default 1.1) is purely a crossing guarantee — never a recorded price. The deprecated `--realistic-fills` / `--bar-spread-bps` are accepted as warn-noops.
+- **Synthetic book calibration** (`--mm-levels` 10, `--mm-base-depth` 100, `--mm-spread-pct` 0.002, `--mm-vol-mult` 0.25, `--mm-max-spread-pct` 0.05): in bar mode the MarketMaker's seeded ladder is the sole source of spread cost for taker fills — calibrate it to the target market. The MM pulls and re-places its quotes each bar; resting strategy limits fill as maker orders when a quote update crosses their level, **or when the bar's [low, high] range trades through their level** (intrabar traversal sweep — fill at the order's own limit price).
+- **Stop fills**: stops trigger on bar high/low and fill anchored at the stop price — or at the bar **open** when the bar gaps through the stop — never at the close. **ExitManager bracket fires use the same anchoring**.
+- **Intra-bar ambiguity**: ExitManager resolves SL-vs-TP worst-case (SL first when both extremes cross in one bar), and tests trailing stops at their **pre-bar** level.
+- **Bracket sizing across partial fills**: an opener that walks multiple book levels emits one fill per level; the armed bracket grows with each partial (entry reference = VWAP across opener fills).
+- **Probabilistic limit fills** (`--fill-prob`, `--fill-fade`, `--fill-decay`; default off): RealisticFillModel gates each limit submit.
 - Latency: two layers (`latency_model` strategy->eligible, `wire_latency_model` order->venue).
-- Impact: SquareRootImpactModel applied before aggression.
-- Bar-spread: full bid-ask on bar-mode market orders (suppressed on L2 symbols).
-- Queue: `--queue-model l2-snapshot` (shadow L2SnapshotQueueModel for adverse-selection honesty), `--maker-queue-model uniform|front|back` (QueueAwareBookAdapter + IQueueModel for paper/backtest maker fills; tracks size_ahead; real prints consume front; L2 shrinkage = cancels per model).
+- Impact: SquareRootImpactModel raises the market-order reference before aggression — recorded prices always come from resting levels. `--walked-book-impact` uses the real L2 walked VWAP as reference when depth is present.
+- Queue: `--queue-model l2-snapshot` (shadow L2SnapshotQueueModel for adverse-selection honesty), `--maker-queue-model uniform|front|back` (QueueAwareBookAdapter + IQueueModel for paper/backtest maker fills).
 
 **Orderbook**: price-time priority matching; FillModel for partials; walked-book impact when L2 present.
 

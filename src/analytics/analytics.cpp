@@ -41,10 +41,7 @@ void Analytics::reset(double initial_cash)
 {
     initial_cash_ = initial_cash;
     cash_ = initial_cash;
-    position_qty_ = 0.0;
-    avg_entry_price_ = 0.0;
-    total_open_commission_ = 0.0;
-    entry_time_ = {};
+    open_positions_.clear();
 
     equity_stride_ = 1;
     equity_counter_ = 0;
@@ -96,7 +93,7 @@ void Analytics::reset(double initial_cash)
     per_strategy_.clear();
 
     return_stats_.reset();
-    downside_stats_.reset();
+    downside_sq_sum_ = 0.0;
 
     peak_equity_ = initial_cash;
     max_drawdown_ = 0.0;
@@ -174,10 +171,7 @@ void Analytics::on_funding(const funding_event& fe)
     total_funding_pnl_ += fe.get_cash_delta();
 
     // Mirror the equity calculation from on_market
-    bool has_position = std::abs(position_qty_) > 1e-12;
-    double equity = cash_;
-    if (has_position)
-        equity += position_qty_ * last_close_;
+    double equity = cash_ + position_value();
 
     last_equity_ = equity;
 
@@ -205,14 +199,14 @@ void Analytics::on_market(const market_event& m)
         first_price_set_ = true;
     }
 
+    open_positions_[m.get_symbol()].last_price = m.get_close();
+
     market_events_total_++;
-    bool has_position = std::abs(position_qty_) > 1e-12;
-    if (has_position)
+    if (any_position_open())
         market_events_in_position_++;
 
-    double equity = cash_;
-    if (has_position)
-        equity += position_qty_ * last_close_;
+    double equity = cash_ + position_value();
+    last_equity_ = equity;
 
     record_equity_point(equity_curve_, equity_stride_, equity_counter_,
                         {m.get_timestamp(), equity});
@@ -231,7 +225,10 @@ void Analytics::on_market(const market_event& m)
         strategy_returns_.push_back(strat_ret);
 
         return_stats_.update(strat_ret);
-        if (strat_ret < 0.0) downside_stats_.update(strat_ret);
+        const double mar = (periods_per_year_ > 0)
+            ? risk_free_rate_ / static_cast<double>(periods_per_year_) : 0.0;
+        const double shortfall = strat_ret - mar;
+        if (shortfall < 0.0) downside_sq_sum_ += shortfall * shortfall;
 
         if (have_bh_now && prev_bh_equity_ > 0.0)
         {
@@ -265,6 +262,8 @@ void Analytics::on_market(const market_event& m)
 void Analytics::on_tick(const tick_event& t)
 {
     last_close_ = t.get_price();
+    open_positions_[t.get_symbol()].last_price = t.get_price();
+    last_equity_ = cash_ + position_value();
 
     // Phase 2.3 - update vol from tick mid (price)
     double mid = t.get_price();
@@ -342,16 +341,19 @@ void Analytics::on_fill(const fill_event& f)
     const double side_sign = (f.get_side() == order_side::buy) ? +1.0 : -1.0;
     double qty_left = filled_qty;
 
-    if (std::abs(position_qty_) > 1e-12 && position_qty_ * side_sign < 0.0)
+    auto& pos = open_positions_[f.get_symbol()];
+    pos.last_price = fill_price;
+
+    if (std::abs(pos.qty) > 1e-12 && pos.qty * side_sign < 0.0)
     {
-        double pos_sign = (position_qty_ > 0.0) ? 1.0 : -1.0;
-        double prev_abs = std::abs(position_qty_);
+        double pos_sign = (pos.qty > 0.0) ? 1.0 : -1.0;
+        double prev_abs = std::abs(pos.qty);
         double close_qty = std::min(prev_abs, qty_left);
 
-        double gross = (fill_price - avg_entry_price_) * close_qty * pos_sign;
+        double gross = (fill_price - pos.avg_entry) * close_qty * pos_sign;
 
         double close_comm = commission * (close_qty / filled_qty);
-        double open_comm_share = total_open_commission_ * (close_qty / prev_abs);
+        double open_comm_share = pos.open_commission * (close_qty / prev_abs);
         double pnl = gross - close_comm - open_comm_share;
 
         if (kAnalyticsPnlDebug) {
@@ -362,21 +364,21 @@ void Analytics::on_fill(const fill_event& f)
                 f.get_symbol().c_str(),
                 (f.get_side() == order_side::buy ? "BUY" : "SELL"),
                 fill_price, filled_qty, commission,
-                position_qty_, avg_entry_price_, total_open_commission_,
+                pos.qty, pos.avg_entry, pos.open_commission,
                 close_qty, gross, close_comm, open_comm_share, pnl);
         }
 
-        total_open_commission_ -= open_comm_share;
+        pos.open_commission -= open_comm_share;
 
         cash_ += -side_sign * close_qty * fill_price - close_comm;
 
-        position_qty_ += side_sign * close_qty;
+        pos.qty += side_sign * close_qty;
         qty_left -= close_qty;
-        if (std::abs(position_qty_) < 1e-12)
+        if (std::abs(pos.qty) < 1e-12)
         {
-            position_qty_ = 0.0;
-            avg_entry_price_ = 0.0;
-            total_open_commission_ = 0.0;
+            pos.qty = 0.0;
+            pos.avg_entry = 0.0;
+            pos.open_commission = 0.0;
         }
 
         rec.pnl = pnl;
@@ -411,7 +413,7 @@ void Analytics::on_fill(const fill_event& f)
         }
 
         auto hold_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            f.get_timestamp() - entry_time_).count();
+            f.get_timestamp() - pos.entry_time).count();
         total_holding_ms_ += static_cast<double>(hold_ms);
         holding_count_++;
     }
@@ -419,12 +421,12 @@ void Analytics::on_fill(const fill_event& f)
     if (qty_left > 1e-12)
     {
         double open_comm = commission * (qty_left / filled_qty);
-        double prev_abs = std::abs(position_qty_);
+        double prev_abs = std::abs(pos.qty);
 
-        avg_entry_price_ = (avg_entry_price_ * prev_abs + fill_price * qty_left)
-                         / (prev_abs + qty_left);
-        position_qty_ += side_sign * qty_left;
-        total_open_commission_ += open_comm;
+        pos.avg_entry = (pos.avg_entry * prev_abs + fill_price * qty_left)
+                      / (prev_abs + qty_left);
+        pos.qty += side_sign * qty_left;
+        pos.open_commission += open_comm;
 
         if (kAnalyticsPnlDebug && prev_abs < 1e-12) {
             std::fprintf(stderr,
@@ -432,11 +434,11 @@ void Analytics::on_fill(const fill_event& f)
                 "avg_entry_set=%.8f open_comm_acc=%.6f\n",
                 f.get_symbol().c_str(),
                 (f.get_side() == order_side::buy ? "BUY" : "SELL"),
-                fill_price, qty_left, open_comm, avg_entry_price_, total_open_commission_);
+                fill_price, qty_left, open_comm, pos.avg_entry, pos.open_commission);
         }
 
         if (prev_abs < 1e-12)
-            entry_time_ = f.get_timestamp();
+            pos.entry_time = f.get_timestamp();
 
         cash_ -= side_sign * qty_left * fill_price + open_comm;
     }
@@ -550,9 +552,7 @@ AnalyticsReport Analytics::snapshot() const
 {
     AnalyticsReport r;
     r.initial_equity = initial_cash_;
-    r.final_equity = cash_;
-    if (std::abs(position_qty_) > 1e-12)
-        r.final_equity += position_qty_ * last_close_;
+    r.final_equity = cash_ + position_value();
 
     r.cumulative_return = (r.final_equity - initial_cash_) / initial_cash_;
     r.total_orders = total_orders_;
@@ -600,16 +600,14 @@ AnalyticsReport Analytics::snapshot() const
         double excess_mean = return_stats_.mean - rf_per_period;
         r.sharpe_ratio = (return_stats_.stddev() > 0.0)
             ? (excess_mean / return_stats_.stddev()) * ann_factor : 0.0;
-    }
-    if (downside_stats_.n > 1)
-    {
-        double excess_mean = return_stats_.mean - rf_per_period;
-        r.sortino_ratio = (downside_stats_.stddev() > 0.0)
-            ? (excess_mean / downside_stats_.stddev()) * ann_factor : 0.0;
-    }
-    else if (return_stats_.n > 1 && return_stats_.mean > rf_per_period)
-    {
-        r.sortino_ratio = 1e9;
+
+        // Downside deviation over ALL periods: sqrt(mean of min(r - MAR, 0)^2).
+        double downside_dev = std::sqrt(
+            downside_sq_sum_ / static_cast<double>(return_stats_.n));
+        if (downside_dev > 0.0)
+            r.sortino_ratio = (excess_mean / downside_dev) * ann_factor;
+        else if (excess_mean > 0.0)
+            r.sortino_ratio = 1e9;   // no downside observed at all
     }
 
     r.max_drawdown = max_drawdown_ * 100.0;

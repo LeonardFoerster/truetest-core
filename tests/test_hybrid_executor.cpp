@@ -128,3 +128,47 @@ TEST(HybridExecutor, ZeroLatencyModel_ObservablyEquivalentToNoModel)
 }
 
 #endif // HAS_BINANCE
+
+TEST(HybridExecutor, RestingLimitSurvivesMidUpdateAndFills)
+{
+    // Regression: on_mid_price used book_->clear(), which destroyed any
+    // strategy limit resting in the shared book — the order stayed "open"
+    // engine-side but could never fill. Re-seeding must cancel only the
+    // synthetic quotes, and a re-seed that crosses the resting level must
+    // surface a maker fill at the order's own limit price.
+    auto paper = std::make_shared<BinanceExecutor>();
+    paper->set_symbol("BTCUSDT");
+    paper->set_last_price(100.0);
+    auto book = std::make_shared<orderbook>();
+    auto hx = std::make_shared<HybridExecutor>(
+        paper, book, /*fee_model=*/nullptr,
+        std::make_shared<PerfectFillModel>(),
+        /*qty_scale=*/1e8, /*spread_step_factor=*/0.0001);
+    hx->on_mid_price(100.0);
+
+    // Passive buy limit well below the market: rests in the shared book.
+    // Use a high order id so we do not collide with HybridExecutor's
+    // synthetic quote ids (OrderIdGenerator sequential from the re-seeds).
+    order_event o(tp{us(0)}, "BTCUSDT", order_type::limit, order_side::buy,
+                  1.0, 99.0, time_in_force::gtc);
+    o.set_order_id(100007);
+    hx->submit_order(o);
+
+    std::vector<fill_event> fills;
+    EXPECT_FALSE(hx->poll_fills(fills));  // nothing crosses 99 yet
+
+    // Mid updates above the limit: the order must survive the re-seed.
+    hx->on_mid_price(100.5);
+    fills.clear();
+    EXPECT_FALSE(hx->poll_fills(fills));
+
+    // Mid drops below the limit: new synthetic asks (≈ 98.0x) cross the
+    // resting buy at 99 → maker fill at its own limit price.
+    hx->on_mid_price(98.0);
+    fills.clear();
+    ASSERT_TRUE(hx->poll_fills(fills))
+        << "resting limit destroyed by re-seed — must survive and fill";
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].get_order_id(), 100007u);
+    EXPECT_DOUBLE_EQ(fills[0].get_fill_price(), 99.0);
+}

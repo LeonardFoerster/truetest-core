@@ -461,6 +461,120 @@ TEST(Analytics, Flipping_LongToShortInOneFill)
     EXPECT_NEAR(r.trade_returns[1], 100.0, 1e-9);
 }
 
+// --- Per-symbol position state (multi-symbol correctness) ---
+
+TEST(Analytics, MultiSymbol_PositionsDoNotNetAcrossSymbols)
+{
+    Analytics a;
+    auto mkt = std::make_shared<market_event>(epoch_ms(0), "A", 100, 100, 100, 100.0);
+    a.on_event(mkt);
+
+    // Long 10 A @ 100
+    auto bf_a = std::make_shared<fill_event>(epoch_ms(1), "A", 1, order_side::buy, 10, 100.0, 0.0);
+    a.on_event(bf_a);
+    // Short 10 B @ 50 — must OPEN a short on B, not close the A long.
+    auto sf_b = std::make_shared<fill_event>(epoch_ms(2), "B", 2, order_side::sell, 10, 50.0, 0.0);
+    a.on_event(sf_b);
+
+    auto r0 = a.generate_report();
+    EXPECT_EQ(r0.total_trades, 0u) << "cross-symbol fill must not be booked as a close";
+
+    // Close A @ 110 → +100; close B @ 40 → +100.
+    auto sf_a = std::make_shared<fill_event>(epoch_ms(3), "A", 3, order_side::sell, 10, 110.0, 0.0);
+    a.on_event(sf_a);
+    auto bf_b = std::make_shared<fill_event>(epoch_ms(4), "B", 4, order_side::buy, 10, 40.0, 0.0);
+    a.on_event(bf_b);
+
+    auto r = a.generate_report();
+    EXPECT_EQ(r.total_trades, 2u);
+    ASSERT_EQ(r.trade_returns.size(), 2u);
+    EXPECT_NEAR(r.trade_returns[0], 100.0, 1e-9);
+    EXPECT_NEAR(r.trade_returns[1], 100.0, 1e-9);
+    EXPECT_NEAR(r.per_symbol.at("A").total_pnl, 100.0, 1e-9);
+    EXPECT_NEAR(r.per_symbol.at("B").total_pnl, 100.0, 1e-9);
+}
+
+TEST(Analytics, MultiSymbol_EquityMarksEachSymbolAtItsOwnPrice)
+{
+    Analytics a;
+    auto m_a = std::make_shared<market_event>(epoch_ms(0), "A", 100, 100, 100, 100.0);
+    a.on_event(m_a);
+    auto m_b = std::make_shared<market_event>(epoch_ms(1), "B", 10, 10, 10, 10.0);
+    a.on_event(m_b);
+
+    // Long 10 A @ 100 and 10 B @ 10 → cash = 100000 - 1000 - 100 = 98900
+    auto bf_a = std::make_shared<fill_event>(epoch_ms(2), "A", 1, order_side::buy, 10, 100.0, 0.0);
+    a.on_event(bf_a);
+    auto bf_b = std::make_shared<fill_event>(epoch_ms(3), "B", 2, order_side::buy, 10, 10.0, 0.0);
+    a.on_event(bf_b);
+
+    // A moves to 110, B stays 10: equity = 98900 + 1100 + 100 = 100100.
+    auto m_a2 = std::make_shared<market_event>(epoch_ms(4), "A", 110, 110, 110, 110.0);
+    a.on_event(m_a2);
+
+    auto r = a.generate_report();
+    EXPECT_NEAR(r.equity_curve.back().equity, 100100.0, 1e-6);
+    EXPECT_NEAR(r.final_equity, 100100.0, 1e-6);
+}
+
+TEST(Analytics, RiskView_EquityPopulatedFromMarketEvents)
+{
+    Analytics a(100000.0);
+    EXPECT_DOUBLE_EQ(a.risk_view().equity, 0.0); // nothing seen yet
+
+    auto m = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
+    a.on_event(m);
+    EXPECT_NEAR(a.risk_view().equity, 100000.0, 1e-6);
+
+    auto bf = std::make_shared<fill_event>(epoch_ms(1), "X", 1, order_side::buy, 10, 100.0, 0.0);
+    a.on_event(bf);
+    auto m2 = std::make_shared<market_event>(epoch_ms(2), "X", 110, 110, 110, 110.0);
+    a.on_event(m2);
+    EXPECT_NEAR(a.risk_view().equity, 100100.0, 1e-6);
+}
+
+TEST(Analytics, Sortino_DownsideDeviationOverAllPeriods)
+{
+    const std::size_t ppy = 252;
+    Analytics a(100000.0, 252, 0.0, ppy);
+
+    auto mkt0 = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
+    a.on_event(mkt0);
+    auto bf = std::make_shared<fill_event>(epoch_ms(0), "X", 1, order_side::buy, 100, 100.0, 0.0);
+    a.on_event(bf);
+    // cash = 90000, pos = 100 → equity = 90000 + 100 * p
+
+    const std::vector<double> prices = {102.0, 101.0, 105.0, 103.0};
+    std::vector<double> rets;
+    double prev_eq = 100000.0;
+    for (double p : prices)
+    {
+        double eq = 90000.0 + 100.0 * p;
+        rets.push_back((eq - prev_eq) / prev_eq);
+        prev_eq = eq;
+    }
+
+    int64_t t = 1;
+    for (double p : prices)
+    {
+        auto m = std::make_shared<market_event>(epoch_ms(t++), "X", p, p, p, p);
+        a.on_event(m);
+    }
+
+    double mean = 0.0;
+    for (double r : rets) mean += r;
+    mean /= static_cast<double>(rets.size());
+
+    // Downside deviation: sqrt(mean over ALL periods of min(r, 0)^2), MAR = 0.
+    double dsq = 0.0;
+    for (double r : rets) if (r < 0.0) dsq += r * r;
+    double downside_dev = std::sqrt(dsq / static_cast<double>(rets.size()));
+    double expected_sortino = (mean / downside_dev) * std::sqrt(static_cast<double>(ppy));
+
+    auto report = a.generate_report();
+    EXPECT_NEAR(report.sortino_ratio, expected_sortino, 1e-9);
+}
+
 TEST(Analytics, FundingEvent_UpdatesCashAndEquityAndRiskView)
 {
     Analytics a(100000.0);

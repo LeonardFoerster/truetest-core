@@ -14,6 +14,12 @@ public:
     explicit BarAggregator(std::chrono::milliseconds interval, bar_callback cb)
         : interval_(interval), callback_(std::move(cb)) {}
 
+    // Emits exactly one immutable bar per completed interval (plus the
+    // final partial bar via flush()). Emission depends only on event-time
+    // timestamps — never on wall-clock time — so the same tick sequence
+    // always produces the same bars regardless of host speed. Consumers
+    // feed each emission to the strategy, so duplicate/partial emissions
+    // would distort indicator state and break determinism.
     void on_tick(const std::string& symbol, double price, int64_t volume,
                  std::chrono::system_clock::time_point timestamp)
     {
@@ -24,7 +30,6 @@ public:
             volume_ = volume;
             symbol_ = symbol;
             bar_open_ = true;
-            emit_bar();
             return;
         }
 
@@ -36,7 +41,6 @@ public:
             open_ = high_ = low_ = close_ = price;
             volume_ = volume;
             symbol_ = symbol;
-            emit_bar();
             return;
         }
 
@@ -44,13 +48,6 @@ public:
         low_ = std::min(low_, price);
         close_ = price;
         volume_ += volume;
-
-        auto now = std::chrono::steady_clock::now();
-        if (now - last_partial_emit_ >= std::chrono::milliseconds(250))
-        {
-            emit_bar();
-            last_partial_emit_ = now;
-        }
     }
 
     void flush()
@@ -68,7 +65,6 @@ public:
         symbol_.clear();
         open_ = high_ = low_ = close_ = 0.0;
         volume_ = 0;
-        last_partial_emit_ = {};
     }
 
 private:
@@ -89,5 +85,4 @@ private:
     double low_ = 0.0;
     double close_ = 0.0;
     int64_t volume_ = 0;
-    std::chrono::steady_clock::time_point last_partial_emit_;
 };

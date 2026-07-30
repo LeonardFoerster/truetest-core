@@ -53,9 +53,15 @@ public:
     // and best-case extremes (longs: low for SL, high for TP/trail; shorts:
     // inverted) so an intra-bar wick through the bracket fires it instead
     // of being missed when only the close is checked. Conservative ordering:
-    // SL is evaluated before TP if both extremes crossed in the same bar.
+    // SL is evaluated before TP if both extremes crossed in the same bar,
+    // and the trailing stop is tested at its pre-bar level (this bar's
+    // favorable extreme raises the trail only for subsequent bars —
+    // assuming the favorable extreme printed first would be look-ahead).
+    // The returned order's price is the anchored fire price: the SL/TP
+    // level itself, or the bar open when the bar gapped through it.
     std::vector<order_event> on_bar(const std::string& symbol,
-                                    double low, double high, double close,
+                                    double open, double low, double high,
+                                    double close,
                                     std::chrono::system_clock::time_point ts);
 
     // Drop everything for one opener (used when strategy exits via its own
