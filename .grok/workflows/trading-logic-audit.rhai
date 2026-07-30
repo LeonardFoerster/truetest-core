@@ -1,23 +1,25 @@
-// trading-logic-audit — find and resolve logical errors critical for serious trading.
+// trading-logic-audit — find and resolve logical errors critical for serious
+// trading AND honest backtesting (look-ahead, fill realism, MC determinism).
 //
-// Scans the trading environment (portfolio/PnL, risk, order lifecycle, fills/realism,
-// safety paths, provider contracts, exits/brackets) for correctness bugs that would
-// silently corrupt live or research decisions. Confirmed findings are fixed when safe;
-// freeze-surface changes are reported for human CCB, not auto-applied.
+// Scans portfolio/PnL, risk, order lifecycle, fills/realism, backtest fidelity,
+// safety paths, provider contracts, exits/brackets for correctness bugs that
+// would silently corrupt live or research decisions. Confirmed findings are
+// fixed when safe; freeze-surface changes are reported for human CCB.
 //
 // Args (all optional):
-//   scope   — "full" (default) | "risk" | "execution" | "safety" | "portfolio" | "provider"
+//   scope   — "full" (default) | "risk" | "execution" | "safety" | "portfolio"
+//             | "provider" | "backtest"
 //   fix     — true (default) to apply non-freeze fixes; false = report-only
 //   max_fix — max confirmed findings to fix in one run (default 4, max 6)
 
 let meta = #{
     name: "trading-logic-audit",
-    description: "Search, verify, and fix logical errors in the trading environment critical for serious trading",
-    when_to_use: "Before serious trading, after execution/risk/portfolio changes, or for periodic correctness audits",
+    description: "Search, verify, and fix logical errors in trading and backtesting critical for serious trading",
+    when_to_use: "Before serious trading/research, after execution/risk/backtest changes, or periodic correctness audits",
     phases: [
-        #{ title: "Scan", detail: "parallel domain hunters for trading-logic bugs" },
+        #{ title: "Scan", detail: "parallel domain hunters for trading + backtest logic bugs" },
         #{ title: "Verify", detail: "adversarial verification of each finding" },
-        #{ title: "Prioritize", detail: "rank confirmed bugs by trading impact" },
+        #{ title: "Prioritize", detail: "rank confirmed bugs by trading/research impact" },
         #{ title: "Fix", detail: "apply safe non-freeze fixes" },
         #{ title: "Retest", detail: "build/tests/gates for applied fixes" },
         #{ title: "Report", detail: "structured audit report" },
@@ -150,14 +152,30 @@ let freeze_prefixes = [
 ];
 
 // Rhai fns do not capture outer lets — pass the freeze list explicitly.
+// Match exact relative path, absolute path ending, or exact basename of a
+// freeze entry. Do NOT treat risk_manager.cpp as freeze (only risk_manager.h).
 fn is_freeze_file(path, freeze_list) {
     for p in freeze_list {
         if path == p { return true; }
-        // also catch basename when agents omit full path
-        if path.len() > 0 && p.len() >= path.len() {
-            let start = p.len() - path.len();
-            if start >= 0 && p.sub_string(start, path.len()) == path { return true; }
+        // absolute or nested: ends with /p
+        let needle = "/" + p;
+        if path.len() >= needle.len() {
+            let start = path.len() - needle.len();
+            if path.sub_string(start, needle.len()) == needle { return true; }
         }
+        // basename-only agent report: "futures_risk_check.h"
+        let slash = -1;
+        let i = 0;
+        while i < p.len() {
+            // find last '/'
+            if p.sub_string(i, 1) == "/" { slash = i; }
+            i += 1;
+        }
+        let base = p;
+        if slash >= 0 {
+            base = p.sub_string(slash + 1, p.len() - slash - 1);
+        }
+        if path == base { return true; }
     }
     false
 }
@@ -189,7 +207,7 @@ if scope == "full" || scope == "risk" {
         focus: "Pre-trade checks that fail open, inverted comparisons, leverage/notional caps ignored, liquidation distance wrong sign, max position not enforced, risk limits only on open not increase, missing order of venue FuturesRiskCheck before RiskManager, circuit breakers never consulted.",
     });
 }
-if scope == "full" || scope == "execution" {
+if scope == "full" || scope == "execution" || scope == "backtest" {
     domains.push(#{
         name: "order-lifecycle",
         paths: "src/execution/order_tracker.h, src/execution/execution_bridge.h, src/execution/execution_adapter.h, src/engine/execution_router.*, src/execution/fill_parser.h, tests/test_execution_*.cpp, tests/test_cancel_race.cpp, tests/test_bridge_unknown_fill.cpp",
@@ -197,8 +215,20 @@ if scope == "full" || scope == "execution" {
     });
     domains.push(#{
         name: "fills-realism",
-        paths: "src/orderbook/, src/execution/*model*, src/execution/queue_*, src/execution/trade_tape_shadow_adapter.h, src/execution/fee_model.h, tests/test_fill_model.cpp, tests/test_realistic_fills.cpp, tests/test_queue_*.cpp, tests/test_engine_lookahead.cpp, tests/test_walked_book_impact.cpp",
-        focus: "Look-ahead bias, optimistic maker fills, fee sign errors, impact applied twice or never, latency model not delaying eligibility, queue position never consumed, bar close used as fill price incorrectly, live path accidentally using sim fill models.",
+        paths: "src/orderbook/, src/execution/*model*, src/execution/queue_*, src/execution/trade_tape_shadow_adapter.h, src/execution/fee_model.h, src/execution/latency_model.h, src/execution/impact_model.h, tests/test_fill_model.cpp, tests/test_realistic_fills.cpp, tests/test_queue_*.cpp, tests/test_engine_lookahead.cpp, tests/test_walked_book_impact.cpp, tests/test_latency_model.cpp, tests/test_fee_model.cpp",
+        focus: "BACKTEST/SHADOW fill honesty: look-ahead bias, optimistic maker fills, fee sign errors, impact applied twice or never, latency not delaying eligibility, queue position never consumed, bar stop fills at close after high/low trigger without path, LocalBook discarding resting limits, live path accidentally using sim fill models.",
+    });
+}
+if scope == "full" || scope == "backtest" {
+    domains.push(#{
+        name: "backtest-lookahead",
+        paths: "src/engine/engine.cpp, src/engine/execution_router.*, src/orderbook/fill_model.h, src/execution/queue_aware_book_adapter.h, src/strategy/, tests/test_engine_lookahead.cpp, tests/test_engine.cpp, tests/test_engine_integration.cpp, tests/test_golden_regression.cpp",
+        focus: "Look-ahead and bar-path fidelity crucial for serious research: strategy sees future bar fields before decision, stops/exits use high/low then fill at close without model, same-bar open+close of position with future knowledge, pending latency order eligible using future mid, indicators updated after signal with wrong bar ordering, OHLCV bar mode using close as both signal and fill without spread.",
+    });
+    domains.push(#{
+        name: "backtest-determinism",
+        paths: "src/simulation/, src/providers/synthetic/, src/engine/engine.cpp (reset_for_next_trial), src/bin/main.inc, tests/test_monte_carlo_*.cpp, tests/test_golden_regression.cpp, tests/providers/",
+        focus: "MC and reproducibility: trials share mutable engine/strategy/RNG state, seed not applied per trial, parallel MC races, non-deterministic iteration order in maps affecting fills, synthetic provider ignoring seed, report missing seed_used, golden path drift, object reuse between trials leaving positions/orders/marks.",
     });
 }
 if scope == "full" || scope == "safety" {
@@ -229,7 +259,7 @@ if scope == "full" {
 }
 
 if domains.len() == 0 {
-    pause("verification", "Unknown args.scope — use full|risk|execution|safety|portfolio|provider");
+    pause("verification", "Unknown args.scope — use full|risk|execution|safety|portfolio|provider|backtest");
 }
 
 // --- Phase 1: Scan ----------------------------------------------------------
@@ -240,20 +270,27 @@ log("Scanning " + domains.len().to_string() + " trading domains (scope=" + scope
 let scan_jobs = [];
 for d in domains {
     let p = "";
-    p += "You are auditing the TrueTest C++ trading engine for LOGICAL ERRORS that matter for serious trading.\n";
+    p += "You are auditing the TrueTest C++ trading/backtesting engine for LOGICAL ERRORS that matter for serious trading and honest research.\n";
     p += "Domain: " + d.name + "\n";
     p += "Primary paths: " + d.paths + "\n";
     p += "Focus: " + d.focus + "\n\n";
+    p += "ALREADY FIXED (do NOT re-report unless still broken in current code):\n";
+    p += "- Analytics last_equity_ seeded and updated on market/tick/fill\n";
+    p += "- RiskManager rejects zero-price non-reducing opens\n";
+    p += "- FuturesRiskCheck uses mark equity (cash+qty*mark) for leverage/liq\n";
+    p += "- engine funding → analytics_.on_event; per-symbol last_mids_by_symbol_\n";
+    p += "- portfolio get_equity(marks_by_symbol) multi-symbol API\n\n";
     p += "MANDATORY METHOD:\n";
     p += "1. Use grep and read_file extensively — never answer from memory.\n";
     p += "2. Read implementation AND matching tests. A bug with no test is still a finding if code is wrong.\n";
-    p += "3. Prefer falsifiable issues: wrong comparison, missing state transition, double apply, fail-open, sign error.\n";
-    p += "4. Ignore style, naming, missing docs, and pure performance unless it changes trading outcomes.\n";
-    p += "5. Severity: critical = wrong money/position/safety in live or research; high = can lose money under common paths; medium = edge cases; low = cosmetic correctness.\n";
-    p += "6. freeze_surface=true if file is on the live-safety freeze list (tt_target, engine.cpp, kill/dms/reconciler, risk_manager.h, futures_risk_check.h, live_safety.h, worker_watchdog.h).\n";
+    p += "3. Prefer falsifiable issues: wrong comparison, missing state transition, double apply, fail-open, sign error, look-ahead, non-determinism.\n";
+    p += "4. Ignore style, naming, missing docs, and pure performance unless it changes trading or backtest outcomes.\n";
+    p += "5. Severity: critical = wrong money/position/safety in live or research; high = can lose money or bias backtests under common paths; medium = edge cases; low = cosmetic.\n";
+    p += "6. freeze_surface=true ONLY for exact freeze files: tt_target.h, engine.cpp, *kill_switch*, *dead_mans*, *reconciler*, risk_manager.h (NOT .cpp), futures_risk_check.h, live_safety.h, worker_watchdog.h.\n";
     p += "7. At most 6 findings. Empty findings is valid ONLY after reading real code and stating domain_summary of what you checked.\n";
-    p += "8. id format: domain-shortslug e.g. portfolio-pnl-double-fee.\n";
+    p += "8. id format: domain-shortslug e.g. backtest-lookahead-same-bar-close.\n";
     p += "9. evidence must cite file + function/symbol + what the code does wrong.\n";
+    p += "10. Prefer NEW bugs not already fixed above. Backtest look-ahead and MC isolation are high value.\n";
     p += "Workspace root is the truetest core repo. Stay under src/ and tests/.\n";
 
     scan_jobs.push(#{
@@ -436,12 +473,13 @@ phase("Prioritize");
 
 let conf_json = json_encode(confirmed);
 let prio_prompt = "";
-prio_prompt += "You prioritize confirmed trading-engine bugs for a fix wave.\n";
+prio_prompt += "You prioritize confirmed trading/backtest-engine bugs for a fix wave.\n";
 prio_prompt += "Confirmed findings JSON:\n" + conf_json + "\n\n";
-prio_prompt += "Return ordered_ids by trading impact (critical money/safety first).\n";
+prio_prompt += "Return ordered_ids by trading AND backtest-research impact (critical money/safety/look-ahead first).\n";
 prio_prompt += "do_not_auto_fix: design rewrites, ambiguous product decisions, or need more research.\n";
-prio_prompt += "human_ccb_required: anything on freeze surface or live-safety paths.\n";
-prio_prompt += "Be conservative: when in doubt, put freeze/safety items in human_ccb_required.\n";
+prio_prompt += "human_ccb_required: ONLY exact freeze files (engine.cpp, futures_risk_check.h, risk_manager.h not .cpp, kill/dms/reconciler, live_safety.h, tt_target.h, worker_watchdog.h).\n";
+prio_prompt += "Non-freeze files (analytics.cpp, portfolio, risk_manager.cpp, orderbook, exits, simulation, strategies) may be auto-fixed if fixable_now.\n";
+prio_prompt += "Prefer fixable backtest honesty bugs (look-ahead, wrong fill price, MC state leak) when clear.\n";
 
 let prio = agent(prio_prompt, #{
     label: "prioritize",
