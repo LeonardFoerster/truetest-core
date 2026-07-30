@@ -147,7 +147,7 @@ set(TEST_SOURCES
     # --- Exits / brackets ---
     tests/test_exit_manager.cpp
     tests/test_bracket_adapter.cpp
-    tests/test_binance_oco_bracket_adapter.cpp
+    tests/providers/binance/test_binance_oco_bracket_adapter.cpp
 
     # --- Indicators ---
     tests/test_sma.cpp
@@ -208,45 +208,45 @@ set(TEST_SOURCES
     tests/test_golden_regression.cpp
 
     # --- Binance (always built; many are gated by HAS_BINANCE at runtime) ---
-    tests/test_binance_parser.cpp
-    tests/test_binance_depth_parser.cpp
-    tests/test_binance_order_encoder.cpp
-    tests/test_binance_rest_order_transport.cpp
-    tests/test_binance_user_data_parser.cpp
-    tests/test_binance_user_data_transport.cpp
-    tests/test_binance_rest_client_time.cpp
-    tests/test_binance_rest_client_rate_limit.cpp
-    tests/test_binance_rest_client_keepalive_timeout.cpp
-    tests/test_binance_user_data_transport_keepalive.cpp
-    tests/test_binance_user_data_transport_reconnect.cpp
-    tests/test_binance_endpoints.cpp
-    tests/test_binance_testnet_live.cpp
-    tests/test_binance_combined_parser.cpp
-    tests/test_binance_futures_order_encoder.cpp
-    tests/test_binance_futures_user_data_parser.cpp
-    tests/test_binance_futures_register.cpp
-    tests/test_binance_futures_reconciler.cpp
-    tests/test_binance_futures_kill_switch.cpp
-    tests/test_binance_futures_bracket_adapter.cpp
-    tests/test_binance_futures_testnet_live.cpp
-    tests/test_binance_futures_safety.cpp
-    tests/test_binance_futures_dead_mans_switch.cpp
+    tests/providers/binance/test_binance_parser.cpp
+    tests/providers/binance/test_binance_depth_parser.cpp
+    tests/providers/binance/test_binance_order_encoder.cpp
+    tests/providers/binance/test_binance_rest_order_transport.cpp
+    tests/providers/binance/test_binance_user_data_parser.cpp
+    tests/providers/binance/test_binance_user_data_transport.cpp
+    tests/providers/binance/test_binance_rest_client_time.cpp
+    tests/providers/binance/test_binance_rest_client_rate_limit.cpp
+    tests/providers/binance/test_binance_rest_client_keepalive_timeout.cpp
+    tests/providers/binance/test_binance_user_data_transport_keepalive.cpp
+    tests/providers/binance/test_binance_user_data_transport_reconnect.cpp
+    tests/providers/binance/test_binance_endpoints.cpp
+    tests/providers/binance/test_binance_testnet_live.cpp
+    tests/providers/binance/test_binance_combined_parser.cpp
+    tests/providers/binance/test_binance_futures_order_encoder.cpp
+    tests/providers/binance/test_binance_futures_user_data_parser.cpp
+    tests/providers/binance/test_binance_futures_register.cpp
+    tests/providers/binance/test_binance_futures_reconciler.cpp
+    tests/providers/binance/test_binance_futures_kill_switch.cpp
+    tests/providers/binance/test_binance_futures_bracket_adapter.cpp
+    tests/providers/binance/test_binance_futures_testnet_live.cpp
+    tests/providers/binance/test_binance_futures_safety.cpp
+    tests/providers/binance/test_binance_futures_dead_mans_switch.cpp
 
     # --- Bitget (always built; gated by HAS_BITGET at compile time) ---
-    tests/test_bitget_endpoints.cpp
-    tests/test_bitget_auth.cpp
-    tests/test_bitget_parser.cpp
-    tests/test_bitget_transport_subscribe.cpp
-    tests/test_bitget_futures_register.cpp
-    tests/test_bitget_rest_client_time.cpp
-    tests/test_bitget_futures_order_encoder.cpp
-    tests/test_bitget_futures_user_data_parser.cpp
-    tests/test_bitget_futures_reconciler.cpp
-    tests/test_bitget_futures_kill_switch.cpp
-    tests/test_bitget_futures_dead_mans_switch.cpp
-    tests/test_bitget_backfill.cpp
-    tests/test_bitget_futures_safety.cpp
-    tests/test_bitget_futures_bracket_adapter.cpp
+    tests/providers/bitget/test_bitget_endpoints.cpp
+    tests/providers/bitget/test_bitget_auth.cpp
+    tests/providers/bitget/test_bitget_parser.cpp
+    tests/providers/bitget/test_bitget_transport_subscribe.cpp
+    tests/providers/bitget/test_bitget_futures_register.cpp
+    tests/providers/bitget/test_bitget_rest_client_time.cpp
+    tests/providers/bitget/test_bitget_futures_order_encoder.cpp
+    tests/providers/bitget/test_bitget_futures_user_data_parser.cpp
+    tests/providers/bitget/test_bitget_futures_reconciler.cpp
+    tests/providers/bitget/test_bitget_futures_kill_switch.cpp
+    tests/providers/bitget/test_bitget_futures_dead_mans_switch.cpp
+    tests/providers/bitget/test_bitget_backfill.cpp
+    tests/providers/bitget/test_bitget_futures_safety.cpp
+    tests/providers/bitget/test_bitget_futures_bracket_adapter.cpp
 
     # --- CLI integration (separate binary) ---
     # (see truetest_cli_tests in root)
