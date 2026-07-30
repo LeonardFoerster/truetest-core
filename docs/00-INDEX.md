@@ -22,6 +22,7 @@
 12. `docs/architecture/03-realism.md` — Realism models (latency/impact/queue/fill/fee) details (extracted).
 13. `docs/operations/01-futures-phase0-operator-sop.md` — Printable Phase 0 operator SOP (checklists, signatures).
 14. `docs/operations/02-futures-testnet.md` — Futures testnet rehearsal guide for DMS/kill-switch/refusal drills (non-qualifying evidence).
+14b. `docs/operations/03-bitget-demo.md` — Bitget UTA demo drill, geo precondition, DMS BD / account-wide caveats (not mainnet readiness).
 15. `docs/architecture/04-performance.md` — Performance capacities, threading, limits.
 16. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md` — Specialized reference (use as needed).
 17. `docs/archive/` — Historical plans (MERGE_PLAN, production-readiness-gaps-2026-05, questdb guides, Edge1 plans). Do not use for current status.
