@@ -75,6 +75,7 @@ public:
         // Snapshot code will .load() as needed.
         const std::atomic<double>& last_mid_price,
         const std::string& last_mark_symbol,
+        const std::unordered_map<std::string, double>& last_mids_by_symbol,
         OrderbookRegistry& orderbook_registry,
         const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters,
         IOrderAuditSink& audit_sink,
@@ -155,6 +156,7 @@ private:
     const engine_config& config_;
     const std::atomic<double>& last_mid_price_;
     const std::string& last_mark_symbol_;
+    const std::unordered_map<std::string, double>& last_mids_by_symbol_;
     OrderbookRegistry& orderbook_registry_;
     const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters_;
     IOrderAuditSink& audit_sink_;

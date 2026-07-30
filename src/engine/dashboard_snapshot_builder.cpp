@@ -39,6 +39,7 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     const engine_config& config,
     const std::atomic<double>& last_mid_price,
     const std::string& last_mark_symbol,
+    const std::unordered_map<std::string, double>& last_mids_by_symbol,
     OrderbookRegistry& orderbook_registry,
     const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters,
     IOrderAuditSink& audit_sink,
@@ -70,6 +71,7 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     , config_(config)
     , last_mid_price_(last_mid_price)
     , last_mark_symbol_(last_mark_symbol)
+    , last_mids_by_symbol_(last_mids_by_symbol)
     , orderbook_registry_(orderbook_registry)
     , execution_adapters_(execution_adapters)
     , audit_sink_(audit_sink)
@@ -194,9 +196,18 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
     // Account
     out.cash             = portfolio_.get_cash();
     out.initial_balance  = portfolio_.get_initial_balance();
-    out.equity           = portfolio_.get_equity(last_mid_price_.load(std::memory_order_relaxed));
+    out.equity           = portfolio_.get_equity(last_mids_by_symbol_);
     out.realized_pnl     = out.equity - out.initial_balance;
     out.unrealized_pnl   = 0.0;
+
+    auto mark_of = [&](const std::string& sym) -> double {
+        auto it = last_mids_by_symbol_.find(sym);
+        if (it != last_mids_by_symbol_.end())
+            return it->second;
+        if (sym == last_mark_symbol_)
+            return last_mid_price_.load(std::memory_order_relaxed);
+        return 0.0;
+    };
 
     // Positions
     out.positions.clear();
@@ -208,7 +219,7 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
         row.symbol     = sym;
         row.qty        = pos.qty;
         row.avg_entry  = (std::abs(pos.qty) > 0.0) ? pos.cost_basis / pos.qty : 0.0;
-        row.mark       = (sym == last_mark_symbol_) ? last_mid_price_.load(std::memory_order_relaxed) : 0.0;
+        row.mark       = mark_of(sym);
         row.unrealized = (row.mark > 0.0) ? (row.mark - row.avg_entry) * pos.qty : 0.0;
         out.unrealized_pnl += row.unrealized;
         out.positions.push_back(std::move(row));
@@ -268,7 +279,11 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
     for (const auto& [sym, pos] : portfolio_.get_positions())
     {
         if (std::abs(pos.qty) < 1e-12) continue;
-        double mark = (sym == last_mark_symbol_) ? last_mid_price_.load(std::memory_order_relaxed) : 0.0;
+        double mark = 0.0;
+        if (auto it = last_mids_by_symbol_.find(sym); it != last_mids_by_symbol_.end())
+            mark = it->second;
+        else if (sym == last_mark_symbol_)
+            mark = last_mid_price_.load(std::memory_order_relaxed);
         if (mark > 0.0) exposure += std::abs(pos.qty) * mark;
     }
     out.risk.exposure       = exposure;
@@ -321,8 +336,12 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
         {
             if (p.symbol == a.symbol) { row.mark = p.mark; break; }
         }
-        if (row.mark == 0.0 && a.symbol == last_mark_symbol_)
-            row.mark = last_mid_price_.load(std::memory_order_relaxed);
+        if (row.mark == 0.0) {
+            if (auto it = last_mids_by_symbol_.find(a.symbol); it != last_mids_by_symbol_.end())
+                row.mark = it->second;
+            else if (a.symbol == last_mark_symbol_)
+                row.mark = last_mid_price_.load(std::memory_order_relaxed);
+        }
         out.brackets.push_back(std::move(row));
     }
 

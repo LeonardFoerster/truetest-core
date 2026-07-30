@@ -115,6 +115,24 @@ private:
     // surface on plain double& held by builder (see memory check 2026-07-18).
     alignas(64) std::atomic<double> last_mid_price_{0.0};
     std::string last_mark_symbol_;
+    // Per-symbol last mid so pre-trade risk and multi-symbol equity do not
+    // value every book with the most-recent symbol's mid.
+    std::unordered_map<std::string, double> last_mids_by_symbol_;
+
+    void note_mark_price(const std::string& symbol, double mid)
+    {
+        last_mid_price_.store(mid, std::memory_order_release);
+        last_mark_symbol_ = symbol;
+        last_mids_by_symbol_[symbol] = mid;
+    }
+
+    double mark_for_symbol(const std::string& symbol) const
+    {
+        auto it = last_mids_by_symbol_.find(symbol);
+        if (it != last_mids_by_symbol_.end())
+            return it->second;
+        return 0.0;
+    }
 
     // Instrument spec cache (moved out; engine delegates). Cold path.
     std::unique_ptr<InstrumentSpecCache> instrument_spec_cache_;

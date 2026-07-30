@@ -274,6 +274,7 @@ engine::engine(std::shared_ptr<data_handler> dh,
         config_,
         last_mid_price_,
         last_mark_symbol_,
+        last_mids_by_symbol_,
         orderbook_registry_,
         execution_adapters_,
         *audit_sink_,
@@ -428,14 +429,20 @@ void engine::publish_event(const event_pointer& ev)
 
     if (dashboard_builder_) dashboard_builder_->refresh_if_due();
 
-    // Phase 2: funding settlements update the primary portfolio cash immediately
-    // (advisory for now; later will also feed risk_snapshot / RiskManager).
+    // Funding settlements: portfolio cash + engine analytics (risk_view equity /
+    // total_funding_pnl / equity curve). Shadow dual book gets the same cash
+    // delta so sim vs exchange equity stays comparable.
     if (ev && ev->get_type() == event_type::funding) {
         if (auto* fe = dynamic_cast<funding_event*>(ev.get())) {
             portfolio_.on_funding(*fe);
+            if (exchange_portfolio_.has_value())
+                exchange_portfolio_->on_funding(*fe);
             // Unconditional via sink seam (run_tag supplied by sink; "" when no persistence).
             // No direct questdb_store_ access. Zero-alloc public seam.
             audit_sink_->record_funding(*fe, audit_sink_ ? audit_sink_->run_tag() : "");
+            analytics_.on_event(ev);
+            if (exchange_analytics_.has_value())
+                exchange_analytics_->on_event(ev);
         }
     }
 
@@ -1129,7 +1136,7 @@ void engine::questdb_end()
 {
     if (!questdb_active_ || !questdb_store_) return;
     const auto report = analytics_.snapshot();
-    const double final_equity = portfolio_.get_equity(last_mid_price_.load(std::memory_order_relaxed));
+    const double final_equity = portfolio_.get_equity(last_mids_by_symbol_);
     const std::size_t rejs = audit_sink_ ? audit_sink_->total_rejections() : 0;
     // Prefer delegating through the seam when available (single place for persistence finalization).
     // See core/docs/engine.md Phase 2 (E-21) + engine-decomposition skill "QuestDB Isolation".
@@ -1276,10 +1283,8 @@ void engine::print_summary()
 
         if (exch && exch_analytics)
         {
-            double last_price = (last_mid_price_.load(std::memory_order_relaxed) > 0.0) ? last_mid_price_.load(std::memory_order_relaxed) : 0.0;
-
-            double sim_equity   = portfolio_.get_equity(last_price);
-            double exch_equity  = exch->get_equity(last_price);
+            double sim_equity   = portfolio_.get_equity(last_mids_by_symbol_);
+            double exch_equity  = exch->get_equity(last_mids_by_symbol_);
             double delta        = exch_equity - sim_equity;
             double delta_pct    = (sim_equity > 0.0) ? (delta / sim_equity * 100.0) : 0.0;
 
@@ -1360,6 +1365,7 @@ void engine::reset_for_next_trial(uint64_t new_seed)
     // Reset some counters / state
     last_mid_price_.store(0.0, std::memory_order_release);
     last_mark_symbol_.clear();
+    last_mids_by_symbol_.clear();
 
     // Clear orderbook registry (L2 state from previous trial)
     orderbook_registry_.clear();
@@ -1510,7 +1516,10 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         // risk-of-ruin trigger.
         if (risk_check_)
         {
-            auto vd = risk_check_->evaluate(*o, portfolio_, last_mid_price_.load(std::memory_order_relaxed));
+            // Symbol-bound mark: never feed another symbol's mid into
+            // FuturesRiskCheck notional/leverage (mark==0 → check skips).
+            auto vd = risk_check_->evaluate(*o, portfolio_,
+                                            mark_for_symbol(o->get_symbol()));
             if (!vd.allow)
             {
                 const std::string reason_str =
@@ -1612,7 +1621,12 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         "{}"
     );
 
-    adapter->set_mid_price(last_mid_price_.load(std::memory_order_relaxed));
+    {
+        const double mid = mark_for_symbol(o->get_symbol());
+        adapter->set_mid_price(mid > 0.0
+            ? mid
+            : last_mid_price_.load(std::memory_order_relaxed));
+    }
     adapter->set_l2_seeded(l2_seeded_symbols_.count(o->get_symbol()) > 0);
 
     router_->submit(*o, adapter.get());
@@ -2607,8 +2621,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     mkt.set_recv_ns(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
 
-    last_mid_price_.store(mkt.get_open(), std::memory_order_release);
-    last_mark_symbol_ = mkt.get_symbol();
+    note_mark_price(mkt.get_symbol(), mkt.get_open());
 
     bool halt = false;
     while (!pending_orders_.empty() &&
@@ -2627,8 +2640,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     if (halt || halt_flag_.load(std::memory_order_acquire))
         return;
 
-    last_mid_price_.store(mkt.get_close(), std::memory_order_release);
-    last_mark_symbol_ = mkt.get_symbol();
+    note_mark_price(mkt.get_symbol(), mkt.get_close());
 
     auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
     if (!preset_has_mm_worker(config_.threading) &&
@@ -2741,8 +2753,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     te.set_recv_ns(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
 
-    last_mid_price_.store(rec.price, std::memory_order_release);
-    last_mark_symbol_ = rec.symbol;
+    note_mark_price(rec.symbol, rec.price);
 
     {
         DEBUG_STAGE(stage_timer_, mm_replenish);
@@ -3420,7 +3431,7 @@ void engine::run()
         auto sim_time = mkt.get_timestamp();
         const auto& symbol = mkt.get_symbol();
 
-        last_mid_price_.store(mkt.get_open(), std::memory_order_release);
+        note_mark_price(symbol, mkt.get_open());
 
         {
             DEBUG_STAGE(stage_timer_, pending_drain);
@@ -3438,7 +3449,7 @@ void engine::run()
         }
         if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
-        last_mid_price_.store(mkt.get_close(), std::memory_order_release);
+        note_mark_price(symbol, mkt.get_close());
 
         {
             DEBUG_STAGE(stage_timer_, stop_check);
@@ -3672,7 +3683,7 @@ void engine::run_tick_data()
     {
         const auto& tick = ticks[i];
 
-        last_mid_price_.store(tick.price, std::memory_order_release);
+        note_mark_price(tick.symbol, tick.price);
 
         {
             DEBUG_STAGE(stage_timer_, mm_replenish);
@@ -3824,7 +3835,7 @@ void engine::run_replay(const std::string& log_path,
             auto& mkt = static_cast<market_event&>(*ev);
             const auto sim_time = mkt.get_timestamp();
 
-            last_mid_price_.store(mkt.get_open(), std::memory_order_release);
+            note_mark_price(mkt.get_symbol(), mkt.get_open());
 
             while (!pending_orders_.empty() &&
                    pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time &&
@@ -3839,7 +3850,7 @@ void engine::run_replay(const std::string& log_path,
             }
             if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
-            last_mid_price_.store(mkt.get_close(), std::memory_order_release);
+            note_mark_price(mkt.get_symbol(), mkt.get_close());
 
             check_pending_stops(mkt.get_high(), mkt.get_low(), sim_time,
                                 event_count, halt_requested);
@@ -3880,7 +3891,7 @@ void engine::run_replay(const std::string& log_path,
             auto& te = static_cast<tick_event&>(*ev);
             const auto sim_time = te.get_timestamp();
 
-            last_mid_price_.store(te.get_price(), std::memory_order_release);
+            note_mark_price(te.get_symbol(), te.get_price());
 
             while (!pending_orders_.empty() &&
                    pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time &&
