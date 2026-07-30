@@ -1209,7 +1209,9 @@ static void apply_preset_with_precedence(CLI::App& app, cli_options& opts)
         if (!was_set("--dead-man-heartbeat-ms"))   opts.dead_man_heartbeat_ms = 8000;
         if (!was_set("--max-notional"))            opts.max_notional_usdt = 15000.0;
         if (!was_set("--max-leverage"))            opts.max_leverage = 2.5;
-        if (!was_set("--min-liq-distance-pct"))    opts.min_liquidation_distance_pct = 7.0;
+        // Fraction (0.07 = 7%), matching FuturesRiskCheck / CLI help. Whole
+        // percent "7" would reject nearly all risk-increasing orders.
+        if (!was_set("--min-liq-distance-pct"))    opts.min_liquidation_distance_pct = 0.07;
         if (!was_set("--max-daily-loss"))          opts.risk_max_daily_loss = 80.0;
         if (!was_set("--risk-unwind"))             opts.risk_unwind = true;
         return;
