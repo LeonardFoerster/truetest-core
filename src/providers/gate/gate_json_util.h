@@ -1,11 +1,12 @@
 #pragma once
 #ifdef HAS_GATE
 
-// Minimal cold-path JSON helpers for Gate wire formats (Phase 0 stub).
-// Phase 1+ parsers expand this; no nlohmann/json. Not for hot-path
-// allocation-sensitive loops without measurement.
+// Cold-path JSON helpers for Gate wire formats. Hand-rolled only — no
+// nlohmann. Expanded for Phase 1 trades / order_book_update / candlesticks.
 
+#include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <string_view>
 
 namespace gate {
@@ -125,6 +126,190 @@ inline std::size_t matching_close(std::string_view json, std::size_t open)
         }
     }
     return std::string_view::npos;
+}
+
+// Locate `"key":{` / `"key":[` and return the container slice incl braces.
+inline std::string_view extract_container(std::string_view json,
+                                          std::string_view key,
+                                          char open_char)
+{
+    auto colon = find_key(json, key);
+    if (colon == std::string_view::npos) return {};
+    std::size_t pos = colon + 1;
+    skip_ws(json, pos);
+    if (pos >= json.size() || json[pos] != open_char) return {};
+    auto close = matching_close(json, pos);
+    if (close == std::string_view::npos) return {};
+    return json.substr(pos, close - pos + 1);
+}
+
+inline std::string_view extract_object(std::string_view json, std::string_view key)
+{
+    return extract_container(json, key, '{');
+}
+
+inline std::string_view extract_array(std::string_view json, std::string_view key)
+{
+    return extract_container(json, key, '[');
+}
+
+// Iterate top-level objects inside an array value `[ {...}, {...} ]`.
+template <typename Fn>
+inline void for_each_array_object(std::string_view array, Fn&& fn)
+{
+    if (array.size() < 2 || array.front() != '[') return;
+    std::size_t pos = 1;
+    const std::size_t n = array.size();
+    while (pos < n)
+    {
+        skip_ws(array, pos);
+        if (pos >= n || array[pos] == ']') break;
+        if (array[pos] == ',') { ++pos; continue; }
+        if (array[pos] != '{') break;
+        auto close = matching_close(array, pos);
+        if (close == std::string_view::npos) break;
+        fn(array.substr(pos, close - pos + 1));
+        pos = close + 1;
+    }
+}
+
+// Iterate any top-level values (object or array element) in `[ ... ]`.
+template <typename Fn>
+inline void for_each_array_value(std::string_view array, Fn&& fn)
+{
+    if (array.size() < 2 || array.front() != '[') return;
+    std::size_t pos = 1;
+    const std::size_t n = array.size();
+    while (pos < n)
+    {
+        skip_ws(array, pos);
+        if (pos >= n || array[pos] == ']') break;
+        if (array[pos] == ',') { ++pos; continue; }
+
+        if (array[pos] == '{' || array[pos] == '[')
+        {
+            auto close = matching_close(array, pos);
+            if (close == std::string_view::npos) break;
+            fn(array.substr(pos, close - pos + 1));
+            pos = close + 1;
+            continue;
+        }
+
+        // Scalar token (number / string / bool / null).
+        if (array[pos] == '"')
+        {
+            auto end = array.find('"', pos + 1);
+            if (end == std::string_view::npos) break;
+            fn(array.substr(pos, end - pos + 1));
+            pos = end + 1;
+            continue;
+        }
+        auto end = array.find_first_of(",] \t\n\r", pos);
+        if (end == std::string_view::npos) end = n;
+        fn(array.substr(pos, end - pos));
+        pos = end;
+    }
+}
+
+// Single linear scan of a flat JSON object region [begin, end).
+// Nested `{...}` / `[...]` values are returned whole without recursing.
+template <typename Fn>
+inline void for_each_flat_field(std::string_view json,
+                                std::size_t begin,
+                                std::size_t end,
+                                Fn&& fn)
+{
+    if (end > json.size()) end = json.size();
+    std::size_t pos = begin;
+    while (pos < end)
+    {
+        auto q = json.find('"', pos);
+        if (q == std::string_view::npos || q >= end)
+            break;
+
+        auto q2 = json.find('"', q + 1);
+        if (q2 == std::string_view::npos || q2 >= end)
+            break;
+
+        std::string_view key = json.substr(q + 1, q2 - q - 1);
+        std::size_t after = q2 + 1;
+        skip_ws(json, after);
+        if (after >= end || json[after] != ':')
+        {
+            pos = q + 1;
+            continue;
+        }
+
+        std::size_t val_pos = after + 1;
+        skip_ws(json, val_pos);
+        if (val_pos >= end)
+            break;
+
+        std::string_view value;
+        std::size_t next = val_pos;
+
+        if (json[val_pos] == '"')
+        {
+            ++val_pos;
+            auto vend = json.find('"', val_pos);
+            if (vend == std::string_view::npos || vend >= end)
+                break;
+            value = json.substr(val_pos, vend - val_pos);
+            next = vend + 1;
+        }
+        else if (json[val_pos] == '{' || json[val_pos] == '[')
+        {
+            auto close = matching_close(json, val_pos);
+            if (close == std::string_view::npos || close >= end)
+                break;
+            value = json.substr(val_pos, close - val_pos + 1);
+            next = close + 1;
+        }
+        else
+        {
+            auto vend = json.find_first_of(",}]\t\n\r ", val_pos);
+            if (vend == std::string_view::npos || vend > end) vend = end;
+            value = json.substr(val_pos, vend - val_pos);
+            next = vend;
+        }
+
+        fn(key, value);
+        pos = next;
+    }
+}
+
+inline bool parse_double_sv(std::string_view sv, double& out)
+{
+    if (sv.empty()) return false;
+    auto [p, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), out);
+    return ec == std::errc();
+}
+
+inline bool parse_int64_sv(std::string_view sv, int64_t& out)
+{
+    if (sv.empty()) return false;
+    auto [p, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), out);
+    return ec == std::errc();
+}
+
+// Parse a JSON number or quoted number into double.
+inline bool parse_numberish(std::string_view sv, double& out)
+{
+    if (sv.size() >= 2 && sv.front() == '"' && sv.back() == '"')
+        sv = sv.substr(1, sv.size() - 2);
+    return parse_double_sv(sv, out);
+}
+
+inline bool parse_intish(std::string_view sv, int64_t& out)
+{
+    if (sv.size() >= 2 && sv.front() == '"' && sv.back() == '"')
+        sv = sv.substr(1, sv.size() - 2);
+    // Prefer integer path; fall back to double→int for "1.0".
+    if (parse_int64_sv(sv, out)) return true;
+    double d = 0.0;
+    if (!parse_double_sv(sv, d)) return false;
+    out = static_cast<int64_t>(d);
+    return true;
 }
 
 } // namespace json_util
