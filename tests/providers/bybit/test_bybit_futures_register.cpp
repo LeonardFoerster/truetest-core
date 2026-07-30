@@ -2,6 +2,7 @@
 
 #ifdef HAS_BYBIT
 
+#include "engine/engine_config.h"
 #include "providers/provider_registry.h"
 #include "providers/bybit/bybit_futures_provider.h"
 
@@ -96,19 +97,50 @@ TEST(BybitFuturesRegister, DepthStreamAndRiskCaps)
     EXPECT_EQ(p->depth_stream(), "orderbook.50");
 }
 
-TEST(BybitFuturesRegister, Phase0OpenRefuses)
+TEST(BybitFuturesRegister, LiveOpenStillRefuses)
 {
+    // Phase 1: live with keys refuses (Phase 2+).
+    // Shadow/paper open needs network — not exercised offline.
     provider_config cfg;
     cfg["symbol"] = "BTCUSDT";
 
     auto p = create(cfg);
     ASSERT_NE(p, nullptr);
-    EXPECT_FALSE(p->open());
-    EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
-    EXPECT_EQ(p->get_transport(), nullptr);
-    EXPECT_EQ(p->get_execution_adapter(), nullptr);
-    p->close();
-    EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::closed);
+
+    engine_config ec;
+    ec.mode = engine_mode::live;
+    p->configure(ec);
+
+    // Inject keys via factory-style: re-create with api_key in pcfg.
+    provider_config live_cfg;
+    live_cfg["symbol"] = "BTCUSDT";
+    live_cfg["api_key"] = "test_key";
+    live_cfg["api_secret"] = "test_secret";
+    auto live = create(live_cfg);
+    ASSERT_NE(live, nullptr);
+    live->configure(ec);
+    EXPECT_FALSE(live->open());
+    EXPECT_EQ(live->lifecycle_state(), IProvider::lifecycle::error);
+    live->close();
+}
+
+TEST(BybitFuturesRegister, AlwaysSupportsEventStream)
+{
+    // Trade-only and depth modes both advertise event stream so main.inc
+    // never falls through to CsvTickParser for bybit-futures.
+    provider_config cfg;
+    cfg["symbol"] = "BTCUSDT";
+
+    auto p = create(cfg);
+    ASSERT_NE(p, nullptr);
+    EXPECT_TRUE(p->supports_event_stream());
+    ASSERT_NE(p->get_event_parser(), nullptr);
+
+    cfg["depth_stream"] = "orderbook.50";
+    auto with_depth = create(cfg);
+    ASSERT_NE(with_depth, nullptr);
+    EXPECT_TRUE(with_depth->supports_event_stream());
+    ASSERT_NE(with_depth->get_event_parser(), nullptr);
 }
 
 #endif // HAS_BYBIT
