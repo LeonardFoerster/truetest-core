@@ -137,9 +137,11 @@ public:
         return found;
     }
 
-    // Signed qty from current-position body. Empty list / no match → 0.0
-    // (flat is valid). Uses size/total + posSide (long>0, short<0).
-    // Returns false only on unparseable non-empty size fields.
+    // Signed qty from current-position body. Empty list → 0.0 (flat is valid
+    // when the venue filtered by symbol). Uses size/total + posSide
+    // (long>0, short<0). Returns false on unparseable size fields OR when
+    // want_symbol is set and a non-empty row list never matches that symbol
+    // (fail-closed — do not treat "other symbols only" as flat).
     static bool extract_position_amt(std::string_view json, double& out,
                                      std::string_view want_symbol = {})
     {
@@ -163,12 +165,15 @@ public:
                 && bitget::extract_sv_number(data_obj, "size").empty()
                 && bitget::extract_sv_number(data_obj, "total").empty())
                 return true;
+            // Wrong-symbol single object: parse_position_row returns false.
             return parse_position_row(data_obj, out, want_symbol);
         }
 
         bool matched = false;
         bool parse_ok = true;
+        int row_count = 0;
         bitget::detail::for_each_array_object(arr, [&](std::string_view obj) {
+            ++row_count;
             if (matched || !parse_ok) return;
             auto sym = bitget::extract_sv_string(obj, "symbol");
             if (!want_symbol.empty() && !sym.empty() && sym != want_symbol)
@@ -184,7 +189,10 @@ public:
         });
 
         if (!parse_ok) return false;
-        // Empty list or no symbol match → flat 0.
+        // Empty list → flat 0. Non-empty without a match for want_symbol → refuse
+        // (symbol form mismatch or unexpected multi-symbol payload).
+        if (!matched && row_count > 0 && !want_symbol.empty())
+            return false;
         return true;
     }
 

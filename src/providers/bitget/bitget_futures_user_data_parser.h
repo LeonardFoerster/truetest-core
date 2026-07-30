@@ -85,8 +85,11 @@ public:
                 first_sv(obj, "execQty"));
             out.last_fill_price = to_double(
                 first_sv(obj, "execPrice"));
-            // Single fill slice — cumulative unknown on this channel.
-            out.cumulative_qty = out.last_fill_qty;
+            // Fill channel is per-slice only — do not invent order-level
+            // cumulative from execQty. ExecutionBridge accumulates
+            // last_fill_qty; leave cumulative_qty at 0 when venue omits it.
+            auto cum = first_sv(obj, "cumExecQty");
+            out.cumulative_qty = cum.empty() ? 0.0 : to_double(cum);
             out.k = parsed_exec::kind::partial_fill;
             extract_fee(obj, out);
             out.ts = parse_ts(obj, raw);
@@ -138,8 +141,8 @@ public:
         if (!arg.empty())
             topic = bitget::extract_sv_string(arg, "topic");
 
-        // Explicit non-position private topics must not become snapshots.
-        if (!topic.empty() && topic != "position")
+        // position + account (Phase 4 funding/balance) only.
+        if (!topic.empty() && topic != "position" && topic != "account")
             return false;
 
         // Without topic, only accept frames that look like position rows
@@ -163,6 +166,105 @@ public:
             return has_side || has_size;
         };
 
+        auto looks_like_account = [](std::string_view obj) {
+            if (obj.empty())
+                return false;
+            // coin / available / equity / balanceChange / asset style fields
+            if (!bitget::extract_sv_string(obj, "coin").empty())
+                return true;
+            if (!bitget::extract_sv_string(obj, "asset").empty())
+                return true;
+            if (!bitget::extract_sv_string(obj, "available").empty()
+                || !bitget::extract_sv_number(obj, "available").empty())
+                return true;
+            if (!bitget::extract_sv_string(obj, "equity").empty()
+                || !bitget::extract_sv_number(obj, "equity").empty())
+                return true;
+            return false;
+        };
+
+        auto classify_account_reason = [](std::string_view obj)
+            -> parsed_position_snapshot::reason {
+            auto t = bitget::extract_sv_string(obj, "bizType");
+            if (t.empty())
+                t = bitget::extract_sv_string(obj, "type");
+            if (t.empty())
+                t = bitget::extract_sv_string(obj, "changeType");
+            // Common funding labels across venues / UTA variants.
+            if (t.find("fund") != std::string_view::npos
+                || t.find("Fund") != std::string_view::npos
+                || t.find("FUND") != std::string_view::npos)
+                return parsed_position_snapshot::reason::funding_fee;
+            if (t.find("liq") != std::string_view::npos
+                || t.find("Liq") != std::string_view::npos)
+                return parsed_position_snapshot::reason::liquidation;
+            return parsed_position_snapshot::reason::other;
+        };
+
+        auto parse_balance_row = [](std::string_view obj)
+            -> parsed_position_snapshot::balance_row {
+            parsed_position_snapshot::balance_row b;
+            auto coin = bitget::extract_sv_string(obj, "coin");
+            if (coin.empty())
+                coin = bitget::extract_sv_string(obj, "asset");
+            b.asset.assign(coin.data(), coin.size());
+
+            auto bal = first_sv(obj, "available");
+            if (bal.empty())
+                bal = first_sv(obj, "equity");
+            if (bal.empty())
+                bal = first_sv(obj, "walletBalance");
+            if (bal.empty())
+                bal = first_sv(obj, "balance");
+            b.wallet_balance = to_double(bal);
+
+            auto delta = first_sv(obj, "balanceChange");
+            if (delta.empty())
+                delta = first_sv(obj, "change");
+            if (delta.empty())
+                delta = first_sv(obj, "delta");
+            b.balance_change = to_double(delta);
+            return b;
+        };
+
+        // --- account channel (balances / funding) ---
+        if (topic == "account")
+        {
+            out = parsed_position_snapshot{};
+            out.r = parsed_position_snapshot::reason::other;
+            auto arr = bitget::detail::extract_array(raw, "data");
+            if (arr.empty())
+            {
+                auto data_obj = bitget::detail::extract_object(raw, "data");
+                std::string_view body =
+                    !data_obj.empty() ? data_obj : raw;
+                out.r = classify_account_reason(body);
+                auto bal = parse_balance_row(body);
+                if (!bal.asset.empty() || bal.wallet_balance != 0.0
+                    || bal.balance_change != 0.0)
+                    out.balances.push_back(std::move(bal));
+                out.ts = parse_ts(body, raw);
+                return !out.balances.empty();
+            }
+            bitget::detail::for_each_array_object(arr, [&](std::string_view obj) {
+                if (out.r == parsed_position_snapshot::reason::other)
+                    out.r = classify_account_reason(obj);
+                auto bal = parse_balance_row(obj);
+                if (!bal.asset.empty() || bal.wallet_balance != 0.0
+                    || bal.balance_change != 0.0)
+                    out.balances.push_back(std::move(bal));
+            });
+            auto ts_sv = first_sv(raw, "ts");
+            if (!ts_sv.empty())
+            {
+                int64_t ms = 0;
+                if (bitget::parse_int64_sv(ts_sv, ms))
+                    out.ts = std::chrono::system_clock::time_point(
+                        std::chrono::milliseconds(ms));
+            }
+            return !out.balances.empty();
+        }
+
         auto arr = bitget::detail::extract_array(raw, "data");
         if (arr.empty())
         {
@@ -177,7 +279,12 @@ public:
                 return false;
 
             out = parsed_position_snapshot{};
-            out.r = parsed_position_snapshot::reason::order;
+            // Position topic is a venue state push, not an order lifecycle
+            // event — use `other` so provider logging is not filtered out
+            // (handler skips reason::order as fill-redundant).
+            out.r = (topic == "position")
+                ? parsed_position_snapshot::reason::other
+                : parsed_position_snapshot::reason::unknown;
             if (auto row = parse_position_row(body); !row.symbol.empty())
                 out.positions.push_back(std::move(row));
             out.ts = parse_ts(body, raw);
@@ -192,12 +299,14 @@ public:
                 if (first.empty())
                     first = o;
             });
-            if (!looks_like_position(first))
+            if (!looks_like_position(first) && !looks_like_account(first))
                 return false;
         }
 
         out = parsed_position_snapshot{};
-        out.r = parsed_position_snapshot::reason::order;
+        out.r = (topic == "position")
+            ? parsed_position_snapshot::reason::other
+            : parsed_position_snapshot::reason::unknown;
 
         bitget::detail::for_each_array_object(arr, [&](std::string_view obj) {
             auto row = parse_position_row(obj);

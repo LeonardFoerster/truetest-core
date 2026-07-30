@@ -52,9 +52,9 @@ public:
 		std::string_view frame;
 		while (transport_->read_frame(frame))
 		{
-			if (auto record = parser_->parse_record(frame))
+			for (auto& record : parser_->parse_records(frame))
 			{
-				sink_(*record, handler);
+				sink_(record, handler);
 				++count;
 			}
 		}
@@ -89,11 +89,11 @@ public:
 			if (auto header_line = transport_->read_line())
 			{
 				parser_->parse_header(*header_line);
-				if (auto record = parser_->parse_record(*header_line))
+				for (auto& record : parser_->parse_records(*header_line))
 				{
-					sink_(*record, handler);
+					sink_(record, handler);
 					if (on_record)
-						on_record(*record);
+						on_record(record);
 				}
 			}
 		}
@@ -107,11 +107,11 @@ public:
 
 			const std::string first_frame(frame);
 			parser_->parse_header(first_frame);
-			if (auto record = parser_->parse_record(first_frame))
+			for (auto& record : parser_->parse_records(first_frame))
 			{
-				sink_(*record, handler);
+				sink_(record, handler);
 				if (on_record)
-					on_record(*record);
+					on_record(record);
 			}
 		}
 
@@ -124,11 +124,11 @@ public:
 			if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))
 				break;
 
-			if (auto record = parser_->parse_record(frame))
+			for (auto& record : parser_->parse_records(frame))
 			{
-				sink_(*record, handler);
+				sink_(record, handler);
 				if (on_record)
-					on_record(*record);
+					on_record(record);
 			}
 		}
 

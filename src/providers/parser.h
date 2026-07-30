@@ -1,8 +1,10 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <string_view>
-#include <optional>
+#include <utility>
+#include <vector>
 
 template <typename T>
 class IDataParser
@@ -17,5 +19,20 @@ public:
 	virtual std::optional<T> parse_record(std::string_view line)
 	{
 		return parse_record(std::string(line));
+	}
+
+	// Multi-record frames (e.g. Bitget publicTrade data[] with N trades).
+	// Default: single parse_record. Override to emit every element of a batch.
+	virtual std::vector<T> parse_records(std::string_view line)
+	{
+		std::vector<T> out;
+		if (auto r = parse_record(line))
+			out.push_back(std::move(*r));
+		return out;
+	}
+
+	virtual std::vector<T> parse_records(const std::string& line)
+	{
+		return parse_records(std::string_view{line});
 	}
 };

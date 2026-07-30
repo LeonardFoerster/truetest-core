@@ -12,6 +12,7 @@
 
 #include <openssl/ssl.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <climits>
@@ -25,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -90,6 +92,7 @@ struct instrument_probe
 };
 
 // Build query for GET /api/v3/market/instruments.
+// Keys are emitted in alphabetical order (category, symbol) for sign stability.
 inline std::string instruments_query(std::string_view category,
                                      std::string_view symbol)
 {
@@ -103,6 +106,56 @@ inline std::string instruments_query(std::string_view category,
         q.append(symbol);
     }
     return q;
+}
+
+// Bitget REST prehash requires query parameters sorted by key (A–Z).
+// Splits on '&', sorts by the key segment before '=', re-joins.
+// Empty / single-param inputs are returned as-is (minus no-op copies).
+inline std::string sort_query_string(std::string_view query)
+{
+    if (query.empty())
+        return {};
+
+    std::vector<std::string_view> parts;
+    std::size_t start = 0;
+    while (start <= query.size())
+    {
+        auto amp = query.find('&', start);
+        if (amp == std::string_view::npos)
+        {
+            if (start < query.size())
+                parts.push_back(query.substr(start));
+            break;
+        }
+        if (amp > start)
+            parts.push_back(query.substr(start, amp - start));
+        start = amp + 1;
+    }
+    if (parts.size() <= 1)
+        return std::string(query);
+
+    std::sort(parts.begin(), parts.end(),
+              [](std::string_view a, std::string_view b) {
+                  const auto ea = a.find('=');
+                  const auto eb = b.find('=');
+                  const auto ka = a.substr(0, ea == std::string_view::npos
+                                                 ? a.size()
+                                                 : ea);
+                  const auto kb = b.substr(0, eb == std::string_view::npos
+                                                 ? b.size()
+                                                 : eb);
+                  return ka < kb;
+              });
+
+    std::string out;
+    out.reserve(query.size());
+    for (std::size_t i = 0; i < parts.size(); ++i)
+    {
+        if (i > 0)
+            out.push_back('&');
+        out.append(parts[i].data(), parts[i].size());
+    }
+    return out;
 }
 
 // Parse instruments envelope (canned or live). Pure — no network.
@@ -331,6 +384,13 @@ public:
                                    std::memory_order_release);
     }
 
+    // Current per-call timeout (for kill-switch restore after temporary tighten).
+    std::chrono::milliseconds per_call_timeout() const
+    {
+        return std::chrono::milliseconds(
+            per_call_timeout_ms_.load(std::memory_order_acquire));
+    }
+
     void set_sync_interval_ms(long long ms) { sync_interval_ms_ = ms; }
 
     long long clock_offset_ms() const
@@ -450,6 +510,9 @@ private:
     {
         maybe_resync_clock();
 
+        // Venue requires alphabetical query keys in the prehash AND URL.
+        const std::string sorted_query = bitget::sort_query_string(query);
+
         long long ts = static_cast<long long>(bitget::local_time_ms())
                      + clock_offset_ms_.load(std::memory_order_acquire);
         char ts_buf[32];
@@ -460,11 +523,11 @@ private:
         {
             std::lock_guard<std::mutex> lk(signer_mu_);
             sign = signer_.sign(bitget::build_prehash(
-                ts_sv, verb_name(method), endpoint, query, body));
+                ts_sv, verb_name(method), endpoint, sorted_query, body));
         }
 
         const std::string target =
-            query.empty() ? endpoint : (endpoint + "?" + query);
+            sorted_query.empty() ? endpoint : (endpoint + "?" + sorted_query);
 
         return execute(method, target, body, /*signed_req=*/true,
                        ts_sv, sign);

@@ -35,15 +35,19 @@ public:
                                            std::string_view json_body)>;
     // Optional: set REST per-call I/O timeout before each step (rest client).
     using set_timeout_fn = std::function<void(std::chrono::milliseconds)>;
+    // Optional: read current timeout so we can restore after kill (shared REST).
+    using get_timeout_fn = std::function<std::chrono::milliseconds()>;
 
     BitgetFuturesKillSwitch(post_fn post,
                             std::string category,
                             std::string symbol,
-                            set_timeout_fn set_timeout = nullptr)
+                            set_timeout_fn set_timeout = nullptr,
+                            get_timeout_fn get_timeout = nullptr)
         : post_(std::move(post))
         , category_(std::move(category))
         , symbol_(std::move(symbol))
         , set_timeout_(std::move(set_timeout))
+        , get_timeout_(std::move(get_timeout))
     {}
 
     bool cancel_all_and_flatten(std::chrono::milliseconds deadline) override
@@ -60,10 +64,28 @@ public:
         // Bound each REST call so a still-down LAN can't wedge shutdown.
         // Two calls fit inside deadline; min(1500ms, deadline/3) leaves
         // slack for TLS handshake reuse and the wall-clock check between.
+        // Always restore the previous timeout — kill shares the live REST
+        // client with DMS heartbeats and subsequent place/cancel.
         const long long per_call_ms =
             std::min<long long>(1500, deadline.count() / 3);
-        if (set_timeout_ && per_call_ms > 0)
+        const auto prev_timeout = get_timeout_
+            ? get_timeout_()
+            : std::chrono::milliseconds{0};
+        const bool tighten = set_timeout_ && per_call_ms > 0;
+        if (tighten)
             set_timeout_(std::chrono::milliseconds(per_call_ms));
+
+        struct restore_timeout
+        {
+            set_timeout_fn* set = nullptr;
+            std::chrono::milliseconds prev{0};
+            bool active = false;
+            ~restore_timeout()
+            {
+                if (active && set && *set)
+                    (*set)(prev);
+            }
+        } restorer{&set_timeout_, prev_timeout, tighten};
 
         // 1) Cancel open orders for this symbol (scoped).
         {
@@ -164,6 +186,7 @@ private:
     std::string category_;
     std::string symbol_;
     set_timeout_fn set_timeout_;
+    get_timeout_fn get_timeout_;
 };
 
 inline std::shared_ptr<BitgetFuturesKillSwitch>
@@ -173,6 +196,7 @@ make_bitget_futures_kill_switch(std::shared_ptr<BitgetRestClient> rest,
 {
     BitgetFuturesKillSwitch::post_fn post;
     BitgetFuturesKillSwitch::set_timeout_fn set_to;
+    BitgetFuturesKillSwitch::get_timeout_fn get_to;
     if (rest)
     {
         post = [rest](std::string_view ep, std::string_view body)
@@ -184,10 +208,13 @@ make_bitget_futures_kill_switch(std::shared_ptr<BitgetRestClient> rest,
         set_to = [rest](std::chrono::milliseconds ms) {
             rest->set_per_call_timeout(ms);
         };
+        get_to = [rest]() {
+            return rest->per_call_timeout();
+        };
     }
     return std::make_shared<BitgetFuturesKillSwitch>(
         std::move(post), std::move(category), std::move(symbol),
-        std::move(set_to));
+        std::move(set_to), std::move(get_to));
 }
 
 #endif // HAS_BITGET

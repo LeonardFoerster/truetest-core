@@ -52,10 +52,33 @@ struct mapped_topic
     std::string interval; // empty unless topic == "kline"
 };
 
+// Bitget UTA kline intervals are case-sensitive:
+//   minutes: 1m,3m,5m,15m,30m (lowercase m)
+//   hours/days: 1H,4H,6H,12H,1D (uppercase H/D)
+// CLI often uses kline4h / candle1d — normalize the suffix.
+inline std::string normalize_kline_interval(std::string_view interval)
+{
+    if (interval.empty())
+        return {};
+    std::string out(interval);
+    const char last = out.back();
+    if (last == 'h' || last == 'H')
+        out.back() = 'H';
+    else if (last == 'd' || last == 'D')
+        out.back() = 'D';
+    else if (last == 'w' || last == 'W')
+        out.back() = 'W';
+    // m / M stay as provided (venue uses lowercase m for minutes).
+    else if (last == 'M')
+        out.back() = 'm';
+    return out;
+}
+
 // Map CLI stream names (plan §7.5) onto Bitget UTA public topics.
 //   trade              → publicTrade
 //   ticker             → ticker
 //   kline1m / candle1m → kline + interval 1m
+//   kline4h / candle1d → kline + 4H / 1D (normalized)
 //   books1|books5|…    → identity
 // Unknown names pass through as the topic (already-mapped publicTrade etc.).
 inline mapped_topic map_stream_to_topic(std::string_view stream)
@@ -76,9 +99,9 @@ inline mapped_topic map_stream_to_topic(std::string_view stream)
     };
 
     if (auto iv = strip_prefix(stream, "kline"))
-        return {"kline", std::string(*iv)};
+        return {"kline", normalize_kline_interval(*iv)};
     if (auto iv = strip_prefix(stream, "candle"))
-        return {"kline", std::string(*iv)};
+        return {"kline", normalize_kline_interval(*iv)};
 
     return {std::string(stream), {}};
 }

@@ -465,9 +465,7 @@ inline std::optional<provider::tick> parse_trade_object(std::string_view obj,
 }
 
 // Full UTA publicTrade WS push → **first** trade in data[] only.
-// Multi-trade frames (N elements in data[]): use parse_all_trades().
-// BitgetCombinedParser / parse_ws_message also surface only the first trade;
-// Task 4 provider loops must call parse_all_trades for batch emit.
+// Multi-trade frames: use parse_all_trades() / BitgetTradeParser::parse_records.
 inline std::optional<provider::tick> parse_trade(std::string_view json)
 {
     auto arg = detail::extract_object(json, "arg");
@@ -492,17 +490,23 @@ inline std::optional<provider::tick> parse_trade(std::string_view json)
 
 // All trades in a publicTrade push (data[]). Provider-facing batch API:
 // when data[] has N trades, returns N ticks (empty vector on miss/malformed).
-// Prefer this over parse_trade / BitgetCombinedParser for multi-trade frames.
+// Production path: BitgetTradeParser::parse_records → DataBridge multi-emit.
 inline std::vector<provider::tick> parse_all_trades(std::string_view json)
 {
     std::vector<provider::tick> out;
     auto arg = detail::extract_object(json, "arg");
     std::string_view symbol;
+    std::string_view topic;
     if (!arg.empty())
+    {
         symbol = extract_sv_string(arg, "symbol");
+        topic  = extract_sv_string(arg, "topic");
+    }
     if (symbol.empty())
         symbol = extract_sv_string(json, "symbol");
     if (symbol.empty())
+        return out;
+    if (!topic.empty() && topic != "publicTrade")
         return out;
 
     auto arr = detail::extract_array(json, "data");
@@ -515,17 +519,39 @@ inline std::vector<provider::tick> parse_all_trades(std::string_view json)
     return out;
 }
 
+inline tick_record tick_to_record(const provider::tick& t)
+{
+    tick_record rec;
+    rec.timestamp = t.timestamp;
+    rec.symbol    = t.symbol;
+    rec.price     = t.price;
+    rec.quantity  = t.quantity;
+    rec.side      = static_cast<data_tick_side>(t.side);
+    return rec;
+}
+
 inline std::optional<tick_record> parse_trade_record(std::string_view json)
 {
     auto t = parse_trade(json);
     if (!t) return std::nullopt;
-    tick_record rec;
-    rec.timestamp = t->timestamp;
-    rec.symbol    = t->symbol;
-    rec.price     = t->price;
-    rec.quantity  = t->quantity;
-    rec.side      = static_cast<data_tick_side>(t->side);
-    return rec;
+    return tick_to_record(*t);
+}
+
+// All publicTrade elements as tick_record (production multi-emit path).
+inline std::vector<tick_record> parse_all_trade_records(std::string_view json)
+{
+    std::vector<tick_record> out;
+    auto ticks = parse_all_trades(json);
+    out.reserve(ticks.size());
+    for (const auto& t : ticks)
+        out.push_back(tick_to_record(t));
+    // Flat / single-object frames without data[] array.
+    if (out.empty())
+    {
+        if (auto one = parse_trade_record(json))
+            out.push_back(std::move(*one));
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -626,15 +652,11 @@ inline std::optional<provider::bar> parse_kline(std::string_view json)
     auto obj = detail::first_data_object(json);
     std::string_view body = obj.empty() ? json : obj;
 
-    // confirm present + false → open candle, skip. Absent → emit (Bitget default).
-    if (auto conf = extract_sv_optional_bool(body, "confirm"))
-    {
-        if (!*conf) return std::nullopt;
-    }
-    else if (auto conf2 = extract_sv_optional_bool(json, "confirm"))
-    {
-        if (!*conf2) return std::nullopt;
-    }
+    // Pure OHLCV parse — no closed-bar policy here. UTA kline pushes have no
+    // `confirm` field and update the open candle ~1/s; closed-bar emission is
+    // handled by kline_closed_gate (start rollover) on the production parsers.
+    // When a classic/legacy payload carries confirm:false the gate still
+    // buffers; confirm:true emits immediately.
 
     std::string_view open_sv, high_sv, low_sv, close_sv, vol_sv, start_sv;
 
@@ -685,27 +707,91 @@ inline std::optional<provider::bar> parse_kline(std::string_view json)
     return b;
 }
 
+// Optional confirm flag on kline body (classic/legacy). UTA has no confirm.
+inline std::optional<bool> extract_kline_confirm(std::string_view json)
+{
+    auto obj = detail::first_data_object(json);
+    std::string_view body = obj.empty() ? json : obj;
+    if (auto conf = extract_sv_optional_bool(body, "confirm"))
+        return conf;
+    return extract_sv_optional_bool(json, "confirm");
+}
+
+// Closed-bar policy for Bitget klines:
+//   - confirm:true  → emit immediately (legacy closed candle)
+//   - confirm:false → buffer open candle, do not emit
+//   - confirm absent (UTA) → buffer; emit previous bar when `date`/`start`
+//     advances (start rollover). First open candle is held until the next
+//     period starts — avoids treating mid-candle updates as completed bars.
+struct kline_closed_gate
+{
+    std::optional<provider::bar> on_bar(provider::bar b,
+                                        std::optional<bool> confirm = std::nullopt)
+    {
+        if (confirm.has_value())
+        {
+            if (!*confirm)
+            {
+                pending_ = std::move(b);
+                return std::nullopt;
+            }
+            // Explicit closed candle — emit now; clear pending for that start.
+            pending_.reset();
+            return b;
+        }
+
+        if (!pending_)
+        {
+            pending_ = std::move(b);
+            return std::nullopt;
+        }
+        if (b.date == pending_->date)
+        {
+            pending_ = std::move(b); // in-progress update
+            return std::nullopt;
+        }
+        auto closed = std::move(*pending_);
+        pending_ = std::move(b);
+        return closed;
+    }
+
+    void reset() { pending_.reset(); }
+
+    const std::optional<provider::bar>& pending() const { return pending_; }
+
+private:
+    std::optional<provider::bar> pending_;
+};
+
+inline std::optional<bar_record> to_bar_record(const provider::bar& b)
+{
+    bar_record rec;
+    rec.date   = b.date;
+    rec.symbol = b.symbol;
+    rec.open   = b.open;
+    rec.high   = b.high;
+    rec.low    = b.low;
+    rec.close  = b.close;
+    rec.volume = b.volume;
+    return rec;
+}
+
 inline std::optional<bar_record> parse_kline_record(std::string_view json)
 {
     auto b = parse_kline(json);
     if (!b) return std::nullopt;
-    bar_record rec;
-    rec.date   = b->date;
-    rec.symbol = b->symbol;
-    rec.open   = b->open;
-    rec.high   = b->high;
-    rec.low    = b->low;
-    rec.close  = b->close;
-    rec.volume = b->volume;
-    return rec;
+    return to_bar_record(*b);
 }
 
 // ---------------------------------------------------------------------------
 // Combined dispatcher (arg.topic → event)
 // ---------------------------------------------------------------------------
 // Single-event surface for IDataParser<provider::event>. For publicTrade,
-// only the **first** data[] trade is returned. Multi-trade batch:
-// callers (Task 4 provider) must use parse_all_trades() and emit each tick.
+// parse_ws_message returns the first trade only; BitgetCombinedParser
+// overrides parse_records to emit the full data[] batch.
+//
+// Kline: raw parse only (no closed-bar gate). Production parsers apply
+// kline_closed_gate so open-candle updates are not treated as completed bars.
 
 inline std::optional<provider::event> parse_ws_message(std::string_view json)
 {
@@ -747,10 +833,20 @@ inline std::optional<provider::event> parse_ws_message(std::string_view json)
     return std::nullopt;
 }
 
+// Apply closed-bar gate to a kline frame. Returns closed bar when ready.
+inline std::optional<provider::bar>
+gated_kline_bar(kline_closed_gate& gate, std::string_view json)
+{
+    auto b = parse_kline(json);
+    if (!b) return std::nullopt;
+    return gate.on_bar(std::move(*b), extract_kline_confirm(json));
+}
+
 } // namespace bitget
 
 // IDataParser adapters (outside namespace, matching Binance style).
 
+// Emits every publicTrade data[] element via parse_records (DataBridge).
 class BitgetTradeParser : public IDataParser<tick_record>
 {
 public:
@@ -765,8 +861,14 @@ public:
     {
         return bitget::parse_trade_record(line);
     }
+
+    std::vector<tick_record> parse_records(std::string_view line) override
+    {
+        return bitget::parse_all_trade_records(line);
+    }
 };
 
+// Stateful: only emits closed bars (start rollover / confirm:true).
 class BitgetKlineParser : public IDataParser<bar_record>
 {
 public:
@@ -774,13 +876,18 @@ public:
 
     std::optional<bar_record> parse_record(const std::string& line) override
     {
-        return bitget::parse_kline_record(std::string_view{line});
+        return parse_record(std::string_view{line});
     }
 
     std::optional<bar_record> parse_record(std::string_view line) override
     {
-        return bitget::parse_kline_record(line);
+        auto closed = bitget::gated_kline_bar(gate_, line);
+        if (!closed) return std::nullopt;
+        return bitget::to_bar_record(*closed);
     }
+
+private:
+    bitget::kline_closed_gate gate_;
 };
 
 class BitgetBooksParser : public IDataParser<provider::l2_snapshot>
@@ -799,8 +906,8 @@ public:
     }
 };
 
-// IDataParser single-event adapter. publicTrade → first trade only;
-// multi-trade frames: use bitget::parse_all_trades (not this class).
+// Combined event adapter. publicTrade → full data[] via parse_records;
+// kline path uses closed-bar gate (same as BitgetKlineParser).
 class BitgetCombinedParser : public IDataParser<provider::event>
 {
 public:
@@ -808,13 +915,65 @@ public:
 
     std::optional<provider::event> parse_record(const std::string& line) override
     {
-        return bitget::parse_ws_message(std::string_view{line});
+        return parse_record(std::string_view{line});
     }
 
     std::optional<provider::event> parse_record(std::string_view line) override
     {
-        return bitget::parse_ws_message(line);
+        auto batch = parse_records(line);
+        if (batch.empty()) return std::nullopt;
+        return std::move(batch.front());
     }
+
+    std::vector<provider::event> parse_records(std::string_view line) override
+    {
+        std::vector<provider::event> out;
+        auto arg = bitget::detail::extract_object(line, "arg");
+        std::string_view topic;
+        if (!arg.empty())
+            topic = bitget::extract_sv_string(arg, "topic");
+
+        if (topic == "publicTrade" || topic.empty())
+        {
+            auto ticks = bitget::parse_all_trades(line);
+            if (!ticks.empty())
+            {
+                out.reserve(ticks.size());
+                for (auto& t : ticks)
+                    out.emplace_back(std::move(t));
+                return out;
+            }
+        }
+
+        if (topic == "kline")
+        {
+            auto closed = bitget::gated_kline_bar(kline_gate_, line);
+            if (closed)
+                out.emplace_back(std::move(*closed));
+            return out;
+        }
+
+        // Empty topic: if frame parses as kline, apply gate (do not fall
+        // through to raw parse_ws_message which would emit open candles).
+        if (topic.empty())
+        {
+            if (auto raw = bitget::parse_kline(line))
+            {
+                auto closed = kline_gate_.on_bar(
+                    std::move(*raw), bitget::extract_kline_confirm(line));
+                if (closed)
+                    out.emplace_back(std::move(*closed));
+                return out;
+            }
+        }
+
+        if (auto ev = bitget::parse_ws_message(line))
+            out.push_back(std::move(*ev));
+        return out;
+    }
+
+private:
+    bitget::kline_closed_gate kline_gate_;
 };
 
 #endif // HAS_BITGET

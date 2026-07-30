@@ -11,12 +11,16 @@
 #include "execution/rate_limiter.h"
 #include "execution/trade_tape_shadow_adapter.h"
 #include "orderbook/orderbook.h"
+#include "core/event.h"
+#include "providers/bitget/bitget_backfill.h"
 #include "providers/bitget/bitget_combined_transport.h"
 #include "providers/bitget/bitget_endpoints.h"
+#include "providers/bitget/bitget_futures_bracket_adapter.h"
 #include "providers/bitget/bitget_futures_dead_mans_switch.h"
 #include "providers/bitget/bitget_futures_kill_switch.h"
 #include "providers/bitget/bitget_futures_order_encoder.h"
 #include "providers/bitget/bitget_futures_reconciler.h"
+#include "providers/bitget/bitget_futures_safety.h"
 #include "providers/bitget/bitget_futures_user_data_parser.h"
 #include "providers/bitget/bitget_hybrid_executor.h"
 #include "providers/bitget/bitget_parser.h"
@@ -25,6 +29,7 @@
 #include "providers/bitget/bitget_rest_order_transport.h"
 #include "providers/bitget/bitget_time_sync.h"
 #include "providers/bitget/bitget_transport.h"
+#include "providers/prepend_transport.h"
 #include "providers/provider.h"
 #include "risk/futures_risk_check.h"
 #include "risk/maintenance_margin_table.h"
@@ -226,8 +231,8 @@ public:
         api_surface_ = std::move(surface);
     }
 
-    // Operator-set advisory inputs (margin_type_strict stored; full advisory
-    // helpers not yet ported — strict path skipped with stderr note).
+    // Operator-set margin/advisory inputs. margin_type_strict is enforced
+    // at live open; liquidation_warn_pct drives position-risk advisories.
     void set_expected_margin_type(std::string mt)
     {
         expected_margin_type_ = std::move(mt);
@@ -279,6 +284,9 @@ public:
         maker_queue_model_ = cfg.maker_queue_model;
         qty_scale_ = cfg.qty_scale;
         spread_step_factor_ = cfg.spread_step_factor;
+        backfill_bars_ = cfg.backfill_bars;
+        backfill_interval_ = cfg.backfill_interval;
+        backfill_host_override_ = cfg.backfill_host;
         seed_ = cfg.seed;
         dashboard_ = cfg.dashboard;
         if (paper_exec_)
@@ -290,14 +298,14 @@ public:
     {
         state_ = lifecycle::opening;
 
-        // Classic mix/v2 is Phase 4 deferred — only empty/"uta" allowed.
-        // Checked here so direct set_api_surface() cannot bypass register.
+        // Classic mix/v2 remains unsupported (no countdown DMS; dual surface
+        // is documented only). Only empty/"uta" allowed.
         if (!api_surface_is_uta(api_surface_))
         {
             std::cerr << "BitgetFuturesProvider: refusing open — "
                          "api_surface='" << api_surface_
                       << "' is not implemented (only empty/'uta'). "
-                         "Classic mix/v2 is Phase 4 deferred.\n";
+                         "Classic mix/v2 is out of scope for this provider.\n";
             state_ = lifecycle::error;
             return false;
         }
@@ -343,8 +351,39 @@ public:
 
         apply_halt_cb_to_transports();
 
-        // Backfill skipped (BitgetBackfill not yet landed).
-        transport_ = live_transport;
+        // REST candle backfill for kline streams → PrependTransport.
+        std::vector<std::string> prepend;
+        if (backfill_bars_ > 0 && is_kline_stream())
+        {
+            std::string interval = backfill_interval_;
+            if (interval.empty())
+                interval = kline_interval_from_stream();
+            if (interval.empty())
+                interval = "1m";
+            interval = bitget::normalize_kline_interval(interval);
+
+            const std::string rest_host = !backfill_host_override_.empty()
+                ? backfill_host_override_
+                : endpoints_.rest_host;
+
+            bitget::BitgetBackfill backfiller(
+                rest_host, endpoints_.rest_port, category_);
+            std::cerr << "  BitgetFuturesProvider: backfilling "
+                      << backfill_bars_ << " bars for " << symbol_
+                      << " (" << interval << ") via " << rest_host << "...\n";
+            auto bars = backfiller.fetch(
+                upper(symbol_), interval, backfill_bars_);
+            std::cerr << "  BitgetFuturesProvider: backfill loaded "
+                      << bars.size() << " bars\n";
+            prepend = bitget::BitgetBackfill::to_prepend_frames(
+                bars, upper(symbol_), interval);
+        }
+
+        if (!prepend.empty())
+            transport_ = std::make_shared<PrependTransport>(
+                live_transport, std::move(prepend));
+        else
+            transport_ = live_transport;
 
         paper_exec_ = std::make_shared<BitgetPaperExecutor>();
         paper_exec_->set_symbol(symbol_);
@@ -444,6 +483,12 @@ public:
 
     std::shared_ptr<IKillSwitch> get_kill_switch() override { return kill_switch_; }
 
+    std::shared_ptr<truetest::exits::IBracketAdapter>
+    get_bracket_adapter() override
+    {
+        return bracket_adapter_;
+    }
+
     std::vector<liveness_source> get_liveness_sources() override
     {
         std::vector<liveness_source> out;
@@ -490,10 +535,7 @@ public:
         return !depth_stream_.empty();
     }
 
-    // Phase 0 / deferred multi-emit: BitgetCombinedParser returns first trade
-    // only per publicTrade frame. Multi-trade data[] batch emit needs a
-    // multi-record parser surface (IDataParser is single-event); use
-    // bitget::parse_all_trades when that lands. Not a live-safety issue.
+    // BitgetCombinedParser::parse_records emits every publicTrade data[] tick.
     std::shared_ptr<IDataParser<provider::event>> get_event_parser() override
     {
         if (depth_stream_.empty()) return nullptr;
@@ -546,6 +588,7 @@ private:
     std::shared_ptr<BitgetFuturesReconciler> reconciler_;
     std::shared_ptr<BitgetFuturesKillSwitch> kill_switch_;
     std::shared_ptr<BitgetFuturesDeadMansSwitch> dms_;
+    std::shared_ptr<BitgetFuturesBracketAdapter> bracket_adapter_;
     std::shared_ptr<BitgetPrivateWsTransport> bitget_private_ws_;
     std::optional<instrument_spec> instrument_spec_;
 
@@ -564,6 +607,10 @@ private:
     int64_t dead_man_countdown_ms_ = 0;
     int64_t dead_man_heartbeat_ms_ = 0;
     bool    dms_attempt_position_close_ = false;
+
+    int backfill_bars_ = 0;
+    std::string backfill_interval_;
+    std::string backfill_host_override_;
 
     std::function<void(std::string_view)> halt_cb_;
     std::function<void(std::shared_ptr<event>)> event_publisher_;
@@ -679,6 +726,34 @@ private:
             }
         }
 
+        // Phase 4: position advisories (margin mismatch / liq distance).
+        // Non-strict path is warning-only; settings-based strict margin already
+        // ran above. Flat maintenance_margin_pct remains the MM model unless
+        // operator sets FuturesRiskCheck::maintenance_margin_pct (no UTA
+        // leverageBracket endpoint equivalent to Binance fapi).
+        {
+            const std::string pos_q =
+                "category=" + category_ + "&symbol=" + upper(symbol_);
+            auto pr = rest_->get("/api/v3/position/current-position", pos_q);
+            if (pr.status >= 200 && pr.status < 300
+                && (pr.business_ok
+                    || bitget::is_business_success(pr.status, pr.body)))
+            {
+                auto advisories = bitget::futures::compute_advisories(
+                    pr.body, upper(symbol_), expected_margin_type_,
+                    liquidation_warn_pct_);
+                for (const auto& a : advisories)
+                    std::cerr << "  [ADVISORY] " << a.note << "\n";
+            }
+            else
+            {
+                std::cerr << "BitgetFuturesProvider: position advisory probe "
+                             "HTTP " << pr.status
+                          << " — skipping margin/liq advisories "
+                             "(reconciler will retry)\n";
+            }
+        }
+
         minter_ = std::make_shared<bitget::ShortClientOidMinter>(seed_);
 
         // Conservative place-order rate: capacity 10, refill 5/s (~5–10/s).
@@ -691,6 +766,9 @@ private:
         kill_switch_ = make_bitget_futures_kill_switch(
             rest_, category_, upper(symbol_));
 
+        bracket_adapter_ = make_bitget_futures_bracket_adapter(
+            rest_, category_);
+
         ExecutionBridge::deps d;
         d.order_tx = make_bitget_rest_order_transport(rest_);
         bitget_private_ws_ = std::make_shared<BitgetPrivateWsTransport>(
@@ -699,16 +777,45 @@ private:
         d.fill_tx = bitget_private_ws_;
         apply_halt_cb_to_transports();
 
-        d.encoder = std::make_shared<BitgetFuturesOrderEncoder>(
+        auto encoder = std::make_shared<BitgetFuturesOrderEncoder>(
             symbol_, category_);
+        // Wire operator margin expectation into place-order body (limit).
+        // Venue default is crossed; isolated accounts must send "isolated".
+        if (!expected_margin_type_.empty())
+        {
+            const std::string canon =
+                bitget::canonical_margin_mode(expected_margin_type_);
+            if (canon == "ISOLATED")
+                encoder->set_margin_mode("isolated");
+            else if (canon == "CROSSED")
+                encoder->set_margin_mode("crossed");
+        }
+        d.encoder = std::move(encoder);
         d.parser = std::make_shared<BitgetFuturesUserDataParser>();
         d.order_rate_limiter = order_rate_limiter_;
         d.client_id_fn = [m = minter_](uint64_t) { return m->next(); };
 
-        // Position snapshots: log only (no portfolio snap-to-venue yet).
+        // Position/account snapshots: log + funding → event_publisher.
         d.position_snapshot_handler =
-            [sym = upper(symbol_)](const parsed_position_snapshot& s) {
+            [this, sym = upper(symbol_)](const parsed_position_snapshot& s) {
                 log_position_snapshot(s, sym);
+                if (s.r != parsed_position_snapshot::reason::funding_fee)
+                    return;
+                for (const auto& b : s.balances)
+                {
+                    if (b.asset != "USDT" && b.asset != "usdt")
+                        continue;
+                    if (b.balance_change == 0.0)
+                        continue;
+                    auto fe = std::make_shared<funding_event>(
+                        s.ts, sym, 0.0, b.balance_change, "FUNDING_FEE");
+                    if (event_publisher_)
+                        event_publisher_(fe);
+                    else
+                        std::cerr << "  [FUNDING] " << sym
+                                  << " cash_delta=" << b.balance_change
+                                  << " (no publisher wired yet)\n";
+                }
             };
 
         bridge_ = std::make_shared<ExecutionBridge>(std::move(d));
@@ -789,29 +896,21 @@ private:
         return true;
     }
 
-    // Wire halt_cb_ (or a live provisional) so disconnect fails closed.
-    // main.inc calls provider->open() before engine set_halt_callback; any
-    // installed fatal_cb disables transport reconnect. Real halt replaces
-    // the provisional when set_halt_callback runs later.
-    // Paper/shadow: leave unset when halt_cb_ empty so public WS can reconnect.
+    // Wire engine halt into transports when present. Matches Binance:
+    // leave fatal_cb unset until set_halt_callback so public/private WS may
+    // reconnect during the open→engine-wire window. A log-only provisional
+    // would disable reconnect without actually halting (fill-blind live).
+    // Paper/shadow: same — no fatal until engine wires halt.
     void apply_halt_cb_to_transports()
     {
-        std::function<void(std::string_view)> cb = halt_cb_;
-        if (!cb)
-        {
-            if (mode_ != engine_mode::live)
-                return;
-            cb = [](std::string_view reason) {
-                std::cerr << "BitgetFuturesProvider: transport fatal before "
-                             "engine halt_cb wired: " << reason << "\n";
-            };
-        }
+        if (!halt_cb_)
+            return;
         if (bitget_transport_)
-            bitget_transport_->set_fatal_disconnect_callback(cb);
+            bitget_transport_->set_fatal_disconnect_callback(halt_cb_);
         if (bitget_combined_transport_)
-            bitget_combined_transport_->set_fatal_disconnect_callback(cb);
+            bitget_combined_transport_->set_fatal_disconnect_callback(halt_cb_);
         if (bitget_private_ws_)
-            bitget_private_ws_->set_fatal_disconnect_callback(cb);
+            bitget_private_ws_->set_fatal_disconnect_callback(halt_cb_);
     }
 
     // Empty or "uta" (any case) → allowed. Everything else → refuse.
@@ -822,6 +921,22 @@ private:
         return (surface[0] == 'u' || surface[0] == 'U')
             && (surface[1] == 't' || surface[1] == 'T')
             && (surface[2] == 'a' || surface[2] == 'A');
+    }
+
+    bool is_kline_stream() const
+    {
+        return stream_type_.rfind("kline", 0) == 0
+            || stream_type_.rfind("candle", 0) == 0;
+    }
+
+    // CLI stream kline1m / candle4h → interval suffix (before normalize).
+    std::string kline_interval_from_stream() const
+    {
+        if (stream_type_.rfind("kline", 0) == 0)
+            return stream_type_.substr(5);
+        if (stream_type_.rfind("candle", 0) == 0)
+            return stream_type_.substr(6);
+        return {};
     }
 
     static std::string upper(const std::string& s)

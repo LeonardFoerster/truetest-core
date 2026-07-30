@@ -43,8 +43,43 @@ namespace bitget {
 // Pure helpers (unit-testable without network)
 // ---------------------------------------------------------------------------
 
+// Minimal JSON string escape for login fields (RFC 8259 subset).
+// Passphrases may contain `"`, `\`, or control chars — raw append breaks the
+// login frame and fails auth silently.
+inline void append_json_escaped(std::string& out, std::string_view s)
+{
+    out.reserve(out.size() + s.size() + 8);
+    for (unsigned char c : s)
+    {
+        switch (c)
+        {
+        case '"':  out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b";  break;
+        case '\f': out += "\\f";  break;
+        case '\n': out += "\\n";  break;
+        case '\r': out += "\\r";  break;
+        case '\t': out += "\\t";  break;
+        default:
+            if (c < 0x20)
+            {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x",
+                              static_cast<unsigned>(c));
+                out += buf;
+            }
+            else
+            {
+                out.push_back(static_cast<char>(c));
+            }
+            break;
+        }
+    }
+}
+
 // Login frame: op=login with apiKey / passphrase / timestamp / sign.
 // Sign is Base64(HMAC-SHA256(secret, ts + "GET" + "/user/verify")).
+// String fields are JSON-escaped; prehash still uses the raw secret/ts.
 inline std::string build_login_json(std::string_view api_key,
                                     std::string_view passphrase,
                                     std::string_view timestamp,
@@ -52,24 +87,24 @@ inline std::string build_login_json(std::string_view api_key,
 {
     std::string j;
     j.reserve(96 + api_key.size() + passphrase.size() + timestamp.size()
-              + sign.size());
+              + sign.size() + 16);
     j += "{\"op\":\"login\",\"args\":[{\"apiKey\":\"";
-    j += api_key;
+    append_json_escaped(j, api_key);
     j += "\",\"passphrase\":\"";
-    j += passphrase;
+    append_json_escaped(j, passphrase);
     j += "\",\"timestamp\":\"";
-    j += timestamp;
+    append_json_escaped(j, timestamp);
     j += "\",\"sign\":\"";
-    j += sign;
+    append_json_escaped(j, sign);
     j += "\"}]}";
     return j;
 }
 
-// Private UTA subscribe: order + fill + position (plan §7.7).
+// Private UTA subscribe: order + fill + position + account (Phase 4 funding).
 // instType is "UTA" (not public-stream "usdt-futures").
 inline std::string build_private_subscribe_json()
 {
-    return R"({"op":"subscribe","args":[{"instType":"UTA","topic":"order"},{"instType":"UTA","topic":"fill"},{"instType":"UTA","topic":"position"}]})";
+    return R"({"op":"subscribe","args":[{"instType":"UTA","topic":"order"},{"instType":"UTA","topic":"fill"},{"instType":"UTA","topic":"position"},{"instType":"UTA","topic":"account"}]})";
 }
 
 // Login ack: event=="login" (or op=="login") and code 0 / "0" / "00000".
@@ -169,7 +204,7 @@ public:
     {
         {
             std::lock_guard<std::mutex> lk(state_mu_);
-            if (state_ == lifecycle::open || state_ == lifecycle::connecting)
+            if (state_ == lifecycle::open)
                 return true;
         }
 
@@ -185,9 +220,32 @@ public:
             reader_.join();
 
         stop_flag_.store(false);
+        ever_open_.store(false, std::memory_order_release);
         set_state(lifecycle::connecting, "connecting private WS");
         reader_ = std::thread([this] { run(); });
-        return true;
+
+        // Fail-closed ready gate: login + subscribe must complete before
+        // ExecutionBridge treats fills_tx as live. Returning true on thread
+        // spawn alone allows place-orders with no user-data stream.
+        {
+            std::unique_lock<std::mutex> lk(state_mu_);
+            const bool signaled = open_cv_.wait_for(
+                lk, kOpenReadyTimeout, [this] {
+                    return state_ == lifecycle::open
+                        || state_ == lifecycle::error
+                        || stop_flag_.load(std::memory_order_acquire);
+                });
+            if (state_ == lifecycle::open)
+                return true;
+
+            std::cerr << "BitgetPrivateWsTransport: open ready-gate failed"
+                      << (signaled ? " (error state)" : " (timeout)")
+                      << "\n";
+        }
+
+        // Tear down partial connect so a subsequent open() starts clean.
+        close();
+        return false;
     }
 
     void close() override
@@ -276,6 +334,8 @@ private:
         {
             std::lock_guard<std::mutex> lk(state_mu_);
             state_ = s;
+            if (s == lifecycle::open || s == lifecycle::error)
+                open_cv_.notify_all();
         }
         if (status_cb_)
             status_cb_(s, note);
@@ -520,6 +580,7 @@ private:
             last_ping_ = std::chrono::steady_clock::now();
 
             reached_open = true;
+            ever_open_.store(true, std::memory_order_release);
             set_state(lifecycle::open, "private WS open (order/fill/position)");
 
             std::string_view view;
@@ -574,13 +635,39 @@ private:
 
             auto r = run_once();
             if (r == run_result::stopped)
-                return;
+            {
+                // Dropped after open without stop_flag → treat as network loss
+                // so fatal_cb / reconnect policy can run (unless close() set stop).
+                if (stop_flag_.load(std::memory_order_acquire))
+                    return;
+                if (!ever_open_.load(std::memory_order_acquire))
+                {
+                    set_state(lifecycle::error,
+                              "private WS stopped before ready");
+                    return;
+                }
+                r = run_result::network_error;
+            }
 
             const char* what = "network error";
             if (r == run_result::handshake_error)
                 what = "handshake error";
             else if (r == run_result::login_error)
                 what = "login error";
+
+            // Initial connect failed before ever open: fail open() wait
+            // immediately — do not burn reconnect budget during ready-gate.
+            if (!ever_open_.load(std::memory_order_acquire))
+            {
+                char buf[192];
+                std::snprintf(buf, sizeof(buf),
+                              "bitget private WS initial connect failed: %s",
+                              what);
+                std::cerr << "BitgetPrivateWsTransport: " << buf << "\n";
+                stop_flag_.store(true, std::memory_order_release);
+                set_state(lifecycle::error, buf);
+                return;
+            }
 
             // Live path: fatal disconnect → halt, no reconnect.
             if (fatal_cb_)
@@ -627,11 +714,14 @@ private:
 
     std::thread reader_;
     std::atomic<bool> stop_flag_{false};
+    // Set once login+subscribe succeed; open() ready-gate and reconnect policy.
+    std::atomic<bool> ever_open_{false};
 
     std::mutex cv_mu_;
     std::condition_variable cv_;
 
     mutable std::mutex state_mu_;
+    std::condition_variable open_cv_;
     lifecycle state_ = lifecycle::closed;
 
     std::chrono::steady_clock::time_point last_ping_{};
@@ -640,6 +730,8 @@ private:
     static constexpr auto kPollWake = std::chrono::seconds(25);
     static constexpr auto kLoginTimeout = std::chrono::seconds(10);
     static constexpr auto kLoginPoll = std::chrono::milliseconds(500);
+    // Bound open() wait: login timeout (10s) + TLS + slack.
+    static constexpr auto kOpenReadyTimeout = std::chrono::seconds(15);
 };
 
 } // namespace bitget

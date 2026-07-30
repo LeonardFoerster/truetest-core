@@ -245,6 +245,9 @@ private:
                 last_beat_ms_.store(WorkerWatchdog::now_monotonic_ms(),
                                     std::memory_order_release);
                 consecutive_fails_ = 0;
+                // Recovered after a close episode — allow another last-resort
+                // close if a later dual-failure streak occurs.
+                close_attempted_ = false;
                 continue;
             }
 
