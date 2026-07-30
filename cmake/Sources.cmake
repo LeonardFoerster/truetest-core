@@ -251,13 +251,34 @@ set(TEST_SOURCES
     # --- Bybit (always built; gated by HAS_BYBIT at compile time) ---
     tests/providers/bybit/test_bybit_endpoints.cpp
     tests/providers/bybit/test_bybit_auth.cpp
+    tests/providers/bybit/test_bybit_parser.cpp
+    tests/providers/bybit/test_bybit_depth_parser.cpp
+    tests/providers/bybit/test_bybit_combined_parser.cpp
+    tests/providers/bybit/test_bybit_backfill.cpp
     tests/providers/bybit/test_bybit_futures_register.cpp
+    tests/providers/bybit/test_bybit_rest_client_time.cpp
+    tests/providers/bybit/test_bybit_futures_order_encoder.cpp
+    tests/providers/bybit/test_bybit_rest_order_transport.cpp
+    tests/providers/bybit/test_bybit_futures_user_data_parser.cpp
+    tests/providers/bybit/test_bybit_futures_reconciler.cpp
+    tests/providers/bybit/test_bybit_futures_kill_switch.cpp
+    tests/providers/bybit/test_bybit_futures_dead_mans_switch.cpp
+    tests/providers/bybit/test_bybit_futures_safety.cpp
+    tests/providers/bybit/test_bybit_futures_bracket_adapter.cpp
+    tests/providers/bybit/test_bybit_futures_testnet_live.cpp
 
     # --- Gate.io (always built; gated by HAS_GATE at compile time) ---
     tests/providers/gate/test_gate_endpoints.cpp
     tests/providers/gate/test_gate_auth.cpp
     tests/providers/gate/test_gate_parser.cpp
     tests/providers/gate/test_gate_futures_register.cpp
+    tests/providers/gate/test_gate_combined_parser.cpp
+    tests/providers/gate/test_gate_transport_subscribe.cpp
+    tests/providers/gate/test_gate_rest_client_time.cpp
+    tests/providers/gate/test_gate_futures_kill_switch.cpp
+    tests/providers/gate/test_gate_futures_reconciler.cpp
+    tests/providers/gate/test_gate_futures_safety.cpp
+    tests/providers/gate/test_gate_futures_dead_mans_switch.cpp
 
     # --- CLI integration (separate binary) ---
     # (see truetest_cli_tests in root)
