@@ -90,8 +90,23 @@ risk_action RiskManager::check_order(const order_event& order,
     if (snap.max_drawdown / 100.0 >= limits_.max_drawdown)
         return risk_action::halt;
 
-    if (static_cast<int>(snap.total_orders - snap.total_fills) >= limits_.max_open_orders)
-        return risk_action::reject;
+    if (limits_.max_open_orders > 0)
+    {
+        // Prefer OrderTracker active count when the engine populated it.
+        // Legacy proxy total_orders-total_fills undercounts multi-partial
+        // fills and can size_t-underflow when fills > orders.
+        std::size_t open_count = 0;
+        if (snap.active_orders_valid)
+        {
+            open_count = snap.active_orders;
+        }
+        else if (snap.total_orders > snap.total_fills)
+        {
+            open_count = snap.total_orders - snap.total_fills;
+        }
+        if (static_cast<int>(open_count) >= limits_.max_open_orders)
+            return risk_action::reject;
+    }
 
     const auto& positions = port.get_positions();
     const auto it = positions.find(order.get_symbol());

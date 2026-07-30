@@ -65,6 +65,12 @@ struct risk_snapshot
     // Phase 2.4 — current market conditions for circuit breakers
     double current_spread_bps = 0.0;
     double current_funding_8h_rate = 0.0;  // last known 8h funding rate (fraction)
+
+    // True resting-order inventory from OrderTracker (pending|open|partial).
+    // When active_orders_valid is false, check_order falls back to the legacy
+    // total_orders - total_fills proxy (workers without a tracker).
+    std::size_t active_orders = 0;
+    bool        active_orders_valid = false;
 };
 
 class RiskManager
