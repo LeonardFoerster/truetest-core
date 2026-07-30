@@ -128,6 +128,28 @@ function(tt_wire_optional_backends target)
         target_compile_definitions(${target} PUBLIC HAS_BITGET)
     endif()
 
+    # Bybit exchange provider (V5 linear USDT perpetuals) — Phase 0 scaffold
+    if(ENABLE_BYBIT)
+        find_package(Boost REQUIRED)
+        find_package(OpenSSL REQUIRED)
+        target_sources(${target} PRIVATE
+            ${_src}/providers/bybit/bybit_futures_register.cpp)
+        target_link_libraries(${target} PUBLIC
+            Boost::headers OpenSSL::SSL OpenSSL::Crypto)
+        target_compile_definitions(${target} PUBLIC HAS_BYBIT)
+    endif()
+
+    # Gate.io exchange provider (USDT-M futures) — Phase 0 scaffold
+    if(ENABLE_GATE)
+        find_package(Boost REQUIRED)
+        find_package(OpenSSL REQUIRED)
+        target_sources(${target} PRIVATE
+            ${_src}/providers/gate/gate_futures_register.cpp)
+        target_link_libraries(${target} PUBLIC
+            Boost::headers OpenSSL::SSL OpenSSL::Crypto)
+        target_compile_definitions(${target} PUBLIC HAS_GATE)
+    endif()
+
     # QuestDB persistence (raw POSIX sockets, zero external deps).
     if(ENABLE_QUESTDB)
         target_sources(${target} PRIVATE

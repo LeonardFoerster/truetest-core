@@ -75,9 +75,35 @@
       }
     },
     {
+      "name": "linux-bybit",
+      "displayName": "Linux + Bybit + Tests",
+      "description": "Bybit V5 linear futures Phase 0 + unit tests",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_BYBIT": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-gate",
+      "displayName": "Linux + Gate.io + Tests",
+      "description": "Gate.io USDT-M futures Phase 0 + unit tests",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_GATE": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
       "name": "linux-providers-questdb",
-      "displayName": "Linux + Binance + Bitget + QuestDB + Tests",
-      "description": "Both exchange providers + QuestDB + tests (phase0 / multi-venue dev)",
+      "displayName": "Linux + Binance + Bitget + Bybit + Gate + QuestDB + Tests",
+      "description": "All exchange providers + QuestDB + tests (phase0 / multi-venue dev)",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
@@ -85,6 +111,8 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "ENABLE_BINANCE": "ON",
         "ENABLE_BITGET": "ON",
+        "ENABLE_BYBIT": "ON",
+        "ENABLE_GATE": "ON",
         "ENABLE_QUESTDB": "ON",
         "BUILD_TESTS": "ON"
       }
@@ -161,6 +189,8 @@
     { "name": "linux-tests", "configurePreset": "linux-tests" },
     { "name": "linux-binance-questdb", "configurePreset": "linux-binance-questdb" },
     { "name": "linux-bitget", "configurePreset": "linux-bitget" },
+    { "name": "linux-bybit", "configurePreset": "linux-bybit" },
+    { "name": "linux-gate", "configurePreset": "linux-gate" },
     { "name": "linux-providers-questdb", "configurePreset": "linux-providers-questdb" },
     { "name": "linux-web", "configurePreset": "linux-web" },
     { "name": "linux-asan", "configurePreset": "linux-asan" },

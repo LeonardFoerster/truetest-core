@@ -9,6 +9,8 @@ option(ENABLE_LIVE_DATA  "Build with WebSocket live data feed (requires Boost.Be
 option(ENABLE_DEBUG      "Build with performance instrumentation (requires Abseil)"   OFF)
 option(ENABLE_BINANCE    "Build with Binance exchange provider"                       OFF)
 option(ENABLE_BITGET     "Build with Bitget exchange provider"                        OFF)
+option(ENABLE_BYBIT      "Build with Bybit exchange provider (V5 linear)"             OFF)
+option(ENABLE_GATE       "Build with Gate.io exchange provider (USDT-M futures)"      OFF)
 option(ENABLE_WEB        "Build with embedded web UI server (civetweb)"                 OFF)
 option(ENABLE_QUESTDB    "Build with QuestDB persistence backend"                     OFF)
 option(ENABLE_TSAN       "Enable ThreadSanitizer"                                     OFF)

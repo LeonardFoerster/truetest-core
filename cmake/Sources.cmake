@@ -248,6 +248,17 @@ set(TEST_SOURCES
     tests/providers/bitget/test_bitget_futures_safety.cpp
     tests/providers/bitget/test_bitget_futures_bracket_adapter.cpp
 
+    # --- Bybit (always built; gated by HAS_BYBIT at compile time) ---
+    tests/providers/bybit/test_bybit_endpoints.cpp
+    tests/providers/bybit/test_bybit_auth.cpp
+    tests/providers/bybit/test_bybit_futures_register.cpp
+
+    # --- Gate.io (always built; gated by HAS_GATE at compile time) ---
+    tests/providers/gate/test_gate_endpoints.cpp
+    tests/providers/gate/test_gate_auth.cpp
+    tests/providers/gate/test_gate_parser.cpp
+    tests/providers/gate/test_gate_futures_register.cpp
+
     # --- CLI integration (separate binary) ---
     # (see truetest_cli_tests in root)
 )
