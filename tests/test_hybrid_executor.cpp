@@ -147,9 +147,11 @@ TEST(HybridExecutor, RestingLimitSurvivesMidUpdateAndFills)
     hx->on_mid_price(100.0);
 
     // Passive buy limit well below the market: rests in the shared book.
+    // Use a high order id so we do not collide with HybridExecutor's
+    // synthetic quote ids (OrderIdGenerator sequential from the re-seeds).
     order_event o(tp{us(0)}, "BTCUSDT", order_type::limit, order_side::buy,
                   1.0, 99.0, time_in_force::gtc);
-    o.set_order_id(7);
+    o.set_order_id(100007);
     hx->submit_order(o);
 
     std::vector<fill_event> fills;
@@ -167,6 +169,6 @@ TEST(HybridExecutor, RestingLimitSurvivesMidUpdateAndFills)
     ASSERT_TRUE(hx->poll_fills(fills))
         << "resting limit destroyed by re-seed — must survive and fill";
     ASSERT_EQ(fills.size(), 1u);
-    EXPECT_EQ(fills[0].get_order_id(), 7u);
+    EXPECT_EQ(fills[0].get_order_id(), 100007u);
     EXPECT_DOUBLE_EQ(fills[0].get_fill_price(), 99.0);
 }
