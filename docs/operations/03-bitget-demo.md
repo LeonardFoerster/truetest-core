@@ -1,10 +1,10 @@
 # Bitget Futures Demo Drill & Operator Preconditions
 
-**Status**: Active operator SOP for Bitget UTA futures (Phases 0–3). Demo drills only — **not** mainnet readiness.
+**Status**: Active operator SOP for Bitget UTA futures (Phases 0–4). Demo drills only — **not** mainnet readiness.
 
 **Authoritative gates**: `docs/governance/01-prod.md`, root/core `AGENTS.md` safety red lines, plan `upcoming_plattform/bitget.md` §12–§14.
 
-**Last updated**: 2026-07-30 (safety residuals: Phase-0 CLI gates + DMS wording).
+**Last updated**: 2026-07-30 (Phase 4: backfill, brackets, advisories, funding account channel).
 
 ---
 
@@ -46,8 +46,8 @@ Checklist:
 
 | Surface | Support in this provider | Notes |
 |---------|--------------------------|-------|
-| **UTA v3** (default) | Full Phase 0–3 path | Public WS + private WS + REST trade + DMS countdown |
-| Classic mix/v2 | Out of scope | No classic countdown DMS; do not request DMS on classic |
+| **UTA v3** (default) | Full Phase 0–4 path | Public WS + private WS + REST trade + DMS + brackets + backfill |
+| Classic mix/v2 | **Refused** | No classic countdown DMS; `api_surface=classic` fails open |
 
 Registry names (both map to the same UTA factory):
 
@@ -228,11 +228,36 @@ Always complete a kill-switch drill on **demo** before any mainnet discussion:
 
 ---
 
+## Phase 4 capabilities (ops)
+
+| Feature | How to use | Notes |
+|---------|------------|-------|
+| **Kline backfill** | `--stream kline1m --backfill 500` | REST `/api/v3/market/candles` → PrependTransport; intervals normalized (`4h`→`4H`) |
+| **Position advisories** | `--margin-type crossed` / `--liquidation-warn-pct 0.05` | Startup `[ADVISORY]` logs; strict margin still via settings gate |
+| **Venue brackets** | Engine ExitManager + `get_bracket_adapter()` | UTA `place-strategy-order` tpsl full; partial fractions decline |
+| **Funding** | Private WS `account` topic | Logs `[FUNDING]` / publishes `funding_event` when balance delta present |
+| **Classic surface** | Do not set `api_surface=classic` | Open refuses; UTA only |
+
+Backfill smoke (public REST, no keys):
+
+```bash
+./build/engine_shadow \
+  --provider bitget-futures \
+  --symbol BTCUSDT \
+  --stream kline1m \
+  --backfill 100 \
+  --no-pin --status-format off --no-tui
+```
+
+Expect `backfill loaded N bars` then live kline stream. First open candle after backfill may be held by closed-bar gate until the next interval starts.
+
+---
+
 ## Mainnet readiness (explicit non-claim)
 
 | Statement | Status |
 |-----------|--------|
-| Phases 0–3 code + unit tests + gate scripts | Implementation complete when Task 11 green |
+| Phases 0–4 code + unit tests + gate scripts | Implementation complete when tests green |
 | Demo drills documented | This SOP |
 | Mainnet tiny-size live | **Not authorized by this doc** |
 | Human CCB / Phase 0 evidence | Required before any mainnet capital |

@@ -78,6 +78,10 @@ src/providers/binance/binance_futures_provider.h
 src/providers/binance/binance_futures_dead_mans_switch.h
 src/providers/binance/binance_futures_kill_switch.h
 src/providers/binance/binance_futures_reconciler.h
+src/providers/bitget/bitget_futures_provider.h
+src/providers/bitget/bitget_futures_dead_mans_switch.h
+src/providers/bitget/bitget_futures_kill_switch.h
+src/providers/bitget/bitget_futures_reconciler.h
 src/risk/risk_manager.h
 src/risk/futures_risk_check.h
 src/execution/live_safety.h

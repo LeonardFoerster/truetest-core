@@ -11,7 +11,7 @@
 01. Root `README.md` — High-level overview, binaries, phases table, safety surface, quick start.
 02. `CLAUDE.md` — AI coding rules, model selection (Sonnet default vs Opus for safety), Phase 1 freeze mechanics, Documentation Maintenance Rules.
 03. `docs/governance/01-prod.md` — Central contract: philosophy, invariants, Phase 0/1+ capital-tier gates, exact command template + "why each element", Go-Live Gate table (9 rows), ritual summary.
-04. `docs/governance/02-prerequisites.md` — Mandatory pre-PR checklist for any frozen-surface edit (10 files, token, scripts, shadow validation).
+04. `docs/governance/02-prerequisites.md` — Mandatory pre-PR checklist for any frozen-surface edit (frozen file list incl. Bitget, token, scripts, shadow validation).
 05. `docs/governance/03-todo.md` (thin high-level) + `docs/todos/` (00-OVERVIEW.md + 01-P0-phase0.md ... 09-...) — Living tasks (P0-*, P1-*, MC-*, R-*, S-*, D-*, A-*); reference items (e.g. docs/todos/01-P0-phase0.md#P0-01) in every safety PR. See 00-OVERVIEW.md .
 06. `docs/governance/04-summary.md` — Condensed status + key excerpts.
 07. `reports/phase0/README.md` + `PROGRESS.md` + `templates/phase0-session-note.md` — Phase 0 evidence requirements, tracker, session note template.

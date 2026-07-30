@@ -15,7 +15,7 @@
 Next: real mainnet/testnet with --depth-stream depth20@100ms --queue-model l2-snapshot --mc-reuse-objects + conservative caps for full evidence (follow P0 ritual). Builds + relevant tests clean. All frozen edits must use proper CCB token process.)
 - **P1-03** Deliver a clean ≥8-hour mainnet `engine_shadow` run (0 drops / unexplained divergence) as the final mechanical gate for Phase 1 exit.
 - **P1-04** Record two-person Phase 1 freeze sign-off (in `decisions/phase1-freeze-*.md` or equivalent under the decisions/ tree — note: dir does not exist yet) and update `prod.md` / `todo.md`.
-- **P1-05** Ensure every future edit to any of the 10 frozen files carries the token + CCB + shadow run (mechanical + cultural). All future safety-surface PRs (even "only docs" that describe the surface) require the token in commit message, CCB review, and clean multi-hour mainnet `engine_shadow` run.
+- **P1-05** Ensure every future edit to any frozen safety file (see `scripts/check-live-safety-freeze.sh`, incl. Bitget futures) carries the token + CCB + shadow run (mechanical + cultural). All future safety-surface PRs (even "only docs" that describe the surface) require the token in commit message, CCB review, and clean multi-hour mainnet `engine_shadow` run.
 
 **Frozen Files (single source of truth – also in `scripts/check-live-safety-freeze.sh`; keep lists in sync across prereq/prod/script/CLAUDE)**:
 ```

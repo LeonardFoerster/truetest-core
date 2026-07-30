@@ -176,7 +176,7 @@ Source registration is centralized in `cmake/Sources.cmake`. Common real setups 
 
 - Strong production primitives already in place (compile-time gating, layered safety, reconciler, DMS + kill, user-data truth, per-lot exits, queue realism, MC engine).
 - **Phase 0** (tiny-size mainnet futures validation): 0/15 qualifying sessions. Phase 0 collection was paused during priority work on the monte-carlo branch (gates/ritual unchanged). Ritual + templates ready in `01-prod.md` + `reports/phase0/`.
-- **Phase 1** Live-Safety Freeze: 10 files under mechanical CCB gate (`scripts/check-live-safety-freeze.sh`). Token + two-person review + clean multi-hour shadow required for all future edits.
+- **Phase 1** Live-Safety Freeze: frozen safety files (Binance + Bitget futures + core/engine/risk/threading) under mechanical CCB gate (`scripts/check-live-safety-freeze.sh`). Token + two-person review + clean multi-hour shadow required for all future edits.
 - Monte Carlo simulation capabilities (integrated from the monte-carlo branch) are available for research and strategy robustness (object reuse, reporter, synthetic provider).
 - **Recommendation**: Research, strategy robustness testing, and tiny-size validation only. Not suitable for meaningful capital until Phase 0/1 exit criteria are met.
 

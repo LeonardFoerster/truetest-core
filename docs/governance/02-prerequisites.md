@@ -14,7 +14,7 @@ See also:
 
 ## Frozen Files (single source of truth)
 
-These 10 files carry the live-safety surface. Any modification requires the `LIVE_SAFETY_CCB_APPROVED` token in the commit message + clean shadow validation.
+These files carry the live-safety surface. Any modification requires the `LIVE_SAFETY_CCB_APPROVED` token in the commit message + clean shadow validation.
 
 ```
 src/core/tt_target.h
@@ -23,6 +23,10 @@ src/providers/binance/binance_futures_provider.h
 src/providers/binance/binance_futures_dead_mans_switch.h
 src/providers/binance/binance_futures_kill_switch.h
 src/providers/binance/binance_futures_reconciler.h
+src/providers/bitget/bitget_futures_provider.h
+src/providers/bitget/bitget_futures_dead_mans_switch.h
+src/providers/bitget/bitget_futures_kill_switch.h
+src/providers/bitget/bitget_futures_reconciler.h
 src/risk/risk_manager.h
 src/risk/futures_risk_check.h
 src/execution/live_safety.h
