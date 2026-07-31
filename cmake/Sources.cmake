@@ -71,6 +71,7 @@ set(ENGINE_CORE_SOURCES
 
     # --- Exits ---
     src/exits/exit_manager.cpp
+    src/exits/default_exit_policy.cpp
 
     # --- Monte Carlo / synthetic simulation (integrated from monte-carlo branch) ---
     src/simulation/imonte_carlo_generator.cpp
@@ -105,6 +106,7 @@ set(TEST_SOURCES
     tests/test_data_handler.cpp
     tests/test_date_parse.cpp
     tests/test_data_bridge.cpp
+    tests/test_binance_kline_csv.cpp
 
     # --- Orderbook & execution model ---
     tests/test_orderbook.cpp
@@ -147,6 +149,8 @@ set(TEST_SOURCES
 
     # --- Exits / brackets ---
     tests/test_exit_manager.cpp
+    tests/test_default_exit_policy.cpp
+    tests/test_default_exit_policy_engine.cpp
     tests/test_bracket_adapter.cpp
     tests/test_binance_oco_bracket_adapter.cpp
 
