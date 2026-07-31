@@ -31,8 +31,16 @@ inline bool emit_record(const bar_record& rec, IMarketSink& sink)
 	bar.low = rec.low;
 	bar.close = rec.close;
 	bar.volume = rec.volume;
-	if (auto tp = tt::date_parse::parse(rec.date))
+	// Prefer open_time (epoch ms) when present — Binance kline CSVs.
+	if (rec.open_time_ms > 0)
+	{
+		bar.ts = std::chrono::system_clock::time_point{
+			std::chrono::milliseconds{rec.open_time_ms}};
+	}
+	else if (auto tp = tt::date_parse::parse(rec.date))
+	{
 		bar.ts = *tp;
+	}
 	return sink.on_bar(bar);
 }
 

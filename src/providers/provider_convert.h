@@ -4,6 +4,8 @@
 #include "data/market_types.h"
 #include "local/csv_parser.h"
 
+#include <chrono>
+
 namespace provider {
 
 inline bar_record to_bar_record(const bar& b)
@@ -65,6 +67,11 @@ inline Bar to_domain_bar(const bar_record& r)
 	out.low = r.low;
 	out.close = r.close;
 	out.volume = r.volume;
+	if (r.open_time_ms > 0)
+	{
+		out.ts = std::chrono::system_clock::time_point{
+			std::chrono::milliseconds{r.open_time_ms}};
+	}
 	return out;
 }
 

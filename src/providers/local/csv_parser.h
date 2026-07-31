@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <charconv>
@@ -24,13 +25,34 @@
 // - Caller is expected to call data_handler::reserve() before loading.
 namespace tt::csv {
 
+// Base-asset volume scale for fractional exchange quantities (matches Binance kline path).
+// Integer-only volume fields (legacy equity CSVs) are stored as-is without scaling.
+inline constexpr double kVolumeScale = 1e8;
+
 inline std::int64_t fast_stoll(std::string_view sv)
 {
     std::int64_t v = 0;
     auto [p, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), v);
-    if (ec != std::errc{})
+    if (ec != std::errc{} || p != sv.data() + sv.size())
         throw std::invalid_argument("fast_stoll failed");
     return v;
+}
+
+// Integer volumes pass through; fractional (e.g. "246.092") → llround(v * 1e8).
+inline std::int64_t parse_bar_volume(std::string_view sv)
+{
+    if (sv.empty()) return 0;
+    try {
+        return fast_stoll(sv);
+    } catch (...) {
+        try {
+            const double d = std::stod(std::string(sv));
+            if (!std::isfinite(d) || d < 0.0) return 0;
+            return static_cast<std::int64_t>(std::llround(d * kVolumeScale));
+        } catch (...) {
+            return 0;
+        }
+    }
 }
 
 } // namespace tt::csv
@@ -43,11 +65,13 @@ struct bar_record
 {
 	std::string date;
 	std::string symbol;
-	double open;
-	double high;
-	double low;
-	double close;
-	int64_t volume;
+	double open = 0;
+	double high = 0;
+	double low = 0;
+	double close = 0;
+	int64_t volume = 0;
+	// Epoch milliseconds from open_time (Binance kline CSV). 0 = unset → use date.
+	int64_t open_time_ms = 0;
 };
 
 class CsvBarParser : public IDataParser<bar_record>
@@ -120,6 +144,7 @@ public:
 			auto low_sv    = get_field("low");
 			auto close_sv  = get_field("close");
 			auto vol_sv    = get_field("volume");
+			auto ot_sv     = get_field("open_time");
 
 			rec.date   = std::string(date_sv);
 			rec.symbol = std::string(sym_sv);
@@ -129,15 +154,12 @@ public:
 			rec.high   = high_sv.empty()  ? 0.0 : std::stod(std::string(high_sv));
 			rec.low    = low_sv.empty()   ? 0.0 : std::stod(std::string(low_sv));
 			rec.close  = close_sv.empty() ? 0.0 : std::stod(std::string(close_sv));
+			rec.volume = tt::csv::parse_bar_volume(vol_sv);
 
-			if (!vol_sv.empty())
+			if (!ot_sv.empty())
 			{
-				try { rec.volume = tt::csv::fast_stoll(vol_sv); }
-				catch (...) { rec.volume = 0; }
-			}
-			else
-			{
-				rec.volume = 0;
+				try { rec.open_time_ms = tt::csv::fast_stoll(ot_sv); }
+				catch (...) { rec.open_time_ms = 0; }
 			}
 
 			return rec;
