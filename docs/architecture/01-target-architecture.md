@@ -26,7 +26,7 @@ Three binaries from one tree via `TT_TARGET` (BACKTEST / SHADOW / LIVE) in `src/
 - **Strategies** (`src/strategy/`): pluggable via `REGISTER_STRATEGY`; emit `order_event` + `exit_intent`. Self-registering (sma, mean-reversion, breakout, adaptive-hybrid, structure-continuation, ...).
 - **Execution** (`src/execution/`): `IExecutionAdapter` family (LocalBook, QueueAware, Hybrid, Bridge), `Portfolio` (per-lot), `OrderTracker`, realism models.
 - **Orderbook & matching** (`src/orderbook/`): price-time priority `Orderbook` + `FillModel`.
-- **Risk & Exits** (`src/risk/`, `src/exits/`): `RiskManager`, venue `IRiskCheck` (FuturesRiskCheck first), `ExitManager` (per-lot SL/TP/trailing), `IBracketAdapter`.
+- **Risk & Exits** (`src/risk/`, `src/exits/`): `RiskManager`, venue `IRiskCheck` (FuturesRiskCheck first), `ExitManager` (per-lot SL/TP/trailing), `DefaultExitPolicy` (platform SL/TP for every strategy via `--exit-policy` / `--sl` / `--tp`), `IBracketAdapter`.
 - **Workers & threading** (`src/threading/`): lock-free SPSC RingBuffer (65536 slots, single producer), Worker base, WorkerWatchdog (3× heartbeat → halt), CPU affinity + presets (inline/light/standard/full/extended), spin policies.
 - **Analytics & UI** (`src/analytics/`, `src/ui/`): Welford stats, adverse selection, report gen, rich ncurses TUI (tabbed panels for positions/lots/L2/risk/brackets/debug), optional web (`--web`).
 - **Safety (futures)**: `BinanceFuturesReconciler` (user-data WS truth), `DeadMansSwitch` (orders-only cancel), `KillSwitch` (flatten + deadline), pre-trade venue checks, terminal `halt_flag_`.

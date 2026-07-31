@@ -120,6 +120,15 @@
 | `--maker-queue-model <none|uniform|front|back>` | Maker queue model for paper limit orders (requires `--depth-stream`). |
 | `--instrument <spec>`       | Per-symbol rules: `SYM:tick=...,lot=...,minq=...,minn=...,maker=...,taker=...` (repeatable). |
 
+### Platform exits (all strategies)
+| Flag | What it does |
+|------|----------------|
+| `--exit-policy <mode>` | **Platform** protective exits applied after each accepted strategy order. Modes: `floor` (default — ensure SL/TP when strategy omitted them), `strategy_only` (legacy research: only strategy `exit_intent`s), `engine_only` (ignore strategy intents), `union` (keep strategy intents; append SL if missing). Position-reducing signal closes do **not** get inverted short/long brackets. |
+| `--sl <frac>` | Stop-loss fraction of entry for platform defaults (`0` = off). Not strategy-specific. |
+| `--tp <frac>` | Take-profit fraction of entry for platform defaults (`0` = off). |
+
+Strategies do **not** need to implement SL/TP. Rich strategy intents (ATR/fib/scale-out) still win under `floor` when they already set `stop_loss`.
+
 ### Risk Limits
 | Flag                              | What it does |
 |-----------------------------------|--------------|

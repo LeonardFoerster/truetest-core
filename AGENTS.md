@@ -239,6 +239,7 @@ Full anti-pattern list: `docs/architecture/02-model.md`, `docs/governance/01-pro
 
 - **Provider is the sole venue extension point** (`IProvider` + safety hooks: reconciler, kill-switch, risk check, brackets).  
 - Engine is composition root; do not push venue ifdefs upward.  
+- **Protective SL/TP is platform-default** (`DefaultExitPolicy` + `--exit-policy`/`--sl`/`--tp`); strategies need not implement stops. Strategy `exit_intent`s refine; they are not required for basic protection.  
 - Layer edges enforced by `scripts/check-layer-deps.sh` — read failures carefully; do not `#include` “upward”.  
 - Interfaces: **`I` prefix** (e.g. `IProvider`, `IRiskCheck`).  
 - File size hygiene: flag ~800+ line files; prefer extract over sprawl (`engine.cpp` decomposition is planned — see `docs/engine.md` + skill `engine-decomposition`). Cold-path extract first; do not casually rewrite hot publish paths.
