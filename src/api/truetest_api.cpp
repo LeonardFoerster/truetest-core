@@ -5,6 +5,8 @@
 #include "engine/engine_config.h"
 #include "data/csv_data_source.h"
 #include "data/data_handler.h"
+#include "data/data_wrapper.h"
+#include "data/market_series.h"
 #include "strategy/strategy_registry.h"
 
 #include <nlohmann/json.hpp>
@@ -205,10 +207,19 @@ int tt_run(tt_engine_handle handle)
             w->strategy->set_param(key, value);
 
         w->dh = std::make_shared<data_handler>();
-        CsvDataSource src(w->data_path);
-        if (!src.load_data(w->dh))
+        // docs/data.md#D-05: load via DataWrapper façade (behaviour-identical CSV path)
+        try
         {
-            set_last_error("failed to load data from: " + w->data_path);
+            auto wrapper = DataWrapper::from_path(w->data_path);
+            if (!wrapper.load(*w->dh))
+            {
+                set_last_error("failed to load data from: " + w->data_path);
+                return 3;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            set_last_error(std::string("failed to load data: ") + e.what());
             return 3;
         }
 

@@ -23,8 +23,9 @@
 #include "core/tt_target.h"
 #include "data/data_source.h"
 #include "data/csv_data_source.h"
-#include "data/binary_cache_source.h"
 #include "data/tick_csv_data_source.h"
+#include "data/data_wrapper.h"
+#include "data/market_series.h"
 #include "execution/fee_model.h"
 #include "execution/latency_model.h"
 #include "orderbook/fill_model.h"
@@ -2211,7 +2212,10 @@ static int run_provider_mode(const cli_options& o)
         {
             auto parser = provider->get_event_parser();
             auto bridge = std::make_shared<DataBridge<provider::event>>(
-                transport, parser, provider::event_sink);
+                transport, parser,
+                [](const provider::event& ev, std::shared_ptr<data_handler> h) {
+                    provider::event_sink(ev, std::move(h));
+                });
             eng->run_streaming(bridge);
         }
         else if (is_tick)
@@ -2311,9 +2315,9 @@ static int run_provider_mode(const cli_options& o)
                         return 1;
                     }
                 }
-                dh->sort_by_date();
+                dh->sort_bars_by_time();
                 std::cout << "    Multi-symbol: loaded " << paths.size()
-                          << " files, " << dh->db_data_symbol.size()
+                          << " files, " << dh->bar_count()
                           << " total bars\n";
             }
             else
