@@ -409,8 +409,8 @@ void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
 
 void engine::switch_symbol(const std::string& new_symbol)
 {
-    data_handler_->db_data_symbol.clear();
-    data_handler_->db_data_symbol.push_back(new_symbol);
+    // MarketSeries read/write API (docs/data.md#D-02) — no public SoA fields.
+    data_handler_->set_all_bar_symbols(new_symbol);
 
     strategy_->set_position_open(new_symbol, false);
 }
@@ -1117,8 +1117,8 @@ void engine::questdb_begin()
                 :  config_.mode == engine_mode::shadow   ? "engine_shadow"
                 :                                          "engine_live");
     scfg.strategy = primary_strategy_name_;
-    if (data_handler_ && !data_handler_->db_data_symbol.empty())
-        scfg.symbol = data_handler_->db_data_symbol.front();
+    if (data_handler_ && data_handler_->has_bar_data())
+        scfg.symbol = data_handler_->first_symbol();
     scfg.initial_equity = config_.initial_balance;
     scfg.notes = config_.run_notes;
     scfg.strict = config_.questdb_strict;
@@ -3555,7 +3555,7 @@ void engine::run()
     }
 
     if (!data_handler_->has_bar_data()) {
-        throw std::runtime_error("no data loaded — call IDataSource::load_data() before run()");
+        throw std::runtime_error("no data loaded — call IMarketSource::load_into() / DataWrapper::load() before run()");
     }
 
     if (!config_.event_log_path.empty())
@@ -3570,7 +3570,8 @@ void engine::run()
     const auto base_ts = (config_.seed != 0)
         ? std::chrono::system_clock::time_point(std::chrono::milliseconds(0))
         : std::chrono::system_clock::now();
-    const auto n = data_handler_->db_data_symbol.size();
+    // docs/data.md#D-02: engine batch loop uses MarketSeries read API only.
+    const auto n = data_handler_->bar_count();
     analytics_.reserve_hint(n);
     const auto start = std::chrono::high_resolution_clock::now();
     if (config_.show_progress) {
@@ -3585,18 +3586,23 @@ void engine::run()
     bool halt_requested = false;
 
     // seed != 0 keeps legacy synthetic stepping (base + i ms) for golden
-    // reproducibility. Normal runs read the CSV date and fall back to +1ms
-    // on parse failure / regression — never silent reordering.
-    const bool use_csv_dates = (config_.seed == 0);
+    // reproducibility. Normal runs use bar_at(i).ts (parsed once at load);
+    // fall back to +1ms on missing/non-monotonic ts — never silent reordering.
+    // docs/data.md#D-10
+    const bool use_series_ts = (config_.seed == 0);
     auto resolve_bar_ts = [&](std::size_t i,
-                              const std::chrono::system_clock::time_point& prev)
+                              const std::chrono::system_clock::time_point& prev,
+                              const MarketSeries::BarView& bar)
         -> std::chrono::system_clock::time_point
     {
-        if (use_csv_dates)
+        if (use_series_ts)
         {
-            const auto& date_str = (i < data_handler_->db_data_date.size())
-                ? data_handler_->db_data_date[i] : std::string{};
-            if (auto parsed = tt::date_parse::parse(date_str))
+            if (bar.ts != std::chrono::system_clock::time_point{})
+            {
+                if (i == 0 || bar.ts > prev) return bar.ts;
+            }
+            // Fallback: parse date view only if ts was not stored
+            if (auto parsed = tt::date_parse::parse(bar.date))
             {
                 if (i == 0 || *parsed > prev) return *parsed;
             }
@@ -3613,16 +3619,18 @@ void engine::run()
              && !worker_failed_.load(std::memory_order_acquire); ++i)
     {
         DEBUG_STAGE(stage_timer_, market_create);
-        auto this_bar_ts = resolve_bar_ts(i, prev_bar_ts);
+        const auto bar = data_handler_->bar_at(i);
+        auto this_bar_ts = resolve_bar_ts(i, prev_bar_ts, bar);
         prev_bar_ts = this_bar_ts;
+        // bar_symbol_at: const string& into series — no temporary on hot path
         market_event mkt(
             this_bar_ts,
-            data_handler_->db_data_symbol[i],
-            data_handler_->db_data_open_value[i],
-            data_handler_->db_data_high_value[i],
-            data_handler_->db_data_low_value[i],
-            data_handler_->db_data_close_value[i],
-            data_handler_->db_data_volume_value[i]
+            data_handler_->bar_symbol_at(i),
+            bar.open,
+            bar.high,
+            bar.low,
+            bar.close,
+            bar.volume
         );
         mkt.set_recv_ns(std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -3859,8 +3867,8 @@ void engine::run_tick_data()
 
     setup_event_loop_infra();
 
-    const auto& ticks = data_handler_->tick_data;
-    const auto n = ticks.size();
+    // docs/data.md#D-02: tick path uses tick_at / tick_count (no public vector).
+    const auto n = data_handler_->tick_count();
     const auto start = std::chrono::high_resolution_clock::now();
 
     if (config_.show_progress) {
@@ -3910,7 +3918,7 @@ void engine::run_tick_data()
              && !halt_flag_.load(std::memory_order_acquire)
              && !worker_failed_.load(std::memory_order_acquire); ++i)
     {
-        const auto& tick = ticks[i];
+        const auto& tick = data_handler_->tick_at(i);
 
         last_mid_price_.store(tick.price, std::memory_order_release);
 
