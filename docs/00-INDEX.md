@@ -26,6 +26,7 @@
 16. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md` — Specialized reference (use as needed).
 17. `docs/archive/` — Historical plans (MERGE_PLAN, production-readiness-gaps-2026-05, questdb guides, Edge1 plans). Do not use for current status.
 18. `engine.md` — Detailed phased execution plan for `src/engine/engine.{h,cpp}` decomposition (see the `engine-decomposition` skill). Reference for god-class reduction work.
+19. `data.md` — Detailed phased redesign plan for the market-data path: independent `MarketSeries` store, `IMarketSource` / `IMarketSink`, and multi-format `DataWrapper` (CSV, Parquet, APIs).
 
 ## Processing Notes
 - **Operators preparing Phase 0**: 01 → 03 → 07 → 13 (SOP) → 08 (ritual details).

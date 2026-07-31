@@ -33,6 +33,8 @@ The full aspirational hierarchy is being populated gradually. `docs/archive/` ho
 - `reference/05-web-ui.md` — Opt-in browser cockpit + backtest review (`-DENABLE_WEB=ON`, `--web`).
 - `reference/03-db.md`, `reference/04-flags.md`, `reference/06-adaptive-hybrid-strategy.md`, this `README.md`.
 - `architecture/` — `01-target-architecture.md`, `02-model.md`, `03-realism.md`, and `04-performance.md` realized; deeper architecture files remain aspirational.
+- `data.md` — Phased redesign plan for market-data ingress (`data_handler` → independent series store + multi-format `DataWrapper`).
+- `engine.md` — Phased decomposition plan for `engine.{h,cpp}`.
 - `operations/` — `01-futures-phase0-operator-sop.md` and `02-futures-testnet.md` realized; additional runbooks remain planned.
 - `governance/` — `01-prod.md`, `02-prerequisites.md`, `03-todo.md`, `04-summary.md` (authoritative; content reduction + pointers applied in 2026-07).
 
