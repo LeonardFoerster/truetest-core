@@ -331,6 +331,8 @@ struct cli_options
     double risk_fraction = 0.02;
     double sl_pct = 0.005;
     double tp_pct = 0.01;
+    // Platform default exit policy: floor|strategy_only|engine_only|union
+    std::string exit_policy = "floor";
 
     std::string checkpoint_path;
     std::string resume_path;
@@ -487,6 +489,22 @@ static void apply_strategy_params(IStrategy& strategy,
         double value = std::stod(p.substr(eq + 1));
         strategy.set_param(key, value);
     }
+}
+
+// Platform DefaultExitPolicy: applies to every strategy via engine_config.
+// Strategies may still declare richer exit_intents; --exit-policy controls merge.
+static void apply_exit_defaults(engine_config& cfg, const cli_options& o)
+{
+    auto mode = truetest::exits::parse_exit_policy_mode(o.exit_policy);
+    if (!mode)
+    {
+        std::cerr << "  ! Unknown --exit-policy '" << o.exit_policy
+                  << "' (use floor|strategy_only|engine_only|union); defaulting to floor\n";
+        mode = truetest::exits::exit_policy_mode::floor;
+    }
+    cfg.exit_defaults.mode = *mode;
+    cfg.exit_defaults.sl_pct = o.sl_pct;
+    cfg.exit_defaults.tp_pct = o.tp_pct;
 }
 
 // Push CLI fee / spread realism into strategy sizing params when supported.
@@ -671,6 +689,7 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_double("risk_fraction", o.risk_fraction);
     get_double("sl", o.sl_pct);
     get_double("tp", o.tp_pct);
+    get_str("exit_policy", o.exit_policy);
     get_int("backfill", o.backfill);
     get_str("backfill_interval", o.backfill_interval);
 
@@ -768,6 +787,7 @@ static void dump_config(const cli_options& o)
     j["risk_fraction"] = o.risk_fraction;
     j["sl"] = o.sl_pct;
     j["tp"] = o.tp_pct;
+    j["exit_policy"] = o.exit_policy;
     j["backfill"] = o.backfill;
     j["backfill_interval"] = o.backfill_interval;
     j["wire_latency_us"] = o.wire_latency_us;
@@ -918,8 +938,16 @@ static void register_cli_options(CLI::App& app, cli_options& o)
 
     app.add_option("--balance", o.balance, "Initial account balance")->default_val(10000.0);
     app.add_option("--risk-fraction", o.risk_fraction, "Position size as equity fraction")->default_val(0.02);
-    app.add_option("--sl", o.sl_pct, "Stop loss fraction of entry price")->default_val(0.005);
-    app.add_option("--tp", o.tp_pct, "Take profit fraction of entry price")->default_val(0.01);
+    app.add_option("--sl", o.sl_pct,
+                   "Platform stop-loss fraction of entry (DefaultExitPolicy; 0=off)")
+        ->default_val(0.005);
+    app.add_option("--tp", o.tp_pct,
+                   "Platform take-profit fraction of entry (DefaultExitPolicy; 0=off)")
+        ->default_val(0.01);
+    app.add_option("--exit-policy", o.exit_policy,
+                   "Platform exit policy: floor (default, ensure SL/TP), strategy_only, "
+                   "engine_only, union")
+        ->default_val("floor");
 
     app.add_option("--checkpoint", o.checkpoint_path,
                    "Write periodic portfolio checkpoint to this binary file");
@@ -1167,6 +1195,7 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--risk-fraction")) opts.risk_fraction = file_opts.risk_fraction;
     if (!was_set("--sl")) opts.sl_pct = file_opts.sl_pct;
     if (!was_set("--tp")) opts.tp_pct = file_opts.tp_pct;
+    if (!was_set("--exit-policy")) opts.exit_policy = file_opts.exit_policy;
     if (!was_set("--backfill")) opts.backfill = file_opts.backfill;
     if (!was_set("--backfill-interval")) opts.backfill_interval = file_opts.backfill_interval;
     if (!was_set("--rolling-window")) opts.rolling_window = file_opts.rolling_window;
@@ -1342,7 +1371,8 @@ static int run_dry_run(const cli_options& o)
     std::cout << "    SMA Period: " << o.sma_period << "\n";
     std::cout << "    Balance:    $" << o.balance << "\n";
     std::cout << "    Risk:       " << (o.risk_fraction * 100) << "% per trade\n";
-    std::cout << "    SL/TP:      " << (o.sl_pct * 100) << "% / " << (o.tp_pct * 100) << "%\n";
+    std::cout << "    SL/TP:      " << (o.sl_pct * 100) << "% / " << (o.tp_pct * 100)
+              << "%  (policy=" << o.exit_policy << ")\n";
     std::string resolved_spin = o.spin_policy_str.empty() ? "adaptive" : o.spin_policy_str;
     print_threading_details(std::cout, "    ",
                             string_to_preset(resolved_preset),
@@ -1790,6 +1820,7 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.periods_per_year = o.periods_per_year;
     prov_cfg.max_equity_points = o.max_equity_points;
     prov_cfg.execution_bar_delay = (o.mode == "live" || o.live) ? 0 : o.exec_bar_delay;
+    apply_exit_defaults(prov_cfg, o);
     if (o.wire_latency_us > 0 && o.mode != "live" && !o.live) {
         prov_cfg.wire_latency_model = std::make_shared<FixedLatencyModel>(
             latency_duration(o.wire_latency_us));
@@ -2006,7 +2037,8 @@ static int run_provider_mode(const cli_options& o)
     std::cout << "    SMA:       " << o.sma_period << "\n";
     std::cout << "    Balance:   $" << o.balance << "\n";
     std::cout << "    Risk:      " << (o.risk_fraction * 100) << "% per trade\n";
-    std::cout << "    SL/TP:     " << (o.sl_pct * 100) << "% / " << (o.tp_pct * 100) << "%\n";
+    std::cout << "    SL/TP:     " << (o.sl_pct * 100) << "% / " << (o.tp_pct * 100)
+              << "%  (policy=" << o.exit_policy << ")\n";
     std::cout << "    Fees:      " << (prov_cfg.fee_model ? "yes" : "none") << "\n";
     std::cout << "    Streaming: " << (is_streaming ? "yes" : "no") << "\n";
     print_threading_details(std::cout, "    ",
@@ -2568,6 +2600,7 @@ static int run_tui_configured_engine(const cli_options& o,
     config.periods_per_year = o.periods_per_year;
     config.max_equity_points = o.max_equity_points;
     config.execution_bar_delay = (o.mode == "live" || o.live) ? 0 : o.exec_bar_delay;
+    apply_exit_defaults(config, o);
     if (o.wire_latency_us > 0 && o.mode != "live" && !o.live) {
         config.wire_latency_model = std::make_shared<FixedLatencyModel>(
             latency_duration(o.wire_latency_us));

@@ -2439,7 +2439,7 @@ void engine::finalize_strategy_route(IStrategy& strategy,
         return;
     }
 
-    register_strategy_exit_intent(strategy, strategy_name, oid);
+    register_strategy_exit_intent(strategy, strategy_name, order);
 }
 
 void engine::dispatch_fill_to_strategy(const fill_event& f)
@@ -2585,8 +2585,9 @@ void engine::drain_async_submit_results(IExecutionAdapter* adapter)
 
 void engine::register_strategy_exit_intent(IStrategy& strategy,
                                            const std::string& strategy_name,
-                                           std::uint64_t order_id)
+                                           const order_event& order)
 {
+    const std::uint64_t order_id = order.get_order_id();
     if (order_id == 0)
     {
         // Opener not assigned (pause/drop) — drain so intents cannot leak
@@ -2595,6 +2596,20 @@ void engine::register_strategy_exit_intent(IStrategy& strategy,
         return;
     }
     auto intents = strategy.take_pending_exit_intents();
+
+    // Platform floor / engine_only / union: attach protective SL/TP for any
+    // strategy that omitted them. Position-reducing signal closes are skipped
+    // so death-cross sells do not arm inverted short brackets.
+    double net_qty = 0.0;
+    {
+        const auto& positions = portfolio_.get_positions();
+        auto it = positions.find(order.get_symbol());
+        if (it != positions.end())
+            net_qty = it->second.qty;
+    }
+    intents = truetest::exits::apply_default_exit_policy(
+        config_.exit_defaults, order, net_qty, std::move(intents));
+
     for (auto& intent : intents)
     {
         intent.opener_order_id = order_id;
@@ -3585,27 +3600,24 @@ void engine::run()
 
     bool halt_requested = false;
 
-    // seed != 0 keeps legacy synthetic stepping (base + i ms) for golden
-    // reproducibility. Normal runs use bar_at(i).ts (parsed once at load);
-    // fall back to +1ms on missing/non-monotonic ts — never silent reordering.
-    // docs/data.md#D-10
-    const bool use_series_ts = (config_.seed == 0);
+    // Prefer stored bar timestamps (open_time / date parsed at load) whenever
+    // present and monotonic. Seed no longer forces synthetic +1ms bar clock —
+    // it remains for fill/MM RNG only. Fall back to base+i / +1ms when ts is
+    // missing or non-monotonic (legacy golden / synthetic series without ts).
+    // docs/data.md#D-10 — LIVE_SAFETY_CCB_APPROVED: narrow resolve_bar_ts only.
     auto resolve_bar_ts = [&](std::size_t i,
                               const std::chrono::system_clock::time_point& prev,
                               const MarketSeries::BarView& bar)
         -> std::chrono::system_clock::time_point
     {
-        if (use_series_ts)
+        if (bar.ts != std::chrono::system_clock::time_point{})
         {
-            if (bar.ts != std::chrono::system_clock::time_point{})
-            {
-                if (i == 0 || bar.ts > prev) return bar.ts;
-            }
-            // Fallback: parse date view only if ts was not stored
-            if (auto parsed = tt::date_parse::parse(bar.date))
-            {
-                if (i == 0 || *parsed > prev) return *parsed;
-            }
+            if (i == 0 || bar.ts > prev) return bar.ts;
+        }
+        // Fallback: parse date view only if ts was not stored
+        if (auto parsed = tt::date_parse::parse(bar.date))
+        {
+            if (i == 0 || *parsed > prev) return *parsed;
         }
         if (i == 0)
             return base_ts + std::chrono::milliseconds(static_cast<long long>(i));

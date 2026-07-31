@@ -209,9 +209,11 @@ private:
 
     truetest::exits::ExitManager exit_manager_;
 
+    // After an accepted strategy order: drain strategy exit intents, apply
+    // platform DefaultExitPolicy (config.exit_defaults), register with ExitManager.
     void register_strategy_exit_intent(IStrategy& strategy,
                                        const std::string& strategy_name,
-                                       std::uint64_t order_id);
+                                       const order_event& order);
 
     // Invoked by the engine on each fill-poll cycle to register any
     // venue-bracket-leg metadata produced by the unknown_fill_handler

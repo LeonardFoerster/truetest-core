@@ -5,6 +5,7 @@
 #include "threading/spin_policy.h"
 #include "execution/instrument.h"
 #include "execution/live_safety.h"
+#include "exits/default_exit_policy.h"
 
 #include <chrono>
 #include <cstddef>
@@ -164,6 +165,11 @@ struct engine_config
     std::size_t max_equity_points = 100000;
 
     std::size_t execution_bar_delay = 1;
+
+    // Platform-default protective exits (SL/TP) applied to every entry
+    // when the strategy emits no (or incomplete) exit_intents. See
+    // exits/default_exit_policy.h. Strategies need not implement stops.
+    truetest::exits::default_exit_params exit_defaults{};
 
     std::unordered_map<std::string, instrument_spec> instrument_overrides;
 
