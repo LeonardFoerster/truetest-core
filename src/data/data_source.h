@@ -1,10 +1,43 @@
 #pragma once
+
+// IDataSource — legacy batch load into shared_ptr<data_handler>.
+// Prefer IMarketSource (market_source.h). Shim kept for one migration cycle.
+
+#include "data/market_source.h"
+#include "data/market_series.h"
+
 #include <memory>
 
-class data_handler;
+// data_handler is a typedef for MarketSeries (market_series.h). Do not
+// forward-declare it as `class data_handler`.
 
-class IDataSource {
+class IDataSource : public IMarketSource
+{
 public:
-    virtual ~IDataSource() = default;
-    virtual bool load_data(std::shared_ptr<data_handler> handler) = 0;
+	~IDataSource() override = default;
+
+	// Legacy entry point used by CLI / TUI / API.
+	virtual bool load_data(std::shared_ptr<data_handler> handler) = 0;
+
+	// IMarketSource default: if sink is a MarketSeries, route via load_data.
+	bool load_into(IMarketSink& sink, LoadStats* stats = nullptr) override
+	{
+		auto* series = dynamic_cast<MarketSeries*>(&sink);
+		if (!series)
+		{
+			if (stats) stats->message = "IDataSource shim requires MarketSeries sink";
+			return false;
+		}
+		// Non-owning shared_ptr alias so legacy load_data can accept it.
+		auto sp = std::shared_ptr<data_handler>(series, [](data_handler*) {});
+		const bool ok = load_data(sp);
+		if (stats)
+		{
+			stats->accepted = series->bar_count() + series->tick_count();
+			stats->rejected = series->validation_errors();
+			if (!ok && stats->message.empty())
+				stats->message = "load_data failed";
+		}
+		return ok;
+	}
 };

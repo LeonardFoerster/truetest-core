@@ -1,14 +1,15 @@
 #pragma once
 
-#include "data_source.h"
+#include "data/data_source.h"
+
 #include <string>
 
 class TickCsvDataSource : public IDataSource
 {
-public:
-    explicit TickCsvDataSource(const std::string& path) : path_(path) {}
-    bool load_data(std::shared_ptr<data_handler> handler) override;
+	std::string path_;
 
-private:
-    std::string path_;
+public:
+	explicit TickCsvDataSource(const std::string& path) : path_(path) {}
+	bool load_data(std::shared_ptr<data_handler> handler) override;
+	bool load_into(IMarketSink& sink, LoadStats* stats = nullptr) override;
 };
