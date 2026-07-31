@@ -69,6 +69,7 @@ TEST(EngineInstrumentSpec, QuantizesLimitPriceAndQty)
     cfg.seed = 1;
     cfg.initial_balance = 100000.0;
     cfg.execution_bar_delay = 0;   // keep same-bar so order_event is observable immediately
+    cfg.exit_defaults.mode = truetest::exits::exit_policy_mode::strategy_only;
 
     instrument_spec spec;
     spec.symbol = "TEST";
@@ -106,6 +107,7 @@ TEST(EngineInstrumentSpec, RejectsBelowMinQty)
     cfg.seed = 1;
     cfg.initial_balance = 100000.0;
     cfg.execution_bar_delay = 0;
+    cfg.exit_defaults.mode = truetest::exits::exit_policy_mode::strategy_only;
 
     instrument_spec spec;
     spec.symbol = "TEST";
@@ -138,6 +140,7 @@ TEST(EngineInstrumentSpec, RejectsBelowMinNotional)
     cfg.seed = 1;
     cfg.initial_balance = 100000.0;
     cfg.execution_bar_delay = 0;
+    cfg.exit_defaults.mode = truetest::exits::exit_policy_mode::strategy_only;
 
     instrument_spec spec;
     spec.symbol = "TEST";

@@ -106,6 +106,8 @@ TEST(ProviderEngineWiring, EngineRoutesOrdersThroughProviderAdapter)
 
     engine_config cfg;
     cfg.provider = fake;
+    // One strategy entry only — platform SL would submit a second closer.
+    cfg.exit_defaults.mode = truetest::exits::exit_policy_mode::strategy_only;
 
     engine eng(dh, nullptr, strat, std::move(cfg));
     eng.run();

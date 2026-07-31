@@ -75,6 +75,9 @@ inline engine_config base_cfg(thread_preset preset = thread_preset::inline_mode)
     cfg.seed = 424242;
     cfg.threading = preset;
     cfg.disable_pinning = true;
+    // Hotpath baselines characterize strategy/engine paths without platform
+    // DefaultExitPolicy order volume (covered by DefaultExitPolicy* tests).
+    cfg.exit_defaults.mode = truetest::exits::exit_policy_mode::strategy_only;
     return cfg;
 }
 

@@ -81,6 +81,8 @@ golden_run_result run_sma_basic()
     cfg.seed            = 424242;
     cfg.threading       = thread_preset::inline_mode;
     cfg.disable_pinning = true;
+    // Pin pure strategy metrics; platform DefaultExitPolicy is covered elsewhere.
+    cfg.exit_defaults.mode = truetest::exits::exit_policy_mode::strategy_only;
 
     engine eng(dh, ob, strat, cfg);
     eng.run();

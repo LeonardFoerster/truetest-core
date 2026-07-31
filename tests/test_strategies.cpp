@@ -61,6 +61,40 @@ TEST(SmaStrategy, NoDoubleEntry)
     EXPECT_EQ(order, std::nullopt);
 }
 
+TEST(SmaStrategy, OptimisticLockBlocksUntilEngineFlats)
+{
+    // Emitting a buy locks the gate even before set_position_open(true)
+    // from the engine, so subsequent bars above SMA cannot free-fire.
+    sma_strategy s(3);
+    s.set_position_open("TEST", false);
+    s.on_market(make_mkt(0, 100.0));
+    s.on_market(make_mkt(1, 100.0));
+    s.on_market(make_mkt(2, 100.0));
+
+    auto first = s.on_market(make_mkt(3, 110.0));
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first->get_side(), order_side::buy);
+    EXPECT_EQ(first->get_order_type(), order_type::market);
+
+    // Do NOT call set_position_open — optimistic lock must still hold.
+    for (int i = 0; i < 10; ++i)
+        EXPECT_FALSE(s.on_market(make_mkt(4 + i, 111.0 + i)).has_value()) << "bar " << i;
+}
+
+TEST(SmaStrategy, FillStyleLimitAtClose)
+{
+    sma_strategy s(3);
+    s.set_param("fill_style", 1.0);
+    s.set_position_open("TEST", false);
+    s.on_market(make_mkt(0, 100.0));
+    s.on_market(make_mkt(1, 100.0));
+    s.on_market(make_mkt(2, 100.0));
+    auto order = s.on_market(make_mkt(3, 110.0));
+    ASSERT_TRUE(order.has_value());
+    EXPECT_EQ(order->get_order_type(), order_type::limit);
+    EXPECT_DOUBLE_EQ(order->get_price(), 110.0);
+}
+
 // --- Mean Reversion Strategy ---
 
 TEST(MeanRevStrategy, BuySignal)
@@ -227,6 +261,46 @@ TEST(MACrossoverStrategy, DeathCross)
     // fast=(100+70)/2=85, slow=(90+100+70)/3=86.67, fast<slow, was above -> death cross
     ASSERT_TRUE(order.has_value());
     EXPECT_EQ(order->get_side(), order_side::sell);
+    EXPECT_EQ(order->get_order_type(), order_type::market);
+}
+
+TEST(MACrossoverStrategy, OptimisticLockBlocksUntilEngineFlats)
+{
+    // Golden cross locks the gate without set_position_open from the engine,
+    // so a later golden cross (after a death cross in the MA state) cannot
+    // stack another entry while the first is still unfilled.
+    ma_crossover_strategy s(2, 3);
+    s.set_position_open("TEST", false);
+    s.on_market(make_mkt(0, 100.0));
+    s.on_market(make_mkt(1, 90.0));
+    s.on_market(make_mkt(2, 80.0)); // seeds prev_fast_above=false
+
+    auto buy = s.on_market(make_mkt(3, 120.0)); // golden cross
+    ASSERT_TRUE(buy.has_value());
+    EXPECT_EQ(buy->get_side(), order_side::buy);
+    EXPECT_EQ(buy->get_order_type(), order_type::market);
+
+    // Do NOT call set_position_open — optimistic lock holds through death
+    // then another recovery: death-cross sell is allowed (closes gate), but
+    // wait — with optimistic open=true, death cross can emit sell. After
+    // sell, gate is false again. For free-fire we care about bars that stay
+    // above without a death cross:
+    EXPECT_FALSE(s.on_market(make_mkt(4, 121.0)).has_value()); // still above, no re-entry
+    EXPECT_FALSE(s.on_market(make_mkt(5, 122.0)).has_value());
+}
+
+TEST(MACrossoverStrategy, FillStyleLimitAtClose)
+{
+    ma_crossover_strategy s(2, 3);
+    s.set_param("fill_style", 1.0);
+    s.set_position_open("TEST", false);
+    s.on_market(make_mkt(0, 100.0));
+    s.on_market(make_mkt(1, 90.0));
+    s.on_market(make_mkt(2, 80.0));
+    auto order = s.on_market(make_mkt(3, 120.0));
+    ASSERT_TRUE(order.has_value());
+    EXPECT_EQ(order->get_order_type(), order_type::limit);
+    EXPECT_DOUBLE_EQ(order->get_price(), 120.0);
 }
 
 // --- Common Checks ---
@@ -242,8 +316,9 @@ TEST(Strategy, OrderFields)
     ASSERT_TRUE(order.has_value());
     EXPECT_EQ(order->get_symbol(), "TEST");
     EXPECT_EQ(order->get_quantity(), 100);
-    EXPECT_EQ(order->get_order_type(), order_type::limit);
-    EXPECT_DOUBLE_EQ(order->get_price(), 110.0);
+    // Default: market for classical next-open fill under exec_bar_delay.
+    EXPECT_EQ(order->get_order_type(), order_type::market);
+    EXPECT_DOUBLE_EQ(order->get_price(), 110.0); // signal reference still close
 }
 
 TEST(Strategy, OnTickDefault)
