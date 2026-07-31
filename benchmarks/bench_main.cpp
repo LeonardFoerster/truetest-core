@@ -150,13 +150,7 @@ static void BM_Engine_Throughput_100k(benchmark::State& state)
     // Build the dataset once, reuse across iterations.
     auto build_handler = [] {
         auto dh = std::make_shared<data_handler>();
-        dh->db_data_date.reserve(N_BARS);
-        dh->db_data_symbol.reserve(N_BARS);
-        dh->db_data_open_value.reserve(N_BARS);
-        dh->db_data_high_value.reserve(N_BARS);
-        dh->db_data_low_value.reserve(N_BARS);
-        dh->db_data_close_value.reserve(N_BARS);
-        dh->db_data_volume_value.reserve(N_BARS);
+        dh->reserve_bars(N_BARS);
 
         double p = 100.0;
         for (std::size_t i = 0; i < N_BARS; ++i)
@@ -172,13 +166,7 @@ static void BM_Engine_Throughput_100k(benchmark::State& state)
                           "2024-01-01T%02zu:%02zu:%02zu",
                           (i / 3600) % 24, (i / 60) % 60, i % 60);
 
-            dh->db_data_date.emplace_back(date_buf);
-            dh->db_data_symbol.emplace_back("BENCH");
-            dh->db_data_open_value.push_back(o);
-            dh->db_data_high_value.push_back(h);
-            dh->db_data_low_value.push_back(l);
-            dh->db_data_close_value.push_back(c);
-            dh->db_data_volume_value.push_back(1000);
+            dh->load_into_queue(date_buf, "BENCH", o, h, l, c, 1000);
 
             p = c;
         }
