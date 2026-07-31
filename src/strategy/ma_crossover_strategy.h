@@ -7,6 +7,10 @@
 #include <string>
 #include <unordered_map>
 
+// Fast/slow SMA crossover: signal on close, default fill is market (pairs
+// with engine execution_bar_delay=1 → next-bar open). fill_style=1 restores
+// legacy LIMIT@close. Optimistic position_open_ on emit stops multi-cycle
+// stacking while entry is delayed/unfilled (engine resyncs on reject/fill).
 class ma_crossover_strategy : public IStrategy
 {
 public:
@@ -19,6 +23,8 @@ public:
         return {
             {"fast_period", static_cast<double>(fast_period_), 1, 10000, "Fast SMA lookback period"},
             {"slow_period", static_cast<double>(slow_period_), 1, 10000, "Slow SMA lookback period"},
+            {"fill_style", static_cast<double>(fill_style_), 0, 1,
+             "0=market (default, next-open with bar delay); 1=limit_at_close"},
         };
     }
 
@@ -26,6 +32,11 @@ public:
     {
         if (key == "fast_period") { fast_period_ = static_cast<std::size_t>(value); fast_smas_.clear(); }
         else if (key == "slow_period") { slow_period_ = static_cast<std::size_t>(value); slow_smas_.clear(); }
+        else if (key == "fill_style") {
+            const int v = static_cast<int>(value);
+            if (v < 0 || v > 1) throw std::runtime_error("fill_style must be 0 or 1");
+            fill_style_ = v;
+        }
         else throw std::runtime_error("Unknown parameter: " + key);
     }
 
@@ -45,6 +56,7 @@ public:
 private:
     std::size_t fast_period_;
     std::size_t slow_period_;
+    int fill_style_ = 0; // 0=market, 1=limit_at_close
     std::unordered_map<std::string, simple_moving_average> fast_smas_;
     std::unordered_map<std::string, simple_moving_average> slow_smas_;
     std::unordered_map<std::string, bool> position_open_;
@@ -52,4 +64,9 @@ private:
 
     simple_moving_average& get_fast_sma(const std::string& symbol);
     simple_moving_average& get_slow_sma(const std::string& symbol);
+
+    order_type order_type_for_fill_style() const
+    {
+        return fill_style_ == 1 ? order_type::limit : order_type::market;
+    }
 };

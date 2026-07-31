@@ -28,12 +28,19 @@ std::optional<order_event> sma_strategy::on_market(const market_event& mkt)
     if (!sma_value) return std::nullopt;
 
     bool is_open = position_open_[mkt.get_symbol()];
+    const order_type otype = order_type_for_fill_style();
+    const double ref_px = mkt.get_close(); // signal reference; market fills at book mid/open
 
     if (!is_open && mkt.get_close() > *sma_value) {
-        return order_event(mkt.get_timestamp(), mkt.get_symbol(), order_type::limit, order_side::buy, 100.0, mkt.get_close());
+        // Optimistic gate: block free-fire until fill or engine resync on reject.
+        position_open_[mkt.get_symbol()] = true;
+        return order_event(mkt.get_timestamp(), mkt.get_symbol(), otype, order_side::buy,
+                           100.0, ref_px);
     }
     if (is_open && mkt.get_close() < *sma_value) {
-        return order_event(mkt.get_timestamp(), mkt.get_symbol(), order_type::limit, order_side::sell, 100.0, mkt.get_close());
+        position_open_[mkt.get_symbol()] = false;
+        return order_event(mkt.get_timestamp(), mkt.get_symbol(), otype, order_side::sell,
+                           100.0, ref_px);
     }
     return std::nullopt;
 }

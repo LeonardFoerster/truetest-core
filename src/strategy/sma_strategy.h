@@ -7,6 +7,10 @@
 #include <string>
 #include <unordered_map>
 
+// Bar SMA strategy: signal on close, default fill is market (pairs with
+// engine execution_bar_delay=1 → next-bar open). fill_style=1 restores
+// legacy LIMIT@close. Optimistic position_open_ on emit stops free-fire
+// while orders are delayed or resting (engine resyncs on reject/fill).
 class sma_strategy : public IStrategy
 {
 public:
@@ -18,12 +22,19 @@ public:
     {
         return {
             {"period", static_cast<double>(period_), 1, 10000, "SMA lookback period"},
+            {"fill_style", static_cast<double>(fill_style_), 0, 1,
+             "0=market (default, next-open with bar delay); 1=limit_at_close"},
         };
     }
 
     void set_param(const std::string& key, double value) override
     {
         if (key == "period") { period_ = static_cast<std::size_t>(value); smas_.clear(); }
+        else if (key == "fill_style") {
+            const int v = static_cast<int>(value);
+            if (v < 0 || v > 1) throw std::runtime_error("fill_style must be 0 or 1");
+            fill_style_ = v;
+        }
         else throw std::runtime_error("Unknown parameter: " + key);
     }
 
@@ -41,8 +52,14 @@ public:
 
 private:
     std::size_t period_;
+    int fill_style_ = 0; // 0=market, 1=limit_at_close
     std::unordered_map<std::string, simple_moving_average> smas_;
     std::unordered_map<std::string, bool> position_open_;
 
     simple_moving_average& get_sma(const std::string& symbol);
+
+    order_type order_type_for_fill_style() const
+    {
+        return fill_style_ == 1 ? order_type::limit : order_type::market;
+    }
 };
