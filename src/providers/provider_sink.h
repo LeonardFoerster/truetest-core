@@ -2,30 +2,49 @@
 
 #include "provider_event.h"
 #include "provider_convert.h"
-#include "data/data_handler.h"
+#include "data/market_series.h"
+#include "data/market_sink.h"
+#include "data/date_parse.h"
 #include "../orderbook/orderbook.h"
 #include "../types/price.h"
 
 #include <memory>
+#include <type_traits>
 
 namespace provider {
 
-inline void event_sink(const event& ev, std::shared_ptr<data_handler> handler)
+// Domain-first sink: provider events → IMarketSink (preferred).
+inline void event_sink(const event& ev, IMarketSink& sink)
 {
 	std::visit([&](const auto& e) {
 		using E = std::decay_t<decltype(e)>;
 
 		if constexpr (std::is_same_v<E, bar>)
 		{
-			auto rec = to_bar_record(e);
-			handler->load_into_queue(rec.date, rec.symbol, rec.open,
-			                         rec.high, rec.low, rec.close, rec.volume);
+			Bar b;
+			b.date = e.date;
+			b.symbol = e.symbol;
+			b.open = e.open;
+			b.high = e.high;
+			b.low = e.low;
+			b.close = e.close;
+			b.volume = e.volume;
+			if (auto tp = tt::date_parse::parse(e.date))
+				b.ts = *tp;
+			sink.on_bar(b);
 		}
 		else if constexpr (std::is_same_v<E, tick>)
 		{
-			handler->add_tick(to_tick_record(e));
+			sink.on_tick(to_tick_record(e));
 		}
 	}, ev);
+}
+
+// Legacy shared_ptr overload for existing DataBridge sink_fn call sites.
+inline void event_sink(const event& ev, std::shared_ptr<data_handler> handler)
+{
+	if (!handler) return;
+	event_sink(ev, static_cast<IMarketSink&>(*handler));
 }
 
 inline void event_sink_l2(const event& ev, std::shared_ptr<orderbook> ob)
