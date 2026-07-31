@@ -53,7 +53,7 @@ inline std::shared_ptr<data_handler> make_ticks(int n, const std::string& symbol
         t.price = 100.0 + (i % 10) * 0.1;
         t.quantity = 10;
         t.side = data_tick_side::unknown;
-        dh->tick_data.push_back(t);
+        dh->add_tick(std::move(t));
     }
     return dh;
 }

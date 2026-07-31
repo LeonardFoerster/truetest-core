@@ -45,9 +45,9 @@ TEST(DataBridge, BatchLoadsBarRecords)
 
 	auto dh = std::make_shared<data_handler>();
 	ASSERT_TRUE(bridge->load_data(dh));
-	EXPECT_EQ(dh->db_data_close_value.size(), 5u);
-	EXPECT_DOUBLE_EQ(dh->db_data_close_value[0], 153.0);
-	EXPECT_DOUBLE_EQ(dh->db_data_close_value[4], 164.0);
+	EXPECT_EQ(dh->bar_count(), 5u);
+	EXPECT_DOUBLE_EQ(dh->bar_at(0).close, 153.0);
+	EXPECT_DOUBLE_EQ(dh->bar_at(4).close, 164.0);
 }
 
 TEST(DataBridge, BatchEmptyTransportReturnsFalse)
@@ -89,7 +89,7 @@ TEST(DataBridge, BatchSkipsMalformedLines)
 
 	auto dh = std::make_shared<data_handler>();
 	ASSERT_TRUE(bridge->load_data(dh));
-	EXPECT_EQ(dh->db_data_close_value.size(), 2u);
+	EXPECT_EQ(dh->bar_count(), 2u);
 }
 
 TEST(DataBridge, BatchLoadsTickRecords)
@@ -105,9 +105,9 @@ TEST(DataBridge, BatchLoadsTickRecords)
 
 	auto dh = std::make_shared<data_handler>();
 	ASSERT_TRUE(bridge->load_data(dh));
-	EXPECT_EQ(dh->tick_data.size(), 2u);
-	EXPECT_DOUBLE_EQ(dh->tick_data[0].price, 150.25);
-	EXPECT_EQ(dh->tick_data[1].side, data_tick_side::ask);
+	EXPECT_EQ(dh->tick_count(), 2u);
+	EXPECT_DOUBLE_EQ(dh->tick_at(0).price, 150.25);
+	EXPECT_EQ(dh->tick_at(1).side, data_tick_side::ask);
 }
 
 // --- Streaming mode tests ---
@@ -138,10 +138,38 @@ TEST(DataBridge, StreamingDeliversAllRecords)
 		transport->request_stop();
 	});
 
+	// D-06: retain_streamed defaults false — enable to assert series growth.
+	bridge->set_retain_streamed(true);
 	bridge->run_streaming(dh);
 	feeder.join();
 
-	EXPECT_EQ(dh->db_data_close_value.size(), 10u);
+	EXPECT_EQ(dh->bar_count(), 10u);
+}
+
+TEST(DataBridge, StreamingDoesNotRetainByDefault)
+{
+	SilenceBridge quiet;
+	auto transport = std::make_shared<MockStreamingTransport>();
+	auto parser = std::make_shared<CsvBarParser>();
+	auto bridge = std::make_shared<DataBridge<bar_record>>(transport, parser, bar_record_sink);
+
+	auto dh = std::make_shared<data_handler>();
+	std::atomic<int> callback_count{0};
+
+	std::thread feeder([&] {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		transport->enqueue("date,symbol,open,high,low,close,volume");
+		for (int i = 0; i < 5; ++i)
+			transport->enqueue("2024-01-01,TEST,100,105,95,102,1000");
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		transport->request_stop();
+	});
+
+	bridge->run_streaming(dh, [&](const bar_record&) { callback_count++; });
+	feeder.join();
+
+	EXPECT_EQ(callback_count.load(), 5);
+	EXPECT_EQ(dh->bar_count(), 0u); // retain_streamed=false default
 }
 
 TEST(DataBridge, StreamingStopReturnPromptly)

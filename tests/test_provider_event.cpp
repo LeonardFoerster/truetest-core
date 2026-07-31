@@ -141,9 +141,9 @@ TEST(ProviderEvent, SinkBarPopulatesHandler)
 	provider::event ev = b;
 	provider::event_sink(ev, dh);
 
-	ASSERT_EQ(dh->db_data_close_value.size(), 1u);
-	EXPECT_DOUBLE_EQ(dh->db_data_close_value[0], 153.0);
-	EXPECT_EQ(dh->db_data_symbol[0], "AAPL");
+	ASSERT_EQ(dh->bar_count(), 1u);
+	EXPECT_DOUBLE_EQ(dh->bar_at(0).close, 153.0);
+	EXPECT_EQ(dh->bar_at(0).symbol, "AAPL");
 }
 
 TEST(ProviderEvent, SinkTickPopulatesHandler)
@@ -160,9 +160,9 @@ TEST(ProviderEvent, SinkTickPopulatesHandler)
 	provider::event ev = t;
 	provider::event_sink(ev, dh);
 
-	ASSERT_EQ(dh->tick_data.size(), 1u);
-	EXPECT_DOUBLE_EQ(dh->tick_data[0].price, 42000.0);
-	EXPECT_EQ(dh->tick_data[0].side, data_tick_side::ask);
+	ASSERT_EQ(dh->tick_count(), 1u);
+	EXPECT_DOUBLE_EQ(dh->tick_at(0).price, 42000.0);
+	EXPECT_EQ(dh->tick_at(0).side, data_tick_side::ask);
 }
 
 TEST(ProviderEvent, SinkStatusNoCrash)

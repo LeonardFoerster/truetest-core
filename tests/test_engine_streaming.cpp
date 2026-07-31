@@ -136,8 +136,8 @@ TEST(EngineStreaming, BarStreamProcessesAllRecords)
     eng.run_streaming(bridge);
     feeder.join();
 
-    // All 10 bar records should have been fed to data_handler
-    EXPECT_EQ(dh->db_data_symbol.size(), 10u);
+    // D-06: default retain_streamed=false — series does not grow; strategy still sees events.
+    EXPECT_EQ(dh->bar_count(), 0u);
     // Strategy should have been called 10 times
     EXPECT_EQ(strategy->get_call_count(), 10);
 }
@@ -208,7 +208,7 @@ TEST(EngineStreaming, BarStreamStopCausesReturn)
     // Should return promptly (< 500ms)
     EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 500);
     // No data should have been processed
-    EXPECT_EQ(dh->db_data_symbol.size(), 0u);
+    EXPECT_EQ(dh->bar_count(), 0u);
 }
 
 TEST(EngineStreaming, BarStreamBatchTransportFallback)
@@ -231,7 +231,8 @@ TEST(EngineStreaming, BarStreamBatchTransportFallback)
 
     eng.run_streaming(bridge);
 
-    EXPECT_EQ(dh->db_data_symbol.size(), 5u);
+    // D-06: process without retaining into series by default
+    EXPECT_EQ(dh->bar_count(), 0u);
     EXPECT_EQ(strategy->get_call_count(), 5);
 }
 
@@ -271,8 +272,8 @@ TEST(EngineStreaming, TickStreamProcessesAllRecords)
     eng.run_streaming(bridge);
     feeder.join();
 
-    // All 8 tick records should have been fed to data_handler
-    EXPECT_EQ(dh->tick_data.size(), 8u);
+    // D-06: ticks processed via callback; series not retained by default
+    EXPECT_EQ(dh->tick_count(), 0u);
     EXPECT_EQ(strategy->get_tick_count(), 8);
 }
 
@@ -305,5 +306,5 @@ TEST(EngineStreaming, TickStreamStopCausesReturn)
     stopper.join();
 
     EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 500);
-    EXPECT_EQ(dh->tick_data.size(), 0u);
+    EXPECT_EQ(dh->tick_count(), 0u);
 }
