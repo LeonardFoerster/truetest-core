@@ -3,6 +3,7 @@
 #include "market_series.h"
 #include "market_types.h"
 
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -92,8 +93,26 @@ bool load_csv_bars(const std::filesystem::path& path, IMarketSink& sink, LoadSta
 			Bar bar;
 			bar.date = get("date");
 			bar.symbol = get("symbol");
-			if (auto tp = tt::date_parse::parse(bar.date))
-				bar.ts = *tp;
+
+			std::string ot_s = get("open_time");
+			if (!ot_s.empty())
+			{
+				try
+				{
+					const auto ms = std::stoll(ot_s);
+					if (ms > 0)
+					{
+						bar.ts = std::chrono::system_clock::time_point{
+							std::chrono::milliseconds{ms}};
+					}
+				}
+				catch (...) {}
+			}
+			if (bar.ts == std::chrono::system_clock::time_point{})
+			{
+				if (auto tp = tt::date_parse::parse(bar.date))
+					bar.ts = *tp;
+			}
 
 			std::string o_s = get("open");
 			std::string h_s = get("high");
@@ -105,9 +124,28 @@ bool load_csv_bars(const std::filesystem::path& path, IMarketSink& sink, LoadSta
 			bar.high = h_s.empty() ? 0.0 : std::stod(h_s);
 			bar.low = l_s.empty() ? 0.0 : std::stod(l_s);
 			bar.close = c_s.empty() ? 0.0 : std::stod(c_s);
+			// Integer volumes as-is; fractional base asset → * 1e8 (Binance klines).
 			if (!v_s.empty())
 			{
-				try { bar.volume = std::stoll(v_s); } catch (...) {}
+				try
+				{
+					std::size_t idx = 0;
+					const long long iv = std::stoll(v_s, &idx);
+					if (idx == v_s.size())
+						bar.volume = iv;
+					else
+						throw std::invalid_argument("fractional");
+				}
+				catch (...)
+				{
+					try
+					{
+						const double d = std::stod(v_s);
+						if (std::isfinite(d) && d >= 0.0)
+							bar.volume = static_cast<int64_t>(std::llround(d * 1e8));
+					}
+					catch (...) {}
+				}
 			}
 
 			if (sink.on_bar(bar))
