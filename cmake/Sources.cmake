@@ -36,11 +36,11 @@ set(ENGINE_CORE_SOURCES
     src/analytics/ascii_widgets.cpp
     src/analytics/report_generator.cpp
 
-    # --- Data sources & loading ---
-    src/data/data_loader.cpp
+    # --- Data series store & multi-format sources (docs/data.md) ---
+    src/data/market_series.cpp
     src/data/csv_data_source.cpp
-    src/data/binary_cache_source.cpp
     src/data/tick_csv_data_source.cpp
+    src/data/data_wrapper.cpp
     src/execution/portfolio.cpp
     src/orderbook/orderbook.cpp
 
