@@ -36,7 +36,7 @@ set(ENGINE_CORE_SOURCES
     src/analytics/ascii_widgets.cpp
     src/analytics/report_generator.cpp
 
-    # --- Data series store & multi-format sources (docs/data.md) ---
+    # --- Data series store & multi-format sources (docs/internal/data-pipeline.md) ---
     src/data/market_series.cpp
     src/data/csv_data_source.cpp
     src/data/tick_csv_data_source.cpp

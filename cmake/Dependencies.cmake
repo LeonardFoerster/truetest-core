@@ -96,7 +96,7 @@ function(tt_wire_optional_backends target)
     set(_src "${CMAKE_SOURCE_DIR}/src")
 
     # HAS_LIVE_DATA remains available for venue live transports under providers/.
-    # Generic WebSocketDataSource was removed (docs/data.md#D-07 — unwired dead end).
+    # Generic WebSocketDataSource was removed (docs/internal/data-pipeline.md#D-07 — unwired dead end).
     if(ENABLE_LIVE_DATA)
         find_package(Boost REQUIRED COMPONENTS system)
         target_link_libraries(${target} PUBLIC Boost::system)

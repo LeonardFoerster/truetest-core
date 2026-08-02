@@ -28,7 +28,7 @@ tt_fetch_dependencies()
 
 # ── Generated build-audit header ────────────────────────────────────────────
 # Captures commit SHA + build timestamp at configure time so every binary
-# emits a reproducible AUDIT log line on startup. See docs/migration.md
+# emits a reproducible AUDIT log line on startup. See docs/architecture/01-target-architecture.md
 # Step 11 notes and cmake/truetest_version.h.in for rationale.
 execute_process(
     COMMAND           git rev-parse --short=12 HEAD
