@@ -207,7 +207,7 @@ int tt_run(tt_engine_handle handle)
             w->strategy->set_param(key, value);
 
         w->dh = std::make_shared<data_handler>();
-        // docs/data.md#D-05: load via DataWrapper façade (behaviour-identical CSV path)
+        // docs/internal/data-pipeline.md#D-05: load via DataWrapper façade (behaviour-identical CSV path)
         try
         {
             auto wrapper = DataWrapper::from_path(w->data_path);

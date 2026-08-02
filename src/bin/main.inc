@@ -922,7 +922,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--min-liq-distance-pct", o.min_liquidation_distance_pct,
         "(futures providers) Minimum projected post-trade buffer "
         "to liquidation, as a fraction (0.05 = 5%). 0 disables. "
-        "Default: 0. See docs/futures-testnet.md for caveats on the "
+        "Default: 0. See docs/operations/02-futures-testnet.md for caveats on the "
         "approximation.");
     app.add_option("--dead-man-countdown-ms", o.dead_man_countdown_ms,
         "(futures providers) Server-side dead-man's-switch countdown "
