@@ -5,7 +5,7 @@
 #include "providers/data_bridge.h"
 #include "providers/local/csv_parser.h"
 #include "providers/local/file_transport.h"
-#include "test_helpers/mock_transport.h"
+#include "helpers/mock_transport.h"
 
 #include <chrono>
 #include <cmath>
