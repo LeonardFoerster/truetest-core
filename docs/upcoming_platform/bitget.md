@@ -10,8 +10,8 @@
 | Surface | Location |
 |---------|----------|
 | Code | `src/providers/bitget/` (UTA v3 USDT-M; classic refused) |
-| Build | `-DENABLE_BITGET=ON`, presets `linux-bitget`, `linux-providers-questdb` |
-| Freeze | `bitget_futures_{provider,dead_mans_switch,kill_switch,reconciler}.h` on Phase 1 freeze list |
+| Build | `-DENABLE_BITGET=ON`, presets `linux-bitget`, `linux-venues` |
+| Freeze | **Not yet** on mechanical Phase-1 freeze list (still Binance-era 10 files). Bitget kill/DMS/reconciler/provider are **live-capable** — treat as safety-adjacent; expand freeze + `LIVE_SAFETY_CCB_APPROVED` before attended mainnet live drills. |
 | Ops SOP | [`docs/operations/03-bitget-demo.md`](../operations/03-bitget-demo.md) (demo drills; **not** mainnet authorization) |
 | CLI | `--provider bitget\|bitget-futures`, `--demo`, `--api-passphrase`, env `TRUETEST_BITGET_*` |
 

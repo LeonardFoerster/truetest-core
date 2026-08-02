@@ -2068,7 +2068,11 @@ static int run_provider_mode(const cli_options& o)
                          "TRUETEST_BITGET_API_PASSPHRASE or --api-passphrase.\n";
             return 1;
         }
-        if (o.testnet || o.demo)
+        // Sandbox confirmation is provider-aware: Bitget honors --demo|--testnet
+        // as paptrading; Binance only honors --testnet. Never skip mainnet
+        // real-money math because of a foreign venue's --demo flag.
+        if (futures_live_sandbox_flags(o)
+            || (provider_is_bitunix(o.provider_name) && (o.demo || o.testnet)))
         {
             std::cout << "  [SANDBOX] Live mode will submit orders to the "
                          "venue demo/testnet endpoints.\n";
@@ -2079,14 +2083,17 @@ static int run_provider_mode(const cli_options& o)
                 return 0;
         }
     }
-    else if (o.testnet || o.demo)
+    else if (provider_is_bitget(o.provider_name) && (o.demo || o.testnet))
     {
-        if (provider_is_bitget(o.provider_name))
-            std::cout << "  [DEMO] Routing Bitget provider to UTA paptrading.\n";
-        else if (provider_is_bitunix(o.provider_name))
-            std::cout << "  [SANDBOX] Bitunix sandbox flags set (verify venue hosts).\n";
-        else
-            std::cout << "  [TESTNET] Routing Binance provider to the spot testnet.\n";
+        std::cout << "  [DEMO] Routing Bitget provider to UTA paptrading.\n";
+    }
+    else if (provider_is_bitunix(o.provider_name) && (o.demo || o.testnet))
+    {
+        std::cout << "  [SANDBOX] Bitunix sandbox flags set (verify venue hosts).\n";
+    }
+    else if (o.testnet)
+    {
+        std::cout << "  [TESTNET] Routing Binance provider to the spot testnet.\n";
     }
 
 #ifdef HAS_WEB
