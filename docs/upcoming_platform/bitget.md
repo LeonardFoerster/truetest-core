@@ -70,7 +70,7 @@ Agents müssen diese Regeln **wörtlich** einhalten. Verstöße = Reject, kein M
 - DMS-Countdown **nicht** adaptiv verlängern unter Load.
 - Kill-Switch, DMS und Freeze **nicht** zu einem vagen „cancel everything“ vermischen.
 - `FuturesRiskCheck` vor `RiskManager` bleibt Engine-Verantwortung; Provider liefert nur `get_risk_check()`.
-- Bitget Safety-Header (`bitget_futures_{provider,dead_mans_switch,kill_switch,reconciler}.h`) sind **auf der Freeze-Liste** (14 Dateien gesamt). Edits brauchen `LIVE_SAFETY_CCB_APPROVED` + CCB + Shadow-Evidence (`/safety`).
+- Bitget Safety-Header (`bitget_futures_{provider,dead_mans_switch,kill_switch,reconciler}.h`) sind **noch nicht** auf der mechanical Phase-1 Freeze-Liste (aktuell 10 Binance-era Dateien in `check-live-safety-freeze.sh`). Trotzdem **safety-adjacent** behandeln: keine stillen Retries, fail-closed. Vor attended Mainnet-Live: Freeze erweitern + `LIVE_SAFETY_CCB_APPROVED` + CCB + Shadow-Evidence (`/safety`).
 
 ### 2.4 Geo / Operator-Precondition (kein Skip der Implementation)
 
