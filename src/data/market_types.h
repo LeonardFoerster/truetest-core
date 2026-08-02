@@ -1,6 +1,6 @@
 #pragma once
 
-// Canonical market domain records (docs/data.md §5.1).
+// Canonical market domain records (docs/internal/data-pipeline.md §5.1).
 // No I/O, no venue headers, no engine includes.
 // Note: do NOT name the side enum `tick_side` — that collides with core/event.h.
 

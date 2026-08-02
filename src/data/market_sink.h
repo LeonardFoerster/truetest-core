@@ -1,6 +1,6 @@
 #pragma once
 
-// IMarketSink — append/process port for market records (docs/data.md §5.2).
+// IMarketSink — append/process port for market records (docs/internal/data-pipeline.md §5.2).
 // Sources depend only on this + market_types; they must not include market_series.
 
 #include "data/market_types.h"

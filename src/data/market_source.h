@@ -1,6 +1,6 @@
 #pragma once
 
-// IMarketSource — format adapters emit domain records into a sink (docs/data.md §5.3).
+// IMarketSource — format adapters emit domain records into a sink (docs/internal/data-pipeline.md §5.3).
 // Hard rule: prefer not including market_series.h — only IMarketSink + market_types.
 
 #include "data/market_sink.h"

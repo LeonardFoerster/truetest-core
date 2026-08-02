@@ -1,7 +1,7 @@
 #pragma once
 
 // DataWrapper — single programmatic façade for multi-format market load
-// (docs/data.md §5.5). Composition root; not a second buffer.
+// (docs/internal/data-pipeline.md §5.5). Composition root; not a second buffer.
 
 #include "data/market_series.h"
 #include "data/market_source.h"

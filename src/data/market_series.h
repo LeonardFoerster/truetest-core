@@ -1,6 +1,6 @@
 #pragma once
 
-// MarketSeries — format-independent market store (docs/data.md §5.4).
+// MarketSeries — format-independent market store (docs/internal/data-pipeline.md §5.4).
 // Evolved from data_handler. Knows validation + SoA/AoS layout only — no CSV/Parquet/HTTP.
 
 #include "data/market_sink.h"
@@ -96,5 +96,5 @@ private:
 	std::vector<Tick> ticks_;
 };
 
-// Migration typedef — one release/PR cycle (docs/data.md §4.3 / D-03).
+// Migration typedef — one release/PR cycle (docs/internal/data-pipeline.md §4.3 / D-03).
 using data_handler = MarketSeries;

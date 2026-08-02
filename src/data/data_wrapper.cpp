@@ -121,7 +121,7 @@ DataWrapper DataWrapper::from_uri(std::string_view uri, DataLoadOptions opt)
 	else if (starts_with(uri, "parquet:"))
 	{
 		throw std::runtime_error(
-			"DataWrapper: parquet: URI requires ENABLE_PARQUET (docs/data.md#D-08; deferred)");
+			"DataWrapper: parquet: URI requires ENABLE_PARQUET (docs/internal/data-pipeline.md#D-08; deferred)");
 	}
 	else
 	{

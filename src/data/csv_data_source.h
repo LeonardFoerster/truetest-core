@@ -5,7 +5,7 @@
 #include <filesystem>
 
 // CSV OHLCV bar source. Implements IMarketSource via IDataSource shim.
-// Format knowledge lives here — not on MarketSeries (docs/data.md D-03/D-04).
+// Format knowledge lives here — not on MarketSeries (docs/internal/data-pipeline.md D-03/D-04).
 class CsvDataSource : public IDataSource
 {
 	std::filesystem::path path_;
