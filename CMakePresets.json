@@ -63,6 +63,47 @@
       }
     },
     {
+      "name": "linux-bitget",
+      "displayName": "Linux + Bitget + Tests",
+      "description": "Bitget UTA futures provider + unit tests",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_BITGET": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-bitunix",
+      "displayName": "Linux + Bitunix + Tests",
+      "description": "Bitunix futures MD/shadow provider + unit tests",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_BITUNIX": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-venues",
+      "displayName": "Linux + Binance + Bitget + Bitunix + Tests",
+      "description": "Product venues (Binance, Bitget, Bitunix) + tests",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_BINANCE": "ON",
+        "ENABLE_BITGET": "ON",
+        "ENABLE_BITUNIX": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
       "name": "linux-web",
       "displayName": "Linux + Web UI + Tests",
       "description": "Embedded web server (civetweb) + tests. Requires npm for web_assets target.",

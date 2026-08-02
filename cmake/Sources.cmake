@@ -237,6 +237,25 @@ set(TEST_SOURCES
     tests/test_binance_futures_safety.cpp
     tests/test_binance_futures_dead_mans_switch.cpp
 
+    # --- Bitget (compiled always; bodies gated by HAS_BITGET) ---
+    tests/providers/bitget/test_bitget_endpoints.cpp
+    tests/providers/bitget/test_bitget_auth.cpp
+    tests/providers/bitget/test_bitget_parser.cpp
+    tests/providers/bitget/test_bitget_transport_subscribe.cpp
+    tests/providers/bitget/test_bitget_futures_register.cpp
+    tests/providers/bitget/test_bitget_rest_client_time.cpp
+    tests/providers/bitget/test_bitget_futures_order_encoder.cpp
+    tests/providers/bitget/test_bitget_futures_user_data_parser.cpp
+    tests/providers/bitget/test_bitget_futures_reconciler.cpp
+    tests/providers/bitget/test_bitget_futures_kill_switch.cpp
+    tests/providers/bitget/test_bitget_futures_dead_mans_switch.cpp
+    tests/providers/bitget/test_bitget_backfill.cpp
+    tests/providers/bitget/test_bitget_futures_safety.cpp
+    tests/providers/bitget/test_bitget_futures_bracket_adapter.cpp
+
+    # --- Bitunix (compiled always; bodies gated by HAS_BITUNIX) ---
+    # (tests added with Phase 0–1 scaffold)
+
     # --- CLI integration (separate binary) ---
     # (see truetest_cli_tests in root)
 )
