@@ -127,7 +127,7 @@ TEST(HybridExecutor, ZeroLatencyModel_ObservablyEquivalentToNoModel)
     EXPECT_EQ(fills.size(), 1u);
 }
 
-#endif // HAS_BINANCE
+// Remaining HybridExecutor tests still require Binance paper executor.
 
 TEST(HybridExecutor, RestingLimitSurvivesMidUpdateAndFills)
 {
@@ -240,3 +240,5 @@ TEST(HybridExecutor, EngineFacingSweepRestingRangeViaIExecutionAdapter)
     EXPECT_EQ(fills[0].get_order_id(), 100202u);
     EXPECT_DOUBLE_EQ(fills[0].get_fill_price(), 99.0);
 }
+
+#endif // HAS_BINANCE

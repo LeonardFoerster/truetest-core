@@ -139,9 +139,9 @@ public:
 		std::string_view frame;
 		while (transport_->read_frame(frame))
 		{
-			if (auto record = parser_->parse_record(frame))
+			for (auto& record : parser_->parse_records(frame))
 			{
-				if (detail::emit_record(*record, sink))
+				if (detail::emit_record(record, sink))
 					++count;
 				else
 					++rejected;
@@ -223,8 +223,8 @@ private:
 			if (auto header_line = transport_->read_line())
 			{
 				parser_->parse_header(*header_line);
-				if (auto record = parser_->parse_record(*header_line))
-					handle(*record);
+				for (auto& record : parser_->parse_records(*header_line))
+					handle(record);
 			}
 		}
 		else
@@ -237,8 +237,8 @@ private:
 
 			const std::string first_frame(frame);
 			parser_->parse_header(first_frame);
-			if (auto record = parser_->parse_record(first_frame))
-				handle(*record);
+			for (auto& record : parser_->parse_records(first_frame))
+				handle(record);
 		}
 
 		while (transport_->is_open())
@@ -250,8 +250,8 @@ private:
 			if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))
 				break;
 
-			if (auto record = parser_->parse_record(frame))
-				handle(*record);
+			for (auto& record : parser_->parse_records(frame))
+				handle(record);
 		}
 
 		if (stats) stats->accepted = count;
