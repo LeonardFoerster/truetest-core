@@ -74,7 +74,7 @@ inline bool emit_record(const provider::event& ev, IMarketSink& sink)
 } // namespace detail
 
 // Null sink: used when streaming with retain_streamed=false (engine processes
-// via on_record only; series must not grow unboundedly — docs/data.md D-06).
+// via on_record only; series must not grow unboundedly — docs/internal/data-pipeline.md D-06).
 class DiscardMarketSink final : public IMarketSink
 {
 public:

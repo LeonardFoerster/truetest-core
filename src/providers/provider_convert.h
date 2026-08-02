@@ -43,7 +43,7 @@ inline tick from_tick_record(const tick_record& r)
 	            static_cast<uint8_t>(r.side)};
 }
 
-// Domain Bar helpers (docs/data.md D-01)
+// Domain Bar helpers (docs/internal/data-pipeline.md D-01)
 inline Bar to_domain_bar(const bar& b)
 {
 	Bar out;
