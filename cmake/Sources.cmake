@@ -254,7 +254,10 @@ set(TEST_SOURCES
     tests/providers/bitget/test_bitget_futures_bracket_adapter.cpp
 
     # --- Bitunix (compiled always; bodies gated by HAS_BITUNIX) ---
-    # (tests added with Phase 0–1 scaffold)
+    tests/providers/bitunix/test_bitunix_auth.cpp
+    tests/providers/bitunix/test_bitunix_endpoints.cpp
+    tests/providers/bitunix/test_bitunix_parser.cpp
+    tests/providers/bitunix/test_bitunix_futures_register.cpp
 
     # --- CLI integration (separate binary) ---
     # (see truetest_cli_tests in root)

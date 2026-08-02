@@ -1,7 +1,7 @@
 # Upcoming Platforms — Multi-Venue Provider Integration
 
-**Status (2026-08-02):** Product venues on `master`: **Binance** (golden), **Bitget** (landing), **Bitunix** (Phase 0–1 planned).  
-**Bybit / Gate.io** full trees are **not** on `master` — archived at git tag `archive/provider-2026-07-30`.
+**Status (2026-08-02):** Product venues: **Binance** (golden), **Bitget** (landed), **Bitunix** (Phase 0–1 MD/shadow).  
+**Bybit / Gate.io** full trees are **not** on this branch — archived at git tag `archive/provider-2026-07-30`.
 
 **Audience:** Agents implementing new CEX providers for TrueTest `core/`.
 
@@ -12,8 +12,8 @@
 | Venue | Registry names | Focus | Tree |
 |-------|----------------|-------|------|
 | **Binance** | `binance`, `binance-futures` | Spot + USDT-M futures (golden path) | `src/providers/binance/` |
-| **Bitget** | `bitget`, `bitget-futures` | UTA USDT-M | `src/providers/bitget/` (port in progress) |
-| **Bitunix** | `bitunix`, `bitunix-futures` | USDT perps | `src/providers/bitunix/` (Phase 0–1) |
+| **Bitget** | `bitget`, `bitget-futures` | UTA USDT-M | `src/providers/bitget/` |
+| **Bitunix** | `bitunix`, `bitunix-futures` | USDT perps MD/shadow | `src/providers/bitunix/` |
 
 ## Archived / not in tree
 
@@ -31,9 +31,9 @@ Thin Phase-0 stubs that previously sat on `master` under `src/providers/bybit/` 
 
 | File | Venue | Status |
 |------|-------|--------|
-| [bitget.md](./bitget.md) | Bitget | Design/DoD (copied with provider port) |
-| [bitunix.md](./bitunix.md) | Bitunix | Phase 0–1 guide (when added) |
-| Ops: [../operations/03-bitget-demo.md](../operations/03-bitget-demo.md) | Bitget demo SOP | When present |
+| [bitget.md](./bitget.md) | Bitget | Design/DoD |
+| [bitunix.md](./bitunix.md) | Bitunix | Phase 0–1 guide |
+| Ops: [../operations/03-bitget-demo.md](../operations/03-bitget-demo.md) | Bitget demo SOP | Present |
 
 ---
 
