@@ -185,7 +185,7 @@ QuestDB writes never block the hot path under normal conditions.
 ## 8. Build & Runtime Tuning for Performance
 
 Key CMake flags:
-- `-DENABLE_NATIVE_OPT=ON` → `-march=native` + unrolling (recommended for live/shadow binaries).
+- `-DENABLE_NATIVE_OPT=ON` → `-march=native` + unrolling on all three engines (Release; portable CI keeps it OFF).
 - `-DENABLE_DEBUG=ON` → StageTimer, ring stats, memory/copy trackers, thread utilization (Abseil-based).
 - `-DENABLE_BENCHMARKS=ON` → Google Benchmark.
 - Release build (`-DCMAKE_BUILD_TYPE=Release`) + LTO where supported.
@@ -254,6 +254,6 @@ Current design already provides strong, measurable, and bounded capacities suita
 
 ---
 
-**Last updated**: 2026 (synthesized from CLAUDE.md, engine sources, threading, object pools, orderbook, config, benchmarks, hot-path tests, and user-manual).
+**Last updated**: 2026 (synthesized from AGENTS.md, engine sources, threading, object pools, orderbook, config, benchmarks, hot-path tests, and user-manual).
 
 Cross-references: `docs/reference/01-instructions.md` (threading + CLI), `docs/reference/02-user-manual.md` (high-level), `src/engine/engine_config.h`, `src/threading/`, `src/types/object_pool.h`, `benchmarks/bench_main.cpp`.

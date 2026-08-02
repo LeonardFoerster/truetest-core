@@ -2,7 +2,7 @@
 
 **Status**: Thin extraction / planned skeleton (Doc Phase per D-03). 
 
-**Planned / extracted; see reference/ for current** authoritative details and diagrams. Full material lives in `docs/reference/02-user-manual.md` (architecture + data flow), `docs/reference/01-instructions.md`, root governance (`prod.md`, `CLAUDE.md`), and source (`src/`).
+**Planned / extracted; see reference/ for current** authoritative details and diagrams. Full material lives in `docs/reference/02-user-manual.md` (architecture + data flow), `docs/reference/01-instructions.md`, root governance (`prod.md`, `AGENTS.md`), and source (`src/`).
 
 **Last updated**: 2026-07 (new content impl — extracted high-level only; no invention).
 
@@ -46,7 +46,7 @@ Data source → parser (market/tick/l2) → Engine dispatch → Strategy(ies)
 4. Fills update state + post to rings.
 5. Async workers consume.
 
-**Key invariants** (repeated in prod, CLAUDE, instructions):
+**Key invariants** (repeated in prod, `AGENTS.md`, instructions):
 - Compile-time live gate absolute.
 - Halt is terminal (write-once).
 - Safety paths loud + non-retrying.

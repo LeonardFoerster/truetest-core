@@ -7,7 +7,7 @@
 This document defines the exact phase definitions, capital-tier gates, Go-Live checklist, Phase 0 operator ritual, and "why we are careful" philosophy. It is the single source of truth that reviewers, CCB members, and future operators consult before any increase in live capital.
 
 See also:
-- `../CLAUDE.md` (AI + human reviewer rules + live-safety freeze mechanics)
+- `../../AGENTS.md` (AI + human reviewer rules + live-safety freeze mechanics)
 - `02-prerequisites.md` (mandatory pre-PR checklist for the frozen safety surface)
 - `03-todo.md` (thin high-level canonical task list; every frozen-surface PR must reference items here or precise docs/todos/ e.g. docs/todos/01-P0-phase0.md#P0-01 per 00-OVERVIEW.md)
 - `reports/phase0/PROGRESS.md` (evidence tracker)
@@ -21,7 +21,7 @@ See also:
 
 > "The engine already implements strong compile-time and runtime safety primitives that most retail or early-stage systems lack... This playbook exists so that future operators cannot say 'we forgot why we were careful.'"
 
-**Core non-negotiable rules** (repeated in CLAUDE, instructions, architecture docs, and every safety review):
+**Core non-negotiable rules** (repeated in `AGENTS.md`, instructions, architecture docs, and every safety review):
 1. Compile-time live-order gate is absolute (`TT_TARGET` + `target_allows_live_orders()` in `src/core/tt_target.h`).
 2. Halt is terminal (`halt_flag_` is write-once; only manual restart clears it).
 3. Safety paths are loud and non-retrying (no auto-resume, no helpful fallbacks on kill/DMS/reconciler/watchdog).
@@ -55,7 +55,7 @@ See also:
   --reconcile-tolerance-bps 3 \
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
   --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \
-  --max-daily-loss 80 --risk-unwind 0.4
+  --max-daily-loss 80 --risk-unwind
 ```
 
 **Why each element is mandatory**:
@@ -81,7 +81,7 @@ Print/sign the SOP, use `new-session.sh`, keep math-captcha visible the entire s
 **Already completed in planning / mechanical artifacts**:
 - 10 files carry the `LIVE-SAFETY SURFACE — Phase 1 freeze` marker (see `scripts/check-live-safety-freeze.sh` for the exact list: `tt_target.h`, `engine.cpp`, futures provider live block, dead_mans_switch, kill_switch, reconciler, risk_manager, futures_risk_check, live_safety, worker_watchdog).
 - Enforcement script wired into pre-commit + CI.
-- CLAUDE.md and reference/01-instructions.md updated with model-selection + CCB rules.
+- AGENTS.md and reference/01-instructions.md updated with model-selection + CCB rules.
 - `02-prerequisites.md` created (mandatory pre-PR checklist).
 
 **Remaining exit criteria**:

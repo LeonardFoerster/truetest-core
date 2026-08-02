@@ -3,7 +3,7 @@
 **Status**: Authoritative mandatory checklist. Every PR (even "docs only") that touches or describes the frozen safety surface **must** satisfy this before merge.
 
 See also:
-- `../CLAUDE.md` (AI model selection rules, anti-patterns, freeze policy)
+- `../../AGENTS.md` (AI model selection rules, anti-patterns, freeze policy)
 - `01-prod.md` (Phase 1 gates, philosophy, full Go-Live context)
 - `03-todo.md` (task references; P1-* items)
 - `scripts/check-live-safety-freeze.sh` (mechanical enforcement)
@@ -38,19 +38,20 @@ src/threading/worker_watchdog.h
 Before opening or merging any PR that edits a frozen file (or significantly describes the surface in docs):
 
 1. **Read the rules**:
-   - Current `CLAUDE.md` (model selection: Opus-level for frozen surface; Sonnet otherwise; anti-pattern list)
+   - Current `AGENTS.md` (model selection: Opus-level for frozen surface; Sonnet otherwise; anti-pattern list)
    - `prod.md` (Phase 1 + gates + invariants + philosophy)
    - This file + relevant `todo.md` P1 items (current gaps/status live in todo + prod; see `docs/archive/production-readiness-gaps-2026-05.md` only for May 2026 historical view)
 
 2. **Run the mechanical check** (must pass or explicitly only non-frozen files changed):
    ```bash
-   ./scripts/check-live-safety-freeze.sh --check-head
+   ./scripts/check-live-safety-freeze.sh
+   # Optional: ./scripts/check-live-safety-freeze.sh --base <commit>
    ```
 
 3. **Commit message requirement**:
    - PR description / commit must contain the exact token: `LIVE_SAFETY_CCB_APPROVED`
 
-4. **No forbidden anti-patterns introduced** (see CLAUDE + prod for full rationale):
+4. **No forbidden anti-patterns introduced** (see `AGENTS.md` + prod for full rationale):
    - No runtime live-order bypass / `target_allows_live_orders` weakening
    - `halt_flag_` remains terminal / write-once (no resettable/auto-clearing)
    - No "helpful" retry, backoff, or fallback on kill-switch / DMS / reconciler / watchdog paths
@@ -74,7 +75,7 @@ Before opening or merging any PR that edits a frozen file (or significantly desc
    - Two-person CCB review for any frozen surface change
 
 8. **Model discipline**:
-   - Use Opus-class model (per CLAUDE) for any edit touching the 10 frozen files or their core invariants.
+   - Use Opus-class model (per `AGENTS.md` multi-agent protocol) for any edit touching the 10 frozen files or their core invariants.
 
 Escalate to CCB if borderline or if the change is large.
 

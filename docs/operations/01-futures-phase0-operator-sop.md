@@ -26,7 +26,7 @@ export BINANCE_FUTURES_SECRET=...
   --reconcile-tolerance-bps 3 \
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
   --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \
-  --max-daily-loss 80 --risk-unwind 0.4
+  --max-daily-loss 80 --risk-unwind
 ```
 
 **Why each element (from prod.md)**:

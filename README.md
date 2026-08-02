@@ -81,33 +81,49 @@ Run with:
 ## Build System
 
 Modernized CMake setup (single source of truth in `cmake/Sources.cmake`; no globs).
+Adding a core `.cpp` or its unit test is done in that one file.
 
-Common configurations are available as presets:
+**Path contract:**
+- **Presets** write to `out/build/<presetName>` (e.g. `out/build/linux-tests`).
+- **Ad-hoc** `cmake -B build ...` still uses the classic `build/` tree (docs/scripts default).
+
+Common configurations as presets:
 
 ```bash
 cmake --preset linux-tests
-cmake --preset linux-binance-questdb
+cmake --build --preset linux-tests -j
+# binaries: out/build/linux-tests/engine_*
+
+cmake --preset linux-binance-questdb   # Binance + QuestDB + tests
+cmake --preset linux-bitget            # Bitget UTA futures
+cmake --preset linux-bitunix           # Bitunix MD/shadow
+cmake --preset linux-venues            # Binance + Bitget + Bitunix
+cmake --preset linux-providers-questdb # all venues + QuestDB
 cmake --preset linux-web
 cmake --preset linux-asan
 cmake --preset linux-release-native
-# ... see docs/reference/01-instructions.md for the full list
+# cmake --list-presets  # full inventory
 ```
 
 Key CMake options:
 
-| Option                    | Effect                              |
-|---------------------------|-------------------------------------|
-| `-DENABLE_BINANCE=ON`     | Binance spot + USDT-M futures       |
-| `-DENABLE_QUESTDB=ON`     | QuestDB ILP writer + schema         |
-| `-DENABLE_WEB=ON`         | Embedded civetweb + `--web` UI      |
-| `-DENABLE_DEBUG=ON`       | Stage timers + instrumentation      |
-| `-DENABLE_NATIVE_OPT=ON`  | `-march=native` (performance builds)|
-| `-DBUILD_TESTS=ON`        | GoogleTest suite                    |
+| Option                    | Effect                                       |
+|---------------------------|----------------------------------------------|
+| `-DENABLE_BINANCE=ON`     | Binance spot + USDT-M futures                |
+| `-DENABLE_BITGET=ON`      | Bitget UTA USDT-M futures                    |
+| `-DENABLE_BITUNIX=ON`     | Bitunix futures (MD/shadow Phase 0–1)        |
+| `-DENABLE_QUESTDB=ON`     | QuestDB ILP writer + schema                  |
+| `-DENABLE_WEB=ON`         | Embedded civetweb + `--web` UI               |
+| `-DENABLE_DEBUG=ON`       | Stage timers + instrumentation               |
+| `-DENABLE_NATIVE_OPT=ON`  | `-march=native` on all three engines (Release)|
+| `-DBUILD_TESTS=ON`        | GoogleTest suite                             |
+| `-DBUILD_SHARED_LIB=ON`   | `libtruetest.so` C API                       |
 
 After enabling the web UI, build the frontend once:
 
 ```bash
 cd src/web/frontend && npm ci && npm run build
+# or: cmake --build out/build/linux-web --target web_assets
 ```
 
 See `docs/reference/01-instructions.md` for the complete reference.
@@ -119,6 +135,8 @@ See `docs/reference/01-instructions.md` for the complete reference.
 | `local`           | OHLCV / tick CSV files           | Paper / hybrid             |
 | `binance`         | REST + WebSocket (trade/depth)   | Live + paper               |
 | `binance-futures` | REST + WebSocket (trade/depth20) | Live + bracket orders      |
+| `bitget-futures`  | Bitget UTA REST + WS (`ENABLE_BITGET`) | Live + paper + safety |
+| `bitunix-futures` | Bitunix REST + WS (`ENABLE_BITUNIX`)   | MD/shadow Phase 0–1   |
 | `synthetic`       | GBM paths (on demand)            | Monte Carlo / backtest     |
 
 Additional modes include `--replay` from zstd-compressed binary logs. Realism models cover latency, market impact, queue position (based on L2 snapshots), and synthetic fill simulation.
@@ -152,7 +170,7 @@ The following core files and modules are under the live-safety freeze (see the e
 
 All modifications require the `LIVE_SAFETY_CCB_APPROVED` token in the commit message, two-person CCB review, and a clean multi-hour `engine_shadow` run. Enforcement is provided by `scripts/check-live-safety-freeze.sh` (wired into pre-commit and CI).
 
-See `docs/governance/01-prod.md`, `docs/governance/02-prerequisites.md`, and `CLAUDE.md`.
+See `docs/governance/01-prod.md`, `docs/governance/02-prerequisites.md`, and `AGENTS.md`.
 
 ## Development Phases
 
@@ -172,12 +190,13 @@ Monte Carlo capabilities are fully integrated into the mainline engine and do no
 | `docs/governance/01-prod.md`          | Production playbook, phases, Go-Live gate, Phase 0 ritual |
 | `docs/governance/03-todo.md`          | High-level task list (detailed items live under `docs/todos/`) |
 | `docs/reference/02-user-manual.md`    | Architecture and operator overview |
-| `CLAUDE.md`                           | AI coding rules, model selection, freeze policy |
+| `AGENTS.md`                           | AI/agent coding rules, freeze policy, hot-path invariants |
 | `docs/reference/05-web-ui.md`         | Web UI usage, endpoints, architecture |
+| `docs/upcoming_platform/`             | Multi-venue status (Binance, Bitget, Bitunix) |
 | `reports/phase0/PROGRESS.md`          | Phase 0 qualifying session tracker |
 | `docs/README.md`                      | Documentation navigation |
 
-Root governance files, `CLAUDE.md`, `reports/phase0/`, and the reference manuals are authoritative. MC and Web UI work do not relax safety or phase gates.
+Root `AGENTS.md`, `docs/governance/`, `reports/phase0/`, and the reference manuals are authoritative. MC and Web UI work do not relax safety or phase gates.
 
 ## Testing
 

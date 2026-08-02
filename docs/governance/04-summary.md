@@ -38,8 +38,10 @@ Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) are produced 
 ## Providers & Data Sources
 
 - **`local`** (always available): OHLCV bar CSV and tick-level CSV.
-- **`binance`** / **`binance-futures`**: Binance Spot + USDT-M Futures (trade, kline, depth20, combined streams). Full REST + WebSocket execution, backfill, recording/replay.
-- **`synthetic`**: On-demand GBM path generation (standalone or Monte Carlo campaigns). Configurable `mu`, `sigma`, steps, initial price.
+- **`binance`** / **`binance-futures`**: Binance Spot + USDT-M Futures (trade, kline, depth20, combined streams). Full REST + WebSocket execution, backfill, recording/replay. Requires `ENABLE_BINANCE`.
+- **`bitget`** / **`bitget-futures`**: Bitget UTA USDT-M futures (trade, kline, books depth). Requires `ENABLE_BITGET`. Demo/paptrading via `--demo`/`--testnet`. See `docs/operations/03-bitget-demo.md`.
+- **`bitunix`** / **`bitunix-futures`**: Bitunix futures MD + paper/shadow (Phase 0–1; live order routing refused). Requires `ENABLE_BITUNIX`. See `docs/upcoming_platform/bitunix.md`.
+- **`synthetic`** / **`montecarlo`**: On-demand GBM path generation (standalone or Monte Carlo campaigns). Configurable `mu`, `sigma`, steps, initial price.
 - **Binary replay**: `--replay` from zstd-compressed event logs (deterministic, with time slicing).
 - **Generic WebSocket** (opt-in `ENABLE_LIVE_DATA`).
 
@@ -58,7 +60,7 @@ Strategies self-register via `REGISTER_STRATEGY` macro and support multi-strateg
 - `breakout` / `coiled-spring`
 - `adaptive-hybrid`
 - `structure-continuation`
-- `larry-connor`
+- `larry_connor` (underscore in registry name)
 - `hedge-demo` (paired legs + ExitManager demo)
 
 **Indicators** (`src/indicator/`):
@@ -145,7 +147,7 @@ Strategies can emit both `order_event`s and `exit_intent` vectors (for per-lot b
 
 - Pre-trade venue caps: `--max-notional`, `--max-leverage`, `--min-liq-distance-pct`.
 - Tiered maintenance-margin table loaded from `/fapi/v1/leverageBracket`.
-- Daily loss limit + risk-unwind fraction.
+- Daily loss limit + optional `--risk-unwind` flag (flatten positions on risk halt).
 - Post-fill risk worker + `ring_drop_policy::halt_on_drop` on critical rings.
 - Funding events partially wired (P&L, QuestDB, snapshots; full analytics/risk circuit breakers in progress).
 
@@ -158,16 +160,17 @@ Strategies can emit both `order_event`s and `exit_intent` vectors (for per-lot b
 cmake -B build && cmake --build build
 ```
 
-Source registration is centralized in `cmake/Sources.cmake`. Common real setups use presets (see `cmake --list-presets` or reference docs).
+Source registration is centralized in `cmake/Sources.cmake` (core + tests; no globs). Optional venue/backend TUs live in `cmake/Dependencies.cmake`. Common real setups use presets (`cmake --list-presets`); preset binaries land in `out/build/<preset>/`, ad-hoc builds in `build/`.
 
 **Key CMake options**:
-- `ENABLE_BINANCE`, `ENABLE_QUESTDB`, `ENABLE_LIVE_DATA`, `ENABLE_DEBUG`, `ENABLE_NATIVE_OPT`
+- Venues: `ENABLE_BINANCE`, `ENABLE_BITGET`, `ENABLE_BITUNIX`
+- Feature: `ENABLE_QUESTDB`, `ENABLE_WEB`, `ENABLE_LIVE_DATA`, `ENABLE_DEBUG`, `ENABLE_NATIVE_OPT` (all three engines when ON)
 - `BUILD_TESTS`, `ENABLE_BENCHMARKS`, `BUILD_SHARED_LIB`
-- Sanitizers: `ENABLE_ASAN` / `TSAN` / `UBSAN`
+- Sanitizers: `ENABLE_ASAN` / `TSAN` / `UBSAN` (TSAN exclusive with ASAN/UBSAN; ASAN+UBSAN OK)
 
 - **C API** (`src/api/`): Opaque handle + JSON config surface (`tt_create_engine`, `tt_run`, `tt_get_results`, …) for embedding (Python ctypes, Node ffi, etc.).
-- **Strategy & Provider registries**: Macro-based self-registration. Drop-in `.cpp` files + re-link.
-- **~310 GoogleTest** cases + golden regression suite (`test_golden_regression`, execution fidelity, L2, brackets, etc.).
+- **Strategy & Provider registries**: Macro-based self-registration. Drop-in `.cpp` files + re-link; register in `Sources.cmake`.
+- **GoogleTest** suite (hundreds of cases) + golden regression (`test_golden_regression`, execution fidelity, L2, brackets, venue safety, etc.).
 - Extensive live testnet + mainnet shadow tests.
 
 ---
@@ -185,7 +188,7 @@ Source registration is centralized in `cmake/Sources.cmake`. Common real setups 
 ## Authoritative References
 
 - `README.md` — High-level entry point
-- `CLAUDE.md` — Single source of truth for current codebase, conventions, model-selection rules
+- `AGENTS.md` — Single source of truth for current codebase, conventions, model-selection rules
 - `01-prod.md` — Production readiness playbook, exact Phase 0/1 gates, Go-Live table, philosophy
 - `../reference/02-user-manual.md` — Operator + technical overview
 - `../reference/01-instructions.md` — Exhaustive CLI flag reference + usage

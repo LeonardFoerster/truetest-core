@@ -63,7 +63,7 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 
 **Main components**:
 - **Core engine** (`src/engine/`): Orchestrates the event loop, worker threads, and lifecycle.
-- **Providers** (`src/providers/`): Data + execution boundary. `local` for CSV/tick replay; `binance` and `binance-futures` for live streaming + REST execution; `synthetic` for on-demand GBM path generation (standalone or via Monte Carlo campaigns).
+- **Providers** (`src/providers/`): Data + execution boundary. `local` for CSV/tick replay; `binance` / `binance-futures` (ENABLE_BINANCE); `bitget` / `bitget-futures` (ENABLE_BITGET); `bitunix` / `bitunix-futures` MD/shadow Phase 0–1 (ENABLE_BITUNIX); `synthetic` / `montecarlo` for GBM paths.
 - **Strategies** (`src/strategy/`): Pluggable via `REGISTER_STRATEGY` macro. Can emit `order_event` and `exit_intent` vectors for brackets.
 - **Execution layer** (`src/execution/`): `IExecutionAdapter`, `Portfolio`, `OrderTracker`, realistic models (`FeeModel`, `FillModel`, `LatencyModel`, `ImpactModel`, `QueuePositionModel`).
 - **Order book & matching** (`src/orderbook/`): `Orderbook` + `FillModel` for backtest realism.
@@ -131,7 +131,7 @@ Full details + caveats + usage in [../governance/01-prod.md](../governance/01-pr
 - Binary event log (zstd) + operational text logs with rotation
 - Rich tabbed TUI (shadow/live) with 10+ specialized panels
 - C API (`src/api/`) for embedding / language bindings
-- ~310 unit tests + golden regression suite
+- Large GoogleTest suite (see `ctest` / `linux-tests` preset; hundreds of cases) + golden regression
 
 # Installation & Compilation
 
@@ -146,27 +146,36 @@ Full details + caveats + usage in [../governance/01-prod.md](../governance/01-pr
 
 **Optional features** (enable via CMake flags):
 - `ENABLE_BINANCE`: Binance WS/REST (Boost.Beast + OpenSSL)
+- `ENABLE_BITGET`: Bitget UTA USDT-M futures
+- `ENABLE_BITUNIX`: Bitunix futures MD/shadow (Phase 0–1)
 - `ENABLE_QUESTDB`: QuestDB ILP persistence
+- `ENABLE_WEB`: Embedded civetweb web UI
 - `ENABLE_DEBUG`: StageTimer + memory instrumentation
-- `ENABLE_NATIVE_OPT`: `-march=native` + aggressive opts (live binary only)
+- `ENABLE_NATIVE_OPT`: `-march=native` + aggressive opts on **all three** engines (Release)
 - `BUILD_TESTS`, `ENABLE_BENCHMARKS`, `BUILD_SHARED_LIB`
 
 **Build steps**:
 
 ```bash
-# Minimal (CSV backtesting only, no network)
+# Minimal (CSV backtesting only, no network) — ad-hoc tree
 cmake -B build
 cmake --build build -j
 ```
 
 Core + test source registration lives in `cmake/Sources.cmake` (the single obvious place to add new code).
 
-Common real combinations are available as presets:
+**Presets** write to `out/build/<presetName>` (not `build/`):
 ```bash
-cmake --preset linux-tests
+cmake --preset linux-tests && cmake --build --preset linux-tests -j
 cmake --preset linux-binance-questdb
+cmake --preset linux-bitget
+cmake --preset linux-bitunix
+cmake --preset linux-venues
+cmake --preset linux-providers-questdb   # all venues + QuestDB
 cmake --preset linux-web
 cmake --preset linux-asan
+cmake --preset linux-release-native
+# cmake --list-presets
 ```
 
 ```bash
@@ -182,26 +191,26 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-**Output binaries**:
+**Output binaries** (ad-hoc `build/` tree; presets use `out/build/<preset>/`):
 - `./build/engine_backtest`
 - `./build/engine_shadow`
 - `./build/engine_live`
 
-**Sanitizers**: `ENABLE_ASAN`, `ENABLE_TSAN`, `ENABLE_UBSAN` (mutually exclusive).
+**Sanitizers**: `ENABLE_TSAN` is mutually exclusive with ASAN/UBSAN; ASAN+UBSAN together is allowed (`linux-asan` preset).
 
 # Configuration & Setup
 
 **Primary interface**: Command-line flags (CLI11). No mandatory config file, but strategies accept `--param key=value` and JSON strategy config is supported in some paths.
 
 **Key configuration categories**:
-- `--provider local|binance|binance-futures` + `--path`, `--symbol`, `--stream`, `--depth-stream`
+- `--provider local|binance|binance-futures|bitget|bitget-futures|bitunix|bitunix-futures|synthetic` + `--path`, `--symbol`, `--stream`, `--depth-stream`
 - `--strategy name` (or comma-separated list) + `--param`
 - Realism models: `--fee`, `--fill-model`, `--latency-model`, `--impact-model`, `--queue-model`
 - Threading: `--thread-preset`, `--no-pin`, `--spin-policy`
-- Risk: `--max-position`, `--daily-loss-limit`, `--max-trades-per-hour`, futures-specific caps
+- Risk: `--max-daily-loss`, `--max-trades-per-hour`, `--risk-unwind`, futures-specific caps (`--max-notional`, `--max-leverage`, …)
 - Persistence: `--persist`, `--questdb-host`, `--log-events`, `--record`
 - Replay: `--replay`, `--replay-from`, `--replay-to`
-- Live safety: `--dead-man-countdown-ms`, `--kill-on-drop`, API key/secret via env or flags
+- Live safety: `--dead-man-countdown-ms`, `--kill-switch-deadline-ms`, credentials via `TRUETEST_*` env or flags
 
 **External services**:
 - Binance API key/secret (read-only for shadow, trading permissions for live)
@@ -234,7 +243,7 @@ For operational details, golden queries, retention/TTL recommendations, soak tes
     --path market_data.csv \
     --strategy sma \
     --sma-period 20 \
-    --initial-balance 10000 \
+    --balance 10000 \
     --fee tiered --maker-rate 0.0002 --taker-rate 0.0004
 ```
 
@@ -272,7 +281,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
     --dead-man-countdown-ms 15000 \
     --max-notional 5000 \
     --min-liq-distance-pct 1.5 \
-    --initial-balance 5000 \
+    --balance 5000 \
     --risk-unwind
 ```
 
@@ -370,7 +379,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - `CMakeLists.txt` - Main build script producing three TT_TARGET binaries + optional shared library.
 - `cmake/CompilerFlags.cmake`, `Dependencies.cmake` - Centralized C++23 flags, sanitizers, and optional backend wiring.
 - `vcpkg.json` - Dependency manifest for optional features (Binance, live data).
-- `README.md`, `onboarding.md`, `CLAUDE.md` - High-level and authoritative internal documentation.
+- `README.md`, `AGENTS.md` — High-level and agent-facing rules (onboarding.md is not present; use this manual + `docs/README.md`).
 
 **Core Engine** (`src/engine/`, `src/core/`):
 - `engine.{h,cpp}`, `engine_config.h` - Central orchestrator, worker management, mode handling (10 files total in engine/).
@@ -378,23 +387,26 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - Event, logging, and worker headers (`event.h`, `event_log.h`, `logging_worker.h`, etc.).
 
 **Providers** (`src/providers/`):
-- `provider.h`, `provider_registry.h`, `data_bridge.h` - Core interfaces and registration.
-- `local/` (4 files) - CSV/tick file transport + parser for backtesting and replay.
-- `binance/` (32 files) - Complete spot + USDT-M futures implementation: parsers, transports, executors, order encoders, bracket adapter, dead-man's switch, kill switch, reconciler, safety checks, user-data handling, time sync, REST client, hybrid executor.
+- `provider.h`, `provider_registry.h`, `data_bridge.h` — Core interfaces and registration.
+- `local/` — CSV/tick file transport + parser for backtesting and replay.
+- `binance/` — Spot + USDT-M futures: parsers, transports, executors, brackets, DMS, kill switch, reconciler, user-data, REST (freeze surface includes several futures headers).
+- `bitget/` — UTA USDT-M futures stack (parallel safety modules; not on the mechanical freeze list yet).
+- `bitunix/` — Futures MD + paper/shadow (Phase 0–1).
+- `synthetic/` — GBM / Monte Carlo generator registration.
 
 **Strategies & Indicators** (`src/strategy/`, `src/indicator/`):
-- `strategy_interface.h`, `strategy_registry.h`, `strategy_factory.h` - Extension points and registration.
-- Concrete strategies: `sma_strategy`, `mean_reversion_strategy`, `ma_crossover_strategy`, `hedge_demo_strategy`, `market_maker` (13 files total).
-- Indicators: `sma.h`, `ema.h`, `rsi.h`, `bollinger.h`.
+- `strategy_interface.h`, `strategy_registry.h`, `strategy_factory.h` — Extension points and registration.
+- Concrete strategies: `sma`, `mean-reversion`, `ma-crossover`, `breakout`, `coiled-spring`, `structure-continuation`, `adaptive-hybrid`, `larry_connor`, `hedge-demo`.
+- Indicators: SMA, EMA, RSI, Bollinger, Stochastic, swing detection, etc.
 
 **Execution & Order Management** (`src/execution/`, `src/exits/`, `src/orderbook/`):
-- `execution_adapter.h`, `portfolio.{h,cpp}`, `order_tracker.h`, `execution_bridge.h`.
+- `execution_adapter.h`, `portfolio.{h,cpp}`, `order_tracker.h`, `execution_bridge.h`, `live_safety.h`.
 - Models: `fee_model.h`, `fill_model.h`, `latency_model.h`, `impact_model.h`, `queue_model.h`, `queue_position_model.h`.
-- `exit_manager.{h,cpp}`, `bracket_adapter.h`, `exit_intent.h`.
-- `orderbook.{h,cpp}`, `fill_model.h`, `orderbook_registry.h` (20 files total in execution/).
+- `exit_manager.{h,cpp}`, `default_exit_policy.{h,cpp}`, `bracket_adapter.h`, `exit_intent.h`.
+- `orderbook.{h,cpp}`, `orderbook_registry.h`.
 
 **Risk & Safety** (`src/risk/`):
-- `risk_manager.{h,cpp}`, `futures_risk_check.h`, `live_safety.h`.
+- `risk_manager.{h,cpp}`, `futures_risk_check.h` (venue pre-trade caps).
 
 **Analytics, UI & Persistence**:
 - `analytics/` (10 files): `analytics.cpp`, `report_generator`, `adverse_selection_tracker`, `shadow_tracker`, ASCII widgets.

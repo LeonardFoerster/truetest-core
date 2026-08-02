@@ -62,7 +62,7 @@ Use `engine_live` only when intentionally testing signed testnet order paths. Us
   --reconcile-tolerance-bps 3 \
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
   --max-notional 150 --max-leverage 2.5 --min-liq-distance-pct 7 \
-  --max-daily-loss 5 --risk-unwind 0.4
+  --max-daily-loss 5 --risk-unwind
 ```
 
 For a no-order rehearsal, prefer `scripts/phase0/dry-run-phase0.sh` or `engine_shadow`.

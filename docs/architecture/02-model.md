@@ -2,13 +2,13 @@
 
 **Status**: Thin extraction (Doc Phase). 
 
-**Planned / extracted; see reference/ for current** authoritative details. Full rationale lives in `CLAUDE.md` + `docs/reference/01-instructions.md` (§2) + `docs/governance/01-prod.md`.
+**Planned / extracted; see reference/ for current** authoritative details. Full rationale lives in `AGENTS.md` + `docs/reference/01-instructions.md` (§2) + `docs/governance/01-prod.md`.
 
-**Last updated**: 2026-07 (new content impl — synthesized from CLAUDE.md + instructions.md anti-patterns list).
+**Last updated**: 2026-07 (new content impl — synthesized from AGENTS.md + instructions.md anti-patterns list).
 
 ---
 
-## AI Coding Assistant Rules (from CLAUDE.md)
+## AI Coding Assistant Rules (from AGENTS.md)
 
 **Default — Sonnet 4.6** sufficient for:
 - New strategies, indicators, tests, CLI flags, docs
@@ -35,7 +35,7 @@ Sonnet has a measurable tendency to add "helpful" fallback/retry logic that viol
 
 **Monte Carlo / simulation layer note**: Generally safe for Sonnet. Invariants to preserve: deterministic per-trial seeding (`base_seed` derives `trial_id ^ magic`), no hidden shared state between trials, `MonteCarloReporter` allocation-light, `--mc-parallel` only with `--thread-preset inline` (conflicts with core pinning otherwise).
 
-## Explicit Anti-Patterns (rejected; from instructions + CLAUDE)
+## Explicit Anti-Patterns (rejected; from instructions + AGENTS.md)
 
 These are **non-negotiable rejects** (pre-merge checklist must confirm none introduced):
 - Retry / backoff / cooldown / auto-resume on kill-switch, DMS, reconciler, watchdog, or halt paths
@@ -72,7 +72,7 @@ See `docs/governance/02-prerequisites.md` (full mandatory checklist) and `docs/g
 ---
 
 **See for current**:
-- `CLAUDE.md` (primary)
+- `AGENTS.md` (primary)
 - `docs/reference/01-instructions.md` (consolidated rules + anti-pattern list)
 - `docs/governance/01-prod.md` (invariants + freeze context)
 - `docs/governance/02-prerequisites.md`
