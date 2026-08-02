@@ -1,41 +1,47 @@
 # TrueTest Documentation — Master 01-N Reading / Processing Order
 
-**Status**: Aspirational index for the slimmed docs hierarchy (Doc Phases). Use as the canonical processing sequence for operators, reviewers, and implementers.
+**Status**: Canonical **linear** reading sequence for operators, reviewers, and implementers.
 
-**Planned / extracted per reorg-spec**; current authoritative details remain in root `AGENTS.md`, `docs/governance/01-prod.md` etc., `docs/reference/01-instructions.md`, `docs/reference/02-user-manual.md`, `reports/phase0/`, `docs/governance/03-todo.md` (thin) + `docs/todos/`. See `docs/README.md` + `docs/todos/00-OVERVIEW.md` for navigation.
+**Topic navigation** (by task): [`docs/README.md`](README.md).  
+**Authoritative gates/tasks**: root `AGENTS.md`, `docs/governance/`, `docs/todos/`, `reports/phase0/`.
 
-**Last updated**: 2026-08-02 (CLAUDE.md → AGENTS.md; venue ops + upcoming_platform indexed)
+**Last updated**: 2026-08-02 (docs tree refactor: `internal/`, `platforms/`, `skills/`)
 
-## Recommended 01-N Order (read / process in this sequence)
+## Recommended 01-N order
 
 01. Root `README.md` — High-level overview, binaries, phases table, safety surface, quick start.
-02. `AGENTS.md` — AI/agent coding rules, Phase 1 freeze mechanics, hot-path + safety red lines, preferred build commands.
-03. `docs/governance/01-prod.md` — Central contract: philosophy, invariants, Phase 0/1+ capital-tier gates, exact command template + "why each element", Go-Live Gate table (9 rows), ritual summary.
-04. `docs/governance/02-prerequisites.md` — Mandatory pre-PR checklist for any frozen-surface edit (10 files, token, scripts, shadow validation).
-05. `docs/governance/03-todo.md` (thin high-level) + `docs/todos/` (00-OVERVIEW.md + 01-P0-phase0.md ... 09-...) — Living tasks (P0-*, P1-*, MC-*, R-*, S-*, D-*, A-*); reference items (e.g. docs/todos/01-P0-phase0.md#P0-01) in every safety PR. See 00-OVERVIEW.md .
-06. `docs/governance/04-summary.md` — Condensed status + key excerpts.
-07. `reports/phase0/README.md` + `PROGRESS.md` + `templates/phase0-session-note.md` — Phase 0 evidence requirements, tracker, session note template.
-08. `docs/reference/01-instructions.md` — Master technical reference: CLI, providers, realism flags, MC usage, full checklists, operator rituals (pointers to prod for deep gates).
-09. `docs/reference/02-user-manual.md` — High-level architecture, data flow diagram, core features (backtest/shadow/live/MC), operator overview.
-10. `docs/architecture/01-target-architecture.md` — Thin high-level target architecture (extracted; see reference/ for current details).
-11. `docs/architecture/02-model.md` — Model selection rules + explicit anti-patterns (extracted from agent rules + instructions).
-12. `docs/architecture/03-realism.md` — Realism models (latency/impact/queue/fill/fee) details (extracted).
-13. `docs/operations/01-futures-phase0-operator-sop.md` — Printable Phase 0 operator SOP (Binance mainnet qualifying; checklists, signatures).
-14. `docs/operations/02-futures-testnet.md` — Binance futures testnet rehearsal guide for DMS/kill-switch/refusal drills (non-qualifying evidence).
-15. `docs/operations/03-bitget-demo.md` — Bitget UTA demo/paptrading drills (not Phase 0 qualifying).
-16. `docs/upcoming_platform/README.md` (+ `bitget.md`, `bitunix.md`) — Multi-venue status and implementation notes.
-17. `docs/architecture/04-performance.md` — Performance capacities, threading, limits.
-18. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md` — Specialized reference (use as needed).
-19. `docs/archive/` — Historical plans (MERGE_PLAN, production-readiness-gaps-2026-05, questdb guides, Edge1 plans). Do not use for current status.
-20. `docs/engine.md` — Phased execution plan for `src/engine/engine.{h,cpp}` decomposition (see the `engine-decomposition` skill).
-21. `docs/data.md` — Market-data path redesign (`MarketSeries`, multi-format `DataWrapper`; mostly shipped).
+02. `AGENTS.md` — AI/agent coding rules, Phase 1 freeze, hot-path + safety red lines, preferred build commands.
+03. `docs/governance/01-prod.md` — Production contract: phases, Go-Live Gate, Phase 0 ritual.
+04. `docs/governance/02-prerequisites.md` — Mandatory pre-PR checklist for frozen-surface edits.
+05. `docs/governance/03-todo.md` (thin) + `docs/todos/` (detailed `00-OVERVIEW` … `09-…`) — Living tasks; cite anchors in safety PRs.
+06. `docs/governance/04-summary.md` — Condensed status.
+07. `reports/phase0/README.md` + `PROGRESS.md` + `templates/phase0-session-note.md` — Phase 0 evidence.
+08. `docs/reference/01-instructions.md` — Master technical reference (CLI, providers, realism, MC).
+09. `docs/reference/02-user-manual.md` — Architecture + operator overview.
+10. `docs/architecture/01-target-architecture.md` — Target architecture sketch.
+11. `docs/architecture/02-model.md` — Model selection + anti-patterns.
+12. `docs/architecture/03-realism.md` — Latency/impact/queue/fill/fee models.
+13. `docs/operations/01-futures-phase0-operator-sop.md` — Qualifying Phase 0 SOP (Binance mainnet).
+14. `docs/operations/02-futures-testnet.md` — Non-qualifying testnet drills.
+15. `docs/operations/03-bitget-demo.md` — Bitget demo (not Phase 0 qualifying).
+16. `docs/platforms/README.md` (+ `bitget.md`, `bitunix.md`) — Multi-venue status.
+17. `docs/architecture/04-performance.md` — Capacities, threading, limits.
+18. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md`, `07-strategy-development.md` — Specialized reference (strategy authors → 07).
+19. `docs/archive/` — Historical only (MERGE_PLAN, gaps snapshot, QuestDB logs, Edge1). Not current status.
+20. `docs/internal/engine-decomposition.md` — `engine.{h,cpp}` decomposition plan (+ skill `engine-decomposition`).
+21. `docs/internal/data-pipeline.md` — Market-data path redesign (`MarketSeries`, `DataWrapper`; mostly shipped).
+22. `docs/skills/00-OVERVIEW.md` — Proposed agent skills (planning only; not installed).
 
-## Processing Notes
-- **Operators preparing Phase 0**: 01 → 03 → 07 → 13 (SOP) → 08 (ritual details).
-- **Safety PR reviewers**: 02 (`AGENTS.md`) → 04 (prereqs) → 05 (todo refs + docs/todos/) → run freeze script.
-- **Full technical picture**: 09 (user-manual) → 08 (instructions) → 10-12 (arch) → 17 (perf).
-- **MC / research**: 08 (MC section) + 09 (stochastic subsection) + 05 (MC-* items in docs/todos/03-MC-simulation.md).
-- **Multi-venue**: 16 + 15 (Bitget demo) + CMake presets `linux-bitget` / `linux-bitunix` / `linux-venues`.
-- Always cross-check "Last updated" and explicit "Planned for Doc Phase X" language. Broken links = doc bug. `AGENTS.md` + `docs/governance/` + `reports/phase0/` are the practical SoT for gates/tasks.
+## Processing notes
 
-Cross-references use explicit planned language for aspirational paths. This index reflects the Planner-Structure extraction strategy (D- items in docs/governance/03-todo.md + docs/todos/06-D-documentation-structure.md).
+| Goal | Path through the index |
+|------|------------------------|
+| **Phase 0 operator** | 01 → 03 → 07 → 13 → 08 |
+| **Safety PR reviewer** | 02 → 04 → 05 → run freeze script |
+| **Full technical picture** | 09 → 08 → 10–12 → 17 |
+| **MC / research** | 08 (MC section) + 09 + `todos/03-MC-simulation.md` |
+| **Strategy author** | 18 → `reference/07-strategy-development.md` (+ 08 flags) |
+| **Multi-venue** | 16 + 15 + CMake presets `linux-bitget` / `linux-bitunix` / `linux-venues` |
+| **Engine decomp implementer** | 20 + `internal/engine-decomposition-design.md` + skill |
+
+Broken links = documentation bugs. Prefer explicit “Planned …” language for unbuilt paths.

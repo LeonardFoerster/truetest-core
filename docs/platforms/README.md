@@ -1,4 +1,4 @@
-# Upcoming Platforms — Multi-Venue Provider Integration
+# Platforms — Multi-Venue Provider Integration
 
 **Status (2026-08-02):** Product venues: **Binance** (golden), **Bitget** (landed), **Bitunix** (Phase 0–1 MD/shadow).  
 **Bybit / Gate.io** full trees are **not** on this branch — archived at git tag `archive/provider-2026-07-30`.
@@ -21,7 +21,7 @@
 |-------|----------|-------|
 | **Bybit** (full Phase 0–4) | `git show archive/provider-2026-07-30:src/providers/bybit/` | Parked off master by design |
 | **Gate.io** (MD + safety partial) | `git show archive/provider-2026-07-30:src/providers/gate/` | Parked; live orders were never wired |
-| Guides for OKX / Kraken / etc. | May exist only on archive tag under `docs/upcoming_platform/` | Not started on master |
+| Guides for OKX / Kraken / etc. | May exist only on archive tag under `docs/platforms/` | Not started on master |
 
 Thin Phase-0 stubs that previously sat on `master` under `src/providers/bybit/` and `src/providers/gate/` were **removed** so the tree only claims venues that ship.
 

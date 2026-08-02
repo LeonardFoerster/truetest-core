@@ -1,6 +1,6 @@
 # Engine Decomposition Plan
 
-**File**: `core/docs/engine.md`  
+**File**: `core/docs/internal/engine-decomposition.md`  
 **Purpose**: Detailed, phased execution plan for significantly reducing the size of `src/engine/engine.{h,cpp}` (the engine "god class") while **guaranteeing identical functionality and behavior**.  
 **Status**: Phase 0 COMPLETE (2026-07-17). Phase 1 Design COMPLETE (2026-07-17) — design document + executable PR/Wave DAG produced and reviewed to 0 issues. See Phase 1 section below + core/docs/internal/engine-decomposition-design.md.  
 **Target**: `engine.cpp` < 1800 LOC (ideally 1200–1500), `engine.h` significantly leaner.  
@@ -75,7 +75,7 @@
 Phases are designed to be executed sequentially by Grok Build using the `design` skill followed by `execute-plan` (or direct subagent waves with worktree isolation). Each phase ends with a mandatory verification gate.
 
 Use the following reference style in commits/PRs:
-- "Addresses core/docs/engine.md#E-03 (Wave 1 Dashboard extraction)"
+- "Addresses core/docs/internal/engine-decomposition.md#E-03 (Wave 1 Dashboard extraction)"
 
 ---
 
@@ -125,11 +125,11 @@ Use the following reference style in commits/PRs:
   - How each public contract is preserved.
   - Isolation strategy (worktrees recommended).
 - **E-13** Add a "PR / Wave DAG" section to this document (or a sibling) that `execute-plan` can parse.
-- **E-14** Reference the design in `docs/todos/02-P1-freeze.md` and `governance/03-todo.md` (e.g. "Addresses core/docs/engine.md#E-11").
+- **E-14** Reference the design in `docs/todos/02-P1-freeze.md` and `governance/03-todo.md` (e.g. "Addresses core/docs/internal/engine-decomposition.md#E-11").
 
 **Definition of Done**:
 - A polished design document exists (can live in `docs/internal/` or be merged into this file).
-- This `engine.md` contains a concrete, numbered wave plan with per-wave LOC targets.
+- This `internal/engine-decomposition.md` contains a concrete, numbered wave plan with per-wave LOC targets.
 - At least one fresh reviewer subagent (not involved in design) has cross-reviewed the plan.
 
 **Exit Criteria**: Design approved per skill rules. No implementation begins.
@@ -298,7 +298,7 @@ ctest -R 'Hotpath|Engine|snapshot|dashboard|Golden' --output-on-failure
 
 **Commit Requirements**:
 - Must contain `LIVE_SAFETY_CCB_APPROVED`.
-- Reference this file (e.g. `Closes core/docs/engine.md#E-80`).
+- Reference this file (e.g. `Closes core/docs/internal/engine-decomposition.md#E-80`).
 - Reference relevant P1 items.
 
 ## PR / Execution Strategy for Grok Build
@@ -352,7 +352,7 @@ This plan guarantees that **functionality stays identical** at every step throug
 
 ### Git & Edit Hygiene
 - No edits to any source files (`engine.{h,cpp}` or other .h/.cpp) performed during Phase 0.
-- `git status` (core repo): engine sources clean. (Unrelated doc files show prior mods: 00-INDEX.md, README.md, 02-P1-freeze.md; this `engine.md` was `??` on initial read.)
+- `git status` (core repo): engine sources clean. (Unrelated doc files show prior mods: 00-INDEX.md, README.md, 02-P1-freeze.md; this `internal/engine-decomposition.md` was `??` on initial read.)
 - All work was strictly read-only analysis + doc update of this plan file (as required by E-08).
 
 ### Verification Commands Executed (Baseline)
@@ -464,7 +464,7 @@ All public contracts (`run*`, `reset_for_next_trial`, `snapshot_dashboard`, `tri
 
 **Phase 0 is COMPLETE.**
 
-All mandatory read-only analysis, mapping, greps, call-site inventory, and runnable (non-build) baselines per `core/docs/engine.md` and the `engine-decomposition` skill have been executed. No code was changed. The engine god-class state and problems are understood at sufficient depth to proceed safely.
+All mandatory read-only analysis, mapping, greps, call-site inventory, and runnable (non-build) baselines per `core/docs/internal/engine-decomposition.md` and the `engine-decomposition` skill have been executed. No code was changed. The engine god-class state and problems are understood at sufficient depth to proceed safely.
 
 Ready for Phase 1 (Design First + Executable PR Plan) when appropriate.
 
@@ -500,11 +500,11 @@ See the full design for details, citations, and diagrams.
 
 ### PR / Wave DAG (from approved design — ready for execute-plan)
 
-This is the parseable, incremental, reviewable, mergeable plan. Numbered. Dependencies explicit. Verification per step. All steps reference core/docs/engine.md#E-##. Use worktree + spawn_subagent (limited capability) + fresh reviewer subagent. Every engine.{h,cpp} touch requires `LIVE_SAFETY_CCB_APPROVED` + gates.
+This is the parseable, incremental, reviewable, mergeable plan. Numbered. Dependencies explicit. Verification per step. All steps reference core/docs/internal/engine-decomposition.md#E-##. Use worktree + spawn_subagent (limited capability) + fresh reviewer subagent. Every engine.{h,cpp} touch requires `LIVE_SAFETY_CCB_APPROVED` + gates.
 
-1. **Prep (Phase 2)**: Files: core/docs/engine.md (update pointers), src/engine/engine.{h,cpp} (comments only). Dependencies: none. Description: Update LIVE-SAFETY + method comments referencing plan + skill. Strengthen seam docs. Run gates. Verification: ./scripts/check-live-safety-freeze.sh passes (token present), ./scripts/check-layer-deps.sh, no *untokened* changes to engine sources, Phase 2 exit note. (Minimal diff; tokened comment edits allowed/expected.)
+1. **Prep (Phase 2)**: Files: core/docs/internal/engine-decomposition.md (update pointers), src/engine/engine.{h,cpp} (comments only). Dependencies: none. Description: Update LIVE-SAFETY + method comments referencing plan + skill. Strengthen seam docs. Run gates. Verification: ./scripts/check-live-safety-freeze.sh passes (token present), ./scripts/check-layer-deps.sh, no *untokened* changes to engine sources, Phase 2 exit note. (Minimal diff; tokened comment edits allowed/expected.)
 
-2. **Wave 1 (Dashboard)**: Files: src/engine/dashboard_snapshot_builder.{h,cpp} (new), src/engine/engine.{h,cpp} (state + method moves + delegation), update any direct callers/tests if needed. Dependencies: 1. Description: E-30..E-36. Move dashboard_view_* + memory_cache_* + open_orders_cache_ (struct) + recent_fills_cache_ + kRecentFillsCap + build/refresh/cache_* + snapshot/request. Builder owns logic + state. Delegate from publish_event + public APIs. Net ~400 LOC reduction. All cache mutations (from canonical sequence) wired to builder. Verification: freeze script + layer-deps + ctest (Hotpath/Engine/snapshot/Golden) + MC reuse (5+ trials) + snapshot equivalence + backtest + wc + git diff --stat. engine.md#E-30.
+2. **Wave 1 (Dashboard)**: Files: src/engine/dashboard_snapshot_builder.{h,cpp} (new), src/engine/engine.{h,cpp} (state + method moves + delegation), update any direct callers/tests if needed. Dependencies: 1. Description: E-30..E-36. Move dashboard_view_* + memory_cache_* + open_orders_cache_ (struct) + recent_fills_cache_ + kRecentFillsCap + build/refresh/cache_* + snapshot/request. Builder owns logic + state. Delegate from publish_event + public APIs. Net ~400 LOC reduction. All cache mutations (from canonical sequence) wired to builder. Verification: freeze script + layer-deps + ctest (Hotpath/Engine/snapshot/Golden) + MC reuse (5+ trials) + snapshot equivalence + backtest + wc + git diff --stat. engine-decomposition.md#E-30.
 
 3. **Wave 2 (Run Refactor)**: Files: src/engine/engine.{h,cpp} (extract skeleton to private run_event_loop or thin coordinator). Dependencies: 2 (or parallel-safe with 1). Description: E-40..E-44. Collapse 4 skeletons via common pump; mode specifics thin. Dupe deletion. Verification: all run variants exercised in golden + integration + MC + identical outputs + hotpath alloc matrix.
 
@@ -549,7 +549,7 @@ This is the parseable, incremental, reviewable, mergeable plan. Numbered. Depend
 
 **Steps 11-12**: Cross-refs/governance updated (this section + Phase 2 state section added to plan; todos referenced). Sign-off recorded via subagent verdicts + this note. (Real two-person CCB would be external.)
 
-**Commit for Phase 2 work**: `3c7f10f` contains `LIVE_SAFETY_CCB_APPROVED`. References `core/docs/engine.md#E-20 E-21 E-24`.
+**Commit for Phase 2 work**: `3c7f10f` contains `LIVE_SAFETY_CCB_APPROVED`. References `core/docs/internal/engine-decomposition.md#E-20 E-21 E-24`.
 
 **Conclusion for Final Phase on current state**:
 - Prep (Phase 2) + design (Phase 1) + baseline (Phase 0) verification **green** for invariants, safety, performance, gates.
@@ -577,7 +577,7 @@ This is the parseable, incremental, reviewable, mergeable plan. Numbered. Depend
 **Executed**: Phase 2 (E-20–E-24) completed and committed with `LIVE_SAFETY_CCB_APPROVED`.
 
 **Changes**:
-- Updated LIVE-SAFETY header and strategic comments in `src/engine/engine.{h,cpp}`, `order_audit_sink.{h,cpp}`, `execution_router.h` to reference `core/docs/engine.md`, Waves, and `engine-decomposition` skill.
+- Updated LIVE-SAFETY header and strategic comments in `src/engine/engine.{h,cpp}`, `order_audit_sink.{h,cpp}`, `execution_router.h` to reference `core/docs/internal/engine-decomposition.md`, Waves, and `engine-decomposition` skill.
 - Strengthened seam documentation and removed legacy dual-path finalize in `questdb_end()` (now always prefers `audit_sink_`).
 - Added "Planned extraction Wave X" markers for future Waves 1-5.
 - Commit: `3c7f10f` (prep comments + seam docs).
@@ -598,6 +598,6 @@ This is the parseable, incremental, reviewable, mergeable plan. Numbered. Depend
 - Binary exercise (prebuilt engine_shadow): performed for baseline.
 - No full ctest/build matrix (per initial "Dont build now"; prebuilts used where possible).
 
-**Next**: Waves 1-5 required before Final Phase ritual can declare decomposition complete. Current state = Phase 2 prep only. No net reduction yet. Plan docs (engine.md, design doc) partially untracked.
+**Next**: Waves 1-5 required before Final Phase ritual can declare decomposition complete. Current state = Phase 2 prep only. No net reduction yet. Plan docs (engine-decomposition.md, design doc) partially untracked.
 
 **Signed**: Grok (2026-07-17). Phase 2 prep complete per plan. Ready for Wave 1 when directed.

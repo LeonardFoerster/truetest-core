@@ -1,7 +1,7 @@
 // integrate-provider — phased multi-venue provider integration for TrueTest core.
 //
 // Orchestrates scaffold → market data → REST/instrument → safety → execution →
-// verify for one venue from docs/upcoming_platform/<venue>.md, using Bitget as
+// verify for one venue from docs/platforms/<venue>.md, using Bitget as
 // the modern golden reference and Binance futures as the secondary golden path.
 //
 // PARALLEL SAFETY: other agents may implement other venues on the same branch.
@@ -132,28 +132,28 @@ if venue == "gate" {
     codepath = "gate";
     flag = "ENABLE_GATE";
     has_macro = "HAS_GATE";
-    guide = "docs/upcoming_platform/gateio.md";
+    guide = "docs/platforms/gateio.md";
     reg_names = "gate-futures, gate";
     test_filter = "gate|Gate";
 } else if venue == "bybit" {
     codepath = "bybit";
     flag = "ENABLE_BYBIT";
     has_macro = "HAS_BYBIT";
-    guide = "docs/upcoming_platform/bybit.md";
+    guide = "docs/platforms/bybit.md";
     reg_names = "bybit-futures, bybit";
     test_filter = "bybit|Bybit";
 } else if venue == "okx" {
     codepath = "okx";
     flag = "ENABLE_OKX";
     has_macro = "HAS_OKX";
-    guide = "docs/upcoming_platform/okx.md";
+    guide = "docs/platforms/okx.md";
     reg_names = "okx-futures, okx";
     test_filter = "okx|Okx|OKX";
 } else if venue == "kraken" {
     codepath = "kraken";
     flag = "ENABLE_KRAKEN";
     has_macro = "HAS_KRAKEN";
-    guide = "docs/upcoming_platform/kraken.md";
+    guide = "docs/platforms/kraken.md";
     reg_names = "kraken-futures, kraken";
     test_filter = "kraken|Kraken";
 } else {
@@ -193,7 +193,7 @@ inv_prompt += "Venue: " + venue + " | Guide: " + guide + " | Codepath: src/provi
 inv_prompt += shared_constraints;
 inv_prompt += "\nREQUIRED ACTIONS (use tools — do not invent):\n";
 inv_prompt += "1. Read " + guide + " fully (or enough to extract phase plan).\n";
-inv_prompt += "2. Read docs/upcoming_platform/README.md status table.\n";
+inv_prompt += "2. Read docs/platforms/README.md status table.\n";
 inv_prompt += "3. Inspect existing golden files: bitget_endpoints/auth/register/provider open(),\n";
 inv_prompt += "   binance_futures_dead_mans_switch, binance_futures_kill_switch, binance_futures_reconciler,\n";
 inv_prompt += "   cmake/Dependencies.cmake ENABLE_BITGET block, cmake/Sources.cmake bitget tests, CMakeLists options.\n";

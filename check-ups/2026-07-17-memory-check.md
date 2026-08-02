@@ -259,7 +259,7 @@ new_string:
 7. Update any suppression files only after real fixes (not to hide problems).
 
 ### Phase 6: Dokumentation & Suppression Management (falls nötig)
-- Update `core/docs/engine.md` (and internal design doc) with the new ownership contracts for the builder, pools, and callbacks.
+- Update `core/docs/internal/engine-decomposition.md` (and internal design doc) with the new ownership contracts for the builder, pools, and callbacks.
 - Add explicit "Lifetime" sections to worker headers and ObjectPool.
 - Document the MC reset contract (what gets cleared vs. what must be re-created).
 - Remove or update the historical `ENGINE_LOC_WAIVER` comment once the extraction is fully cleaned.

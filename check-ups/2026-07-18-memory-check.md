@@ -272,7 +272,7 @@ new_string:
 1. Add explicit lifetime / ownership contracts as comments at major seams (engine <-> provider callbacks, ring publish, pool acquire, builder construction, MC reset).
 2. Update test_object_pool.cpp and engine tests with non-trivial escape + late-drop + in-flight scenarios (under ASAN).
 3. If any remaining signals require suppression (after investigation), add targeted ones with TODO + link to this report.
-4. Update docs/engine.md or internal/ with "decomposition lifetime invariants" section.
+4. Update docs/internal/engine-decomposition.md or internal/ with "decomposition lifetime invariants" section.
 5. Consider adding a weekly CI job that runs the sanitizer matrix + this skill.
 
 ## Notes on the Recent CLI Stack Fix

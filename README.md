@@ -99,12 +99,12 @@ Tracked in [`docs/todos/`](docs/todos/) and governance — **do not treat as ava
 | **Phase 0** | Tiny-size mainnet futures validation — **0/15** qualifying sessions ([`reports/phase0/`](reports/phase0/)) |
 | **Risk / DMS** | Further R-*/S-* items (funding analytics, DMS flatten automation, etc.) |
 | **Venues** | Bitunix live path · further Bitget freeze expansion · Bybit/Gate **archived** (not on master) · COIN-M inverse · hedge mode |
-| **Engine** | `engine.cpp` decomposition waves ([`docs/engine.md`](docs/engine.md)) |
-| **Data** | Parquet / external API sources deferred ([`docs/data.md`](docs/data.md)) |
+| **Engine** | `engine.cpp` decomposition waves ([`docs/internal/engine-decomposition.md`](docs/internal/engine-decomposition.md)) |
+| **Data** | Parquet / external API sources deferred ([`docs/internal/data-pipeline.md`](docs/internal/data-pipeline.md)) |
 | **Ops / Go-Live** | 9-row capital gate, Prometheus drills, formal CCB size increases |
 | **Other** | Multi-symbol / cross-margin risk, richer language bindings, Solana/Drift keeper (research only) |
 
-Venue design notes: [`docs/upcoming_platform/`](docs/upcoming_platform/).
+Venue design notes: [`docs/platforms/`](docs/platforms/).
 
 ---
 
@@ -479,7 +479,7 @@ Edits need **`LIVE_SAFETY_CCB_APPROVED`**, two-person CCB, clean multi-hour `eng
 | [`docs/governance/01-prod.md`](docs/governance/01-prod.md) | Phases, Go-Live, Phase 0 ritual |
 | [`docs/todos/`](docs/todos/) | Detailed backlog |
 | [`AGENTS.md`](AGENTS.md) | Agent rules, freeze, hot path |
-| [`docs/upcoming_platform/`](docs/upcoming_platform/) | Venue status |
+| [`docs/platforms/`](docs/platforms/) | Venue status |
 | [`docs/README.md`](docs/README.md) | Full nav |
 
 ---

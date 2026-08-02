@@ -1,6 +1,6 @@
 # Bitget Futures Provider — Grok Build Implementation Guide
 
-**Ziel-Datei:** `docs/upcoming_platform/bitget.md`  
+**Ziel-Datei:** `docs/platforms/bitget.md`  
 **Workspace:** `/home/leonard/work/projects/truetest/core`  
 **Golden Path (Vorbild):** `src/providers/binance/*` — insbesondere `binance_futures_*`  
 **Stand API-Recherche:** 2026-07 (UTA v3 primär; Classic mix/v2 als Fallback-Oberfläche dokumentiert)

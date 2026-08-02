@@ -244,7 +244,7 @@ Full anti-pattern list: `docs/architecture/02-model.md`, `docs/governance/01-pro
 - **Protective SL/TP is platform-default** (`DefaultExitPolicy` + `--exit-policy`/`--sl`/`--tp`); strategies need not implement stops. Strategy `exit_intent`s refine; they are not required for basic protection.  
 - Layer edges enforced by `scripts/check-layer-deps.sh` — read failures carefully; do not `#include` “upward”.  
 - Interfaces: **`I` prefix** (e.g. `IProvider`, `IRiskCheck`).  
-- File size hygiene: flag ~800+ line files; prefer extract over sprawl (`engine.cpp` decomposition is planned — see `docs/engine.md` + skill `engine-decomposition`). Cold-path extract first; do not casually rewrite hot publish paths.
+- File size hygiene: flag ~800+ line files; prefer extract over sprawl (`engine.cpp` decomposition is planned — see `docs/internal/engine-decomposition.md` + skill `engine-decomposition`). Cold-path extract first; do not casually rewrite hot publish paths.
 
 Register new sources in **`cmake/Sources.cmake`** (no directory globs).
 
@@ -314,15 +314,18 @@ Then: `/testing` → `TESTING VERDICT: PASS` → `/check-work` → thematic comm
 
 | Topic | Doc |
 |-------|-----|
-| Index | `docs/00-INDEX.md` |
+| Index / nav | `docs/00-INDEX.md`, `docs/README.md` |
 | Prod / phases | `docs/governance/01-prod.md` |
 | Freeze PR checklist | `docs/governance/02-prerequisites.md` |
 | Todos | `docs/governance/03-todo.md`, `docs/todos/` |
 | CLI / build / MC | `docs/reference/01-instructions.md` |
+| Strategy SDK | `docs/reference/07-strategy-development.md` |
 | Performance capacities | `docs/architecture/04-performance.md` |
 | Model routing + anti-patterns | `docs/architecture/02-model.md` |
-| Engine decomp plan | `docs/engine.md` |
+| Engine decomp plan | `docs/internal/engine-decomposition.md` |
+| Data pipeline plan | `docs/internal/data-pipeline.md` |
+| Multi-venue | `docs/platforms/` |
 
 ---
 
-*Last updated: 2026-07-26 — nested core rulebook; pairs with workspace root AGENTS.md.*
+*Last updated: 2026-08-02 — docs tree paths (`internal/`, `platforms/`); pairs with workspace root AGENTS.md.*

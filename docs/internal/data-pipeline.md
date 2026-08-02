@@ -1,6 +1,6 @@
 # Data Pipeline Redesign Plan
 
-**File**: `core/docs/data.md`  
+**File**: `core/docs/internal/data-pipeline.md`  
 **Purpose**: Detailed, phased execution plan for redesigning the market-data path so storage is independent of formats, and a single **DataWrapper** façade can accept CSV, Parquet, historical APIs, and more — without weakening hot-path, layer, or live-safety invariants.  
 **Status**: **IMPLEMENTED through D-07 + D-10 core** (2026-07-31). D-08 Parquet and D-09 historical API deferred (need human dep/network approval).  
 **Scope**: `src/data/**`, `src/providers/data_bridge.h`, related sinks/parsers/transports, engine **batch iteration and streaming feed wiring** only (not full engine decomposition).  
@@ -35,7 +35,7 @@
 | `docs/architecture/02-model.md` | Anti-patterns |
 | `docs/reference/01-instructions.md` | CLI providers, MC flags |
 | `docs/reference/02-user-manual.md` | Operator-facing architecture |
-| `docs/engine.md` | Engine decomp; touch `run*` carefully |
+| `docs/internal/engine-decomposition.md` | Engine decomp; touch `run*` carefully |
 | `docs/reference/03-db.md` | QuestDB = audit, not market ingress |
 | `src/data/market_series.*`, `market_types.h`, `data_wrapper.*` | New store + façade (was data_handler/data_loader) |
 | `src/providers/data_bridge.h`, `transport.h`, `parser.h` | Existing multi-format skeleton |
@@ -45,7 +45,7 @@
 | `src/bin/main.inc`, `src/api/truetest_api.cpp` | Ownership / factory sites |
 | `scripts/check-layer-deps.sh`, `check-hotpath-json.sh` | Mandatory gates after `src/` edits |
 
-Cross-reference work items as: `core/docs/data.md#D-03` (phase / wave id).
+Cross-reference work items as: `core/docs/internal/data-pipeline.md#D-03` (phase / wave id).
 
 ---
 
@@ -431,7 +431,7 @@ Do **not** force every format through `IDataTransport::read_line`.
 
 ## 7. Phased Execution Plan
 
-Execute phases **in order**. Each phase ends with the verification gate in §9. Prefer small PRs. Reference commits as `docs/data.md#D-0N`.
+Execute phases **in order**. Each phase ends with the verification gate in §9. Prefer small PRs. Reference commits as `docs/internal/data-pipeline.md#D-0N`.
 
 ### Phase D-00 — Characterization & inventory (read-only / tests only)
 
@@ -824,7 +824,7 @@ New files → `cmake/Sources.cmake`. Optional sources wrapped in target conditio
 | W6 | D-08–D-09 | Parquet + API (optional, can split) |
 | W7 | D-10–D-11 | Timestamps + cleanup |
 
-Parallelization: D-08/D-09 can proceed after D-05 on separate branches if D-04 sink API is stable. Do not parallelize D-02 with large engine decomp waves without coordination (`docs/engine.md`).
+Parallelization: D-08/D-09 can proceed after D-05 on separate branches if D-04 sink API is stable. Do not parallelize D-02 with large engine decomp waves without coordination (`docs/internal/engine-decomposition.md`).
 
 ---
 
@@ -896,4 +896,4 @@ The redesign is **done** when:
 
 ---
 
-*Last updated: 2026-07-31 — initial redesign instructions from multi-lens data pipeline analysis. Pair with `AGENTS.md` and `docs/engine.md` when touching engine feed loops.*
+*Last updated: 2026-07-31 — initial redesign instructions from multi-lens data pipeline analysis. Pair with `AGENTS.md` and `docs/internal/engine-decomposition.md` when touching engine feed loops.*

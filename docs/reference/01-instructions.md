@@ -199,7 +199,7 @@ cmake --preset linux-release-native    # Release + NATIVE_OPT (all engines)
 
 ## 7. Providers, Data Sources, Realism Models, Orderbook (consolidated)
 
-**Providers** (`IProvider`; see also `docs/upcoming_platform/`):
+**Providers** (`IProvider`; see also `docs/platforms/`):
 - `local`: CSV OHLCV (bar) or tick-level; multi-path.
 - `binance` / `binance-futures` (`ENABLE_BINANCE`): Combined trade + depth WS, REST execution (HybridExecutor paper/shadow, signed REST + user-data WS live), L2 seeding when `--depth-stream`.
 - `bitget` / `bitget-futures` (`ENABLE_BITGET`): UTA USDT-M futures; `--demo`/`--testnet` → paptrading; depth e.g. `books5`. Ops: `docs/operations/03-bitget-demo.md`.

@@ -1,12 +1,12 @@
 # Engine God Class Decomposition — Phase 1 Design Document
 
-**Title**: Phase 1 Design: Engine Decomposition (Waves 1-5 per core/docs/engine.md)
+**Title**: Phase 1 Design: Engine Decomposition (Waves 1-5 per core/docs/internal/engine-decomposition.md)
 **Author**: Grok (systems architect, delegated build subagent)
 **Date**: 2026-07-17
 **Status**: Draft (Phase 1 output; awaiting approval before any implementation)
-**Inputs**: core/docs/engine.md (Current State After Phase 0 section, responsibility matrix, Phased Execution Plan Waves 1-5), ~/.grok/skills/engine-decomposition/SKILL.md (all non-negotiables), src/engine/engine.{h,cpp}, core/docs/governance/01-prod.md, 02-prerequisites.md, core/docs/todos/02-P1-freeze.md, core/docs/architecture/04-performance.md, extracted seams (order_audit_sink.{h,cpp}, execution_router.{h,cpp}, instrument_spec_cache.{h,cpp}, checkpoint.{h,cpp}).
+**Inputs**: core/docs/internal/engine-decomposition.md (Current State After Phase 0 section, responsibility matrix, Phased Execution Plan Waves 1-5), ~/.grok/skills/engine-decomposition/SKILL.md (all non-negotiables), src/engine/engine.{h,cpp}, core/docs/governance/01-prod.md, 02-prerequisites.md, core/docs/todos/02-P1-freeze.md, core/docs/architecture/04-performance.md, extracted seams (order_audit_sink.{h,cpp}, execution_router.{h,cpp}, instrument_spec_cache.{h,cpp}, checkpoint.{h,cpp}).
 
-**Related**: Addresses core/docs/engine.md#E-10 to E-14 (Phase 1: Design First + Executable PR Plan). Will be referenced to update engine.md with DAG.
+**Related**: Addresses core/docs/internal/engine-decomposition.md#E-10 to E-14 (Phase 1: Design First + Executable PR Plan). Will be referenced to update engine-decomposition.md with DAG.
 
 ---
 
@@ -14,7 +14,7 @@
 
 The `engine` class (`src/engine/engine.h:82`, `src/engine/engine.cpp:4383` LOC / `engine.h:492` LOC as of Phase 0 baseline) is a god class owning hot event-loop dispatch (`publish_event`, `process_order` canonical 8-step sequence), object pools, four duplicated `run*()` skeletons, cold dashboard snapshot construction with caches, pending order scheduling (priority_queue + vector stops), worker/ring lifecycle, QuestDB activation, safety flags, attribution, exits integration, and MC reuse via `reset_for_next_trial`.
 
-Phase 1 of the Engine Decomposition Plan (following the exact Waves 1-5 in core/docs/engine.md) proposes extracting **cold paths first** into focused collaborators while **preserving identical bit-for-bit behavior** for backtest/shadow/live (all `TT_TARGET` / `ENABLE_*` combos), MC object reuse, golden regressions, hot-path alloc tests, and engine integration tests. Hot path remains zero-alloc, no virtuals, lock-free SPSC rings, `acquire_pooled` + `publish_event` + `forbid_runtime_grow` discipline unchanged forever.
+Phase 1 of the Engine Decomposition Plan (following the exact Waves 1-5 in core/docs/internal/engine-decomposition.md) proposes extracting **cold paths first** into focused collaborators while **preserving identical bit-for-bit behavior** for backtest/shadow/live (all `TT_TARGET` / `ENABLE_*` combos), MC object reuse, golden regressions, hot-path alloc tests, and engine integration tests. Hot path remains zero-alloc, no virtuals, lock-free SPSC rings, `acquire_pooled` + `publish_event` + `forbid_runtime_grow` discipline unchanged forever.
 
 **Proposed target after all waves**:
 - `engine.cpp` <1800 LOC (stretch 1200-1500).
@@ -30,25 +30,25 @@ Net complexity reduction via deletion of duplicated run skeletons, scattered cac
 
 **Current state (post-Phase 0, 2026-07-17)**:
 - Baseline: `wc -l` reports 4383/492 (confirmed via tool).
-- Already-extracted good seams reduce some bloat (see responsibility matrix in engine.md:409).
-- Remaining bloat sources (engine.md:34):
+- Already-extracted good seams reduce some bloat (see responsibility matrix in engine-decomposition.md:409).
+- Remaining bloat sources (engine-decomposition.md:34):
   - Four `run*()` methods (`run()` ~line 3758, `run_tick_data()` ~4018, `run_replay()` ~4219, `run_streaming` overloads ~3284/3436/3575) with near-identical skeletons: pending clear, questdb_begin, start_workers, pin, event loop + pending drain + check_pending_stops + dispatch + teardown (stop_workers + questdb_end).
   - `build_dashboard_view` (~561) + `refresh_dashboard_view_if_due` (~486), `cache_*` (~510-560), `open_orders_cache_` (unordered_map<uint64_t, open_order_cache_entry> at engine.h:210), `recent_fills_cache_` (deque), memory_cache_ (~199), snapshot/request APIs. Largest cold method; used by TUI render thread (via `snapshot_dashboard` at engine.h:469) and web poller.
   - Pending scheduling: `pending_orders_` (priority_queue<pending_entry, ..., decltype(&engine::pending_cmp)> at engine.h:310), `pending_stops_` (vector at 294), `day_order_ids_`, `order_seq_`, `check_pending_stops` (~2615), registration in `route_order`.
   - Worker/ring: `start_workers()` (~1279), `stop_workers()` (~1492), `make_logging_worker()`, all `* _ring_`, `* _worker_` unique_ptrs (engine.h:350), drop counters, pinning.
   - Scattered: `stamp_fill_attribution`, `dispatch_*`, `notify_position_change_all`, `write_adapter_diagnostics`, `unwind_positions`, meta lookups (some already partially routed via router_).
-- Hot vs cold classification (engine.md:381): `acquire_pooled`/`publish_event`/`process_order`/`route_order`/`evaluate_exits`/`trigger_halt` sacred. Dashboard + run duplication + workers + pending = high-LOC cold targets.
-- Call sites (engine.md:429): src/simulation/monte_carlo_controller.cpp (reset + run variants), tests (test_hotpath_*, test_golden_regression, test_engine_*, test_monte_carlo_controller), src/api/truetest_api.cpp, providers (event_publisher, halt_callback, funding_factory via acquire_pooled), TUI/web (snapshot + request_refresh + ring getters), exit_manager callbacks.
+- Hot vs cold classification (engine-decomposition.md:381): `acquire_pooled`/`publish_event`/`process_order`/`route_order`/`evaluate_exits`/`trigger_halt` sacred. Dashboard + run duplication + workers + pending = high-LOC cold targets.
+- Call sites (engine-decomposition.md:429): src/simulation/monte_carlo_controller.cpp (reset + run variants), tests (test_hotpath_*, test_golden_regression, test_engine_*, test_monte_carlo_controller), src/api/truetest_api.cpp, providers (event_publisher, halt_callback, funding_factory via acquire_pooled), TUI/web (snapshot + request_refresh + ring getters), exit_manager callbacks.
 - Pain: Continued direct growth risks spaghetti. Duplication defeats determinism/maintainability. Header pollution exposes cold state.
 
-**Why now**: Phase 0 complete + signed off (engine.md:450). Follows engine-decomposition skill mandates. Aligns with P1 freeze (docs/todos/02-P1-freeze.md#P1-02 references engine.md plan), 01-prod.md (LIVE-SAFETY SURFACE), 02-prerequisites.md, architecture/04-performance.md (zero-alloc rules).
+**Why now**: Phase 0 complete + signed off (engine-decomposition.md:450). Follows engine-decomposition skill mandates. Aligns with P1 freeze (docs/todos/02-P1-freeze.md#P1-02 references engine-decomposition.md plan), 01-prod.md (LIVE-SAFETY SURFACE), 02-prerequisites.md, architecture/04-performance.md (zero-alloc rules).
 
 ---
 
 ## Goals & Non-Goals
 
-**Goals (non-negotiable, per SKILL.md + engine.md)**:
-- **Net complexity reduction**: Delete duplicated skeletons, concepts, branches (e.g. per-mode run setup), not just move. Target line counts per engine.md table.
+**Goals (non-negotiable, per SKILL.md + engine-decomposition.md)**:
+- **Net complexity reduction**: Delete duplicated skeletons, concepts, branches (e.g. per-mode run setup), not just move. Target line counts per engine-decomposition.md table.
 - **Identical functionality**: Bit-for-bit for backtest/shadow/live + all ENABLE combos + MC `reset_for_next_trial` reuse + golden + alloc matrix + integration tests + real runs.
 - **Zero-alloc hot path discipline forever**: Preserve exactly `prewarm_object_pools`, `drain_object_pool_returns`, `acquire_pooled<T>`, `forbid_runtime_grow`, all `*_pool_`, `publish_event`, rings, no heap/string/json/vector growth on event loop. No new virtuals on hot paths.
 - **Contract preservation**: `run*()`, `reset_for_next_trial(uint64_t)`, `snapshot_dashboard(...)`, `trigger_halt(string_view)`, ring getters (`get_*_ring`), `get_*_worker`, operator controls (`set_pause_all`, `request_flatten`, `cancel_order` etc.), `get_halt_flag`, public analytics/portfolio access remain behaviorally identical.
@@ -70,7 +70,7 @@ Net complexity reduction via deletion of duplicated run skeletons, scattered cac
 
 ## Proposed Design
 
-Follow **exact phased plan** in core/docs/engine.md (Phases 0 done, then Phase 2 prep, Waves 1-5). Cold-first order: dashboard (highest leverage cold, ~350-500 LOC) before run duplication or pending (which have hot-path call sites).
+Follow **exact phased plan** in core/docs/internal/engine-decomposition.md (Phases 0 done, then Phase 2 prep, Waves 1-5). Cold-first order: dashboard (highest leverage cold, ~350-500 LOC) before run duplication or pending (which have hot-path call sites).
 
 **Target layout after Waves** (before/after responsibilities):
 
@@ -111,7 +111,7 @@ graph TD
 **Per-wave exact moves** (cited from current code; see engine.h:189 for dashboard state block, engine.cpp:3758 for run skeletons):
 
 **Phase 2 (Prep, minimal low-risk)**:
-- Update top-of-file LIVE-SAFETY comments + all strategic method comments (publish_event, process_order canonical seq, reset, run*) to reference core/docs/engine.md + engine-decomposition skill.
+- Update top-of-file LIVE-SAFETY comments + all strategic method comments (publish_event, process_order canonical seq, reset, run*) to reference core/docs/internal/engine-decomposition.md + engine-decomposition skill.
 - Ensure seams complete (already via audit_sink_/router_ per Phase 0 grep).
 - Add any thin forwarding accessors if needed for future (e.g. `get_portfolio_for_snapshot()` const ref — but prefer passing at construction of builder).
 - No net LOC reduction expected.
@@ -334,7 +334,7 @@ None for persisted data or public schemas. Internal:
 
 ## Rollout Plan
 
-**Isolation (mandatory per SKILL + engine.md)**:
+**Isolation (mandatory per SKILL + engine-decomposition.md)**:
 - Each wave in dedicated `git worktree` (e.g. `git worktree add ../worktree-wave1 engine-decomp-wave1`).
 - Use `spawn_subagent` (capability_mode limited to read-write on extraction files + engine.{h,cpp} only).
 - Fresh reviewer subagent (not involved in design/impl) + cross-review with quality/performance/zero-alloc-perf-auditor/check-work/safety/phase-ritual-enforcer before declaring wave done.
@@ -380,7 +380,7 @@ All paths assume execution from the git root (the directory containing src/, scr
 
 ## References
 
-- core/docs/engine.md (full plan, Phase 0 matrix, Waves, targets)
+- core/docs/internal/engine-decomposition.md (full plan, Phase 0 matrix, Waves, targets)
 - ~/.grok/skills/engine-decomposition/SKILL.md (invariants, workflow, ritual, protected paths)
 - core/docs/governance/01-prod.md, 02-prerequisites.md, core/docs/todos/02-P1-freeze.md
 - core/docs/architecture/04-performance.md (zero-alloc, rings, pools)
@@ -389,17 +389,17 @@ All paths assume execution from the git root (the directory containing src/, scr
 - Call sites: src/simulation/monte_carlo_controller.cpp, tests/test_*.cpp (esp. hotpath, golden, engine, monte_carlo), src/api/truetest_api.cpp, ui/ + web/ (snapshot)
 - Prior art: ExecutionRouter (h:30 ctor refs), InstrumentSpecCache (thin cold cache)
 
-Paths are given from the core git root (the directory containing src/, scripts/, docs/) unless otherwise noted (e.g. "core/docs/engine.md" when referring to the plan file from outside the git tree). All command examples assume `cwd` at that git root.
+Paths are given from the core git root (the directory containing src/, scripts/, docs/) unless otherwise noted (e.g. "core/docs/internal/engine-decomposition.md" when referring to the plan file from outside the git tree). All command examples assume `cwd` at that git root.
 
 ---
 
 ## PR / Wave DAG (Executable by execute-plan skill)
 
-This is the parseable, incremental, reviewable, mergeable plan. Numbered. Dependencies explicit. Verification per step. All steps reference core/docs/engine.md#E-##. Use worktree + spawn_subagent + fresh reviewer. No engine.{h,cpp} source change without LIVE_SAFETY_CCB_APPROVED + gates. (Paths in this section are from the core git root containing src/ and scripts/.)
+This is the parseable, incremental, reviewable, mergeable plan. Numbered. Dependencies explicit. Verification per step. All steps reference core/docs/internal/engine-decomposition.md#E-##. Use worktree + spawn_subagent + fresh reviewer. No engine.{h,cpp} source change without LIVE_SAFETY_CCB_APPROVED + gates. (Paths in this section are from the core git root containing src/ and scripts/.)
 
-1. **Wave/Prep 0 (Phase 2 Prep)**: Files: core/docs/engine.md (update pointers), src/engine/engine.{h,cpp} (comments only). Dependencies: none (Phase 0 done). Description: Update LIVE-SAFETY + method comments referencing plan + skill. Strengthen seam docs. Run full non-build gates. Verification: ./scripts/check-live-safety-freeze.sh passes (token present in commit message), ./scripts/check-layer-deps.sh, no *untokened* changes to engine sources, Phase 2 exit note in engine.md. (Minimal diff; tokened comment edits are allowed/expected per Phase 2 and LIVE_SAFETY rules.)
+1. **Wave/Prep 0 (Phase 2 Prep)**: Files: core/docs/internal/engine-decomposition.md (update pointers), src/engine/engine.{h,cpp} (comments only). Dependencies: none (Phase 0 done). Description: Update LIVE-SAFETY + method comments referencing plan + skill. Strengthen seam docs. Run full non-build gates. Verification: ./scripts/check-live-safety-freeze.sh passes (token present in commit message), ./scripts/check-layer-deps.sh, no *untokened* changes to engine sources, Phase 2 exit note in engine-decomposition.md. (Minimal diff; tokened comment edits are allowed/expected per Phase 2 and LIVE_SAFETY rules.)
 
-2. **Wave 1 (Dashboard)**: Files: src/engine/dashboard_snapshot_builder.{h,cpp} (new), src/engine/engine.{h,cpp} (state + method moves + delegation + includes), update callers in src/ui/..., src/web/..., tests/... (if any direct; expect none). Dependencies: 1. Description: Exact E-30..E-36 moves (dashboard_view_* + caches + build/refresh/cache_* + snapshot/request). Builder owns build logic + state. Delegate from publish_event + public APIs. Net ~400 LOC reduction. Verification: gate script + layer-deps + ctest Hotpath/Engine/snapshot/Golden + MC reuse (5 trials) + snapshot equivalence compare (before/after artifact) + one backtest + wc/git-diff-stat. Reference: engine.md#E-30. (Cold, safe first extraction.)
+2. **Wave 1 (Dashboard)**: Files: src/engine/dashboard_snapshot_builder.{h,cpp} (new), src/engine/engine.{h,cpp} (state + method moves + delegation + includes), update callers in src/ui/..., src/web/..., tests/... (if any direct; expect none). Dependencies: 1. Description: Exact E-30..E-36 moves (dashboard_view_* + caches + build/refresh/cache_* + snapshot/request). Builder owns build logic + state. Delegate from publish_event + public APIs. Net ~400 LOC reduction. Verification: gate script + layer-deps + ctest Hotpath/Engine/snapshot/Golden + MC reuse (5 trials) + snapshot equivalence compare (before/after artifact) + one backtest + wc/git-diff-stat. Reference: engine-decomposition.md#E-30. (Cold, safe first extraction.)
 
 3. **Wave 2 (Run Refactor)**: Files: src/engine/engine.{h,cpp} (extract skeleton to private run_event_loop or thin coordinator), run* methods refactored. (Possibly small event_loop_coordinator.{h,cpp} if justified.) Dependencies: 2 (or 1 if dashboard independent). Description: E-40..E-44. Collapse 4 skeletons; mode-specifics remain thin. Dupe deletion primary. Verification: all run variants (bar/tick/replay/streaming*) exercised in golden + engine_integration + MC reuse campaign + identical output compare (reports/event-logs/portfolio) + hotpath alloc matrix + alloc tests. No hot path changes.
 
@@ -407,11 +407,11 @@ This is the parseable, incremental, reviewable, mergeable plan. Numbered. Depend
 
 5. **Wave 4 (Worker Orchestrator)**: Files: src/engine/worker_orchestrator.{h,cpp} (new), src/engine/engine.{h,cpp} (move rings/workers/threads/drops/start/stop/make/pin + getters forward). Dependencies: 2 (workers started in run). Description: E-60..E-63. Centralize lifecycle + pinning + drops. Public getters preserved. Verification: threading_correctness test + worker drop/hwm identical + shutdown/MC dtor paths + full test matrix.
 
-6. **Wave 5 (Polish + Shrink)**: Files: src/engine/engine.{h,cpp} (move remaining helpers: stamp_*, dispatch_*, notify_*, unwind_*, lookups; header forward decls + shrink), docs updates (engine.md DAG, reference, todos/02-P1-freeze.md, architecture), cmake/Sources.cmake (LOC guard). Dependencies: 1-4. Description: E-70..E-75. Net final reduction. Header hygiene. Verification: final wc targets + full ritual (build matrix debug/release/sanitizers, entire ctest, hotpath/pool tests, check-work, performance+zero-alloc-auditor, quality, safety review, git diff --stat net reduction + no behavior diff, /code-review strict, ≥1 clean backtest + ≥1 engine_shadow, two sign-offs). Update engine.md with post-completion notes.
+6. **Wave 5 (Polish + Shrink)**: Files: src/engine/engine.{h,cpp} (move remaining helpers: stamp_*, dispatch_*, notify_*, unwind_*, lookups; header forward decls + shrink), docs updates (engine-decomposition.md DAG, reference, todos/02-P1-freeze.md, architecture), cmake/Sources.cmake (LOC guard). Dependencies: 1-4. Description: E-70..E-75. Net final reduction. Header hygiene. Verification: final wc targets + full ritual (build matrix debug/release/sanitizers, entire ctest, hotpath/pool tests, check-work, performance+zero-alloc-auditor, quality, safety review, git diff --stat net reduction + no behavior diff, /code-review strict, ≥1 clean backtest + ≥1 engine_shadow, two sign-offs). Update engine-decomposition.md with post-completion notes.
 
 **DAG edges**: Prep → Wave1 (parallel possible with 2 but sequential recommended). Waves 2/3/4 have cross (run uses scheduler + orchestrator) but can be ordered 2 then 3 then 4. Wave5 last. Each produces mergeable PR with token + evidence.
 
-**Post-DAG**: Update core/docs/engine.md "PR / Execution Strategy" + line targets table with actuals. Enable LOC guard.
+**Post-DAG**: Update core/docs/internal/engine-decomposition.md "PR / Execution Strategy" + line targets table with actuals. Enable LOC guard.
 
 This design satisfies engine-decomposition: net reduction via dupe/concept deletion, cold-first, hot path untouched (zero allocs/virtuals), identical contracts + MC, single IOrderAuditSink seam, full governance for LIVE-SAFETY, verification gates enabling ritual, worktree+subagent+reviewer isolation.
 

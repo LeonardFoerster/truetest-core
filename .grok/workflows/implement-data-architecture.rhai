@@ -1,7 +1,7 @@
 let meta = #{
     name: "implement-data-architecture",
-    description: "Execute docs/data.md phases D-00..D-11: MarketSeries, IMarketSink/Source, DataWrapper",
-    when_to_use: "When implementing the market-data pipeline redesign from docs/data.md",
+    description: "Execute docs/internal/data-pipeline.md phases D-00..D-11: MarketSeries, IMarketSink/Source, DataWrapper",
+    when_to_use: "When implementing the market-data pipeline redesign from docs/internal/data-pipeline.md",
     phases: [
         #{ title: "Survey", detail: "D-00 inventory + clean-architecture diagnosis" },
         #{ title: "Foundation", detail: "D-01 domain types + IMarketSink + series store" },
@@ -60,7 +60,7 @@ phase("Survey");
 // ═══════════════════════════════════════════════════════════════════════════
 
 let common = "";
-common += "Workspace: TrueTest core C++23 trading engine. Plan: docs/data.md. ";
+common += "Workspace: TrueTest core C++23 trading engine. Plan: docs/internal/data-pipeline.md. ";
 common += "AGENTS.md rules: zero-alloc hot path, layer deps (data must not include engine/providers venue), ";
 common += "engine.cpp is LIVE-SAFETY freeze surface — minimal edits only. ";
 common += "Register sources in cmake/Sources.cmake. After src/ edits run: ";
@@ -176,7 +176,7 @@ h1 += "D-07: DELETE BinaryCacheSource and WebSocketDataSource (files + cmake Sou
 h1 += "Confirm no callers via grep. ";
 h1 += "D-10: sort_bars_by_time primary; engine uses stored ts; multi-symbol secondary key. ";
 if skip_parquet {
-    h1 += "D-08 Parquet: DO NOT add Arrow dependency — document deferred in docs/data.md Open Decisions. ";
+    h1 += "D-08 Parquet: DO NOT add Arrow dependency — document deferred in docs/internal/data-pipeline.md Open Decisions. ";
 }
 if skip_http {
     h1 += "D-09 Historical API: DO NOT add network client — document deferred. ";
@@ -195,7 +195,7 @@ phase("Verify");
 // ═══════════════════════════════════════════════════════════════════════════
 
 let v1 = common;
-v1 += "D-11 CLEANUP + VERIFY. Update docs/data.md status lines for completed phases. ";
+v1 += "D-11 CLEANUP + VERIFY. Update docs/internal/data-pipeline.md status lines for completed phases. ";
 v1 += "Short pointer in docs if needed. Ensure cmake lists only live TUs. ";
 v1 += "Run: ./scripts/check-hotpath-json.sh ; ./scripts/check-layer-deps.sh ; ./scripts/check-live-safety-freeze.sh ; ";
 v1 += "cmake --build build -j (or configure with linux-tests if needed); ctest --test-dir build --output-on-failure ";
@@ -215,7 +215,7 @@ let vjobs = [];
 let vp = common;
 vp += "ADVERSARIAL VERIFY of data pipeline redesign. Grep for remaining public db_data_ writes outside market_series, ";
 vp += "IDataSource without shim, load_from_csv on store, BinaryCache/WebSocket leftovers, layer violations data→engine. ";
-vp += "Read key headers. pass=true only if architecture goals 1-7 from docs/data.md §1 substantially met for non-deferred phases. ";
+vp += "Read key headers. pass=true only if architecture goals 1-7 from docs/internal/data-pipeline.md §1 substantially met for non-deferred phases. ";
 vp += "List blockers concretely.";
 vjobs.push(#{ prompt: vp, label: "adv-arch", capability_mode: "read-only", agent_type: "explore", output_schema: verdict_schema });
 
@@ -228,7 +228,7 @@ let verdicts = parallel(vjobs);
 
 let report = "";
 report += "# Data Architecture Implementation Report\n\n";
-report += "Plan: docs/data.md\n\n";
+report += "Plan: docs/internal/data-pipeline.md\n\n";
 if foundation != () && foundation.success { report += "## Foundation\n" + foundation.output.summary + "\n\n"; }
 if consumers != () && consumers.success { report += "## Consumers\n" + consumers.output.summary + "\n\n"; }
 if sources != () && sources.success { report += "## Sources\n" + sources.output.summary + "\n\n"; }

@@ -28,4 +28,4 @@
 - Root: `archive/`, `decisions/`, `upcoming/`, `PHASE0_COMPLETION_PLAN.md`, Coiled_Spring...Guide.md
 - Keep lists in docs/README + instructions in sync with realized state.
 
-**Last updated**: 2026-08-02 (cmake-update light hygiene: buildPresets + venue/docs path contract; prior: 2026-07-06 SOP path reconciled).
+**Last updated**: 2026-08-02 (docs tree refactor: `engine.md`/`data.md` → `docs/internal/`; `upcoming_platform/` → `platforms/`; `upcoming_skills/` → `skills/`; README primary nav + 00-INDEX linear order. Prior: cmake-update hygiene + SOP path reconcile).

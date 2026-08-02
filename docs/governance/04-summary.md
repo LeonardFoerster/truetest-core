@@ -40,7 +40,7 @@ Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) are produced 
 - **`local`** (always available): OHLCV bar CSV and tick-level CSV.
 - **`binance`** / **`binance-futures`**: Binance Spot + USDT-M Futures (trade, kline, depth20, combined streams). Full REST + WebSocket execution, backfill, recording/replay. Requires `ENABLE_BINANCE`.
 - **`bitget`** / **`bitget-futures`**: Bitget UTA USDT-M futures (trade, kline, books depth). Requires `ENABLE_BITGET`. Demo/paptrading via `--demo`/`--testnet`. See `docs/operations/03-bitget-demo.md`.
-- **`bitunix`** / **`bitunix-futures`**: Bitunix futures MD + paper/shadow (Phase 0–1; live order routing refused). Requires `ENABLE_BITUNIX`. See `docs/upcoming_platform/bitunix.md`.
+- **`bitunix`** / **`bitunix-futures`**: Bitunix futures MD + paper/shadow (Phase 0–1; live order routing refused). Requires `ENABLE_BITUNIX`. See `docs/platforms/bitunix.md`.
 - **`synthetic`** / **`montecarlo`**: On-demand GBM path generation (standalone or Monte Carlo campaigns). Configurable `mu`, `sigma`, steps, initial price.
 - **Binary replay**: `--replay` from zstd-compressed event logs (deterministic, with time slicing).
 - **Generic WebSocket** (opt-in `ENABLE_LIVE_DATA`).

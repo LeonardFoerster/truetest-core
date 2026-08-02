@@ -2,7 +2,7 @@
 
 **Status**: Active operator SOP for Bitget UTA futures (Phases 0–4). Demo drills only — **not** mainnet readiness.
 
-**Authoritative gates**: `docs/governance/01-prod.md`, root/core `AGENTS.md` safety red lines, plan `docs/upcoming_platform/bitget.md` §12–§14.
+**Authoritative gates**: `docs/governance/01-prod.md`, root/core `AGENTS.md` safety red lines, plan `docs/platforms/bitget.md` §12–§14.
 
 **Last updated**: 2026-07-30 (Phase 4: backfill, brackets, advisories, funding account channel).
 
@@ -285,5 +285,5 @@ grep -i "POSITION-SNAPSHOT\|funding\|drift\|reconcile\|halt\|kill\|DMS\|Bitget" 
 
 - `docs/operations/01-futures-phase0-operator-sop.md` — Binance Phase 0 printable SOP
 - `docs/operations/02-futures-testnet.md` — Binance testnet drills
-- `docs/upcoming_platform/bitget.md` — implementation plan (§12 examples, §14 DoD)
+- `docs/platforms/bitget.md` — implementation plan (§12 examples, §14 DoD)
 - `src/providers/bitget/` — provider surface (UTA only)
