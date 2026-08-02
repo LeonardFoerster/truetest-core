@@ -104,6 +104,22 @@
       }
     },
     {
+      "name": "linux-providers-questdb",
+      "displayName": "Linux + All Venues + QuestDB + Tests",
+      "description": "Binance + Bitget + Bitunix + QuestDB + tests (ops-style full provider matrix)",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_BINANCE": "ON",
+        "ENABLE_BITGET": "ON",
+        "ENABLE_BITUNIX": "ON",
+        "ENABLE_QUESTDB": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
       "name": "linux-web",
       "displayName": "Linux + Web UI + Tests",
       "description": "Embedded web server (civetweb) + tests. Requires npm for web_assets target.",
@@ -160,8 +176,8 @@
     },
     {
       "name": "linux-release-native",
-      "displayName": "Linux Release + Native Opt (live tuning)",
-      "description": "Release with -march=native etc. (affects all three engines)",
+      "displayName": "Linux Release + Native Opt (all engines)",
+      "description": "Release with -march=native etc. (affects all three engines when ENABLE_NATIVE_OPT=ON)",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
       "generator": "Unix Makefiles",
       "binaryDir": "${sourceDir}/out/build/${presetName}",
@@ -170,5 +186,21 @@
         "ENABLE_NATIVE_OPT": "ON"
       }
     }
+  ],
+  "buildPresets": [
+    { "name": "windows-ninja", "configurePreset": "windows-ninja" },
+    { "name": "windows-vs-2022", "configurePreset": "windows-vs-2022" },
+    { "name": "linux-default", "configurePreset": "linux-default" },
+    { "name": "linux-tests", "configurePreset": "linux-tests" },
+    { "name": "linux-binance-questdb", "configurePreset": "linux-binance-questdb" },
+    { "name": "linux-bitget", "configurePreset": "linux-bitget" },
+    { "name": "linux-bitunix", "configurePreset": "linux-bitunix" },
+    { "name": "linux-venues", "configurePreset": "linux-venues" },
+    { "name": "linux-providers-questdb", "configurePreset": "linux-providers-questdb" },
+    { "name": "linux-web", "configurePreset": "linux-web" },
+    { "name": "linux-asan", "configurePreset": "linux-asan" },
+    { "name": "linux-tsan", "configurePreset": "linux-tsan" },
+    { "name": "linux-benchmarks", "configurePreset": "linux-benchmarks" },
+    { "name": "linux-release-native", "configurePreset": "linux-release-native" }
   ]
 }

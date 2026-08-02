@@ -5,7 +5,8 @@
 #
 # Public surface:
 #   tt_apply_common_flags(<target>)      # warnings + debug defines + sanitizers
-#   tt_apply_live_flags(<target>)        # -march=native etc. (only the live binary)
+#   tt_apply_live_flags(<target>)        # -march=native etc. when ENABLE_NATIVE_OPT
+#                                        # (applied to all three engines from root)
 #
 # Global behaviour applied on include:
 #   * CMAKE_CXX_STANDARD = 23 (REQUIRED)
@@ -89,9 +90,10 @@ function(tt_apply_common_flags target)
 endfunction()
 
 # ── tt_apply_live_flags(target) ─────────────────────────────────────────────
-# Release-build microarchitecture tuning applied ONLY to engine_live (or any
-# binary that needs maximum throughput). Backtest and shadow binaries skip
-# these so their builds remain portable across CI hardware.
+# Release-build microarchitecture tuning when ENABLE_NATIVE_OPT is ON.
+# Root CMakeLists applies this to engine_backtest, engine_shadow, and
+# engine_live alike (operators who opt in want it across the board).
+# CI and portable builds keep ENABLE_NATIVE_OPT=OFF.
 function(tt_apply_live_flags target)
     if(NOT ENABLE_NATIVE_OPT OR MSVC)
         return()

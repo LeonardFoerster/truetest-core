@@ -14,8 +14,8 @@ option(ENABLE_WEB        "Build with embedded web UI server (civetweb)"         
 option(ENABLE_QUESTDB    "Build with QuestDB persistence backend"                     OFF)
 option(ENABLE_TSAN       "Enable ThreadSanitizer"                                     OFF)
 option(ENABLE_ASAN       "Enable AddressSanitizer (mutually exclusive with TSAN)"     OFF)
-option(ENABLE_UBSAN      "Enable UndefinedBehaviorSanitizer (mutex with TSAN)"        OFF)
-option(ENABLE_NATIVE_OPT "Enable -march=native + unroll/omit-fp on engine_live only"  OFF)
+option(ENABLE_UBSAN      "Enable UndefinedBehaviorSanitizer (mutually exclusive with TSAN)" OFF)
+option(ENABLE_NATIVE_OPT "Enable -march=native + unroll/omit-fp on all three engines (Release)" OFF)
 option(BUILD_SHARED_LIB  "Build libtruetest shared library with C API for embedding"  OFF)
 option(BUILD_TESTS       "Build unit tests"                                           OFF)
 option(ENABLE_BENCHMARKS "Build performance benchmarks (Google Benchmark)"            OFF)
@@ -63,6 +63,10 @@ configure_file(
 # Source list lives in cmake/Sources.cmake (ENGINE_CORE_SOURCES).
 # This keeps the one obvious registration point for core code.
 add_library(engine_core OBJECT ${ENGINE_CORE_SOURCES})
+# PIC always on so BUILD_SHARED_LIB can link engine_core objects into
+# libtruetest.so without R_X86_64_PC32 failures. Static engine_* binaries
+# are unaffected (PIC objects link fine into executables).
+set_target_properties(engine_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(engine_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${CMAKE_BINARY_DIR}/generated")
