@@ -17,7 +17,7 @@
 // signatures using bare names. These mirror the nested structs currently
 // private in engine (hoisting / dedup happens in later integration PRs).
 //
-// See core/docs/engine.md + engine-decomposition skill for router extraction history
+// See core/docs/internal/engine-decomposition.md + engine-decomposition skill for router extraction history
 // and Phase 2 seam completeness (E-21): all adapter decisions go through this.
 struct pending_cancel_meta
 {

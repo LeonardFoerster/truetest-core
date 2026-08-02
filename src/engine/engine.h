@@ -184,7 +184,7 @@ private:
     void maybe_questdb_tick();
 
     // New seams from engine-decomposition (PR-03 wiring).
-    // See core/docs/engine.md Phase 2 (E-20/E-21) + ~/.grok/skills/engine-decomposition/SKILL.md.
+    // See core/docs/internal/engine-decomposition.md Phase 2 (E-20/E-21) + ~/.grok/skills/engine-decomposition/SKILL.md.
     // - audit_sink_: single seam for *all* order/fill/reject/cancel/amend/funding/event recording.
     //   Engine calls ONLY record_* methods. No questdb_store_ inspection for decisions.
     // - router_: adapter resolution, submit/poll_fills, L2 forwarding, advance.
@@ -193,7 +193,7 @@ private:
     std::unique_ptr<ExecutionRouter> router_;
 
     // Dashboard logic extracted to cold collaborator (Wave 1).
-    // See core/docs/engine.md (E-30..) + engine-decomposition skill.
+    // See core/docs/internal/engine-decomposition.md (E-30..) + engine-decomposition skill.
     // Engine delegates public snapshot API and the refresh tick from publish_event.
     // Cache mutations from hot paths (fills, orders) now go through the builder.
     std::unique_ptr<DashboardSnapshotBuilder> dashboard_builder_;
@@ -329,7 +329,7 @@ private:
     std::vector<std::shared_ptr<order_event>> pending_stops_;
 
     // Pending order scheduling state.
-    // Planned extraction Wave 3 (PendingOrderScheduler) per core/docs/engine.md#E-50
+    // Planned extraction Wave 3 (PendingOrderScheduler) per core/docs/internal/engine-decomposition.md#E-50
     // + engine-decomposition skill. Must preserve exact determinism for MC/golden.
     struct pending_entry
     {
@@ -409,7 +409,7 @@ private:
     std::unique_ptr<MarketMakerWorker> mm_worker_;
 
     // Worker/ring lifecycle state.
-    // Planned extraction Wave 4 (WorkerOrchestrator) per core/docs/engine.md#E-60
+    // Planned extraction Wave 4 (WorkerOrchestrator) per core/docs/internal/engine-decomposition.md#E-60
     // + engine-decomposition skill. Keep public getters for compat.
     std::mutex switch_mu_;
     std::string pending_symbol_;
@@ -431,7 +431,7 @@ private:
     std::unique_ptr<LoggingWorker> make_logging_worker();
 
     // Wave 2 helpers: common skeleton for run* methods (E-40..E-44)
-    // See core/docs/engine.md + engine-decomposition skill.
+    // See core/docs/internal/engine-decomposition.md + engine-decomposition skill.
     // Extracted as private methods first (minimal surface on frozen file).
     // Later waves will delegate pending (W3), workers (W4).
     void clear_pending_state();

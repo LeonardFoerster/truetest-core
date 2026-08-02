@@ -1,6 +1,6 @@
 #include "order_audit_sink.h"
 
-// Implementation of IOrderAuditSink seam (see core/docs/engine.md Phase 2 E-21 + engine-decomposition skill).
+// Implementation of IOrderAuditSink seam (see core/docs/internal/engine-decomposition.md Phase 2 E-21 + engine-decomposition skill).
 // Engine never bypasses this for recording.
 
 #ifdef HAS_QUESTDB

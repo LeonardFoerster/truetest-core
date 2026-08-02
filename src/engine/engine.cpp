@@ -38,7 +38,7 @@
 // *kill_switch*, *dead_mans_switch*, *reconciler* under
 // providers/binance/, risk/*, ExecutionBridge, live_safety.h
 //
-// Engine decomposition (see core/docs/engine.md + ~/.grok/skills/engine-decomposition/SKILL.md):
+// Engine decomposition (see core/docs/internal/engine-decomposition.md + ~/.grok/skills/engine-decomposition/SKILL.md):
 // Phase 2 prep in progress. Cold-path extractions (dashboard, scheduler, workers, run skeleton)
 // planned in subsequent waves. All changes must preserve zero-alloc hot path,
 // identical behavior for MC reuse / backtest / shadow / live, and single
@@ -241,7 +241,7 @@ engine::engine(std::shared_ptr<data_handler> dh,
     }
 
     // Wire new seams (PR-03, behind existing activation, minimal).
-    // See core/docs/engine.md Phase 2 (E-21) + engine-decomposition skill:
+    // See core/docs/internal/engine-decomposition.md Phase 2 (E-21) + engine-decomposition skill:
     // All recording MUST go exclusively through audit_sink_ (IOrderAuditSink).
     // No raw questdb decision sites for data capture. Activation only here.
     // Router owns adapter resolution, submit/poll, L2, advance. No ad-hoc bypass.
@@ -253,7 +253,7 @@ engine::engine(std::shared_ptr<data_handler> dh,
 #endif
 
     // Router wiring (adapters map passed by ref so resolve populates the original execution_adapters_ for iterator compat).
-    // See core/docs/engine.md (execution router extraction) and engine-decomposition/SKILL.md.
+    // See core/docs/internal/engine-decomposition.md (execution router extraction) and engine-decomposition/SKILL.md.
     router_ = std::make_unique<ExecutionRouter>(
         orderbook_registry_,
         config_,
@@ -409,7 +409,7 @@ void engine::set_strategy(std::shared_ptr<IStrategy> strategy)
 
 void engine::switch_symbol(const std::string& new_symbol)
 {
-    // MarketSeries read/write API (docs/data.md#D-02) — no public SoA fields.
+    // MarketSeries read/write API (docs/internal/data-pipeline.md#D-02) — no public SoA fields.
     data_handler_->set_all_bar_symbols(new_symbol);
 
     strategy_->set_position_open(new_symbol, false);
@@ -689,7 +689,7 @@ void engine::pin_event_loop_thread()
 
 void engine::start_workers()
 {
-    // Worker/ring orchestration. See core/docs/engine.md Wave 4 (E-60) + engine-decomposition.
+    // Worker/ring orchestration. See core/docs/internal/engine-decomposition.md Wave 4 (E-60) + engine-decomposition.
     // Will be delegated to WorkerOrchestrator (rings, pinning, start/stop, drops).
     halt_flag_.store(false, std::memory_order_release);
     provider_callbacks_armed_.store(true, std::memory_order_release);
@@ -1177,7 +1177,7 @@ void engine::questdb_end()
     const double final_equity = portfolio_.get_equity(last_mid_price_.load(std::memory_order_relaxed));
     const std::size_t rejs = audit_sink_ ? audit_sink_->total_rejections() : 0;
     // Prefer delegating through the seam when available (single place for persistence finalization).
-    // See core/docs/engine.md Phase 2 (E-21) + engine-decomposition skill "QuestDB Isolation".
+    // See core/docs/internal/engine-decomposition.md Phase 2 (E-21) + engine-decomposition skill "QuestDB Isolation".
     // The else branch below is legacy fallback only (should be unreachable when questdb_active_).
     // All recording paths use audit_sink_; finalize should too.
     if (audit_sink_)
@@ -1196,7 +1196,7 @@ void engine::questdb_end()
                                   report.winning_trades);
     }
     // Note: legacy direct questdb_store_ finalize path removed in Phase 2 prep
-    // (core/docs/engine.md#E-21) to enforce single IOrderAuditSink seam.
+    // (core/docs/internal/engine-decomposition.md#E-21) to enforce single IOrderAuditSink seam.
     // Activation in questdb_begin always sets a real sink when store is active.
     questdb_active_ = false;
 }
@@ -1380,7 +1380,7 @@ const Analytics* engine::get_exchange_analytics() const
 // See declaration in engine.h for documentation.
 void engine::reset_for_next_trial(uint64_t new_seed)
 {
-    // Reset for MC object reuse. See core/docs/engine.md (Phase 0 notes + future waves).
+    // Reset for MC object reuse. See core/docs/internal/engine-decomposition.md (Phase 0 notes + future waves).
     // State owned by future extracted collaborators will be cleared via their clear/reset hooks.
     // Reset main portfolio (cash, positions, lots)
     portfolio_.reset();
@@ -3559,7 +3559,7 @@ void engine::run()
 {
     // One of four similar run* methods. Duplicated event-loop skeleton (pending clear,
     // workers, pin, questdb, progress, drains, teardown) targeted for Wave 2 refactor
-    // (shared run_event_loop or thin EventLoopCoordinator) per core/docs/engine.md#E-40
+    // (shared run_event_loop or thin EventLoopCoordinator) per core/docs/internal/engine-decomposition.md#E-40
     // + engine-decomposition skill. Cold extraction only; hot paths unchanged.
     if (!data_handler_) throw std::runtime_error("missing dependencies");
 
@@ -3585,7 +3585,7 @@ void engine::run()
     const auto base_ts = (config_.seed != 0)
         ? std::chrono::system_clock::time_point(std::chrono::milliseconds(0))
         : std::chrono::system_clock::now();
-    // docs/data.md#D-02: engine batch loop uses MarketSeries read API only.
+    // docs/internal/data-pipeline.md#D-02: engine batch loop uses MarketSeries read API only.
     const auto n = data_handler_->bar_count();
     analytics_.reserve_hint(n);
     const auto start = std::chrono::high_resolution_clock::now();
@@ -3604,7 +3604,7 @@ void engine::run()
     // present and monotonic. Seed no longer forces synthetic +1ms bar clock —
     // it remains for fill/MM RNG only. Fall back to base+i / +1ms when ts is
     // missing or non-monotonic (legacy golden / synthetic series without ts).
-    // docs/data.md#D-10 — LIVE_SAFETY_CCB_APPROVED: narrow resolve_bar_ts only.
+    // docs/internal/data-pipeline.md#D-10 — LIVE_SAFETY_CCB_APPROVED: narrow resolve_bar_ts only.
     auto resolve_bar_ts = [&](std::size_t i,
                               const std::chrono::system_clock::time_point& prev,
                               const MarketSeries::BarView& bar)
@@ -3879,7 +3879,7 @@ void engine::run_tick_data()
 
     setup_event_loop_infra();
 
-    // docs/data.md#D-02: tick path uses tick_at / tick_count (no public vector).
+    // docs/internal/data-pipeline.md#D-02: tick path uses tick_at / tick_count (no public vector).
     const auto n = data_handler_->tick_count();
     const auto start = std::chrono::high_resolution_clock::now();
 
