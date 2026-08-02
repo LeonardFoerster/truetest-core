@@ -2,7 +2,7 @@
 # check-layer-deps.sh
 #
 # Enforces the deepdive's layered dependency graph (prerequisites.md §10,
-# docs/target-architecture.md §1.1) by parsing every project-local #include
+# docs/architecture/01-target-architecture.md §1.1) by parsing every project-local #include
 # edge in src/ and rejecting any edge that points *upward* through the layering.
 #
 # The allowed direction is strictly one-way: each module is listed below with
@@ -16,7 +16,7 @@
 #
 # Exit 0 on clean pass; exit 1 on any forbidden edge (with the edge printed).
 #
-# Deferred (documented in docs/migration.md Step 10 notes):
+# Deferred (documented historically; current layer rules: docs/architecture/01-target-architecture.md):
 #   * Encoding the graph as CMake OBJECT libraries — requires header-level
 #     cycle resolution (risk↔analytics coupling) beyond Step 10's scope.
 #   * Header hygiene (src/<module>/include/tt/<module>/) — separate sweep.

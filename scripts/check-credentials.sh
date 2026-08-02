@@ -18,7 +18,7 @@
 #   * src/providers/binance/     — Binance provider owns the REST credential
 #     store and HMAC signing. Per prerequisites.md §10 the deepdive moves this
 #     into src/bin/engine_live/ later; until that move lands (tracked in
-#     docs/migration.md Step 10 notes), the provider directory is allow-listed.
+#     docs/architecture/01-target-architecture.md), the provider directory is allow-listed.
 #   * src/main.cpp               — the three binaries still share one main.cpp
 #     during the current transition. When src/bin/<target>/main.cpp lands
 #     (Step 10 src/bin/ split, currently in-flight), this entry should be
