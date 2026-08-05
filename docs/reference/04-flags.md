@@ -129,7 +129,7 @@
 | Flag | What it does |
 |------|----------------|
 | `--exit-policy <mode>` | **Platform** protective exits applied after each accepted strategy order. Modes: `floor` (default — ensure SL/TP when strategy omitted them), `strategy_only` (legacy research: only strategy `exit_intent`s), `engine_only` (ignore strategy intents), `union` (keep strategy intents; append SL if missing). Position-reducing signal closes do **not** get inverted short/long brackets. |
-| `--sl <frac>` | Stop-loss fraction of entry for platform defaults (`0` = off). Default `0.005`. |
+| `--sl <frac>` | Stop-loss fraction of entry for platform defaults (`0` = off). Default `0.003` (0.3%). |
 | `--tp <frac>` | Take-profit fraction of entry for platform defaults (`0` = off). Default `0.01`. |
 
 Strategies do **not** need to implement SL/TP. Rich strategy intents (ATR/fib/scale-out) still win under `floor` when they already set `stop_loss`.
@@ -154,6 +154,14 @@ Strategies do **not** need to implement SL/TP. Rich strategy intents (ATR/fib/sc
 | `--output-format <json\|csv>` | Results format. |
 | `--status-format <auto\|tui\|plain\|ndjson\|off>` | Live dashboard mode (default `auto` → rich TUI on tty for shadow/live). |
 | `--no-tui`              | Shortcut for `--status-format=plain`. |
+
+### ImGui strategy desk (only when built with `ENABLE_IMGUI=ON` / `HAS_IMGUI_DESK`)
+| Flag | What it does |
+|------|----------------|
+| `--desk` | Open the personal ImGui desk (Monitor panels + operator pause/flatten/kill). Prefer over rich TUI when set. Batch runs keep the window open on the final snapshot until closed. See `docs/internal/imgui-desk-design.md`. |
+| `--desk-demo-data` | Start the desk with deterministic DEMO DATA research panels already enabled (same as the menu toggle) - headless visual QA / manual smoke without a mouse click. |
+| `--no-footprint` | Disable footprint public-trade collection, which otherwise auto-activates with `--desk`. Never affects trading behavior either way - purely observational (`footprint.md`). |
+| `--footprint-tick-size` | Exact decimal tick-size override for the footprint panel (e.g. `0.01`), used only when official instrument metadata disagrees or is unavailable; conflicting values make the footprint unavailable rather than guessing. |
 
 ### Web UI (only when built with `ENABLE_WEB=ON` / `HAS_WEB`)
 | Flag | What it does |

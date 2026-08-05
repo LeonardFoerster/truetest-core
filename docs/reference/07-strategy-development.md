@@ -256,12 +256,12 @@ Breakout emittiert z. B. zwei Intents: `qty_fraction = 0.45` (SL+TP) und `0.55
 | `engine_only` | nur Platform; Strategy-Intents verworfen |
 | `union` | Strategy behalten; fehlt global ein SL und Platform hat SL → SL-only Intent **appenden**. Wenn Strategy-Plan **leer** und Platform vorhanden → **voller** Platform-Intent (nicht nur SL-Append) |
 
-Params in `default_exit_params`: `sl_pct` (Default `0.005`), `tp_pct` (`0.01`), `trail_pct` (`0.0` — **kein** CLI-Flag, nur Config-Struct).
+Params in `default_exit_params`: `sl_pct` (Default `0.003` = 0.3%), `tp_pct` (`0.01` = 1%), `trail_pct` (`0.0` — **kein** CLI-Flag, nur Config-Struct).
 
 CLI → `engine_config.exit_defaults` (`apply_exit_defaults` in `main.inc`):
 
 ```text
---sl 0.005  --tp 0.01  --exit-policy floor
+--sl 0.003  --tp 0.01  --exit-policy floor
 ```
 
 `parse_exit_policy_mode` akzeptiert zusätzlich Hyphen-Aliase:
@@ -622,7 +622,7 @@ Optional Intent-Emission bei Entry:
 
 ```cpp
 pending_intents_.push_back(
-    truetest::exits::make_long_exit_intent(sym, price, qty, 0.005, 0.01));
+    truetest::exits::make_long_exit_intent(sym, price, qty, 0.003, 0.01));
 // take_pending_exit_intents: return std::move(pending_intents_); clear
 // Engine drainiert nur, wenn dieser Callback auch ein order_event returnt.
 ```
@@ -665,7 +665,7 @@ cmake -B build -DBUILD_TESTS=ON && cmake --build build -j --target engine_backte
   --provider synthetic \
   --strategy my-strategy \
   --param period=20 \
-  --sl 0.005 --tp 0.01 --exit-policy floor \
+  --sl 0.003 --tp 0.01 --exit-policy floor \
   --seed 424242 \
   --no-pin --status-format off --no-tui \
   --output /tmp/run.json

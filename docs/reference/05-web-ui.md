@@ -61,6 +61,19 @@ shows a **Demo data** badge — useful for design work without a backend.
 | `GET /api/results` | `ResultsReport` — `engine.get_analytics().generate_report()` |
 | `WS /stream` | Live `SnapshotFrame` JSON: one frame on connect, then at the poll rate (~10 Hz) |
 
+**SnapshotFrame schema:** `schema_version` **2** (additive over v1). New blocks for
+engine telemetry (Trading desk / operator board):
+
+| Key | Contents |
+|-----|----------|
+| `memory` | `/proc` RSS/heap when available; pool/ring byte footprints |
+| `debug` | `target`/`mode`/`preset`, `worker_count`, ring size/HWM/drops, pool in-use, subsystem errors; optional `stages` on `HAS_DEBUG` builds |
+
+The monorepo Next.js UI does **not** call these endpoints directly — the Fastify
+backend proxies them (`CORE_WEB_URL` → `GET /api/engine/snapshot`). Research jobs
+still use headless `--status-format off` and report JSON; this stream is for an
+attended `engine_* --web` session.
+
 Two screens: **Live Dashboard** (account, equity+drawdown, positions, open-lot
 SL↔TP brackets, L2 ladder, fills tape, per-strategy cards, risk gauges, system
 health) and **Backtest Review** (metric board, benchmark, equity-vs-benchmark
