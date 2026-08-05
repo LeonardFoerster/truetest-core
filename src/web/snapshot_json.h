@@ -16,6 +16,8 @@ namespace truetest::web {
 // Pure function over the struct; no engine/threading deps, off the hot path.
 std::string snapshot_to_json(const truetest::ui::dashboard_snapshot& s);
 
-inline constexpr int snapshot_schema_version = 1;
+// v1: account/positions/health/l2/trend (initial web UI)
+// v2: additive `memory` + `debug` blocks for Trading desk engine telemetry
+inline constexpr int snapshot_schema_version = 2;
 
 } // namespace truetest::web

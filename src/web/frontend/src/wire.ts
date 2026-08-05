@@ -165,6 +165,88 @@ export interface WireTrend {
   rate_now: number;
 }
 
+/** v2 — process memory from /proc + in-process pool/ring footprints. */
+export interface WireMemPool {
+  name: string;
+  blocks: number;
+  slot_size: number;
+  bytes: number;
+  in_use: number;
+  capacity_slots: number;
+  grow_count: number;
+}
+
+export interface WireMemRing {
+  name: string;
+  capacity: number;
+  element_bytes: number;
+  bytes: number;
+}
+
+export interface WireMemory {
+  available: boolean;
+  rss_bytes: number;
+  vm_bytes: number;
+  peak_rss_bytes: number;
+  heap_bytes: number;
+  pool_bytes_total: number;
+  ring_bytes_total: number;
+  pools: WireMemPool[];
+  rings: WireMemRing[];
+}
+
+export interface WireDebugRing {
+  name: string;
+  size: number;
+  hwm: number;
+  capacity: number;
+  drops: number;
+}
+
+export interface WireDebugPool {
+  name: string;
+  blocks: number;
+  block_size: number;
+  capacity: number;
+  in_use: number;
+  grow_count: number;
+}
+
+export interface WireDebugError {
+  name: string;
+  msg: string;
+}
+
+export interface WireDebugStage {
+  name: string;
+  calls: number;
+  avg_ns: number;
+  min_ns: number;
+  max_ns: number;
+}
+
+/** v2 — engine introspection (workers, rings, pools, mode). */
+export interface WireDebug {
+  target: string;
+  mode: string;
+  has_binance: boolean;
+  has_questdb: boolean;
+  has_debug: boolean;
+  has_live_data: boolean;
+  preset: string;
+  worker_count: number;
+  cpu_pin: boolean;
+  spin_policy: string;
+  event_count: number;
+  pending_orders: number;
+  open_orders_cache: number;
+  armed_brackets: number;
+  rings: WireDebugRing[];
+  pools: WireDebugPool[];
+  errors: WireDebugError[];
+  stages?: WireDebugStage[];
+}
+
 export interface SnapshotFrame {
   schema_version: number;
   account: { cash: number; equity: number; initial_balance: number; realized_pnl: number; unrealized_pnl: number };
@@ -179,6 +261,10 @@ export interface SnapshotFrame {
   l2: WireL2;
   health: WireHealth;
   trend: WireTrend;
+  /** schema_version >= 2 */
+  memory?: WireMemory;
+  /** schema_version >= 2 */
+  debug?: WireDebug;
 }
 
 export interface WireSubAnalytics {

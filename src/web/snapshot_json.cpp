@@ -253,6 +253,116 @@ std::string snapshot_to_json(const dashboard_snapshot& s)
         .kv("rate_now", s.trend.rate_now)
         .endobj();
 
+    // ---- memory (v2) — /proc + in-process pool/ring footprints ----
+    {
+        const auto& m = s.memory;
+        j.key("memory").obj()
+            .kv("available", m.available)
+            .kv("rss_bytes", static_cast<unsigned long long>(m.rss_bytes))
+            .kv("vm_bytes", static_cast<unsigned long long>(m.vm_bytes))
+            .kv("peak_rss_bytes", static_cast<unsigned long long>(m.peak_rss_bytes))
+            .kv("heap_bytes", static_cast<unsigned long long>(m.heap_bytes))
+            .kv("pool_bytes_total", static_cast<unsigned long long>(m.pool_bytes_total))
+            .kv("ring_bytes_total", static_cast<unsigned long long>(m.ring_bytes_total));
+        j.key("pools").arr();
+        for (const auto& p : m.pools)
+        {
+            j.obj()
+                .kv("name", p.name ? p.name : "")
+                .kv("blocks", p.blocks)
+                .kv("slot_size", p.slot_size)
+                .kv("bytes", static_cast<unsigned long long>(p.bytes))
+                .kv("in_use", p.in_use)
+                .kv("capacity_slots", p.capacity_slots)
+                .kv("grow_count", p.grow_count)
+                .endobj();
+        }
+        j.endarr();
+        j.key("rings").arr();
+        for (const auto& r : m.rings)
+        {
+            j.obj()
+                .kv("name", r.name ? r.name : "")
+                .kv("capacity", r.capacity)
+                .kv("element_bytes", r.element_bytes)
+                .kv("bytes", static_cast<unsigned long long>(r.bytes))
+                .endobj();
+        }
+        j.endarr();
+        j.endobj();
+    }
+
+    // ---- debug (v2) — workers, rings, pools, mode (cold-path only) ----
+    {
+        const auto& d = s.debug;
+        j.key("debug").obj()
+            .kv("target", d.target)
+            .kv("mode", d.mode)
+            .kv("has_binance", d.has_binance)
+            .kv("has_questdb", d.has_questdb)
+            .kv("has_debug", d.has_debug)
+            .kv("has_live_data", d.has_live_data)
+            .kv("preset", d.preset)
+            .kv("worker_count", d.worker_count)
+            .kv("cpu_pin", d.cpu_pin)
+            .kv("spin_policy", d.spin_policy)
+            .kv("event_count", static_cast<unsigned long long>(d.event_count))
+            .kv("pending_orders", d.pending_orders)
+            .kv("open_orders_cache", d.open_orders_cache)
+            .kv("armed_brackets", d.armed_brackets);
+        j.key("rings").arr();
+        for (const auto& r : d.rings)
+        {
+            j.obj()
+                .kv("name", r.name ? r.name : "")
+                .kv("size", r.size)
+                .kv("hwm", r.hwm)
+                .kv("capacity", r.capacity)
+                .kv("drops", static_cast<unsigned long long>(r.drops))
+                .endobj();
+        }
+        j.endarr();
+        j.key("pools").arr();
+        for (const auto& p : d.pools)
+        {
+            j.obj()
+                .kv("name", p.name ? p.name : "")
+                .kv("blocks", p.blocks)
+                .kv("block_size", p.block_size)
+                .kv("capacity", p.capacity)
+                .kv("in_use", p.in_use)
+                .kv("grow_count", p.grow_count)
+                .endobj();
+        }
+        j.endarr();
+        j.key("errors").arr();
+        for (const auto& e : d.errors)
+        {
+            j.obj()
+                .kv("name", e.name ? e.name : "")
+                .kv("msg", e.msg)
+                .endobj();
+        }
+        j.endarr();
+        // Stage timings only when present (HAS_DEBUG builds); keep poll payloads small.
+        if (!d.stages.empty())
+        {
+            j.key("stages").arr();
+            for (const auto& st : d.stages)
+            {
+                j.obj()
+                    .kv("name", st.name ? st.name : "")
+                    .kv("calls", static_cast<unsigned long long>(st.calls))
+                    .kv("avg_ns", static_cast<unsigned long long>(st.avg_ns))
+                    .kv("min_ns", static_cast<unsigned long long>(st.min_ns))
+                    .kv("max_ns", static_cast<unsigned long long>(st.max_ns))
+                    .endobj();
+            }
+            j.endarr();
+        }
+        j.endobj();
+    }
+
     j.endobj();
     return out;
 }
