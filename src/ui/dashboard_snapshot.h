@@ -112,9 +112,9 @@ struct dashboard_snapshot
 
         bool   provider_present = false;
         std::string provider_name;
-        int    provider_state = 0;            // matches connection_state enum
+        int    provider_state = 0;            // lifecycle: 0 closed, 1 opening, 2 open, 3 error
 
-        double rate_ev_per_sec = 0.0;          // EMA from ConsoleDashboard
+        double rate_ev_per_sec = 0.0;          // consumer-supplied event-rate EMA
 
         // QuestDB persistence health (populated when --persist is active)
         struct questdb_view

@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "operator_actions.h"
 #include "overlays.h"  // brings ConfirmKind into truetest::ui
 #include "toast.h"     // for ToastStack (small include, only under HAS_RICH_TUI)
 
@@ -24,18 +25,6 @@ struct dashboard_snapshot;
 // reaches into engine internals directly. Returning false means "no snapshot
 // available yet" (e.g. engine still constructing).
 using snapshot_fn = std::function<bool(dashboard_snapshot&)>;
-
-// Optional operator-control hooks. The TUI calls these from its input
-// handler in response to hotkeys (`p`, `F`, `K`). Each hook is allowed
-// to be null - the TUI shows a "no-op" toast when the action isn't
-// available (e.g. backtest mode without a kill switch).
-struct operator_actions
-{
-    std::function<void()>      pause_toggle;       // `p`
-    std::function<bool()>      pause_state;        // for the status overlay
-    std::function<void()>      flatten;            // `F` (with confirm)
-    std::function<bool(std::chrono::milliseconds deadline)> kill;  // `K` (with confirm)
-};
 
 // ncurses-backed multi-tab live dashboard. Owns terminal init/teardown
 // and the 100 ms render loop. Reads streaming_stats and the recent-event
