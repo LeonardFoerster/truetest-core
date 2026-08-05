@@ -22,7 +22,7 @@ class hedge_demo_strategy : public IStrategy
 public:
     explicit hedge_demo_strategy(std::size_t hedge_gap = 5,
                                  double notional = 100.0,
-                                 double sl_pct = 0.005,
+                                 double sl_pct = 0.003,
                                  double tp_pct = 0.01);
 
     std::optional<order_event> on_market(const market_event& mkt) override;

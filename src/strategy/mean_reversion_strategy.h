@@ -18,7 +18,7 @@ public:
     explicit mean_reversion_strategy(std::size_t period = 20,
                                      double equity = 10000.0,
                                      double risk_fraction = 0.02,
-                                     double sl_pct = 0.005,
+                                     double sl_pct = 0.003,
                                      double tp_pct = 0.01,
                                      std::size_t atr_period = 14);
     std::optional<order_event> on_market(const market_event& mkt) override;

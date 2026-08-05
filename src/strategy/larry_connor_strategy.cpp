@@ -75,6 +75,9 @@ std::optional<order_event> larry_connor_strategy::on_market(const market_event& 
         if (qty <= 0.0) return std::nullopt;
         st.position_open = true;
         st.open_qty = qty;
+        pending_intents_.push_back(
+            truetest::exits::make_long_exit_intent(
+                sym, close, qty, sl_pct_, tp_pct_, "larry_connor"));
         return order_event(mkt.get_timestamp(), sym,
                            order_type::market, order_side::buy, qty, close);
     }
@@ -93,6 +96,14 @@ void larry_connor_strategy::set_position_open(const std::string& symbol, bool op
         st.open_qty = 0.0;
 }
 
+std::vector<truetest::exits::exit_intent>
+larry_connor_strategy::take_pending_exit_intents()
+{
+    std::vector<truetest::exits::exit_intent> out;
+    out.swap(pending_intents_);
+    return out;
+}
+
 std::vector<param_def> larry_connor_strategy::get_param_schema() const
 {
     return {
@@ -102,6 +113,8 @@ std::vector<param_def> larry_connor_strategy::get_param_schema() const
         {"atr_period", static_cast<double>(atr_period_), 1, 1000, "Wilder's ATR period"},
         {"equity", equity_, 0, 1e18, "Account equity for position sizing"},
         {"risk_fraction", risk_fraction_, 0, 1, "Notional as fraction of equity per trade"},
+        {"sl_pct", sl_pct_, 0, 1, "Stop-loss as fraction of entry"},
+        {"tp_pct", tp_pct_, 0, 1, "Take-profit as fraction of entry"},
         {"entry_fee_rate", entry_fee_rate_, 0, 0.05, "Entry fee as fraction of notional"},
         {"entry_slip_bps", entry_slip_bps_, 0, 500, "Adverse entry slippage (bps)"},
         {"fixed_fee_per_leg", fixed_fee_per_leg_, 0, 1e6, "Fixed fee per fill leg"},
@@ -116,6 +129,8 @@ void larry_connor_strategy::set_param(const std::string& key, double value)
     else if (key == "atr_period") { atr_period_ = static_cast<std::size_t>(value); states_.clear(); }
     else if (key == "equity") equity_ = value;
     else if (key == "risk_fraction") risk_fraction_ = value;
+    else if (key == "sl_pct") sl_pct_ = value;
+    else if (key == "tp_pct") tp_pct_ = value;
     else if (key == "entry_fee_rate") entry_fee_rate_ = value;
     else if (key == "entry_slip_bps") entry_slip_bps_ = value;
     else if (key == "fixed_fee_per_leg") fixed_fee_per_leg_ = value;
@@ -145,4 +160,5 @@ void larry_connor_strategy::reset(uint64_t /*seed*/)
 {
     // Clear per-symbol indicator + position state so the next MC trial starts fresh.
     states_.clear();
+    pending_intents_.clear();
 }

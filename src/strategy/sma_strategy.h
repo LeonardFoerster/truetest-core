@@ -1,22 +1,28 @@
 #pragma once
 #include "../core/event.h"
 #include "../indicator/sma.h"
+#include "exits/exit_intent.h"
 #include "strategy_interface.h"
 
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // Bar SMA strategy: signal on close, default fill is market (pairs with
 // engine execution_bar_delay=1 → next-bar open). fill_style=1 restores
 // legacy LIMIT@close. Optimistic position_open_ on emit stops free-fire
 // while orders are delayed or resting (engine resyncs on reject/fill).
+//
+// Pure recipe: sizing via equity * risk_fraction against platform SL distance;
+// protective SL/TP via exit_intent (defaults 0.3% / 1%).
 class sma_strategy : public IStrategy
 {
 public:
     explicit sma_strategy(std::size_t period = 20);
     std::optional<order_event> on_market(const market_event& mkt) override;
     void set_position_open(const std::string& symbol, bool open) override;
+    std::vector<truetest::exits::exit_intent> take_pending_exit_intents() override;
 
     std::vector<param_def> get_param_schema() const override
     {
@@ -24,6 +30,10 @@ public:
             {"period", static_cast<double>(period_), 1, 10000, "SMA lookback period"},
             {"fill_style", static_cast<double>(fill_style_), 0, 1,
              "0=market (default, next-open with bar delay); 1=limit_at_close"},
+            {"equity", equity_, 0, 1e18, "Account equity for position sizing"},
+            {"risk_fraction", risk_fraction_, 0, 1, "Fraction of equity risked per trade"},
+            {"sl_pct", sl_pct_, 0, 1, "Stop-loss as fraction of entry"},
+            {"tp_pct", tp_pct_, 0, 1, "Take-profit as fraction of entry"},
         };
     }
 
@@ -35,6 +45,10 @@ public:
             if (v < 0 || v > 1) throw std::runtime_error("fill_style must be 0 or 1");
             fill_style_ = v;
         }
+        else if (key == "equity") equity_ = value;
+        else if (key == "risk_fraction") risk_fraction_ = value;
+        else if (key == "sl_pct") sl_pct_ = value;
+        else if (key == "tp_pct") tp_pct_ = value;
         else throw std::runtime_error("Unknown parameter: " + key);
     }
 
@@ -53,10 +67,17 @@ public:
 private:
     std::size_t period_;
     int fill_style_ = 0; // 0=market, 1=limit_at_close
+    double equity_ = 10000.0;
+    double risk_fraction_ = 0.02;
+    double sl_pct_ = 0.003;
+    double tp_pct_ = 0.01;
     std::unordered_map<std::string, simple_moving_average> smas_;
     std::unordered_map<std::string, bool> position_open_;
+    std::unordered_map<std::string, double> position_qty_;
+    std::vector<truetest::exits::exit_intent> pending_intents_;
 
     simple_moving_average& get_sma(const std::string& symbol);
+    double size_long(double entry) const;
 
     order_type order_type_for_fill_style() const
     {

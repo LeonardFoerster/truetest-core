@@ -17,7 +17,7 @@ struct strategy_params {
     std::size_t sma_period = 20;
     double balance = 10000.0;
     double risk_fraction = 0.02;
-    double sl_pct = 0.005;
+    double sl_pct = 0.003;
     double tp_pct = 0.01;
 };
 
