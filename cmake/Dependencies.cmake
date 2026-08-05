@@ -97,15 +97,17 @@ function(tt_wire_optional_backends target)
 
     # HAS_LIVE_DATA remains available for venue live transports under providers/.
     # Generic WebSocketDataSource was removed (docs/internal/data-pipeline.md#D-07 — unwired dead end).
+    # Boost.System is header-only in modern Boost (no boost_system package / Boost::system
+    # target on 1.89+); use Boost::headers like the venue providers below.
     if(ENABLE_LIVE_DATA)
-        find_package(Boost REQUIRED COMPONENTS system)
-        target_link_libraries(${target} PUBLIC Boost::system)
+        find_package(Boost CONFIG REQUIRED)
+        target_link_libraries(${target} PUBLIC Boost::headers)
         target_compile_definitions(${target} PUBLIC HAS_LIVE_DATA)
     endif()
 
     # Binance exchange provider
     if(ENABLE_BINANCE)
-        find_package(Boost REQUIRED)
+        find_package(Boost CONFIG REQUIRED)
         find_package(OpenSSL REQUIRED)
         target_sources(${target} PRIVATE
             ${_src}/providers/binance/binance_register.cpp
@@ -118,7 +120,7 @@ function(tt_wire_optional_backends target)
 
     # Bitget UTA USDT-M futures provider
     if(ENABLE_BITGET)
-        find_package(Boost REQUIRED)
+        find_package(Boost CONFIG REQUIRED)
         find_package(OpenSSL REQUIRED)
         target_sources(${target} PRIVATE
             ${_src}/providers/bitget/bitget_futures_register.cpp)
@@ -129,7 +131,7 @@ function(tt_wire_optional_backends target)
 
     # Bitunix futures provider (Phase 0–1 MD/shadow)
     if(ENABLE_BITUNIX)
-        find_package(Boost REQUIRED)
+        find_package(Boost CONFIG REQUIRED)
         find_package(OpenSSL REQUIRED)
         target_sources(${target} PRIVATE
             ${_src}/providers/bitunix/bitunix_futures_register.cpp)
