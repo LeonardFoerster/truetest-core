@@ -87,17 +87,21 @@ risk_action RiskManager::check_order(const order_event& order,
                                      const portfolio& port,
                                      const risk_snapshot& snap)
 {
-    if (snap.max_drawdown / 100.0 >= limits_.max_drawdown)
-        return risk_action::halt;
-
-    if (static_cast<int>(snap.total_orders - snap.total_fills) >= limits_.max_open_orders)
-        return risk_action::reject;
-
     const auto& positions = port.get_positions();
     const auto it = positions.find(order.get_symbol());
     const position* current_pos = (it != positions.end()) ? &it->second : nullptr;
     const bool reducing_exposure = reduces_position_exposure(order, current_pos);
     const double projected_notional = projected_position_notional(order, current_pos);
+
+    // Portfolio DD: block new risk only. Reduce-only / exit orders must still
+    // pass so inventory can be flattened after a breach (soft backtest and
+    // live halt paths both need this — otherwise exits are rejected too).
+    if (!reducing_exposure &&
+        snap.max_drawdown / 100.0 >= limits_.max_drawdown)
+        return risk_action::halt;
+
+    if (static_cast<int>(snap.total_orders - snap.total_fills) >= limits_.max_open_orders)
+        return risk_action::reject;
 
     if (!reducing_exposure &&
         projected_notional > limits_.max_position_value)
@@ -161,7 +165,7 @@ risk_action RiskManager::check_order(const order_event& order,
         order_timestamps_.push_back({order.get_timestamp()});
     }
 
-    if (limits_.max_daily_loss > 0.0)
+    if (!reducing_exposure && limits_.max_daily_loss > 0.0)
     {
         update_daily_reset(order.get_timestamp());
         if (daily_loss_ >= limits_.max_daily_loss)
