@@ -33,7 +33,7 @@ ALLOWED[debug]=""
 ALLOWED[orderbook]="core types"
 ALLOWED[threading]="core utils debug"
 ALLOWED[execution]="core types orderbook"
-ALLOWED[analytics]="core threading risk"
+ALLOWED[analytics]="core threading risk types"
 ALLOWED[market_maker]="core orderbook threading types"
 ALLOWED[risk]="core execution analytics"
 ALLOWED[strategy]="core types indicator execution exits threading"
@@ -44,6 +44,9 @@ ALLOWED[api]="engine core data strategy execution"
 ALLOWED[web]="ui analytics"   # read-only serializers: dashboard_snapshot + AnalyticsReport
 
 # Current cross-module contracts beyond the original lower-layer graph:
+#   * analytics/footprint (footprint.md §2.2) aggregates the leaf PublicTrade
+#     POD (types layer) into footprint bars - cold research math, no provider
+#     or engine dependency, so only the `types` edge was added.
 #   * analytics exposes a risk snapshot used by RiskManager gatekeeping.
 #   * strategies use dense SymbolTable ids via SymbolStateStore (types layer).
 #   * strategies emit exit intents, and adaptive hybrid owns worker/thread knobs.
