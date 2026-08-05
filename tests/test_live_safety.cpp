@@ -8,6 +8,7 @@
 #include "engine/engine.h"
 #include "engine/engine_config.h"
 #include "data/data_handler.h"
+#include "exits/default_exit_policy.h"
 #include "orderbook/orderbook.h"
 #include "market_maker/market_maker.h"
 #include "strategy/strategy_interface.h"
@@ -236,6 +237,12 @@ TEST(LiveSafety, RiskHaltSetsProcessWideHaltFlag)
     cfg.seed            = 7;
     cfg.threading       = thread_preset::inline_mode;
     cfg.disable_pinning = true;
+    // Live-safety path under test: hard portfolio halt (not soft research mode).
+    cfg.risk_soft_portfolio_limits = false;
+    // No platform SL/TP — otherwise stops flatten inventory before DD trips.
+    cfg.exit_defaults.mode   = truetest::exits::exit_policy_mode::strategy_only;
+    cfg.exit_defaults.sl_pct = 0.0;
+    cfg.exit_defaults.tp_pct = 0.0;
     cfg.risk.max_drawdown       = 0.05;  // 5%
     cfg.risk.max_loss_per_trade = 1e9;   // isolate drawdown path
 

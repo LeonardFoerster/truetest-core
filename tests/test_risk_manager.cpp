@@ -122,6 +122,85 @@ TEST(RiskManager, DrawdownExceeded_Halt)
     EXPECT_EQ(rm.check_order(ord, port, snap), risk_action::halt);
 }
 
+// Portfolio DD must not block reduce-only / exit orders — otherwise inventory
+// cannot flatten after a breach (soft backtest and live halt paths both need this).
+TEST(RiskManager, DrawdownExceeded_AllowsLongReduction)
+{
+    risk_limits lim;
+    lim.max_drawdown = 0.10;
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    fill_event open_long(epoch_ms(0), "AAPL", 1, order_side::buy, 40, 100.0, 0.0);
+    port.on_fill(open_long);
+
+    order_event reduce(epoch_ms(1), "AAPL", order_type::limit, order_side::sell, 10, 100.0);
+    auto snap = make_snap(15.0, 1, 1);  // 15% DD > 10% limit
+
+    EXPECT_EQ(rm.check_order(reduce, port, snap), risk_action::pass);
+
+    // Increasing risk still hard-halts.
+    order_event add(epoch_ms(2), "AAPL", order_type::limit, order_side::buy, 5, 100.0);
+    EXPECT_EQ(rm.check_order(add, port, snap), risk_action::halt);
+}
+
+TEST(RiskManager, DrawdownExceeded_AllowsShortReduction)
+{
+    risk_limits lim;
+    lim.max_drawdown = 0.10;
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    fill_event open_short(epoch_ms(0), "AAPL", 1, order_side::sell, 40, 100.0, 0.0);
+    port.on_fill(open_short);
+
+    order_event cover(epoch_ms(1), "AAPL", order_type::limit, order_side::buy, 10, 100.0);
+    auto snap = make_snap(20.0, 1, 1);
+
+    EXPECT_EQ(rm.check_order(cover, port, snap), risk_action::pass);
+
+    order_event short_more(epoch_ms(2), "AAPL", order_type::limit, order_side::sell, 5, 100.0);
+    EXPECT_EQ(rm.check_order(short_more, port, snap), risk_action::halt);
+}
+
+TEST(RiskManager, DailyLossExceeded_BlocksNewRisk_AllowsReduction)
+{
+    risk_limits lim;
+    lim.max_daily_loss = 150.0;
+    lim.max_drawdown = 1.0;  // isolate daily-loss path
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    // Two losing closed trades accumulate daily_loss_ past the limit.
+    fill_event fill1(epoch_ms(0), "AAPL", 1, order_side::sell, 10, 90.0, 0.0);
+    risk_snapshot snap1;
+    snap1.has_last_trade = true;
+    snap1.last_trade_pnl = -100.0;
+    snap1.last_trade_seq = 1;
+    EXPECT_EQ(rm.check_post_fill(fill1, port, snap1), risk_action::pass);
+
+    fill_event fill2(epoch_ms(1), "AAPL", 2, order_side::sell, 10, 90.0, 0.0);
+    risk_snapshot snap2;
+    snap2.has_last_trade = true;
+    snap2.last_trade_pnl = -100.0;
+    snap2.last_trade_seq = 2;
+    EXPECT_EQ(rm.check_post_fill(fill2, port, snap2), risk_action::halt);
+
+    // Open inventory so a sell is recognized as reduce-only.
+    fill_event open_long(epoch_ms(2), "AAPL", 3, order_side::buy, 20, 100.0, 0.0);
+    port.on_fill(open_long);
+
+    auto order_snap = make_snap(0.0, 3, 3);
+    order_event new_risk(epoch_ms(3), "AAPL", order_type::limit, order_side::buy, 5, 100.0);
+    EXPECT_EQ(rm.check_order(new_risk, port, order_snap), risk_action::halt);
+
+    order_event reduce(epoch_ms(4), "AAPL", order_type::limit, order_side::sell, 5, 100.0);
+    EXPECT_EQ(rm.check_order(reduce, port, order_snap), risk_action::pass);
+}
+
 TEST(RiskManager, PostFillLossExceeded_Halt)
 {
     risk_limits lim;

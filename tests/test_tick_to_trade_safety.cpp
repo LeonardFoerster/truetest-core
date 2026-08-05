@@ -225,6 +225,7 @@ TEST(TickToTradeSafety, ProviderFill_PostFillRiskHaltsProcessWide)
     cfg.initial_balance = 100000.0;
     cfg.threading = thread_preset::inline_mode;
     cfg.disable_pinning = true;
+    cfg.risk_soft_portfolio_limits = false; // hard post-fill halt under test
     // First fill increments trade_timestamps; check_post_fill sees size >= 1 → halt.
     cfg.risk.max_trades_per_hour = 1;
     cfg.risk.max_drawdown = 1.0;
@@ -494,6 +495,7 @@ TEST(TickToTradeSafety, ProcessWideHalt_RefusesFurtherSubmits)
     cfg.threading = thread_preset::inline_mode;
     cfg.disable_pinning = true;
     cfg.execution_bar_delay = 0;  // submit immediately on emit
+    cfg.risk_soft_portfolio_limits = false; // hard post-fill halt under test
     // First fill trips post-fill max_trades_per_hour → trigger_halt.
     cfg.risk.max_trades_per_hour = 1;
     cfg.risk.max_drawdown = 1.0;

@@ -315,7 +315,10 @@ TEST(Strategy, OrderFields)
     auto order = s.on_market(make_mkt(3, 110.0));
     ASSERT_TRUE(order.has_value());
     EXPECT_EQ(order->get_symbol(), "TEST");
-    EXPECT_EQ(order->get_quantity(), 100);
+    // Risk-sized: equity*risk_fraction / (entry*sl_pct), capped by full equity
+    // notional → min(606.06…, 10000/110) = 10000/110 ≈ 90.909…
+    EXPECT_NEAR(order->get_quantity(), 10000.0 / 110.0, 1e-6);
+    EXPECT_GT(order->get_quantity(), 0.0);
     // Default: market for classical next-open fill under exec_bar_delay.
     EXPECT_EQ(order->get_order_type(), order_type::market);
     EXPECT_DOUBLE_EQ(order->get_price(), 110.0); // signal reference still close

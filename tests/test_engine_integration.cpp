@@ -16,6 +16,7 @@
 #include "engine/engine_config.h"
 #include "data/data_handler.h"
 #include "execution/portfolio.h"
+#include "exits/default_exit_policy.h"
 #include "market_maker/market_maker.h"
 #include "orderbook/orderbook.h"
 #include "strategy/sma_strategy.h"
@@ -195,46 +196,103 @@ TEST(EngineIntegration, OrderProducesFillAndUpdatesAnalytics)
 
 
 // ---------------------------------------------------------------------------
-// Risk halt: aggressive buying with a tight max_drawdown limit stops the run
+// Soft portfolio risk (backtest default): DD rejects new risk but continues
 // ---------------------------------------------------------------------------
 
-TEST(EngineIntegration, RiskDrawdownLimitHaltsEngine)
-{
-    silence_cout quiet;
+namespace {
 
-    // Declining market: 500 bars falling 1% per bar ensures a deep
-    // drawdown for a strategy that only buys.
+// Shared declining-book setup for soft vs hard portfolio risk.
+engine_config make_drawdown_risk_cfg(bool soft)
+{
+    engine_config cfg;
+    cfg.initial_balance = 10000.0;
+    cfg.seed            = 3;
+    cfg.threading       = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.risk_soft_portfolio_limits = soft;
+    // Isolate portfolio DD: no platform SL/TP that would flatten early.
+    cfg.exit_defaults.mode   = truetest::exits::exit_policy_mode::strategy_only;
+    cfg.exit_defaults.sl_pct = 0.0;
+    cfg.exit_defaults.tp_pct = 0.0;
+    cfg.risk.max_drawdown       = 0.05;   // 5% drawdown
+    cfg.risk.max_loss_per_trade = 1e9;
+    return cfg;
+}
+
+std::shared_ptr<data_handler> make_declining_bars(int n)
+{
     auto dh = std::make_shared<data_handler>();
     double price = 100.0;
-    for (int i = 0; i < 500; ++i)
+    for (int i = 0; i < n; ++i)
     {
         double close = price * (1.0 - 0.01);
         dh->load_into_queue("2024-01-01", "TEST",
                             price, price + 0.1, close - 0.1, close, 1000);
         price = close;
     }
+    return dh;
+}
 
+} // namespace
+
+TEST(EngineIntegration, RiskDrawdownSoftContinuesRun)
+{
+    silence_cout quiet;
+
+    auto dh = make_declining_bars(500);
     auto ob = std::make_shared<orderbook>();
-    // Aggressive buyer: 10 qty per bar so positions build up quickly.
-    auto strat = std::make_shared<relentless_buyer>(10.0);
+    // Large size so inventory DD breaches 5% quickly without platform SL.
+    auto strat = std::make_shared<relentless_buyer>(50.0);
 
     MarketMaker mm(3);
-    mm.add_orders(ob, 100.0, 100);
+    mm.add_orders(ob, 100.0, 500);
 
-    engine_config cfg;
-    cfg.initial_balance = 10000.0;
-    cfg.seed            = 3;
-    cfg.threading       = thread_preset::inline_mode;
-    cfg.disable_pinning = true;
-    // Tight limits so the engine trips early.
-    cfg.risk.max_drawdown       = 0.05;   // 5% drawdown triggers halt
-    cfg.risk.max_loss_per_trade = 1e9;    // don't let per-trade limit fire first
-
-    engine eng(dh, ob, strat, cfg);
+    engine eng(dh, ob, strat, make_drawdown_risk_cfg(/*soft=*/true));
     eng.run();
 
-    // Engine should have stopped before consuming every bar.
+    // Soft mode: strategy still sees every bar; no process-wide halt.
+    EXPECT_EQ(strat->calls(), 500);
+    EXPECT_FALSE(eng.get_halt_flag().load(std::memory_order_acquire));
+    const auto rep = eng.get_analytics().generate_report();
+    EXPECT_GT(rep.max_drawdown, 5.0);
+
+    // Reject-only proof: risk must have rejected new risk after DD (not pass-through).
+    // Without soft→reject mapping this would stay 0 while the run still "continues".
+    EXPECT_GT(eng.total_audit_rejections(), 0u);
+    // Fills must stop well short of one-per-bar (500 attempts); residual inventory
+    // from early fills is fine, but unbounded new risk is not.
+    EXPECT_LT(rep.total_fills, static_cast<std::size_t>(strat->calls()) / 2);
+}
+
+// Hard stop: same setup with soft limits disabled → terminal halt.
+TEST(EngineIntegration, RiskDrawdownHardStopHaltsEngine)
+{
+    silence_cout quiet;
+
+    auto dh = make_declining_bars(500);
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<relentless_buyer>(50.0);
+
+    MarketMaker mm(3);
+    mm.add_orders(ob, 100.0, 500);
+
+    engine eng(dh, ob, strat, make_drawdown_risk_cfg(/*soft=*/false));
+    eng.run();
+
     EXPECT_LT(strat->calls(), 500);
-    // Risk halt must raise process-wide halt_flag_ (not only local halt_requested).
     EXPECT_TRUE(eng.get_halt_flag().load(std::memory_order_acquire));
+}
+
+// Pure wiring lock for main.inc resolve_risk_soft_portfolio_limits (no process spawn).
+TEST(EngineConfig, RiskSoftPortfolioLimitsResolveByMode)
+{
+    EXPECT_TRUE(resolve_risk_soft_portfolio_limits(false, "backtest"));
+    EXPECT_TRUE(resolve_risk_soft_portfolio_limits(false, ""));
+    EXPECT_TRUE(resolve_risk_soft_portfolio_limits(false, "research"));
+
+    EXPECT_FALSE(resolve_risk_soft_portfolio_limits(false, "shadow"));
+    EXPECT_FALSE(resolve_risk_soft_portfolio_limits(false, "live"));
+    EXPECT_FALSE(resolve_risk_soft_portfolio_limits(true, "backtest"));
+    EXPECT_FALSE(resolve_risk_soft_portfolio_limits(true, "shadow"));
+    EXPECT_FALSE(resolve_risk_soft_portfolio_limits(true, ""));
 }

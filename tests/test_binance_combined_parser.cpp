@@ -35,6 +35,73 @@ TEST(BinanceCombinedParser, RawTradeFrame_ProducesTick)
     EXPECT_DOUBLE_EQ(t.price, 42000.5);
 }
 
+// --- footprint.md §2.1 enrichment: native trade id + opt-in exact decimal ---
+
+TEST(BinanceCombinedParser, RawTradeFrame_PopulatesNativeTradeId)
+{
+    auto p = make_parser();
+    const std::string frame =
+        R"({"e":"trade","E":1704067200000,"s":"BTCUSDT","t":987654321,)"
+        R"("p":"42000.5","q":"0.01","T":1704067200001,"m":false})";
+
+    auto ev = p.parse_record(frame);
+    ASSERT_TRUE(ev.has_value());
+    const auto& t = std::get<provider::tick>(*ev);
+    EXPECT_EQ(t.native_trade_id, 987654321ULL);
+    EXPECT_FALSE(t.has_exact_decimal); // no exact tick size configured - unchanged default
+}
+
+TEST(BinanceCombinedParser, ConfiguredExactDecimalPopulatesExactFieldsWithoutTouchingDoubles)
+{
+    BinanceCombinedParser p;
+    p.configure_exact_decimal("0.01", 8);
+    const std::string frame =
+        R"({"e":"trade","E":1704067200000,"s":"BTCUSDT","t":1,)"
+        R"("p":"68120.50","q":"0.01230000","T":1704067200001,"m":true})";
+
+    auto ev = p.parse_record(frame);
+    ASSERT_TRUE(ev.has_value());
+    const auto& t = std::get<provider::tick>(*ev);
+    EXPECT_TRUE(t.has_exact_decimal);
+    EXPECT_EQ(t.price_ticks, 6812050);
+    EXPECT_EQ(t.base_qty_atoms, 1230000);
+    // Existing double-path fields are still populated exactly as before -
+    // the enrichment is additive, matching footprint.md §2.1's requirement
+    // that "existing engine conversion will ignore the enrichment".
+    EXPECT_DOUBLE_EQ(t.price, 68120.50);
+}
+
+TEST(BinanceCombinedParser, UnconfiguredInstanceNeverSetsHasExactDecimal)
+{
+    // A fresh parser without configure_exact_decimal() must behave exactly
+    // as before - no cross-instance state leakage, no accidental default-on.
+    auto p = make_parser();
+    const std::string frame =
+        R"({"e":"trade","E":1704067200000,"s":"BTCUSDT","t":1,)"
+        R"("p":"68120.50","q":"0.01230000","T":1704067200001,"m":true})";
+    auto ev = p.parse_record(frame);
+    ASSERT_TRUE(ev.has_value());
+    EXPECT_FALSE(std::get<provider::tick>(*ev).has_exact_decimal);
+}
+
+TEST(BinanceCombinedParser, PriceFormatOurStrictParserRejectsDegradesGracefully)
+{
+    // std::from_chars<double> (used by the pre-existing double path) accepts
+    // scientific notation; our strict decimal-only parse_decimal() rejects
+    // it (Binance never actually sends this shape - this proves the guard
+    // fails closed rather than crashing/miscomputing if it ever did).
+    BinanceCombinedParser p;
+    p.configure_exact_decimal("0.01", 8);
+    const std::string frame =
+        R"({"e":"trade","E":1704067200000,"s":"BTCUSDT","t":1,)"
+        R"("p":"1e2","q":"0.01","T":1704067200001,"m":true})";
+    auto ev = p.parse_record(frame);
+    ASSERT_TRUE(ev.has_value());
+    const auto& t = std::get<provider::tick>(*ev);
+    EXPECT_DOUBLE_EQ(t.price, 100.0); // primary double path still succeeds
+    EXPECT_FALSE(t.has_exact_decimal); // exact path fails closed, not crashes
+}
+
 TEST(BinanceCombinedParser, CombinedEnvelope_TradeFrame_ProducesTick)
 {
     auto p = make_parser();

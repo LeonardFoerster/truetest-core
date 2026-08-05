@@ -122,6 +122,32 @@ TEST(Analytics, FillEvent_BuyUpdatesEquity)
     EXPECT_GT(r.equity_curve.back().equity, 100000.0);
 }
 
+TEST(Analytics, OpenPosition_ReportsUnrealizedPnl)
+{
+    Analytics a(10000.0);
+    auto mkt = std::make_shared<market_event>(epoch_ms(0), "X", 100, 100, 100, 100.0);
+    a.on_event(mkt);
+
+    auto ord = std::make_shared<order_event>(epoch_ms(1), "X", order_type::limit, order_side::buy, 10, 100.0);
+    ord->set_order_id(1);
+    a.on_event(ord);
+    auto fill = std::make_shared<fill_event>(epoch_ms(1), "X", 1, order_side::buy, 10, 100.0, 0.0);
+    a.on_event(fill);
+
+    auto mkt2 = std::make_shared<market_event>(epoch_ms(2), "X", 110, 110, 110, 110.0);
+    a.on_event(mkt2);
+
+    auto r = a.generate_report();
+    ASSERT_EQ(r.open_positions.size(), 1u);
+    EXPECT_EQ(r.open_positions[0].symbol, "X");
+    EXPECT_DOUBLE_EQ(r.open_positions[0].quantity, 10.0);
+    EXPECT_DOUBLE_EQ(r.open_positions[0].avg_entry, 100.0);
+    EXPECT_DOUBLE_EQ(r.open_positions[0].mark, 110.0);
+    EXPECT_DOUBLE_EQ(r.open_positions[0].unrealized_pnl, 100.0); // (110-100)*10
+    EXPECT_DOUBLE_EQ(r.unrealized_pnl, 100.0);
+    EXPECT_DOUBLE_EQ(r.realized_pnl, 0.0);
+}
+
 TEST(Analytics, RoundTrip_PnL)
 {
     Analytics a;

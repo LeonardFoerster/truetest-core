@@ -36,7 +36,9 @@ TEST(OrderAuditSink, NoopDoesNotCrash)
 
     sink.record_event("test_event", "AAPL", "test_strat", 42, "info", "hello", "{\"k\":1}");
 
-    EXPECT_EQ(sink.total_rejections(), 0u);
+    // Noop still records rejection counts (for soft-risk tests without QuestDB);
+    // other record_* remain no-ops.
+    EXPECT_EQ(sink.total_rejections(), 2u);
 
     auto h = sink.health();
     EXPECT_FALSE(h.connected);
