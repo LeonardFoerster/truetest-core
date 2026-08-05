@@ -36,6 +36,7 @@ bld/
 !BacktestEngine/src/utils/log/
 [Ll]ogs/
 build/
+launch-default.sh
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/
@@ -438,3 +439,6 @@ secret*
 
 
 upcoming_plattform/
+
+# ImGui desk layout (local operator prefs)
+truetest_desk*.ini

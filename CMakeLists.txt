@@ -11,6 +11,7 @@ option(ENABLE_BINANCE    "Build with Binance exchange provider"                 
 option(ENABLE_BITGET     "Build with Bitget UTA futures provider"                     OFF)
 option(ENABLE_BITUNIX    "Build with Bitunix futures provider (MD/shadow Phase 0–1)"  OFF)
 option(ENABLE_WEB        "Build with embedded web UI server (civetweb)"                 OFF)
+option(ENABLE_IMGUI      "Build with in-process ImGui strategy desk (GLFW+OpenGL3)"     OFF)
 option(ENABLE_QUESTDB    "Build with QuestDB persistence backend"                     OFF)
 option(ENABLE_TSAN       "Enable ThreadSanitizer"                                     OFF)
 option(ENABLE_ASAN       "Enable AddressSanitizer (mutually exclusive with TSAN)"     OFF)
@@ -100,6 +101,13 @@ _tt_add_engine_binary(engine_live     TT_TARGET_LIVE     src/bin/engine_live/mai
 # engine_backtest keeps the existing ANSI ConsoleDashboard.
 tt_wire_rich_tui(engine_shadow)
 tt_wire_rich_tui(engine_live)
+
+# ImGui personal strategy desk (optional; GLFW + OpenGL3 + ImPlot).
+# Wired on shadow/live for Monitor/Execute; research launcher is Phase 4+.
+if(ENABLE_IMGUI)
+    tt_wire_imgui_desk(engine_shadow)
+    tt_wire_imgui_desk(engine_live)
+endif()
 
 # Native microarchitecture tuning. Gated on ENABLE_NATIVE_OPT (default off);
 # when the user opts in they want it across the board, not just on live.

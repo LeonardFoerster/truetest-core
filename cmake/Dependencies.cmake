@@ -95,17 +95,35 @@ endfunction()
 function(tt_wire_optional_backends target)
     set(_src "${CMAKE_SOURCE_DIR}/src")
 
+    # Shared Boost find for live/venue backends. Prefer Config-mode (CMP0167 NEW)
+    # so modern Boost (header-only System since 1.69; e.g. 1.91 ships boost_headers
+    # only, no boost_system package) works without FindBoost deprecation noise.
+    if(ENABLE_LIVE_DATA OR ENABLE_BINANCE OR ENABLE_BITGET OR ENABLE_BITUNIX)
+        if(POLICY CMP0167)
+            cmake_policy(SET CMP0167 NEW)
+        endif()
+        find_package(Boost REQUIRED)
+    endif()
+
     # HAS_LIVE_DATA remains available for venue live transports under providers/.
     # Generic WebSocketDataSource was removed (docs/internal/data-pipeline.md#D-07 — unwired dead end).
+    # Do not request COMPONENTS system — link Boost::headers (preferred) or
+    # Boost::system when present on older installs that still export that target.
     if(ENABLE_LIVE_DATA)
-        find_package(Boost REQUIRED COMPONENTS system)
-        target_link_libraries(${target} PUBLIC Boost::system)
+        if(TARGET Boost::headers)
+            target_link_libraries(${target} PUBLIC Boost::headers)
+        elseif(TARGET Boost::system)
+            target_link_libraries(${target} PUBLIC Boost::system)
+        else()
+            message(FATAL_ERROR
+                "ENABLE_LIVE_DATA requires Boost::headers or Boost::system "
+                "(found Boost but neither target exists)")
+        endif()
         target_compile_definitions(${target} PUBLIC HAS_LIVE_DATA)
     endif()
 
     # Binance exchange provider
     if(ENABLE_BINANCE)
-        find_package(Boost REQUIRED)
         find_package(OpenSSL REQUIRED)
         target_sources(${target} PRIVATE
             ${_src}/providers/binance/binance_register.cpp
@@ -118,7 +136,6 @@ function(tt_wire_optional_backends target)
 
     # Bitget UTA USDT-M futures provider
     if(ENABLE_BITGET)
-        find_package(Boost REQUIRED)
         find_package(OpenSSL REQUIRED)
         target_sources(${target} PRIVATE
             ${_src}/providers/bitget/bitget_futures_register.cpp)
@@ -129,7 +146,6 @@ function(tt_wire_optional_backends target)
 
     # Bitunix futures provider (Phase 0–1 MD/shadow)
     if(ENABLE_BITUNIX)
-        find_package(Boost REQUIRED)
         find_package(OpenSSL REQUIRED)
         target_sources(${target} PRIVATE
             ${_src}/providers/bitunix/bitunix_futures_register.cpp)
@@ -240,4 +256,81 @@ function(tt_wire_rich_tui target)
     target_include_directories(${target} PRIVATE ${CURSES_INCLUDE_DIRS})
     target_link_libraries(${target} PRIVATE ${CURSES_LIBRARIES})
     target_compile_definitions(${target} PRIVATE HAS_RICH_TUI)
+endfunction()
+
+# ── tt_wire_imgui_desk(target) ──────────────────────────────────────────────
+# Personal ImGui strategy desk (Monitor/Execute). Cold path only.
+# Call on engine_shadow / engine_live when ENABLE_IMGUI=ON. Fetches Dear ImGui
+# + ImPlot once; links system GLFW + OpenGL.
+function(tt_wire_imgui_desk target)
+    if(NOT ENABLE_IMGUI)
+        return()
+    endif()
+
+    find_package(OpenGL REQUIRED)
+    find_package(glfw3 QUIET)
+    if(NOT glfw3_FOUND AND NOT TARGET glfw)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(GLFW3 REQUIRED glfw3)
+    endif()
+
+    if(NOT TARGET truetest_imgui)
+        FetchContent_Declare(
+            imgui
+            GIT_REPOSITORY https://github.com/ocornut/imgui.git
+            # Docking branch — multi-panel trading desk layout
+            GIT_TAG        v1.91.8-docking
+        )
+        FetchContent_Declare(
+            implot
+            GIT_REPOSITORY https://github.com/epezent/implot.git
+            GIT_TAG        v0.16
+        )
+        FetchContent_GetProperties(imgui)
+        if(NOT imgui_POPULATED)
+            FetchContent_Populate(imgui)
+        endif()
+        FetchContent_GetProperties(implot)
+        if(NOT implot_POPULATED)
+            FetchContent_Populate(implot)
+        endif()
+
+        add_library(truetest_imgui STATIC
+            ${imgui_SOURCE_DIR}/imgui.cpp
+            ${imgui_SOURCE_DIR}/imgui_draw.cpp
+            ${imgui_SOURCE_DIR}/imgui_tables.cpp
+            ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+            ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+            ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+            ${implot_SOURCE_DIR}/implot.cpp
+            ${implot_SOURCE_DIR}/implot_items.cpp)
+        target_include_directories(truetest_imgui PUBLIC
+            ${imgui_SOURCE_DIR}
+            ${imgui_SOURCE_DIR}/backends
+            ${implot_SOURCE_DIR})
+        target_link_libraries(truetest_imgui PUBLIC OpenGL::GL)
+        if(TARGET glfw)
+            target_link_libraries(truetest_imgui PUBLIC glfw)
+        elseif(TARGET glfw3)
+            target_link_libraries(truetest_imgui PUBLIC glfw3)
+        else()
+            target_include_directories(truetest_imgui PUBLIC ${GLFW3_INCLUDE_DIRS})
+            target_link_libraries(truetest_imgui PUBLIC ${GLFW3_LIBRARIES})
+        endif()
+        # ImGui is third-party; silence pedantic warnings from engine flags.
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(truetest_imgui PRIVATE -Wno-error -w)
+        endif()
+        set_target_properties(truetest_imgui PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        message(STATUS "ENABLE_IMGUI: Dear ImGui v1.91.8-docking + ImPlot v0.16 + GLFW/OpenGL3")
+    endif()
+
+    target_sources(${target} PRIVATE ${IMGUI_DESK_SOURCES})
+    target_link_libraries(${target} PRIVATE truetest_imgui)
+    target_compile_definitions(${target} PRIVATE HAS_IMGUI_DESK)
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/src/ui/desk/assets
+                $<TARGET_FILE_DIR:${target}>/desk_assets
+        COMMENT "Copying TrueTest desk font assets")
 endfunction()

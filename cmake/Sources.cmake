@@ -17,6 +17,24 @@
 # The LOC regression guard for engine.cpp lives here so it is co-located with
 # the source lists that are affected by engine decomposition work.
 
+# ── IMGUI_DESK_SOURCES (target-private, ENABLE_IMGUI only) ──────────────────
+set(IMGUI_DESK_SOURCES
+    src/ui/desk/desk_app.cpp
+    src/ui/desk/demo_research.cpp
+    src/ui/desk/footprint_camera.cpp
+    src/ui/desk/footprint_presentation_bridge.cpp
+    src/ui/desk/footprint_panel_state.cpp
+    src/ui/desk/footprint_live_source.cpp
+    src/ui/desk/desk_layout.cpp
+    src/ui/desk/panels/about_dialog.cpp
+    src/ui/desk/panels/debug_panel.cpp
+    src/ui/desk/panels/activity_panel.cpp
+    src/ui/desk/panels/market_panels.cpp
+    src/ui/desk/panels/portfolio_panels.cpp
+    src/ui/desk/panels/research_panels.cpp
+    src/ui/desk/panels/status_panels.cpp
+)
+
 # ── ENGINE_CORE_SOURCES (identical across the three binaries) ────────────────
 # Every source file that is identical across the three binaries lives here.
 # main.cpp is intentionally NOT part of engine_core — each executable owns
@@ -35,6 +53,11 @@ set(ENGINE_CORE_SOURCES
     src/analytics/analytics.cpp
     src/analytics/ascii_widgets.cpp
     src/analytics/report_generator.cpp
+
+    # --- Footprint aggregation (footprint.md §2.2) ---
+    src/analytics/footprint/footprint_aggregator.cpp
+    src/analytics/footprint/footprint_reconciler.cpp
+    src/analytics/footprint/footprint_segment_cache.cpp
 
     # --- Data series store & multi-format sources (docs/internal/data-pipeline.md) ---
     src/data/market_series.cpp
@@ -198,6 +221,16 @@ set(TEST_SOURCES
     tests/test_hybrid_executor.cpp
     tests/test_cancel_race.cpp
 
+    # --- Footprint research ingress (footprint.md §2.1) ---
+    tests/test_decimal_ticks.cpp
+    tests/test_footprint_ingress.cpp
+    tests/test_footprint_aggregator.cpp
+    tests/test_footprint_dedup.cpp
+    tests/test_footprint_reorder_window.cpp
+    tests/test_footprint_reconciler.cpp
+    tests/test_footprint_segment_cache.cpp
+    tests/test_footprint_suggestions.cpp
+
     # --- Order / client id ---
     tests/test_client_order_id.cpp
     tests/test_rate_limiter.cpp
@@ -208,6 +241,17 @@ set(TEST_SOURCES
     tests/test_toast.cpp
     tests/test_tui_prefs.cpp
     tests/test_overlays.cpp
+    tests/test_imgui_desk_state.cpp
+    tests/test_imgui_monitor_model.cpp
+    tests/test_footprint_camera.cpp
+    tests/test_footprint_presentation_bridge.cpp
+    tests/test_footprint_panel_state.cpp
+    tests/test_footprint_live_source.cpp
+    src/ui/desk/demo_research.cpp
+    src/ui/desk/footprint_camera.cpp
+    src/ui/desk/footprint_presentation_bridge.cpp
+    src/ui/desk/footprint_panel_state.cpp
+    src/ui/desk/footprint_live_source.cpp
 
     # --- Golden regression ---
     tests/test_golden_regression.cpp
