@@ -59,15 +59,27 @@
 #include "data/questdb/run_tag.h"
 #endif
 #include "ui/console_dashboard.h"
-#ifdef HAS_RICH_TUI
+#include "ui/operator_actions.h"
+#if defined(HAS_RICH_TUI) || defined(HAS_IMGUI_DESK) || defined(HAS_WEB)
 #include "ui/dashboard_snapshot.h"
+#endif
+#ifdef HAS_RICH_TUI
 #include "ui/tabbed_dashboard.h"
+#endif
+#ifdef HAS_IMGUI_DESK
+#include "ui/desk/desk_app.h"
 #endif
 
 #ifdef HAS_BINANCE
 #include "providers/binance/binance_parser.h"
+#include "providers/binance/binance_combined_parser.h"
 #include "providers/binance/binance_recorder.h"
 #include "providers/binance/binance_replay_transport.h"
+#endif
+
+#ifdef HAS_IMGUI_DESK
+#include "providers/footprint/footprint_venue_capabilities.h"
+#include "ui/desk/footprint_live_source.h"
 #endif
 
 #ifdef HAS_DEBUG
@@ -331,8 +343,8 @@ struct cli_options
 
     double balance = 10000.0;
     double risk_fraction = 0.02;
-    double sl_pct = 0.005;
-    double tp_pct = 0.01;
+    double sl_pct = 0.003;   // platform default stop-loss 0.3%
+    double tp_pct = 0.01;    // platform default take-profit 1%
     // Platform default exit policy: floor|strategy_only|engine_only|union
     std::string exit_policy = "floor";
 
@@ -388,6 +400,26 @@ struct cli_options
     std::string status_format = "auto";
     bool no_tui = false;
 
+    // ImGui personal strategy desk (HAS_IMGUI_DESK). Mutually exclusive with
+    // rich ncurses TUI when both are available — desk wins if --desk is set.
+    bool desk = false;
+    // Starts the desk with deterministic "DEMO DATA" research panels already
+    // enabled (same effect as the menu toggle) - lets headless visual QA
+    // (footprint.md §3) and manual smoke checks reach the research surfaces
+    // without a mouse click.
+    bool desk_demo_data = false;
+
+    // footprint.md §1: "Automatic activation with --desk in HAS_IMGUI_DESK
+    // builds; --no-footprint will disable collection." Collection never
+    // affects trading behavior either way - it only feeds the desk's
+    // Orderflow footprint panel.
+    bool no_footprint = false;
+    // Exact-decimal tick-size override for the active symbol
+    // (footprint.md §2.1 footprint.tick_size_overrides.<venue>.<symbol> /
+    // --footprint-tick-size). Kept as a STRING end to end so the whole
+    // price-bucketing chain stays exact - never parsed to a double.
+    std::string footprint_tick_size;
+
     // Embedded web UI (HAS_WEB). Read-only; off by default.
     bool web = false;
     int web_port = 8080;
@@ -418,12 +450,22 @@ struct cli_options
 #endif
 };
 
+// "binance" and "binance-futures" are two distinct, non-aliased providers
+// (spot vs. USD-M futures - see binance_register.cpp / binance_futures_
+// register.cpp), unlike bitget/bitunix which register both their bare and
+// "-futures" names against the same factory. So this must stay an exact
+// match, never a prefix match, or it would also catch spot "binance".
+static bool provider_is_binance_futures(const std::string& name)
+{
+    return name == "binance-futures";
+}
+
 // Phase-0 live discipline for futures venues (Binance USDT-M + Bitget UTA).
 // Mainnet/live without sandbox flags: refuse if no venue caps or daily-loss.
 // Sandbox (Binance --testnet; Bitget --demo|--testnet): warn only.
 static bool is_futures_live_provider(const std::string& name)
 {
-    if (name == "binance-futures")
+    if (provider_is_binance_futures(name))
         return true;
     // bitget / bitget-futures (spot Bitget is not in scope)
     return name.rfind("bitget", 0) == 0;
@@ -973,7 +1015,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--risk-fraction", o.risk_fraction, "Position size as equity fraction")->default_val(0.02);
     app.add_option("--sl", o.sl_pct,
                    "Platform stop-loss fraction of entry (DefaultExitPolicy; 0=off)")
-        ->default_val(0.005);
+        ->default_val(0.003);
     app.add_option("--tp", o.tp_pct,
                    "Platform take-profit fraction of entry (DefaultExitPolicy; 0=off)")
         ->default_val(0.01);
@@ -1149,6 +1191,21 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Live status display: auto, tui, plain, ndjson, off (default: auto)")
         ->default_val("auto");
     app.add_flag("--no-tui", o.no_tui, "Shortcut for --status-format=plain");
+
+#ifdef HAS_IMGUI_DESK
+    app.add_flag("--desk", o.desk,
+                 "Open the ImGui strategy desk (Monitor/Execute; personal tool)");
+    app.add_flag("--desk-demo-data", o.desk_demo_data,
+                 "Start the desk with deterministic DEMO DATA research panels "
+                 "already enabled (headless visual QA / manual smoke)");
+    app.add_flag("--no-footprint", o.no_footprint,
+                 "Disable footprint public-trade collection (auto-enabled "
+                 "with --desk; never affects trading behavior either way)");
+    app.add_option("--footprint-tick-size", o.footprint_tick_size,
+                   "Exact decimal tick-size override for the footprint panel "
+                   "(e.g. \"0.01\") - only used when official instrument "
+                   "metadata disagrees or is unavailable");
+#endif
 
 #ifdef HAS_WEB
     app.add_flag("--web", o.web, "Serve the web UI (read-only) for this session");
@@ -1866,17 +1923,16 @@ static int run_provider_mode(const cli_options& o)
     auto prov_strategy = StrategyRegistry::instance().create(resolved);
     if (resolved == "sma" && o.sma_period != 20)
         prov_strategy->set_param("period", static_cast<double>(o.sma_period));
-    if (resolved == "mean-reversion") {
-        if (o.sma_period != 20) prov_strategy->set_param("period", static_cast<double>(o.sma_period));
-        if (o.balance != 10000.0) prov_strategy->set_param("equity", o.balance);
-        if (o.risk_fraction != 0.02) prov_strategy->set_param("risk_fraction", o.risk_fraction);
-        if (o.sl_pct != 0.005) prov_strategy->set_param("sl_pct", o.sl_pct);
-        if (o.tp_pct != 0.01) prov_strategy->set_param("tp_pct", o.tp_pct);
-    }
-    if (resolved == "breakout" || resolved == "coiled-spring") {
-        if (o.balance != 10000.0) prov_strategy->set_param("equity", o.balance);
-        if (o.risk_fraction != 0.02) prov_strategy->set_param("risk_fraction", o.risk_fraction);
-    }
+    if (resolved == "mean-reversion" && o.sma_period != 20)
+        prov_strategy->set_param("period", static_cast<double>(o.sma_period));
+    // Push platform sizing / protective exits into any strategy that accepts them.
+    auto try_set = [](IStrategy& s, const char* key, double v) {
+        try { s.set_param(key, v); } catch (const std::exception&) {}
+    };
+    try_set(*prov_strategy, "equity", o.balance);
+    try_set(*prov_strategy, "risk_fraction", o.risk_fraction);
+    try_set(*prov_strategy, "sl_pct", o.sl_pct);
+    try_set(*prov_strategy, "tp_pct", o.tp_pct);
     apply_execution_cost_params(*prov_strategy, o);
     apply_strategy_params(*prov_strategy, o.params);
 
@@ -1888,6 +1944,10 @@ static int run_provider_mode(const cli_options& o)
             return 1;
         }
         auto extra = StrategyRegistry::instance().create(nm);
+        try_set(*extra, "equity", o.balance);
+        try_set(*extra, "risk_fraction", o.risk_fraction);
+        try_set(*extra, "sl_pct", o.sl_pct);
+        try_set(*extra, "tp_pct", o.tp_pct);
         apply_execution_cost_params(*extra, o);
         apply_strategy_params(*extra, o.params);
         extra_strategies.emplace_back(nm, std::move(extra));
@@ -1982,7 +2042,10 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
     prov_cfg.risk_unwind = o.risk_unwind;
 
-    const bool resolved_live = (o.mode == "live" || o.live);
+    // Soft portfolio limits: reject-only in backtest; hard halt in live/shadow.
+    // Locked by EngineConfig.RiskSoftPortfolioLimitsResolveByMode unit tests.
+    prov_cfg.risk_soft_portfolio_limits =
+        resolve_risk_soft_portfolio_limits(o.live, o.mode);
 
 #ifdef HAS_QUESTDB
     prov_cfg.persist_enabled = o.persist;
@@ -2024,6 +2087,7 @@ static int run_provider_mode(const cli_options& o)
     else if (o.provider_name == "binance")
         prov_cfg.fee_model = std::make_shared<TieredFeeModel>(0.001, 0.001);
 
+    const bool resolved_live = (o.mode == "live" || o.live);
     if (o.mode == "shadow")
         prov_cfg.mode = engine_mode::shadow;
     else if (resolved_live)
@@ -2292,28 +2356,9 @@ static int run_provider_mode(const cli_options& o)
         auto web_srv = start_web(*eng);
 #endif
 
-#ifdef HAS_RICH_TUI
-        // Rich (ncurses) tabbed dashboard for shadow/live binaries when the
-        // resolved status mode is TUI. ncurses takes over the terminal, so
-        // we skip render_banner() (it would be cleared on initscr) and skip
-        // the inner ConsoleDashboard render loop - the rich TUI reads from
-        // the same ConsoleDashboard atomics + recent-event ring, and pulls
-        // structured tables (positions, lots, ...) via engine::snapshot_dashboard.
-        std::unique_ptr<truetest::ui::TabbedDashboard> rich_tui;
-        if (dashboard && truetest::target_uses_rich_tui()
-            && dashboard->is_tui())
-        {
-            auto snap_fn = [&eng](truetest::ui::dashboard_snapshot& out) {
-                bool ok = eng->snapshot_dashboard(out);
-                if (ok) out.debug.target = truetest::target_name();
-                return ok;
-            };
-            rich_tui = std::make_unique<truetest::ui::TabbedDashboard>(
-                dashboard, snap_fn);
-
-            // Wire operator hotkey actions. Pause/flatten always available;
-            // kill switch comes from the provider when one supplies it
-            // (Binance does - backtest does not).
+#if defined(HAS_RICH_TUI) || defined(HAS_IMGUI_DESK)
+        // Shared operator hooks for rich TUI and/or ImGui desk.
+        auto make_operator_actions = [&]() {
             truetest::ui::operator_actions ops;
             ops.pause_toggle = [&eng]() {
                 eng->set_pause_all(!eng->is_pause_all());
@@ -2327,7 +2372,56 @@ static int run_provider_mode(const cli_options& o)
                     };
                 }
             }
-            rich_tui->set_actions(std::move(ops));
+            return ops;
+        };
+
+        auto make_snap_fn = [&]() {
+            return [&eng](truetest::ui::dashboard_snapshot& out) {
+                bool ok = eng->snapshot_dashboard(out);
+                if (ok) out.debug.target = truetest::target_name();
+                return ok;
+            };
+        };
+#endif
+
+#ifdef HAS_IMGUI_DESK
+        // ImGui personal desk — preferred interactive surface when --desk.
+        // Does not take over the terminal (windowed); ConsoleDashboard may
+        // still run in plain/ndjson mode for logs.
+        std::unique_ptr<truetest::ui::desk::DeskApp> imgui_desk;
+        if (o.desk)
+        {
+            imgui_desk = std::make_unique<truetest::ui::desk::DeskApp>(
+                make_snap_fn(), dashboard);
+            imgui_desk->set_actions(make_operator_actions());
+            if (o.desk_demo_data)
+                imgui_desk->set_demo_enabled(true);
+            std::string title = std::string("TrueTest Desk — ") + truetest::target_name();
+            imgui_desk->set_title(std::move(title));
+            if (!imgui_desk->start())
+            {
+                std::cerr << "  ! --desk: failed to start ImGui window; "
+                             "continuing without desk\n";
+                imgui_desk.reset();
+            }
+        }
+#endif
+
+#ifdef HAS_RICH_TUI
+        // Rich (ncurses) tabbed dashboard for shadow/live binaries when the
+        // resolved status mode is TUI and the ImGui desk is not active.
+        // ncurses takes over the terminal, so we skip render_banner().
+        std::unique_ptr<truetest::ui::TabbedDashboard> rich_tui;
+        if (dashboard && truetest::target_uses_rich_tui()
+            && dashboard->is_tui()
+#ifdef HAS_IMGUI_DESK
+            && !imgui_desk
+#endif
+            )
+        {
+            rich_tui = std::make_unique<truetest::ui::TabbedDashboard>(
+                dashboard, make_snap_fn());
+            rich_tui->set_actions(make_operator_actions());
         }
 #endif
 
@@ -2344,11 +2438,26 @@ static int run_provider_mode(const cli_options& o)
             else
 #endif
             {
-                dashboard->render_banner();
-                dashboard->push_event(
-                    truetest::ui::event_severity::notice,
-                    "engine starting");
-                dashboard->start();
+                // With --desk, prefer plain status so ncurses doesn't fight
+                // the GL window for the terminal.
+#ifdef HAS_IMGUI_DESK
+                if (imgui_desk && dashboard->is_tui())
+                {
+                    // Still push events; banner only for non-TUI or fallback.
+                    dashboard->push_event(
+                        truetest::ui::event_severity::notice,
+                        "engine starting (ImGui desk)");
+                    // Don't start ncurses-style TUI loop when desk owns UX.
+                }
+                else
+#endif
+                {
+                    dashboard->render_banner();
+                    dashboard->push_event(
+                        truetest::ui::event_severity::notice,
+                        "engine starting");
+                    dashboard->start();
+                }
             }
         }
 
@@ -2366,6 +2475,82 @@ static int run_provider_mode(const cli_options& o)
                 [](const provider::event& ev, std::shared_ptr<data_handler> h) {
                     provider::event_sink(ev, std::move(h));
                 });
+
+#ifdef HAS_IMGUI_DESK
+            // footprint.md §1/§2.1: auto-activate with --desk; --no-footprint
+            // disables collection. Installed as an opt-in DataBridge research
+            // tap (§2.1) - never on the engine's own event path, never
+            // touching eng/provider behavior either way.
+            std::shared_ptr<truetest::ui::desk::FootprintLiveSource> footprint_live_source;
+            if (o.desk && !o.no_footprint)
+            {
+                std::optional<double> official_tick_size;
+                if (auto spec = provider->get_instrument(o.symbol); spec && spec->tick_size > 0.0)
+                    official_tick_size = spec->tick_size;
+
+                std::optional<double> override_tick_size;
+                if (!o.footprint_tick_size.empty())
+                {
+                    try { override_tick_size = std::stod(o.footprint_tick_size); }
+                    catch (...) {
+                        std::cerr << "  ! --footprint-tick-size: not a number, ignoring\n";
+                    }
+                }
+
+                const auto resolution = truetest::footprint::resolve_footprint_tick_size(
+                    official_tick_size, override_tick_size);
+                if (resolution.status == truetest::footprint::tick_size_status::resolved)
+                {
+                    // Match the actual registered provider names (see
+                    // provider_is_binance_futures/provider_is_bitget/
+                    // provider_is_bitunix above), not bare "binance"/
+                    // "bitget"/"bitunix" - the launch script and the
+                    // --provider examples above both use the "-futures"
+                    // names, which these exact-string checks used to miss,
+                    // silently leaving venue at "unknown" for every
+                    // real-world run.
+                    truetest::footprint::venue_id venue = truetest::footprint::venue_id::unknown;
+                    if (provider_is_binance_futures(o.provider_name)) venue = truetest::footprint::venue_id::binance_usdm;
+                    else if (provider_is_bitget(o.provider_name)) venue = truetest::footprint::venue_id::bitget_usdtm;
+                    else if (provider_is_bitunix(o.provider_name)) venue = truetest::footprint::venue_id::bitunix_futures;
+
+                    truetest::ui::desk::FootprintLiveSourceConfig fp_cfg;
+                    fp_cfg.venue = venue;
+                    fp_cfg.symbol_label = o.symbol;
+                    fp_cfg.tick_size = resolution.tick_size;
+                    fp_cfg.qty_atom_scale = 1e8; // satoshi-like default; per-venue precision is Phase 4b
+
+                    footprint_live_source =
+                        std::make_shared<truetest::ui::desk::FootprintLiveSource>(fp_cfg);
+
+#ifdef HAS_BINANCE
+                    // Only Binance gets exact-decimal wiring today (native
+                    // trade id + string-exact price/qty via
+                    // BinanceCombinedParser::configure_exact_decimal(), which
+                    // needs the SAME exact string the tick-size resolution
+                    // above just validated). Other venues on this event-stream
+                    // path still get a working, float-derived footprint tap
+                    // for free via try_tap_push()'s fallback conversion.
+                    if (!o.footprint_tick_size.empty())
+                        if (auto* combined = dynamic_cast<BinanceCombinedParser*>(parser.get()))
+                            combined->configure_exact_decimal(o.footprint_tick_size);
+#endif
+
+                    bridge->set_research_tap([footprint_live_source](const provider::event& ev) {
+                        footprint_live_source->tap(ev);
+                    });
+                    if (imgui_desk)
+                        imgui_desk->set_live_footprint_source(footprint_live_source);
+                }
+                else if (dashboard)
+                {
+                    dashboard->push_event(truetest::ui::event_severity::warn,
+                        "footprint: tick size unavailable/conflicting for this "
+                        "symbol - collection disabled this run");
+                }
+            }
+#endif
+
             eng->run_streaming(bridge);
         }
         else if (is_tick)
@@ -2489,6 +2674,37 @@ static int run_provider_mode(const cli_options& o)
         for (auto& es : extra_strategies)
             eng->add_strategy(es.second, es.first);
 
+#ifdef HAS_IMGUI_DESK
+        // Batch / synthetic runs: open desk so the operator can watch the
+        // final snapshot (and mid-run if the batch is long). Window stays
+        // up after the run until closed — same review intent as --web.
+        std::unique_ptr<truetest::ui::desk::DeskApp> batch_desk;
+        if (o.desk)
+        {
+            auto snap_fn = [&eng](truetest::ui::dashboard_snapshot& out) {
+                bool ok = eng->snapshot_dashboard(out);
+                if (ok) out.debug.target = truetest::target_name();
+                return ok;
+            };
+            batch_desk = std::make_unique<truetest::ui::desk::DeskApp>(snap_fn);
+            truetest::ui::operator_actions ops;
+            ops.pause_toggle = [&eng]() {
+                eng->set_pause_all(!eng->is_pause_all());
+            };
+            ops.pause_state = [&eng]() { return eng->is_pause_all(); };
+            ops.flatten     = [&eng]() { eng->request_flatten(); };
+            batch_desk->set_actions(std::move(ops));
+            if (o.desk_demo_data)
+                batch_desk->set_demo_enabled(true);
+            batch_desk->set_title(std::string("TrueTest Desk — ") + truetest::target_name());
+            if (!batch_desk->start())
+            {
+                std::cerr << "  ! --desk: failed to start ImGui window\n";
+                batch_desk.reset();
+            }
+        }
+#endif
+
         if (is_tick)
             eng->run_tick_data();
         else
@@ -2497,6 +2713,15 @@ static int run_provider_mode(const cli_options& o)
         eng->print_summary();
         export_results(eng->get_analytics(), o.output, o.output_format);
         opened_provider.release();
+
+#ifdef HAS_IMGUI_DESK
+        if (batch_desk && batch_desk->is_running())
+        {
+            std::cerr << "  desk open with final snapshot — close the window to exit\n";
+            while (batch_desk->is_running())
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        }
+#endif
 
 #ifdef HAS_WEB
         // Backtest is blocking and done; keep the server alive so the operator
@@ -2796,6 +3021,10 @@ static int run_tui_configured_engine(const cli_options& o,
     config.risk.max_trades_per_hour = o.risk_max_trades_per_hour;
     config.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
     config.risk_unwind = o.risk_unwind;
+    // Non-provider path is always engine_backtest binary → soft by default.
+    // Still route through the resolver so mode typos / future flags stay consistent.
+    config.risk_soft_portfolio_limits =
+        resolve_risk_soft_portfolio_limits(/*live_flag=*/false, "backtest");
 
     if (!o.thread_preset_str.empty())
         config.threading = string_to_preset(o.thread_preset_str);
