@@ -80,17 +80,22 @@ public:
                               double win_rate, double calmar, std::size_t total_trades, std::size_t winning_trades) {}
 };
 
+// Default sink: counts rejections so soft-risk / unit tests can prove
+// reject-only behavior without QuestDB. All other record_* are no-ops.
 class NoopOrderAuditSink final : public IOrderAuditSink {
 public:
     void record_order_submitted(const order_event&, const char*) override {}
     void record_status_transition(uint64_t, order_status, order_status, const char*) override {}
     void record_fill(const fill_event&, uint64_t, const char*, const char*) override {}
-    void record_rejection(const order_event&, const char*, const char*) override {}
+    void record_rejection(const order_event&, const char*, const char*) override
+    {
+        ++total_rejections_;
+    }
     void record_cancellation(uint64_t, const char*, const char*, const char*) override {}
     void record_amendment(uint64_t, const char*, double, double, double, double, std::chrono::system_clock::time_point) override {}
     void record_funding(const funding_event&, const char*) override {}
     void record_event(const char*, const char*, const char*, uint64_t, const char*, const char*, const char*) override {}
-    std::size_t total_rejections() const override { return 0; }
+    std::size_t total_rejections() const override { return total_rejections_; }
     const char* run_tag() const override { return ""; }
     Health health() const override { return {}; }
     void tick() override {}
@@ -98,6 +103,9 @@ public:
     void finalize_run([[maybe_unused]] double, [[maybe_unused]] std::size_t, [[maybe_unused]] std::size_t, [[maybe_unused]] std::size_t,
                       [[maybe_unused]] double, [[maybe_unused]] double, [[maybe_unused]] double, [[maybe_unused]] double,
                       [[maybe_unused]] double, [[maybe_unused]] double, [[maybe_unused]] std::size_t, [[maybe_unused]] std::size_t) override {}
+
+private:
+    std::size_t total_rejections_ = 0;
 };
 
 #ifdef HAS_QUESTDB

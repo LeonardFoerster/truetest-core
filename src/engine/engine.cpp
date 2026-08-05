@@ -1583,11 +1583,17 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
 
         auto snap = analytics_.risk_view();
         auto action = risk_manager_.check_order(*o, portfolio_, snap);
+        // Backtest research: portfolio risk breaches reject the trade only —
+        // never stop the market replay. Live/shadow keep terminal halt.
+        if (action == risk_action::halt && config_.risk_soft_portfolio_limits)
+            action = risk_action::reject;
         if (action == risk_action::halt || action == risk_action::reject)
         {
             const char* reason = (action == risk_action::halt)
                 ? "risk limit breached - engine halted"
-                : "order rejected by risk manager";
+                : (config_.risk_soft_portfolio_limits
+                       ? "order rejected by risk manager (soft portfolio limits)"
+                       : "order rejected by risk manager");
 
             auto rej = acquire_pooled(rejection_pool_,
                 o->get_timestamp(), o->get_symbol(), o->get_order_id(), reason);
@@ -2397,6 +2403,19 @@ bool engine::handle_engine_fill(fill_event& f,
         auto post_action = risk_manager_.check_post_fill(f, portfolio_, post_snap);
         if (post_action == risk_action::halt)
         {
+            // Soft backtest: fill already applied; log and keep replaying data.
+            if (config_.risk_soft_portfolio_limits)
+            {
+                audit_sink_->record_event(
+                    "risk_decision",
+                    f.get_symbol().c_str(),
+                    "",
+                    f.get_order_id(),
+                    "soft_post_fill",
+                    "post-fill portfolio limit breached — continue (soft)",
+                    "{}");
+                return true;
+            }
             if (config_.risk_unwind)
                 unwind_positions(event_count);
             trigger_halt("risk post-fill limit breached - engine halted");

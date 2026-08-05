@@ -556,6 +556,13 @@ public:
 
     const OrderTracker& get_order_tracker() const { return order_tracker_; }
 
+    // Rejections recorded via IOrderAuditSink (Noop counts; QuestDB sink counts).
+    // Used by soft-portfolio-risk tests to prove reject-only (not pass-through).
+    std::size_t total_audit_rejections() const
+    {
+        return audit_sink_ ? audit_sink_->total_rejections() : 0;
+    }
+
     // Prefer is_halted() for production reads. Mutable ref is retained for
     // tests; production code must never clear halt mid-run (S3 terminal).
     bool is_halted() const

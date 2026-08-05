@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 class IFeeModel;
@@ -25,6 +26,18 @@ class IQueueModel;
 namespace truetest::ui { class ConsoleDashboard; }
 
 enum class engine_mode { backtest, shadow, live };
+
+// Resolve research soft-portfolio limits from CLI/API mode flags.
+// Live and shadow MUST hard-halt (return false). Backtest / research soft-reject.
+// Pure helper so unit tests lock main.inc wiring without spawning a process.
+// `live_flag` covers `--live`; `mode` covers `--mode live|shadow|backtest`.
+inline bool resolve_risk_soft_portfolio_limits(bool live_flag,
+                                               std::string_view mode) noexcept
+{
+    if (live_flag) return false;
+    if (mode == "live" || mode == "shadow") return false;
+    return true;
+}
 
 // block (default, backtest): the event loop applies backpressure — it
 // spins until the worker drains the ring, so no event is ever lost and
@@ -105,6 +118,12 @@ struct engine_config
 
     risk_limits risk = {};
     bool risk_unwind = false;
+
+    // Research / backtest default: portfolio risk breaches (max DD, daily
+    // loss, …) reject the offending order instead of terminal halt, so the
+    // remaining market data still runs to EOF. Live and shadow MUST leave
+    // this false (fail-closed: risk_action::halt → trigger_halt).
+    bool risk_soft_portfolio_limits = true;
 
     uint64_t seed = 0;
 
