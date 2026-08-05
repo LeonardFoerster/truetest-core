@@ -5,218 +5,73 @@
 <h1 align="center">TrueTest</h1>
 
 <p align="center">
-  <strong>Modular C++23 trading engine</strong> for reproducible backtesting,<br/>
-  divergence-aware shadow trading, and gated live execution — one tree, three binaries.
+  <strong>Modular C++23 trading engine</strong> — reproducible backtests, shadow divergence,<br/>
+  and gated live execution. One tree, three binaries, compile-time live gate.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/C%2B%2B-23-22D3EE?style=for-the-badge&logo=cplusplus&logoColor=0B1220" alt="C++23" />
   <img src="https://img.shields.io/badge/CMake-3.22%2B-F59E0B?style=for-the-badge&logo=cmake&logoColor=0B1220" alt="CMake" />
   <img src="https://img.shields.io/badge/platform-Arch%20%7C%20Fedora-0B1220?style=for-the-badge&labelColor=22D3EE" alt="Arch and Fedora" />
-  <img src="https://img.shields.io/badge/tests-1000%2B-22D3EE?style=for-the-badge&logo=googletest&logoColor=0B1220" alt="1000+ tests" />
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/backtest-TT__TARGET-64748B?style=flat-square" alt="backtest" />
-  <img src="https://img.shields.io/badge/shadow-TT__TARGET-22D3EE?style=flat-square" alt="shadow" />
-  <img src="https://img.shields.io/badge/live-gated-F59E0B?style=flat-square" alt="live gated" />
-  <img src="https://img.shields.io/badge/venues-Binance%20%7C%20Bitget%20%7C%20Bitunix-0B1220?style=flat-square&labelColor=334155" alt="venues" />
-  <img src="https://img.shields.io/badge/hot_path-zero--alloc-22D3EE?style=flat-square&labelColor=0B1220" alt="zero-alloc" />
 </p>
 
 ---
 
-> **Intended use** — Private personal research and retail tool only. Not enterprise or institutional software for others.  
-> **Mature paths** — Monte Carlo, high-fidelity backtest, shadow divergence analysis.  
-> **Live** (`engine_live`) — experimental, tiny-size, fully attended, your own risk. Phase 0/1 are personal discipline and evidence practices.  
-> **Supported platforms** — **Arch Linux** and **Fedora** only (and close Arch/Fedora derivatives). Windows, macOS, and other Linux distros are **not** supported.  
-> **This tree** — C++ engine package **`core/`** inside the TrueTest workspace (sibling packages: `backend/`, `UI/`, …). This README documents **only** the engine.
+**Personal research / retail tool only** — not enterprise software, not financial advice.  
+**Supported OS:** **Arch Linux** and **Fedora** only. Windows, macOS, and other distros are unsupported.  
+**This repo** is the C++ engine (`truetest-core`). Sibling packages (`backend/`, `UI/`, …) are separate checkouts if you use the wider workspace.
 
-Three binaries share one codebase and differ only by compile-time `TT_TARGET`. Live-order paths are **physically eliminated** (DCE) in non-live targets via `src/core/tt_target.h` → `target_allows_live_orders()`.
+Live orders are **compile-time impossible** in non-live binaries (`TT_TARGET` + DCE in `src/core/tt_target.h`).  
+**Config precedence:** CLI flags override `--config` JSON; JSON overrides hard defaults. There is no `TRUETEST_CONFIG` env var.
 
-**Config precedence:** explicit CLI flags → `--config` JSON file → hard defaults. There is **no** `TRUETEST_CONFIG` environment variable.
-
-```mermaid
-flowchart LR
-  CLI["CLI flags"] --> CFG["--config JSON"]
-  CFG --> DEF["Hard defaults"]
-  CLI -. wins .-> RUN["Engine run"]
-  CFG -. if unset .-> RUN
-  DEF -. fallback .-> RUN
-```
-
-| | Binary | `TT_TARGET` | Live orders | Primary use |
-|:---:|:-------|:------------|:------------|:------------|
-| <img src="https://img.shields.io/badge/-backtest-64748B?style=flat-square" alt="" /> | `engine_backtest` | `BACKTEST` | Impossible | Historical replay, MC campaigns |
-| <img src="https://img.shields.io/badge/-shadow-22D3EE?style=flat-square" alt="" /> | `engine_shadow` | `SHADOW` | Impossible | Real-time paper vs exchange |
-| <img src="https://img.shields.io/badge/-live-F59E0B?style=flat-square" alt="" /> | `engine_live` | `LIVE` | Allowed (gated) | Real-money execution with safeguards |
-
-```mermaid
-flowchart TB
-  subgraph compile["Compile-time TT_TARGET"]
-    BT["engine_backtest<br/>BACKTEST"]
-    SH["engine_shadow<br/>SHADOW"]
-    LV["engine_live<br/>LIVE"]
-  end
-  BT --> DCE["Live order code DCE'd out"]
-  SH --> DCE
-  LV --> GATE["Live orders allowed<br/>operator + risk gates"]
-```
+| Binary | `TT_TARGET` | Live orders | Use |
+|:-------|:------------|:------------|:----|
+| `engine_backtest` | `BACKTEST` | Impossible | Historical replay, Monte Carlo |
+| `engine_shadow` | `SHADOW` | Impossible | Real-time paper vs exchange |
+| `engine_live` | `LIVE` | Allowed (gated) | Real money — experimental, attended |
 
 ---
 
-## Feature list (shipped)
+## 60-second happy path
 
-What exists **in this tree today** (not aspirational):
+Arch (minimal packages for a synthetic backtest):
 
-### Engine & modes
-- Three compile-time targets: `engine_backtest` · `engine_shadow` · `engine_live`
-- Headless / CI-friendly runs (`--no-tui`, `--status-format`, `--dry-run`, `--dump-config`)
-- Multi-strategy runs (`--strategy sma,mean-reversion`)
-- Platform protective exits: `--exit-policy` (`floor` default) · `--sl` · `--tp`
-- Thread presets: `inline` · `light` · `standard` · `full` · `extended` (+ pin / spin policy)
-- C API embed (`BUILD_SHARED_LIB` → `libtruetest.so`)
-
-### Data, realism & research
-- Local CSV OHLCV + tick, multi-path
-- Binary zstd event log record/replay (`--log-events` / `--replay`)
-- Realism models: latency, impact, walked-book, queue (L2), probabilistic fills, synthetic MM book
-- Monte Carlo: GBM generator, multi-trial campaigns, `--mc-reuse-objects`, experimental `--mc-parallel` (with `inline` threads)
-- Synthetic / `montecarlo` provider
-
-### Venues (opt-in at build time)
-| Venue | CLI names | Maturity |
-|:------|:----------|:---------|
-| **Binance** | `binance`, `binance-futures` | Golden path (spot + USDT-M) |
-| **Bitget** | `bitget`, `bitget-futures` | Landed UTA USDT-M · demo via `--demo` |
-| **Bitunix** | `bitunix`, `bitunix-futures` | Phase 0–1 MD + paper/shadow (live routing refused) |
-| **Local / synthetic** | `local`, `synthetic` | Always available |
-
-```mermaid
-pie showData
-  title Venue maturity (qualitative)
-  "Binance golden path" : 40
-  "Bitget landed" : 25
-  "Bitunix Phase 0–1" : 15
-  "Local / synthetic" : 20
+```bash
+sudo pacman -S --needed base-devel cmake git ninja gcc
+git clone https://github.com/LeonardFoerster/truetest-core.git
+cd truetest-core
+cmake --preset linux-tests
+cmake --build --preset linux-tests -j"$(nproc)"
+./out/build/linux-tests/engine_backtest \
+  --provider synthetic --strategy sma --seed 424242 \
+  --no-pin --status-format off --no-tui \
+  --output /tmp/run.json
 ```
 
-### Safety & risk
-- Compile-time live-order gate (`TT_TARGET` / DCE)
-- Reconciler, Dead Man’s Switch, kill-switch, venue `IRiskCheck`
-- Terminal `halt_flag_`, user-data WS as source of truth, `WorkerWatchdog`
-- Phase 1 mechanical freeze (10 files + `LIVE_SAFETY_CCB_APPROVED`)
+Fedora: install `cmake git ninja-build gcc gcc-c++` via `dnf`, then the same `cmake` / run lines.  
+First configure needs **network** (FetchContent pulls CLI11, zstd, nlohmann/json at pinned tags).
 
-### Strategies & indicators
-- Strategies: `sma` · `ma-crossover` · `mean-reversion` · `breakout` · `coiled-spring` · `larry_connor` · `hedge-demo` · `adaptive-hybrid` · `structure-continuation`
-- Indicators: SMA, EMA, RSI, Stochastic, Bollinger, ATR, swing detection, rolling extremes
-
-### Observability & UI
-- zstd binary logs + rotating text logs
-- Optional QuestDB ILP (`ENABLE_QUESTDB`, `--persist`, `--persist-strict`)
-- Rich ncurses TUI (shadow/live)
-- Optional read-only web UI (`ENABLE_WEB`, `--web` + token on shadow/live)
-- 1000+ GoogleTest cases, golden regression, hot-path / layer / freeze gate scripts
+Full tests after build: `ctest --test-dir out/build/linux-tests --output-on-failure`.
 
 ---
 
-## Upcoming features (planned / not shipped)
-
-Tracked in [`docs/todos/`](docs/todos/) and governance — **do not treat as available**:
-
-| Track | Examples |
-|:------|:---------|
-| **Phase 0** | Tiny-size mainnet futures validation — **0/15** qualifying sessions ([`reports/phase0/`](reports/phase0/)) |
-| **Risk / DMS** | Further R-*/S-* items (funding analytics, DMS flatten automation, etc.) |
-| **Venues** | Bitunix live path · further Bitget freeze expansion · Bybit/Gate **archived** (not on master) · COIN-M inverse · hedge mode |
-| **Engine** | `engine.cpp` decomposition waves ([`docs/internal/engine-decomposition.md`](docs/internal/engine-decomposition.md)) |
-| **Data** | Parquet / external API sources deferred ([`docs/internal/data-pipeline.md`](docs/internal/data-pipeline.md)) |
-| **Ops / Go-Live** | 9-row capital gate, Prometheus drills, formal CCB size increases |
-| **Other** | Multi-symbol / cross-margin risk, richer language bindings, Solana/Drift keeper (research only) |
-
-Venue design notes: [`docs/platforms/`](docs/platforms/).
-
-```mermaid
-xychart-beta
-  title "Phase 0 qualifying sessions (target 15)"
-  x-axis [done, remaining]
-  y-axis "sessions" 0 --> 15
-  bar [0, 15]
-```
-
----
-
-## Installation & build
-
-### Supported platforms
-
-| Platform | Status |
-|:---------|:-------|
-| **Arch Linux** (Manjaro, EndeavourOS, …) | Supported |
-| **Fedora** (close RHEL clones only if GCC ≥ 13) | Supported |
-| Other Linux, Windows, macOS | **Not supported** |
-
-Presets and day-to-day docs assume Arch or Fedora. No install recipes are maintained for other OS families.
-
-### Requirements
-
-Aligned with `cmake/Dependencies.cmake` and root `CMakeLists.txt` (system packages vs FetchContent).
-
-| Component | When needed | Notes |
-|:----------|:------------|:------|
-| **CMake** ≥ **3.22** | Always | Configure / generate |
-| **C++23** toolchain | Always | GCC **13+** or Clang **16+** |
-| **Git** | Always | FetchContent clones |
-| **Ninja** | Recommended | Used by Linux CMake presets |
-| **pkg-config** | Recommended | Helps CMake find system libs |
-| **ncurses** (wide / Curses) | **Shadow / live link** | `find_package(Curses REQUIRED)` for rich TUI |
-| **Boost** | Venues / live data | `find_package(Boost …)` when `ENABLE_BINANCE` / `BITGET` / `BITUNIX` / `LIVE_DATA` |
-| **OpenSSL** | Venues | `find_package(OpenSSL REQUIRED)` with the same venue flags |
-| **Node.js + npm** | Optional web SPA | Only for `ENABLE_WEB` + `web_assets` frontend build |
-
-**Fetched automatically** (no system package required for these):
-
-| Dep | Trigger |
-|:----|:--------|
-| CLI11, zstd, nlohmann/json | Always (`tt_fetch_dependencies`) |
-| GoogleTest | `BUILD_TESTS` |
-| Google Benchmark | `ENABLE_BENCHMARKS` |
-| civetweb | `ENABLE_WEB` |
-| Abseil | `ENABLE_DEBUG` |
-
-Minimal CSV backtest needs only compiler + CMake + Git (FetchContent pulls CLI11 / zstd / json). Shadow/live need **ncurses**. Venue providers need **Boost + OpenSSL**.
-
----
+## Install packages
 
 ### Arch Linux / Manjaro / EndeavourOS
 
 ```bash
-# Base toolchain + TUI
-sudo pacman -S --needed base-devel cmake git ninja pkgconf \
-  gcc clang \
-  ncurses
+# Toolchain + recommended
+sudo pacman -S --needed base-devel cmake git ninja pkgconf gcc clang
 
-# Venues / live networking (Binance, Bitget, Bitunix, LIVE_DATA)
+# Shadow / live TUI
+sudo pacman -S --needed ncurses
+
+# Venue providers (Binance / Bitget / Bitunix / LIVE_DATA)
 sudo pacman -S --needed boost openssl
 
-# Optional: web frontend build
+# Optional: web SPA assets
 sudo pacman -S --needed nodejs npm
 ```
-
-```bash
-git clone https://github.com/LeonardFoerster/truetest-core.git
-cd truetest-core
-
-# Recommended: tests + full unit suite
-cmake --preset linux-tests
-cmake --build --preset linux-tests -j"$(nproc)"
-ctest --test-dir out/build/linux-tests --output-on-failure
-
-# Venues example (Binance + QuestDB)
-# cmake --preset linux-binance-questdb && cmake --build --preset linux-binance-questdb -j"$(nproc)"
-```
-
----
 
 ### Fedora
 
@@ -227,62 +82,50 @@ sudo dnf install -y \
   gcc gcc-c++ \
   ncurses-devel \
   boost-devel openssl-devel \
-  nodejs npm   # optional, web UI only
+  nodejs npm   # optional
 ```
 
-Ensure the default GCC is **≥ 13** (or install a newer toolchain / clang with C++23).
-
-```bash
-git clone https://github.com/LeonardFoerster/truetest-core.git
-cd truetest-core
-
-cmake --preset linux-tests
-cmake --build --preset linux-tests -j"$(nproc)"
-ctest --test-dir out/build/linux-tests --output-on-failure
-```
-
-Ad-hoc tree (docs/scripts often use `build/`):
-
-```bash
-cmake -B build -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-ctest --test-dir build --output-on-failure
-```
+GCC **≥ 13** or Clang **≥ 16**. If CMake cannot find Boost after enabling venues, install the distro `-devel` package and reconfigure in a clean build dir.
 
 ---
 
-### Common feature builds (Arch & Fedora)
+## Build
+
+| Style | Configure | Binaries |
+|:------|:----------|:---------|
+| **Preset** (preferred) | `cmake --preset linux-tests` | `out/build/linux-tests/` |
+| **Ad-hoc** | `cmake -B build -DBUILD_TESTS=ON` | `build/` |
 
 ```bash
-# Binance + QuestDB + tests
-cmake --preset linux-binance-questdb && cmake --build --preset linux-binance-questdb -j"$(nproc)"
+cmake --preset linux-tests
+cmake --build --preset linux-tests -j"$(nproc)"
 
-# Bitget / Bitunix / all venues
+# Common feature presets
+cmake --preset linux-binance-questdb && cmake --build --preset linux-binance-questdb -j"$(nproc)"
 cmake --preset linux-bitget   && cmake --build --preset linux-bitget -j"$(nproc)"
 cmake --preset linux-bitunix  && cmake --build --preset linux-bitunix -j"$(nproc)"
 cmake --preset linux-venues   && cmake --build --preset linux-venues -j"$(nproc)"
-
-# Web UI (needs npm for SPA)
-cmake --preset linux-web && cmake --build --preset linux-web -j"$(nproc)"
-cmake --build --preset linux-web --target web_assets   # if npm is available
-
-# Sanitizers / release-native
-cmake --preset linux-asan && cmake --build --preset linux-asan -j"$(nproc)"
+cmake --preset linux-web      && cmake --build --preset linux-web -j"$(nproc)"
+cmake --preset linux-asan     && cmake --build --preset linux-asan -j"$(nproc)"
 cmake --preset linux-release-native && cmake --build --preset linux-release-native -j"$(nproc)"
 ```
 
 | CMake option | System deps |
 |:-------------|:------------|
-| (minimal backtest) | compiler + cmake + git (+ ninja recommended) |
-| Shadow/live link | **ncurses** |
+| Minimal backtest | compiler, cmake, git (+ ninja) |
+| Shadow / live link | **ncurses** |
 | `ENABLE_BINANCE` / `BITGET` / `BITUNIX` / `LIVE_DATA` | **Boost** + **OpenSSL** |
-| `ENABLE_QUESTDB` | none extra (raw sockets) |
-| `ENABLE_WEB` | FetchContent civetweb; **npm** only for SPA assets |
-| `BUILD_TESTS` / `ENABLE_BENCHMARKS` / `ENABLE_DEBUG` | FetchContent (GTest / Benchmark / Abseil) |
+| `ENABLE_QUESTDB` | none extra |
+| `ENABLE_WEB` | civetweb via FetchContent; **npm** for SPA |
+| `BUILD_TESTS` / `ENABLE_BENCHMARKS` / `ENABLE_DEBUG` | GTest / Benchmark / Abseil via FetchContent |
+
+Source lists: `cmake/Sources.cmake` (no globs).
 
 ---
 
 ## Architecture
+
+Simplified data path (not every engine stage):
 
 ```mermaid
 flowchart TB
@@ -292,70 +135,64 @@ flowchart TB
     SYN["Synthetic / MC"]
   end
 
-  subgraph binaries["Binaries · TT_TARGET"]
-    EB["engine_backtest"]
-    ES["engine_shadow"]
-    EL["engine_live"]
-  end
-
-  sources --> IP["IProvider<br/>parse · transport"]
+  sources --> IP["IProvider"]
   IP --> LOOP["Engine event loop"]
-
   LOOP --> STR["Strategy"]
   LOOP --> RISK["Risk / exits"]
   LOOP --> BOOK["Orderbook"]
-
-  STR --> RINGS["SPSC rings / object pools<br/>zero-alloc hot path"]
-  RISK --> RINGS
-  BOOK --> RINGS
-
-  IP --> SAFE["Safety hooks"]
-  SAFE --> DMS["DMS · kill · reconciler · IRiskCheck"]
-
-  RINGS --> OBS["TUI · Web · QuestDB · zstd event log"]
-  DMS --> OBS
+  STR --> HOT["Pools + SPSC rings<br/>hot-path discipline"]
+  RISK --> HOT
+  BOOK --> HOT
+  IP --> SAFE["DMS · kill · reconciler · IRiskCheck"]
+  HOT --> COLD["TUI · Web · QuestDB · logs"]
+  SAFE --> COLD
 ```
 
-**Provider is the only venue extension point** (`IProvider` + reconciler / kill-switch / risk-check / brackets). Core layers must not grow `HAS_*` venue ifdefs. Details: [`docs/architecture/`](docs/architecture/) · [`AGENTS.md`](AGENTS.md).
-
-```mermaid
-flowchart LR
-  subgraph hot["Hot path"]
-    P["Parse"] --> E["Engine"]
-    E --> S["Strategy"]
-    S --> R["Risk"]
-    R --> O["Orderbook / publish"]
-  end
-  subgraph cold["Cold path"]
-    TUI["ncurses TUI"]
-    WEB["Web UI"]
-    QDB["QuestDB"]
-    LOG["zstd / text logs"]
-  end
-  O -. SPSC / workers .-> cold
-```
+**Provider is the only venue extension point** (`IProvider` + safety hooks). Core must not grow `HAS_*` venue ifdefs.  
+Hot path aims for **zero heap / low jitter** (pools, prewarm, `forbid_runtime_grow`); not every cold path is allocation-free.  
+Details: [`docs/architecture/`](docs/architecture/) · [`AGENTS.md`](AGENTS.md).
 
 ---
 
-## Quick start & typical workflows
+## What you can run today
 
-Paths below assume a **preset** build (`out/build/…`). For ad-hoc builds, replace with `./build/…`.
+- **Backtest / MC** — CSV, synthetic, realism models, multi-trial MC (`--mc-reuse-objects`; `--mc-parallel` with `--thread-preset inline`)
+- **Shadow** — paper vs venue (Binance golden path; Bitget landed; Bitunix MD/shadow Phase 0–1)
+- **Live** — `engine_live` only, experimental, tiny size, attended
+- **Platform exits** — `--exit-policy` / `--sl` / `--tp`
+- **Obs** — ncurses TUI (shadow/live), optional web (`ENABLE_WEB`), optional QuestDB (`ENABLE_QUESTDB`)
+- **Strategies** — e.g. `sma`, `ma-crossover`, `mean-reversion`, `breakout` / `coiled-spring`, `adaptive-hybrid`, `structure-continuation` (see strategy docs)
 
-### Credentials (env preferred)
+Full feature and flag reference: [`docs/reference/`](docs/reference/).  
+Planned work (not shipped): [`docs/todos/`](docs/todos/) · Phase 0 **0/15** sessions in [`reports/phase0/`](reports/phase0/).
 
-Environment variables **win over** `--api-key` / `--api-secret` / `--api-passphrase` (CLI secrets can leak via process lists). **Never commit keys.**
+| Venue | CLI | Notes |
+|:------|:----|:------|
+| Binance | `binance`, `binance-futures` | Golden path |
+| Bitget | `bitget`, `bitget-futures` | UTA USDT-M; demo via `--demo` |
+| Bitunix | `bitunix`, `bitunix-futures` | Live routing refused |
+| Local / synthetic | `local`, `synthetic` | Always available |
 
-| Venue | Variables |
-|:------|:----------|
-| Binance (default resolve) | `TRUETEST_BINANCE_API_KEY`, `TRUETEST_BINANCE_API_SECRET` |
-| Bitget | `TRUETEST_BITGET_API_KEY`, `…_SECRET`, `…_PASSPHRASE` |
-| Bitunix | `TRUETEST_BITUNIX_API_KEY`, `…_SECRET` |
+---
 
-Optional hygiene: `scripts/check-credentials.sh`. Full flags: [`docs/reference/04-flags.md`](docs/reference/04-flags.md).
+## Workflows
 
-### Workflows
+Paths assume a **preset** build under `out/build/…` (use `./build/…` for ad-hoc).
 
-**1. CSV backtest (minimal build)**
+### Credentials
+
+Env vars **win over** CLI secrets (CLI can leak via process lists). Never commit keys.
+
+```bash
+export TRUETEST_BINANCE_API_KEY="…"
+export TRUETEST_BINANCE_API_SECRET="…"
+# Bitget also: TRUETEST_BITGET_API_PASSPHRASE
+# Bitunix: TRUETEST_BITUNIX_API_KEY / _SECRET
+```
+
+Optional: `scripts/check-credentials.sh`. Flags: [`docs/reference/04-flags.md`](docs/reference/04-flags.md).
+
+### 1. CSV backtest
 
 ```bash
 ./build/engine_backtest \
@@ -364,7 +201,7 @@ Optional hygiene: `scripts/check-credentials.sh`. Full flags: [`docs/reference/0
   --strategy sma
 ```
 
-**2. Headless synthetic / CI-style**
+### 2. Headless synthetic / CI
 
 ```bash
 ./out/build/linux-tests/engine_backtest \
@@ -373,20 +210,17 @@ Optional hygiene: `scripts/check-credentials.sh`. Full flags: [`docs/reference/0
   --output /tmp/run.json
 ```
 
-**3. Monte Carlo campaign**
+### 3. Monte Carlo
 
 ```bash
 ./out/build/linux-tests/engine_backtest \
-  --provider synthetic \
-  --strategy sma \
+  --provider synthetic --strategy sma \
   --monte-carlo --mc-trials 50 \
-  --mc-reuse-objects \
-  --thread-preset inline \
+  --mc-reuse-objects --thread-preset inline \
   --no-pin --status-format off --no-tui
-# With --mc-parallel, keep --thread-preset inline (pinning conflicts otherwise).
 ```
 
-**4. Shadow vs Binance futures (paper; needs `ENABLE_BINANCE`)**
+### 4. Shadow vs Binance futures (needs `ENABLE_BINANCE`)
 
 ```bash
 ./out/build/linux-binance-questdb/engine_shadow \
@@ -397,7 +231,7 @@ Optional hygiene: `scripts/check-credentials.sh`. Full flags: [`docs/reference/0
   --persist --run-tag my_shadow_run
 ```
 
-**5. Bitget demo / paper trading (needs `ENABLE_BITGET`; not Phase 0 qualifying)**
+### 5. Bitget paper (needs `ENABLE_BITGET`; not Phase 0 qualifying)
 
 ```bash
 ./out/build/linux-bitget/engine_shadow \
@@ -406,101 +240,46 @@ Optional hygiene: `scripts/check-credentials.sh`. Full flags: [`docs/reference/0
   --stream trade \
   --depth-stream books5 \
   --no-pin --status-format off --no-tui
-# Live demo: engine_live + --demo --live + TRUETEST_BITGET_* — see docs/operations/03-bitget-demo.md
 ```
 
-**6. Live (experimental)** — `--live` + credentials + math captcha on mainnet. Ritual: [`docs/governance/01-prod.md`](docs/governance/01-prod.md).
+### 6. Live (experimental)
 
-**7. Web UI (read-only; needs `ENABLE_WEB`)**
+> **Do not run `engine_live` on mainnet until Phase 0 discipline is in place.**  
+> Needs `--live`, credentials, captcha ritual, tiny size, full attendance.  
+> See [`docs/governance/01-prod.md`](docs/governance/01-prod.md).
+
+### 7. Web UI (read-only; needs `ENABLE_WEB`)
 
 ```bash
 cmake -B build -DENABLE_WEB=ON && cmake --build build -j
 cd src/web/frontend && npm ci && npm run build
 ./build/engine_shadow ... --web --web-token <secret> --web-assets src/web/assets
-# → http://127.0.0.1:8080/   (shadow/live require --web-token)
-```
-
-```mermaid
-flowchart TD
-  A["Pick workflow"] --> B{"Data source?"}
-  B -->|CSV| C["engine_backtest<br/>--provider local"]
-  B -->|Synthetic / MC| D["engine_backtest<br/>--provider synthetic"]
-  B -->|Venue paper| E["engine_shadow<br/>ENABLE_* venue"]
-  B -->|Tiny live| F["engine_live<br/>attended ritual"]
-  E --> G["Optional --persist / --web"]
-  F --> H["Phase 0 evidence"]
+# http://127.0.0.1:8080/  — shadow/live require --web-token
 ```
 
 ---
 
-## Build flags (short)
+## Dependencies (system vs FetchContent)
 
-| Style | Configure | Binaries |
-|:------|:----------|:---------|
-| **Preset** | `cmake --preset linux-tests` | `out/build/linux-tests/` |
-| **Ad-hoc** | `cmake -B build -DBUILD_TESTS=ON` | `build/` |
+| Component | When | Notes |
+|:----------|:-----|:------|
+| CMake ≥ 3.22, C++23, Git | Always | |
+| Ninja, pkg-config | Recommended | Presets use Ninja |
+| ncurses (Curses) | Shadow / live | `find_package(Curses REQUIRED)` |
+| Boost, OpenSSL | Venues / `LIVE_DATA` | `find_package` in `cmake/Dependencies.cmake` |
+| Node.js + npm | Optional web SPA | `web_assets` only |
 
-| Option | Effect |
-|:-------|:-------|
-| `-DENABLE_BINANCE` / `BITGET` / `BITUNIX` | Venue providers (needs Boost + OpenSSL) |
-| `-DENABLE_QUESTDB` / `WEB` / `DEBUG` | Persistence / web UI / instrumentation |
-| `-DENABLE_NATIVE_OPT` | `-march=native` on all three engines (Release) |
-| `-DBUILD_TESTS` / `BUILD_SHARED_LIB` | GoogleTest / `libtruetest.so` |
-
-Source lists: **`cmake/Sources.cmake`** (no globs). Full tables above under *Installation*.
-
----
-
-## Troubleshooting
-
-| Symptom | Likely fix |
-|:--------|:-----------|
-| CMake/compiler rejects C++23 | GCC ≥ 13 or Clang ≥ 16 on Arch/Fedora |
-| `engine_shadow` / `engine_live` fail to link Curses | Install **ncurses** (`ncurses` / `ncurses-devel`) |
-| Configure fails on Boost/OpenSSL | Install system Boost + OpenSSL **or** drop venue `ENABLE_*` flags |
-| “Binary not found” after `cmake --preset …` | Presets write to **`out/build/<preset>/`**, not `build/` |
-| `--web` exits on shadow/live | Pass **`--web-token`** (required outside backtest) |
-| Venue provider “not found” at runtime | Rebuild with matching `ENABLE_BINANCE` / `BITGET` / `BITUNIX` |
-| MC + parallel hangs / odd affinity | Use `--thread-preset inline` with `--mc-parallel`; prefer `--no-pin` in containers |
-| Build on Windows / macOS / Debian | **Not supported** — use Arch or Fedora |
+| Fetched automatically | Trigger |
+|:----------------------|:--------|
+| CLI11, zstd, nlohmann/json | Always |
+| GoogleTest | `BUILD_TESTS` |
+| Google Benchmark | `ENABLE_BENCHMARKS` |
+| civetweb | `ENABLE_WEB` |
+| Abseil | `ENABLE_DEBUG` |
 
 ---
 
-## Safety surface (Phase 1 freeze)
-
-| Layer | Frozen paths (exact list in `scripts/check-live-safety-freeze.sh`) |
-|:------|:-------------------------------------------------------------------|
-| Gate | `src/core/tt_target.h` |
-| Engine | `src/engine/engine.cpp` |
-| Binance futures | `binance_futures_{provider,dead_mans_switch,kill_switch,reconciler}.h` |
-| Risk / exec / threads | `risk_manager.h` · `futures_risk_check.h` · `live_safety.h` · `worker_watchdog.h` |
-
-Edits need **`LIVE_SAFETY_CCB_APPROVED`**, two-person CCB, clean multi-hour `engine_shadow`.  
-→ [`docs/governance/01-prod.md`](docs/governance/01-prod.md) · [`docs/governance/02-prerequisites.md`](docs/governance/02-prerequisites.md) · [`AGENTS.md`](AGENTS.md)
-
-| Phase | Status |
-|:------|:-------|
-| Phase 0 tiny-size mainnet | **0/15** qualifying |
-| Phase 1 freeze | **Enforced** |
-| Risk / DMS backlog | Partial (`docs/todos/`) |
-
----
-
-## Documentation map
-
-| Document | Purpose |
-|:---------|:--------|
-| [`docs/reference/01-instructions.md`](docs/reference/01-instructions.md) | Master how-to |
-| [`docs/reference/04-flags.md`](docs/reference/04-flags.md) | CLI flags (`main.inc`) |
-| [`docs/governance/01-prod.md`](docs/governance/01-prod.md) | Phases, Go-Live, Phase 0 ritual |
-| [`docs/todos/`](docs/todos/) | Detailed backlog |
-| [`AGENTS.md`](AGENTS.md) | Agent rules, freeze, hot path |
-| [`docs/platforms/`](docs/platforms/) | Venue status |
-| [`docs/README.md`](docs/README.md) | Full nav |
-
----
-
-## Testing, gates & contributing
+## Gates, freeze & testing
 
 ```bash
 cmake --preset linux-tests && cmake --build --preset linux-tests -j
@@ -512,24 +291,55 @@ ctest --test-dir out/build/linux-tests --output-on-failure
 ./scripts/check-live-safety-freeze.sh
 ```
 
-- **Agents / AI rules:** [`AGENTS.md`](AGENTS.md) (this package) and parent workspace `AGENTS.md` for monorepo scope.
-- **Frozen surface PRs:** commit body must contain `LIVE_SAFETY_CCB_APPROVED` + checklist in [`docs/governance/02-prerequisites.md`](docs/governance/02-prerequisites.md).
+**Phase 1 freeze** (token `LIVE_SAFETY_CCB_APPROVED` + CCB + clean shadow):  
+`tt_target.h`, `engine.cpp`, Binance futures safety headers, `risk_manager.h`, `futures_risk_check.h`, `live_safety.h`, `worker_watchdog.h` — exact list in `scripts/check-live-safety-freeze.sh`.  
+→ [`docs/governance/01-prod.md`](docs/governance/01-prod.md) · [`02-prerequisites.md`](docs/governance/02-prerequisites.md) · [`AGENTS.md`](AGENTS.md)
+
+| Phase | Status |
+|:------|:-------|
+| Phase 0 tiny-size mainnet | **0/15** qualifying |
+| Phase 1 freeze | **Enforced** |
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|:--------|:----|
+| C++23 rejected | GCC ≥ 13 or Clang ≥ 16 on Arch/Fedora |
+| Shadow/live Curses link error | Install `ncurses` / `ncurses-devel` |
+| Boost/OpenSSL configure fail | Install devel packages or drop venue `ENABLE_*` |
+| Binary not found after preset | Look under `out/build/<preset>/`, not `build/` |
+| `--web` exits on shadow/live | Pass `--web-token` |
+| Provider missing at runtime | Rebuild with matching `ENABLE_*` |
+| MC parallel / affinity issues | `--thread-preset inline` with `--mc-parallel`; `--no-pin` in containers |
+| Windows / macOS / other Linux | **Unsupported** — use Arch or Fedora |
+
+---
+
+## Documentation
+
+| Doc | Purpose |
+|:----|:--------|
+| [`docs/reference/01-instructions.md`](docs/reference/01-instructions.md) | Master how-to |
+| [`docs/reference/04-flags.md`](docs/reference/04-flags.md) | CLI flags |
+| [`docs/reference/07-strategy-development.md`](docs/reference/07-strategy-development.md) | Strategies |
+| [`docs/governance/01-prod.md`](docs/governance/01-prod.md) | Phases / live ritual |
+| [`docs/todos/`](docs/todos/) | Backlog |
+| [`docs/platforms/`](docs/platforms/) | Venues |
+| [`AGENTS.md`](AGENTS.md) | Agent rules, freeze, hot path |
+| [`docs/README.md`](docs/README.md) | Full nav |
 
 ---
 
 ## License & disclaimer
 
-- **License:** No `LICENSE` file is present in this tree at the time of writing. Treat the project as **private personal research software** unless the author publishes an explicit license.
-- **Not financial advice.** Nothing here is an offer to manage capital or a guarantee of trading performance.
-- **Live trading risks total loss of capital.** Use tiny size, attend the process, and follow Phase 0/1 gates before increasing size.
-- **Not enterprise / multi-tenant production software.** See intended use at the top of this file.
+- No `LICENSE` file in-tree — treat as **private personal research** unless the author publishes one.
+- **Not financial advice.** Live trading can lose all capital. Tiny size, attend the process, respect Phase 0/1.
+- Not multi-tenant production software.
 
 ---
 
 <p align="center">
-  <img src="https://img.shields.io/badge/TrueTest-personal_research_platform-0B1220?style=for-the-badge&labelColor=22D3EE&color=0B1220" alt="personal research" />
-</p>
-
-<p align="center">
-  <sub>Use it responsibly. Supported platforms: Arch Linux and Fedora. All live trading carries risk.</sub>
+  <sub>Arch Linux · Fedora · personal research only · live trading is your risk</sub>
 </p>
