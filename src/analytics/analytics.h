@@ -53,6 +53,17 @@ struct trade_record
     std::string strategy_name;
 };
 
+// End-of-run open inventory (mark-to-market).
+struct open_position_report
+{
+    std::string symbol;
+    double quantity = 0.0;      // signed: >0 long, <0 short
+    double avg_entry = 0.0;
+    double mark = 0.0;
+    double unrealized_pnl = 0.0;
+    const char* side() const { return quantity >= 0.0 ? "long" : "short"; }
+};
+
 struct sub_analytics
 {
     double total_pnl = 0.0;
@@ -128,6 +139,11 @@ struct AnalyticsReport
     std::unordered_map<std::string, sub_analytics> per_strategy;
 
     std::vector<trade_record> trades;
+
+    // Realized = sum of closed-trade PnL; unrealized = open MTM vs avg entry.
+    double realized_pnl = 0.0;
+    double unrealized_pnl = 0.0;
+    std::vector<open_position_report> open_positions;
 };
 
 class Analytics : public Worker

@@ -559,6 +559,24 @@ AnalyticsReport Analytics::snapshot() const
     r.total_fills = total_fills_;
     r.total_trades = trade_returns_.size();
 
+    // Closed-trade realized PnL + open mark-to-market unrealized.
+    r.realized_pnl = total_win_ - total_loss_;
+    r.unrealized_pnl = 0.0;
+    r.open_positions.clear();
+    for (const auto& [sym, pos] : open_positions_)
+    {
+        if (std::abs(pos.qty) <= 1e-12) continue;
+        open_position_report op;
+        op.symbol = sym;
+        op.quantity = pos.qty;
+        op.avg_entry = pos.avg_entry;
+        op.mark = pos.last_price > 0.0 ? pos.last_price : pos.avg_entry;
+        // Long: (mark - entry) * qty; short qty negative → same formula.
+        op.unrealized_pnl = (op.mark - op.avg_entry) * op.quantity;
+        r.unrealized_pnl += op.unrealized_pnl;
+        r.open_positions.push_back(std::move(op));
+    }
+
     r.avg_slippage = (slippage_count_ > 0) ? total_slippage_ / static_cast<double>(slippage_count_) : 0.0;
     r.avg_slippage_signed = (slippage_count_ > 0)
         ? total_slippage_signed_ / static_cast<double>(slippage_count_) : 0.0;
@@ -749,7 +767,8 @@ void Analytics::export_json(const std::string& path) const
         R"("avg_win":%.6f,"avg_loss":%.6f,"largest_winner":%.6f,"largest_loser":%.6f,)"
         R"("time_in_market_pct":%.4f,"avg_slippage":%.6f,)"
         R"("buy_and_hold_return":%.6f,"strategy_vs_benchmark":%.6f,)"
-        R"("alpha":%.6f,"beta":%.6f,"information_ratio":%.6f,"tracking_error":%.6f)",
+        R"("alpha":%.6f,"beta":%.6f,"information_ratio":%.6f,"tracking_error":%.6f,)"
+        R"("realized_pnl":%.2f,"unrealized_pnl":%.2f)",
         r.initial_equity, r.final_equity, r.cumulative_return, r.annualized_return,
         r.sharpe_ratio, r.sortino_ratio, r.max_drawdown, r.calmar_ratio,
         r.rolling_sharpe, r.rolling_max_drawdown,
@@ -757,7 +776,8 @@ void Analytics::export_json(const std::string& path) const
         r.avg_win, r.avg_loss, r.largest_winner, r.largest_loser,
         r.time_in_market_pct, r.avg_slippage,
         r.buy_and_hold_return, r.strategy_vs_benchmark,
-        r.alpha, r.beta, r.information_ratio, r.tracking_error);
+        r.alpha, r.beta, r.information_ratio, r.tracking_error,
+        r.realized_pnl, r.unrealized_pnl);
 
     f << "{" << (buf + 1);
 
@@ -790,6 +810,20 @@ void Analytics::export_json(const std::string& path) const
             t.quantity, t.fill_price, t.commission, t.pnl,
             t.symbol.c_str(), t.strategy_name.c_str());
         f << tbuf;
+    }
+    f << "]";
+
+    f << ",\"open_positions\":[";
+    for (std::size_t i = 0; i < r.open_positions.size(); ++i)
+    {
+        if (i > 0) f << ",";
+        const auto& op = r.open_positions[i];
+        char obuf[384];
+        std::snprintf(obuf, sizeof(obuf),
+            R"({"symbol":"%s","quantity":%.8g,"avg_entry":%.6f,"mark":%.6f,"unrealized_pnl":%.2f,"side":"%s"})",
+            op.symbol.c_str(), op.quantity, op.avg_entry, op.mark, op.unrealized_pnl,
+            op.side());
+        f << obuf;
     }
     f << "]";
 
