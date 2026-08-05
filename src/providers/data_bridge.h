@@ -103,6 +103,18 @@ public:
 	void set_retain_streamed(bool retain) { retain_streamed_ = retain; }
 	bool retain_streamed() const { return retain_streamed_; }
 
+	// Optional research tap (footprint.md §2.1). Fires once per streamed
+	// record, right after it is parsed, from the same thread that drives
+	// run_streaming_impl - never a second producer thread. Default is unset
+	// (nullptr check only, same cost as the existing on_record hook below).
+	// Whatever is installed here owns the "must not allocate, lock, format,
+	// log, retry, aggregate, or block" contract - DataBridge itself stays a
+	// generic pass-through and knows nothing about footprint/PublicTrade
+	// types, so this template does not gain a dependency on any one
+	// consumer.
+	using research_tap_fn = std::function<void(const T&)>;
+	void set_research_tap(research_tap_fn tap) { research_tap_ = std::move(tap); }
+
 	bool load_data(std::shared_ptr<data_handler> handler) override
 	{
 		if (!handler) return false;
@@ -215,6 +227,8 @@ private:
 			detail::emit_record(record, sink);
 			if (on_record)
 				on_record(record);
+			if (research_tap_)
+				research_tap_(record);
 			++count;
 		};
 
@@ -261,6 +275,7 @@ private:
 	std::shared_ptr<IDataTransport> transport_;
 	std::shared_ptr<IDataParser<T>> parser_;
 	sink_fn sink_;
+	research_tap_fn research_tap_;
 	std::atomic<bool>* halt_flag_ = nullptr;
 	bool retain_streamed_ = false; // D-06 default: do not grow series on stream
 };

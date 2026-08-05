@@ -4,7 +4,9 @@
 #include "providers/provider_event.h"
 #include "providers/binance/binance_parser.h"
 #include "providers/binance/binance_depth_parser.h"
+#include "providers/footprint/decimal_ticks.h"
 
+#include <cstdlib>
 #include <optional>
 #include <string>
 
@@ -14,6 +16,20 @@ public:
     bool parse_header(const std::string&) override
     {
         return true;
+    }
+
+    // footprint.md §2.1: opt-in exact-decimal wiring. Unset by default (no
+    // behavior change - has_exact_decimal stays false on every tick, same
+    // as before this method existed). Callers (main.inc, not this class)
+    // resolve tick_size themselves - see resolve_footprint_tick_size() -
+    // and only call this with a genuinely exact decimal string (the
+    // official-metadata path is presently double-only and is NOT routed
+    // here to avoid a double round-trip masquerading as "exact"; use
+    // --footprint-tick-size for a real exact-decimal source today).
+    void configure_exact_decimal(std::string_view tick_size_str, int atom_decimals = 8)
+    {
+        exact_tick_size_ = truetest::footprint::parse_decimal(tick_size_str);
+        atom_decimals_ = atom_decimals;
     }
 
     std::optional<provider::event> parse_record(const std::string& line) override
@@ -41,6 +57,41 @@ public:
             t.quantity = rec->quantity;
             t.side = (rec->side == data_tick_side::bid) ? 0 :
                      (rec->side == data_tick_side::ask) ? 1 : 2;
+
+            // Native trade id ("t") - unconditional, cheap, always exact
+            // (it's an integer already). footprint.md §2.1.
+            if (const auto id_str = binance::extract_number(data_json, "t"); !id_str.empty())
+            {
+                char* end = nullptr;
+                const auto id = std::strtoull(id_str.c_str(), &end, 10);
+                if (end && *end == '\0')
+                    t.native_trade_id = id;
+            }
+
+            // Exact integer price_ticks/base_qty_atoms - only when the
+            // caller configured a genuinely exact tick size (see
+            // configure_exact_decimal() above). Parses Binance's raw "p"/"q"
+            // decimal strings directly; never touches rec->price/quantity
+            // (already lossy doubles) for this path.
+            if (exact_tick_size_)
+            {
+                const auto price_str = binance::extract_number(data_json, "p");
+                const auto qty_str = binance::extract_number(data_json, "q");
+                const auto price_dec = truetest::footprint::parse_decimal(price_str);
+                const auto qty_dec = truetest::footprint::parse_decimal(qty_str);
+                if (price_dec && qty_dec)
+                {
+                    const auto ticks = truetest::footprint::decimal_to_ticks(*price_dec, *exact_tick_size_);
+                    const auto atoms = truetest::footprint::decimal_to_atoms(*qty_dec, atom_decimals_);
+                    if (ticks && atoms)
+                    {
+                        t.price_ticks = *ticks;
+                        t.base_qty_atoms = *atoms;
+                        t.has_exact_decimal = true;
+                    }
+                }
+            }
+
             return provider::event{t};
         }
         else if (event_type == "kline")
@@ -130,4 +181,7 @@ private:
             c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return sym;
     }
+
+    std::optional<truetest::footprint::DecimalValue> exact_tick_size_;
+    int atom_decimals_ = 8;
 };
