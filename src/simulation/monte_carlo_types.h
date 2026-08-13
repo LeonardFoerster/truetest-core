@@ -163,9 +163,19 @@ struct McRunConfig {
     // Initial equity for each trial (passed through to engine_config and reports)
     double initial_balance = 10000.0;
 
-    // Realism / engine settings to apply to every trial
+    // Realism / engine settings to apply to every trial (must match single-run
+    // semantics when CLI sets fee/latency/impact — FR-02; maker-queue — FR-mc-queue).
     double order_latency_us = 0.0;
     double impact_k_bps = 0.0;
+    double impact_adv = 0.0;          // ADV for SquareRootImpactModel; 0 = no impact
+    std::string fee_model;            // "", "fixed", "tiered"
+    double fee_value = 0.0;           // fixed fee per trade
+    double maker_rate = 0.0;
+    double taker_rate = 0.0;
+    double bar_spread_bps = 0.0;      // half-spread adverse slip (mirrors main.inc --bar-spread-bps)
+    // Maker-queue / hybrid paper path ("" or "none" = off; uniform|front|back).
+    std::string maker_queue_model;
+    bool walked_book_impact = false;
 
     bool keep_full_reports = false;   // if true, TrialResult can carry more data
 

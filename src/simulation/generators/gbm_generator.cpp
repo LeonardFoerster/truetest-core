@@ -92,10 +92,11 @@ SyntheticPath GBMGenerator::generate(uint64_t seed, const McGeneratorConfig& cfg
 
         const int64_t volume = static_cast<int64_t>(1000.0 * vol_noise(rng));
 
-        // Date string is synthetic but sortable
+        // Epoch-ms date strings: parseable with second/ms resolution, strictly
+        // increasing by 1 minute (avoids midnight collapse + invalid calendar days).
+        const int64_t ts_ms = 1'704'067'200'000LL + i * 60'000; // 2024-01-01 UTC + i minutes
         char date_buf[32];
-        std::snprintf(date_buf, sizeof(date_buf), "2024-01-%02lld %02lld:%02lld",
-                      1 + (i / (24*60)), (i / 60) % 24, i % 60);
+        std::snprintf(date_buf, sizeof(date_buf), "%lld", static_cast<long long>(ts_ms));
 
         path.bars.push_back(make_bar(cfg.symbol, date_buf, open, high, low, close, volume));
         path.ticks.push_back(make_tick(cfg.symbol, i, close, volume / 10 + 1));

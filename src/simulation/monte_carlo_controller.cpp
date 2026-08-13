@@ -7,7 +7,11 @@
 #include "engine/engine_config.h"
 #include "data/data_handler.h"
 #include "strategy/strategy_registry.h"
+#include "strategy/apply_execution_cost_params.h"
 #include "execution/fee_model.h"
+#include "execution/impact_model.h"
+#include "execution/latency_model.h"
+#include "execution/queue_model.h"
 #include "analytics/analytics.h"
 
 #include <algorithm>
@@ -43,6 +47,14 @@ void apply_strategy_params(IStrategy& strategy,
     for (const auto& [key, value] : params) {
         strategy.set_param(key, value);
     }
+}
+
+// Push fee realism into strategy sizing params (shared with CLI main.inc).
+// Without this, MC charges commissions on fills but fee-aware strategies size
+// as if fees=0.
+void apply_execution_cost_params(IStrategy& strategy, const McRunConfig& cfg) {
+    ::apply_execution_cost_params(strategy, cfg.maker_rate, cfg.taker_rate,
+                                  cfg.bar_spread_bps, cfg.fee_model, cfg.fee_value);
 }
 
 } // anonymous namespace
@@ -114,10 +126,16 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
     }
     load_synthetic_path_into_handler(path, dh);
 
-    // 3. Strategy (reuse or fresh)
+    // 3. Strategy (reuse or fresh). HIGH-03: refuse reuse for strategies that
+    // do not fully clear trial-local state (supports_mc_trial_reuse() == false).
     std::shared_ptr<IStrategy> strategy;
     if (config_.reuse_objects_between_trials && reusable_strategy_)
     {
+        if (!reusable_strategy_->supports_mc_trial_reuse()) {
+            throw std::runtime_error(
+                "MonteCarlo: strategy '" + config_.strategy_name +
+                "' does not support mc-reuse-objects (incomplete reset)");
+        }
         reusable_strategy_->reset(result.seed_used);   // pass seed for RNG-based strategies
         strategy = reusable_strategy_;
     }
@@ -129,25 +147,80 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
                 "MonteCarlo: unknown strategy '" + config_.strategy_name +
                 "' (no silent fallback)");
         }
+        // Costs first, then --param overrides (same order as single-run CLI).
+        apply_execution_cost_params(*strategy, config_);
         apply_strategy_params(*strategy, config_.strategy_params);
         if (config_.reuse_objects_between_trials)
+        {
+            if (!strategy->supports_mc_trial_reuse()) {
+                throw std::runtime_error(
+                    "MonteCarlo: strategy '" + config_.strategy_name +
+                    "' does not support mc-reuse-objects (incomplete reset); "
+                    "use a strategy that implements supports_mc_trial_reuse()");
+            }
             reusable_strategy_ = strategy;
+        }
     }
 
-    // 4. Build minimal engine config for this trial
+    // 4. Build engine config for this trial — wire fee/latency/impact (FR-02).
     engine_config ecfg;
     ecfg.mode = engine_mode::backtest;
     ecfg.initial_balance = config_.initial_balance;
     ecfg.seed = result.seed_used;     // important for any internal RNGs
     ecfg.show_progress = false;       // MC campaigns: avoid progress spam
 
-    // Passive-side fill pricing is always on; nothing to forward here.
-    // Latency / impact can be wired here in later phases using the existing model classes
-    // when McRunConfig exposes more detailed realism knobs.
+    if (config_.fee_model == "fixed")
+        ecfg.fee_model = std::make_shared<FixedFeeModel>(config_.fee_value);
+    else if (config_.fee_model == "tiered")
+        ecfg.fee_model = std::make_shared<TieredFeeModel>(
+            config_.maker_rate, config_.taker_rate);
 
-    // 5. Construct engine (still fresh construction in Phase A).
+    if (config_.order_latency_us > 0.0)
+    {
+        ecfg.latency_model = std::make_shared<FixedLatencyModel>(
+            latency_duration(static_cast<long long>(config_.order_latency_us)));
+    }
+
+    if (config_.impact_k_bps > 0.0 && config_.impact_adv > 0.0)
+    {
+        ecfg.impact_model = std::make_shared<SquareRootImpactModel>(
+            config_.impact_k_bps, config_.impact_adv);
+    }
+    else if (config_.impact_k_bps > 0.0 && !(config_.impact_adv > 0.0))
+    {
+        // Refuse silent no-op: impact_k without ADV cannot be applied.
+        throw std::runtime_error(
+            "MonteCarlo: impact_k_bps > 0 requires impact_adv > 0 "
+            "(would otherwise ignore impact knobs silently)");
+    }
+
+    // FR-mc-queue-unwired: wire maker-queue + walked-book same as single-run CLI.
+    ecfg.walked_book_impact = config_.walked_book_impact;
+    if (!config_.maker_queue_model.empty() && config_.maker_queue_model != "none")
+    {
+        if (config_.maker_queue_model == "uniform")
+            ecfg.maker_queue_model = std::make_shared<UniformCancelModel>();
+        else if (config_.maker_queue_model == "front")
+            ecfg.maker_queue_model = std::make_shared<FrontCancelModel>();
+        else if (config_.maker_queue_model == "back")
+            ecfg.maker_queue_model = std::make_shared<BackCancelModel>();
+        else
+        {
+            throw std::runtime_error(
+                "MonteCarlo: unknown maker_queue_model '" + config_.maker_queue_model
+                + "' (expected none|uniform|front|back)");
+        }
+    }
+
+    // 5. Fresh engine per trial (not reset_for_next_trial). Engine reuse is
+    // incomplete: adapters/pending/marks are not fully cleared by reset yet.
+    // reuse_objects_between_trials only reuses data_handler + strategy.
     // engine embeds multi-MiB ObjectPools — never stack-allocate (8 MiB default stack).
     auto eng = std::make_unique<engine>(dh, nullptr, strategy, std::move(ecfg));
+    // Stamp primary so order_meta / fill attribution carry strategy_name
+    // (dispatch also falls back when empty; this keeps multi-strategy routing
+    // and portfolio/audit attribution consistent).
+    eng->set_primary_strategy_name(config_.strategy_name);
 
     // Run the backtest
     if (!path.bars.empty()) {
