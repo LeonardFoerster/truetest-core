@@ -25,17 +25,17 @@ TEST(ImGuiDeskPages, LabelsAndDockspaceIdsAreUnique)
         EXPECT_TRUE(focus_dockspaces.insert(
             truetest::ui::desk::desk_focus_dockspace_name(page)).second);
     }
-    EXPECT_EQ(labels.size(), 5u);
-    EXPECT_EQ(dockspaces.size(), 5u);
-    EXPECT_EQ(focus_dockspaces.size(), 5u);
+    EXPECT_EQ(labels.size(), 1u);
+    EXPECT_EQ(dockspaces.size(), 1u);
+    EXPECT_EQ(focus_dockspaces.size(), 1u);
 }
 
-TEST(ImGuiDeskPages, DefaultsToOrderflowAndSwitchesDeterministically)
+TEST(ImGuiDeskPages, DefaultsToMonitorAndSwitchesDeterministically)
 {
     using truetest::ui::desk::DeskPage;
     truetest::ui::desk::DeskPageController controller;
-    EXPECT_EQ(controller.active_page(), DeskPage::orderflow);
-    EXPECT_FALSE(controller.select(DeskPage::orderflow));
+    EXPECT_EQ(controller.active_page(), DeskPage::monitor);
+    EXPECT_FALSE(controller.select(DeskPage::monitor));
     EXPECT_TRUE(controller.select(DeskPage::operations));
     EXPECT_EQ(controller.active_page(), DeskPage::operations);
     controller.request_layout_reset();
@@ -64,18 +64,23 @@ TEST(ImGuiDeskPages, V2PanelInstancesAreUniqueAcrossWorkspaces)
             EXPECT_LE(count, 1);
     }
 
+    // Only Monitor is in desk_pages now; it launches activity_blotter,
+    // health, and risk exactly once. Everything else below is dormant
+    // (still fully defined in desk_layout_model.h, just benched from
+    // desk_pages) and launches zero times until re-added.
+    for (const auto panel : {
+             DeskPanel::activity_blotter, DeskPanel::health, DeskPanel::risk})
+        EXPECT_EQ(launched[static_cast<std::size_t>(panel)], 1) << static_cast<int>(panel);
     for (const auto panel : {
              DeskPanel::watchlist, DeskPanel::orderflow_canvas, DeskPanel::orderflow_dom,
-             DeskPanel::selected_context, DeskPanel::activity_blotter,
+             DeskPanel::selected_context,
              DeskPanel::liquidity_heatmap, DeskPanel::liquidity_dom,
              DeskPanel::liquidations, DeskPanel::liquidity_tape,
              DeskPanel::tpo_profile, DeskPanel::volume_profile, DeskPanel::session_context,
              DeskPanel::funding, DeskPanel::correlation,
              DeskPanel::equity, DeskPanel::operations_activity, DeskPanel::strategies,
-             DeskPanel::risk, DeskPanel::health})
-        EXPECT_EQ(launched[static_cast<std::size_t>(panel)], 1) << static_cast<int>(panel);
-    EXPECT_EQ(launched[static_cast<std::size_t>(DeskPanel::debug)], 0);
-    EXPECT_EQ(launched[static_cast<std::size_t>(DeskPanel::market_detail)], 0);
+             DeskPanel::debug, DeskPanel::market_detail})
+        EXPECT_EQ(launched[static_cast<std::size_t>(panel)], 0) << static_cast<int>(panel);
 }
 
 TEST(ImGuiDeskPages, FeatureMapMatchesCyrexWorkflows)
@@ -148,8 +153,8 @@ TEST(ImGuiDeskLayout, KpiColumnsAdaptWithoutDroppingMetrics)
 TEST(ImGuiDeskLayout, VersionedPersistenceCannotRestoreLegacyPages)
 {
     using namespace truetest::ui::desk;
-    EXPECT_EQ(desk_layout_version, 2u);
-    EXPECT_STREQ(desk_layout_ini_filename, "truetest_desk_v2.ini");
+    EXPECT_EQ(desk_layout_version, 3u);
+    EXPECT_STREQ(desk_layout_ini_filename, "truetest_desk_v3.ini");
     EXPECT_TRUE(should_seed_default_layout(false, false));
     EXPECT_FALSE(should_seed_default_layout(true, false));
     EXPECT_FALSE(should_keep_inactive_dockspace(false));
@@ -159,11 +164,14 @@ TEST(ImGuiDeskLayout, VersionedPersistenceCannotRestoreLegacyPages)
 TEST(ImGuiDeskCommands, SearchIsCaseInsensitiveAndOperatorShortcutsRequireBareKeys)
 {
     using namespace truetest::ui::desk;
-    EXPECT_TRUE(desk_command_matches(desk_commands[0], "order"));
-    EXPECT_TRUE(desk_command_matches(desk_commands[4], "RISK"));
+    // desk_commands (6 entries): 0=WORKSPACE MONITOR, 1=RESET LAYOUT,
+    // 2=TOGGLE DEMO DATA, 3=FOCUS PRIMARY, 4=TOGGLE LAYOUT LOCK,
+    // 5=TOGGLE DENSITY.
+    EXPECT_TRUE(desk_command_matches(desk_commands[0], "monitor"));
+    EXPECT_TRUE(desk_command_matches(desk_commands[0], "RISK"));
     EXPECT_FALSE(desk_command_matches(desk_commands[0], "funding"));
-    EXPECT_TRUE(desk_command_matches(desk_commands[8], "lock"));
-    EXPECT_TRUE(desk_command_matches(desk_commands[9], "comfortable"));
+    EXPECT_TRUE(desk_command_matches(desk_commands[4], "lock"));
+    EXPECT_TRUE(desk_command_matches(desk_commands[5], "comfortable"));
     EXPECT_TRUE(operator_shortcut_allowed(false, false, false, false,
                                           false, false, false));
     EXPECT_FALSE(operator_shortcut_allowed(true, false, false, false,

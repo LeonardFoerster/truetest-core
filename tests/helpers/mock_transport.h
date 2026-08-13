@@ -29,7 +29,10 @@ public:
 	bool is_open() const override
 	{
 		std::lock_guard<std::mutex> lk(mu_);
-		return open_;
+		// Stay open for drain after request_stop while queued lines remain.
+		// DataBridge loops on is_open(); closing early drops pending frames
+		// when the consumer is mid-callback (TSan/slow paths).
+		return open_ || !lines_.empty();
 	}
 
 	std::optional<std::string> read_line() override
@@ -47,13 +50,15 @@ public:
 	{
 		std::unique_lock<std::mutex> lk(mu_);
 		cv_.wait(lk, [this] { return !lines_.empty() || stopped_; });
-		if (stopped_ && lines_.empty())
+		if (lines_.empty())
 		{
 			open_ = false;
 			return std::nullopt;
 		}
 		auto line = std::move(lines_.front());
 		lines_.pop();
+		if (stopped_ && lines_.empty())
+			open_ = false;
 		return line;
 	}
 
@@ -61,7 +66,9 @@ public:
 	{
 		std::lock_guard<std::mutex> lk(mu_);
 		stopped_ = true;
-		open_ = false;
+		// Close only when queue is already empty; otherwise drain via reads.
+		if (lines_.empty())
+			open_ = false;
 		cv_.notify_all();
 	}
 

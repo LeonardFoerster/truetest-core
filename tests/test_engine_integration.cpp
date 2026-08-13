@@ -79,12 +79,15 @@ public:
         }
         return std::nullopt;
     }
+    void on_fill(const fill_event&, std::uint64_t) override { ++fills_seen_; }
     void set_position_open(const std::string&, bool open) override { position_open_ = open; }
 
     int calls() const { return calls_; }
+    int fills_seen() const { return fills_seen_; }
 
 private:
     int  calls_        = 0;
+    int  fills_seen_   = 0;
     bool position_open_ = false;
 };
 
@@ -194,6 +197,36 @@ TEST(EngineIntegration, OrderProducesFillAndUpdatesAnalytics)
     EXPECT_TRUE(open_ids.empty());
 }
 
+// corr-1 / FR-08: when set_primary_strategy_name is omitted (MC, C API, many
+// tests), order_meta strategy_name stays empty. dispatch_fill_to_strategy must
+// still deliver fills to the primary strategy so on_fill can reconcile qty.
+TEST(EngineIntegration, FillDispatchedToPrimaryWhenStrategyNameUnset)
+{
+    silence_cout quiet;
+
+    auto dh = make_oscillating_bars(10);
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<forcing_strategy>();
+
+    MarketMaker mm(7);
+    mm.add_orders(ob, 100.0, 40);
+
+    engine_config cfg;
+    cfg.initial_balance = 10000.0;
+    cfg.seed            = 7;
+    cfg.threading       = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+
+    engine eng(dh, ob, strat, cfg);
+    // Intentionally omit set_primary_strategy_name — regression lock for corr-1.
+    eng.run();
+
+    auto rep = eng.get_analytics().generate_report();
+    ASSERT_GE(rep.total_fills, 1u);
+    EXPECT_EQ(strat->fills_seen(), static_cast<int>(rep.total_fills))
+        << "primary strategy on_fill must run even when strategy_name is empty";
+}
+
 
 // ---------------------------------------------------------------------------
 // Soft portfolio risk (backtest default): DD rejects new risk but continues
@@ -295,4 +328,26 @@ TEST(EngineConfig, RiskSoftPortfolioLimitsResolveByMode)
     EXPECT_FALSE(resolve_risk_soft_portfolio_limits(true, "backtest"));
     EXPECT_FALSE(resolve_risk_soft_portfolio_limits(true, "shadow"));
     EXPECT_FALSE(resolve_risk_soft_portfolio_limits(true, ""));
+}
+
+// soft-post-mode-gate: even if risk_soft_portfolio_limits is left true,
+// shadow mode must hard-halt on post-fill portfolio risk (fail-closed).
+TEST(EngineIntegration, SoftFlagIgnoredInShadowMode_HardHalts)
+{
+    silence_cout quiet;
+
+    auto dh = make_declining_bars(500);
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<relentless_buyer>(50.0);
+
+    MarketMaker mm(3);
+    mm.add_orders(ob, 100.0, 500);
+
+    engine_config cfg = make_drawdown_risk_cfg(/*soft=*/true);
+    cfg.mode = engine_mode::shadow; // ctor must force soft off for non-backtest
+    engine eng(dh, ob, strat, std::move(cfg));
+    eng.run();
+
+    EXPECT_TRUE(eng.get_halt_flag().load(std::memory_order_acquire))
+        << "shadow must not fail-open on soft portfolio flag";
 }

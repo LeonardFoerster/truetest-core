@@ -88,8 +88,12 @@ TEST(DataBridge, BatchSkipsMalformedLines)
 	auto bridge = std::make_shared<DataBridge<bar_record>>(transport, parser, bar_record_sink);
 
 	auto dh = std::make_shared<data_handler>();
-	ASSERT_TRUE(bridge->load_data(dh));
+	LoadStats stats;
+	ASSERT_TRUE(bridge->load_into(*dh, &stats));
 	EXPECT_EQ(dh->bar_count(), 2u);
+	// DR-REPLAY-02: unparseable frames must be accounted (not silently dropped).
+	EXPECT_EQ(stats.accepted, 2u);
+	EXPECT_EQ(stats.rejected, 2u);
 }
 
 TEST(DataBridge, BatchLoadsTickRecords)

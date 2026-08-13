@@ -456,13 +456,16 @@ TEST(CLI, PersistFlagRejectedWhenQuestDbDisabled)
 
 // ─── B5: Maker queue model (Phase 1) ───────────────────────────────────────
 
-TEST(CLI, MakerQueueModelRequiresDepthStream)
+TEST(CLI, MakerQueueModelAcceptedWithoutDepth)
 {
+    // Without L2, QueueAware is conservative (no front-of-queue); bar sweep still works.
     std::string out;
-    int rc = run_truetest("--maker-queue-model uniform --dry-run", out);
-    EXPECT_EQ(rc, 1);
-    EXPECT_NE(out.find("--maker-queue-model"), std::string::npos);
-    EXPECT_NE(out.find("requires --depth-stream"), std::string::npos);
+    int rc = run_truetest("--maker-queue-model uniform --dry-run "
+                          "--strategy sma --provider synthetic", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+    EXPECT_NE(out.find("without --depth-stream"), std::string::npos);
+    EXPECT_NE(out.find("no optimistic join-front"), std::string::npos);
 }
 
 TEST(CLI, MakerQueueModelAcceptedWithDepth)
@@ -472,4 +475,5 @@ TEST(CLI, MakerQueueModelAcceptedWithDepth)
                           "--dry-run --strategy sma --provider local --path market_data.csv", out);
     EXPECT_EQ(rc, 0);
     EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+    EXPECT_EQ(out.find("without --depth-stream"), std::string::npos);
 }

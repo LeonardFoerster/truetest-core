@@ -7,11 +7,13 @@
 #include "market_maker/market_maker.h"
 #include "types/order_id.h"
 
+#include <atomic>
 #include <cstdio>
 #include <chrono>
 #include <cmath>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 static auto epoch_ms(int64_t ms)
@@ -19,10 +21,18 @@ static auto epoch_ms(int64_t ms)
     return std::chrono::system_clock::time_point(std::chrono::milliseconds(ms));
 }
 
-// RAII temp file that deletes on destruction
+// RAII temp file that deletes on destruction.
+// Paths must be process-unique: fixed /tmp names race when ASan/TSan (or
+// parallel ctest) suites run concurrently and both touch EventLog tests.
 struct TempFile {
     std::string path;
-    TempFile(const std::string& name) : path("/tmp/truetest_test_" + name) {}
+    explicit TempFile(const std::string& name)
+    {
+        static std::atomic<uint64_t> seq{0};
+        path = "/tmp/truetest_test_" + std::to_string(static_cast<unsigned long>(::getpid()))
+             + "_" + std::to_string(seq.fetch_add(1, std::memory_order_relaxed))
+             + "_" + name;
+    }
     ~TempFile() { std::remove(path.c_str()); }
 };
 
@@ -359,9 +369,13 @@ TEST(EventLog, Deterministic_SameSeedSameLog)
     auto bytes1 = read_file_bytes(tf1.path);
     auto bytes2 = read_file_bytes(tf2.path);
 
-    ASSERT_FALSE(bytes1.empty());
-    ASSERT_EQ(bytes1.size(), bytes2.size());
-    EXPECT_EQ(bytes1, bytes2);
+    ASSERT_FALSE(bytes1.empty()) << "log path: " << tf1.path;
+    ASSERT_EQ(bytes1.size(), bytes2.size())
+        << "same seed must yield equal log sizes; paths=" << tf1.path
+        << " vs " << tf2.path;
+    EXPECT_EQ(bytes1, bytes2)
+        << "same seed must yield byte-identical event logs; paths="
+        << tf1.path << " vs " << tf2.path;
 }
 
 TEST(EventLog, Deterministic_DifferentSeedDifferentLog)

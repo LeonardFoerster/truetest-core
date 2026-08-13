@@ -7,6 +7,18 @@
 #include <vector>
 #include <string>
 
+// LSan helpers for intentional late-drop leaks (see LateDropNonTrivialAfterDtorIsSafe).
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    include <sanitizer/lsan_interface.h>
+#    define TT_OBJECT_POOL_HAS_LSAN 1
+#  endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) && !defined(TT_OBJECT_POOL_HAS_LSAN)
+#  include <sanitizer/lsan_interface.h>
+#  define TT_OBJECT_POOL_HAS_LSAN 1
+#endif
+
 // Simple test type
 struct Widget
 {
@@ -266,9 +278,15 @@ TEST(ObjectPool, LateDropAfterDtorIsSafe)
 TEST(ObjectPool, LateDropNonTrivialAfterDtorIsSafe)
 {
     std::shared_ptr<StringWidget> survivor;
+    // Captured while the pool (and thus StringWidget storage) is still live.
+    // After ~pool, reading survivor->name would itself be UAF.
+    const void* intentional_string_heap = nullptr;
     {
         ObjectPool<StringWidget, 4> pool;
+        // Long enough to force a heap std::string buffer (beyond SSO) so the
+        // intentional late-drop leak is a real external allocation.
         survivor = pool.acquire("late-drop-target", 777);
+        intentional_string_heap = survivor->name.data();
 
         // one via deferred too
         auto temp = pool.acquire("deferred-late", 1);
@@ -276,9 +294,14 @@ TEST(ObjectPool, LateDropNonTrivialAfterDtorIsSafe)
     }
     // ~pool disarms lifetime_ here.
 
-    // Drop must be a safe no-op (may leak the StringWidget's std::string storage
-    // + the slot itself). This is the documented safety contract for escaped
-    // pooled objects across shutdown/MC boundaries.
+    // Drop must be a safe no-op: running ~T would UAF into freed pool storage,
+    // so heap owned by T (std::string buffer) is intentionally abandoned until
+    // process exit. Quarantine that expected allocation so full ASan+LSan
+    // suites stay fail-closed green without weakening the late-drop contract.
+#if defined(TT_OBJECT_POOL_HAS_LSAN)
+    if (intentional_string_heap)
+        __lsan_ignore_object(intentional_string_heap);
+#endif
     survivor.reset();
 
     SUCCEED();
