@@ -42,6 +42,7 @@ set(IMGUI_DESK_SOURCES
 set(ENGINE_CORE_SOURCES
     # --- Engine core + supporting ---
     src/engine/engine.cpp
+    src/engine/engine_pending.cpp
     src/engine/execution_router.cpp
     src/engine/order_audit_sink.cpp
     src/engine/instrument_spec_cache.cpp
@@ -144,6 +145,11 @@ set(TEST_SOURCES
     tests/test_queue_position_model.cpp
     tests/test_walked_book_impact.cpp
     tests/test_realistic_fills.cpp
+    tests/test_backtest_defect_hybrid_unit.cpp
+    tests/test_backtest_defect_hybrid_engine.cpp
+    tests/test_backtest_defect_mc_fees.cpp
+    tests/test_backtest_defect_engine_loop.cpp
+    tests/test_backtest_defect_data_replay.cpp
     tests/test_stop_fill_pricing.cpp
     tests/test_bridge_unknown_fill.cpp
 
