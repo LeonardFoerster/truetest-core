@@ -10,8 +10,9 @@ namespace {
 class MultiSource final : public IMarketSource
 {
 public:
-	explicit MultiSource(std::vector<std::unique_ptr<IMarketSource>> parts)
-		: parts_(std::move(parts)) {}
+	MultiSource(std::vector<std::unique_ptr<IMarketSource>> parts, bool allow_partial)
+		: parts_(std::move(parts))
+		, allow_partial_(allow_partial) {}
 
 	bool load_into(IMarketSink& sink, LoadStats* stats) override
 	{
@@ -25,11 +26,21 @@ public:
 				if (stats)
 				{
 					*stats = total;
-					stats->message = part.message.empty()
+					const std::string detail = part.message.empty()
 						? "multi-source partial failure"
 						: part.message;
+					// DR-REPLAY-03: default fail-closed so multi-file portfolios
+					// never run green with missing legs. Callers that relied on
+					// the old soft-success default must now opt in explicitly.
+					stats->message = allow_partial_
+						? detail
+						: detail + " (fail-closed default; set "
+						  "DataLoadOptions::allow_partial_sources=true to keep "
+						  "rows accepted so far)";
 				}
-				return any; // soft: keep what we have if any accepted
+				if (allow_partial_)
+					return any;
+				return false;
 			}
 			total.accepted += part.accepted;
 			total.rejected += part.rejected;
@@ -41,6 +52,7 @@ public:
 
 private:
 	std::vector<std::unique_ptr<IMarketSource>> parts_;
+	bool allow_partial_ = false;
 };
 
 std::unique_ptr<IMarketSource> source_for_path(const std::filesystem::path& path,
@@ -92,7 +104,10 @@ DataWrapper DataWrapper::from_paths(const std::vector<std::filesystem::path>& pa
 	parts.reserve(paths.size());
 	for (const auto& p : paths)
 		parts.push_back(source_for_path(p, /*force_tick=*/false));
-	return DataWrapper(std::make_unique<MultiSource>(std::move(parts)), std::move(opt));
+	const bool allow_partial = opt.allow_partial_sources;
+	return DataWrapper(
+		std::make_unique<MultiSource>(std::move(parts), allow_partial),
+		std::move(opt));
 }
 
 DataWrapper DataWrapper::from_uri(std::string_view uri, DataLoadOptions opt)
@@ -149,6 +164,21 @@ bool DataWrapper::load(MarketSeries& out)
 		return false;
 	}
 
+	// DR-REPLAY-04: apply declared from/to/symbols filters (were previously no-ops).
+	if (opt_.from || opt_.to || !opt_.symbols.empty())
+	{
+		const std::size_t before_bars = out.bar_count();
+		const std::size_t before_ticks = out.tick_count();
+		out.filter_window(opt_.from, opt_.to, opt_.symbols);
+		const std::size_t dropped =
+			(before_bars - out.bar_count()) + (before_ticks - out.tick_count());
+		if (dropped > 0)
+		{
+			std::cerr << "  · DataWrapper: filtered " << dropped
+			          << " records outside from/to/symbols window\n";
+		}
+	}
+
 	if (opt_.fail_if_empty && out.empty())
 	{
 		std::cerr << "  ! DataWrapper: load produced no records\n";
@@ -157,6 +187,10 @@ bool DataWrapper::load(MarketSeries& out)
 
 	if (opt_.sort_after_load && out.has_bar_data())
 		out.sort_bars_by_time();
+	// Tick tapes may arrive multi-file / out-of-order; sort when requested
+	// (same contract as bars — never silently truncate OOO ticks).
+	if (opt_.sort_after_load && out.has_tick_data())
+		out.sort_ticks_by_time();
 
 	return true;
 }

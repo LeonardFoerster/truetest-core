@@ -22,6 +22,9 @@ struct DataLoadOptions
 	std::vector<std::string> symbols; // empty = all
 	bool sort_after_load = true;
 	bool fail_if_empty = true;
+	// Multi-file: default fail-closed on any part failure (DR-REPLAY-03).
+	// When true, keep rows accepted so far and return success if any accepted.
+	bool allow_partial_sources = false;
 	bool retain_streamed = false; // live default: do not grow series
 	std::size_t reserve_hint = 0;
 };

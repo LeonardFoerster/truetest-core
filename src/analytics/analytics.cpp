@@ -79,6 +79,8 @@ void Analytics::reset(double initial_cash)
     favorable_count_ = 0;
     total_orders_ = 0;
     total_fills_ = 0;
+    soft_post_fill_breaches_ = 0;
+    data_rows_rejected_ = 0;
 
     total_holding_ms_ = 0.0;
     holding_count_ = 0;
@@ -558,6 +560,9 @@ AnalyticsReport Analytics::snapshot() const
     r.total_orders = total_orders_;
     r.total_fills = total_fills_;
     r.total_trades = trade_returns_.size();
+    r.soft_post_fill_breaches = soft_post_fill_breaches_;
+    r.data_rows_rejected = data_rows_rejected_;
+    r.fee_model = fee_model_;
 
     // Closed-trade realized PnL + open mark-to-market unrealized.
     r.realized_pnl = total_win_ - total_loss_;
@@ -768,7 +773,8 @@ void Analytics::export_json(const std::string& path) const
         R"("time_in_market_pct":%.4f,"avg_slippage":%.6f,)"
         R"("buy_and_hold_return":%.6f,"strategy_vs_benchmark":%.6f,)"
         R"("alpha":%.6f,"beta":%.6f,"information_ratio":%.6f,"tracking_error":%.6f,)"
-        R"("realized_pnl":%.2f,"unrealized_pnl":%.2f)",
+        R"("realized_pnl":%.2f,"unrealized_pnl":%.2f,)"
+        R"("soft_post_fill_breaches":%zu,"data_rows_rejected":%zu,"fee_model":"%s")",
         r.initial_equity, r.final_equity, r.cumulative_return, r.annualized_return,
         r.sharpe_ratio, r.sortino_ratio, r.max_drawdown, r.calmar_ratio,
         r.rolling_sharpe, r.rolling_max_drawdown,
@@ -777,7 +783,9 @@ void Analytics::export_json(const std::string& path) const
         r.time_in_market_pct, r.avg_slippage,
         r.buy_and_hold_return, r.strategy_vs_benchmark,
         r.alpha, r.beta, r.information_ratio, r.tracking_error,
-        r.realized_pnl, r.unrealized_pnl);
+        r.realized_pnl, r.unrealized_pnl,
+        r.soft_post_fill_breaches, r.data_rows_rejected,
+        r.fee_model.empty() ? "zero" : r.fee_model.c_str());
 
     f << "{" << (buf + 1);
 

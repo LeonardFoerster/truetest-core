@@ -78,6 +78,20 @@ parse(std::string_view s)
         auto epoch_s = detail::utc_tm_to_epoch_s(t);
         return tp{ms{epoch_s * 1000 + frac_ms}};
     }
+    // HH:MM without seconds (GBM synthetic dates historically used this form).
+    // Must run before date-only parse, which would midnight-collapse the time.
+    if (std::sscanf(buf.c_str(), "%4d-%2d-%2d%c%2d:%2d",
+                    &y, &mo, &d, &sep, &h, &mi) == 6 &&
+        (sep == 'T' || sep == ' '))
+    {
+        // Require that we did not also match a full seconds form already.
+        // If a trailing :SS exists, the 7-field parse above would have taken it.
+        std::tm t{};
+        t.tm_year = y - 1900; t.tm_mon = mo - 1; t.tm_mday = d;
+        t.tm_hour = h; t.tm_min = mi; t.tm_sec = 0;
+        auto epoch_s = detail::utc_tm_to_epoch_s(t);
+        return tp{sec{epoch_s}};
+    }
     if (std::sscanf(buf.c_str(), "%4d-%2d-%2d",
                     &y, &mo, &d) == 3)
     {
@@ -87,6 +101,28 @@ parse(std::string_view s)
         return tp{sec{epoch_s}};
     }
     return std::nullopt;
+}
+
+// Streaming / replay bar clock: prefer open_time_ms, then date string parse.
+// Never fall back to system_clock::now() — that makes latency/eligibility
+// non-deterministic for ISO/CSV dates and open_time-only klines.
+//
+// `fallback` is the caller's last successfully-resolved timestamp (not a
+// fixed epoch-0 sentinel): a single malformed/date-less row mid-stream must
+// hold sim time steady rather than snapping to 1970 and then jumping back.
+inline std::chrono::system_clock::time_point
+resolve_bar_clock(std::int64_t open_time_ms,
+                  std::string_view date,
+                  std::chrono::system_clock::time_point fallback)
+{
+    if (open_time_ms > 0)
+    {
+        return std::chrono::system_clock::time_point{
+            std::chrono::milliseconds{open_time_ms}};
+    }
+    if (auto tp = parse(date))
+        return *tp;
+    return fallback;
 }
 
 }

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <iostream>
 #include <numeric>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -90,11 +91,11 @@ bool MarketSeries::add_tick(tick_record rec)
 		++validation_error_count_;
 		return false;
 	}
+	// Accept out-of-order ticks; callers sort via sort_ticks_by_time() after load
+	// (DR-03: never silently drop OOO rows without a chance to reorder).
 	if (!ticks_.empty() && rec.timestamp < ticks_.back().timestamp)
 	{
-		std::cerr << "  ! Tick: non-monotonic timestamp, skipping\n";
-		++validation_error_count_;
-		return false;
+		std::cerr << "  ! Tick: non-monotonic timestamp (will sort after load)\n";
 	}
 
 	ticks_.push_back(std::move(rec));
@@ -150,6 +151,102 @@ void MarketSeries::sort_bars_by_time()
 	reorder_double(bar_low_);
 	reorder_double(bar_close_);
 	reorder_int(bar_volume_);
+}
+
+void MarketSeries::sort_ticks_by_time()
+{
+	if (ticks_.size() < 2) return;
+	std::stable_sort(ticks_.begin(), ticks_.end(),
+	                 [](const Tick& a, const Tick& b) {
+		                 if (a.timestamp != b.timestamp)
+			                 return a.timestamp < b.timestamp;
+		                 return a.symbol < b.symbol;
+	                 });
+}
+
+void MarketSeries::filter_window(
+	std::optional<std::chrono::system_clock::time_point> from,
+	std::optional<std::chrono::system_clock::time_point> to,
+	const std::vector<std::string>& symbols)
+{
+	std::unordered_set<std::string> sym_set(symbols.begin(), symbols.end());
+	const bool filter_sym = !sym_set.empty();
+
+	auto in_window = [&](std::chrono::system_clock::time_point ts,
+	                     const std::string& sym) {
+		if (filter_sym && sym_set.count(sym) == 0)
+			return false;
+		// Default/empty timestamps: keep when no from/to bound applies to them
+		// only if neither bound is set; otherwise drop unparseable history.
+		if (from && ts != std::chrono::system_clock::time_point{} && ts < *from)
+			return false;
+		if (from && ts == std::chrono::system_clock::time_point{})
+			return false;
+		if (to && ts != std::chrono::system_clock::time_point{} && ts > *to)
+			return false;
+		if (to && ts == std::chrono::system_clock::time_point{})
+			return false;
+		return true;
+	};
+
+	if (!bar_symbol_.empty())
+	{
+		const std::size_t n = bar_symbol_.size();
+		std::vector<std::size_t> keep;
+		keep.reserve(n);
+		for (std::size_t i = 0; i < n; ++i)
+		{
+			if (in_window(bar_ts_[i], bar_symbol_[i]))
+				keep.push_back(i);
+		}
+		if (keep.size() != n)
+		{
+			auto pick_str = [&](std::vector<std::string>& v) {
+				std::vector<std::string> out;
+				out.reserve(keep.size());
+				for (auto i : keep) out.push_back(std::move(v[i]));
+				v = std::move(out);
+			};
+			auto pick_d = [&](std::vector<double>& v) {
+				std::vector<double> out;
+				out.reserve(keep.size());
+				for (auto i : keep) out.push_back(v[i]);
+				v = std::move(out);
+			};
+			auto pick_i = [&](std::vector<int64_t>& v) {
+				std::vector<int64_t> out;
+				out.reserve(keep.size());
+				for (auto i : keep) out.push_back(v[i]);
+				v = std::move(out);
+			};
+			auto pick_tp = [&](std::vector<std::chrono::system_clock::time_point>& v) {
+				std::vector<std::chrono::system_clock::time_point> out;
+				out.reserve(keep.size());
+				for (auto i : keep) out.push_back(v[i]);
+				v = std::move(out);
+			};
+			pick_tp(bar_ts_);
+			pick_str(bar_date_);
+			pick_str(bar_symbol_);
+			pick_d(bar_open_);
+			pick_d(bar_high_);
+			pick_d(bar_low_);
+			pick_d(bar_close_);
+			pick_i(bar_volume_);
+		}
+	}
+
+	if (!ticks_.empty())
+	{
+		std::vector<Tick> kept;
+		kept.reserve(ticks_.size());
+		for (auto& t : ticks_)
+		{
+			if (in_window(t.timestamp, t.symbol))
+				kept.push_back(std::move(t));
+		}
+		ticks_ = std::move(kept);
+	}
 }
 
 MarketSeries::BarView MarketSeries::bar_at(std::size_t i) const

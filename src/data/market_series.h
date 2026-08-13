@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -41,8 +42,22 @@ public:
 	// when timestamps are equal/default.
 	void sort_bars_by_time();
 	void sort_by_date() { sort_bars_by_time(); } // legacy alias
+	// Sort ticks by timestamp ascending (stable). Call after multi-file or
+	// out-of-order tick loads so the engine never sees a silently truncated tape.
+	void sort_ticks_by_time();
+
+	// DR-REPLAY-04: drop bars/ticks outside [from,to] and not in symbols
+	// (empty symbols = keep all). Applied after load in DataWrapper.
+	void filter_window(std::optional<std::chrono::system_clock::time_point> from,
+	                   std::optional<std::chrono::system_clock::time_point> to,
+	                   const std::vector<std::string>& symbols);
 
 	// ── Read API (zero-extra-alloc views for engine batch loops) ───────────
+	// BarView::symbol/date are string_view into SoA storage. Valid only until
+	// the next mutating series operation (filter_window, clear, sort that
+	// reorders strings, set_all_bar_symbols, further load). Do not store
+	// BarView across those calls — use bar_symbol_at / bar_date_at for stable
+	// string refs, or copy into std::string immediately (engine market_event).
 	struct BarView
 	{
 		std::chrono::system_clock::time_point ts{};

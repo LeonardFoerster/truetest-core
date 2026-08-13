@@ -144,6 +144,12 @@ struct AnalyticsReport
     double realized_pnl = 0.0;
     double unrealized_pnl = 0.0;
     std::vector<open_position_report> open_positions;
+
+    // Research honesty fields (soft risk + data quality).
+    std::size_t soft_post_fill_breaches = 0;
+    std::size_t data_rows_rejected = 0;
+    // Fee model label for exports (FR-zero-fee-default): "zero"|"fixed"|"tiered"|...
+    std::string fee_model = "zero";
 };
 
 class Analytics : public Worker
@@ -216,6 +222,25 @@ public:
     void print_report() const;
     void export_csv(const std::string& equity_path, const std::string& trades_path) const;
     void export_json(const std::string& path) const;
+
+    // Soft post-fill risk continued under research soft mode (EL-06).
+    void note_soft_post_fill_breach() { ++soft_post_fill_breaches_; }
+    void set_soft_post_fill_breaches(std::size_t n) { soft_post_fill_breaches_ = n; }
+    std::size_t soft_post_fill_breaches() const { return soft_post_fill_breaches_; }
+    // Data load reject count (invalid CSV/tick rows) for report honesty (DR-02).
+    void set_data_rows_rejected(std::size_t n) { data_rows_rejected_ = n; }
+    // Fee model echo so exports cannot be misread as net-of-fees (FR-zero-fee-default).
+    void set_fee_model(std::string label) { fee_model_ = std::move(label); }
+    const std::string& fee_model() const { return fee_model_; }
+    std::size_t data_rows_rejected() const { return data_rows_rejected_; }
+    // Fold engine-local research counters into export analytics (threaded presets).
+    void fold_research_counters(std::size_t soft_breaches, std::size_t rows_rejected)
+    {
+        if (soft_breaches > soft_post_fill_breaches_)
+            soft_post_fill_breaches_ = soft_breaches;
+        if (rows_rejected > data_rows_rejected_)
+            data_rows_rejected_ = rows_rejected;
+    }
 
     double rolling_sharpe() const;
     double rolling_max_drawdown() const;
@@ -363,6 +388,9 @@ private:
     std::size_t adverse_count_ = 0;
     std::size_t favorable_count_ = 0;
     std::size_t total_orders_ = 0;
+    std::size_t soft_post_fill_breaches_ = 0;
+    std::size_t data_rows_rejected_ = 0;
+    std::string fee_model_{"zero"};
     std::size_t total_fills_ = 0;
 
     double total_holding_ms_ = 0.0;

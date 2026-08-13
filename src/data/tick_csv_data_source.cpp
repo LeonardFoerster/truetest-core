@@ -24,7 +24,8 @@ bool TickCsvDataSource::load_into(IMarketSink& sink, LoadStats* stats)
 		return false;
 	}
 
-	if (auto* series = dynamic_cast<MarketSeries*>(&sink))
+	auto* series = dynamic_cast<MarketSeries*>(&sink);
+	if (series)
 		series->reserve_ticks(4096);
 
 	std::size_t accepted = 0;
@@ -76,6 +77,11 @@ bool TickCsvDataSource::load_into(IMarketSink& sink, LoadStats* stats)
 		else
 			++rejected;
 	}
+
+	// add_tick() tolerates out-of-order rows without dropping them (DR-03); the
+	// tape must be re-sorted here or the engine will iterate ticks non-monotonically.
+	if (series)
+		series->sort_ticks_by_time();
 
 	if (stats)
 	{
