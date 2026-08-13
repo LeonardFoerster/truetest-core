@@ -225,6 +225,10 @@ int tt_run(tt_engine_handle handle)
 
         w->eng = std::make_unique<engine>(
             w->dh, nullptr, w->strategy, std::move(w->config));
+        // Stamp primary so order_meta / fill attribution carry strategy_name
+        // (dispatch also falls back when empty; this keeps FR-08 on_fill and
+        // portfolio attribution consistent with named strategies).
+        w->eng->set_primary_strategy_name(w->strategy_name);
         w->eng->run();
         w->has_run = true;
         return 0;

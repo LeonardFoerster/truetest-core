@@ -34,6 +34,7 @@
 #include "execution/impact_model.h"
 #include "orderbook/orderbook.h"
 #include "strategy/strategy_registry.h"
+#include "strategy/apply_execution_cost_params.h"
 #include "strategy/mean_reversion_strategy.h"
 #include "strategy/sma_strategy.h"
 #include "strategy/ma_crossover_strategy.h"
@@ -577,32 +578,8 @@ static void apply_exit_defaults(engine_config& cfg, const cli_options& o)
 // conservative adverse-slip estimate when no L2 walk is available at size time.
 static void apply_execution_cost_params(IStrategy& strategy, const cli_options& o)
 {
-    auto schema = strategy.get_param_schema();
-    auto has = [&](const char* name) {
-        for (const auto& p : schema)
-            if (p.name == name) return true;
-        return false;
-    };
-    auto set_if = [&](const char* name, double value) {
-        if (value <= 0.0 || !has(name)) return;
-        try { strategy.set_param(name, value); }
-        catch (const std::exception&) { /* schema race / unknown — ignore */ }
-    };
-
-    // Prefer taker for market-style risk; fall back to maker if only that is set.
-    const double entry_fee = (o.taker_rate > 0.0) ? o.taker_rate
-                           : (o.maker_rate > 0.0) ? o.maker_rate : 0.0;
-    const double exit_fee  = entry_fee;
-    set_if("entry_fee_rate", entry_fee);
-    set_if("exit_fee_rate",  exit_fee);
-
-    // Half-spread as per-leg adverse slip when bar-spread realism is enabled.
-    if (o.bar_spread_bps > 0.0)
-    {
-        const double half = o.bar_spread_bps * 0.5;
-        set_if("entry_slip_bps", half);
-        set_if("exit_slip_bps",  half);
-    }
+    ::apply_execution_cost_params(strategy, o.maker_rate, o.taker_rate,
+                                  o.bar_spread_bps, o.fee_model, o.fee_value);
 }
 
 // Parse one --instrument entry (e.g. "BTCUSDT:tick=0.01,lot=0.00001,minn=5").
@@ -1161,8 +1138,10 @@ static void register_cli_options(CLI::App& app, cli_options& o)
         ->check(CLI::IsMember({"none", "l2-snapshot"}));
     app.add_option("--maker-queue-model", o.maker_queue_model,
                    "Maker queue model for paper/backtest limit orders. 'none' (default) = "
-                   "optimistic front-of-queue. 'uniform'/'front'/'back' use cancel attribution. "
-                   "Requires --depth-stream. Ignored in --mode live.")
+                   "LocalBook only. 'uniform'/'front'/'back' use HybridPaper + cancel attribution. "
+                   "--depth-stream optional: without it QueueAware refuses front-of-queue "
+                   "tape fills (conservative); bar [low,high] sweep still fills limits. "
+                   "Ignored in --mode live.")
         ->default_val("none")
         ->check(CLI::IsMember({"none", "uniform", "front", "back"}));
     app.add_option("--instrument", o.instrument_specs,
@@ -1442,10 +1421,12 @@ static int apply_sim_realism(engine_config& cfg, const cli_options& o, bool is_l
 
 static int run_dry_run(const cli_options& o)
 {
+    // Without L2, QueueAware joins conservatively (no front-of-queue on tape);
+    // bar [low,high] sweep still fills passive limits.
     if (o.maker_queue_model != "none" && o.depth_stream.empty()) {
-        std::cerr << "[error] --maker-queue-model " << o.maker_queue_model
-                  << " requires --depth-stream\n";
-        return 1;
+        std::cerr << "[warn] --maker-queue-model " << o.maker_queue_model
+                  << " without --depth-stream: size_ahead is infinite without L2 "
+                     "(no optimistic join-front); bar range sweep still fills limits\n";
     }
 
     std::string resolved_strategy = o.strategy.empty() ? "mean-reversion" : o.strategy;
@@ -1621,10 +1602,33 @@ static int run_monte_carlo_mode(const cli_options& o)
         }
     }
 
-    // Apply some realism from top-level flags (best effort for Phase 3).
-    // Passive-side fill pricing is always on; no flag to forward.
+    // Wire fee/latency/impact + maker-queue into every MC trial (FR-02 / FR-mc-queue).
     mc_cfg.order_latency_us = o.order_latency_us;
     mc_cfg.impact_k_bps = o.impact_k_bps;
+    mc_cfg.impact_adv = o.impact_adv;
+    mc_cfg.fee_model = o.fee_model;
+    mc_cfg.fee_value = o.fee_value;
+    mc_cfg.maker_rate = o.maker_rate;
+    mc_cfg.taker_rate = o.taker_rate;
+    mc_cfg.bar_spread_bps = o.bar_spread_bps;
+    mc_cfg.maker_queue_model = o.maker_queue_model;
+    mc_cfg.walked_book_impact = o.walked_book_impact;
+    if (mc_cfg.impact_k_bps > 0.0 && !(mc_cfg.impact_adv > 0.0)) {
+        std::cerr << "  ! --impact-k-bps requires --impact-adv > 0 (MC would ignore impact)\n";
+        return 1;
+    }
+    if (!mc_cfg.maker_queue_model.empty() && mc_cfg.maker_queue_model != "none"
+        && mc_cfg.maker_queue_model != "uniform" && mc_cfg.maker_queue_model != "front"
+        && mc_cfg.maker_queue_model != "back") {
+        std::cerr << "  ! --maker-queue-model must be none|uniform|front|back\n";
+        return 1;
+    }
+    if (!mc_cfg.maker_queue_model.empty() && mc_cfg.maker_queue_model != "none"
+        && o.depth_stream.empty()) {
+        std::cerr << "[warn] MC --maker-queue-model without --depth-stream: "
+                     "QueueAware joins conservatively (no front-of-queue without L2); "
+                     "bar/tick range sweep still fills passive limits\n";
+    }
 
     // Enable richer per-trial data when user asked for --output (for downstream tools / plot.py)
     mc_cfg.keep_full_reports = !o.output.empty();
@@ -2014,10 +2018,11 @@ static int run_provider_mode(const cli_options& o)
             prov_cfg.queue_position_model = std::make_shared<L2SnapshotQueueModel>();
         }
         if (o.maker_queue_model != "none") {
+            // Depth optional: without L2, no optimistic front-of-queue; bar sweep fills.
             if (o.depth_stream.empty()) {
-                std::cerr << "[error] --maker-queue-model " << o.maker_queue_model
-                          << " requires --depth-stream\n";
-                return 1;
+                std::cerr << "[warn] --maker-queue-model " << o.maker_queue_model
+                          << " without --depth-stream: size_ahead is infinite without L2 "
+                             "(no optimistic join-front); bar range sweep still fills limits\n";
             }
             if (o.maker_queue_model == "uniform")
                 prov_cfg.maker_queue_model = std::make_shared<UniformCancelModel>();
@@ -2607,6 +2612,10 @@ static int run_provider_mode(const cli_options& o)
     }
     else
     {
+        // DR-REPLAY-02: accumulate LoadStats so parse rejects (empty
+        // parse_records) and sink validation rejects both reach
+        // set_data_rows_rejected — validation_errors() alone misses parse drops.
+        LoadStats load_stats;
         if (is_tick)
         {
             std::shared_ptr<IDataParser<tick_record>> parser;
@@ -2620,7 +2629,7 @@ static int run_provider_mode(const cli_options& o)
             auto bridge = std::make_shared<DataBridge<tick_record>>(
                 transport, parser, tick_record_sink);
 
-            if (!bridge->load_data(dh))
+            if (!bridge->load_into(*dh, &load_stats))
             {
                 std::cerr << "  ! Failed to load tick data via provider bridge.\n";
                 return 1;
@@ -2644,11 +2653,14 @@ static int run_provider_mode(const cli_options& o)
                     auto file_transport = std::make_shared<FileTransport>(p);
                     auto sub_bridge = std::make_shared<DataBridge<bar_record>>(
                         file_transport, parser, bar_record_sink);
-                    if (!sub_bridge->load_data(dh))
+                    LoadStats part;
+                    if (!sub_bridge->load_into(*dh, &part))
                     {
                         std::cerr << "  ! Failed to load bar data from " << p << "\n";
                         return 1;
                     }
+                    load_stats.accepted += part.accepted;
+                    load_stats.rejected += part.rejected;
                 }
                 dh->sort_bars_by_time();
                 std::cout << "    Multi-symbol: loaded " << paths.size()
@@ -2660,16 +2672,30 @@ static int run_provider_mode(const cli_options& o)
                 auto bridge = std::make_shared<DataBridge<bar_record>>(
                     transport, parser, bar_record_sink);
 
-                if (!bridge->load_data(dh))
+                if (!bridge->load_into(*dh, &load_stats))
                 {
                     std::cerr << "  ! Failed to load bar data via provider bridge.\n";
                     return 1;
                 }
+                // Match multi-file / API path: always time-order bars (DR-04).
+                dh->sort_bars_by_time();
             }
+        }
+
+        if (is_tick)
+            dh->sort_ticks_by_time();
+
+        const std::size_t data_rejects = load_stats.rejected;
+        if (data_rejects > 0)
+        {
+            std::cerr << "  ! Data load rejected " << data_rejects
+                      << " invalid/unparseable row(s)\n";
         }
 
         // engine embeds multi-MiB ObjectPools — heap only (default stack is 8 MiB).
         auto eng = std::make_unique<engine>(dh, nullptr, prov_strategy, std::move(prov_cfg));
+        if (data_rejects > 0)
+            eng->set_data_rows_rejected(data_rejects);
         eng->set_primary_strategy_name(resolved);
         for (auto& es : extra_strategies)
             eng->add_strategy(es.second, es.first);
@@ -2983,10 +3009,11 @@ static int run_tui_configured_engine(const cli_options& o,
             config.queue_position_model = std::make_shared<L2SnapshotQueueModel>();
         }
         if (o.maker_queue_model != "none") {
+            // Depth optional: without L2, no optimistic front-of-queue; bar sweep fills.
             if (o.depth_stream.empty()) {
-                std::cerr << "[error] --maker-queue-model " << o.maker_queue_model
-                          << " requires --depth-stream\n";
-                return 1;
+                std::cerr << "[warn] --maker-queue-model " << o.maker_queue_model
+                          << " without --depth-stream: size_ahead is infinite without L2 "
+                             "(no optimistic join-front); bar range sweep still fills limits\n";
             }
             if (o.maker_queue_model == "uniform")
                 config.maker_queue_model = std::make_shared<UniformCancelModel>();
@@ -2999,12 +3026,6 @@ static int run_tui_configured_engine(const cli_options& o,
                o.queue_model != "none" || o.maker_queue_model != "none") {
         std::cerr << "[warn] --walked-book-impact / --queue-model / "
                      "--maker-queue-model ignored in live mode\n";
-    }
-    // General validation for maker queue model (works for local + binance providers)
-    if (o.maker_queue_model != "none" && o.depth_stream.empty()) {
-        std::cerr << "[error] --maker-queue-model " << o.maker_queue_model
-                  << " requires --depth-stream\n";
-        return 1;
     }
 
     config.instrument_overrides = parse_instrument_specs(o.instrument_specs);
@@ -3081,6 +3102,17 @@ static int run_tui_configured_engine(const cli_options& o,
         if (!confirm_real_money_math())
             return 0;
         config.mode = engine_mode::live;
+    }
+
+    // Soft portfolio limits were resolved as backtest earlier; re-resolve after
+    // the operator picks shadow/live so post-fill never fail-opens there.
+    {
+        const char* mode_str = "backtest";
+        if (config.mode == engine_mode::shadow) mode_str = "shadow";
+        else if (config.mode == engine_mode::live) mode_str = "live";
+        config.risk_soft_portfolio_limits =
+            resolve_risk_soft_portfolio_limits(
+                config.mode == engine_mode::live, mode_str);
     }
 
     if (config.mode != engine_mode::backtest)
