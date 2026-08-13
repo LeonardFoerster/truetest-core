@@ -368,6 +368,14 @@ bool orderbook::modify_order(order_id id, Price new_price, quantity new_qty)
     return true;
 }
 
+order_pointer orderbook::get_order(order_id id) const
+{
+    auto it = order_map_.find(id);
+    if (it == order_map_.end() || !it->second)
+        return nullptr;
+    return it->second->order;
+}
+
 std::size_t orderbook::size() const
 {
     return order_map_.size();

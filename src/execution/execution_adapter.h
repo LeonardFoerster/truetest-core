@@ -11,8 +11,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <random>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -99,12 +101,19 @@ public:
     // Bar-mode traversal: fill resting limits whose price lies inside
     // [low, high]. Returns true if any fill was produced (caller should
     // poll_fills). Default false — paper LocalBookAdapter / Hybrid only.
+    // bar_volume > 0 caps aggregate fill quantity across orders (FIFO by
+    // resting map order / submit order); <=0 leaves full-remaining fills.
     virtual bool sweep_resting_range(const std::string& /*symbol*/,
                                      double /*low*/, double /*high*/,
-                                     std::chrono::system_clock::time_point /*ts*/)
+                                     std::chrono::system_clock::time_point /*ts*/,
+                                     double /*bar_volume*/ = 0.0)
     {
         return false;
     }
+
+    // Qty filled by the most recent successful sweep_resting_range (0 if none).
+    // Hybrid uses this to subtract local consumption before queue sweep.
+    virtual double last_sweep_fill_qty() const { return 0.0; }
 };
 
 class LocalBookAdapter : public IExecutionAdapter
@@ -202,7 +211,20 @@ public:
         else
             book_price = Price::from_double(o.get_price());
 
-        quantity book_quantity = static_cast<quantity>(std::round(o.get_quantity() * qty_scale_));
+        // Apply fill-fade BEFORE matching so book and portfolio qty stay aligned.
+        // Post-match shrink left the book fully consumed while portfolio understated.
+        double match_qty = o.get_quantity();
+        const double fade_rate = fill_model_ ? fill_model_->get_fade_rate() : 0.0;
+        if (fade_rate > 0.0)
+        {
+            match_qty *= (1.0 - fade_rate);
+            if (!(match_qty > 0.0))
+                return;
+        }
+
+        quantity book_quantity = static_cast<quantity>(std::round(match_qty * qty_scale_));
+        if (book_quantity <= 0)
+            return;
 
         // Prefer the orderbook object pool (prewarmed + forbid_runtime_grow)
         // over a freestanding heap allocation on every paper submit.
@@ -232,8 +254,6 @@ public:
                 resting_info{book_order, o.get_symbol(), o.get_side()};
         }
 
-        double fade_rate = fill_model_ ? fill_model_->get_fade_rate() : 0.0;
-
         for (const auto& trade : resulting_trades)
         {
             const bool we_are_bid = (trade.get_bid_trade().orderId_ == o.get_order_id());
@@ -254,13 +274,6 @@ public:
                 // only a crossing limit, never a recorded fill price.
                 double fill_price = counter_trade.price_.to_double();
                 double fill_qty = static_cast<double>(our_trade_info.quantity_) / qty_scale_;
-
-                if (fade_rate > 0.0)
-                {
-                    fill_qty *= (1.0 - fade_rate);
-                    if (fill_qty <= 0.0)
-                        continue;
-                }
 
                 double commission = 0.0;
                 if (fee_model_)
@@ -327,6 +340,14 @@ public:
 
     bool cancel_order(uint64_t order_id) override
     {
+        // Only succeed when we actually hold the order (resting or cancel
+        // already in flight). Unknown ids must return false so Hybrid does
+        // not treat "local always true" as a successful cancel.
+        const bool known = resting_.count(order_id) > 0
+                        || pending_cancels_.count(order_id) > 0;
+        if (!known)
+            return false;
+
         // Models "too slow to pull": cancel starts an in-flight window
         // and the order keeps matching until advance_time() drains it.
         if (latency_model_)
@@ -342,13 +363,46 @@ public:
 
     bool modify_order(uint64_t order_id, double new_price, double new_qty) override
     {
-        // The book replaces the order object on modify; the tracked
-        // pointer would go stale, so the modified order leaves the
-        // resting set (it still matches normally at submit-time crossings).
-        resting_.erase(order_id);
+        // Transactional amend (HIGH-01 memory-check):
+        // 1) Unknown id → fail closed without touching the book.
+        // 2) Cancel already in flight → fail closed too: the order still sits
+        //    in resting_ until advance_time() drains the cancel window, but
+        //    amending it now would be silently negated when that cancel fires.
+        // 3) Keep resting_ until book modify succeeds (erase-before-commit
+        //    dropped tracking on book failure → silent missed fills).
+        // 4) On success re-bind to the live body (book cancel+recreates).
+        auto rit = resting_.find(order_id);
+        const bool in_resting = rit != resting_.end();
+        if (!in_resting && pending_cancels_.count(order_id) == 0)
+            return false;
+        if (pending_cancels_.count(order_id) > 0)
+            return false;
+
+        resting_info saved{};
+        if (in_resting)
+            saved = rit->second; // keep entry until success
+
         Price book_price = Price::from_double(new_price);
         quantity book_qty = static_cast<quantity>(std::round(new_qty * qty_scale_));
-        return ob_->modify_order(order_id, book_price, book_qty);
+        if (!ob_->modify_order(order_id, book_price, book_qty))
+            return false; // resting_ still points at pre-modify body if present
+
+        // Book replace: pre-modify order_pointer is semantically stale — rebind.
+        if (in_resting)
+        {
+            if (auto body = ob_->get_order(order_id))
+            {
+                if (body->get_remaining_quantity() > 0)
+                    resting_[order_id] = resting_info{body, saved.symbol, saved.side};
+                else
+                    resting_.erase(order_id);
+            }
+            else
+            {
+                resting_.erase(order_id);
+            }
+        }
+        return true;
     }
 
     void advance_time(std::chrono::system_clock::time_point ts) override
@@ -387,19 +441,26 @@ public:
     // bar's [low, high] range was traded through intrabar even when the MM
     // re-quote anchors (open/close/stop refs) never crossed it — without
     // this, a buy limit at 99 misses a bar with low 98 / close 101 entirely.
-    // Fills the full remaining quantity at the order's own limit price
-    // (maker) and removes it from the book. Returns true if anything filled.
+    // Fills at the order's own limit price (maker). When bar_volume > 0,
+    // aggregate fill qty across orders is capped by volume (residual stays
+    // resting). Returns true if anything filled.
     bool sweep_resting_range(const std::string& symbol,
                              double low, double high,
-                             std::chrono::system_clock::time_point ts) override
+                             std::chrono::system_clock::time_point ts,
+                             double bar_volume = 0.0) override
     {
+        last_sweep_fill_qty_ = 0.0;
         if (resting_.empty() || !(low > 0.0) || !(high > 0.0))
             return false;
         if (low > high) std::swap(low, high);
 
+        double volume_left = (bar_volume > 0.0) ? bar_volume
+                                                : std::numeric_limits<double>::infinity();
         bool any = false;
         for (auto it = resting_.begin(); it != resting_.end(); )
         {
+            if (!(volume_left > 0.0)) break;
+
             auto& ri = it->second;
             if (ri.symbol != symbol) { ++it; continue; }
             // Skip orders with a cancel in flight — "too slow to pull"
@@ -407,36 +468,73 @@ public:
             // during the cancel window would be generous, not adverse.
             if (pending_cancels_.count(it->first)) { ++it; continue; }
 
+            // Always use live book body for remaining qty/price (HIGH-02).
+            if (auto live = ob_->get_order(it->first))
+                ri.book_order = live;
+            else
+            {
+                it = resting_.erase(it);
+                continue;
+            }
+
             const double px = ri.book_order->get_price().to_double();
             const bool traversed = (ri.side == order_side::buy)
                 ? (low <= px) : (high >= px);
             if (!traversed) { ++it; continue; }
 
-            const double fill_qty =
+            const double remaining =
                 static_cast<double>(ri.book_order->get_remaining_quantity())
                 / qty_scale_;
-            if (fill_qty <= 0.0)
+            if (remaining <= 0.0)
             {
                 it = resting_.erase(it);
                 continue;
             }
+
+            const double fill_qty = std::min(remaining, volume_left);
+            if (!(fill_qty > 0.0)) { ++it; continue; }
 
             double commission = 0.0;
             if (fee_model_)
                 commission = fee_model_->compute_commission(
                     ri.side, fill_qty, px, /*is_taker=*/false);
 
+            const double rem_after = remaining - fill_qty;
             pending_fills_.emplace_back(
                 ts, ri.symbol, it->first, ri.side,
                 fill_qty, px, commission,
-                /*remaining=*/0.0, next_fill_id_++);
+                rem_after, next_fill_id_++);
             any = true;
+            volume_left -= fill_qty;
+            last_sweep_fill_qty_ += fill_qty;
 
-            ob_->cancel_order(it->first);
-            it = resting_.erase(it);
+            if (rem_after <= 1e-12)
+            {
+                ob_->cancel_order(it->first);
+                it = resting_.erase(it);
+            }
+            else
+            {
+                // Partial: shrink book qty; rebind live body after recreate.
+                const quantity new_q = static_cast<quantity>(
+                    std::round(rem_after * qty_scale_));
+                if (new_q > 0)
+                    ob_->modify_order(it->first,
+                        Price::from_double(px), new_q);
+                if (auto body = ob_->get_order(it->first))
+                    ri.book_order = body;
+                else
+                {
+                    it = resting_.erase(it);
+                    continue;
+                }
+                ++it;
+            }
         }
         return any;
     }
+
+    double last_sweep_fill_qty() const override { return last_sweep_fill_qty_; }
 
 private:
     std::shared_ptr<orderbook> ob_;
@@ -451,6 +549,7 @@ private:
     uint64_t next_fill_id_ = 1;
     bool debug_fills_ = false;
     int debug_fills_left_ = 0;
+    double last_sweep_fill_qty_ = 0.0;
     // Volume-weighted average price for walking `qty` through the
     // passive side of the book. Returns 0 when the book has fewer
     // resting units than requested - the caller falls back to its

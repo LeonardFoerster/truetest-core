@@ -169,6 +169,9 @@ public:
     void cancel_order(order_id order_id);
     trades match_order(order_modify order);
     bool modify_order(order_id id, Price new_price, quantity new_qty);
+    // Live book body for id after add/modify (nullptr if unknown). Used by
+    // LocalBookAdapter to re-bind resting_ after amend (FR-local-modify).
+    order_pointer get_order(order_id id) const;
     std::size_t size() const;
     orderbook_lvl_infos get_order_infos() const;
 

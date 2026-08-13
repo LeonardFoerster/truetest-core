@@ -73,7 +73,12 @@ public:
     std::size_t get_total_fills() const { return total_fills_; }
     double get_cash() const { return cash_; }
     double get_initial_balance() const { return initial_balance_; }
+    // Single-price mark (legacy / single-symbol). Prefer the marks overload
+    // for multi-symbol portfolios.
     double get_equity(double last_price) const;
+    // Per-symbol marks; symbols missing from `marks` fall back to `fallback_price`.
+    double get_equity(const std::unordered_map<std::string, double>& marks,
+                      double fallback_price = 0.0) const;
     double get_total_funding_pnl() const { return total_funding_pnl_; }
 
     const std::unordered_map<std::string, position>& get_positions() const { return positions_; }
