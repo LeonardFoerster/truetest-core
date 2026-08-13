@@ -21,8 +21,8 @@ void draw_account_strip(const dashboard_snapshot& snap,
                         const MonitorTelemetry& telemetry)
 {
     constexpr std::size_t metric_count = 9;
-    constexpr float gap = 6.0f;
-    constexpr float card_height = 60.0f;
+    constexpr float gap = theme::kMetricCardGap;
+    constexpr float card_height = theme::kMetricCardHeight;
     const float available = ImGui::GetContentRegionAvail().x;
     const std::size_t columns = kpi_column_count(available, metric_count);
     const std::size_t rows = (metric_count + columns - 1) / columns;
@@ -127,7 +127,7 @@ void draw_safety_strip(const dashboard_snapshot& snap,
                        const MonitorTelemetry& telemetry)
 {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::bg1());
-    ImGui::BeginChild("safety_strip", ImVec2(0, 38), true);
+    ImGui::BeginChild("safety_strip", ImVec2(0, theme::kStripHeight), true);
 
     const bool paused = actions.pause_state ? actions.pause_state() : false;
     theme::status_badge(snap.risk.halted ? "HALT SET — RESTART" : "HALT not set",
@@ -226,11 +226,12 @@ void draw_risk_panel(const dashboard_snapshot& snap)
         return;
     }
     const bool drawdown_warning = snap.risk.max_drawdown_limit > 0.0
-        && snap.risk.max_drawdown_pct / snap.risk.max_drawdown_limit > 0.6;
+        && snap.risk.max_drawdown_pct / snap.risk.max_drawdown_limit > theme::kWarnFraction;
     const bool exposure_warning = snap.risk.exposure_limit > 0.0
-        && snap.risk.exposure / snap.risk.exposure_limit > 0.6;
+        && snap.risk.exposure / snap.risk.exposure_limit > theme::kWarnFraction;
     const bool orders_warning = snap.risk.open_orders_limit > 0
-        && static_cast<double>(snap.risk.open_orders) / snap.risk.open_orders_limit > 0.6;
+        && static_cast<double>(snap.risk.open_orders) / snap.risk.open_orders_limit
+               > theme::kWarnFraction;
     theme::section_header("RISK ENVELOPE", "reported limits and terminal state",
                           snap.risk.halted ? theme::danger()
                                            : ((drawdown_warning || exposure_warning
@@ -257,27 +258,27 @@ void draw_risk_panel(const dashboard_snapshot& snap)
         const float fraction = limit > 0.0
             ? static_cast<float>(std::clamp(used / limit, 0.0, 1.0)) : 0.0f;
         ImGui::Text("%s", label);
-        ImGui::SameLine(140);
+        ImGui::SameLine(theme::kLabelColumnWidth);
         if (percent)
             ImGui::Text("%s / %s", fmt_pct_abs(used, true).c_str(),
                         fmt_pct_abs(limit, true).c_str());
         else
             ImGui::Text("%s / %s", fmt_usd(used).c_str(), fmt_usd(limit).c_str());
-        const ImVec4 color = fraction > 0.85f ? theme::danger()
-            : (fraction > 0.6f ? theme::warn() : theme::accent());
+        const ImVec4 color = fraction > theme::kDangerFraction ? theme::danger()
+            : (fraction > theme::kWarnFraction ? theme::warn() : theme::accent());
         ImGui::PushStyleColor(ImGuiCol_PlotHistogram, color);
         ImGui::ProgressBar(fraction, ImVec2(-1, 14));
         ImGui::PopStyleColor();
     };
 
     ImGui::Text("Daily loss");
-    ImGui::SameLine(140);
+    ImGui::SameLine(theme::kLabelColumnWidth);
     ImGui::TextColored(theme::tx_faint(), "N/A (limit %s)",
                        fmt_usd(snap.risk.daily_loss_limit).c_str());
     gauge("Drawdown", snap.risk.max_drawdown_pct, snap.risk.max_drawdown_limit, true);
     gauge("Exposure", snap.risk.exposure, snap.risk.exposure_limit);
     ImGui::Text("Open orders");
-    ImGui::SameLine(140);
+    ImGui::SameLine(theme::kLabelColumnWidth);
     ImGui::Text("%zu / %zu", snap.risk.open_orders, snap.risk.open_orders_limit);
 
     ImGui::Separator();

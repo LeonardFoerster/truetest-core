@@ -25,12 +25,12 @@ struct DeskCommand
     DeskPage page;
 };
 
-inline constexpr std::array<DeskCommand, 10> desk_commands = {{
-    {"WORKSPACE ORDERFLOW", "Open the trading/orderflow cockpit", DeskCommandKind::select_page, DeskPage::orderflow},
-    {"WORKSPACE LIQUIDITY", "Open live depth history", DeskCommandKind::select_page, DeskPage::liquidity},
-    {"WORKSPACE STRUCTURE", "Open TPO and volume profile", DeskCommandKind::select_page, DeskPage::structure},
-    {"WORKSPACE MARKETS", "Open funding and correlation", DeskCommandKind::select_page, DeskPage::markets},
-    {"WORKSPACE OPERATIONS", "Open risk and engine operations", DeskCommandKind::select_page, DeskPage::operations},
+// Single-page desk for now (orderflow/liquidity/structure/markets/operations
+// stay fully defined in desk_layout_model.h, just benched from desk_pages —
+// trim their WORKSPACE commands here too so the palette can't "escape" to a
+// dormant page and steal activity_blotter/health/risk from Monitor).
+inline constexpr std::array<DeskCommand, 6> desk_commands = {{
+    {"WORKSPACE MONITOR", "Positions, orders, activity, health and risk", DeskCommandKind::select_page, DeskPage::monitor},
     {"RESET LAYOUT", "Restore this workspace default", DeskCommandKind::reset_layout, DeskPage::count},
     {"TOGGLE DEMO DATA", "Enable or disable deterministic UI fixtures", DeskCommandKind::toggle_demo, DeskPage::count},
     {"FOCUS PRIMARY", "Maximize or restore the primary surface", DeskCommandKind::toggle_focus, DeskPage::count},

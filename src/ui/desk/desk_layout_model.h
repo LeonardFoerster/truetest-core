@@ -10,8 +10,8 @@
 
 namespace truetest::ui::desk {
 
-inline constexpr std::uint32_t desk_layout_version = 2;
-inline constexpr const char* desk_layout_ini_filename = "truetest_desk_v2.ini";
+inline constexpr std::uint32_t desk_layout_version = 3;
+inline constexpr const char* desk_layout_ini_filename = "truetest_desk_v3.ini";
 
 enum class DeskPage : std::uint8_t
 {
@@ -20,6 +20,10 @@ enum class DeskPage : std::uint8_t
     structure,
     markets,
     operations,
+    // Single operator-monitoring page (positions/orders, health, risk).
+    // orderflow/liquidity/structure/markets/operations stay fully defined
+    // above (dormant, not in desk_pages) so they're trivial to re-enable.
+    monitor,
     count,
 };
 
@@ -47,12 +51,8 @@ struct DeskPanelAssignment
     DeskDockSlot slot;
 };
 
-inline constexpr std::array<DeskPage, 5> desk_pages = {
-    DeskPage::orderflow,
-    DeskPage::liquidity,
-    DeskPage::structure,
-    DeskPage::markets,
-    DeskPage::operations,
+inline constexpr std::array<DeskPage, 1> desk_pages = {
+    DeskPage::monitor,
 };
 
 constexpr const char* desk_page_label(DeskPage page) noexcept
@@ -64,6 +64,7 @@ constexpr const char* desk_page_label(DeskPage page) noexcept
     case DeskPage::structure:  return "Structure";
     case DeskPage::markets:    return "Markets";
     case DeskPage::operations: return "Operations";
+    case DeskPage::monitor:    return "Monitor";
     case DeskPage::count:      break;
     }
     return "Unknown";
@@ -78,6 +79,7 @@ constexpr const char* desk_page_dockspace_name(DeskPage page) noexcept
     case DeskPage::structure:  return "StructureDockSpaceV2";
     case DeskPage::markets:    return "MarketsDockSpaceV2";
     case DeskPage::operations: return "OperationsDockSpaceV2";
+    case DeskPage::monitor:    return "MonitorDockSpaceV2";
     case DeskPage::count:      break;
     }
     return "UnknownDockSpaceV2";
@@ -92,6 +94,7 @@ constexpr const char* desk_focus_dockspace_name(DeskPage page) noexcept
     case DeskPage::structure:  return "StructureFocusDockSpaceV2";
     case DeskPage::markets:    return "MarketsFocusDockSpaceV2";
     case DeskPage::operations: return "OperationsFocusDockSpaceV2";
+    case DeskPage::monitor:    return "MonitorFocusDockSpaceV2";
     case DeskPage::count:      break;
     }
     return "UnknownFocusDockSpaceV2";
@@ -139,6 +142,9 @@ constexpr DeskLayoutGeometry desk_layout_geometry(DeskPage page) noexcept
     case DeskPage::structure:  return {0.28f, 0.00f, 0.00f, 0.48f};
     case DeskPage::markets:    return {0.32f, 0.00f, 0.00f, 0.48f};
     case DeskPage::operations: return {0.28f, 0.25f, 0.32f, 0.48f};
+    // Monitor: primary (activity/positions/orders) + a right column split
+    // 55/45 into health (top) / risk (bottom). No left/bottom splits needed.
+    case DeskPage::monitor:    return {0.30f, 0.00f, 0.00f, 0.45f};
     case DeskPage::count:      break;
     }
     return {0.17f, 0.12f, 0.145f, 0.30f};
@@ -210,6 +216,14 @@ inline constexpr std::array<DeskPanelAssignment, 5> operations_assignments = {{
     {DeskPanel::operations_activity, DeskDockSlot::bottom},
 }};
 
+// Monitor: reuses activity_blotter/health/risk verbatim from the (dormant)
+// orderflow/operations pages — no new panel UI, just a new home for them.
+inline constexpr std::array<DeskPanelAssignment, 3> monitor_assignments = {{
+    {DeskPanel::activity_blotter, DeskDockSlot::primary},
+    {DeskPanel::health, DeskDockSlot::right_top},
+    {DeskPanel::risk, DeskDockSlot::right_bottom},
+}};
+
 constexpr std::span<const DeskPanelAssignment>
 desk_page_assignments(DeskPage page) noexcept
 {
@@ -220,6 +234,7 @@ desk_page_assignments(DeskPage page) noexcept
     case DeskPage::structure:  return structure_assignments;
     case DeskPage::markets:    return markets_assignments;
     case DeskPage::operations: return operations_assignments;
+    case DeskPage::monitor:    return monitor_assignments;
     case DeskPage::count:      break;
     }
     return {};
@@ -263,7 +278,7 @@ public:
     }
 
 private:
-    DeskPage active_ = DeskPage::orderflow;
+    DeskPage active_ = DeskPage::monitor;
     std::optional<DeskPage> pending_reset_;
 };
 

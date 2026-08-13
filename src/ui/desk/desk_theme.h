@@ -8,9 +8,19 @@
 
 #include <cstring>
 
-// Calm workstation palette. Color is reserved for hierarchy and state; panel
+// Bloomberg-terminal palette: near-black surfaces, amber accent, saturated
+// green/red up/down. Color is reserved for hierarchy and state; panel
 // surfaces stay neutral so semantic colors remain immediately recognizable.
 namespace truetest::ui::desk::theme {
+
+// Shared layout constants — panels should pull from here instead of
+// hardcoding their own spacing/thresholds, so the desk reads as one system.
+inline constexpr float kStripHeight      = 38.0f;  // safety_strip / page_switcher child height
+inline constexpr float kMetricCardHeight = 60.0f;  // metric_card height
+inline constexpr float kMetricCardGap    = 6.0f;   // metric_card / kpi grid gap
+inline constexpr float kLabelColumnWidth = 140.0f; // label/value row SameLine() offset
+inline constexpr float kWarnFraction     = 0.6f;   // gauge warn threshold (fraction of limit)
+inline constexpr float kDangerFraction   = 0.85f;  // gauge danger threshold (fraction of limit)
 
 inline ImVec4 rgba(float r, float g, float b, float a = 1.0f)
 {
@@ -34,37 +44,37 @@ inline float dp(float value)
 }
 
 // Surfaces
-inline ImVec4 bg0()     { return rgba(11, 15, 20); }       // app
-inline ImVec4 bg1()     { return rgba(16, 22, 29); }       // panel
-inline ImVec4 bg2()     { return rgba(23, 32, 42); }       // elevated
-inline ImVec4 bg3()     { return rgba(31, 43, 55); }       // hover
+inline ImVec4 bg0()     { return rgba(10, 10, 10); }       // app
+inline ImVec4 bg1()     { return rgba(18, 18, 18); }       // panel
+inline ImVec4 bg2()     { return rgba(27, 27, 27); }       // elevated
+inline ImVec4 bg3()     { return rgba(38, 38, 38); }       // hover
 inline ImVec4 line()    { return ImVec4(1, 1, 1, 0.08f); }
 inline ImVec4 line_hi() { return ImVec4(1, 1, 1, 0.14f); }
 
 // Text
-inline ImVec4 tx_hi()   { return rgba(230, 237, 243); }
-inline ImVec4 tx_mid()  { return rgba(168, 179, 193); }
-inline ImVec4 tx_lo()   { return rgba(111, 126, 142); }
-inline ImVec4 tx_faint(){ return rgba(75, 89, 104); }
+inline ImVec4 tx_hi()   { return rgba(232, 232, 232); }
+inline ImVec4 tx_mid()  { return rgba(168, 168, 168); }
+inline ImVec4 tx_lo()   { return rgba(110, 110, 110); }
+inline ImVec4 tx_faint(){ return rgba(69, 69, 69); }
 
 // Hierarchy / charts
-inline ImVec4 accent()      { return rgba(224, 160, 59); }
-inline ImVec4 accent_dim()  { return rgba(224, 160, 59, 0.18f); }
-inline ImVec4 secondary()   { return rgba(77, 182, 229); }
-inline ImVec4 secondary_dim(){ return rgba(77, 182, 229, 0.16f); }
-inline ImVec4 info()        { return rgba(78, 169, 224); }
-inline ImVec4 info_dim()    { return rgba(78, 169, 224, 0.17f); }
-inline ImVec4 data_link()   { return rgba(77, 182, 229); }
+inline ImVec4 accent()      { return rgba(255, 149, 0); }
+inline ImVec4 accent_dim()  { return rgba(255, 149, 0, 0.18f); }
+inline ImVec4 secondary()   { return rgba(41, 182, 246); }
+inline ImVec4 secondary_dim(){ return rgba(41, 182, 246, 0.16f); }
+inline ImVec4 info()        { return rgba(38, 166, 224); }
+inline ImVec4 info_dim()    { return rgba(38, 166, 224, 0.17f); }
+inline ImVec4 data_link()   { return rgba(41, 182, 246); }
 
 // Semantic
-inline ImVec4 up()       { return rgba(67, 194, 132); }
-inline ImVec4 up_dim()   { return rgba(67, 194, 132, 0.15f); }
-inline ImVec4 down()     { return rgba(231, 96, 103); }
-inline ImVec4 down_dim() { return rgba(231, 96, 103, 0.16f); }
-inline ImVec4 warn()     { return rgba(230, 169, 74); }
-inline ImVec4 warn_dim() { return rgba(230, 169, 74, 0.17f); }
-inline ImVec4 danger()   { return rgba(239, 72, 85); }
-inline ImVec4 danger_dim(){ return rgba(239, 72, 85, 0.21f); }
+inline ImVec4 up()       { return rgba(0, 200, 83); }
+inline ImVec4 up_dim()   { return rgba(0, 200, 83, 0.15f); }
+inline ImVec4 down()     { return rgba(255, 59, 48); }
+inline ImVec4 down_dim() { return rgba(255, 59, 48, 0.16f); }
+inline ImVec4 warn()     { return rgba(255, 193, 7); }
+inline ImVec4 warn_dim() { return rgba(255, 193, 7, 0.17f); }
+inline ImVec4 danger()   { return rgba(255, 23, 68); }
+inline ImVec4 danger_dim(){ return rgba(255, 23, 68, 0.21f); }
 
 enum class StatusTone
 {

@@ -694,9 +694,14 @@ void DeskApp::draw_menu_bar(const dashboard_snapshot* snap, bool has_snap)
 
 void DeskApp::draw_page_switcher()
 {
+    // Single-page desk for now: no point showing a one-item tab strip.
+    // Re-adding pages to desk_pages makes this switcher reappear for free.
+    if (desk_pages.size() <= 1)
+        return;
+
     const bool narrow = ImGui::GetContentRegionAvail().x < theme::dp(900.0f);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::bg1());
-    ImGui::BeginChild("page_switcher", ImVec2(0, theme::dp(38.0f)), true,
+    ImGui::BeginChild("page_switcher", ImVec2(0, theme::dp(theme::kStripHeight)), true,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     if (!narrow)
     {
@@ -972,6 +977,15 @@ void DeskApp::draw_frame(const dashboard_snapshot* snap, bool has_snap)
     if (has_snap && snap)
         draw_halt_banner(*snap);
 
+    // Always-visible P&L/risk header — deliberately rendered outside the
+    // dockspace (not a dockable ImGui::Begin window) so it can never be
+    // dragged away, closed, or buried under another tab.
+    if (page_controller_.active_page() == DeskPage::monitor)
+    {
+        static const dashboard_snapshot empty_monitor_snapshot{};
+        panels::draw_account_strip(snap ? *snap : empty_monitor_snapshot, monitor_telemetry_);
+    }
+
     const DeskPage active_page = page_controller_.active_page();
     const ImGuiID normal_dock_id = ImGui::GetID(desk_page_dockspace_name(active_page));
     const ImGuiID focus_dock_id = ImGui::GetID(desk_focus_dockspace_name(active_page));
@@ -1109,6 +1123,26 @@ void DeskApp::draw_frame(const dashboard_snapshot* snap, bool has_snap)
                 panels::draw_strategies_panel(current);
                 panels::draw_risk_panel(current);
                 panels::draw_health_panel(current, monitor_telemetry_);
+            }
+        }
+        break;
+    case DeskPage::monitor:
+        if (!snap)
+        {
+            draw_waiting_window(DeskPanel::activity_blotter, "POSITIONS & ACTIVITY");
+            if (!focus_mode_)
+            {
+                draw_waiting_window(DeskPanel::health, "SYSTEM HEALTH");
+                draw_waiting_window(DeskPanel::risk, "RISK");
+            }
+        }
+        else
+        {
+            panels::draw_activity_panel(DeskPanel::activity_blotter, snap, density_);
+            if (!focus_mode_)
+            {
+                panels::draw_health_panel(current, monitor_telemetry_);
+                panels::draw_risk_panel(current);
             }
         }
         break;

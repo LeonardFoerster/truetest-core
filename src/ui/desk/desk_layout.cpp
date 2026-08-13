@@ -16,9 +16,13 @@ void set_node_locked(ImGuiDockNode* node, bool locked)
 {
     if (!node)
         return;
+    // NoDockingOverMe (imgui_internal.h): also reject a window being dropped
+    // onto this node as a new tab — NoDockingSplit alone only blocks new
+    // *splits*, not tab-merges, so a locked panel could still be buried
+    // under another tab without it.
     constexpr ImGuiDockNodeFlags lock_flags =
         ImGuiDockNodeFlags_NoResize | ImGuiDockNodeFlags_NoUndocking
-        | ImGuiDockNodeFlags_NoDockingSplit;
+        | ImGuiDockNodeFlags_NoDockingSplit | ImGuiDockNodeFlags_NoDockingOverMe;
     if (locked)
     {
         node->LocalFlags |= lock_flags;

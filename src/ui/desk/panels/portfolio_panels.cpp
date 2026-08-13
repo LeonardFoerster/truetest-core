@@ -96,7 +96,7 @@ void draw_positions_panel(const dashboard_snapshot& snap)
         {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::TextColored(theme::accent(), "%s", position.symbol.c_str());
+            ImGui::TextColored(theme::data_link(), "%s", position.symbol.c_str());
             ImGui::TableNextColumn();
             position_side_badge(position.qty);
             ImGui::TableNextColumn();
@@ -153,7 +153,7 @@ void draw_lots_panel(const dashboard_snapshot& snap)
                 {
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
-                    ImGui::TextColored(theme::accent(), "%s", bracket.symbol.c_str());
+                    ImGui::TextColored(theme::data_link(), "%s", bracket.symbol.c_str());
                     ImGui::TableNextColumn();
                     position_side_badge(bracket.side);
                     ImGui::TableNextColumn();
@@ -196,7 +196,7 @@ void draw_lots_panel(const dashboard_snapshot& snap)
                     ImGui::TableNextColumn();
                     ImGui::Text("%llu", static_cast<unsigned long long>(lot.opener_order_id));
                     ImGui::TableNextColumn();
-                    ImGui::TextColored(theme::accent(), "%s", lot.symbol.c_str());
+                    ImGui::TextColored(theme::data_link(), "%s", lot.symbol.c_str());
                     ImGui::TableNextColumn();
                     ImGui::TextUnformatted(lot.strategy_name.c_str());
                     ImGui::TableNextColumn();
@@ -251,7 +251,7 @@ void draw_orders_panel(const dashboard_snapshot& snap)
                 ImGui::TableNextColumn();
                 ImGui::Text("%llu", static_cast<unsigned long long>(order.order_id));
                 ImGui::TableNextColumn();
-                ImGui::TextColored(theme::accent(), "%s", order.symbol.c_str());
+                ImGui::TextColored(theme::data_link(), "%s", order.symbol.c_str());
                 ImGui::TableNextColumn();
                 side_badge(order.side);
                 ImGui::TableNextColumn();
