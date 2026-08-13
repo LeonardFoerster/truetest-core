@@ -207,10 +207,11 @@ public:
 
     bool sweep_resting_range(const std::string& symbol,
                              double low, double high,
-                             std::chrono::system_clock::time_point ts) override
+                             std::chrono::system_clock::time_point ts,
+                             double bar_volume = 0.0) override
     {
         return book_adapter_
-            ? book_adapter_->sweep_resting_range(symbol, low, high, ts)
+            ? book_adapter_->sweep_resting_range(symbol, low, high, ts, bar_volume)
             : false;
     }
 

@@ -151,7 +151,17 @@ public:
 		std::string_view frame;
 		while (transport_->read_frame(frame))
 		{
-			for (auto& record : parser_->parse_records(frame))
+			// Empty parse_records = unparseable/malformed frame (nullopt from
+			// parse_record, or multi-record parser returned nothing). Count as
+			// rejected so garbage CSV lines do not silently thin the sample
+			// (DR-REPLAY-02). Emit failures (sink validation) also reject.
+			auto records = parser_->parse_records(frame);
+			if (records.empty())
+			{
+				++rejected;
+				continue;
+			}
+			for (auto& record : records)
 			{
 				if (detail::emit_record(record, sink))
 					++count;
@@ -166,7 +176,10 @@ public:
 			stats->accepted = count;
 			stats->rejected = rejected;
 		}
-		std::cout << "  DataBridge: loaded " << count << " records\n";
+		std::cout << "  DataBridge: loaded " << count << " records";
+		if (rejected > 0)
+			std::cout << " (" << rejected << " rejected)";
+		std::cout << "\n";
 		return count > 0;
 	}
 
