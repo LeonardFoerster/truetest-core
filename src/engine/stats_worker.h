@@ -38,6 +38,8 @@ public:
     AnalyticsReport last_snapshot() const { return last_snapshot_; }
 
     const Analytics& analytics() const { return analytics_; }
+    // Mutable only for cold-path fold of engine research counters after stop.
+    Analytics& analytics() { return analytics_; }
 
 private:
     Analytics analytics_;

@@ -75,6 +75,13 @@ public:
         // Snapshot code will .load() as needed.
         const std::atomic<double>& last_mid_price,
         const std::string& last_mark_symbol,
+        // Per-symbol marks (FR-06); same map engine uses for final/shadow equity.
+        // Lifetime: engine-owned; written on event thread, read on cold snapshot
+        // (e.g. the web server's poller thread, a genuine concurrent reader —
+        // see web/web_server.h). Unlike last_mid_price_ this is a plain
+        // unordered_map, so every access must go through last_mark_prices_mu.
+        const std::unordered_map<std::string, double>& last_mark_prices,
+        std::mutex& last_mark_prices_mu,
         OrderbookRegistry& orderbook_registry,
         const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters,
         IOrderAuditSink& audit_sink,
@@ -155,6 +162,8 @@ private:
     const engine_config& config_;
     const std::atomic<double>& last_mid_price_;
     const std::string& last_mark_symbol_;
+    const std::unordered_map<std::string, double>& last_mark_prices_;
+    std::mutex& last_mark_prices_mu_;
     OrderbookRegistry& orderbook_registry_;
     const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters_;
     IOrderAuditSink& audit_sink_;

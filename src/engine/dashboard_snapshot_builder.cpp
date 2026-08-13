@@ -39,6 +39,8 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     const engine_config& config,
     const std::atomic<double>& last_mid_price,
     const std::string& last_mark_symbol,
+    const std::unordered_map<std::string, double>& last_mark_prices,
+    std::mutex& last_mark_prices_mu,
     OrderbookRegistry& orderbook_registry,
     const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters,
     IOrderAuditSink& audit_sink,
@@ -70,6 +72,8 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     , config_(config)
     , last_mid_price_(last_mid_price)
     , last_mark_symbol_(last_mark_symbol)
+    , last_mark_prices_(last_mark_prices)
+    , last_mark_prices_mu_(last_mark_prices_mu)
     , orderbook_registry_(orderbook_registry)
     , execution_adapters_(execution_adapters)
     , audit_sink_(audit_sink)
@@ -191,10 +195,14 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
 {
     using snap_t = truetest::ui::dashboard_snapshot;
 
-    // Account
+    // Account — multi-symbol marks (FR-06), same path as engine final/shadow equity.
+    const double last_mid = last_mid_price_.load(std::memory_order_relaxed);
     out.cash             = portfolio_.get_cash();
     out.initial_balance  = portfolio_.get_initial_balance();
-    out.equity           = portfolio_.get_equity(last_mid_price_.load(std::memory_order_relaxed));
+    {
+        std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
+        out.equity = portfolio_.get_equity(last_mark_prices_, last_mid);
+    }
     out.realized_pnl     = out.equity - out.initial_balance;
     out.unrealized_pnl   = 0.0;
 
@@ -208,7 +216,15 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
         row.symbol     = sym;
         row.qty        = pos.qty;
         row.avg_entry  = (std::abs(pos.qty) > 0.0) ? pos.cost_basis / pos.qty : 0.0;
-        row.mark       = (sym == last_mark_symbol_) ? last_mid_price_.load(std::memory_order_relaxed) : 0.0;
+        // Prefer per-symbol mark; fall back to last_mid only for the primary symbol.
+        row.mark = 0.0;
+        {
+            std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
+            if (auto it = last_mark_prices_.find(sym); it != last_mark_prices_.end() && it->second > 0.0)
+                row.mark = it->second;
+        }
+        if (row.mark <= 0.0 && sym == last_mark_symbol_)
+            row.mark = last_mid;
         row.unrealized = (row.mark > 0.0) ? (row.mark - row.avg_entry) * pos.qty : 0.0;
         out.unrealized_pnl += row.unrealized;
         out.positions.push_back(std::move(row));
@@ -268,7 +284,14 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
     for (const auto& [sym, pos] : portfolio_.get_positions())
     {
         if (std::abs(pos.qty) < 1e-12) continue;
-        double mark = (sym == last_mark_symbol_) ? last_mid_price_.load(std::memory_order_relaxed) : 0.0;
+        double mark = 0.0;
+        {
+            std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
+            if (auto it = last_mark_prices_.find(sym); it != last_mark_prices_.end() && it->second > 0.0)
+                mark = it->second;
+        }
+        if (mark <= 0.0 && sym == last_mark_symbol_)
+            mark = last_mid;
         if (mark > 0.0) exposure += std::abs(pos.qty) * mark;
     }
     out.risk.exposure       = exposure;
@@ -321,8 +344,16 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
         {
             if (p.symbol == a.symbol) { row.mark = p.mark; break; }
         }
-        if (row.mark == 0.0 && a.symbol == last_mark_symbol_)
-            row.mark = last_mid_price_.load(std::memory_order_relaxed);
+        if (row.mark == 0.0)
+        {
+            {
+                std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
+                if (auto it = last_mark_prices_.find(a.symbol); it != last_mark_prices_.end() && it->second > 0.0)
+                    row.mark = it->second;
+            }
+            if (row.mark == 0.0 && a.symbol == last_mark_symbol_)
+                row.mark = last_mid;
+        }
         out.brackets.push_back(std::move(row));
     }
 

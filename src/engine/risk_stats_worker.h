@@ -59,6 +59,8 @@ public:
     }
 
     const Analytics& analytics() const { return analytics_; }
+    // Mutable only for cold-path fold of engine research counters after stop.
+    Analytics& analytics() { return analytics_; }
 
 private:
     RiskManager risk_manager_;

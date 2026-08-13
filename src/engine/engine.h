@@ -115,6 +115,21 @@ private:
     // surface on plain double& held by builder (see memory check 2026-07-18).
     alignas(64) std::atomic<double> last_mid_price_{0.0};
     std::string last_mark_symbol_;
+    // Per-symbol last marks for multi-symbol portfolio equity (FR-06).
+    // Reserve/clear at run start — never first-touch rehash on the hot mark path.
+    // Unlike last_mid_price_ (atomic<double>), this is a plain map: it can
+    // still insert on an unreserved symbol (rehash) while a snapshot reader
+    // is mid-iteration/find. The web server's poller thread reads this
+    // concurrently with the event-loop thread via DashboardSnapshotBuilder
+    // (see web/web_server.h) — a real cross-thread access, not hypothetical.
+    // Guard every read/write with last_mark_prices_mu_.
+    mutable std::mutex last_mark_prices_mu_;
+    std::unordered_map<std::string, double> last_mark_prices_;
+    // Last market/tick sim timestamp for cancel/amend audit (EL-CANCEL-WALLCLOCK).
+    // Updated on every bar/tick event path; cancel_event uses this, not wall clock.
+    std::chrono::system_clock::time_point last_sim_time_{};
+    std::size_t soft_post_fill_breaches_{0};
+    std::size_t data_rows_rejected_{0};
 
     // Instrument spec cache (moved out; engine delegates). Cold path.
     std::unique_ptr<InstrumentSpecCache> instrument_spec_cache_;
@@ -287,10 +302,12 @@ private:
     // Bar-mode traversal fills for resting strategy limits: a limit whose
     // level lies inside the bar's [low, high] traded through intrabar even
     // if the MM re-quote anchors (open/close/stop refs) never crossed it.
+    // bar_volume caps aggregate fill qty (FR-bar-sweep-ignores-volume); 0 = uncapped.
     void sweep_resting_limits(const std::string& symbol,
                               double low, double high,
                               const std::chrono::system_clock::time_point& ts,
-                              std::size_t& event_count, bool& halt_requested);
+                              std::size_t& event_count, bool& halt_requested,
+                              double bar_volume = 0.0);
 
     // Stops trigger on the bar's high/low and fill anchored at the stop
     // price (or the open when the bar gaps through). Tick callers pass
@@ -439,6 +456,24 @@ private:
     void teardown_event_loop_infra();
     void drain_final_pending(std::size_t& event_count, bool& halt_requested);
     void cancel_day_orders();
+    // Per-symbol mark for multi-symbol pending fills (EL-MULTISYM-MID).
+    // last_mark_prices_[sym] if positive, else last_mid_price_.
+    double mid_for_symbol(const std::string& symbol) const;
+    // Drain time-eligible pending orders; re-center each order's book at that
+    // symbol's mark and temporarily set last_mid so process_order / adapter
+    // mid / risk see the order symbol (not the current event symbol).
+    void drain_pending_orders(const std::chrono::system_clock::time_point& sim_time,
+                              std::size_t& event_count, bool& halt_requested,
+                              bool force_all = false);
+    // Paper maker-queue: feed a trade print into resolved adapters then drain fills.
+    // No-op unless config_.maker_queue_model is set (QueueAware needs a tape).
+    void feed_paper_trade_and_drain(const std::string& symbol,
+                                    double price, double qty,
+                                    std::chrono::system_clock::time_point ts,
+                                    std::size_t& event_count, bool& halt_requested);
+    // After workers join: stamp soft/data research counters onto export analytics.
+    void fold_research_counters_into_export_analytics();
+    void prepare_mark_prices_for_run(std::size_t symbol_hint = 8);
     void report_run_summary(std::size_t event_count, std::chrono::high_resolution_clock::time_point start_time);
 
 public:
@@ -490,12 +525,7 @@ public:
         flatten_request_.store(true, std::memory_order_release);
     }
 
-    void add_strategy(std::shared_ptr<IStrategy> strategy, const std::string& name)
-    {
-        if (!strategy) return;
-        additional_strategies_.push_back(std::move(strategy));
-        additional_strategy_names_.push_back(name);
-    }
+    void add_strategy(std::shared_ptr<IStrategy> strategy, const std::string& name);
     void switch_symbol(const std::string& new_symbol);
     bool cancel_order(const std::string& symbol, uint64_t order_id,
                       const std::string& reason = "");
@@ -509,6 +539,12 @@ public:
                          tick_side side, double price, int64_t new_qty);
     void print_summary();
     const Analytics& get_analytics() const;
+    // Research honesty: invalid CSV/tick rows counted at load (before workers start).
+    void set_data_rows_rejected(std::size_t n);
+
+    // Sum of live resting quotes across paper adapters (Hybrid/QueueAware/Local).
+    // Used by tests and EOS diagnostics to prove DAY cancel cleared residuals.
+    std::size_t total_live_quotes() const;
 
     // Resets internal heavy objects (portfolio [incl. lots], analytics, exit_manager,
     // order_tracker, risk_manager, market_maker, adverse_selection, orderbook_registry,
@@ -520,12 +556,12 @@ public:
     // mostly untouched (workers repopulate via rings; full reset complex/unnecessary
     // for MC). See implementation comments.
     //
-    // This is intended primarily for MonteCarloController when reuse_objects_between_trials
-    // is enabled. It is NOT a general-purpose reset and does not restore the engine to a
-    // pristine post-construction state in all cases.
+    // Intended for strategy/data_handler reuse experiments. MC default still
+    // constructs a fresh engine per trial (MonteCarloController). This is NOT a
+    // full pristine reset: execution_adapters_, pending DAY queues, and some rings
+    // are left as-is until full reuse is implemented.
     //
-    // Call this after engine construction (or between trials) when you want to reuse the
-    // engine instance across multiple independent backtests.
+    // Call only when you control the reuse contract (no escaped pooled events).
     void reset_for_next_trial(uint64_t new_seed);
 
     // Only valid in shadow mode. Returns nullptr otherwise.

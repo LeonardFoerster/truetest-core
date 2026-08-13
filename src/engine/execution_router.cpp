@@ -1,5 +1,6 @@
 #include "execution_router.h"
 
+#include "execution/hybrid_paper_adapter.h"
 #include "execution/queue_aware_book_adapter.h"
 // NOTE: no concrete bridge / local / shadow includes here.
 // Capability queries go through the IExecutionAdapter base.
@@ -40,25 +41,27 @@ std::shared_ptr<IExecutionAdapter> ExecutionRouter::resolve_adapter(const std::s
     {
         auto ob = ob_reg_.get_or_create(symbol);
 
+        // Local book always needed for market/stop (exits + aggressive entries).
+        auto local = std::make_shared<LocalBookAdapter>(
+            ob, cfg_.fee_model, cfg_.fill_model,
+            cfg_.seed != 0 ? static_cast<unsigned>(cfg_.seed + 2) : cfg_.fill_rng_seed,
+            cfg_.market_aggression, cfg_.qty_scale,
+            cfg_.latency_model, cfg_.impact_model,
+            cfg_.walked_book_impact);
+        if (cfg_.debug_fills)
+            local->set_debug_fills(true, cfg_.debug_fills_budget);
+
         if (cfg_.maker_queue_model)
         {
-            // Use queue-aware paper execution for passive limits
+            // Hybrid: limits → queue-aware; market/stop → local (never silent drop).
             auto qa = std::make_shared<QueueAwareBookAdapter>(
                 cfg_.maker_queue_model,
                 cfg_.fee_model,
                 cfg_.latency_model);
-            adapter = qa;
+            adapter = std::make_shared<HybridPaperAdapter>(std::move(local), std::move(qa));
         }
         else
         {
-            auto local = std::make_shared<LocalBookAdapter>(
-                ob, cfg_.fee_model, cfg_.fill_model,
-                cfg_.seed != 0 ? static_cast<unsigned>(cfg_.seed + 2) : cfg_.fill_rng_seed,
-                cfg_.market_aggression, cfg_.qty_scale,
-                cfg_.latency_model, cfg_.impact_model,
-                cfg_.walked_book_impact);
-            if (cfg_.debug_fills)
-                local->set_debug_fills(true, cfg_.debug_fills_budget);
             adapter = local;
         }
     }
