@@ -71,22 +71,24 @@ Two primary uses:
    - Helps explain why a resting order "should" have filled (or not) vs. real tape.
 
 2. **Maker / paper queue simulation** (backtest + shadow maker orders, `--maker-queue-model`):
-   - `QueueAwareBookAdapter` + `IQueueModel` (`src/execution/queue_aware_book_adapter.h`, `queue_model.h`).
-   - Models: `uniform` (recommended default), `front`, `back` (or `BackCancelModel`).
-   - Tracks `size_ahead` for passive orders.
-   - Real prints consume front of queue; L2 shrinkage triggers modeled cancels per chosen policy.
-   - Enables realistic passive fill probability without over-optimism.
+   - `HybridPaperAdapter` routes **limits** to `QueueAwareBookAdapter` and **market/stop** to `LocalBookAdapter` (protective SL/TP and aggressive entries never silent-drop).
+   - `IQueueModel` (`queue_model.h`): `uniform` (recommended), `front`, `back`.
+   - Tracks `size_ahead` for passive orders; trade tape + L2 shrinkage update queue position.
+   - **Paper tape:** bar/tick backtests feed synthetic `on_trade` prints into adapters so QueueAware limits can fill (bar close / tick price × qty). Without tape, passive limits would silent-no-op.
+   - **DAY/EOS:** cancels route through the full adapter path (Hybrid/QueueAware), not book-only.
+   - **Modify:** queue-held limits fail closed (no cancel-and-claim-success). True amend/resubmit is not implemented for QueueAware.
+   - Requires `--depth-stream` for meaningful L2; without depth, the default is **conservative** — limits join with `size_ahead=+inf` (no `on_trade` fills at all), not front-of-queue. Bar/tick range sweep still fills passive limits on `[low,high]`. Opt-in `set_join_front_without_l2(true)` restores legacy optimistic join-front, but no CLI/production path currently exposes it.
 
-See: `test_queue_model.cpp`, `test_queue_position_model.cpp`, `test_queue_aware_adapter.cpp`.
+See: `test_queue_model.cpp`, `test_queue_aware_adapter.cpp`, `test_backtest_defect_closure.cpp` (FR-01, Hybrid*).
 
 ---
 
 ## Fill Models
 
-- `--realistic-fills`: enables passive/resting price logic + multi-level walked fills (one event per price level).
-- `FillModel` (`src/orderbook/fill_model.h`): partial-fill probability modeling on the synthetic orderbook.
-- In shadow: `TradeTapeShadowAdapter` replays real trade tape against simulated orders for divergence tracking (`shadow_tracker`).
-- `test_realistic_fills.cpp`, `test_bridge_unknown_fill.cpp`, golden regressions.
+- Passive-side fill pricing is **always on** (resting counterparty price). `--realistic-fills` is a **deprecated warn-noop**.
+- `--fill-prob` / `--fill-fade` / `--fill-decay`: probabilistic limit acceptance + pre-match qty fade (book and portfolio stay aligned).
+- In shadow: `TradeTapeShadowAdapter` replays real trade tape against simulated orders.
+- `test_realistic_fills.cpp`, `test_backtest_defect_closure.cpp` (FR-03).
 
 Fill events carry rich metadata (opener, strategy, queue_position, futures flags, signed qty, etc.) for analytics + QuestDB.
 
@@ -108,10 +110,10 @@ Funding is partially wired (events exist; full risk/P&L impact in progress — s
 
 - **Live bypass**: All realism models are compile/runtime bypassed for `engine_live`. Use only to measure *what would have happened* in shadow vs. real.
 - L2 models require depth stream + sufficient history (L2 seeding).
-- MC uses the same models (via synthetic provider) but with stylized L2 (constant spread + noise; see todo MC-03).
+- **Monte Carlo**: fee (`--fee`/`--maker-rate`/`--taker-rate`), order latency (`--order-latency-us`), and impact (`--impact-k-bps` + `--impact-adv`) are applied to **every trial**. Impact without ADV refuses to run (no silent ignore). Synthetic/MC bar dates are epoch-ms with 1-minute spacing.
 - Never calibrate realism params from testnet (synthetic liquidity, fictional funding, resets, thin books).
 - Queue/impact fidelity limited by data quality and model simplicity (no hidden liquidity, etc.).
-- Full per-trial MC order lifecycle + richer QuestDB still in progress (MC-06).
+- Zero default commission/impact when flags are omitted is intentional research default — report/export should show costs applied when set.
 
 ---
 

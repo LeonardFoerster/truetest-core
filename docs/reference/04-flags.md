@@ -122,7 +122,7 @@
 | `--fill-prob / --fill-fade / --fill-decay` | Probabilistic limit-fill model (default off). |
 | `--mm-levels / --mm-base-depth / --mm-spread-pct / --mm-vol-mult / --mm-max-spread-pct` | Synthetic-book calibration. |
 | `--queue-model <none\|l2-snapshot>` | Shadow queue-position model (requires `--depth-stream`). |
-| `--maker-queue-model <none\|uniform\|front\|back>` | Maker queue model for paper limit orders (requires `--depth-stream`). |
+| `--maker-queue-model <none\|uniform\|front\|back>` | Maker queue model for paper limit orders. `--depth-stream` optional, but without it QueueAware joins **conservatively** (`size_ahead=+inf`, no `on_trade` fills — no front-of-queue assumption without real L2); bar/tick range sweep still fills passive limits on `[low,high]`. |
 | `--instrument <spec>`       | Per-symbol rules: `SYM:tick=...,lot=...,minq=...,minn=...,maker=...,taker=...` (repeatable). |
 
 ### Platform exits (all strategies)
