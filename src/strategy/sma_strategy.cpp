@@ -33,6 +33,8 @@ double sma_strategy::size_long(double entry) const
     in.entry_price = entry;
     in.stop_price = entry * (1.0 - sl_dist);
     in.is_long = true;
+    in.entry_fee_rate = entry_fee_rate_;
+    in.exit_fee_rate = exit_fee_rate_;
     in.max_notional_frac = 1.0; // never exceed full equity notional
     return truetest::risk::compute_risk_quantity(in);
 }
@@ -80,7 +82,10 @@ std::optional<order_event> sma_strategy::on_market(const market_event& mkt)
 void sma_strategy::set_position_open(const std::string& symbol, bool open)
 {
     position_open_[symbol] = open;
-    if (!open) position_qty_[symbol] = 0.0;
+    if (!open) {
+        position_qty_[symbol] = 0.0;
+        opener_filled_[symbol] = 0.0;
+    }
 }
 
 std::vector<truetest::exits::exit_intent> sma_strategy::take_pending_exit_intents()

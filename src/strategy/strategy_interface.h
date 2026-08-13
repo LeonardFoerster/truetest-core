@@ -81,4 +81,8 @@ public:
     // The seed is provided so RNG-based strategies can be made deterministic across trials.
     // Default is a no-op.
     virtual void reset(uint64_t /*seed*/ = 0) {}
+
+    // Monte Carlo --mc-reuse-objects: only strategies that fully clear trial-local
+    // state in reset() may opt in. Default false refuses silent state leak (HIGH-03).
+    virtual bool supports_mc_trial_reuse() const { return false; }
 };

@@ -34,6 +34,8 @@ public:
             {"risk_fraction", risk_fraction_, 0, 1, "Fraction of equity risked per trade"},
             {"sl_pct", sl_pct_, 0, 1, "Stop-loss as fraction of entry"},
             {"tp_pct", tp_pct_, 0, 1, "Take-profit as fraction of entry"},
+            {"entry_fee_rate", entry_fee_rate_, 0, 0.05, "Entry fee as fraction of notional"},
+            {"exit_fee_rate", exit_fee_rate_, 0, 0.05, "Exit fee as fraction of notional"},
         };
     }
 
@@ -49,8 +51,39 @@ public:
         else if (key == "risk_fraction") risk_fraction_ = value;
         else if (key == "sl_pct") sl_pct_ = value;
         else if (key == "tp_pct") tp_pct_ = value;
+        else if (key == "entry_fee_rate") entry_fee_rate_ = value;
+        else if (key == "exit_fee_rate") exit_fee_rate_ = value;
         else throw std::runtime_error("Unknown parameter: " + key);
     }
+
+    void on_fill(const fill_event& fill, std::uint64_t /*opener_order_id*/) override
+    {
+        // Reconcile exit size with actual filled qty (FR-08 partials).
+        const auto& sym = fill.get_symbol();
+        const double filled = fill.get_filled_quantity();
+        if (fill.get_side() == order_side::buy)
+        {
+            opener_filled_[sym] += filled;
+            position_qty_[sym] = opener_filled_[sym];
+        }
+        else
+        {
+            position_qty_[sym] = std::max(0.0, position_qty_[sym] - filled);
+            if (position_qty_[sym] <= 1e-12)
+                opener_filled_[sym] = 0.0;
+        }
+    }
+
+    // MC / reuse: clear indicator + position maps so trials do not leak state.
+    void reset(uint64_t /*seed*/ = 0) override
+    {
+        smas_.clear();
+        position_open_.clear();
+        position_qty_.clear();
+        opener_filled_.clear();
+        pending_intents_.clear();
+    }
+    bool supports_mc_trial_reuse() const override { return true; }
 
     std::vector<std::pair<std::string, double>> get_indicator_values(
         const std::string& symbol) const override
@@ -71,9 +104,12 @@ private:
     double risk_fraction_ = 0.02;
     double sl_pct_ = 0.003;
     double tp_pct_ = 0.01;
+    double entry_fee_rate_ = 0.0;
+    double exit_fee_rate_ = 0.0;
     std::unordered_map<std::string, simple_moving_average> smas_;
     std::unordered_map<std::string, bool> position_open_;
     std::unordered_map<std::string, double> position_qty_;
+    std::unordered_map<std::string, double> opener_filled_;
     std::vector<truetest::exits::exit_intent> pending_intents_;
 
     simple_moving_average& get_sma(const std::string& symbol);

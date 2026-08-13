@@ -60,6 +60,7 @@ public:
         const std::string& symbol) const override;
 
     void reset(uint64_t seed = 0) override;
+    bool supports_mc_trial_reuse() const override { return true; }
 
 private:
     // Config (temporary sizing parameters)
