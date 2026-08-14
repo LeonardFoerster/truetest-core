@@ -104,6 +104,23 @@
       }
     },
     {
+      "name": "linux-dev",
+      "displayName": "Linux daily dev (venues + ImGui + live data + tests)",
+      "description": "Single warm tree for desk/shadow work. Prefer over ad-hoc build-dev/ to avoid duplicate multi-GB trees.",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTS": "ON",
+        "ENABLE_IMGUI": "ON",
+        "ENABLE_LIVE_DATA": "ON",
+        "ENABLE_BINANCE": "ON",
+        "ENABLE_BITGET": "ON",
+        "ENABLE_BITUNIX": "ON"
+      }
+    },
+    {
       "name": "linux-providers-questdb",
       "displayName": "Linux + All Venues + QuestDB + Tests",
       "description": "Binance + Bitget + Bitunix + QuestDB + tests (ops-style full provider matrix)",
@@ -196,6 +213,7 @@
     { "name": "linux-bitget", "configurePreset": "linux-bitget" },
     { "name": "linux-bitunix", "configurePreset": "linux-bitunix" },
     { "name": "linux-venues", "configurePreset": "linux-venues" },
+    { "name": "linux-dev", "configurePreset": "linux-dev" },
     { "name": "linux-providers-questdb", "configurePreset": "linux-providers-questdb" },
     { "name": "linux-web", "configurePreset": "linux-web" },
     { "name": "linux-asan", "configurePreset": "linux-asan" },
