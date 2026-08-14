@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <string_view>
 
@@ -160,6 +161,25 @@ void DeskApp::show_toast(std::string msg, std::chrono::milliseconds ttl)
 {
     toast_ = std::move(msg);
     toast_until_ = std::chrono::steady_clock::now() + ttl;
+}
+
+bool DeskApp::guarded_call(const char* label, const std::function<void()>& body)
+{
+    try
+    {
+        body();
+        return true;
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr, "[desk] %s threw: %s\n", label, e.what());
+        return false;
+    }
+    catch (...)
+    {
+        std::fprintf(stderr, "[desk] %s threw a non-std exception\n", label);
+        return false;
+    }
 }
 
 bool DeskApp::start()
@@ -329,6 +349,19 @@ void DeskApp::render_loop()
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigWindowsMoveFromTitleBarOnly = true;
+    // Defends the render-loop catch block below: EndFrame() already calls
+    // ImGui's internal ErrorRecoveryTryToRecoverState() when
+    // ConfigErrorRecovery is on (default true, set explicitly here for
+    // clarity), which rebalances any Begin/PushID/PushStyleColor stacks
+    // left open by a mid-frame exception. Left at its own default
+    // (ConfigErrorRecoveryEnableAssert=true), that recovery still calls
+    // IM_ASSERT on the way out - an abort in assert-enabled builds, exactly
+    // the crash the catch block exists to prevent. Disabling just the
+    // assert keeps the stack-rebalancing recovery and the debug log line,
+    // without defeating render_loop()'s "one dropped frame, not a crash"
+    // contract for this specific class of fault.
+    io.ConfigErrorRecovery = true;
+    io.ConfigErrorRecoveryEnableAssert = false;
     io.IniFilename = desk_layout_ini_filename;
 
     theme::apply();
@@ -361,13 +394,33 @@ void DeskApp::render_loop()
         const auto now = std::chrono::steady_clock::now();
         if (now >= next_poll)
         {
-            if (snap_fn_)
+            // snap_fn_/research_fn_ are the one place engine-adjacent code
+            // runs on this thread. They execute outside ImGui's frame scope,
+            // so a thrown exception here is cleanly recoverable: log, fall
+            // back to "no data this tick", toast, and keep the desk running.
+            // Separate try/catch per call - not one block wrapping both -
+            // so a research_fn_ fault doesn't discard a snap_fn_ result
+            // that already succeeded moments earlier in the same tick.
+            if (!guarded_call("snapshot callback", [&] {
+                    if (snap_fn_)
+                    {
+                        has_snap = snap_fn_(snap);
+                        if (has_snap)
+                            monitor_telemetry_.merge(snap, data_.get(), now);
+                    }
+                }))
             {
-                has_snap = snap_fn_(snap);
-                if (has_snap)
-                    monitor_telemetry_.merge(snap, data_.get(), now);
+                has_snap = false;
+                show_toast("Snapshot callback error — see stderr");
             }
-            external_research_ = research_fn_ ? research_fn_() : research_view_handle{};
+
+            if (!guarded_call("research callback", [&] {
+                    external_research_ = research_fn_ ? research_fn_() : research_view_handle{};
+                }))
+            {
+                external_research_ = research_view_handle{};
+                show_toast("Research callback error — see stderr");
+            }
             refresh_live_footprint(); // safe here - before this iteration's draw_frame() captures `research`
             next_poll = now + tick_;
         }
@@ -376,9 +429,43 @@ void DeskApp::render_loop()
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
-        handle_hotkeys();
-        draw_frame(has_snap ? &snap : nullptr, has_snap);
-        draw_command_palette();
+        // Dear ImGui is not exception-safe mid-frame (per its own FAQ): a
+        // throw here can leave Begin/End or ID-stack state unbalanced. We
+        // can't safely recover *within* the corrupted frame, so on catch we
+        // skip presenting this frame entirely and let EndFrame() below do
+        // the real recovery: with ConfigErrorRecovery on (set at init,
+        // above) it calls ImGui's own ErrorRecoveryTryToRecoverState()
+        // internally, rebalancing any stack a mid-frame throw left open, so
+        // the next NewFrame() starts clean rather than merely not-asserting.
+        // Escalates to a clean thread shutdown if frame exceptions keep
+        // happening rather than risk compounding corruption forever anyway.
+        // A single transient throw still just costs one dropped frame; the
+        // engine itself is never touched by this thread.
+        const bool frame_ok = guarded_call("frame draw", [&] {
+            handle_hotkeys();
+            draw_frame(has_snap ? &snap : nullptr, has_snap);
+            draw_command_palette();
+        });
+
+        if (!frame_ok)
+        {
+            ++consecutive_frame_errors_;
+            show_toast("Frame draw error — see stderr");
+            try { ImGui::EndFrame(); } catch (...) {}
+
+            static constexpr int kMaxConsecutiveFrameErrors = 5;
+            if (consecutive_frame_errors_ >= kMaxConsecutiveFrameErrors)
+            {
+                std::fprintf(stderr,
+                             "[desk] %d consecutive frame errors — shutting down desk "
+                             "thread (engine keeps running headless)\n",
+                             consecutive_frame_errors_);
+                running_.store(false, std::memory_order_release);
+                break;
+            }
+            continue; // don't present a possibly-corrupted frame
+        }
+        consecutive_frame_errors_ = 0;
 
         ImGui::Render();
         int dw = 0, dh = 0;
@@ -883,7 +970,7 @@ void DeskApp::draw_help_overlay()
         ImGui::BulletText("F11 — focus/restore primary surface");
         ImGui::BulletText("Use the top switch to move between workspaces");
         ImGui::BulletText("Unlock Layout > Lock layout, then drag titles to re-dock");
-        ImGui::BulletText("Layout saved to truetest_desk_v2.ini");
+        ImGui::BulletText("Layout saved to %s", desk_layout_ini_filename);
         ImGui::Separator();
         ImGui::TextColored(theme::tx_lo(),
                            "Halt is terminal. Flatten/kill never auto-retry.");
@@ -1067,7 +1154,9 @@ void DeskApp::draw_frame(const dashboard_snapshot* snap, bool has_snap)
         // Reassigning demo_research_ now would dangle it mid-frame. Defer
         // to the top of the next draw_frame() instead (see there).
         if (panels::draw_orderflow_canvas_panel(research, context_,
-                                                footprint_demo_.camera, footprint_demo_.settings))
+                                                footprint_demo_.camera, footprint_demo_.settings,
+                                                footprint_demo_.bounds_cache,
+                                                footprint_demo_.viewport_cache))
         {
             footprint_needs_reaggregate_ = true;
         }

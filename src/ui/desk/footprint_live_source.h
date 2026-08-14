@@ -73,7 +73,15 @@ private:
 
     truetest::footprint::data_status status_ = truetest::footprint::data_status::backfilling;
     std::uint64_t received_count_ = 0;
-    std::uint64_t publish_version_ = 0;
+    // Version handed out on the last publish that actually changed
+    // anything (drained new trades or a status transition) - see poll()'s
+    // comment. Drawn from the shared next_research_version() sequence
+    // (research_views.h) rather than a local counter starting at 0, so two
+    // distinct FootprintLiveSource instances (e.g. across a reconnect that
+    // constructs a fresh one) can never coincidentally hand out the same
+    // version number. 0 doubles as "never published" since
+    // next_research_version() never hands out 0.
+    std::uint64_t last_published_version_ = 0;
 };
 
 } // namespace truetest::ui::desk

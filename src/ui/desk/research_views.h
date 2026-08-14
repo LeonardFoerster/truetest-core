@@ -3,6 +3,7 @@
 #include "providers/footprint/footprint_research_service.h"
 #include "ui/desk/desk_context.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <array>
@@ -12,6 +13,23 @@
 #include <vector>
 
 namespace truetest::ui::desk {
+
+// Process-wide monotonic counter for live research sources' publish
+// versions (FootprintLiveSource and, in future, any other live surface
+// source). A per-instance-local counter starting at 0 risks two distinct
+// source instances (e.g. across a reconnect that constructs a fresh
+// FootprintLiveSource) both producing version 1 on their first publish -
+// which would corrupt anything caching on version (e.g. research_panels.cpp's
+// FootprintBoundsCache/FootprintViewportCache) into reusing stale data.
+// NOT used by the demo fixture, which deliberately keeps a small, stable,
+// deterministic version of its own (see demo_research.cpp) - the cache
+// layer instead disambiguates demo from live via DeskDataState, not by
+// making every version process-wide unique.
+inline std::uint64_t next_research_version() noexcept
+{
+    static std::atomic<std::uint64_t> counter{1};
+    return counter.fetch_add(1, std::memory_order_relaxed);
+}
 
 inline constexpr std::size_t max_visible_research_cells = 12'000;
 

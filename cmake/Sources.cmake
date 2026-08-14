@@ -30,7 +30,6 @@ set(IMGUI_DESK_SOURCES
     src/ui/desk/panels/debug_panel.cpp
     src/ui/desk/panels/activity_panel.cpp
     src/ui/desk/panels/market_panels.cpp
-    src/ui/desk/panels/portfolio_panels.cpp
     src/ui/desk/panels/research_panels.cpp
     src/ui/desk/panels/status_panels.cpp
 )

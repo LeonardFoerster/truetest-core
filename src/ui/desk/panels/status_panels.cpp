@@ -180,19 +180,14 @@ void draw_strategies_panel(const dashboard_snapshot& snap)
     }
     theme::section_header("STRATEGY ATTRIBUTION", "reported session metrics",
                           theme::secondary());
-    if (ImGui::BeginTable("st", 7,
-                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
-                              | ImGuiTableFlags_ScrollY,
-                          ImVec2(0, -1)))
+    static constexpr TableColumn kStrategiesColumns[] = {
+        {"Name"}, {"PnL"}, {"Trades"}, {"Win%"}, {"PF"}, {"Lots"}, {"Brk"},
+    };
+    if (begin_table("st", kStrategiesColumns,
+                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
+                        | ImGuiTableFlags_ScrollY,
+                    ImVec2(0, -1)))
     {
-        ImGui::TableSetupColumn("Name");
-        ImGui::TableSetupColumn("PnL");
-        ImGui::TableSetupColumn("Trades");
-        ImGui::TableSetupColumn("Win%");
-        ImGui::TableSetupColumn("PF");
-        ImGui::TableSetupColumn("Lots");
-        ImGui::TableSetupColumn("Brk");
-        ImGui::TableHeadersRow();
         for (const auto& strategy : snap.strategies)
         {
             ImGui::TableNextRow();

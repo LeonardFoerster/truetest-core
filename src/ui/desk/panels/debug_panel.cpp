@@ -4,6 +4,7 @@
 
 #include "ui/desk/desk_theme.h"
 #include "ui/desk/desk_window_names.h"
+#include "ui/desk/panels/panel_helpers.h"
 
 #include "imgui.h"
 
@@ -51,16 +52,13 @@ void draw_debug_panel(const dashboard_snapshot& snap)
                 snap.debug.spin_policy.empty() ? "N/A" : snap.debug.spin_policy.c_str());
 
     section("RINGS");
-    if (ImGui::BeginTable("debug_rings", 5,
-                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
-                              | ImGuiTableFlags_Resizable))
+    static constexpr panels::TableColumn kRingsColumns[] = {
+        {"Name"}, {"Depth"}, {"HWM"}, {"Capacity"}, {"Drops"},
+    };
+    if (panels::begin_table("debug_rings", kRingsColumns,
+                            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
+                                | ImGuiTableFlags_Resizable))
     {
-        ImGui::TableSetupColumn("Name");
-        ImGui::TableSetupColumn("Depth");
-        ImGui::TableSetupColumn("HWM");
-        ImGui::TableSetupColumn("Capacity");
-        ImGui::TableSetupColumn("Drops");
-        ImGui::TableHeadersRow();
         for (const auto& ring : snap.debug.rings)
         {
             ImGui::TableNextRow();
@@ -97,17 +95,13 @@ void draw_debug_panel(const dashboard_snapshot& snap)
     }
 
     section("POOLS");
-    if (ImGui::BeginTable("debug_pools", 6,
-                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
-                              | ImGuiTableFlags_Resizable))
+    static constexpr panels::TableColumn kPoolsColumns[] = {
+        {"Name"}, {"Blocks"}, {"In use"}, {"Capacity"}, {"Fill"}, {"Runtime grows"},
+    };
+    if (panels::begin_table("debug_pools", kPoolsColumns,
+                            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg
+                                | ImGuiTableFlags_Resizable))
     {
-        ImGui::TableSetupColumn("Name");
-        ImGui::TableSetupColumn("Blocks");
-        ImGui::TableSetupColumn("In use");
-        ImGui::TableSetupColumn("Capacity");
-        ImGui::TableSetupColumn("Fill");
-        ImGui::TableSetupColumn("Runtime grows");
-        ImGui::TableHeadersRow();
         for (const auto& pool : snap.debug.pools)
         {
             ImGui::TableNextRow();
@@ -170,20 +164,17 @@ void draw_debug_panel(const dashboard_snapshot& snap)
         ImGui::TextColored(theme::tx_faint(), "No subsystem error text reported (not a health assertion)");
 
     section("STAGE TIMINGS");
+    static constexpr panels::TableColumn kStagesColumns[] = {
+        {"Stage"}, {"Calls"}, {"Avg ns"}, {"Min ns"}, {"Max ns"},
+    };
     if (snap.debug.stages.empty())
     {
         ImGui::TextColored(theme::tx_faint(),
                            snap.debug.has_debug ? "No stage samples yet" : "N/A — build with ENABLE_DEBUG");
     }
-    else if (ImGui::BeginTable("debug_stages", 5,
-                               ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+    else if (panels::begin_table("debug_stages", kStagesColumns,
+                                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
     {
-        ImGui::TableSetupColumn("Stage");
-        ImGui::TableSetupColumn("Calls");
-        ImGui::TableSetupColumn("Avg ns");
-        ImGui::TableSetupColumn("Min ns");
-        ImGui::TableSetupColumn("Max ns");
-        ImGui::TableHeadersRow();
         for (const auto& stage : snap.debug.stages)
         {
             ImGui::TableNextRow();
@@ -210,15 +201,13 @@ void draw_debug_panel(const dashboard_snapshot& snap)
     ImGui::Text("pool estimate %.1f MiB   ring payload estimate %.1f MiB",
                 mib(snap.memory.pool_bytes_total), mib(snap.memory.ring_bytes_total));
 
+    static constexpr panels::TableColumn kMemoryPoolsColumns[] = {
+        {"Pool"}, {"Reserved MiB"}, {"In use"}, {"Capacity slots"},
+    };
     if (!snap.memory.pools.empty()
-        && ImGui::BeginTable("debug_memory_pools", 4,
-                             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+        && panels::begin_table("debug_memory_pools", kMemoryPoolsColumns,
+                               ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
     {
-        ImGui::TableSetupColumn("Pool");
-        ImGui::TableSetupColumn("Reserved MiB");
-        ImGui::TableSetupColumn("In use");
-        ImGui::TableSetupColumn("Capacity slots");
-        ImGui::TableHeadersRow();
         for (const auto& pool : snap.memory.pools)
         {
             ImGui::TableNextRow();
@@ -230,15 +219,13 @@ void draw_debug_panel(const dashboard_snapshot& snap)
         ImGui::EndTable();
     }
 
+    static constexpr panels::TableColumn kMemoryRingsColumns[] = {
+        {"Ring"}, {"Capacity"}, {"Element bytes"}, {"Payload MiB"},
+    };
     if (!snap.memory.rings.empty()
-        && ImGui::BeginTable("debug_memory_rings", 4,
-                             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+        && panels::begin_table("debug_memory_rings", kMemoryRingsColumns,
+                               ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
     {
-        ImGui::TableSetupColumn("Ring");
-        ImGui::TableSetupColumn("Capacity");
-        ImGui::TableSetupColumn("Element bytes");
-        ImGui::TableSetupColumn("Payload MiB");
-        ImGui::TableHeadersRow();
         for (const auto& ring : snap.memory.rings)
         {
             ImGui::TableNextRow();
@@ -254,12 +241,12 @@ void draw_debug_panel(const dashboard_snapshot& snap)
     {
         ImGui::TextColored(theme::tx_faint(),
                            "Mapped virtual ranges below are not an RSS decomposition.");
-        if (ImGui::BeginTable("debug_memory_maps", 2,
-                              ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+        static constexpr panels::TableColumn kMemoryMapsColumns[] = {
+            {"Mapping class"}, {"Virtual MiB"},
+        };
+        if (panels::begin_table("debug_memory_maps", kMemoryMapsColumns,
+                                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
         {
-            ImGui::TableSetupColumn("Mapping class");
-            ImGui::TableSetupColumn("Virtual MiB");
-            ImGui::TableHeadersRow();
             for (const auto& segment : snap.memory.other_breakdown)
             {
                 ImGui::TableNextRow();

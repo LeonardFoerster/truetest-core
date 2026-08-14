@@ -22,7 +22,9 @@ void draw_watchlist_panel(const dashboard_snapshot* snap,
 bool draw_orderflow_canvas_panel(const ResearchPresentation* research,
                                  DeskLinkContext& context,
                                  FootprintCamera& camera,
-                                 FootprintPanelSettings& settings);
+                                 FootprintPanelSettings& settings,
+                                 FootprintBoundsCache& bounds_cache,
+                                 FootprintViewportCache& viewport_cache);
 void draw_dom_panel(DeskPanel panel,
                     const dashboard_snapshot* snap,
                     const ResearchPresentation* research,
@@ -49,8 +51,6 @@ void draw_funding_panel(const ResearchPresentation* research,
                         DeskDensity density);
 void draw_correlation_panel(const ResearchPresentation* research,
                             const DeskLinkContext& context);
-void draw_market_detail_panel(const ResearchPresentation* research,
-                              const DeskLinkContext& context);
 
 } // namespace truetest::ui::desk::panels
 

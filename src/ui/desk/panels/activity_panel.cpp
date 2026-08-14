@@ -28,19 +28,18 @@ void draw_positions(const dashboard_snapshot& snap, float row_height, const char
         empty_row(symbol_filter ? "No open positions for selected symbol" : "No open positions");
         return;
     }
-    if (!ImGui::BeginTable("activity_positions", 6,
-                           ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
-                               | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
-                           ImVec2(0, -1)))
+    static constexpr TableColumn kPositionsColumns[] = {
+        {"SYMBOL"}, {"SIDE"},
+        {"QTY", ImGuiTableColumnFlags_WidthStretch},
+        {"ENTRY", ImGuiTableColumnFlags_WidthStretch},
+        {"MARK", ImGuiTableColumnFlags_WidthStretch},
+        {"UPNL", ImGuiTableColumnFlags_WidthStretch},
+    };
+    if (!begin_table("activity_positions", kPositionsColumns,
+                     ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
+                         | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
+                     ImVec2(0, -1), /*freeze_cols=*/0, /*freeze_rows=*/1))
         return;
-    ImGui::TableSetupColumn("SYMBOL");
-    ImGui::TableSetupColumn("SIDE");
-    ImGui::TableSetupColumn("QTY", ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupColumn("ENTRY", ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupColumn("MARK", ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupColumn("UPNL", ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupScrollFreeze(0, 1);
-    ImGui::TableHeadersRow();
     for (const auto& position : snap.positions)
     {
         if (symbol_filter && position.symbol != symbol_filter) continue;
@@ -64,15 +63,14 @@ void draw_orders(const dashboard_snapshot& snap, float row_height, const char* s
         empty_row(symbol_filter ? "No working orders for selected symbol" : "No working orders");
         return;
     }
-    if (!ImGui::BeginTable("activity_orders", 7,
-                           ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
-                               | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
-                           ImVec2(0, -1)))
+    static constexpr TableColumn kOrdersColumns[] = {
+        {"ID"}, {"SYMBOL"}, {"SIDE"}, {"TYPE"}, {"QTY"}, {"PRICE"}, {"STATE"},
+    };
+    if (!begin_table("activity_orders", kOrdersColumns,
+                     ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
+                         | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
+                     ImVec2(0, -1), /*freeze_cols=*/0, /*freeze_rows=*/1))
         return;
-    const char* columns[] = {"ID", "SYMBOL", "SIDE", "TYPE", "QTY", "PRICE", "STATE"};
-    for (const char* column : columns) ImGui::TableSetupColumn(column);
-    ImGui::TableSetupScrollFreeze(0, 1);
-    ImGui::TableHeadersRow();
     for (const auto& order : snap.open_orders)
     {
         if (symbol_filter && order.symbol != symbol_filter) continue;
@@ -98,15 +96,14 @@ void draw_fills(const dashboard_snapshot& snap, float row_height, const char* sy
                                 : "No fills in the snapshot window");
         return;
     }
-    if (!ImGui::BeginTable("activity_fills", 6,
-                           ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
-                               | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
-                           ImVec2(0, -1)))
+    static constexpr TableColumn kFillsColumns[] = {
+        {"SYMBOL"}, {"SIDE"}, {"QTY"}, {"PRICE"}, {"FEE"}, {"SOURCE"},
+    };
+    if (!begin_table("activity_fills", kFillsColumns,
+                     ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
+                         | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
+                     ImVec2(0, -1), /*freeze_cols=*/0, /*freeze_rows=*/1))
         return;
-    const char* columns[] = {"SYMBOL", "SIDE", "QTY", "PRICE", "FEE", "SOURCE"};
-    for (const char* column : columns) ImGui::TableSetupColumn(column);
-    ImGui::TableSetupScrollFreeze(0, 1);
-    ImGui::TableHeadersRow();
     if (!symbol_filter)
     {
         ImGuiListClipper clipper;
@@ -151,13 +148,13 @@ void draw_protection(const dashboard_snapshot& snap, float row_height, const cha
                                 : "No active lots or protective brackets");
         return;
     }
-    if (!ImGui::BeginTable("activity_protection", 7,
-                           ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
-                               | ImGuiTableFlags_ScrollY, ImVec2(0, -1)))
+    static constexpr TableColumn kProtectionColumns[] = {
+        {"SYMBOL"}, {"SIDE"}, {"QTY"}, {"ENTRY"}, {"STOP"}, {"TARGET"}, {"OWNER"},
+    };
+    if (!begin_table("activity_protection", kProtectionColumns,
+                     ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
+                         | ImGuiTableFlags_ScrollY, ImVec2(0, -1)))
         return;
-    const char* columns[] = {"SYMBOL", "SIDE", "QTY", "ENTRY", "STOP", "TARGET", "OWNER"};
-    for (const char* column : columns) ImGui::TableSetupColumn(column);
-    ImGui::TableHeadersRow();
     for (const auto& bracket : snap.brackets)
     {
         if (symbol_filter && bracket.symbol != symbol_filter) continue;

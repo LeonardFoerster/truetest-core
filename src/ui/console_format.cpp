@@ -200,6 +200,23 @@ const char* state_color(connection_state s, bool on)
     }
 }
 
+double spread_bps(double bid, double ask)
+{
+    if (bid <= 0.0 || ask <= 0.0) return 0.0;
+    const double mid = (bid + ask) * 0.5;
+    return mid > 0.0 ? (ask - bid) / mid * 1e4 : 0.0;
+}
+
+std::uint64_t total_ring_drops(const streaming_stats& s)
+{
+    return s.ring_drops_logging.load(std::memory_order_relaxed)
+         + s.ring_drops_risk.load(std::memory_order_relaxed)
+         + s.ring_drops_stats.load(std::memory_order_relaxed)
+         + s.ring_drops_observer.load(std::memory_order_relaxed)
+         + s.ring_drops_risk_stats.load(std::memory_order_relaxed)
+         + s.ring_drops_mm.load(std::memory_order_relaxed);
+}
+
 std::string clock_hhmmss(std::chrono::system_clock::time_point tp)
 {
     std::time_t tt = std::chrono::system_clock::to_time_t(tp);

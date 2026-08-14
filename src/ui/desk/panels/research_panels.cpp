@@ -83,15 +83,6 @@ ImU32 heat_color(float value)
         0.20f + 0.78f * mix));
 }
 
-struct FootprintDataBounds
-{
-    std::int64_t time_min_ms = 0;
-    std::int64_t time_max_ms = 1;
-    double price_min = 0.0;
-    double price_max = 1.0;
-    bool valid = false;
-};
-
 FootprintDataBounds compute_footprint_bounds(const std::vector<FootprintBarView>& bars)
 {
     FootprintDataBounds b;
@@ -125,6 +116,65 @@ FootprintDataBounds compute_footprint_bounds(const std::vector<FootprintBarView>
         b.price_max = b.price_min + 1.0;
     b.valid = true;
     return b;
+}
+
+const ResearchSurfaceStatus& footprint_surface(const ResearchPresentation& research) noexcept
+{
+    return research.surfaces[static_cast<std::size_t>(ResearchSurface::footprint)];
+}
+
+// Wraps compute_footprint_bounds() with FootprintBoundsCache so the O(bars)
+// scan only runs when the footprint surface actually republishes, instead
+// of on every one of the two call sites below, every frame.
+const FootprintDataBounds& cached_footprint_bounds(FootprintBoundsCache& cache,
+                                                   const ResearchPresentation& research)
+{
+    const auto& surface = footprint_surface(research);
+    if (!cache.has_value || cache.state != surface.state || cache.version != surface.version)
+    {
+        cache.bounds = compute_footprint_bounds(research.footprint);
+        cache.state = surface.state;
+        cache.version = surface.version;
+        cache.has_value = true;
+    }
+    return cache.bounds;
+}
+
+// Wraps the viewport-culled index list + heat-intensity normalization max
+// (both purely a function of footprint data (state, version) + camera's
+// visible time range - see FootprintViewportCache) so draw_footprint_canvas()
+// only redoes this O(bars) + O(bars*levels) work when data or the visible
+// range actually changed, and reuses `visible_indices`' storage across frames.
+const FootprintViewportCache& cached_footprint_viewport(FootprintViewportCache& cache,
+                                                         const ResearchPresentation& research,
+                                                         const FootprintCamera& camera)
+{
+    const auto& surface = footprint_surface(research);
+    if (cache.has_value && cache.state == surface.state && cache.version == surface.version
+        && cache.time_min_ms == camera.time_min_ms() && cache.time_max_ms == camera.time_max_ms())
+        return cache;
+
+    cache.visible_indices.clear();
+    for (std::size_t i = 0; i < research.footprint.size(); ++i)
+    {
+        const auto& bar = research.footprint[i];
+        if (bar.end_ms < camera.time_min_ms() || bar.start_ms > camera.time_max_ms())
+            continue;
+        cache.visible_indices.push_back(i);
+    }
+
+    cache.max_total_all = 1.0;
+    for (auto i : cache.visible_indices)
+        for (const auto& lv : research.footprint[i].levels)
+            cache.max_total_all = std::max(cache.max_total_all,
+                                           lv.buy_qty + lv.sell_qty + lv.unknown_qty);
+
+    cache.state = surface.state;
+    cache.version = surface.version;
+    cache.time_min_ms = camera.time_min_ms();
+    cache.time_max_ms = camera.time_max_ms();
+    cache.has_value = true;
+    return cache;
 }
 
 const char* bar_state_label(FootprintBarState s)
@@ -177,10 +227,11 @@ theme::StatusTone footprint_status_tone(truetest::footprint::data_status status)
 // republishes the underlying aggregator/presentation.
 bool draw_footprint_toolbar(FootprintPanelSettings& settings,
                             FootprintCamera& camera,
-                            const ResearchPresentation* research)
+                            const ResearchPresentation* research,
+                            FootprintBoundsCache& bounds_cache)
 {
     const FootprintPanelSettings before = settings;
-    const auto bounds = research ? compute_footprint_bounds(research->footprint) : FootprintDataBounds{};
+    const auto bounds = research ? cached_footprint_bounds(bounds_cache, *research) : FootprintDataBounds{};
     const auto latest_index = research
         ? static_cast<std::int64_t>(research->footprint.size()) - 1 : 0;
 
@@ -251,7 +302,9 @@ bool draw_footprint_toolbar(FootprintPanelSettings& settings,
 void draw_footprint_canvas(const ResearchPresentation& research,
                            DeskLinkContext& context,
                            FootprintCamera& camera,
-                           const FootprintPanelSettings& settings)
+                           const FootprintPanelSettings& settings,
+                           FootprintBoundsCache& bounds_cache,
+                           FootprintViewportCache& viewport_cache)
 {
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -270,7 +323,7 @@ void draw_footprint_canvas(const ResearchPresentation& research,
         return;
     }
 
-    const auto bounds = compute_footprint_bounds(research.footprint);
+    const auto& bounds = cached_footprint_bounds(bounds_cache, research);
     const auto latest_bar_index = static_cast<std::int64_t>(research.footprint.size()) - 1;
     camera.update_latest(latest_bar_index, bounds.time_min_ms, bounds.time_max_ms,
                          bounds.price_min, bounds.price_max);
@@ -287,23 +340,15 @@ void draw_footprint_canvas(const ResearchPresentation& research,
             - static_cast<float>((price - camera.price_min()) / span_p) * chart_height;
     };
 
-    // Viewport culling (cyrex/00-architecture.md §7).
-    std::vector<std::size_t> visible_indices;
-    visible_indices.reserve(std::min<std::size_t>(research.footprint.size(), 512));
-    for (std::size_t i = 0; i < research.footprint.size(); ++i)
-    {
-        const auto& bar = research.footprint[i];
-        if (bar.end_ms < camera.time_min_ms() || bar.start_ms > camera.time_max_ms())
-            continue;
-        visible_indices.push_back(i);
-    }
+    // Viewport culling (cyrex/00-architecture.md §7) + heat-intensity
+    // normalization, both cached - see FootprintViewportCache and
+    // cached_footprint_viewport() above.
+    const auto& viewport = cached_footprint_viewport(viewport_cache, research, camera);
+    const auto& visible_indices = viewport.visible_indices;
 
     const std::size_t cells_per_bar = visible_indices.empty() ? 1
         : std::max<std::size_t>(1, max_visible_research_cells / visible_indices.size());
-    double max_total_all = 1.0;
-    for (auto i : visible_indices)
-        for (const auto& lv : research.footprint[i].levels)
-            max_total_all = std::max(max_total_all, lv.buy_qty + lv.sell_qty + lv.unknown_qty);
+    const double max_total_all = viewport.max_total_all;
 
     for (auto bar_index : visible_indices)
     {
@@ -566,12 +611,13 @@ void draw_watchlist_panel(const dashboard_snapshot* snap,
     if (!ImGui::Begin(desk_window_name(DeskPanel::watchlist))) { ImGui::End(); return; }
     panel_header("WATCHLIST", context, research, ResearchSurface::watchlist);
     const float row_height = theme::dp(desk_row_height(density));
+    static constexpr TableColumn kWatchlistColumns[] = {
+        {"SYMBOL"}, {"LAST"}, {"CHG"},
+    };
     if (research && !research->watchlist.empty()
-        && ImGui::BeginTable("watchlist_rows", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
-                             ImVec2(0, -1)))
+        && begin_table("watchlist_rows", kWatchlistColumns,
+                       ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, -1)))
     {
-        ImGui::TableSetupColumn("SYMBOL"); ImGui::TableSetupColumn("LAST"); ImGui::TableSetupColumn("CHG");
-        ImGui::TableHeadersRow();
         ImGuiListClipper clipper;
         clipper.Begin(clipper_count(research->watchlist.size()), row_height);
         while (clipper.Step())
@@ -602,17 +648,19 @@ void draw_watchlist_panel(const dashboard_snapshot* snap,
 bool draw_orderflow_canvas_panel(const ResearchPresentation* research,
                                  DeskLinkContext& context,
                                  FootprintCamera& camera,
-                                 FootprintPanelSettings& settings)
+                                 FootprintPanelSettings& settings,
+                                 FootprintBoundsCache& bounds_cache,
+                                 FootprintViewportCache& viewport_cache)
 {
     if (!ImGui::Begin(desk_window_name(DeskPanel::orderflow_canvas))) { ImGui::End(); return false; }
     panel_header("FOOTPRINT / ORDERFLOW", context, research, ResearchSurface::footprint);
 
-    const bool needs_reaggregate = draw_footprint_toolbar(settings, camera, research);
+    const bool needs_reaggregate = draw_footprint_toolbar(settings, camera, research, bounds_cache);
 
     if (!research || research->footprint.empty())
         draw_unavailable("Requires normalized public trades, instrument tick size, and the cold ResearchStore.");
     else
-        draw_footprint_canvas(*research, context, camera, settings);
+        draw_footprint_canvas(*research, context, camera, settings, bounds_cache, viewport_cache);
 
     ImGui::End();
     return needs_reaggregate;
@@ -641,14 +689,14 @@ void draw_dom_panel(DeskPanel panel,
             reference_price = research->footprint.back().close;
         if (actual_l2 && snap->l2.symbol == context.symbol)
             reference_price = snap->l2.mid;
-        if (ImGui::BeginTable("dom_rows", 6,
-                              ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY
-                                  | ImGuiTableFlags_BordersInnerV,
-                              ImVec2(0, -1)))
+        static constexpr TableColumn kDomColumns[] = {
+            {"BID"}, {"PRICE"}, {"ASK"}, {"BOUGHT"}, {"SOLD"}, {"DELTA"},
+        };
+        if (begin_table("dom_rows", kDomColumns,
+                        ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY
+                            | ImGuiTableFlags_BordersInnerV,
+                        ImVec2(0, -1), /*freeze_cols=*/0, /*freeze_rows=*/1))
         {
-            const char* columns[] = {"BID", "PRICE", "ASK", "BOUGHT", "SOLD", "DELTA"};
-            for (const char* column : columns) ImGui::TableSetupColumn(column);
-            ImGui::TableSetupScrollFreeze(0, 1); ImGui::TableHeadersRow();
             const float row_height = theme::dp(desk_row_height(density));
             ImGuiListClipper clipper;
             clipper.Begin(clipper_count(research->dom.size()), row_height);
@@ -670,11 +718,12 @@ void draw_dom_panel(DeskPanel panel,
     else if (actual_l2)
     {
         ImGui::TextColored(theme::tx_lo(), "Resting depth from engine snapshot · aggression unavailable");
-        if (ImGui::BeginTable("snapshot_dom", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY,
-                              ImVec2(0, -1)))
+        static constexpr TableColumn kSnapshotDomColumns[] = {
+            {"BID"}, {"PRICE"}, {"ASK"},
+        };
+        if (begin_table("snapshot_dom", kSnapshotDomColumns,
+                        ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, -1)))
         {
-            ImGui::TableSetupColumn("BID"); ImGui::TableSetupColumn("PRICE"); ImGui::TableSetupColumn("ASK");
-            ImGui::TableHeadersRow();
             for (auto it = snap->l2.asks.rbegin(); it != snap->l2.asks.rend(); ++it)
             {
                 ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextUnformatted("—");
@@ -837,14 +886,14 @@ void draw_liquidity_tape_panel(const ResearchPresentation* research,
 {
     if (!ImGui::Begin(desk_window_name(DeskPanel::liquidity_tape))) { ImGui::End(); return; }
     panel_header("LIQUIDATION TAPE", context, research, ResearchSurface::liquidations);
+    static constexpr TableColumn kLiquidationColumns[] = {
+        {"SIDE"}, {"PRICE"}, {"NOTIONAL"}, {"SOURCE"},
+    };
     if (!research || research->liquidations.empty())
         draw_unavailable("Real venue liquidation prints will appear here after provider wiring.");
-    else if (ImGui::BeginTable("liquidation_tape", 4,
-                               ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, -1)))
+    else if (begin_table("liquidation_tape", kLiquidationColumns,
+                         ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY, ImVec2(0, -1)))
     {
-        ImGui::TableSetupColumn("SIDE"); ImGui::TableSetupColumn("PRICE");
-        ImGui::TableSetupColumn("NOTIONAL"); ImGui::TableSetupColumn("SOURCE");
-        ImGui::TableHeadersRow();
         const float row_height = theme::dp(desk_row_height(density));
         ImGuiListClipper clipper;
         clipper.Begin(clipper_count(research->liquidations.size()), row_height);
@@ -912,15 +961,15 @@ void draw_funding_panel(const ResearchPresentation* research,
 {
     if (!ImGui::Begin(desk_window_name(DeskPanel::funding))) { ImGui::End(); return; }
     panel_header("FUNDING INTELLIGENCE", context, research, ResearchSurface::funding);
+    static constexpr TableColumn kFundingColumns[] = {
+        {"SYMBOL"}, {"VENUE"}, {"RATE"}, {"ANN."}, {"BASIS"}, {"NEXT"},
+    };
     if (!research || research->funding.empty())
         draw_unavailable("Requires market funding quotes; portfolio funding cash events are intentionally not used.");
-    else if (ImGui::BeginTable("funding_rows", 6,
-                               ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY
-                                   | ImGuiTableFlags_BordersInnerV, ImVec2(0, -1)))
+    else if (begin_table("funding_rows", kFundingColumns,
+                         ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY
+                             | ImGuiTableFlags_BordersInnerV, ImVec2(0, -1)))
     {
-        const char* columns[] = {"SYMBOL", "VENUE", "RATE", "ANN.", "BASIS", "NEXT"};
-        for (const char* column : columns) ImGui::TableSetupColumn(column);
-        ImGui::TableHeadersRow();
         const float row_height = theme::dp(desk_row_height(density));
         ImGuiListClipper clipper;
         clipper.Begin(clipper_count(research->funding.size()), row_height);
@@ -991,16 +1040,6 @@ void draw_correlation_panel(const ResearchPresentation* research,
     }
     ImGui::Dummy(ImVec2(static_cast<float>(n + 1) * cell, static_cast<float>(n + 1) * cell));
     ImGui::TextColored(theme::tx_faint(), "15m window · 5s returns · pairwise complete observations");
-    ImGui::End();
-}
-
-void draw_market_detail_panel(const ResearchPresentation* research,
-                              const DeskLinkContext& context)
-{
-    if (!ImGui::Begin(desk_window_name(DeskPanel::market_detail))) { ImGui::End(); return; }
-    panel_header("PAIR / CARRY DETAIL", context, research, ResearchSurface::correlation);
-    ImGui::TextColored(theme::tx_mid(), "Pair and carry detail is reserved for the future selection contract.");
-    ImGui::TextColored(theme::tx_faint(), "Cross-venue carry is illustrative and never places orders.");
     ImGui::End();
 }
 

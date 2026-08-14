@@ -44,5 +44,18 @@ const char* state_color(connection_state s, bool on);
 
 std::string clock_hhmmss(std::chrono::system_clock::time_point tp);
 
+// Shared by ConsoleDashboard::render_tui() and TabbedDashboard::draw_status_bar()/
+// compute_render_digest() - was previously duplicated inline in both files
+// with the risk (already realized once - see total_ring_drops()) of the two
+// copies drifting out of sync.
+double spread_bps(double bid, double ask);
+
+// Sum of all 6 ring-drop counters, in one place so a newly-added ring's
+// counter can't silently miss one of the several call sites that need the
+// total (tabbed_dashboard.cpp's compute_render_digest() previously summed
+// only 3 of the 6 - see AGENTS.md's dashboard_snapshot note for the general
+// pattern this kind of drift falls into).
+std::uint64_t total_ring_drops(const streaming_stats& s);
+
 }
 

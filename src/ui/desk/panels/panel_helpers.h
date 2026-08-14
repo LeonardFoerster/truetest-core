@@ -12,8 +12,39 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <span>
 
 namespace truetest::ui::desk::panels {
+
+// One column of a begin_table() call. `flags`/`width` map straight onto
+// ImGui::TableSetupColumn's own parameters - leave both at their default
+// (0, 0.0f) for a stretch column with no explicit width.
+struct TableColumn
+{
+    const char* label;
+    ImGuiTableColumnFlags flags = 0;
+    float width = 0.0f;
+};
+
+// Collapses the BeginTable + TableSetupColumn(...)*N [+ TableSetupScrollFreeze]
+// + TableHeadersRow sequence hand-rolled at ~17 call sites across the desk
+// panels. Caller still calls ImGui::EndTable() itself on success, matching
+// existing call-site discipline (no RAII wrapper). freeze_cols/freeze_rows
+// default to 0 (skip TableSetupScrollFreeze entirely) since most tables here
+// don't freeze a header row/column.
+inline bool begin_table(const char* id, std::span<const TableColumn> columns,
+                        ImGuiTableFlags flags, ImVec2 size = ImVec2(0, -1),
+                        int freeze_cols = 0, int freeze_rows = 0)
+{
+    if (!ImGui::BeginTable(id, static_cast<int>(columns.size()), flags, size))
+        return false;
+    for (const auto& col : columns)
+        ImGui::TableSetupColumn(col.label, col.flags, col.width);
+    if (freeze_cols > 0 || freeze_rows > 0)
+        ImGui::TableSetupScrollFreeze(freeze_cols, freeze_rows);
+    ImGui::TableHeadersRow();
+    return true;
+}
 
 inline void text_pnl(double value)
 {

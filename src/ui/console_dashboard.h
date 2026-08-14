@@ -92,6 +92,13 @@ struct alignas(64) streaming_stats
 struct dashboard_config
 {
     output_mode mode = output_mode::auto_detect;
+    // Set when --desk is active: ConsoleDashboard's ncurses-free box TUI
+    // does cursor-hide + in-place cursor-hop redraws on this terminal,
+    // which looks glitchy alongside the GL window owning the visible UX -
+    // resolve_mode() folds this into plain instead of tui, whether tui was
+    // requested explicitly or via auto-detect resolving to tui on a real
+    // TTY (ndjson/plain/off requests are left alone).
+    bool desk_active = false;
     std::string title = "TrueTest";
     std::string target = "engine";
     std::string feed   = "";
@@ -168,7 +175,32 @@ private:
     void render_tui(std::string& buf);
     void render_plain(std::string& buf);
     void render_ndjson(std::string& buf);
-    static output_mode resolve_mode(output_mode requested);
+
+    // One method per render_tui() row (or logical row-group), each appending
+    // to rows_scratch_. Split out of what used to be a single ~450-line
+    // function so each concern (title, state, PnL, ...) is independently
+    // readable/greppable. `color` is threaded through rather than each
+    // method re-querying supports_color() (isatty()+getenv() per row).
+    void append_title_row(bool color);
+    void append_state_row(bool color);
+    // last_px/pos_qty_fp8 are read once in render_tui() and passed in here
+    // and to append_unrealized_row()/append_risk_row() below, rather than
+    // each method re-loading the atomic independently - otherwise a fill
+    // landing mid-render-pass could make the Price row and the Risk row's
+    // inventory-skew% disagree about the position within one displayed
+    // frame (they used to share a single top-of-function load, before
+    // render_tui() was split into these per-row methods).
+    void append_price_row(bool color, std::int64_t last_px);
+    void append_threads_row(bool color);
+    void append_events_row(bool color);
+    void append_pnl_row(bool color);
+    void append_unrealized_row(bool color, std::int64_t pos_qty_fp8);
+    void append_toxicity_row(bool color);
+    void append_quotes_row(bool color);
+    void append_risk_row(bool color, std::int64_t last_px, std::int64_t pos_qty_fp8);
+    void append_rings_row(bool color);
+    void append_recent_rows(bool color);
+    static output_mode resolve_mode(output_mode requested, bool desk_active);
     static bool stdout_is_tty();
     static bool supports_color();
 

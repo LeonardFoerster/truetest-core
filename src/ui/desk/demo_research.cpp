@@ -11,6 +11,13 @@ research_view_handle make_demo_research_presentation()
     auto view = std::make_shared<ResearchPresentation>();
     view->state = DeskDataState::demo;
     view->source = "deterministic local fixture";
+    // Fixed, not drawn from next_research_version(): two calls to this
+    // function must produce the SAME version (see
+    // ImGuiDeskDemo.FixtureIsDeterministicBoundedAndExplicit - identical
+    // fixture content is expected to compare as identical). Demo-vs-live
+    // version-number collisions are prevented at the cache layer instead
+    // (research_panels.cpp keys on (state, version), not version alone) -
+    // see FootprintBoundsCache's comment.
     view->version = 1;
     for (auto& surface : view->surfaces)
     {

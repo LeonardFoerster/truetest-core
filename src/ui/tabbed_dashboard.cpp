@@ -3,6 +3,7 @@
 #include "tabbed_dashboard.h"
 
 #include "console_dashboard.h"
+#include "console_format.h"
 #include "dashboard_snapshot.h"
 #include "overlays.h"
 #include "panels/overview_panel.h"
@@ -353,68 +354,73 @@ void TabbedDashboard::handle_input()
         }
         else if (ch == '/')
         {
-            // Enter filter input mode: show a blocking prompt at the
-            // bottom of the screen, capture chars until Enter/Esc.
-            // Keeps the panel rendered behind so the user sees what
-            // they're filtering. Uses synchronous getch (we already
-            // own the input loop - no nested loops).
-            std::string buf;
-            int h = 0, w = 0;
-            getmaxyx(stdscr, h, w);
-            // Fix #5: RAII guard so we always restore nodelay + cursor even on early return / signal
-            struct PromptGuard {
-                ~PromptGuard() {
-                    nodelay(stdscr, TRUE);
-                    curs_set(0);
-                }
-            };
-            PromptGuard _guard;
-
-            // Fix #4: Make the filter prompt responsive to shutdown (no more stuck getch on exit)
-            nodelay(stdscr, TRUE);
-            curs_set(1);
-            for (;;)
-            {
-                if (!running_.load(std::memory_order_acquire))
-                {
-                    buf.clear();
-                    break;   // shutdown requested - exit prompt cleanly
-                }
-
-                move(h - 1, 0); clrtoeol();
-                attron(COLOR_PAIR(4) | A_BOLD);
-                mvprintw(h - 1, 1, " /");
-                attroff(COLOR_PAIR(4) | A_BOLD);
-                mvaddstr(h - 1, 4, buf.c_str());
-                refresh();
-
-                int kc = getch();
-                if (kc == ERR)
-                {
-                    // no key - yield a bit so shutdown can be observed quickly
-                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                    continue;
-                }
-
-                if (kc == 27) { buf.clear(); break; }     // Esc cancels
-                if (kc == '\n' || kc == KEY_ENTER) break; // accept
-                if (kc == KEY_BACKSPACE || kc == 127 || kc == 8)
-                {
-                    if (!buf.empty()) buf.pop_back();
-                }
-                else if (kc >= 32 && kc < 127 &&
-                         buf.size() < 64)
-                    buf.push_back(static_cast<char>(kc));
-            }
-            nodelay(stdscr, TRUE);   // ensure we leave in the expected state for the guard
-            const int active = active_tab_.load(std::memory_order_acquire);
-            if (active >= 0 && active < static_cast<int>(panels_.size()))
-                panels_[active]->set_filter(buf);
-            set_toast(buf.empty() ? "filter cleared"
-                                  : ("filter: " + buf));
+            run_filter_prompt();
         }
         ch = getch();
     }
+}
+
+void TabbedDashboard::run_filter_prompt()
+{
+    // Enter filter input mode: show a blocking prompt at the
+    // bottom of the screen, capture chars until Enter/Esc.
+    // Keeps the panel rendered behind so the user sees what
+    // they're filtering. Uses synchronous getch (we already
+    // own the input loop - no nested loops).
+    std::string buf;
+    int h = 0, w = 0;
+    getmaxyx(stdscr, h, w);
+    // Fix #5: RAII guard so we always restore nodelay + cursor even on early return / signal
+    struct PromptGuard {
+        ~PromptGuard() {
+            nodelay(stdscr, TRUE);
+            curs_set(0);
+        }
+    };
+    PromptGuard _guard;
+
+    // Fix #4: Make the filter prompt responsive to shutdown (no more stuck getch on exit)
+    nodelay(stdscr, TRUE);
+    curs_set(1);
+    for (;;)
+    {
+        if (!running_.load(std::memory_order_acquire))
+        {
+            buf.clear();
+            break;   // shutdown requested - exit prompt cleanly
+        }
+
+        move(h - 1, 0); clrtoeol();
+        attron(COLOR_PAIR(4) | A_BOLD);
+        mvprintw(h - 1, 1, " /");
+        attroff(COLOR_PAIR(4) | A_BOLD);
+        mvaddstr(h - 1, 4, buf.c_str());
+        refresh();
+
+        int kc = getch();
+        if (kc == ERR)
+        {
+            // no key - yield a bit so shutdown can be observed quickly
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+
+        if (kc == 27) { buf.clear(); break; }     // Esc cancels
+        if (kc == '\n' || kc == KEY_ENTER) break; // accept
+        if (kc == KEY_BACKSPACE || kc == 127 || kc == 8)
+        {
+            if (!buf.empty()) buf.pop_back();
+        }
+        else if (kc >= 32 && kc < 127 &&
+                 buf.size() < 64)
+            buf.push_back(static_cast<char>(kc));
+    }
+    nodelay(stdscr, TRUE);   // ensure we leave in the expected state for the guard
+    const int active = active_tab_.load(std::memory_order_acquire);
+    if (active >= 0 && active < static_cast<int>(panels_.size()))
+        panels_[active]->set_filter(buf);
+    set_toast(buf.empty() ? "filter cleared"
+                          : ("filter: " + buf));
 }
 
 void TabbedDashboard::set_toast(const std::string& msg)
@@ -517,13 +523,7 @@ void TabbedDashboard::draw_status_bar(int width,
     const std::int64_t  unrl_fp4 = s.unrealized_pnl_fp4.load(std::memory_order_relaxed);
     const std::int64_t  dd_fp4   = s.drawdown_fp4.load(std::memory_order_relaxed);
     const bool halted = s.halt_flag.load(std::memory_order_acquire);
-    const std::uint64_t drops_total =
-          s.ring_drops_logging.load(std::memory_order_relaxed)
-        + s.ring_drops_risk.load(std::memory_order_relaxed)
-        + s.ring_drops_stats.load(std::memory_order_relaxed)
-        + s.ring_drops_observer.load(std::memory_order_relaxed)
-        + s.ring_drops_risk_stats.load(std::memory_order_relaxed)
-        + s.ring_drops_mm.load(std::memory_order_relaxed);
+    const std::uint64_t drops_total = total_ring_drops(s);
 
     const double last = (last_fp8 < 0) ? 0.0 : static_cast<double>(last_fp8) / 1e8;
     const double bid  = (bid_fp8  < 0) ? 0.0 : static_cast<double>(bid_fp8)  / 1e8;
@@ -537,6 +537,13 @@ void TabbedDashboard::draw_status_bar(int width,
     // Using new semantic style system (Phase 2)
     using Color = truetest::ui::Color;
 
+    // Deliberately NOT console_format.h's state_label()/state_color(): this
+    // status bar needs terser labels ("reconn"/"HALT") to fit its tight
+    // fields, vs. state_label()'s full words ("RECONNECT"/"HALTED") sized
+    // for console_dashboard's wider box layout. Two label sets by design,
+    // not an accidental duplicate - see AGENTS.md's dashboard_snapshot note
+    // for the general pattern, but this specific case is an intentional
+    // presentation difference, not drift.
     auto state_text = [](connection_state st) {
         switch (st) {
             case connection_state::idle:         return "idle";
@@ -601,9 +608,7 @@ void TabbedDashboard::draw_status_bar(int width,
         put_field("last:", buf, Color::Accent, false);
     }
     if (bid_fp8 > 0 && ask_fp8 > 0) {
-        const double mid = (bid + ask) * 0.5;
-        const double bps = mid > 0 ? (ask - bid) / mid * 1e4 : 0.0;
-        std::snprintf(buf, sizeof(buf), "%.1fbp", bps);
+        std::snprintf(buf, sizeof(buf), "%.1fbp", spread_bps(bid, ask));
         put_field("spr:", buf, Color::Muted, false);
     }
 
@@ -788,9 +793,11 @@ std::uint64_t TabbedDashboard::compute_render_digest(
         mix(static_cast<std::uint64_t>(s.unrealized_pnl_fp4.load(std::memory_order_relaxed)));
         mix(static_cast<std::uint64_t>(s.drawdown_fp4.load(std::memory_order_relaxed)));
         mix(s.halt_flag.load(std::memory_order_acquire) ? 1ULL : 0ULL);
-        mix(s.ring_drops_logging.load(std::memory_order_relaxed));
-        mix(s.ring_drops_risk.load(std::memory_order_relaxed));
-        mix(s.ring_drops_stats.load(std::memory_order_relaxed));
+        // Was previously 3 individual mix() calls covering only
+        // logging/risk/stats - observer/risk_stats/mm drops could climb
+        // without ever tripping a redraw of the status bar's drops
+        // indicator. total_ring_drops() covers all 6 in one call.
+        mix(total_ring_drops(s));
     }
 
     if (snap)

@@ -4,8 +4,21 @@
 **Category**: Refactor Guardian  
 **Priority**: High  
 **Target scope**: Project  
-**Status**: Planning document (2026-07-16)  
+**Status**: Executed 2026-08-14 (see completion note below) — kept as reference for the pattern, not as an open item
 **Source**: ` (retired one-time review docs) 05-ui-large-files.md`
+
+## Completion note (2026-08-14)
+
+Executed as part of a broader desk+TUI improvement pass on the `imgui` branch. Findings and outcome, since the numbers below have moved since this doc was written:
+
+- The `tabbed_dashboard.cpp` (~1215) / `console_dashboard.cpp` (~1097) LOC cited below were already stale by the time this ran — actual counts were 993/892 (the `src/ui/panels/*` extraction and `console_format.cpp` split referenced in this doc had already happened). Both were already under the 1k guideline, so "get under 1000 lines" was not the live problem; the real remaining issues were a 448-line monolithic `ConsoleDashboard::render_tui()` (over half its file) and concrete duplication between the two files.
+- `render_tui()` was split into 12 named `append_*_row()` methods (title/state/price/threads/events/pnl/unrealized/toxicity/quotes/risk/rings/recent), each independently readable; `render_tui()` itself is now a ~65-line orchestrator that calls them in order plus the unchanged diff-based repaint engine.
+- Extracted `spread_bps()` and `total_ring_drops()` into `console_format.h`/`.cpp` (both ncurses-free, already the shared formatting layer) - previously each was hand-computed inline, separately, in both `console_dashboard.cpp` and `tabbed_dashboard.cpp`. Covered by new tests in `tests/test_console_format.cpp`.
+- Fixed a real bug found via this dedup: `TabbedDashboard::compute_render_digest()`'s change-detector was only mixing 3 of the 6 `ring_drops_*` counters (logging/risk/stats — missing observer/risk_stats/mm), so drops in those three could climb without ever triggering a status-bar redraw. Now uses `total_ring_drops()`, covering all 6.
+- `TabbedDashboard::handle_input()`'s self-contained `/`-filter prompt (own RAII guard, own blocking `getch()` loop) was extracted to `run_filter_prompt()`.
+- **Deliberately NOT merged**: `state_label()`/`state_color()` (console_format.h) vs. `tabbed_dashboard.cpp`'s local `state_text`/`get_state_color` lambdas, and `fmt_duration()` vs. tabbed's adaptive uptime formatting. Both pairs looked like duplication in the initial analysis but turned out to be *intentionally* different presentations for different space constraints (terse "reconn"/"HALT" status-bar labels vs. full "RECONNECT"/"HALTED" box labels; fixed-width "HH:MM:SS" box uptime vs. adaptive "up 1h23m" status-bar uptime) — merging them would have been a visible UX regression, not a cleanup. Left in place, now with a comment at the tabbed_dashboard.cpp call site explaining why.
+- Net effect: LOC went up slightly (993→1000, 892→913) from the added method signatures/comments — this refactor was never primarily about the line count; both files' worst single-function-readability problem is gone, and the cross-file duplication (that had already caused one bug) is now a single source of truth.
+- Not done, and deliberately out of scope for this pass: further splitting `handle_input()` (244 lines) or `draw_status_bar()` (219 lines) beyond the filter-prompt extraction. Both are already-coherent single state machines / single status bars; forcing further splits for a line-count target alone wasn't judged worth the added risk. Revisit only if either grows materially from here.
 
 ---
 

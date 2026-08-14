@@ -52,3 +52,33 @@ TEST(ConsoleFormat, RowProducesBox)
     EXPECT_TRUE(r.find("│") != std::string::npos);
     EXPECT_TRUE(r.find("content") != std::string::npos);
 }
+
+// spread_bps()/total_ring_drops() were previously hand-computed inline,
+// separately, in both console_dashboard.cpp and tabbed_dashboard.cpp -
+// factored out during the TUI dedup pass (see AGENTS.md's dashboard_snapshot
+// note). Covered here since they're now the single source of truth for both.
+TEST(ConsoleFormat, SpreadBps)
+{
+    using truetest::ui::spread_bps;
+    EXPECT_DOUBLE_EQ(spread_bps(100.0, 100.0), 0.0);
+    // (101-99)/100 * 1e4 = 200 bps
+    EXPECT_DOUBLE_EQ(spread_bps(99.0, 101.0), 200.0);
+    EXPECT_DOUBLE_EQ(spread_bps(0.0, 100.0), 0.0);   // non-positive bid -> 0
+    EXPECT_DOUBLE_EQ(spread_bps(100.0, -1.0), 0.0);  // non-positive ask -> 0
+}
+
+TEST(ConsoleFormat, TotalRingDropsSumsAllSixCounters)
+{
+    using truetest::ui::streaming_stats;
+    using truetest::ui::total_ring_drops;
+    streaming_stats s;
+    EXPECT_EQ(total_ring_drops(s), 0u);
+
+    s.ring_drops_logging.store(1);
+    s.ring_drops_risk.store(2);
+    s.ring_drops_stats.store(3);
+    s.ring_drops_observer.store(4);
+    s.ring_drops_risk_stats.store(5);
+    s.ring_drops_mm.store(6);
+    EXPECT_EQ(total_ring_drops(s), 21u);
+}

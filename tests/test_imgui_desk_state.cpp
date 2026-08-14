@@ -79,7 +79,7 @@ TEST(ImGuiDeskPages, V2PanelInstancesAreUniqueAcrossWorkspaces)
              DeskPanel::tpo_profile, DeskPanel::volume_profile, DeskPanel::session_context,
              DeskPanel::funding, DeskPanel::correlation,
              DeskPanel::equity, DeskPanel::operations_activity, DeskPanel::strategies,
-             DeskPanel::debug, DeskPanel::market_detail})
+             DeskPanel::debug})
         EXPECT_EQ(launched[static_cast<std::size_t>(panel)], 0) << static_cast<int>(panel);
 }
 

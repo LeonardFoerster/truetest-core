@@ -53,6 +53,7 @@ research_view_handle FootprintLiveSource::poll()
         ++drained;
     }
 
+    const auto status_before = status_;
     if (ring_.discontinuous())
     {
         status_ = truetest::footprint::data_status::recovering;
@@ -79,7 +80,17 @@ research_view_handle FootprintLiveSource::poll()
     view->footprint_status = status_;
     view->state = received_count_ > 0 ? DeskDataState::live : DeskDataState::unavailable;
     view->source = config_.symbol_label;
-    view->version = ++publish_version_;
+    // Only mint a new version when something actually changed - new trades
+    // drained or a status transition - not on every ~100ms poll cadence
+    // regardless of whether anything moved. aggregator_.on_trade() is the
+    // only thing that mutates bar state, so drained==0 with no status
+    // change means to_footprint_bar_views() above reproduced byte-identical
+    // output; republishing a fresh version for it would defeat
+    // research_panels.cpp's FootprintBoundsCache/FootprintViewportCache,
+    // forcing their O(bars) rescans every tick even on a quiet market.
+    if (drained > 0 || status_ != status_before || last_published_version_ == 0)
+        last_published_version_ = next_research_version();
+    view->version = last_published_version_;
 
     auto& surface = view->surfaces[static_cast<std::size_t>(ResearchSurface::footprint)];
     surface.state = view->state;

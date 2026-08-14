@@ -57,8 +57,10 @@ bool ConsoleDashboard::supports_color()
     return true;
 }
 
-output_mode ConsoleDashboard::resolve_mode(output_mode requested)
+output_mode ConsoleDashboard::resolve_mode(output_mode requested, bool desk_active)
 {
+    if (desk_active && (requested == output_mode::tui || requested == output_mode::auto_detect))
+        return output_mode::plain;
     if (requested != output_mode::auto_detect) return requested;
     if (stdout_is_tty() && supports_color()) return output_mode::tui;
     return output_mode::plain;
@@ -66,7 +68,7 @@ output_mode ConsoleDashboard::resolve_mode(output_mode requested)
 
 ConsoleDashboard::ConsoleDashboard(dashboard_config cfg)
     : cfg_(std::move(cfg))
-    , resolved_mode_(resolve_mode(cfg_.mode))
+    , resolved_mode_(resolve_mode(cfg_.mode, cfg_.desk_active))
 {
     rows_scratch_.reserve(16);
 
@@ -323,12 +325,7 @@ void ConsoleDashboard::render_loop()
                     stats_.best_bid_fp8.load(std::memory_order_relaxed))
               + static_cast<std::uint64_t>(
                     stats_.best_ask_fp8.load(std::memory_order_relaxed))
-              + stats_.ring_drops_logging.load(std::memory_order_relaxed)
-              + stats_.ring_drops_risk.load(std::memory_order_relaxed)
-              + stats_.ring_drops_stats.load(std::memory_order_relaxed)
-              + stats_.ring_drops_observer.load(std::memory_order_relaxed)
-              + stats_.ring_drops_risk_stats.load(std::memory_order_relaxed)
-              + stats_.ring_drops_mm.load(std::memory_order_relaxed);
+              + total_ring_drops(stats_);
             const int uptime_sec = static_cast<int>(
                 std::chrono::duration_cast<std::chrono::seconds>(
                     now - start_time_).count());
@@ -359,366 +356,364 @@ void ConsoleDashboard::render_loop()
     }
 }
 
-void ConsoleDashboard::render_tui(std::string& buf)
+void ConsoleDashboard::append_title_row(bool color)
 {
-    const bool color = supports_color();
+    auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - start_time_);
+    std::string title;
+    title += cfg_.title;
+    title += " • ";
+    title += cfg_.target;
+    if (!cfg_.feed.empty())
+    {
+        title += " • ";
+        title += cfg_.feed;
+    }
+    std::string time_str = fmt_duration(uptime);
+    int title_vis = visible_width_utf8(title) + visible_width_utf8(time_str) + 5;
+    int dashes = inner_width - title_vis;
+    if (dashes < 2) dashes = 2;
+    std::string r;
+    r += "┌─ ";
+    if (color) r += ansi::bold;
+    if (color) r += ansi::fg_cyan;
+    r += title;
+    if (color) r += ansi::reset;
+    r += ' ';
+    r += make_hline(dashes);
+    r += ' ';
+    if (color) r += ansi::dim;
+    r += time_str;
+    if (color) r += ansi::reset;
+    r += " ─┐";
+    r += ansi::clear_to_eol;
+    rows_scratch_.push_back(std::move(r));
+}
+
+void ConsoleDashboard::append_state_row(bool color)
+{
     const auto state = static_cast<connection_state>(
         stats_.state.load(std::memory_order_acquire));
+    const std::uint64_t drops = total_ring_drops(stats_);
 
-    const std::uint64_t events = stats_.events_total.load(std::memory_order_relaxed);
-    const std::uint64_t fills  = stats_.fills_total.load(std::memory_order_relaxed);
-    const std::uint64_t trades = stats_.trades_total.load(std::memory_order_relaxed);
-    const std::int64_t last_px = stats_.last_price_fp8.load(std::memory_order_relaxed);
+    std::string c;
+    if (color) c += ansi::fg_cyan;
+    c += "State  ";
+    if (color) c += ansi::reset;
+    if (color) c += state_color(state, true);
+    c += "● ";
+    c += state_label(state);
+    if (color) c += ansi::reset;
+    c = pad_right(c, 22);
+    if (color) c += ansi::fg_cyan;
+    c += "Feed  ";
+    if (color) c += ansi::reset;
+    char rb[32];
+    std::snprintf(rb, sizeof(rb), "%6.0f ev/s", rate_ema_);
+    c += rb;
+    c = pad_right(c, 48);
+    if (color) c += ansi::fg_cyan;
+    c += "Ring drops ";
+    if (color) c += (drops > 0 ? ansi::fg_br_red : ansi::reset);
+    c += fmt_u64(drops);
+    if (color) c += ansi::reset;
+    rows_scratch_.push_back(row(c, color));
+}
+
+void ConsoleDashboard::append_price_row(bool color, std::int64_t last_px)
+{
     const std::int64_t bid     = stats_.best_bid_fp8.load(std::memory_order_relaxed);
     const std::int64_t ask     = stats_.best_ask_fp8.load(std::memory_order_relaxed);
     const std::uint32_t bf_done  = stats_.backfill_done.load(std::memory_order_relaxed);
     const std::uint32_t bf_total = stats_.backfill_total.load(std::memory_order_relaxed);
+
+    std::string c;
+    if (color) c += ansi::fg_cyan;
+    c += "Last   ";
+    if (color) c += ansi::reset;
+    c += last_px < 0 ? "-" : fmt_price_fp8(last_px);
+    c = pad_right(c, 22);
+    if (color) c += ansi::fg_cyan;
+    c += "Spread ";
+    if (color) c += ansi::reset;
+    if (bid > 0 && ask > 0)
+    {
+        double b = static_cast<double>(bid) / 1e8;
+        double a = static_cast<double>(ask) / 1e8;
+        char sb[32];
+        std::snprintf(sb, sizeof(sb), "%5.2f bps", spread_bps(b, a));
+        c += sb;
+    }
+    else
+    {
+        c += "-";
+    }
+    c = pad_right(c, 48);
+    if (color) c += ansi::fg_cyan;
+    c += "Backfill ";
+    if (color) c += ansi::reset;
+    if (bf_total > 0)
+    {
+        char b[32];
+        std::snprintf(b, sizeof(b), "%u/%u %s", bf_done, bf_total,
+                      bf_done >= bf_total ? "✓" : "…");
+        c += b;
+    }
+    else
+    {
+        c += "-";
+    }
+    rows_scratch_.push_back(row(c, color));
+}
+
+void ConsoleDashboard::append_threads_row(bool color)
+{
+    if (cfg_.threading_summary.empty()) return;
+    std::string c;
+    if (color) c += ansi::fg_cyan;
+    c += "Threads ";
+    if (color) c += ansi::reset;
+    c += " ";
+    if (color) c += ansi::dim;
+    c += cfg_.threading_summary;
+    if (color) c += ansi::reset;
+    rows_scratch_.push_back(row(c, color));
+}
+
+void ConsoleDashboard::append_events_row(bool color)
+{
+    const std::uint64_t events = stats_.events_total.load(std::memory_order_relaxed);
+    const std::uint64_t fills  = stats_.fills_total.load(std::memory_order_relaxed);
+    const std::uint64_t trades = stats_.trades_total.load(std::memory_order_relaxed);
+
+    std::string c;
+    if (color) c += ansi::fg_cyan;
+    c += "Events  ";
+    if (color) c += ansi::reset;
+    c += fmt_u64(events);
+    c = pad_right(c, 26);
+    if (color) c += ansi::fg_cyan;
+    c += "Fills ";
+    if (color) c += ansi::reset;
+    c += fmt_u64(fills);
+    c = pad_right(c, 40);
+    if (color) c += ansi::fg_cyan;
+    c += "Round-trips ";
+    if (color) c += ansi::reset;
+    c += fmt_u64(trades);
+    rows_scratch_.push_back(row(c, color));
+}
+
+void ConsoleDashboard::append_pnl_row(bool color)
+{
+    const std::int64_t pnl_fp4 = stats_.realized_pnl_fp4.load(std::memory_order_relaxed);
+    const std::int64_t dd_fp4  = stats_.drawdown_fp4.load(std::memory_order_relaxed);
+
+    std::string c;
+    if (color) c += ansi::fg_cyan;
+    c += "Realized PnL  ";
+    if (color) c += ansi::reset;
+    if (color)
+        c += pnl_fp4 > 0 ? ansi::fg_br_green
+           : pnl_fp4 < 0 ? ansi::fg_br_red
+           : ansi::fg_gray;
+    c += fmt_pnl_fp4(pnl_fp4);
+    if (color) c += ansi::reset;
+    c = pad_right(c, 30);
+    if (color) c += ansi::fg_cyan;
+    c += "Drawdown ";
+    if (color) c += ansi::reset;
+    char db[32];
+    std::snprintf(db, sizeof(db), "%+.2f%%",
+                  static_cast<double>(dd_fp4) / 1e2);
+    if (color) c += dd_fp4 <= -500 ? ansi::fg_br_red
+                 :  dd_fp4 <= -100 ? ansi::fg_br_yel
+                 :  ansi::fg_gray;
+    c += db;
+    if (color) c += ansi::reset;
+    rows_scratch_.push_back(row(c, color));
+}
+
+void ConsoleDashboard::append_unrealized_row(bool color, std::int64_t pos_qty_fp8)
+{
+    const std::int64_t unreal_fp4 = stats_.unrealized_pnl_fp4.load(std::memory_order_relaxed);
+
+    std::string c;
+    if (color) c += ansi::fg_cyan;
+    c += "Unrealized    ";
+    if (color) c += ansi::reset;
+    if (color)
+        c += unreal_fp4 > 0 ? ansi::fg_br_green
+           : unreal_fp4 < 0 ? ansi::fg_br_red
+           : ansi::fg_gray;
+    c += fmt_pnl_fp4(unreal_fp4);
+    if (color) c += ansi::reset;
+    c = pad_right(c, 30);
+    if (color) c += ansi::fg_cyan;
+    c += "Position ";
+    if (color) c += ansi::reset;
+    if (color)
+        c += pos_qty_fp8 > 0 ? ansi::fg_br_green
+           : pos_qty_fp8 < 0 ? ansi::fg_br_red
+           : ansi::fg_gray;
+    c += fmt_position_fp8(pos_qty_fp8);
+    if (color) c += ansi::reset;
+    rows_scratch_.push_back(row(c, color));
+}
+
+// Toxicity + Win rate. Toxicity: positive markout = bleeding to adverse
+// selection; red >2 bps, yellow >0.5 bps, gray otherwise.
+void ConsoleDashboard::append_toxicity_row(bool color)
+{
+    const std::uint64_t trades = stats_.trades_total.load(std::memory_order_relaxed);
+    const std::uint32_t wr_bps = stats_.win_rate_bps.load(std::memory_order_relaxed);
+    const std::int32_t tox_fp2 = stats_.toxicity_bps_fp2.load(std::memory_order_relaxed);
+    const std::uint32_t tox_n  = stats_.toxicity_samples.load(std::memory_order_relaxed);
+
+    std::string c;
+    if (color) c += ansi::fg_cyan;
+    c += "Toxicity      ";
+    if (color) c += ansi::reset;
+    if (color && tox_n > 0)
+        c += tox_fp2 >  200 ? ansi::fg_br_red
+           : tox_fp2 >   50 ? ansi::fg_br_yel
+           : tox_fp2 <    0 ? ansi::fg_br_green
+           : ansi::fg_gray;
+    c += fmt_toxicity_bps_fp2(tox_fp2, tox_n);
+    if (color) c += ansi::reset;
+    if (tox_n > 0)
+    {
+        char tn[24];
+        std::snprintf(tn, sizeof(tn), " (n=%u)", tox_n);
+        if (color) c += ansi::dim;
+        c += tn;
+        if (color) c += ansi::reset;
+    }
+    c = pad_right(c, 34);
+    if (color) c += ansi::fg_cyan;
+    c += "Win rate ";
+    if (color) c += ansi::reset;
+    if (trades > 0)
+    {
+        char wr[16];
+        std::snprintf(wr, sizeof(wr), "%u%%", wr_bps / 100);
+        if (color)
+            c += wr_bps >= 5500 ? ansi::fg_br_green
+               : wr_bps >= 4500 ? ansi::fg_gray
+               : ansi::fg_br_yel;
+        c += wr;
+        if (color) c += ansi::reset;
+    }
+    else
+    {
+        c += "-";
+    }
+    rows_scratch_.push_back(row(c, color));
+}
+
+// Queue pos: 0 = all at front, 10000 = all at back. Populated by
+// QueueAwareBookAdapter; other adapters return 0 -> dashes.
+void ConsoleDashboard::append_quotes_row(bool color)
+{
+    const std::uint32_t live_qs  = stats_.live_quotes.load(std::memory_order_relaxed);
+    const std::uint32_t qpos_bps = stats_.avg_queue_pos_bps.load(std::memory_order_relaxed);
+
+    std::string c;
+    if (color) c += ansi::fg_cyan;
+    c += "Quotes        ";
+    if (color) c += ansi::reset;
+    if (live_qs > 0)
+    {
+        char qb[24];
+        std::snprintf(qb, sizeof(qb), "%u live", live_qs);
+        c += qb;
+    }
+    else
+    {
+        c += "-";
+    }
+    c = pad_right(c, 34);
+    if (color) c += ansi::fg_cyan;
+    c += "Queue pos ";
+    if (color) c += ansi::reset;
+    if (live_qs > 0)
+    {
+        char qp[16];
+        std::snprintf(qp, sizeof(qp), "%u%%", qpos_bps / 100);
+        c += qp;
+    }
+    else
+    {
+        c += "-";
+    }
+    rows_scratch_.push_back(row(c, color));
+}
+
+void ConsoleDashboard::append_risk_row(bool color, std::int64_t last_px, std::int64_t pos_qty_fp8)
+{
     const std::uint32_t open_ord = stats_.open_orders.load(std::memory_order_relaxed);
-    const std::uint64_t drops = stats_.ring_drops_logging.load(std::memory_order_relaxed)
-                              + stats_.ring_drops_risk.load(std::memory_order_relaxed)
-                              + stats_.ring_drops_stats.load(std::memory_order_relaxed)
-                              + stats_.ring_drops_observer.load(std::memory_order_relaxed)
-                              + stats_.ring_drops_risk_stats.load(std::memory_order_relaxed)
-                              + stats_.ring_drops_mm.load(std::memory_order_relaxed);
-    const std::int64_t pnl_fp4     = stats_.realized_pnl_fp4.load(std::memory_order_relaxed);
-    const std::int64_t unreal_fp4  = stats_.unrealized_pnl_fp4.load(std::memory_order_relaxed);
-    const std::int64_t pos_qty_fp8 = stats_.position_qty_fp8.load(std::memory_order_relaxed);
-    const std::int64_t dd_fp4      = stats_.drawdown_fp4.load(std::memory_order_relaxed);
-    const std::uint32_t wr_bps     = stats_.win_rate_bps.load(std::memory_order_relaxed);
-    const std::int32_t tox_fp2     = stats_.toxicity_bps_fp2.load(std::memory_order_relaxed);
-    const std::uint32_t tox_n      = stats_.toxicity_samples.load(std::memory_order_relaxed);
-    const std::uint32_t live_qs    = stats_.live_quotes.load(std::memory_order_relaxed);
-    const std::uint32_t qpos_bps   = stats_.avg_queue_pos_bps.load(std::memory_order_relaxed);
     const bool halted = stats_.halt_flag.load(std::memory_order_acquire);
 
-    auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
-        std::chrono::steady_clock::now() - start_time_);
-
-    // Each row is self-contained (no '\n'); the diff loop below decides
-    // whether to emit the row or advance the cursor past an unchanged one.
-    auto& rows = rows_scratch_;
-    rows.clear();
-
+    std::string c;
+    if (color) c += ansi::fg_cyan;
+    c += "Risk    ";
+    if (color) c += ansi::reset;
+    c += "halt:";
+    if (color) c += halted ? ansi::fg_br_red : ansi::fg_gray;
+    c += halted ? "yes" : "no";
+    if (color) c += ansi::reset;
+    c += "  open:";
+    c += fmt_u64(open_ord);
+    if (cfg_.risk_max_open_orders > 0)
     {
-        std::string title;
-        title += cfg_.title;
-        title += " • ";
-        title += cfg_.target;
-        if (!cfg_.feed.empty())
-        {
-            title += " • ";
-            title += cfg_.feed;
-        }
-        std::string time_str = fmt_duration(uptime);
-        int title_vis = visible_width_utf8(title) + visible_width_utf8(time_str) + 5;
-        int dashes = inner_width - title_vis;
-        if (dashes < 2) dashes = 2;
-        std::string r;
-        r += "┌─ ";
-        if (color) r += ansi::bold;
-        if (color) r += ansi::fg_cyan;
-        r += title;
-        if (color) r += ansi::reset;
-        r += ' ';
-        r += make_hline(dashes);
-        r += ' ';
-        if (color) r += ansi::dim;
-        r += time_str;
-        if (color) r += ansi::reset;
-        r += " ─┐";
-        r += ansi::clear_to_eol;
-        rows.push_back(std::move(r));
+        c += "/";
+        c += fmt_u64(static_cast<std::uint64_t>(cfg_.risk_max_open_orders));
     }
-
+    if (cfg_.risk_max_daily_loss > 0.0)
     {
-        std::string c;
-        if (color) c += ansi::fg_cyan;
-        c += "State  ";
-        if (color) c += ansi::reset;
-        if (color) c += state_color(state, true);
-        c += "● ";
-        c += state_label(state);
-        if (color) c += ansi::reset;
-        c = pad_right(c, 22);
-        if (color) c += ansi::fg_cyan;
-        c += "Feed  ";
-        if (color) c += ansi::reset;
-        char rb[32];
-        std::snprintf(rb, sizeof(rb), "%6.0f ev/s", rate_ema_);
-        c += rb;
-        c = pad_right(c, 48);
-        if (color) c += ansi::fg_cyan;
-        c += "Ring drops ";
-        if (color) c += (drops > 0 ? ansi::fg_br_red : ansi::reset);
-        c += fmt_u64(drops);
-        if (color) c += ansi::reset;
-        rows.push_back(row(c, color));
+        char buf2[48];
+        std::snprintf(buf2, sizeof(buf2), "  day-loss cap $%.0f",
+                      cfg_.risk_max_daily_loss);
+        c += buf2;
     }
-
+    if (cfg_.risk_max_position_value > 0.0 && last_px > 0 && pos_qty_fp8 != 0)
     {
-        std::string c;
-        if (color) c += ansi::fg_cyan;
-        c += "Last   ";
-        if (color) c += ansi::reset;
-        c += last_px < 0 ? "-" : fmt_price_fp8(last_px);
-        c = pad_right(c, 22);
-        if (color) c += ansi::fg_cyan;
-        c += "Spread ";
-        if (color) c += ansi::reset;
-        if (bid > 0 && ask > 0)
-        {
-            double b = static_cast<double>(bid) / 1e8;
-            double a = static_cast<double>(ask) / 1e8;
-            double mid = (b + a) * 0.5;
-            double bps = mid > 0 ? (a - b) / mid * 1e4 : 0.0;
-            char sb[32];
-            std::snprintf(sb, sizeof(sb), "%5.2f bps", bps);
-            c += sb;
-        }
-        else
-        {
-            c += "-";
-        }
-        c = pad_right(c, 48);
-        if (color) c += ansi::fg_cyan;
-        c += "Backfill ";
-        if (color) c += ansi::reset;
-        if (bf_total > 0)
-        {
-            char b[32];
-            std::snprintf(b, sizeof(b), "%u/%u %s", bf_done, bf_total,
-                          bf_done >= bf_total ? "✓" : "…");
-            c += b;
-        }
-        else
-        {
-            c += "-";
-        }
-        rows.push_back(row(c, color));
+        const double qty       = static_cast<double>(pos_qty_fp8) / 1.0e8;
+        const double last      = static_cast<double>(last_px)     / 1.0e8;
+        const double inv_value = std::abs(qty) * last;
+        const double pct       = inv_value / cfg_.risk_max_position_value * 100.0;
+        char buf3[48];
+        std::snprintf(buf3, sizeof(buf3), "  inv %.0f%%", pct);
+        c += buf3;
     }
+    rows_scratch_.push_back(row(c, color));
+}
 
-    if (!cfg_.threading_summary.empty())
-    {
-        std::string c;
-        if (color) c += ansi::fg_cyan;
-        c += "Threads ";
+void ConsoleDashboard::append_rings_row(bool color)
+{
+    const auto log_d   = stats_.ring_drops_logging.load(std::memory_order_relaxed);
+    const auto risk_d  = stats_.ring_drops_risk.load(std::memory_order_relaxed);
+    const auto stats_d = stats_.ring_drops_stats.load(std::memory_order_relaxed);
+    const auto mm_d    = stats_.ring_drops_mm.load(std::memory_order_relaxed);
+    auto emit = [&](std::string& c, const char* lbl, std::uint64_t v) {
+        c += lbl;
+        if (color) c += (v > 0 ? ansi::fg_br_red : ansi::fg_gray);
+        c += fmt_u64(v);
         if (color) c += ansi::reset;
-        c += " ";
-        if (color) c += ansi::dim;
-        c += cfg_.threading_summary;
-        if (color) c += ansi::reset;
-        rows.push_back(row(c, color));
-    }
+    };
+    std::string c;
+    if (color) c += ansi::fg_cyan;
+    c += "Rings   ";
+    if (color) c += ansi::reset;
+    emit(c, "log:",    log_d);
+    emit(c, "  risk:", risk_d);
+    emit(c, "  stats:",stats_d);
+    emit(c, "  mm:",   mm_d);
+    rows_scratch_.push_back(row(c, color));
+}
 
-    rows.push_back(row_separator_);
-
-    {
-        std::string c;
-        if (color) c += ansi::fg_cyan;
-        c += "Events  ";
-        if (color) c += ansi::reset;
-        c += fmt_u64(events);
-        c = pad_right(c, 26);
-        if (color) c += ansi::fg_cyan;
-        c += "Fills ";
-        if (color) c += ansi::reset;
-        c += fmt_u64(fills);
-        c = pad_right(c, 40);
-        if (color) c += ansi::fg_cyan;
-        c += "Round-trips ";
-        if (color) c += ansi::reset;
-        c += fmt_u64(trades);
-        rows.push_back(row(c, color));
-    }
-
-    {
-        std::string c;
-        if (color) c += ansi::fg_cyan;
-        c += "Realized PnL  ";
-        if (color) c += ansi::reset;
-        if (color)
-            c += pnl_fp4 > 0 ? ansi::fg_br_green
-               : pnl_fp4 < 0 ? ansi::fg_br_red
-               : ansi::fg_gray;
-        c += fmt_pnl_fp4(pnl_fp4);
-        if (color) c += ansi::reset;
-        c = pad_right(c, 30);
-        if (color) c += ansi::fg_cyan;
-        c += "Drawdown ";
-        if (color) c += ansi::reset;
-        char db[32];
-        std::snprintf(db, sizeof(db), "%+.2f%%",
-                      static_cast<double>(dd_fp4) / 1e2);
-        if (color) c += dd_fp4 <= -500 ? ansi::fg_br_red
-                     :  dd_fp4 <= -100 ? ansi::fg_br_yel
-                     :  ansi::fg_gray;
-        c += db;
-        if (color) c += ansi::reset;
-        rows.push_back(row(c, color));
-    }
-
-    {
-        std::string c;
-        if (color) c += ansi::fg_cyan;
-        c += "Unrealized    ";
-        if (color) c += ansi::reset;
-        if (color)
-            c += unreal_fp4 > 0 ? ansi::fg_br_green
-               : unreal_fp4 < 0 ? ansi::fg_br_red
-               : ansi::fg_gray;
-        c += fmt_pnl_fp4(unreal_fp4);
-        if (color) c += ansi::reset;
-        c = pad_right(c, 30);
-        if (color) c += ansi::fg_cyan;
-        c += "Position ";
-        if (color) c += ansi::reset;
-        if (color)
-            c += pos_qty_fp8 > 0 ? ansi::fg_br_green
-               : pos_qty_fp8 < 0 ? ansi::fg_br_red
-               : ansi::fg_gray;
-        c += fmt_position_fp8(pos_qty_fp8);
-        if (color) c += ansi::reset;
-        rows.push_back(row(c, color));
-    }
-
-    // Toxicity + Win rate. Toxicity: positive markout = bleeding to adverse
-    // selection; red >2 bps, yellow >0.5 bps, gray otherwise.
-    {
-        std::string c;
-        if (color) c += ansi::fg_cyan;
-        c += "Toxicity      ";
-        if (color) c += ansi::reset;
-        if (color && tox_n > 0)
-            c += tox_fp2 >  200 ? ansi::fg_br_red
-               : tox_fp2 >   50 ? ansi::fg_br_yel
-               : tox_fp2 <    0 ? ansi::fg_br_green
-               : ansi::fg_gray;
-        c += fmt_toxicity_bps_fp2(tox_fp2, tox_n);
-        if (color) c += ansi::reset;
-        if (tox_n > 0)
-        {
-            char tn[24];
-            std::snprintf(tn, sizeof(tn), " (n=%u)", tox_n);
-            if (color) c += ansi::dim;
-            c += tn;
-            if (color) c += ansi::reset;
-        }
-        c = pad_right(c, 34);
-        if (color) c += ansi::fg_cyan;
-        c += "Win rate ";
-        if (color) c += ansi::reset;
-        if (trades > 0)
-        {
-            char wr[16];
-            std::snprintf(wr, sizeof(wr), "%u%%", wr_bps / 100);
-            if (color)
-                c += wr_bps >= 5500 ? ansi::fg_br_green
-                   : wr_bps >= 4500 ? ansi::fg_gray
-                   : ansi::fg_br_yel;
-            c += wr;
-            if (color) c += ansi::reset;
-        }
-        else
-        {
-            c += "-";
-        }
-        rows.push_back(row(c, color));
-    }
-
-    // Queue pos: 0 = all at front, 10000 = all at back. Populated by
-    // QueueAwareBookAdapter; other adapters return 0 -> dashes.
-    {
-        std::string c;
-        if (color) c += ansi::fg_cyan;
-        c += "Quotes        ";
-        if (color) c += ansi::reset;
-        if (live_qs > 0)
-        {
-            char qb[24];
-            std::snprintf(qb, sizeof(qb), "%u live", live_qs);
-            c += qb;
-        }
-        else
-        {
-            c += "-";
-        }
-        c = pad_right(c, 34);
-        if (color) c += ansi::fg_cyan;
-        c += "Queue pos ";
-        if (color) c += ansi::reset;
-        if (live_qs > 0)
-        {
-            char qp[16];
-            std::snprintf(qp, sizeof(qp), "%u%%", qpos_bps / 100);
-            c += qp;
-        }
-        else
-        {
-            c += "-";
-        }
-        rows.push_back(row(c, color));
-    }
-
-    {
-        std::string c;
-        if (color) c += ansi::fg_cyan;
-        c += "Risk    ";
-        if (color) c += ansi::reset;
-        c += "halt:";
-        if (color) c += halted ? ansi::fg_br_red : ansi::fg_gray;
-        c += halted ? "yes" : "no";
-        if (color) c += ansi::reset;
-        c += "  open:";
-        c += fmt_u64(open_ord);
-        if (cfg_.risk_max_open_orders > 0)
-        {
-            c += "/";
-            c += fmt_u64(static_cast<std::uint64_t>(cfg_.risk_max_open_orders));
-        }
-        if (cfg_.risk_max_daily_loss > 0.0)
-        {
-            char buf2[48];
-            std::snprintf(buf2, sizeof(buf2), "  day-loss cap $%.0f",
-                          cfg_.risk_max_daily_loss);
-            c += buf2;
-        }
-        if (cfg_.risk_max_position_value > 0.0 && last_px > 0 && pos_qty_fp8 != 0)
-        {
-            const double qty       = static_cast<double>(pos_qty_fp8) / 1.0e8;
-            const double last      = static_cast<double>(last_px)     / 1.0e8;
-            const double inv_value = std::abs(qty) * last;
-            const double pct       = inv_value / cfg_.risk_max_position_value * 100.0;
-            char buf3[48];
-            std::snprintf(buf3, sizeof(buf3), "  inv %.0f%%", pct);
-            c += buf3;
-        }
-        rows.push_back(row(c, color));
-    }
-
-    {
-        const auto log_d   = stats_.ring_drops_logging.load(std::memory_order_relaxed);
-        const auto risk_d  = stats_.ring_drops_risk.load(std::memory_order_relaxed);
-        const auto stats_d = stats_.ring_drops_stats.load(std::memory_order_relaxed);
-        const auto mm_d    = stats_.ring_drops_mm.load(std::memory_order_relaxed);
-        auto emit = [&](std::string& c, const char* lbl, std::uint64_t v) {
-            c += lbl;
-            if (color) c += (v > 0 ? ansi::fg_br_red : ansi::fg_gray);
-            c += fmt_u64(v);
-            if (color) c += ansi::reset;
-        };
-        std::string c;
-        if (color) c += ansi::fg_cyan;
-        c += "Rings   ";
-        if (color) c += ansi::reset;
-        emit(c, "log:",    log_d);
-        emit(c, "  risk:", risk_d);
-        emit(c, "  stats:",stats_d);
-        emit(c, "  mm:",   mm_d);
-        rows.push_back(row(c, color));
-    }
-
-    rows.push_back(row_recent_header_);
-
+void ConsoleDashboard::append_recent_rows(bool color)
+{
     // Seqlock reads: verify slot.seq == idx*2+2 before and after the copy;
     // a racing next-cycle writer flips seq and we render the row blank.
     constexpr int recent_rows = 4;
@@ -759,9 +754,41 @@ void ConsoleDashboard::render_tui(std::string& buf)
             c += "  ";
             c.append(snapshot[i].msg, snapshot[i].msg_len);
         }
-        rows.push_back(row(c, color));
+        rows_scratch_.push_back(row(c, color));
     }
+}
 
+void ConsoleDashboard::render_tui(std::string& buf)
+{
+    const bool color = supports_color();
+
+    // Loaded once and threaded through, not re-loaded per row: both feed
+    // more than one row (Price/Risk share last_px, Unrealized/Risk share
+    // pos_qty_fp8), and a fill landing mid-render-pass between two
+    // independent loads could otherwise make those rows disagree about the
+    // position within a single displayed frame.
+    const std::int64_t last_px     = stats_.last_price_fp8.load(std::memory_order_relaxed);
+    const std::int64_t pos_qty_fp8 = stats_.position_qty_fp8.load(std::memory_order_relaxed);
+
+    // Each row is self-contained (no '\n'); the diff loop below decides
+    // whether to emit the row or advance the cursor past an unchanged one.
+    auto& rows = rows_scratch_;
+    rows.clear();
+
+    append_title_row(color);
+    append_state_row(color);
+    append_price_row(color, last_px);
+    append_threads_row(color);
+    rows.push_back(row_separator_);
+    append_events_row(color);
+    append_pnl_row(color);
+    append_unrealized_row(color, pos_qty_fp8);
+    append_toxicity_row(color);
+    append_quotes_row(color);
+    append_risk_row(color, last_px, pos_qty_fp8);
+    append_rings_row(color);
+    rows.push_back(row_recent_header_);
+    append_recent_rows(color);
     rows.push_back(row_bottom_);
 
     const int row_count = static_cast<int>(rows.size());

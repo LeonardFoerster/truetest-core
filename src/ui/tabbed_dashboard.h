@@ -59,6 +59,14 @@ public:
 private:
     void render_loop();
     void handle_input();
+
+    // Blocking `/`-filter prompt: captures chars synchronously until
+    // Enter/Esc, then applies the buffer to the active panel's filter.
+    // Split out of handle_input() since it's a self-contained mini-UI
+    // (own RAII guard, own getch() loop) rather than part of the main
+    // dispatch switch.
+    void run_filter_prompt();
+
     void draw_chrome(int width, int height, int active);
 
     // Persistent one-line summary rendered above every tab. Pulls from

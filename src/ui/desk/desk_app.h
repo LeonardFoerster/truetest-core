@@ -94,6 +94,13 @@ private:
     void refresh_live_footprint();
     void show_toast(std::string msg,
                     std::chrono::milliseconds ttl = std::chrono::seconds{3});
+    // Runs body(), logging (and swallowing) any exception it throws in the
+    // consistent "[desk] <label> threw..." shape render_loop() wants at each
+    // of its guarded call sites; returns false when body threw so the caller
+    // can apply its own fallback/toast. Never call across a frame boundary -
+    // same discipline as the sites that use it (render_loop()'s poll block
+    // and its frame-draw block).
+    bool guarded_call(const char* label, const std::function<void()>& body);
 
     snapshot_fn snap_fn_;
     std::shared_ptr<truetest::ui::ConsoleDashboard> data_;
@@ -137,6 +144,12 @@ private:
     int  fill_filter_ = 0; // 0=all 1=buy 2=sell
     MonitorTelemetry monitor_telemetry_;
     std::vector<std::size_t> visible_fill_rows_;
+    // Consecutive per-frame draw exceptions (handle_hotkeys/draw_frame/
+    // draw_command_palette). Reset to 0 on any clean frame; render_loop()
+    // shuts the desk thread down (never the process) once this crosses
+    // kMaxConsecutiveFrameErrors — see render_loop() for why ImGui itself
+    // isn't safely recoverable mid-frame, only between frames.
+    int consecutive_frame_errors_ = 0;
 };
 
 } // namespace truetest::ui::desk

@@ -400,6 +400,13 @@ struct cli_options
     // Dashboard: auto (tui if tty, else plain), or force a mode.
     std::string status_format = "auto";
     bool no_tui = false;
+    // Forces ConsoleDashboard's own ncurses-free ANSI-box TUI
+    // (render_tui()) over the rich ncurses TabbedDashboard on
+    // engine_shadow/engine_live, when both would otherwise be eligible.
+    // Without this flag there is no way to reach ConsoleDashboard's TUI on
+    // those binaries - TabbedDashboard always wins whenever both are
+    // constructed. See tt_wire_rich_tui/rich_tui construction below.
+    bool simple_tui = false;
 
     // ImGui personal strategy desk (HAS_IMGUI_DESK). Mutually exclusive with
     // rich ncurses TUI when both are available — desk wins if --desk is set.
@@ -1170,6 +1177,12 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Live status display: auto, tui, plain, ndjson, off (default: auto)")
         ->default_val("auto");
     app.add_flag("--no-tui", o.no_tui, "Shortcut for --status-format=plain");
+    app.add_flag("--simple-tui", o.simple_tui,
+                 "On engine_shadow/engine_live, use ConsoleDashboard's own "
+                 "ncurses-free ANSI-box status display instead of the rich "
+                 "tabbed ncurses dashboard. No effect on engine_backtest "
+                 "(rich TUI isn't compiled there) or with --status-format "
+                 "other than tui/auto-resolved-to-tui.");
 
 #ifdef HAS_IMGUI_DESK
     app.add_flag("--desk", o.desk,
@@ -2245,7 +2258,14 @@ static int run_provider_mode(const cli_options& o)
     {
         truetest::ui::dashboard_config dcfg;
         // --no-tui overrides --status-format.
-        const std::string& sf = o.no_tui ? std::string("plain") : o.status_format;
+        std::string sf = o.no_tui ? std::string("plain") : o.status_format;
+#ifdef HAS_IMGUI_DESK
+        // ConsoleDashboard::resolve_mode() folds this into plain instead of
+        // tui (see dashboard_config::desk_active) - without it,
+        // dashboard->is_tui() could still come back true with --desk set,
+        // which used to silently start neither tui nor plain output below.
+        dcfg.desk_active = o.desk;
+#endif
         if      (sf == "auto")   dcfg.mode = truetest::ui::output_mode::auto_detect;
         else if (sf == "tui")    dcfg.mode = truetest::ui::output_mode::tui;
         else if (sf == "plain")  dcfg.mode = truetest::ui::output_mode::plain;
@@ -2416,9 +2436,14 @@ static int run_provider_mode(const cli_options& o)
         // Rich (ncurses) tabbed dashboard for shadow/live binaries when the
         // resolved status mode is TUI and the ImGui desk is not active.
         // ncurses takes over the terminal, so we skip render_banner().
+        // --simple-tui opts out in favor of ConsoleDashboard's own
+        // ncurses-free render_tui() (see dashboard->start() below) - the
+        // only way to reach that surface on these binaries, since this
+        // condition would otherwise always prefer the rich TUI.
         std::unique_ptr<truetest::ui::TabbedDashboard> rich_tui;
         if (dashboard && truetest::target_uses_rich_tui()
             && dashboard->is_tui()
+            && !o.simple_tui
 #ifdef HAS_IMGUI_DESK
             && !imgui_desk
 #endif
@@ -2443,26 +2468,19 @@ static int run_provider_mode(const cli_options& o)
             else
 #endif
             {
-                // With --desk, prefer plain status so ncurses doesn't fight
-                // the GL window for the terminal.
-#ifdef HAS_IMGUI_DESK
-                if (imgui_desk && dashboard->is_tui())
-                {
-                    // Still push events; banner only for non-TUI or fallback.
-                    dashboard->push_event(
-                        truetest::ui::event_severity::notice,
-                        "engine starting (ImGui desk)");
-                    // Don't start ncurses-style TUI loop when desk owns UX.
-                }
-                else
-#endif
-                {
-                    dashboard->render_banner();
-                    dashboard->push_event(
-                        truetest::ui::event_severity::notice,
-                        "engine starting");
-                    dashboard->start();
-                }
+                // rich_tui is null here - either target_uses_rich_tui() is
+                // false, --simple-tui was passed, or dcfg.mode was already
+                // forced to plain above because --desk is active (so
+                // dashboard->is_tui() is false too in that case). Either
+                // way dashboard->start() below is safe to call
+                // unconditionally: it runs render_tui()/render_plain()/
+                // render_ndjson() per whatever dcfg.mode actually resolved
+                // to, never fighting a GL window for the terminal.
+                dashboard->render_banner();
+                dashboard->push_event(
+                    truetest::ui::event_severity::notice,
+                    "engine starting");
+                dashboard->start();
             }
         }
 

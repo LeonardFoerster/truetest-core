@@ -262,6 +262,9 @@ Register new sources in **`cmake/Sources.cmake`** (no directory globs).
 | Report JSON / CLI flags | Backend/UI contract impact; reproducibility fields |
 | Any “optimisation” | Benchmarks before/after; hotpath tests; no mean-only claims |
 | `cmake/` / `Sources.cmake` | Configure + build affected targets |
+| `dashboard_snapshot` (new/changed field) | Render it (or explicitly, visibly omit it) in **both** the ncurses TUI (`src/ui/panels/*`, `tabbed_dashboard.cpp`, `console_dashboard.cpp`) and the ImGui desk (`src/ui/desk/panels/*`) before merging — see note below |
+
+**Two UI stacks, one snapshot.** The ncurses rich TUI and the ImGui desk are both first-class, actively maintained surfaces over the same `dashboard_snapshot`/`operator_actions` seam (no plan to freeze or retire either currently) — see `docs/internal/imgui-desk-design.md`. This has already drifted once inside a single week on the desk alone (a dead `portfolio_panels.cpp::draw_positions_panel` duplicating the live `activity_panel.cpp::draw_positions()` with the same columns/badges, just not wired in). With both stacks staying in parity long-term, the same drift can happen *across* the two UIs just as easily — a field added to one renderer and forgotten in the other won't fail a build, only silently miss an operator's screen. Check both renderers whenever `dashboard_snapshot` changes.
 
 ---
 

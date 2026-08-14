@@ -1,6 +1,7 @@
 #pragma once
 
 #include "analytics/footprint/footprint_aggregator.h"
+#include "ui/desk/desk_context.h"
 #include "ui/desk/footprint_camera.h"
 
 #include <cstdint>
@@ -53,6 +54,62 @@ struct FootprintPanelSettings
 std::int64_t footprint_bar_type_interval_ns(FootprintPanelSettings::BarType type) noexcept;
 const char* footprint_bar_type_label(FootprintPanelSettings::BarType type) noexcept;
 
+// Time/price extent of a footprint bar series (research_panels.cpp's
+// compute_footprint_bounds()). Kept ImGui-free like the rest of this header.
+struct FootprintDataBounds
+{
+    std::int64_t time_min_ms = 0;
+    std::int64_t time_max_ms = 1;
+    double price_min = 0.0;
+    double price_max = 1.0;
+    bool valid = false;
+};
+
+// Caches compute_footprint_bounds()'s O(bars) scan, keyed on the footprint
+// surface's own (state, publish version) pair (ResearchSurfaceStatus::state
+// + ::version, NOT ResearchPresentation::version - the top-level version is
+// not bumped by refresh_demo_footprint()/refresh_live_footprint() when only
+// the footprint field republishes, so it would never invalidate this
+// cache). Recompute when either changes; otherwise reuse `bounds` as-is.
+//
+// `state` is part of the key, not just `version`, because version alone is
+// only unique WITHIN one source: the demo fixture deliberately keeps a
+// small, fixed, deterministic version (see demo_research.cpp), while a live
+// FootprintLiveSource starts its own counter near 0 too - so "version 1"
+// can legitimately mean either "the demo fixture" or "a live source's first
+// publish". Without `state` disambiguating them, switching from demo to a
+// freshly-connected live source (or back) could hit a coincidental version
+// match and silently reuse the WRONG source's cached bounds - exactly the
+// kind of dishonest-display bug the DeskDataState contract elsewhere in the
+// desk exists to prevent.
+struct FootprintBoundsCache
+{
+    DeskDataState state = DeskDataState::unavailable;
+    std::uint64_t version = 0;
+    bool has_value = false;
+    FootprintDataBounds bounds{};
+};
+
+// Caches draw_footprint_canvas()'s viewport-culled bar index list and heat-
+// intensity normalization max. Both are recomputed together from the same
+// inputs - footprint data (state, version) and the camera's visible TIME
+// range only (culling in draw_footprint_canvas is time-only, never
+// price-filtered) - so one staleness check covers both. See
+// FootprintBoundsCache's comment for why `state` is part of the key, not
+// just `version`. `visible_indices`' storage persists across frames
+// (cleared, not reallocated) to avoid a per-frame heap allocation once
+// capacity stabilizes.
+struct FootprintViewportCache
+{
+    DeskDataState state = DeskDataState::unavailable;
+    std::uint64_t version = 0;
+    std::int64_t time_min_ms = 0;
+    std::int64_t time_max_ms = 0;
+    bool has_value = false;
+    std::vector<std::size_t> visible_indices;
+    double max_total_all = 1.0;
+};
+
 // Bundles the camera + settings + the real aggregator behind the footprint
 // demo fixture. footprint.md §2.2's own definition of raw-frame replay -
 // "use the same parser and aggregator ... perform no REST requests and
@@ -66,6 +123,12 @@ struct FootprintDemoState
     FootprintPanelSettings settings;
     truetest::footprint::FootprintAggregator aggregator;
     std::vector<truetest::footprint::PublicTrade> trades;
+    // Per-frame recompute caches for the footprint canvas - see
+    // FootprintBoundsCache/FootprintViewportCache above. Named generically
+    // (not "demo_*") because they cache whatever ResearchPresentation is
+    // currently active, demo or external live source alike.
+    FootprintBoundsCache bounds_cache;
+    FootprintViewportCache viewport_cache;
 
     // Rebuilds `aggregator`'s config from `settings` and replays `trades`
     // into it from scratch. Call whenever an aggregation-affecting setting
