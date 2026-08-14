@@ -98,44 +98,49 @@ reports/phase0/ contains the evidence machinery (README for layout, PROGRESS.md 
 
 ## 5. Build & CMake Reference (from instructions.md + AGENTS.md + perf docs)
 
-**Minimal (zero external deps)** — ad-hoc tree `build/`:
+**Canonical path:** CMake presets → `out/build/<preset>/`. Prefer **one warm tree** for daily work. Ad-hoc `build/` is legacy/one-off only — do not keep it warm in parallel with presets (each tree re-builds FetchContent `_deps/`, typically 0.5–2 GB).
+
+**Minimal tests tree:**
 ```bash
-cmake -B build
-cmake --build build
+cmake --preset linux-tests
+cmake --build --preset linux-tests -j --target engine_backtest truetest_tests
+ctest --test-dir out/build/linux-tests --output-on-failure
 ```
-Produces `engine_backtest`, `engine_shadow`, `engine_live` (distinct `TT_TARGET`).
+Produces `engine_backtest`, `engine_shadow`, `engine_live` (distinct `TT_TARGET`) under `out/build/linux-tests/`.
 
 **Source registration:** Core and test source lists live in `cmake/Sources.cmake` (the single obvious place to register a new strategy, simulation component, or test). Optional venue/backend `.cpp` files are wired in `cmake/Dependencies.cmake` under `if(ENABLE_*)`. No directory globs.
 
 **Path contract:**
-| Style | Configure | Binary dir |
-|-------|-----------|------------|
-| Preset | `cmake --preset linux-tests` | `out/build/linux-tests` |
-| Ad-hoc | `cmake -B build -DBUILD_TESTS=ON` | `build/` |
+| Style | Configure | Binary dir | When |
+|-------|-----------|------------|------|
+| Preset (preferred) | `cmake --preset linux-tests` | `out/build/linux-tests` | Daily tests / CI-shaped work |
+| Daily desk | `cmake --preset linux-dev` | `out/build/linux-dev` | Shadow + ImGui + venues (also `./launch-default.sh`) |
+| Ad-hoc (avoid multi-tree) | `cmake -B build -DBUILD_TESTS=ON` | `build/` | One-off only; delete when done |
 
 Matching build presets exist so `cmake --build --preset <name>` works with the preset `binaryDir`.
 
-**Full-featured** (or use presets for common combos):
+**Disk budget / cleanup:**
 ```bash
-cmake -B build \
-  -DENABLE_BINANCE=ON \
-  -DENABLE_BITGET=ON \
-  -DENABLE_BITUNIX=ON \
-  -DENABLE_QUESTDB=ON \
-  -DENABLE_LIVE_DATA=ON \
-  -DENABLE_DEBUG=ON \
-  -DENABLE_NATIVE_OPT=ON \
-  -DBUILD_TESTS=ON \
-  -DENABLE_BENCHMARKS=ON \
-  -DBUILD_SHARED_LIB=ON
-cmake --build build -j$(nproc)
-ctest --test-dir build
+./scripts/clean-builds.sh                         # list sizes (dry-run)
+./scripts/clean-builds.sh --keep linux-tests --apply
+./scripts/clean-builds.sh --keep linux-tests --keep linux-dev --apply
+./scripts/clean-builds.sh --stale 14 --apply      # drop trees idle ≥ 14 days
+./scripts/clean-builds.sh --all --apply           # wipe every local build tree
+```
+Keep ≤ 1–2 warm trees. Drop ASAN/TSAN/bench trees after the session that needed them.
+
+**Full-featured one-off** (prefer a named preset when possible):
+```bash
+cmake --preset linux-providers-questdb
+cmake --build --preset linux-providers-questdb -j$(nproc)
+ctest --test-dir out/build/linux-providers-questdb
 ```
 
-**CMake Presets** (recommended for real combinations):
+**CMake Presets** (recommended combinations):
 ```bash
 cmake --list-presets
 cmake --preset linux-tests && cmake --build --preset linux-tests -j
+cmake --preset linux-dev               # venues + ImGui + live data + tests (daily desk)
 cmake --preset linux-binance-questdb   # Binance + QuestDB + tests
 cmake --preset linux-bitget            # Bitget UTA
 cmake --preset linux-bitunix           # Bitunix MD/shadow

@@ -129,6 +129,13 @@ Core third-party headers/libs for a minimal CSV backtest are **FetchContent**-pu
 
 Primary development and CI target. Prefer **CMake presets** → binaries in `out/build/<preset>/`.
 
+**Disk budget:** each preset/ad-hoc tree re-builds FetchContent deps and is often **0.5–2 GB**. Keep **≤ 1–2 warm trees** (typically `linux-tests`, optionally `linux-dev` for desk/shadow). Do not leave `build/`, `build-dev/`, and several `out/build/*` trees around at once. Cleanup:
+
+```bash
+./scripts/clean-builds.sh                              # dry-run list
+./scripts/clean-builds.sh --keep linux-tests --apply   # drop everything else
+```
+
 #### Arch Linux / Manjaro / EndeavourOS
 
 ```bash
@@ -180,12 +187,21 @@ cmake --build --preset linux-tests -j"$(nproc)"
 # binaries: out/build/linux-tests/engine_*
 ```
 
-Ad-hoc tree (docs/scripts often use `build/`):
+Daily desk/shadow (venues + ImGui) — **one** tree, not a second `build-dev/`:
+
+```bash
+cmake --preset linux-dev
+cmake --build --preset linux-dev -j"$(nproc)" --target engine_shadow truetest_tests
+# or: ./launch-default.sh
+```
+
+Ad-hoc `build/` is legacy/one-off only (do not keep warm next to presets):
 
 ```bash
 cmake -B build -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
+# when finished: rm -rf build   # or ./scripts/clean-builds.sh --keep linux-tests --apply
 ```
 
 #### Fedora / RHEL / Alma / Rocky
