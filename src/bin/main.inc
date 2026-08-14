@@ -2259,13 +2259,11 @@ static int run_provider_mode(const cli_options& o)
         truetest::ui::dashboard_config dcfg;
         // --no-tui overrides --status-format.
         std::string sf = o.no_tui ? std::string("plain") : o.status_format;
-#ifdef HAS_IMGUI_DESK
-        // ConsoleDashboard::resolve_mode() folds this into plain instead of
-        // tui (see dashboard_config::desk_active) - without it,
-        // dashboard->is_tui() could still come back true with --desk set,
-        // which used to silently start neither tui nor plain output below.
-        dcfg.desk_active = o.desk;
-#endif
+        // desk_active is NOT set from o.desk here. If --desk is requested but
+        // the GL window fails to start, we still want tui/auto to resolve to
+        // a terminal TUI (rich or simple). set_desk_active(true) runs only
+        // after DeskApp::start() succeeds (see below) so a live desk and the
+        // box/ncurses TUI never share the terminal.
         if      (sf == "auto")   dcfg.mode = truetest::ui::output_mode::auto_detect;
         else if (sf == "tui")    dcfg.mode = truetest::ui::output_mode::tui;
         else if (sf == "plain")  dcfg.mode = truetest::ui::output_mode::plain;
@@ -2426,8 +2424,17 @@ static int run_provider_mode(const cli_options& o)
             if (!imgui_desk->start())
             {
                 std::cerr << "  ! --desk: failed to start ImGui window; "
-                             "continuing without desk\n";
+                             "falling back to terminal status "
+                             "(rich/simple TUI if --status-format allows)\n";
                 imgui_desk.reset();
+            }
+            else if (dashboard)
+            {
+                // Desk owns the interactive UX — fold tui/auto to plain so
+                // ConsoleDashboard does not cursor-hop the same terminal.
+                // Only after a successful start(); on failure we leave the
+                // original resolve so operators still get a TUI.
+                dashboard->set_desk_active(true);
             }
         }
 #endif
@@ -2440,6 +2447,8 @@ static int run_provider_mode(const cli_options& o)
         // ncurses-free render_tui() (see dashboard->start() below) - the
         // only way to reach that surface on these binaries, since this
         // condition would otherwise always prefer the rich TUI.
+        // After a successful --desk start, set_desk_active(true) made
+        // is_tui() false so this branch correctly stays off.
         std::unique_ptr<truetest::ui::TabbedDashboard> rich_tui;
         if (dashboard && truetest::target_uses_rich_tui()
             && dashboard->is_tui()
@@ -2469,13 +2478,11 @@ static int run_provider_mode(const cli_options& o)
 #endif
             {
                 // rich_tui is null here - either target_uses_rich_tui() is
-                // false, --simple-tui was passed, or dcfg.mode was already
-                // forced to plain above because --desk is active (so
-                // dashboard->is_tui() is false too in that case). Either
-                // way dashboard->start() below is safe to call
-                // unconditionally: it runs render_tui()/render_plain()/
-                // render_ndjson() per whatever dcfg.mode actually resolved
-                // to, never fighting a GL window for the terminal.
+                // false, --simple-tui was passed, desk is running (mode
+                // folded to plain via set_desk_active), or status was
+                // already plain/ndjson/off. dashboard->start() is safe:
+                // it runs render_tui()/render_plain()/render_ndjson() per
+                // the resolved mode, never fighting a live GL window.
                 dashboard->render_banner();
                 dashboard->push_event(
                     truetest::ui::event_severity::notice,

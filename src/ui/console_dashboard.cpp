@@ -66,6 +66,13 @@ output_mode ConsoleDashboard::resolve_mode(output_mode requested, bool desk_acti
     return output_mode::plain;
 }
 
+void ConsoleDashboard::set_desk_active(bool active)
+{
+    // Render thread is not running yet (callers must invoke before start()).
+    cfg_.desk_active = active;
+    resolved_mode_ = resolve_mode(cfg_.mode, cfg_.desk_active);
+}
+
 ConsoleDashboard::ConsoleDashboard(dashboard_config cfg)
     : cfg_(std::move(cfg))
     , resolved_mode_(resolve_mode(cfg_.mode, cfg_.desk_active))

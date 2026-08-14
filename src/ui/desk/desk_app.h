@@ -57,6 +57,10 @@ public:
     // partial wiring, never a blanket LIVE/DEMO label). Call before start().
     void set_live_footprint_source(std::shared_ptr<FootprintLiveSource> source);
 
+    // Spawns the desk thread and waits until post-init research succeeds
+    // (start_ok_). Returns false on GLFW/ImGui/post-init failure or timeout;
+    // on false the worker is joined so a later start() is safe. Desk-thread
+    // exceptions are caught so they do not std::terminate the engine process.
     bool start();
     void stop();
     bool is_running() const { return running_.load(std::memory_order_acquire); }

@@ -147,6 +147,15 @@ public:
 
     bool is_tui() const { return resolved_mode_ == output_mode::tui; }
 
+    // Re-run resolve_mode() after construction. Used when --desk was
+    // requested but the GL window failed to start: callers leave
+    // desk_active=false at construction so tui/auto can still become a
+    // terminal TUI, then call set_desk_active(true) only after DeskApp
+    // start() succeeds so the box TUI never fights a live GL window.
+    // Must be called before start() — the render thread reads
+    // resolved_mode_ without a lock.
+    void set_desk_active(bool active);
+
     // Public view of one recent event - used by the rich (ncurses)
     // dashboard, which can't read the private seqlocked storage directly.
     struct recent_event_view

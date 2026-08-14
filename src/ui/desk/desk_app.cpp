@@ -186,18 +186,37 @@ bool DeskApp::start()
 {
     bool expected = false;
     if (!running_.compare_exchange_strong(expected, true))
-        return is_running();
+        return start_ok_.load(std::memory_order_acquire);
+
+    // Prior run may have exited cleanly (window close / frame-error budget)
+    // with running_ already false but thread_ still joinable. Join before
+    // reassign — assigning over a joinable std::thread is std::terminate.
+    if (thread_.joinable())
+        thread_.join();
 
     start_ok_.store(false, std::memory_order_release);
     thread_ = std::thread([this] { render_loop(); });
 
+    // Wait until post-init research setup finishes (or the desk thread
+    // aborts). Success is start_ok_ only — a still-running thread is not
+    // enough (that previously let start() return true before post-init).
     for (int i = 0; i < 150 && running_.load(std::memory_order_acquire); ++i)
     {
         if (start_ok_.load(std::memory_order_acquire))
             return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    return running_.load(std::memory_order_acquire);
+
+    if (start_ok_.load(std::memory_order_acquire))
+        return true;
+
+    // Fail-closed: join the worker so a later start() cannot assign over a
+    // still-joinable std::thread (which would std::terminate). stop() is
+    // safe if the worker already cleared running_.
+    running_.store(false, std::memory_order_release);
+    if (thread_.joinable())
+        thread_.join();
+    return false;
 }
 
 void DeskApp::stop()
@@ -276,6 +295,7 @@ void DeskApp::apply_fonts(float content_scale)
 
 void DeskApp::render_loop()
 {
+    consecutive_frame_errors_ = 0;
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfw_init_for_desk())
     {
@@ -342,148 +362,183 @@ void DeskApp::render_loop()
         }
     }
 
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImPlot::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    io.ConfigWindowsMoveFromTitleBarOnly = true;
-    // Defends the render-loop catch block below: EndFrame() already calls
-    // ImGui's internal ErrorRecoveryTryToRecoverState() when
-    // ConfigErrorRecovery is on (default true, set explicitly here for
-    // clarity), which rebalances any Begin/PushID/PushStyleColor stacks
-    // left open by a mid-frame exception. Left at its own default
-    // (ConfigErrorRecoveryEnableAssert=true), that recovery still calls
-    // IM_ASSERT on the way out - an abort in assert-enabled builds, exactly
-    // the crash the catch block exists to prevent. Disabling just the
-    // assert keeps the stack-rebalancing recovery and the debug log line,
-    // without defeating render_loop()'s "one dropped frame, not a crash"
-    // contract for this specific class of fault.
-    io.ConfigErrorRecovery = true;
-    io.ConfigErrorRecoveryEnableAssert = false;
-    io.IniFilename = desk_layout_ini_filename;
-
-    theme::apply();
-    float content_scale_x = 1.0f;
-    float content_scale_y = 1.0f;
-    glfwGetWindowContentScale(window, &content_scale_x, &content_scale_y);
-    const float content_scale = std::clamp(std::max(content_scale_x, content_scale_y),
-                                           1.0f, 2.5f);
-    theme::set_ui_scale(content_scale);
-    if (content_scale > 1.0f)
-        ImGui::GetStyle().ScaleAllSizes(content_scale);
-    apply_fonts(content_scale);
-
-    ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL3_Init(glsl_version);
-
-    start_ok_.store(true, std::memory_order_release);
-
-    dashboard_snapshot snap{};
-    demo_research_ = make_demo_research_presentation();
-    refresh_demo_footprint();
-    refresh_live_footprint();
-    bool has_snap = false;
-    auto next_poll = std::chrono::steady_clock::now();
-
-    while (running_.load(std::memory_order_acquire) && !glfwWindowShouldClose(window))
+    // Outer try covers ImGui setup (apply_fonts can allocate/throw) through
+    // the frame loop so an uncaught exception cannot unwind this std::thread
+    // into process std::terminate. Cleanup is staged: never call backend
+    // Shutdown without Init (ImGui asserts / UB), and destroy contexts only
+    // if CreateContext ran.
+    bool imgui_ctx = false;
+    bool implot_ctx = false;
+    bool imgui_backends = false;
+    try
     {
-        glfwPollEvents();
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        imgui_ctx = true;
+        ImPlot::CreateContext();
+        implot_ctx = true;
 
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= next_poll)
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        io.ConfigWindowsMoveFromTitleBarOnly = true;
+        // Keep ErrorRecovery stack rebalance; disable its IM_ASSERT abort so
+        // mid-frame faults cost one dropped frame rather than process death.
+        io.ConfigErrorRecovery = true;
+        io.ConfigErrorRecoveryEnableAssert = false;
+        io.IniFilename = desk_layout_ini_filename;
+
+        theme::apply();
+        float content_scale_x = 1.0f;
+        float content_scale_y = 1.0f;
+        glfwGetWindowContentScale(window, &content_scale_x, &content_scale_y);
+        const float content_scale = std::clamp(std::max(content_scale_x, content_scale_y),
+                                               1.0f, 2.5f);
+        theme::set_ui_scale(content_scale);
+        if (content_scale > 1.0f)
+            ImGui::GetStyle().ScaleAllSizes(content_scale);
+        apply_fonts(content_scale);
+
+        ImGui_ImplGlfw_InitForOpenGL(window, true);
+        ImGui_ImplOpenGL3_Init(glsl_version);
+        imgui_backends = true;
+
+        dashboard_snapshot snap{};
+        // Post-init allocates demo research + optional live footprint.
+        // start_ok_ only after this succeeds.
+        if (!guarded_call("post-init research", [&] {
+                demo_research_ = make_demo_research_presentation();
+                refresh_demo_footprint();
+                refresh_live_footprint();
+            }))
         {
-            // snap_fn_/research_fn_ are the one place engine-adjacent code
-            // runs on this thread. They execute outside ImGui's frame scope,
-            // so a thrown exception here is cleanly recoverable: log, fall
-            // back to "no data this tick", toast, and keep the desk running.
-            // Separate try/catch per call - not one block wrapping both -
-            // so a research_fn_ fault doesn't discard a snap_fn_ result
-            // that already succeeded moments earlier in the same tick.
-            if (!guarded_call("snapshot callback", [&] {
-                    if (snap_fn_)
+            std::fprintf(stderr,
+                         "[desk] post-init research failed — desk disabled "
+                         "(engine keeps running headless)\n");
+            running_.store(false, std::memory_order_release);
+        }
+        else
+        {
+            start_ok_.store(true, std::memory_order_release);
+
+            bool has_snap = false;
+            auto next_poll = std::chrono::steady_clock::now();
+
+            while (running_.load(std::memory_order_acquire)
+                   && !glfwWindowShouldClose(window))
+            {
+                glfwPollEvents();
+
+                const auto now = std::chrono::steady_clock::now();
+                if (now >= next_poll)
+                {
+                    // Engine-adjacent / allocating sites outside ImGui frame
+                    // scope — recoverable via guarded_call + toast.
+                    if (!guarded_call("snapshot callback", [&] {
+                            if (snap_fn_)
+                            {
+                                has_snap = snap_fn_(snap);
+                                if (has_snap)
+                                    monitor_telemetry_.merge(snap, data_.get(), now);
+                            }
+                        }))
                     {
-                        has_snap = snap_fn_(snap);
-                        if (has_snap)
-                            monitor_telemetry_.merge(snap, data_.get(), now);
+                        has_snap = false;
+                        show_toast("Snapshot callback error — see stderr");
                     }
-                }))
-            {
-                has_snap = false;
-                show_toast("Snapshot callback error — see stderr");
-            }
 
-            if (!guarded_call("research callback", [&] {
-                    external_research_ = research_fn_ ? research_fn_() : research_view_handle{};
-                }))
-            {
-                external_research_ = research_view_handle{};
-                show_toast("Research callback error — see stderr");
+                    if (!guarded_call("research callback", [&] {
+                            external_research_ = research_fn_
+                                ? research_fn_()
+                                : research_view_handle{};
+                        }))
+                    {
+                        external_research_ = research_view_handle{};
+                        show_toast("Research callback error — see stderr");
+                    }
+
+                    // Before draw_frame() captures research this iteration.
+                    if (!guarded_call("live footprint poll",
+                                     [&] { refresh_live_footprint(); }))
+                    {
+                        show_toast("Live footprint poll error — see stderr");
+                    }
+                    next_poll = now + tick_;
+                }
+
+                ImGui_ImplOpenGL3_NewFrame();
+                ImGui_ImplGlfw_NewFrame();
+                ImGui::NewFrame();
+
+                // Mid-frame throws: skip present; EndFrame rebalances stacks
+                // (ConfigErrorRecovery). Repeated faults shut desk thread only.
+                const bool frame_ok = guarded_call("frame draw", [&] {
+                    handle_hotkeys();
+                    draw_frame(has_snap ? &snap : nullptr, has_snap);
+                    draw_command_palette();
+                });
+
+                if (!frame_ok)
+                {
+                    ++consecutive_frame_errors_;
+                    show_toast("Frame draw error — see stderr");
+                    try { ImGui::EndFrame(); } catch (...) {}
+
+                    static constexpr int kMaxConsecutiveFrameErrors = 5;
+                    if (consecutive_frame_errors_ >= kMaxConsecutiveFrameErrors)
+                    {
+                        std::fprintf(stderr,
+                                     "[desk] %d consecutive frame errors — shutting "
+                                     "down desk thread (engine keeps running "
+                                     "headless)\n",
+                                     consecutive_frame_errors_);
+                        running_.store(false, std::memory_order_release);
+                        break;
+                    }
+                    continue;
+                }
+                consecutive_frame_errors_ = 0;
+
+                ImGui::Render();
+                int dw = 0, dh = 0;
+                glfwGetFramebufferSize(window, &dw, &dh);
+                glViewport(0, 0, dw, dh);
+                const ImVec4 clear = theme::bg0();
+                glClearColor(clear.x, clear.y, clear.z, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+                glfwSwapBuffers(window);
             }
-            refresh_live_footprint(); // safe here - before this iteration's draw_frame() captures `research`
-            next_poll = now + tick_;
         }
-
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
-
-        // Dear ImGui is not exception-safe mid-frame (per its own FAQ): a
-        // throw here can leave Begin/End or ID-stack state unbalanced. We
-        // can't safely recover *within* the corrupted frame, so on catch we
-        // skip presenting this frame entirely and let EndFrame() below do
-        // the real recovery: with ConfigErrorRecovery on (set at init,
-        // above) it calls ImGui's own ErrorRecoveryTryToRecoverState()
-        // internally, rebalancing any stack a mid-frame throw left open, so
-        // the next NewFrame() starts clean rather than merely not-asserting.
-        // Escalates to a clean thread shutdown if frame exceptions keep
-        // happening rather than risk compounding corruption forever anyway.
-        // A single transient throw still just costs one dropped frame; the
-        // engine itself is never touched by this thread.
-        const bool frame_ok = guarded_call("frame draw", [&] {
-            handle_hotkeys();
-            draw_frame(has_snap ? &snap : nullptr, has_snap);
-            draw_command_palette();
-        });
-
-        if (!frame_ok)
-        {
-            ++consecutive_frame_errors_;
-            show_toast("Frame draw error — see stderr");
-            try { ImGui::EndFrame(); } catch (...) {}
-
-            static constexpr int kMaxConsecutiveFrameErrors = 5;
-            if (consecutive_frame_errors_ >= kMaxConsecutiveFrameErrors)
-            {
-                std::fprintf(stderr,
-                             "[desk] %d consecutive frame errors — shutting down desk "
-                             "thread (engine keeps running headless)\n",
-                             consecutive_frame_errors_);
-                running_.store(false, std::memory_order_release);
-                break;
-            }
-            continue; // don't present a possibly-corrupted frame
-        }
-        consecutive_frame_errors_ = 0;
-
-        ImGui::Render();
-        int dw = 0, dh = 0;
-        glfwGetFramebufferSize(window, &dw, &dh);
-        glViewport(0, 0, dw, dh);
-        const ImVec4 clear = theme::bg0();
-        glClearColor(clear.x, clear.y, clear.z, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        glfwSwapBuffers(window);
+    }
+    catch (const std::exception& e)
+    {
+        std::fprintf(stderr,
+                     "[desk] render_loop uncaught: %s — shutting down desk "
+                     "thread (engine keeps running headless)\n",
+                     e.what());
+        running_.store(false, std::memory_order_release);
+    }
+    catch (...)
+    {
+        std::fprintf(stderr,
+                     "[desk] render_loop uncaught non-std exception — shutting "
+                     "down desk thread (engine keeps running headless)\n");
+        running_.store(false, std::memory_order_release);
     }
 
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImPlot::DestroyContext();
-    ImGui::DestroyContext();
+    if (imgui_backends)
+    {
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplGlfw_Shutdown();
+    }
+    if (implot_ctx)
+        ImPlot::DestroyContext();
+    if (imgui_ctx)
+        ImGui::DestroyContext();
     glfwDestroyWindow(window);
     glfwTerminate();
+    start_ok_.store(false, std::memory_order_release);
     running_.store(false, std::memory_order_release);
 }
 
