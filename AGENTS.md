@@ -31,33 +31,44 @@ C++ standard: **C++23**. Build system: CMake + `cmake/Sources.cmake` (no globs) 
 ./scripts/check-layer-deps.sh
 ./scripts/check-live-safety-freeze.sh
 
-# Tests — pick ONE tree and stay consistent:
-#   Presets → out/build/<preset>/   |   ad-hoc → build/
+# Tests — pick ONE preset tree and stay consistent (prefer presets, not ad-hoc build/):
 cmake --preset linux-tests
-cmake --build --preset linux-tests -j
+cmake --build --preset linux-tests -j --target engine_backtest truetest_tests
 ctest --test-dir out/build/linux-tests --output-on-failure
-# or ad-hoc:
-#   cmake -B build -DBUILD_TESTS=ON && cmake --build build -j
-#   ctest --test-dir build --output-on-failure
+
+# Daily desk/shadow (venues + ImGui) — single warm tree, not build-dev/:
+# cmake --preset linux-dev && cmake --build --preset linux-dev -j --target engine_shadow truetest_tests
 
 # Hot-path focus
 ctest --test-dir out/build/linux-tests -R 'hotpath|Hotpath|ObjectPool|Ring' --output-on-failure
 
-# ASAN when touching pools/rings/lifetime
+# ASAN when touching pools/rings/lifetime (delete tree after; do not keep warm forever)
 cmake --preset linux-asan && cmake --build --preset linux-asan -j
+# ./scripts/clean-builds.sh --keep linux-tests --apply   # drop asan/extra trees
 
-# Benchmarks (perf claims only)
-cmake -B build -DENABLE_BENCHMARKS=ON -DENABLE_NATIVE_OPT=ON
-cmake --build build --target truetest_benchmarks -j
-./build/truetest_benchmarks --benchmark_filter='Orderbook|Engine_Throughput|HotPath'
+# Benchmarks (perf claims only) — reuse preset tree, avoid a second forest:
+cmake --preset linux-benchmarks && cmake --build --preset linux-benchmarks -j --target truetest_benchmarks
+./out/build/linux-benchmarks/truetest_benchmarks --benchmark_filter='Orderbook|Engine_Throughput|HotPath'
 ```
+
+### Disk budget (build trees)
+
+Each CMake preset/`build-*` dir re-builds FetchContent deps (`_deps/`) and is typically **0.5–2 GB**. Keeping many warm trees (e.g. `build/` + `build-dev/` + several `out/build/*`) multiplies to tens of GB.
+
+| Rule | Detail |
+|------|--------|
+| Warm trees | **≤ 1–2** (usually `linux-tests` and optionally `linux-dev`) |
+| Prefer | `cmake --preset …` → `out/build/<preset>/` |
+| Avoid | Parallel ad-hoc `build/`, `build-dev/`, `build-asan/` beside presets |
+| Cleanup | `./scripts/clean-builds.sh` (dry-run) then `--keep linux-tests --apply` |
+| Sanitizers | Build on demand; remove with clean-builds after the session |
 
 **After any edit under `src/`**: run the three check scripts. Do not ask.
 
 Headless reproducible backtest (R&D / backend):
 
 ```bash
-./build/engine_backtest \
+./out/build/linux-tests/engine_backtest \
   --provider synthetic \
   --strategy sma \
   --seed 424242 \
