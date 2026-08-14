@@ -82,3 +82,74 @@ TEST(ConsoleFormat, TotalRingDropsSumsAllSixCounters)
     s.ring_drops_mm.store(6);
     EXPECT_EQ(total_ring_drops(s), 21u);
 }
+
+// desk_active folds tui/auto into plain so the GL desk never shares the
+// terminal with ConsoleDashboard's cursor-hop TUI. resolve_mode is private;
+// is_tui() is the public contract main.inc / TabbedDashboard gate on.
+TEST(ConsoleDashboardMode, DeskActiveForcesPlainFromExplicitTui)
+{
+    truetest::ui::dashboard_config cfg;
+    cfg.mode = truetest::ui::output_mode::tui;
+    cfg.desk_active = true;
+    truetest::ui::ConsoleDashboard dash(std::move(cfg));
+    EXPECT_FALSE(dash.is_tui());
+}
+
+TEST(ConsoleDashboardMode, DeskActiveForcesPlainFromAutoDetect)
+{
+    // auto_detect would normally become tui on a color TTY; desk_active must
+    // short-circuit before the TTY probe so CI/headless and real desks agree.
+    truetest::ui::dashboard_config cfg;
+    cfg.mode = truetest::ui::output_mode::auto_detect;
+    cfg.desk_active = true;
+    truetest::ui::ConsoleDashboard dash(std::move(cfg));
+    EXPECT_FALSE(dash.is_tui());
+}
+
+TEST(ConsoleDashboardMode, DeskActiveLeavesNdjsonPlainAndOffAlone)
+{
+    for (auto mode : {truetest::ui::output_mode::ndjson,
+                      truetest::ui::output_mode::plain,
+                      truetest::ui::output_mode::off})
+    {
+        truetest::ui::dashboard_config cfg;
+        cfg.mode = mode;
+        cfg.desk_active = true;
+        truetest::ui::ConsoleDashboard dash(std::move(cfg));
+        EXPECT_FALSE(dash.is_tui()) << "mode=" << static_cast<int>(mode);
+    }
+}
+
+TEST(ConsoleDashboardMode, ExplicitTuiWithoutDeskStaysTui)
+{
+    truetest::ui::dashboard_config cfg;
+    cfg.mode = truetest::ui::output_mode::tui;
+    cfg.desk_active = false;
+    truetest::ui::ConsoleDashboard dash(std::move(cfg));
+    EXPECT_TRUE(dash.is_tui());
+}
+
+// main.inc constructs with desk_active=false, then set_desk_active(true)
+// only after DeskApp::start() succeeds — so a failed desk still leaves a
+// terminal TUI available.
+TEST(ConsoleDashboardMode, SetDeskActiveAfterConstructFoldsTui)
+{
+    truetest::ui::dashboard_config cfg;
+    cfg.mode = truetest::ui::output_mode::tui;
+    cfg.desk_active = false;
+    truetest::ui::ConsoleDashboard dash(std::move(cfg));
+    ASSERT_TRUE(dash.is_tui());
+    dash.set_desk_active(true);
+    EXPECT_FALSE(dash.is_tui());
+}
+
+TEST(ConsoleDashboardMode, SetDeskActiveFalseRestoresExplicitTui)
+{
+    truetest::ui::dashboard_config cfg;
+    cfg.mode = truetest::ui::output_mode::tui;
+    cfg.desk_active = true;
+    truetest::ui::ConsoleDashboard dash(std::move(cfg));
+    ASSERT_FALSE(dash.is_tui());
+    dash.set_desk_active(false);
+    EXPECT_TRUE(dash.is_tui());
+}

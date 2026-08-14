@@ -103,6 +103,32 @@ TEST(CLI, InvalidModeDetectedByDryRun)
     EXPECT_NE(out.find("Unknown mode"), std::string::npos);
 }
 
+// --simple-tui opts ConsoleDashboard's ANSI-box TUI over TabbedDashboard on
+// shadow/live. Smoke: flag is registered on backtest + live (cli_tests
+// depends on those two) and accepted by dry-run; runtime TUI selection is
+// main.inc wiring exercised via ConsoleDashboardMode unit tests.
+TEST(CLI, SimpleTuiFlagInHelpOnBacktestAndLive)
+{
+    std::string out;
+    int rc = run_truetest("--help", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("--simple-tui"), std::string::npos);
+
+    out.clear();
+    rc = run_engine_live("--help", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("--simple-tui"), std::string::npos);
+}
+
+TEST(CLI, SimpleTuiAcceptedOnDryRun)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--dry-run --strategy sma --provider synthetic --simple-tui", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(out.find("not expected"), std::string::npos);
+}
+
 // ─── B2: JSON config file ──────────────────────────────────────────────────
 
 TEST(ConfigFile, LoadsValuesFromJSON)
