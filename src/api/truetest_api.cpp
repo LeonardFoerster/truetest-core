@@ -7,6 +7,7 @@
 #include "data/data_handler.h"
 #include "data/data_wrapper.h"
 #include "data/market_series.h"
+#include "strategy/strategy_interface.h"
 #include "strategy/strategy_registry.h"
 
 #include <nlohmann/json.hpp>

@@ -19,6 +19,7 @@
 
 #include "engine/engine.h"
 #include "engine/engine_config.h"
+#include "engine/live_safety_session.h"
 #include "core/event_log.h"
 #include "core/tt_target.h"
 #include "data/data_source.h"
@@ -46,6 +47,7 @@
 #include "presets/preset.h"
 
 #include "providers/provider_registry.h"
+#include "bin/provider_open_policy.h"
 #include "providers/data_bridge.h"
 #include "providers/provider_sink.h"
 #include "providers/local/csv_parser.h"
@@ -93,8 +95,6 @@
 #include "web/report_json.h"
 #endif
 
-static std::atomic<DataBridge<tick_record>*> g_tick_bridge{nullptr};
-static std::atomic<DataBridge<bar_record>*> g_bar_bridge{nullptr};
 #ifdef HAS_WEB
 // Set by SIGINT/SIGTERM so a post-backtest web session can serve the final
 // report until the operator exits.
@@ -102,41 +102,10 @@ static std::atomic<bool> g_web_stop{false};
 #endif
 static void install_shutdown_handler()
 {
-    std::signal(SIGINT, [](int) {
-        if (auto* tb = g_tick_bridge.load(std::memory_order_acquire)) tb->stop();
-        if (auto* bb = g_bar_bridge.load(std::memory_order_acquire)) bb->stop();
-    });
-    std::signal(SIGTERM, [](int) {
-        if (auto* tb = g_tick_bridge.load(std::memory_order_acquire)) tb->stop();
-        if (auto* bb = g_bar_bridge.load(std::memory_order_acquire)) bb->stop();
-    });
+    truetest::bin::reset_shutdown_signal();
+    std::signal(SIGINT, truetest::bin::mark_shutdown_signal);
+    std::signal(SIGTERM, truetest::bin::mark_shutdown_signal);
 }
-
-class provider_close_guard
-{
-public:
-    explicit provider_close_guard(std::shared_ptr<IProvider> provider)
-        : provider_(std::move(provider))
-    {}
-
-    ~provider_close_guard()
-    {
-        if (active_ && provider_)
-        {
-            try { provider_->close(); }
-            catch (...) {}
-        }
-    }
-
-    provider_close_guard(const provider_close_guard&) = delete;
-    provider_close_guard& operator=(const provider_close_guard&) = delete;
-
-    void release() { active_ = false; }
-
-private:
-    std::shared_ptr<IProvider> provider_;
-    bool active_ = true;
-};
 
 // Live-money safety gate. Prints a loud red warning and forces the operator
 // to solve a fresh random addition problem before real orders can be sent.
@@ -340,7 +309,6 @@ struct cli_options
     long        dead_man_countdown_ms = 30000;
     long        dead_man_heartbeat_ms = 0;
     bool        disarm_deadman = false;
-    bool        dms_attempt_position_close = false;  // Phase 3 DMS hardening
 
     double balance = 10000.0;
     double risk_fraction = 0.02;
@@ -491,6 +459,26 @@ static bool validate_binance_futures_live_phase0(const cli_options& o,
                                                  std::ostream& errors,
                                                  std::ostream& warnings)
 {
+    if (!std::isfinite(o.min_liquidation_distance_pct)
+        || (o.min_liquidation_distance_pct < 0.0
+            && o.min_liquidation_distance_pct != -1.0)
+        || o.min_liquidation_distance_pct > 1.0)
+    {
+        errors << "  ! --min-liq-distance-pct must be a finite fraction in "
+                  "[0,1] (use 0.07 for 7%).\n";
+        return false;
+    }
+    if (o.dead_man_countdown_ms < 0 || o.dead_man_heartbeat_ms < 0
+        || (o.dead_man_countdown_ms == 0 && o.dead_man_heartbeat_ms > 0)
+        || (o.dead_man_countdown_ms > 0 && o.dead_man_heartbeat_ms > 0
+            && o.dead_man_heartbeat_ms >= o.dead_man_countdown_ms))
+    {
+        errors << "  ! Dead-man timing must be non-negative; an explicit "
+                  "heartbeat requires a positive countdown and must be "
+                  "strictly shorter than it.\n";
+        return false;
+    }
+
     const bool resolved_live = (o.mode == "live" || o.live);
     if (!is_futures_live_provider(o.provider_name) || !resolved_live)
         return true;
@@ -837,6 +825,7 @@ static void dump_config(const cli_options& o)
     j["mode"] = o.mode.empty() ? TT_DEFAULT_MODE : o.mode;
     j["balance"] = o.balance;
     j["risk_fraction"] = o.risk_fraction;
+    j["min_liquidation_distance_pct"] = o.min_liquidation_distance_pct;
     j["sl"] = o.sl_pct;
     j["tp"] = o.tp_pct;
     j["exit_policy"] = o.exit_policy;
@@ -909,7 +898,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--mc-model", o.mc_model, "Generator model for Monte Carlo (gbm only; default: gbm)");
     app.add_flag("--mc-parallel", o.mc_parallel, "EXPERIMENTAL: Run MC trials in parallel (Phase 5). Strong warnings apply - see controller docs. Only safe with inline threading preset.");
     app.add_flag("--mc-reuse-objects", o.mc_reuse_objects, "Phase A: Reuse data_handler/strategy (and reset other heavy objects) between MC trials instead of full reconstruction each time.");
-    app.add_option("--strategy", o.strategy, "Strategy: mean-reversion, sma, ma-crossover, breakout, coiled-spring, adaptive-hybrid, structure-continuation");
+    app.add_option("--strategy", o.strategy, "Strategy: mean-reversion, sma, ma-crossover, breakout, coiled-spring, structure-continuation");
     app.add_option("--format", o.format, "Data format: tick, bar");
     app.add_option("--sma-period", o.sma_period, "SMA indicator period")->default_val(20);
     app.add_option("--param", o.params, "Strategy parameter: key=value (repeatable)");
@@ -970,15 +959,6 @@ static void register_cli_options(CLI::App& app, cli_options& o)
         "operator deliberately wants to pause without venue-side "
         "auto-cancel.");
 
-    app.add_flag("--dms-attempt-position-close", o.dms_attempt_position_close,
-        "(futures providers, Phase 3) When the DMS heartbeat thread "
-        "detects persistent failure to refresh the venue countdown, "
-        "attempt a position flatten in addition to the venue "
-        "order-cancel countdown (Binance: reduceOnly MARKET; Bitget: "
-        "close-positions). Hardens DMS into an in-process last-resort "
-        "flattener. Pairs with external tt_watchdog for total process "
-        "death. Default: false.");
-
     app.add_option("--api-key", o.api_key, "API key for exchange");
     app.add_option("--api-secret", o.api_secret, "API secret for exchange");
     app.add_option("--api-passphrase", o.api_passphrase,
@@ -1014,7 +994,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Write a checkpoint every N events (default: 10000)")
        ->default_val(10000);
     app.add_option("--resume", o.resume_path,
-                   "Restore portfolio state from a checkpoint before running");
+                   "Unavailable: v1 checkpoints are diagnostic-only and cannot be resumed");
 
     app.add_option("--backfill", o.backfill, "Historical bars to fetch before streaming")->default_val(500);
     app.add_option("--backfill-interval", o.backfill_interval, "Kline interval for backfill");
@@ -1356,7 +1336,7 @@ static void apply_preset_with_precedence(CLI::App& app, cli_options& opts)
         if (!was_set("--dead-man-heartbeat-ms"))   opts.dead_man_heartbeat_ms = 8000;
         if (!was_set("--max-notional"))            opts.max_notional_usdt = 15000.0;
         if (!was_set("--max-leverage"))            opts.max_leverage = 2.5;
-        if (!was_set("--min-liq-distance-pct"))    opts.min_liquidation_distance_pct = 7.0;
+        if (!was_set("--min-liq-distance-pct"))    opts.min_liquidation_distance_pct = 0.07;
         if (!was_set("--max-daily-loss"))          opts.risk_max_daily_loss = 80.0;
         if (!was_set("--risk-unwind"))             opts.risk_unwind = true;
         return;
@@ -1557,7 +1537,7 @@ static int run_replay_mode(const cli_options& o)
     eng->run_replay(o.replay_path, o.replay_from_us, o.replay_to_us);
     eng->print_summary();
     export_results(eng->get_analytics(), o.output, o.output_format);
-    return 0;
+    return eng->run_succeeded() ? 0 : 1;
 }
 
 // Monte Carlo campaign runner (Phase 3)
@@ -1852,6 +1832,7 @@ static exchange_credentials resolve_exchange_credentials(
 
 static int run_provider_mode(const cli_options& o)
 {
+    bool run_ok = true;
     std::string primary_path = o.provider_path;
     {
         auto comma = primary_path.find(',');
@@ -1895,8 +1876,6 @@ static int run_provider_mode(const cli_options& o)
     pcfg["dead_man_countdown_ms"] = std::to_string(effective_countdown);
     if (o.dead_man_heartbeat_ms > 0)
         pcfg["dead_man_heartbeat_ms"] = std::to_string(o.dead_man_heartbeat_ms);
-    if (o.dms_attempt_position_close)
-        pcfg["dms_attempt_position_close"] = "true";
 
     // === Monte Carlo mode (Phase 3) ===
     if (o.monte_carlo || o.mc_trials > 0) {
@@ -2189,14 +2168,43 @@ static int run_provider_mode(const cli_options& o)
 
     provider->configure(prov_cfg);
 
-    if (provider->has_data_feed() && !provider->open())
+    auto live_safety_session = std::make_shared<LiveSafetySession>(
+        provider, prov_cfg.mode == engine_mode::live,
+        prov_cfg.kill_switch_deadline);
+    prov_cfg.live_safety_session = live_safety_session;
+
+    // Install the async-signal-safe notifier before provider open so a signal
+    // during bounded startup is latched and the session can close partial
+    // venue state instead of relying on the OS default termination path.
+    if (prov_cfg.mode != engine_mode::backtest) install_shutdown_handler();
+    if (!truetest::bin::open_provider_if_required(
+            *provider, *live_safety_session))
     {
         std::cerr << "  ! Provider failed to open.\n";
         return 1;
     }
-    provider_close_guard opened_provider(provider);
 
-    auto transport = provider->get_transport();
+    return truetest::bin::run_provider_session_guarded(
+        *live_safety_session,
+        [&]() -> int {
+
+    auto market_data_feed = provider->get_market_data_feed();
+    const bool provider_advertises_event_stream =
+        provider->supports_event_stream();
+    if ((provider_advertises_event_stream && !market_data_feed)
+        || (market_data_feed && !market_data_feed->ready()))
+    {
+        // This is inside run_provider_session_guarded(). Throw rather than
+        // return so an already-open live provider runs the mandatory
+        // kill-before-finish shutdown sequence.
+        throw std::runtime_error(
+            "provider advertised an incomplete market-data event stream; "
+            "refusing unsafe parser fallback");
+    }
+
+    auto transport = market_data_feed
+        ? market_data_feed->transport
+        : provider->get_transport();
     if (!transport)
         transport = std::make_shared<FileTransport>(primary_path);
 
@@ -2371,8 +2379,6 @@ static int run_provider_mode(const cli_options& o)
         for (auto& es : extra_strategies)
             eng->add_strategy(es.second, es.first);
 
-        install_shutdown_handler();
-
 #ifdef HAS_WEB
         // Streams live snapshots over /stream for the duration of the run;
         // stopped when web_srv leaves scope at the end of this branch.
@@ -2388,13 +2394,9 @@ static int run_provider_mode(const cli_options& o)
             };
             ops.pause_state  = [&eng]() { return eng->is_pause_all(); };
             ops.flatten      = [&eng]() { eng->request_flatten(); };
-            if (provider) {
-                if (auto ks = provider->get_kill_switch()) {
-                    ops.kill = [ks](std::chrono::milliseconds dl) {
-                        return ks->cancel_all_and_flatten(dl);
-                    };
-                }
-            }
+            ops.kill = [&eng](std::chrono::milliseconds dl) {
+                return eng->request_operator_kill(dl);
+            };
             return ops;
         };
 
@@ -2491,15 +2493,15 @@ static int run_provider_mode(const cli_options& o)
             }
         }
 
-        // Unified event-stream path - provider-agnostic. When the provider
-        // advertises it (currently: Binance with --depth-stream set), build
-        // a single DataBridge<provider::event>; L2 frames populate the
-        // engine's orderbook_registry_ directly so LocalBookAdapter can
-        // match against real exchange levels. Otherwise fall back to the
-        // existing specialized bar/tick bridges.
-        if (provider && provider->supports_event_stream())
+        // Unified event-stream path - provider-agnostic. A complete
+        // MarketDataFeed carries the matching parser for this public stream;
+        // L2 frames populate the engine's orderbook_registry_ directly so
+        // LocalBookAdapter can match against real exchange levels. Providers
+        // without such a feed stay on the existing specialized bar/tick
+        // bridges.
+        if (market_data_feed)
         {
-            auto parser = provider->get_event_parser();
+            auto parser = market_data_feed->parser;
             auto bridge = std::make_shared<DataBridge<provider::event>>(
                 transport, parser,
                 [](const provider::event& ev, std::shared_ptr<data_handler> h) {
@@ -2581,6 +2583,7 @@ static int run_provider_mode(const cli_options& o)
             }
 #endif
 
+            truetest::bin::bridge_shutdown_monitor bridge_monitor(bridge);
             eng->run_streaming(bridge);
         }
         else if (is_tick)
@@ -2595,9 +2598,8 @@ static int run_provider_mode(const cli_options& o)
 
             auto bridge = std::make_shared<DataBridge<tick_record>>(
                 transport, parser, tick_record_sink);
-            g_tick_bridge.store(bridge.get(), std::memory_order_release);
+            truetest::bin::bridge_shutdown_monitor bridge_monitor(bridge);
             eng->run_streaming(bridge);
-            g_tick_bridge.store(nullptr, std::memory_order_release);
         }
         else
         {
@@ -2611,9 +2613,8 @@ static int run_provider_mode(const cli_options& o)
 
             auto bridge = std::make_shared<DataBridge<bar_record>>(
                 transport, parser, bar_record_sink);
-            g_bar_bridge.store(bridge.get(), std::memory_order_release);
+            truetest::bin::bridge_shutdown_monitor bridge_monitor(bridge);
             eng->run_streaming(bridge);
-            g_bar_bridge.store(nullptr, std::memory_order_release);
         }
 
         if (dashboard)
@@ -2625,15 +2626,23 @@ static int run_provider_mode(const cli_options& o)
                 dashboard->stop();
         }
 
+        const bool shutdown_ok = eng->finalize_live_shutdown(
+            live_shutdown_reason::normal_end);
+        run_ok = shutdown_ok && eng->run_succeeded();
+
+        // Failed streams and failed shutdowns do not publish a normal
+        // completion summary/export; their partial state is diagnostic only.
         // Skip the multi-line analytics report when the TUI owns stdout -
         // the box on screen is already the report surface, and dumping
         // another fixed-width report below it was the "final analysis
         // windows" complaint. Non-TUI runs still print it. File export
         // via --output is unaffected in either case.
-        if (!dashboard || !dashboard->is_tui())
-            eng->print_summary();
-        export_results(eng->get_analytics(), o.output, o.output_format);
-        opened_provider.release();
+        if (run_ok)
+        {
+            if (!dashboard || !dashboard->is_tui())
+                eng->print_summary();
+            export_results(eng->get_analytics(), o.output, o.output_format);
+        }
     }
     else
     {
@@ -2761,9 +2770,14 @@ static int run_provider_mode(const cli_options& o)
         else
             eng->run();
 
-        eng->print_summary();
-        export_results(eng->get_analytics(), o.output, o.output_format);
-        opened_provider.release();
+        const bool shutdown_ok = eng->finalize_live_shutdown(
+            live_shutdown_reason::normal_end);
+        run_ok = shutdown_ok && eng->run_succeeded();
+        if (run_ok)
+        {
+            eng->print_summary();
+            export_results(eng->get_analytics(), o.output, o.output_format);
+        }
 
 #ifdef HAS_IMGUI_DESK
         if (batch_desk && batch_desk->is_running())
@@ -2793,7 +2807,9 @@ static int run_provider_mode(const cli_options& o)
         }
 #endif
     }
-    return 0;
+    return run_ok ? 0 : 1;
+        },
+        std::cerr);
 }
 
 // Small helper extracted so that the initial frame of run_tui_mode stays tiny.
@@ -3057,6 +3073,18 @@ static int run_tui_configured_engine(const cli_options& o,
     config.reconcile_tolerance_bps = o.reconcile_tolerance_bps;
     config.kill_switch_deadline = std::chrono::milliseconds(o.kill_switch_deadline_ms);
 
+#ifdef HAS_QUESTDB
+    config.persist_enabled = o.persist || o.questdb_strict;
+    config.questdb_host = o.questdb_host;
+    config.questdb_ilp_port = o.questdb_ilp_port;
+    config.questdb_http_port = o.questdb_http_port;
+    config.run_tag = o.run_tag;
+    config.run_notes = o.run_notes;
+    config.questdb_flush_cadence =
+        std::chrono::milliseconds(o.questdb_flush_ms);
+    config.questdb_strict = o.questdb_strict;
+#endif
+
     config.risk.max_position_value = o.risk_max_position_value;
     config.risk.max_drawdown = o.risk_max_drawdown;
     config.risk.max_loss_per_trade = o.risk_max_loss_per_trade;
@@ -3171,7 +3199,7 @@ static int run_tui_configured_engine(const cli_options& o,
     eng->print_summary();
     export_results(eng->get_analytics(), o.output, o.output_format);
 
-    return 0;
+    return eng->run_succeeded() ? 0 : 1;
 }
 
 int main(int argc, char* argv[])
@@ -3220,6 +3248,21 @@ int main(int argc, char* argv[])
                       << "'. Run will use explicit flags + defaults only.\n";
         }
     }
+
+    if (!opts.resume_path.empty()) {
+        std::cerr << "  ! --resume is unavailable: version 1 checkpoints are "
+                     "diagnostic portfolio snapshots, not complete deterministic "
+                     "engine state.\n";
+        return 1;
+    }
+#ifdef HAS_QUESTDB
+    if (opts.questdb_strict && (opts.monte_carlo || opts.mc_trials > 0)) {
+        std::cerr << "  ! --persist-strict is unavailable for Monte Carlo: "
+                     "campaign persistence does not provide the per-trial "
+                     "strict durability contract.\n";
+        return 1;
+    }
+#endif
 
     if (opts.dump_config_flag) { dump_config(opts); return 0; }
     if (opts.dry_run) return run_dry_run(opts);
