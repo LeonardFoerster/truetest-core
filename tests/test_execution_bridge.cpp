@@ -1,10 +1,16 @@
 #include <gtest/gtest.h>
 
 #include "execution/execution_bridge.h"
+#include "providers/binance/binance_futures_user_data_parser.h"
+#include "providers/binance/binance_user_data_parser.h"
+#ifdef HAS_BITGET
+#include "providers/bitget/bitget_futures_user_data_parser.h"
+#endif
 
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <new>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -183,8 +189,11 @@ public:
 class FakeParser : public IFillParser
 {
 public:
-    bool parse(std::string_view raw, parsed_exec& out) override
+    execution_parse_result parse(std::string_view raw,
+                                 parsed_exec& out) override
     {
+        if (raw == "malformed") return execution_parse_result::malformed;
+        if (raw == "throws") throw std::bad_alloc{};
         std::vector<std::string> parts;
         std::string cur;
         for (char c : raw)
@@ -193,7 +202,7 @@ public:
             else          { cur.push_back(c); }
         }
         if (!cur.empty()) parts.push_back(std::move(cur));
-        if (parts.size() < 7) return false;
+        if (parts.size() < 7) return execution_parse_result::unrelated;
 
         const auto& k = parts[0];
         if      (k == "ack")     out.k = parsed_exec::kind::ack;
@@ -211,14 +220,28 @@ public:
         out.last_fill_qty     = std::stod(parts[5]);
         out.last_fill_price   = std::stod(parts[6]);
         out.ts                = std::chrono::system_clock::now();
-        return true;
+        return execution_parse_result::valid;
     }
+
+    bool parse_position_snapshot(std::string_view,
+                                 parsed_position_snapshot&) override
+    {
+        ++snapshot_calls;
+        if (throw_snapshot) throw std::bad_alloc{};
+        return false;
+    }
+
+    int snapshot_calls = 0;
+    bool throw_snapshot = false;
 };
 
 class FakeFundingParser : public IFillParser
 {
 public:
-    bool parse(std::string_view, parsed_exec&) override { return false; }
+    execution_parse_result parse(std::string_view, parsed_exec&) override
+    {
+        return execution_parse_result::unrelated;
+    }
 
     funding_parse_result parse_funding_update(
         std::string_view raw, parsed_funding_update& out) noexcept override
@@ -250,6 +273,7 @@ struct bridge_harness
     std::shared_ptr<FakeFillTransport>  ft = std::make_shared<FakeFillTransport>();
     std::shared_ptr<FakeEncoder>        en = std::make_shared<FakeEncoder>();
     std::shared_ptr<FakeParser>         pa = std::make_shared<FakeParser>();
+    int execution_failures = 0;
 
     std::unique_ptr<ExecutionBridge> bridge;
 
@@ -262,6 +286,7 @@ struct bridge_harness
         d.fill_tx  = ft;
         d.encoder  = en;
         d.parser   = pa;
+        d.execution_failure_handler = [this] { ++execution_failures; };
         d.start_transport_thread = false;
         bridge = std::make_unique<ExecutionBridge>(std::move(d));
     }
@@ -288,6 +313,32 @@ TEST(ExecutionBridge, OpensTransports)
     ASSERT_TRUE(h.bridge->open());
     EXPECT_TRUE(h.tx->opened_);
     EXPECT_EQ(h.ft->state(), IFillTransport::lifecycle::open);
+}
+
+TEST(ExecutionBridge, MissingParserOrFatalSinkCannotOpen)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<FakeEncoder>();
+
+    ExecutionBridge::deps missing_parser;
+    missing_parser.order_tx = tx;
+    missing_parser.fill_tx = ft;
+    missing_parser.encoder = en;
+    missing_parser.start_transport_thread = false;
+    ExecutionBridge no_parser(std::move(missing_parser));
+    EXPECT_FALSE(no_parser.open());
+    EXPECT_FALSE(tx->opened_);
+
+    ExecutionBridge::deps missing_sink;
+    missing_sink.order_tx = tx;
+    missing_sink.fill_tx = ft;
+    missing_sink.encoder = en;
+    missing_sink.parser = std::make_shared<FakeParser>();
+    missing_sink.start_transport_thread = false;
+    ExecutionBridge no_sink(std::move(missing_sink));
+    EXPECT_FALSE(no_sink.open());
+    EXPECT_FALSE(tx->opened_);
 }
 
 TEST(ExecutionBridge, SubmitEncodesAndSends)
@@ -419,6 +470,268 @@ TEST(ExecutionBridge, UnknownClientIdDropsFill)
     EXPECT_FALSE(h.bridge->poll_fills(fills));
 }
 
+TEST(ExecutionBridge, MalformedPrivateExecutionClosesAdmissionOnce)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+
+    h.ft->deliver("malformed");
+    h.ft->deliver("malformed");
+
+    EXPECT_EQ(h.execution_failures, 1);
+    EXPECT_EQ(h.pa->snapshot_calls, 0);
+    EXPECT_FALSE(h.bridge->last_error().empty());
+    EXPECT_FALSE(h.bridge->open());
+
+    h.bridge->submit_order(make_order(98));
+    h.bridge->drain_outbound_for_test();
+    EXPECT_TRUE(h.tx->submissions_.empty());
+    EXPECT_FALSE(h.bridge->cancel_order(98));
+}
+
+TEST(ExecutionBridge, ThrowingPrivateParserClosesAdmissionBeforeSnapshot)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+
+    h.ft->deliver("throws");
+
+    EXPECT_EQ(h.execution_failures, 1);
+    EXPECT_EQ(h.pa->snapshot_calls, 0);
+    h.bridge->submit_order(make_order(99));
+    h.bridge->drain_outbound_for_test();
+    EXPECT_TRUE(h.tx->submissions_.empty());
+}
+
+TEST(ExecutionBridge, ThrowingPrivateSnapshotPathClosesAdmission)
+{
+    bridge_harness h;
+    h.bridge->set_unknown_fill_handler({});
+    // Enable the snapshot branch; a real provider uses this for futures
+    // account/position updates after the tri-state execution parser says
+    // unrelated.
+    h.bridge.reset();
+    ExecutionBridge::deps d;
+    d.order_tx = h.tx;
+    d.fill_tx = h.ft;
+    d.encoder = h.en;
+    d.parser = h.pa;
+    d.execution_failure_handler = [&h] { ++h.execution_failures; };
+    d.position_snapshot_handler = [](const parsed_position_snapshot&) {};
+    d.start_transport_thread = false;
+    h.bridge = std::make_unique<ExecutionBridge>(std::move(d));
+    ASSERT_TRUE(h.bridge->open());
+
+    h.pa->throw_snapshot = true;
+    h.ft->deliver("unrelated-control-frame");
+
+    EXPECT_EQ(h.execution_failures, 1);
+    h.bridge->submit_order(make_order(991));
+    h.bridge->drain_outbound_for_test();
+    EXPECT_TRUE(h.tx->submissions_.empty());
+}
+
+TEST(ExecutionBridge, BinanceListenKeyExpiryClosesAdmission)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<FakeEncoder>();
+    int execution_failures = 0;
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.encoder = en;
+    d.parser = std::make_shared<BinanceUserDataParser>();
+    d.execution_failure_handler = [&] { ++execution_failures; };
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    ft->deliver(R"({"e":"listenKeyExpired","E":1700000000000})");
+
+    EXPECT_EQ(execution_failures, 1);
+    bridge.submit_order(make_order(100));
+    bridge.drain_outbound_for_test();
+    EXPECT_TRUE(tx->submissions_.empty());
+}
+
+TEST(ExecutionBridge, BinanceOcoListLifecycleClosesAdmissionUntilTypedIngress)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<FakeEncoder>();
+    int execution_failures = 0;
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.encoder = en;
+    d.parser = std::make_shared<BinanceUserDataParser>();
+    d.execution_failure_handler = [&] { ++execution_failures; };
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    ft->deliver(R"({"e":"listStatus","E":1700000000000,"l":"ALL_DONE","L":"ALL_DONE"})");
+
+    EXPECT_EQ(execution_failures, 1);
+    bridge.submit_order(make_order(101));
+    bridge.drain_outbound_for_test();
+    EXPECT_TRUE(tx->submissions_.empty());
+}
+
+TEST(ExecutionBridge, BinanceFuturesListenKeyExpiryClosesAdmission)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<FakeEncoder>();
+    int execution_failures = 0;
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.encoder = en;
+    d.parser = std::make_shared<BinanceFuturesUserDataParser>();
+    d.execution_failure_handler = [&] { ++execution_failures; };
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    ft->deliver(R"({"e":"listenKeyExpired","E":1700000000000})");
+
+    EXPECT_EQ(execution_failures, 1);
+    bridge.submit_order(make_order(101));
+    bridge.drain_outbound_for_test();
+    EXPECT_TRUE(tx->submissions_.empty());
+}
+
+TEST(ExecutionBridge, BinanceFuturesUnsupportedConditionalLifecycleClosesAdmission)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<FakeEncoder>();
+    int execution_failures = 0;
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.encoder = en;
+    d.parser = std::make_shared<BinanceFuturesUserDataParser>();
+    d.execution_failure_handler = [&] { ++execution_failures; };
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    ft->deliver(R"({"e":"CONDITIONAL_ORDER_TRIGGER_REJECT","E":1700000000000})");
+
+    EXPECT_EQ(execution_failures, 1);
+    bridge.submit_order(make_order(102));
+    bridge.drain_outbound_for_test();
+    EXPECT_TRUE(tx->submissions_.empty());
+}
+
+TEST(ExecutionBridge, ContradictoryTrackedExchangeIdentityHaltsBeforeSecondFill)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(1000, "BTCUSDT", 2.0, 100.0));
+
+    h.ft->deliver("partial|tt-1000|EX-A|BTCUSDT|buy|1|100");
+    h.ft->deliver("partial|tt-1000|EX-B|BTCUSDT|buy|1|100");
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(h.bridge->poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills.front().get_order_id(), 1000u);
+    EXPECT_EQ(h.execution_failures, 1);
+
+    h.bridge->submit_order(make_order(1001));
+    h.bridge->drain_outbound_for_test();
+    EXPECT_TRUE(h.tx->submissions_.empty());
+}
+
+TEST(ExecutionBridge, ExchangeIdentityCannotBelongToTwoTrackedOrders)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(1010, "BTCUSDT", 2.0, 100.0));
+    h.bridge->submit_order(make_order(1011, "BTCUSDT", 2.0, 100.0));
+
+    h.ft->deliver("partial|tt-1011|EX-SHARED|BTCUSDT|buy|1|100");
+    h.ft->deliver("partial|tt-1010|EX-SHARED|BTCUSDT|buy|1|100");
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(h.bridge->poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills.front().get_order_id(), 1011u);
+    EXPECT_EQ(h.execution_failures, 1);
+
+    h.bridge->submit_order(make_order(1012));
+    h.bridge->drain_outbound_for_test();
+    EXPECT_TRUE(h.tx->submissions_.empty());
+}
+
+TEST(ExecutionBridge, UnknownClientCannotReuseTrackedExchangeIdentity)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(1015, "BTCUSDT", 2.0, 100.0));
+
+    h.ft->deliver("partial|tt-1015|EX-A|BTCUSDT|buy|1|100");
+    h.ft->deliver("ack|tt-other|EX-A|BTCUSDT|buy|0|0");
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(h.bridge->poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills.front().get_order_id(), 1015u);
+    EXPECT_EQ(h.execution_failures, 1);
+
+    h.bridge->submit_order(make_order(1016));
+    h.bridge->drain_outbound_for_test();
+    EXPECT_TRUE(h.tx->submissions_.empty());
+}
+
+TEST(ExecutionBridge, PrivateAndRestExchangeIdentityConflictHalts)
+{
+    auto tx = std::make_shared<BlockingOrderTransport>();
+    tx->next_exchange_id_ = "EX-REST";
+    auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<FakeEncoder>();
+    auto pa = std::make_shared<FakeParser>();
+    int execution_failures = 0;
+
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.encoder = en;
+    d.parser = pa;
+    d.execution_failure_handler = [&] { ++execution_failures; };
+    d.start_transport_thread = true;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    bridge.submit_order(make_order(1020, "BTCUSDT", 2.0, 100.0));
+    ASSERT_TRUE(tx->wait_until_entered());
+    ft->deliver("partial|tt-1020|EX-PRIVATE|BTCUSDT|buy|1|100");
+    tx->release();
+
+    std::vector<ExecutionBridge::submit_result> results;
+    for (int i = 0; i < 10000 && results.empty(); ++i)
+    {
+        (void)bridge.poll_submit_results(results);
+        std::this_thread::yield();
+    }
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_FALSE(results.front().ok);
+    EXPECT_TRUE(results.front().uncertain);
+    EXPECT_TRUE(results.front().fatal);
+    EXPECT_EQ(execution_failures, 1);
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(bridge.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    bridge.submit_order(make_order(1021));
+    EXPECT_FALSE(bridge.cancel_order(1020));
+    bridge.close();
+}
+
 TEST(ExecutionBridge, StatusTransitionsDrainable)
 {
     bridge_harness h;
@@ -459,17 +772,16 @@ TEST(ExecutionBridge, TerminalStatesClearMapping)
     EXPECT_FALSE(h.bridge->poll_fills(fills));
 }
 
-TEST(ExecutionBridge, ConcurrentFillIngestAndPoll)
+TEST(ExecutionBridge, SinglePrivateProducerIngestAndPoll)
 {
-    // Drive handle_message from multiple threads while a separate thread
-    // drains poll_fills. After joining, total polled fills must equal
-    // total ingested - no loss, no duplicates.
+    // A private WebSocket reader is the sole producer.  The engine may drain
+    // concurrently, but modelling four concurrent transport callbacks would
+    // test an MPSC contract that live ingress deliberately does not provide.
     bridge_harness h;
     ASSERT_TRUE(h.bridge->open());
 
-    constexpr int k_orders  = 200;
-    constexpr int k_threads = 4;
-    constexpr int k_per_thread = 250;  // 1000 total messages across 4 threads
+    constexpr int k_orders = 200;
+    constexpr int k_messages = 1000;
 
     for (int i = 0; i < k_orders; ++i)
         h.bridge->submit_order(make_order(static_cast<uint64_t>(i + 1),
@@ -505,33 +817,28 @@ TEST(ExecutionBridge, ConcurrentFillIngestAndPoll)
     });
 
     std::atomic<int> produced{0};
-    std::vector<std::thread> feeders;
-    feeders.reserve(k_threads);
-    for (int t = 0; t < k_threads; ++t)
-    {
-        feeders.emplace_back([&, t]() {
-            for (int i = 0; i < k_per_thread; ++i)
-            {
-                int order_idx = (t * k_per_thread + i) % k_orders;
-                std::ostringstream wire;
-                wire << "partial|tt-" << (order_idx + 1)
-                     << "|EX-1|TEST|buy|0.001|100";
-                h.ft->deliver(wire.str());
-                produced.fetch_add(1);
-            }
-        });
-    }
-    for (auto& f : feeders) f.join();
+    std::thread feeder([&] {
+        for (int i = 0; i < k_messages; ++i)
+        {
+            const int order_idx = i % k_orders;
+            std::ostringstream wire;
+            wire << "partial|tt-" << (order_idx + 1)
+                 << "|EX-" << (order_idx + 1)
+                 << "|TEST|buy|0.001|100";
+            h.ft->deliver(wire.str());
+            produced.fetch_add(1);
+        }
+    });
+    feeder.join();
 
     // Let the poller drain.
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     stop_poller.store(true);
     poller.join();
 
-    EXPECT_EQ(produced.load(), k_threads * k_per_thread);
+    EXPECT_EQ(produced.load(), k_messages);
     std::lock_guard<std::mutex> lk(collected_mu);
-    EXPECT_EQ(static_cast<int>(collected.size()),
-              k_threads * k_per_thread);
+    EXPECT_EQ(static_cast<int>(collected.size()), k_messages);
 
     // Fill ids must be unique.
     std::vector<uint64_t> ids;
@@ -653,6 +960,7 @@ TEST(ExecutionBridge, NonStdTransportExceptionClosesAdmissionBeforeNextMutation)
     d.fill_tx = ft;
     d.encoder = en;
     d.parser = pa;
+    d.execution_failure_handler = [] {};
     d.start_transport_thread = true;
     ExecutionBridge bridge(std::move(d));
     ASSERT_TRUE(bridge.open());
@@ -787,10 +1095,14 @@ TEST(ExecutionBridge, FundingFastPathEnqueuesOrLatchesFailure)
 {
     auto tx = std::make_shared<FakeOrderTransport>();
     auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<FakeEncoder>();
     ExecutionBridge::deps d;
     d.order_tx = tx;
     d.fill_tx = ft;
+    d.encoder = en;
     d.parser = std::make_shared<FakeFundingParser>();
+    int execution_failures = 0;
+    d.execution_failure_handler = [&] { ++execution_failures; };
     d.start_transport_thread = false;
     int accepted = 0;
     int failures = 0;
@@ -809,6 +1121,110 @@ TEST(ExecutionBridge, FundingFastPathEnqueuesOrLatchesFailure)
     ft->deliver("malformed");
     EXPECT_EQ(accepted, 1);
     EXPECT_EQ(failures, 1);
+    EXPECT_EQ(execution_failures, 1);
+
+    // A malformed funding envelope cannot leave a queued/new REST mutation
+    // admissible while the provider's failure callback makes its way to the
+    // engine.  The bridge closes synchronously on the reader thread.
+    bridge.submit_order(make_order(711));
+    bridge.drain_outbound_for_test();
+    EXPECT_TRUE(tx->submissions_.empty());
+}
+
+TEST(ExecutionBridge, FundingCallbacksMustBePaired)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.parser = std::make_shared<FakeFundingParser>();
+    d.execution_failure_handler = [] {};
+    d.funding_update_handler = [](const parsed_funding_update&) { return true; };
+    d.start_transport_thread = false;
+
+    ExecutionBridge bridge(std::move(d));
+    EXPECT_FALSE(bridge.open());
+    EXPECT_FALSE(tx->opened_);
+}
+
+#ifdef HAS_BITGET
+TEST(ExecutionBridge,
+     BitgetHarmlessControlPassesButContradictoryFundingControlClosesAdmission)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<FakeEncoder>();
+    int execution_failures = 0;
+    int funding_failures = 0;
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.encoder = en;
+    d.parser = std::make_shared<BitgetFuturesUserDataParser>();
+    d.execution_failure_handler = [&] { ++execution_failures; };
+    d.funding_update_handler = [](const parsed_funding_update&) { return true; };
+    d.funding_failure_handler = [&] { ++funding_failures; };
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    // The funding fast-path must defer a real subscribe ACK to the execution
+    // parser rather than terminally treating it as malformed funding.
+    ft->deliver(
+        R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"},"code":"0"})");
+    EXPECT_EQ(execution_failures, 0);
+    EXPECT_EQ(funding_failures, 0);
+    bridge.submit_order(make_order(722));
+    bridge.drain_outbound_for_test();
+    ASSERT_EQ(tx->submissions_.size(), 1u);
+
+    // A data-bearing control is not a valid account funding push and must
+    // reach the parser's terminal control-vs-data validation.
+    ft->deliver(
+        R"({"event":"info","arg":{"instType":"UTA","topic":"account"},"data":[{"bizType":"funding_fee","coin":"USDT","balanceChange":"-0.5"}],"ts":1700000000000})");
+    EXPECT_EQ(execution_failures, 1);
+    EXPECT_EQ(funding_failures, 0);
+    bridge.submit_order(make_order(723));
+    bridge.drain_outbound_for_test();
+    EXPECT_EQ(tx->submissions_.size(), 1u);
+}
+#endif
+
+TEST(ExecutionBridge, DuplicateEngineOrClientIdentityClosesAdmissionBeforeSend)
+{
+    {
+        bridge_harness h;
+        ASSERT_TRUE(h.bridge->open());
+        h.bridge->submit_order(make_order(712));
+        h.bridge->submit_order(make_order(712));
+
+        EXPECT_EQ(h.execution_failures, 1);
+        h.bridge->drain_outbound_for_test();
+        EXPECT_TRUE(h.tx->submissions_.empty());
+    }
+
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<FakeEncoder>();
+    auto pa = std::make_shared<FakeParser>();
+    int failures = 0;
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.encoder = en;
+    d.parser = pa;
+    d.client_id_fn = [](uint64_t) { return std::string{"duplicate-client"}; };
+    d.execution_failure_handler = [&] { ++failures; };
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+    bridge.submit_order(make_order(713));
+    bridge.submit_order(make_order(714));
+
+    EXPECT_EQ(failures, 1);
+    bridge.drain_outbound_for_test();
+    EXPECT_TRUE(tx->submissions_.empty());
 }
 
 TEST(ExecutionBridge, QuiesceWaitsForAdmittedCallAndRejectsQueuedAndLateMutations)
@@ -822,6 +1238,7 @@ TEST(ExecutionBridge, QuiesceWaitsForAdmittedCallAndRejectsQueuedAndLateMutation
     d.fill_tx = ft;
     d.encoder = en;
     d.parser = pa;
+    d.execution_failure_handler = [] {};
     d.start_transport_thread = true;
     ExecutionBridge bridge(std::move(d));
     ASSERT_TRUE(bridge.open());

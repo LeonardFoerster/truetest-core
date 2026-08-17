@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -24,28 +25,53 @@ public:
     funding_parse_result parse_funding_update(
         std::string_view raw, parsed_funding_update& out) noexcept override
     {
-        const bool funding_like = contains_fund(raw);
         if (!provider_recovery::is_authoritative_object(raw))
-            return funding_like ? funding_parse_result::invalid
-                                : funding_parse_result::not_funding;
+            return funding_parse_result::not_funding;
+
+        // A post-ready control envelope is never an account funding push.
+        // Let the regular execution parser classify it: that preserves
+        // harmless subscribe/login acknowledgements while its stricter
+        // control-vs-data checks reject contradictory data-bearing controls.
+        for (const auto key : {std::string_view{"event"},
+                               std::string_view{"op"}})
+        {
+            std::string_view ignored;
+            if (provider_recovery::payload_parser(raw)
+                    .inspect_top_level_member(key, ignored)
+                != provider_recovery::payload_parser::member_result::missing)
+                return funding_parse_result::not_funding;
+        }
 
         std::string_view arg;
+        const auto arg_state = provider_recovery::payload_parser(raw)
+            .inspect_top_level_member("arg", arg);
+        if (arg_state == provider_recovery::payload_parser::member_result::missing)
+            return funding_parse_result::not_funding;
+        if (arg_state != provider_recovery::payload_parser::member_result::unique
+            || !provider_recovery::is_authoritative_object(arg))
+            return funding_parse_result::invalid;
+
         std::string_view topic;
-        if (!provider_recovery::top_level_member(raw, "arg", arg)
-            || !provider_recovery::is_authoritative_object(arg)
-            || !provider_recovery::top_level_plain_string(
-                arg, "topic", topic))
-            return funding_like ? funding_parse_result::invalid
-                                : funding_parse_result::not_funding;
+        if (!provider_recovery::top_level_plain_string(arg, "topic", topic))
+            return funding_parse_result::invalid;
         if (topic != "account")
-            return funding_like ? funding_parse_result::invalid
-                                : funding_parse_result::not_funding;
+            return funding_parse_result::not_funding;
+        // Funding is authoritative only on our subscribed UTA account
+        // channel.  Do not let a same-named foreign/malformed channel enter
+        // the bridge funding fast-path and bypass execution admission.
+        if (!provider_recovery::top_level_exact_string(arg, "instType", "UTA"))
+            return funding_parse_result::invalid;
+
+        // Only an authoritative account-channel envelope may be considered
+        // funding-like.  A client id, symbol, or error text containing
+        // "fund" on the order/fill channels must never preempt execution
+        // parsing and turn an otherwise valid lifecycle record fatal.
+        const bool funding_like = contains_fund(raw);
 
         std::string_view data;
         if (!provider_recovery::top_level_member(raw, "data", data)
             || !provider_recovery::is_authoritative_object_array(data))
-            return funding_like ? funding_parse_result::invalid
-                                : funding_parse_result::not_funding;
+            return funding_parse_result::invalid;
 
         std::size_t funding_rows = 0;
         bool non_funding_row = false;
@@ -148,125 +174,119 @@ public:
         std::int64_t event_time_ms = 0;
         if (!provider_recovery::top_level_scalar_text(raw, "ts", raw_ts)
             || !parse_int64(raw_ts, event_time_ms)
-            || event_time_ms <= 0)
+            || event_time_ms <= 0
+            || !system_clock_millis_is_representable(event_time_ms))
             return funding_parse_result::invalid;
 
         out = parsed_funding_update{event_time_ms, delta};
         return funding_parse_result::valid;
     }
 
-    bool parse(std::string_view raw, parsed_exec& out) override
+    execution_parse_result parse(std::string_view raw,
+                                 parsed_exec& out) override
     {
-        auto arg = bitget::detail::extract_object(raw, "arg");
+        if (raw == "ping" || raw == "pong")
+            return execution_parse_result::unrelated;
+        if (!provider_recovery::is_authoritative_object(raw))
+            return execution_parse_result::malformed;
+
+        std::string_view control_event;
+        const auto control_member = provider_recovery::payload_parser(raw)
+            .inspect_top_level_member("event", control_event);
+        if (control_member
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+            return execution_parse_result::malformed;
+        if (control_member == provider_recovery::payload_parser::member_result::unique)
+        {
+            if (!provider_recovery::top_level_plain_string(
+                    raw, "event", control_event))
+                return execution_parse_result::malformed;
+            if (is_harmless_control(raw, control_event))
+                return execution_parse_result::unrelated;
+            // Post-ready server errors and unrecognised controls are not a
+            // harmless payload.  The transport only classifies login/
+            // subscription failures during setup, so preserve fail-closed
+            // behaviour after readiness as well.
+            return execution_parse_result::malformed;
+        }
+
+        std::string_view control_op;
+        const auto op_member = provider_recovery::payload_parser(raw)
+            .inspect_top_level_member("op", control_op);
+        if (op_member
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+            return execution_parse_result::malformed;
+        if (op_member == provider_recovery::payload_parser::member_result::unique)
+        {
+            if (!provider_recovery::top_level_plain_string(raw, "op", control_op))
+                return execution_parse_result::malformed;
+            if (is_harmless_control(raw, control_op))
+                return execution_parse_result::unrelated;
+            return execution_parse_result::malformed;
+        }
+
+        std::string_view arg;
+        const auto arg_member = provider_recovery::payload_parser(raw)
+            .inspect_top_level_member("arg", arg);
+        if (arg_member
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+            return execution_parse_result::malformed;
+        if (arg_member == provider_recovery::payload_parser::member_result::missing)
+            return looks_like_private_push(raw)
+                ? execution_parse_result::malformed
+                : execution_parse_result::unrelated;
+        if (!provider_recovery::is_authoritative_object(arg))
+            return execution_parse_result::malformed;
+
         std::string_view topic;
-        if (!arg.empty())
-            topic = bitget::extract_sv_string(arg, "topic");
+        if (!provider_recovery::top_level_exact_string(arg, "instType", "UTA")
+            || !provider_recovery::top_level_plain_string(arg, "topic", topic))
+            return execution_parse_result::malformed;
 
         if (topic == "position" || topic == "account")
-            return false;
+            return looks_like_execution_data(raw)
+                ? execution_parse_result::malformed
+                : execution_parse_result::unrelated;
 
-        // Require order or fill topic when arg is present.
-        if (!topic.empty() && topic != "order" && topic != "fill"
+        if (topic != "order" && topic != "fill"
             && topic != "fast-fill")
-            return false;
+            return looks_like_private_push(raw)
+                ? execution_parse_result::malformed
+                : execution_parse_result::unrelated;
 
-        auto obj = bitget::detail::first_data_object(raw);
-        if (obj.empty())
-        {
-            // Some pushes nest a single object under "data":{...}.
-            auto data_obj = bitget::detail::extract_object(raw, "data");
-            if (!data_obj.empty())
-                obj = data_obj;
-        }
-        if (obj.empty())
-            return false;
+        // The UTA order/fill channels currently specify snapshot as their
+        // only push action.  Missing, duplicate, non-string, or unknown
+        // action makes a known execution envelope structurally ambiguous.
+        std::string_view action;
+        const auto action_member = provider_recovery::payload_parser(raw)
+            .inspect_top_level_member("action", action);
+        if (action_member
+            != provider_recovery::payload_parser::member_result::unique
+            || !provider_recovery::top_level_plain_string(raw, "action", action)
+            || action != "snapshot")
+            return execution_parse_result::malformed;
 
-        // Guard: order/fill payloads carry clientOid or orderId.
-        auto client = bitget::extract_sv_string(obj, "clientOid");
-        auto order_id = bitget::extract_sv_string(obj, "orderId");
-        if (order_id.empty())
-            order_id = bitget::extract_sv_number(obj, "orderId");
-        if (client.empty() && order_id.empty())
-            return false;
+        std::string_view data;
+        if (!provider_recovery::top_level_member(raw, "data", data)
+            || !provider_recovery::is_authoritative_object_array(data))
+            return execution_parse_result::malformed;
 
-        // Position-looking objects (size + posSide, no orderStatus/execQty)
-        // must not leak into the exec path.
-        if (topic.empty())
-        {
-            auto status = bitget::extract_sv_string(obj, "orderStatus");
-            auto exec_qty = bitget::extract_sv_string(obj, "execQty");
-            if (exec_qty.empty())
-                exec_qty = bitget::extract_sv_number(obj, "execQty");
-            if (status.empty() && exec_qty.empty())
-                return false;
-        }
+        std::string_view object;
+        std::size_t rows = 0;
+        const bool single_row = provider_recovery::every_top_level_object(
+            data, [&](std::string_view row) noexcept {
+                if (++rows != 1) return false;
+                object = row;
+                return true;
+            });
+        if (!single_row || rows != 1)
+            return execution_parse_result::malformed;
 
-        out = parsed_exec{};
-        out.client_order_id.assign(client.data(), client.size());
-        out.exchange_order_id.assign(order_id.data(), order_id.size());
-        out.symbol = std::string(bitget::extract_sv_string(obj, "symbol"));
-
-        auto side = bitget::extract_sv_string(obj, "side");
-        out.side = map_side(side);
-
-        // Prefer fill channel fields for last_fill_*.
-        const bool is_fill =
-            (topic == "fill" || topic == "fast-fill"
-             || (!bitget::extract_sv_string(obj, "execQty").empty()
-                 || !bitget::extract_sv_number(obj, "execQty").empty()));
-
-        if (is_fill && topic != "order")
-        {
-            out.last_fill_qty = to_double(
-                first_sv(obj, "execQty"));
-            out.last_fill_price = to_double(
-                first_sv(obj, "execPrice"));
-            // Fill channel is per-slice only — do not invent order-level
-            // cumulative from execQty. ExecutionBridge accumulates
-            // last_fill_qty; leave cumulative_qty at 0 when venue omits it.
-            auto cum = first_sv(obj, "cumExecQty");
-            out.cumulative_qty = cum.empty() ? 0.0 : to_double(cum);
-            out.k = parsed_exec::kind::partial_fill;
-            extract_fee(obj, out);
-            out.ts = parse_ts(obj, raw);
-            return true;
-        }
-
-        // Order channel (or bare order object).
-        auto status = bitget::extract_sv_string(obj, "orderStatus");
-        out.k = classify_order_status(status);
-        out.cumulative_qty = to_double(first_sv(obj, "cumExecQty"));
-
-        // Prefer fill channel for last_fill_*; leave 0 on pure order status
-        // unless the venue embeds an incremental fill (rare on UTA order).
-        // Do not invent last_fill from cumExecQty (double-counts vs fill).
-        out.last_fill_qty = 0.0;
-        out.last_fill_price = 0.0;
-
-        // Dual-channel safety: order channel carries lifecycle only
-        // (last_fill_*=0). Demote both partially_filled and filled so the
-        // bridge does not untrack early — fill channel owns last_fill_qty
-        // and completion is detected when cumulative >= total on the bridge.
-        if ((out.k == parsed_exec::kind::partial_fill
-             || out.k == parsed_exec::kind::full_fill)
-            && out.last_fill_qty <= 0.0)
-            out.k = parsed_exec::kind::other;
-
-        extract_fee(obj, out);
-
-        if (out.k == parsed_exec::kind::rejected
-            || out.k == parsed_exec::kind::canceled)
-        {
-            auto err = bitget::extract_sv_string(obj, "cancelReason");
-            if (err.empty())
-                err = bitget::extract_sv_string(obj, "msg");
-            if (err.empty())
-                err = bitget::extract_sv_string(obj, "error");
-            out.error.assign(err.data(), err.size());
-        }
-
-        out.ts = parse_ts(obj, raw);
-        return true;
+        parsed_exec candidate;
+        if (!parse_execution_object(topic, object, raw, candidate))
+            return execution_parse_result::malformed;
+        out = std::move(candidate);
+        return execution_parse_result::valid;
     }
 
     bool parse_position_snapshot(std::string_view raw,
@@ -517,6 +537,424 @@ public:
     }
 
 private:
+    // A data-bearing push with no usable routing envelope cannot be safely
+    // reclassified as a position/control update.  Keep the test deliberately
+    // narrow so a pure control frame remains unrelated.
+    static bool looks_like_private_push(std::string_view raw) noexcept
+    {
+        for (const auto key : {std::string_view{"action"},
+                               std::string_view{"data"}})
+        {
+            std::string_view ignored;
+            if (provider_recovery::payload_parser(raw)
+                    .inspect_top_level_member(key, ignored)
+                != provider_recovery::payload_parser::member_result::missing)
+                return true;
+        }
+        return false;
+    }
+
+    // Account and position state live on separate channels, but a corrupt
+    // routing discriminator must not turn a complete order/fill row into an
+    // ignorable account update.  Look only for order-specific row fields so
+    // legitimate position/account snapshots keep their existing route.
+    static bool looks_like_execution_data(std::string_view raw) noexcept
+    {
+        std::string_view data;
+        const auto data_state = provider_recovery::payload_parser(raw)
+            .inspect_top_level_member("data", data);
+        if (data_state == provider_recovery::payload_parser::member_result::missing)
+            return false;
+        // A duplicate/invalid data member on an execution-shaped private push
+        // is not a harmless position snapshot.  The outer channel can be
+        // corrupted too, so fail closed rather than delegating to the legacy
+        // snapshot parser's permissive object fallback.
+        if (data_state != provider_recovery::payload_parser::member_result::unique)
+            return true;
+
+        bool found_execution_field = false;
+        const auto row_has_execution_field = [&](std::string_view row) noexcept {
+            for (const auto key : {std::string_view{"orderId"},
+                                   std::string_view{"clientOid"},
+                                   std::string_view{"execQty"},
+                                   std::string_view{"execPrice"},
+                                   std::string_view{"orderStatus"}})
+            {
+                std::string_view ignored;
+                if (provider_recovery::payload_parser(row)
+                        .inspect_top_level_member(key, ignored)
+                    != provider_recovery::payload_parser::member_result::missing)
+                    return true;
+            }
+            return false;
+        };
+
+        if (provider_recovery::is_authoritative_object_array(data))
+        {
+            (void)provider_recovery::every_top_level_object(
+                data, [&](std::string_view row) noexcept {
+                    found_execution_field = row_has_execution_field(row);
+                    return !found_execution_field;
+                });
+        }
+        else if (provider_recovery::is_authoritative_object(data))
+        {
+            found_execution_field = row_has_execution_field(data);
+        }
+        return found_execution_field;
+    }
+
+    static bool control_code_is_success(std::string_view raw,
+                                        bool required) noexcept
+    {
+        std::string_view raw_code;
+        const auto state = provider_recovery::payload_parser(raw)
+            .inspect_top_level_member("code", raw_code);
+        if (state
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+            return false;
+        if (state == provider_recovery::payload_parser::member_result::missing)
+            return !required;
+        std::string_view code;
+        return provider_recovery::top_level_scalar_text(raw, "code", code)
+            && (code == "0" || code == "00000");
+    }
+
+    static bool is_harmless_control(std::string_view raw,
+                                    std::string_view control) noexcept
+    {
+        // A control discriminator must never mask a data-bearing execution
+        // frame.  This is intentionally strict: an embedded order/fill is a
+        // contradictory private envelope, not an ignorable notification.
+        // `action` is equally execution-specific on Bitget's private push
+        // schema.  In particular, an `info` control carrying
+        // `action:"snapshot"` plus an order/fill routing arg but missing
+        // `data` is a malformed execution envelope, not an informational
+        // control frame.
+        std::string_view action;
+        if (provider_recovery::payload_parser(raw).inspect_top_level_member(
+                "action", action)
+            != provider_recovery::payload_parser::member_result::missing)
+            return false;
+        std::string_view data;
+        if (provider_recovery::payload_parser(raw).inspect_top_level_member(
+                "data", data)
+            != provider_recovery::payload_parser::member_result::missing)
+            return false;
+
+        if (control == "subscribe")
+        {
+            if (!control_code_is_success(raw, false)) return false;
+            std::string_view arg;
+            std::string_view topic;
+            return provider_recovery::top_level_member(raw, "arg", arg)
+                && provider_recovery::is_authoritative_object(arg)
+                && provider_recovery::top_level_exact_string(
+                    arg, "instType", "UTA")
+                && provider_recovery::top_level_plain_string(arg, "topic", topic)
+                && (topic == "order" || topic == "fill"
+                    || topic == "position" || topic == "account");
+        }
+        if (control == "login")
+            return control_code_is_success(raw, true);
+        if (control == "info" || control == "ping" || control == "pong")
+            return control_code_is_success(raw, false);
+        return false;
+    }
+
+    static bool required_plain_string(std::string_view object,
+                                      std::string_view key,
+                                      std::string_view& out) noexcept
+    {
+        return provider_recovery::top_level_plain_string(object, key, out)
+            && !out.empty();
+    }
+
+    static bool optional_plain_string(std::string_view object,
+                                      std::string_view key,
+                                      std::string_view& out) noexcept
+    {
+        const auto result = provider_recovery::payload_parser(object)
+            .inspect_top_level_member(key, out);
+        if (result == provider_recovery::payload_parser::member_result::missing)
+        {
+            out = {};
+            return true;
+        }
+        if (result
+            != provider_recovery::payload_parser::member_result::unique)
+            return false;
+        return provider_recovery::top_level_plain_string(object, key, out);
+    }
+
+    static bool optional_scalar(std::string_view object,
+                                std::string_view key,
+                                std::string_view& out) noexcept
+    {
+        const auto result = provider_recovery::payload_parser(object)
+            .inspect_top_level_member(key, out);
+        if (result == provider_recovery::payload_parser::member_result::missing)
+        {
+            out = {};
+            return true;
+        }
+        if (result
+            != provider_recovery::payload_parser::member_result::unique)
+            return false;
+        return provider_recovery::top_level_scalar_text(object, key, out);
+    }
+
+    static bool required_scalar(std::string_view object,
+                                std::string_view key,
+                                std::string_view& out) noexcept
+    {
+        return provider_recovery::top_level_scalar_text(object, key, out)
+            && !out.empty();
+    }
+
+    static bool parse_optional_finite(std::string_view object,
+                                      std::string_view key,
+                                      double& out,
+                                      bool& present) noexcept
+    {
+        std::string_view text;
+        const auto result = provider_recovery::payload_parser(object)
+            .inspect_top_level_member(key, text);
+        if (result
+            == provider_recovery::payload_parser::member_result::missing)
+        {
+            present = false;
+            out = 0.0;
+            return true;
+        }
+        if (result
+            != provider_recovery::payload_parser::member_result::unique
+            || !provider_recovery::top_level_scalar_text(object, key, text)
+            || text.empty())
+            return false;
+        present = true;
+        return parse_finite_double(text, out);
+    }
+
+    static bool parse_optional_finite(std::string_view object,
+                                      std::string_view key,
+                                      double& out) noexcept
+    {
+        bool ignored = false;
+        return parse_optional_finite(object, key, out, ignored);
+    }
+
+    static bool parse_positive_timestamp(std::string_view object,
+                                         std::string_view key,
+                                         std::int64_t& out) noexcept
+    {
+        std::string_view text;
+        if (!provider_recovery::top_level_scalar_text(object, key, text)
+            || text.empty() || !parse_int64(text, out))
+            return false;
+        return out > 0 && system_clock_millis_is_representable(out);
+    }
+
+    static bool parse_timestamp(std::string_view object,
+                                std::string_view wrapper,
+                                std::chrono::system_clock::time_point& out) noexcept
+    {
+        std::int64_t wrapper_ms = 0;
+        if (!parse_positive_timestamp(wrapper, "ts", wrapper_ms))
+            return false;
+
+        std::int64_t selected_ms = wrapper_ms;
+        bool selected_from_object = false;
+        for (const auto key : {std::string_view{"execTime"},
+                               std::string_view{"updatedTime"},
+                               std::string_view{"createdTime"},
+                               std::string_view{"ts"}})
+        {
+            std::string_view value;
+            const auto result = provider_recovery::payload_parser(object)
+                .inspect_top_level_member(key, value);
+            if (result
+                == provider_recovery::payload_parser::member_result::missing)
+                continue;
+            if (result
+                != provider_recovery::payload_parser::member_result::unique
+                || !provider_recovery::top_level_scalar_text(object, key, value)
+                || value.empty())
+                return false;
+            std::int64_t parsed = 0;
+            if (!parse_int64(value, parsed) || parsed <= 0
+                || !system_clock_millis_is_representable(parsed))
+                return false;
+            if (!selected_from_object)
+            {
+                selected_ms = parsed;
+                selected_from_object = true;
+            }
+        }
+
+        out = std::chrono::system_clock::time_point(
+            std::chrono::milliseconds(selected_ms));
+        return true;
+    }
+
+    static std::optional<order_side>
+    parse_execution_side(std::string_view side) noexcept
+    {
+        if (side == "buy" || side == "BUY") return order_side::buy;
+        if (side == "sell" || side == "SELL") return order_side::sell;
+        return std::nullopt;
+    }
+
+    static bool known_order_status(std::string_view status) noexcept
+    {
+        return status == "new" || status == "live" || status == "init"
+            || status == "partially_filled" || status == "filled"
+            || status == "cancelled" || status == "canceled"
+            || status == "rejected";
+    }
+
+    static bool parse_fee(std::string_view object, parsed_exec& out)
+    {
+        std::string_view fee_detail;
+        const auto detail_result = provider_recovery::payload_parser(object)
+            .inspect_top_level_member("feeDetail", fee_detail);
+        if (detail_result
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+            return false;
+
+        if (detail_result == provider_recovery::payload_parser::member_result::unique
+            && !provider_recovery::is_exact_null(fee_detail))
+        {
+            if (!provider_recovery::is_authoritative_object_array(fee_detail))
+                return false;
+            std::size_t rows = 0;
+            return provider_recovery::every_top_level_object(
+                fee_detail, [&](std::string_view fee_object) {
+                    if (++rows != 1) return false;
+                    bool has_fee = false;
+                    double fee = 0.0;
+                    std::string_view asset;
+                    if (!parse_optional_finite(fee_object, "fee", fee, has_fee)
+                        || !has_fee || !optional_plain_string(
+                            fee_object, "feeCoin", asset))
+                        return false;
+                    if (fee != 0.0 && asset.empty()) return false;
+                    out.commission = std::abs(fee);
+                    out.commission_asset.assign(asset.data(), asset.size());
+                    return true;
+                });
+        }
+
+        bool has_fee = false;
+        double fee = 0.0;
+        std::string_view asset;
+        if (!parse_optional_finite(object, "fee", fee, has_fee)
+            || !optional_plain_string(object, "feeCoin", asset))
+            return false;
+        if (has_fee && fee != 0.0 && asset.empty()) return false;
+        if (has_fee) out.commission = std::abs(fee);
+        out.commission_asset.assign(asset.data(), asset.size());
+        return true;
+    }
+
+    static bool parse_execution_object(std::string_view topic,
+                                       std::string_view object,
+                                       std::string_view wrapper,
+                                       parsed_exec& out)
+    {
+        if (!provider_recovery::is_authoritative_object(object)) return false;
+
+        std::string_view client;
+        std::string_view exchange;
+        std::string_view symbol;
+        std::string_view side_text;
+        if (!optional_plain_string(object, "clientOid", client)
+            || !required_scalar(object, "orderId", exchange)
+            || !required_plain_string(object, "symbol", symbol)
+            || !required_plain_string(object, "side", side_text))
+            return false;
+        const auto side = parse_execution_side(side_text);
+        if ((client.empty() && exchange.empty()) || !side) return false;
+
+        std::string_view category;
+        if (!required_plain_string(object, "category", category)
+            || (category != "usdt-futures" && category != "USDT-FUTURES"))
+            return false;
+
+        parsed_exec candidate;
+        candidate.client_order_id.assign(client.data(), client.size());
+        candidate.exchange_order_id.assign(exchange.data(), exchange.size());
+        candidate.symbol.assign(symbol.data(), symbol.size());
+        candidate.side = *side;
+
+        if (topic == "fill" || topic == "fast-fill")
+        {
+            bool has_qty = false;
+            bool has_price = false;
+            bool has_cumulative = false;
+            if (!parse_optional_finite(object, "execQty", candidate.last_fill_qty,
+                                       has_qty)
+                || !parse_optional_finite(object, "execPrice",
+                                          candidate.last_fill_price, has_price)
+                || !parse_optional_finite(object, "cumExecQty",
+                                          candidate.cumulative_qty, has_cumulative)
+                || !has_qty || !has_price
+                || candidate.last_fill_qty <= 0.0
+                || candidate.last_fill_price <= 0.0
+                || (has_cumulative
+                    && candidate.cumulative_qty < candidate.last_fill_qty))
+                return false;
+            candidate.k = parsed_exec::kind::partial_fill;
+        }
+        else
+        {
+            std::string_view status;
+            bool has_cumulative = false;
+            if (!required_plain_string(object, "orderStatus", status)
+                || !known_order_status(status)
+                || !parse_optional_finite(object, "cumExecQty",
+                                          candidate.cumulative_qty, has_cumulative)
+                || candidate.cumulative_qty < 0.0)
+                return false;
+            candidate.k = classify_order_status(status);
+
+            if ((candidate.k == parsed_exec::kind::partial_fill
+                 || candidate.k == parsed_exec::kind::full_fill)
+                && (!has_cumulative || candidate.cumulative_qty <= 0.0))
+                return false;
+
+            // Acknowledgements and rejections cannot truthfully report an
+            // already-executed quantity.  Cancellation is intentionally
+            // exempt: a partially filled order may be cancelled afterwards.
+            if ((candidate.k == parsed_exec::kind::ack
+                 || candidate.k == parsed_exec::kind::rejected)
+                && has_cumulative && candidate.cumulative_qty > 0.0)
+                return false;
+
+            // UTA's order channel is lifecycle-only.  The fill channel owns
+            // incremental economic quantities, so keep completed status
+            // tracked until the corresponding fill slice is processed.
+            if (candidate.k == parsed_exec::kind::partial_fill
+                || candidate.k == parsed_exec::kind::full_fill)
+                candidate.k = parsed_exec::kind::other;
+
+            if (candidate.k == parsed_exec::kind::rejected
+                || candidate.k == parsed_exec::kind::canceled)
+            {
+                std::string_view error;
+                if (!optional_plain_string(object, "cancelReason", error))
+                    return false;
+                candidate.error.assign(error.data(), error.size());
+            }
+        }
+
+        if (!parse_fee(object, candidate)
+            || !parse_timestamp(object, wrapper, candidate.ts))
+            return false;
+        out = std::move(candidate);
+        return true;
+    }
+
     static bool contains_fund(std::string_view text) noexcept
     {
         if (text.size() < 4) return false;

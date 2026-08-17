@@ -26,6 +26,7 @@
 #include "providers/binance/hybrid_executor.h"
 #include "orderbook/orderbook.h"
 
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <iostream>
@@ -246,6 +247,14 @@ public:
                 endpoints_.is_testnet);
             kill_switch_ = std::make_shared<BinanceKillSwitch>(
                 rest_, upper(symbol_), assets.base, minter_);
+            if (private_execution_failure_latched_.load(
+                    std::memory_order_acquire))
+            {
+                std::cerr << "BinanceProvider: refusing live open after private "
+                             "execution parser failure\n";
+                state_ = lifecycle::error;
+                return false;
+            }
             live_mutations_cancelled_->store(false, std::memory_order_release);
             bracket_adapter_ = make_binance_oco_bracket_adapter(
                 rest_, live_mutations_cancelled_);
@@ -259,6 +268,9 @@ public:
             apply_halt_cb_to_transports();
             d.encoder  = std::make_shared<BinanceOrderEncoder>(symbol_);
             d.parser   = std::make_shared<BinanceUserDataParser>();
+            d.execution_failure_handler = [this]() noexcept {
+                fail_private_execution_ingress();
+            };
             d.order_rate_limiter = order_rate_limiter_;
             d.client_id_fn = [m = minter_](uint64_t) { return m->next(); };
 
@@ -351,6 +363,7 @@ public:
     void set_halt_callback(
         std::function<void(std::string_view reason)> cb) override
     {
+        execution_failure_cb_.store(cb);
         halt_cb_.store(std::move(cb));
         apply_halt_cb_to_transports();
     }
@@ -406,6 +419,23 @@ private:
     std::shared_ptr<BinanceCombinedTransport>  binance_combined_transport_;
     std::shared_ptr<BinanceUserDataTransport>  binance_user_data_;
     ThreadSafeCallback<void(std::string_view)> halt_cb_;
+    LatchedFailureCallback execution_failure_cb_;
+    std::atomic<bool> private_execution_failure_latched_{false};
+
+    void fail_private_execution_ingress() noexcept
+    {
+        if (private_execution_failure_latched_.exchange(
+                true, std::memory_order_acq_rel))
+            return;
+        live_mutations_cancelled_->store(true, std::memory_order_release);
+        execution_failure_cb_.publish(
+            "binance private execution parser rejected a known envelope");
+        if (transport_)
+        {
+            try { transport_->request_stop(); }
+            catch (...) {}
+        }
+    }
 
     void apply_halt_cb_to_transports()
     {

@@ -68,6 +68,14 @@ public:
             funding_update_handler;
         std::function<void()> funding_failure_handler;
 
+        // A parser has recognized a private execution envelope but cannot
+        // prove its required structure, identity, numeric fields, or time.
+        // This runs once on the private reader thread after the bridge has
+        // closed order admission.  It must synchronously latch the provider/
+        // engine halt path; it must not enqueue a REST submit result because
+        // that queue has a different producer and ordering contract.
+        std::function<void()> execution_failure_handler;
+
         bool start_transport_thread = true;
     };
 
@@ -141,9 +149,24 @@ public:
 
     bool open()
     {
-        if (!d_.order_tx || !d_.fill_tx)
+        // A malformed known private-execution frame is terminal for this
+        // bridge instance.  A later open() must not silently resurrect order
+        // admission after its provider has begun a halt/reconcile path.
+        if (malformed_execution_latched_.load(std::memory_order_acquire))
         {
-            set_error("ExecutionBridge: missing transport");
+            set_error("ExecutionBridge: malformed private execution envelope");
+            return false;
+        }
+        // A live private bridge without both the tri-state parser and its
+        // terminal failure sink could accept orders while silently losing the
+        // venue's only authoritative lifecycle feed.  Refuse configuration
+        // before opening either transport.
+        if (!d_.order_tx || !d_.fill_tx || !d_.parser
+            || !d_.execution_failure_handler
+            || (static_cast<bool>(d_.funding_update_handler)
+                != static_cast<bool>(d_.funding_failure_handler)))
+        {
+            set_error("ExecutionBridge: missing execution safety dependency");
             return false;
         }
         if (!d_.order_tx->open())
@@ -158,7 +181,26 @@ public:
             return false;
         }
 
-        accepting_orders_.store(true, std::memory_order_release);
+        // fill_tx->open() may synchronously deliver a private frame.  Publish
+        // admission only if no such callback latched a terminal parse fault.
+        bool malformed_during_open = false;
+        {
+            std::lock_guard<std::mutex> admission_lock(venue_admission_mu_);
+            if (malformed_execution_latched_.load(std::memory_order_acquire))
+                malformed_during_open = true;
+            else
+                accepting_orders_.store(true, std::memory_order_release);
+        }
+        if (malformed_during_open)
+        {
+            // Do not join/close a transport while holding
+            // venue_admission_mu_: its reader may be finalizing the same
+            // malformed-frame latch and waiting for that lock.
+            d_.fill_tx->close();
+            d_.order_tx->close();
+            set_error("ExecutionBridge: malformed private execution envelope");
+            return false;
+        }
         // Start background transport thread (only for live order paths).
         // The thread owns all actual calls to order_tx.
         if (d_.start_transport_thread)
@@ -225,10 +267,25 @@ public:
         t.side      = o.get_side();
         t.total_qty = o.get_quantity();
 
+        bool duplicate_identity = false;
         {
             std::lock_guard<std::mutex> lk(map_mu_);
-            by_engine_id_[t.engine_id] = t;
-            by_client_id_[t.client_id] = t.engine_id;
+            // A reused engine/client identity can make an otherwise valid
+            // venue fill bind to a different intent.  Reject it before the
+            // request enters the transport queue; overwriting either index is
+            // never a recoverable condition for a live ledger.
+            duplicate_identity = by_engine_id_.contains(t.engine_id)
+                || by_client_id_.contains(t.client_id);
+            if (!duplicate_identity)
+            {
+                by_engine_id_.emplace(t.engine_id, t);
+                by_client_id_.emplace(t.client_id, t.engine_id);
+            }
+        }
+        if (duplicate_identity)
+        {
+            fail_malformed_execution();
+            return;
         }
 
         submit_request req;
@@ -353,7 +410,14 @@ private:
 
     void handle_message(std::string_view raw)
     {
-        if (!d_.parser) return;
+        if (!d_.parser)
+        {
+            // `open()` refuses this configuration, but retain a defensive
+            // fail-closed guard in case a future construction path violates
+            // that invariant.
+            fail_malformed_execution();
+            return;
+        }
 
         parsed_funding_update funding;
         const auto funding_result =
@@ -367,16 +431,42 @@ private:
                 try { accepted = d_.funding_update_handler(funding); }
                 catch (...) { accepted = false; }
             }
-            if (!accepted && d_.funding_failure_handler)
+            if (!accepted)
             {
-                try { d_.funding_failure_handler(); }
-                catch (...) {}
+                // A malformed or unrouteable funding update is just as
+                // authoritative as a malformed execution envelope.  Close
+                // admission synchronously before any provider/engine callback
+                // so a queued REST mutation cannot outrun the halt path.
+                fail_malformed_execution();
+                if (d_.funding_failure_handler)
+                {
+                    try { d_.funding_failure_handler(); }
+                    catch (...) {}
+                }
             }
             return;
         }
 
         parsed_exec msg;
-        if (!d_.parser->parse(raw, msg))
+        execution_parse_result execution_result =
+            execution_parse_result::malformed;
+        try
+        {
+            execution_result = d_.parser->parse(raw, msg);
+        }
+        catch (...)
+        {
+            fail_malformed_execution();
+            return;
+        }
+
+        if (execution_result == execution_parse_result::malformed)
+        {
+            fail_malformed_execution();
+            return;
+        }
+
+        if (execution_result == execution_parse_result::unrelated)
         {
             // Not an order-lifecycle event; might be a server-pushed
             // position/balance snapshot. Spot's parser short-circuits
@@ -384,9 +474,19 @@ private:
             // ACCOUNT_UPDATE.
             if (d_.position_snapshot_handler)
             {
-                parsed_position_snapshot snap;
-                if (d_.parser->parse_position_snapshot(raw, snap))
-                    d_.position_snapshot_handler(snap);
+                try
+                {
+                    parsed_position_snapshot snap;
+                    if (d_.parser->parse_position_snapshot(raw, snap))
+                        d_.position_snapshot_handler(snap);
+                }
+                catch (...)
+                {
+                    // Snapshot processing is still private venue truth.  Do
+                    // not let an allocation/handler failure bypass the same
+                    // terminal admission latch used for malformed execution.
+                    fail_malformed_execution();
+                }
             }
             return;
         }
@@ -394,24 +494,53 @@ private:
         uint64_t engine_id = 0;
         double total_qty = 0.0;
         double tracked_cumulative = 0.0;
+        bool conflicting_identity = false;
+        bool unknown_client = false;
         {
-            bool unknown = false;
+            std::lock_guard<std::mutex> lk(map_mu_);
+            auto cit = by_client_id_.find(msg.client_order_id);
+            if (cit == by_client_id_.end())
             {
-                std::lock_guard<std::mutex> lk(map_mu_);
-                auto cit = by_client_id_.find(msg.client_order_id);
-                if (cit == by_client_id_.end())
-                    unknown = true;
-                else
-                    engine_id = cit->second;
+                unknown_client = true;
+                // Do not let an unrecognised client ID hide a known exchange
+                // ID. This is an explicit contradictory-ID condition, not a
+                // venue-managed bracket fallback.
+                if (!msg.exchange_order_id.empty())
+                {
+                    for (const auto& [other_engine_id, other] : by_engine_id_)
+                    {
+                        (void)other_engine_id;
+                        if (other.exchange_id == msg.exchange_order_id)
+                        {
+                            conflicting_identity = true;
+                            break;
+                        }
+                    }
+                }
             }
-            if (unknown)
-            {
-                // Unknown client_id but we may still recognize the
-                // exchange_order_id as a venue-managed bracket leg.
-                // Defer to the engine-supplied handler.
+            else
+                engine_id = cit->second;
+        }
+
+        if (conflicting_identity)
+        {
+            fail_malformed_execution();
+            return;
+        }
+
+        if (unknown_client)
+        {
+            // Unknown client_id may still be a venue-managed bracket leg.
+            // Only actual economic fills are eligible for that path. A
+            // cancel/reject/expiry is deliberately left for Slice 3's typed
+            // lifecycle ingress and must never become a synthetic fill.
+            if (msg.k == parsed_exec::kind::partial_fill ||
+                msg.k == parsed_exec::kind::full_fill)
                 dispatch_unknown_fill(msg);
-                return;
-            }
+            return;
+        }
+
+        {
             std::lock_guard<std::mutex> lk(map_mu_);
             auto cit = by_client_id_.find(msg.client_order_id);
             if (cit == by_client_id_.end()) return;
@@ -419,26 +548,57 @@ private:
             auto eit = by_engine_id_.find(engine_id);
             if (eit == by_engine_id_.end()) return;
 
-            if (!msg.exchange_order_id.empty() && eit->second.exchange_id.empty())
-                eit->second.exchange_id = msg.exchange_order_id;
-
-            if (msg.k == parsed_exec::kind::partial_fill ||
-                msg.k == parsed_exec::kind::full_fill)
+            if (!msg.exchange_order_id.empty())
             {
-                eit->second.cumulative_qty += msg.last_fill_qty;
+                for (const auto& [other_engine_id, other] : by_engine_id_)
+                {
+                    if (other_engine_id != engine_id
+                        && other.exchange_id == msg.exchange_order_id)
+                    {
+                        conflicting_identity = true;
+                        break;
+                    }
+                }
+                if (!conflicting_identity && eit->second.exchange_id.empty())
+                {
+                    eit->second.exchange_id = msg.exchange_order_id;
+                }
+                else if (!conflicting_identity
+                         && eit->second.exchange_id != msg.exchange_order_id)
+                {
+                    conflicting_identity = true;
+                }
             }
 
-            total_qty = eit->second.total_qty;
-            tracked_cumulative = eit->second.cumulative_qty;
+            if (msg.symbol != eit->second.symbol || msg.side != eit->second.side)
+                conflicting_identity = true;
 
-            if (msg.k == parsed_exec::kind::full_fill   ||
-                msg.k == parsed_exec::kind::canceled    ||
-                msg.k == parsed_exec::kind::rejected    ||
-                msg.k == parsed_exec::kind::expired)
+            if (!conflicting_identity)
             {
-                by_client_id_.erase(msg.client_order_id);
-                by_engine_id_.erase(engine_id);
+                if (msg.k == parsed_exec::kind::partial_fill ||
+                    msg.k == parsed_exec::kind::full_fill)
+                {
+                    eit->second.cumulative_qty += msg.last_fill_qty;
+                }
+
+                total_qty = eit->second.total_qty;
+                tracked_cumulative = eit->second.cumulative_qty;
+
+                if (msg.k == parsed_exec::kind::full_fill   ||
+                    msg.k == parsed_exec::kind::canceled    ||
+                    msg.k == parsed_exec::kind::rejected    ||
+                    msg.k == parsed_exec::kind::expired)
+                {
+                    by_client_id_.erase(msg.client_order_id);
+                    by_engine_id_.erase(engine_id);
+                }
             }
+        }
+
+        if (conflicting_identity)
+        {
+            fail_malformed_execution();
+            return;
         }
 
         if (msg.k != parsed_exec::kind::partial_fill &&
@@ -483,12 +643,25 @@ private:
     void dispatch_unknown_fill(const parsed_exec& msg)
     {
         unknown_fill_handler handler;
+        try
         {
             std::lock_guard<std::mutex> lk(handler_mu_);
             handler = unknown_fill_handler_;
         }
-        if (!handler) return;
-        if (msg.exchange_order_id.empty()) return;
+        catch (...)
+        {
+            fail_malformed_execution();
+            return;
+        }
+        // An economic fill that cannot be tied either to an engine order or
+        // to a registered venue bracket is account divergence, not benign
+        // telemetry.  Leaving it unbooked would let the local ledger keep
+        // trading against a state the venue has disproved.
+        if (!handler || msg.exchange_order_id.empty())
+        {
+            fail_malformed_execution();
+            return;
+        }
 
         std::uint64_t fill_id;
         {
@@ -496,8 +669,25 @@ private:
             fill_id = next_fill_id_++;
         }
 
-        auto sr = handler(msg, fill_id);
-        if (!sr) return;
+        std::optional<synth_result> sr;
+        try
+        {
+            sr = handler(msg, fill_id);
+        }
+        catch (...)
+        {
+            // The resolver may allocate while mapping a venue-managed bracket
+            // leg.  An exception here cannot be allowed to escape the private
+            // reader and leave local order admission live after losing an
+            // economic venue event.
+            fail_malformed_execution();
+            return;
+        }
+        if (!sr)
+        {
+            fail_malformed_execution();
+            return;
+        }
 
         // Record meta first so the engine can register in order_meta_
         // before processing the fill. Both queues use their own mutex
@@ -516,6 +706,34 @@ private:
     static std::string make_client_id(uint64_t engine_order_id)
     {
         return "tt-" + std::to_string(engine_order_id);
+    }
+
+    void fail_malformed_execution() noexcept
+    {
+        bool expected = false;
+        if (!malformed_execution_latched_.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel,
+                std::memory_order_acquire))
+            return;
+
+        // Close the bridge before notifying the provider.  This makes every
+        // concurrent or subsequent submit fail locally even if the provider
+        // callback has not yet reached the engine thread.
+        {
+            std::lock_guard<std::mutex> admission_lock(venue_admission_mu_);
+            close_terminal_admission();
+        }
+        if (d_.execution_failure_handler)
+        {
+            try { d_.execution_failure_handler(); }
+            catch (...) {}
+        }
+        // Diagnostics are strictly secondary to closing admission and
+        // notifying the halt owner.  This path can be entered while handling
+        // an allocation failure from a parser, so it must not terminate the
+        // process before the safety callback has run.
+        try { set_error("ExecutionBridge: malformed private execution envelope"); }
+        catch (...) {}
     }
 
     void set_error(std::string msg)
@@ -579,6 +797,7 @@ private:
     std::thread transport_thread_;
     std::atomic<bool> transport_running_{false};
     std::atomic<bool> accepting_orders_{false};
+    std::atomic<bool> malformed_execution_latched_{false};
 
     void transport_loop();
     void process_one_submit(const submit_request& req);
@@ -751,12 +970,42 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
             by_client_id_.erase(req.client_id);
     }
 
+    bool response_identity_conflict = false;
     if (res.ok && !res.exchange_order_id.empty())
     {
         std::lock_guard<std::mutex> lk(map_mu_);
         auto it = by_engine_id_.find(req.engine_id);
-        if (it != by_engine_id_.end() && it->second.exchange_id.empty())
-            it->second.exchange_id = res.exchange_order_id;
+        if (it != by_engine_id_.end())
+        {
+            if (!it->second.exchange_id.empty()
+                && it->second.exchange_id != res.exchange_order_id)
+            {
+                response_identity_conflict = true;
+            }
+            else
+            {
+                for (const auto& [other_engine_id, other] : by_engine_id_)
+                {
+                    if (other_engine_id != req.engine_id
+                        && other.exchange_id == res.exchange_order_id)
+                    {
+                        response_identity_conflict = true;
+                        break;
+                    }
+                }
+                if (!response_identity_conflict)
+                    it->second.exchange_id = res.exchange_order_id;
+            }
+        }
+    }
+
+    if (response_identity_conflict)
+    {
+        res.ok = false;
+        res.uncertain = true;
+        res.fatal = true;
+        res.error = "conflicting exchange order id from order transport";
+        fail_malformed_execution();
     }
 
     submit_result sr;

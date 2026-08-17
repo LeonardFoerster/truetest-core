@@ -605,6 +605,7 @@ public:
     void set_halt_callback(
         std::function<void(std::string_view reason)> cb) override
     {
+        execution_failure_cb_.store(cb);
         halt_cb_.store(std::move(cb));
         apply_halt_cb_to_transports();
     }
@@ -698,6 +699,8 @@ private:
     std::string backfill_host_override_;
 
     ThreadSafeCallback<void(std::string_view)> halt_cb_;
+    LatchedFailureCallback execution_failure_cb_;
+    std::atomic<bool> private_execution_failure_latched_{false};
     ProviderFundingIngress funding_ingress_;
 
     // Live refuse checklist (plan Phase 2 / Task 9).
@@ -851,6 +854,13 @@ private:
         kill_switch_ = make_bitget_futures_kill_switch(
             rest_, category_, upper(symbol_));
 
+        if (private_execution_failure_latched_.load(
+                std::memory_order_acquire))
+        {
+            std::cerr << "BitgetFuturesProvider: refusing live open after "
+                         "private execution parser failure\n";
+            return false;
+        }
         live_mutations_cancelled_->store(false, std::memory_order_release);
         bracket_adapter_ = make_bitget_futures_bracket_adapter(
             rest_, category_, live_mutations_cancelled_, upper(symbol_));
@@ -879,6 +889,9 @@ private:
         }
         d.encoder = std::move(encoder);
         d.parser = std::make_shared<BitgetFuturesUserDataParser>();
+        d.execution_failure_handler = [this]() noexcept {
+            fail_private_execution_ingress();
+        };
         d.order_rate_limiter = order_rate_limiter_;
         d.client_id_fn = [m = minter_](uint64_t) { return m->next(); };
 
@@ -971,6 +984,21 @@ private:
             try { (*halt)("bitget funding ingress overflow or malformed update"); }
             catch (...) {}
         }
+        if (transport_)
+        {
+            try { transport_->request_stop(); }
+            catch (...) {}
+        }
+    }
+
+    void fail_private_execution_ingress() noexcept
+    {
+        if (private_execution_failure_latched_.exchange(
+                true, std::memory_order_acq_rel))
+            return;
+        live_mutations_cancelled_->store(true, std::memory_order_release);
+        execution_failure_cb_.publish(
+            "bitget private execution parser rejected a known envelope");
         if (transport_)
         {
             try { transport_->request_stop(); }

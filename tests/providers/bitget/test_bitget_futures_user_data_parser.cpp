@@ -253,7 +253,7 @@ TEST(BitgetFuturesUserDataParser, OrderStatusNewIsAck)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(order_push("new"), out));
+    ASSERT_EQ(p.parse(order_push("new"), out), execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::ack);
     EXPECT_EQ(out.symbol, "BTCUSDT");
     EXPECT_EQ(out.client_order_id, "tt-1");
@@ -266,9 +266,9 @@ TEST(BitgetFuturesUserDataParser, OrderStatusLiveAndInitAreAck)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(order_push("live"), out));
+    ASSERT_EQ(p.parse(order_push("live"), out), execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::ack);
-    ASSERT_TRUE(p.parse(order_push("init"), out));
+    ASSERT_EQ(p.parse(order_push("init"), out), execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::ack);
 }
 
@@ -276,7 +276,8 @@ TEST(BitgetFuturesUserDataParser, OrderStatusPartiallyFilled)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(order_push("partially_filled", "0.4"), out));
+    ASSERT_EQ(p.parse(order_push("partially_filled", "0.4"), out),
+              execution_parse_result::valid);
     // Order channel leaves last_fill_qty=0 → demote to other (fill channel
     // owns incremental qty; avoids zero-qty partial_fill into the bridge).
     EXPECT_EQ(out.k, parsed_exec::kind::other);
@@ -288,7 +289,8 @@ TEST(BitgetFuturesUserDataParser, OrderStatusFilled)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(order_push("filled", "1.0"), out));
+    ASSERT_EQ(p.parse(order_push("filled", "1.0"), out),
+              execution_parse_result::valid);
     // Order channel last_fill=0 → demote filled→other so bridge does not
     // untrack before fill-channel slices arrive (dual-channel race).
     EXPECT_EQ(out.k, parsed_exec::kind::other);
@@ -300,10 +302,12 @@ TEST(BitgetFuturesUserDataParser, OrderStatusCancelled)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(order_push("cancelled"), out));
+    ASSERT_EQ(p.parse(order_push("cancelled"), out),
+              execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::canceled);
 
-    ASSERT_TRUE(p.parse(order_push("canceled"), out));
+    ASSERT_EQ(p.parse(order_push("canceled"), out),
+              execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::canceled);
 }
 
@@ -317,7 +321,7 @@ TEST(BitgetFuturesUserDataParser, OrderStatusRejected)
     ASSERT_NE(pos, std::string::npos);
     j.replace(pos, std::string(R"("cancelReason":"")").size(),
               R"("cancelReason":"INSUFFICIENT_MARGIN")");
-    ASSERT_TRUE(p.parse(j, out));
+    ASSERT_EQ(p.parse(j, out), execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::rejected);
     EXPECT_EQ(out.error, "INSUFFICIENT_MARGIN");
 }
@@ -326,7 +330,8 @@ TEST(BitgetFuturesUserDataParser, OrderSellSide)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(order_push("new", "0", "sell"), out));
+    ASSERT_EQ(p.parse(order_push("new", "0", "sell"), out),
+              execution_parse_result::valid);
     EXPECT_EQ(out.side, order_side::sell);
 }
 
@@ -334,7 +339,8 @@ TEST(BitgetFuturesUserDataParser, OrderFeeDetail)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(order_push("filled", "1"), out));
+    ASSERT_EQ(p.parse(order_push("filled", "1"), out),
+              execution_parse_result::valid);
     EXPECT_DOUBLE_EQ(out.commission, 0.01);
     EXPECT_EQ(out.commission_asset, "USDT");
 }
@@ -345,7 +351,8 @@ TEST(BitgetFuturesUserDataParser, FillChannelLastFill)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(fill_push("0.4", "60000.5"), out));
+    ASSERT_EQ(p.parse(fill_push("0.4", "60000.5"), out),
+              execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::partial_fill);
     EXPECT_DOUBLE_EQ(out.last_fill_qty, 0.4);
     EXPECT_DOUBLE_EQ(out.last_fill_price, 60000.5);
@@ -364,7 +371,8 @@ TEST(BitgetFuturesUserDataParser, FillChannelSell)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(fill_push("0.1", "1", "sell"), out));
+    ASSERT_EQ(p.parse(fill_push("0.1", "1", "sell"), out),
+              execution_parse_result::valid);
     EXPECT_EQ(out.side, order_side::sell);
 }
 
@@ -393,7 +401,8 @@ TEST(BitgetFuturesUserDataParser, FillChannelDoesNotInventCumulative)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(fill_push("0.4", "60000.5"), out));
+    ASSERT_EQ(p.parse(fill_push("0.4", "60000.5"), out),
+              execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::partial_fill);
     EXPECT_DOUBLE_EQ(out.last_fill_qty, 0.4);
     // No cumExecQty on fill channel → leave 0 (bridge sums last_fill).
@@ -446,7 +455,227 @@ TEST(BitgetFuturesUserDataParser, ParseRejectsPositionTopic)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    EXPECT_FALSE(p.parse(position_push("1", "long"), out));
+    EXPECT_EQ(p.parse(position_push("1", "long"), out),
+              execution_parse_result::unrelated);
+}
+
+TEST(BitgetFuturesUserDataParser, HarmlessControlsLeaveOutputUntouched)
+{
+    BitgetFuturesUserDataParser p;
+    parsed_exec out;
+    out.symbol = "sentinel";
+    out.client_order_id = "keep";
+
+    EXPECT_EQ(p.parse("ping", out), execution_parse_result::unrelated);
+    EXPECT_EQ(p.parse("pong", out), execution_parse_result::unrelated);
+    EXPECT_EQ(p.parse(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"},"code":"0"})",
+                  out),
+              execution_parse_result::unrelated);
+    EXPECT_EQ(p.parse(R"({"event":"info","msg":"connected"})", out),
+              execution_parse_result::unrelated);
+    EXPECT_EQ(out.symbol, "sentinel");
+    EXPECT_EQ(out.client_order_id, "keep");
+}
+
+TEST(BitgetFuturesUserDataParser,
+     MalformedExecutionOrErrorFailsClosedAndPreservesOutput)
+{
+    BitgetFuturesUserDataParser p;
+    parsed_exec out;
+    out.symbol = "sentinel";
+    out.client_order_id = "keep";
+
+    EXPECT_EQ(p.parse(R"({"event":"error","code":"30001"})", out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"},"code":"30001"})",
+                  out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"wrong"},"code":"0"})",
+                  out),
+              execution_parse_result::malformed);
+    // A control discriminator must not hide an execution-shaped push with a
+    // missing data member.  A genuine subscribe ACK has no action field.
+    EXPECT_EQ(p.parse(
+                  R"({"event":"info","action":"snapshot","arg":{"instType":"UTA","topic":"order"},"ts":1})",
+                  out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(R"({"arg":{"instType":"UTA","topic":"order"},"data":[{}],"ts":1})", out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(
+                  R"({"action":"snapshot","data":[{"category":"usdt-futures","symbol":"BTCUSDT","orderId":"42","clientOid":"tt-1","side":"buy","execQty":"1","execPrice":"100","execTime":"1700000000002","fee":"0","feeCoin":"USDT"}],"ts":1700000000003})",
+                  out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(
+                  R"({"action":"snapshot","arg":{"instType":"UTA","topic":"unknown"},"data":[{"category":"usdt-futures","symbol":"BTCUSDT","orderId":"42","clientOid":"tt-1","side":"buy","execQty":"1","execPrice":"100","execTime":"1700000000002","fee":"0","feeCoin":"USDT"}],"ts":1700000000003})",
+                  out),
+              execution_parse_result::malformed);
+
+    auto execution_on_account_channel = fill_push();
+    const auto fill_topic = execution_on_account_channel.find(R"("topic":"fill")");
+    ASSERT_NE(fill_topic, std::string::npos);
+    execution_on_account_channel.replace(
+        fill_topic, std::string(R"("topic":"fill")").size(),
+        R"("topic":"account")");
+    EXPECT_EQ(p.parse(execution_on_account_channel, out),
+              execution_parse_result::malformed);
+
+    EXPECT_EQ(p.parse(
+                  R"({"action":"snapshot","arg":{"instType":"UTA","topic":"position"},"data":{"category":"usdt-futures","symbol":"BTCUSDT","orderId":"42","clientOid":"tt-1","side":"buy","execQty":"1","execPrice":"100"},"ts":1700000000003})",
+                  out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(fill_push("0.4", "60000", "garbage"), out),
+              execution_parse_result::malformed);
+
+    auto bad_qty = fill_push();
+    const auto qty = bad_qty.find(R"("execQty":"0.4")");
+    ASSERT_NE(qty, std::string::npos);
+    bad_qty.replace(qty, std::string(R"("execQty":"0.4")").size(),
+                    R"("execQty":"nan")");
+    EXPECT_EQ(p.parse(bad_qty, out), execution_parse_result::malformed);
+
+    auto bad_fee = fill_push();
+    const auto fee = bad_fee.find(R"("fee":"0.024")");
+    ASSERT_NE(fee, std::string::npos);
+    bad_fee.replace(fee, std::string(R"("fee":"0.024")").size(),
+                    R"("fee":"nan")");
+    EXPECT_EQ(p.parse(bad_fee, out), execution_parse_result::malformed);
+
+    auto embedded_fill = fill_push();
+    embedded_fill.insert(1, R"("event":"info",)");
+    EXPECT_EQ(p.parse(embedded_fill, out), execution_parse_result::malformed);
+
+    auto wrong_surface = fill_push();
+    const auto uta = wrong_surface.find(R"("instType":"UTA")");
+    ASSERT_NE(uta, std::string::npos);
+    wrong_surface.replace(uta, std::string(R"("instType":"UTA")").size(),
+                          R"("instType":"SPOT")");
+    EXPECT_EQ(p.parse(wrong_surface, out), execution_parse_result::malformed);
+
+    auto wrong_category = fill_push();
+    const auto category = wrong_category.find(R"("category":"usdt-futures")");
+    ASSERT_NE(category, std::string::npos);
+    wrong_category.replace(category,
+                           std::string(R"("category":"usdt-futures")").size(),
+                           R"("category":"spot")");
+    EXPECT_EQ(p.parse(wrong_category, out), execution_parse_result::malformed);
+
+    auto wrong_action = fill_push();
+    const auto action = wrong_action.find(R"("action":"snapshot")");
+    ASSERT_NE(action, std::string::npos);
+    wrong_action.replace(action, std::string(R"("action":"snapshot")").size(),
+                         R"("action":"update")");
+    EXPECT_EQ(p.parse(wrong_action, out), execution_parse_result::malformed);
+
+    auto missing_action = order_push("new");
+    const auto action_prefix = missing_action.find(R"("action":"snapshot",)");
+    ASSERT_NE(action_prefix, std::string::npos);
+    missing_action.erase(action_prefix,
+                         std::string(R"("action":"snapshot",)").size());
+    EXPECT_EQ(p.parse(missing_action, out), execution_parse_result::malformed);
+
+    auto duplicate_action = fill_push();
+    duplicate_action.insert(1, R"("action":"snapshot",)");
+    EXPECT_EQ(p.parse(duplicate_action, out), execution_parse_result::malformed);
+
+    auto missing_order_id = fill_push();
+    const auto order_id = missing_order_id.find(R"("orderId":"42",)");
+    ASSERT_NE(order_id, std::string::npos);
+    missing_order_id.erase(order_id, std::string(R"("orderId":"42",)").size());
+    EXPECT_EQ(p.parse(missing_order_id, out), execution_parse_result::malformed);
+
+    auto untyped_fee = fill_push();
+    const auto fee_coin = untyped_fee.find(R"("feeCoin":"USDT")");
+    ASSERT_NE(fee_coin, std::string::npos);
+    untyped_fee.replace(fee_coin, std::string(R"("feeCoin":"USDT")").size(),
+                        R"("feeCoin":"")");
+    EXPECT_EQ(p.parse(untyped_fee, out), execution_parse_result::malformed);
+
+    auto empty_time = fill_push();
+    const auto time = empty_time.find(R"("execTime":"1700000000002")");
+    ASSERT_NE(time, std::string::npos);
+    empty_time.replace(time,
+                       std::string(R"("execTime":"1700000000002")").size(),
+                       R"("execTime":"")");
+    EXPECT_EQ(p.parse(empty_time, out), execution_parse_result::malformed);
+
+    auto overflow_time = fill_push();
+    const auto timestamp = overflow_time.find("1700000000003");
+    ASSERT_NE(timestamp, std::string::npos);
+    overflow_time.replace(timestamp, std::string("1700000000003").size(),
+                          "9223372036854775807");
+    EXPECT_EQ(p.parse(overflow_time, out), execution_parse_result::malformed);
+    EXPECT_EQ(out.symbol, "sentinel");
+    EXPECT_EQ(out.client_order_id, "keep");
+}
+
+TEST(BitgetFuturesUserDataParser, FundingParserDoesNotPreemptOrderText)
+{
+    BitgetFuturesUserDataParser p;
+    parsed_funding_update funding;
+    const auto order = order_push("new", "0", "buy", "fund-client");
+
+    EXPECT_EQ(p.parse_funding_update(order, funding),
+              funding_parse_result::not_funding);
+}
+
+TEST(BitgetFuturesUserDataParser, FundingTimestampMustFitSystemClock)
+{
+    BitgetFuturesUserDataParser p;
+    parsed_funding_update funding;
+    const std::string overflow =
+        R"({"action":"snapshot","arg":{"instType":"UTA","topic":"account"},"data":[{"bizType":"funding_fee","coin":"USDT","balanceChange":"-0.5"}],"ts":"9223372036854775807"})";
+
+    EXPECT_EQ(p.parse_funding_update(overflow, funding),
+              funding_parse_result::invalid);
+}
+
+TEST(BitgetFuturesUserDataParser, FundingRequiresAuthoritativeUtaAccountRoute)
+{
+    BitgetFuturesUserDataParser p;
+    parsed_funding_update funding;
+    constexpr std::string_view body =
+        R"({"arg":{"topic":"account"},"data":[{"bizType":"funding_fee","coin":"USDT","balanceChange":"-0.5"}],"ts":1700000000000})";
+    EXPECT_EQ(p.parse_funding_update(body, funding),
+              funding_parse_result::invalid);
+
+    constexpr std::string_view wrong_surface =
+        R"({"arg":{"instType":"SPOT","topic":"account"},"data":[{"bizType":"funding_fee","coin":"USDT","balanceChange":"-0.5"}],"ts":1700000000000})";
+    EXPECT_EQ(p.parse_funding_update(wrong_surface, funding),
+              funding_parse_result::invalid);
+
+    constexpr std::string_view contradictory_control =
+        R"({"event":"info","arg":{"instType":"UTA","topic":"account"},"data":[{"bizType":"funding_fee","coin":"USDT","balanceChange":"-0.5"}],"ts":1700000000000})";
+    EXPECT_EQ(p.parse_funding_update(contradictory_control, funding),
+              funding_parse_result::not_funding);
+    parsed_exec execution;
+    EXPECT_EQ(p.parse(contradictory_control, execution),
+              execution_parse_result::malformed);
+}
+
+TEST(BitgetFuturesUserDataParser, FilledOrderRequiresPositiveCumulativeQuantity)
+{
+    BitgetFuturesUserDataParser p;
+    parsed_exec out;
+    EXPECT_EQ(p.parse(order_push("partially_filled", "0"), out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(order_push("filled", "0"), out),
+              execution_parse_result::malformed);
+}
+
+TEST(BitgetFuturesUserDataParser,
+     AcknowledgedOrRejectedOrderCannotClaimExecutedQuantity)
+{
+    BitgetFuturesUserDataParser p;
+    parsed_exec out;
+    for (const auto status : {"new", "live", "init", "rejected"})
+    {
+        EXPECT_EQ(p.parse(order_push(status, "1"), out),
+                  execution_parse_result::malformed)
+            << status;
+    }
 }
 
 TEST(BitgetFuturesUserDataParser, ParsePositionSnapshotRejectsOrderTopic)
@@ -487,7 +716,7 @@ TEST(BitgetFuturesUserDataParser, OrderTsFromUpdatedTime)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(order_push("new"), out));
+    ASSERT_EQ(p.parse(order_push("new"), out), execution_parse_result::valid);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   out.ts.time_since_epoch())
                   .count();

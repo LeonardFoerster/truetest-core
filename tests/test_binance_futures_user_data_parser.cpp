@@ -53,14 +53,134 @@ TEST(BinanceFuturesUserDataParser, RejectsNonOrderTradeUpdates)
     // parse_position_snapshot() instead. This is the contract that lets
     // ExecutionBridge route the two event kinds to different consumers.
     std::string acct = R"({"e":"ACCOUNT_UPDATE","E":1})";
-    EXPECT_FALSE(p.parse(acct, out));
+    EXPECT_EQ(p.parse(acct, out), execution_parse_result::unrelated);
 
     std::string listen = R"({"e":"listenKeyExpired","E":1})";
-    EXPECT_FALSE(p.parse(listen, out));
+    EXPECT_EQ(p.parse(listen, out), execution_parse_result::malformed);
+
+    std::string terminated = R"({"e":"eventStreamTerminated","E":1})";
+    EXPECT_EQ(p.parse(terminated, out), execution_parse_result::malformed);
 
     std::string spot = R"({"e":"executionReport","E":1,"s":"X","c":"c","S":"BUY",)"
                        R"("x":"NEW","X":"NEW","i":1,"l":"0","L":"0","z":"0","n":"0","N":"USDT"})";
-    EXPECT_FALSE(p.parse(spot, out));
+    EXPECT_EQ(p.parse(spot, out), execution_parse_result::unrelated);
+}
+
+TEST(BinanceFuturesUserDataParser, HarmlessControlsLeaveOutputUntouched)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_exec out;
+    out.symbol = "sentinel";
+    out.client_order_id = "keep";
+
+    EXPECT_EQ(p.parse("ping", out), execution_parse_result::unrelated);
+    EXPECT_EQ(p.parse("pong", out), execution_parse_result::unrelated);
+    EXPECT_EQ(p.parse(R"({"result":null,"id":1})", out),
+              execution_parse_result::unrelated);
+    EXPECT_EQ(out.symbol, "sentinel");
+    EXPECT_EQ(out.client_order_id, "keep");
+}
+
+TEST(BinanceFuturesUserDataParser,
+     MalformedKnownEnvelopeFailsClosedAndPreservesOutput)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_exec out;
+    out.symbol = "sentinel";
+    out.client_order_id = "keep";
+
+    EXPECT_EQ(p.parse(R"({"e":"ORDER_TRADE_UPDATE")", out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(R"({"e":"ORDER_TRADE_UPDATE"})", out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(R"({"o":{"s":"BTCUSDT","c":"tt-1","S":"BUY","x":"NEW","X":"NEW","i":42}})", out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(R"({"e":"bogus","o":{"s":"BTCUSDT","c":"tt-1","S":"BUY","x":"NEW","X":"NEW","i":42}})", out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(update("NEW", "FILLED"), out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(update("TRADE", "FILLED", "nan", "100", "1"), out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(update("NEW", "NEW", "0", "0", "0", "tt-1", "HOLD"), out),
+              execution_parse_result::malformed);
+    auto missing_fee = update("TRADE", "FILLED", "1", "100", "1");
+    const auto fee = missing_fee.find(R"(,"n":"0.0")");
+    ASSERT_NE(fee, std::string::npos);
+    missing_fee.erase(fee, std::string(R"(,"n":"0.0")").size());
+    EXPECT_EQ(p.parse(missing_fee, out), execution_parse_result::malformed);
+    auto missing_order_id = update("NEW", "NEW");
+    const auto order_id = missing_order_id.find(R"("i":42,)");
+    ASSERT_NE(order_id, std::string::npos);
+    missing_order_id.erase(order_id, std::string(R"("i":42,)").size());
+    EXPECT_EQ(p.parse(missing_order_id, out), execution_parse_result::malformed);
+    auto nonnumeric_order_id = update("NEW", "NEW");
+    const auto numeric_order_id = nonnumeric_order_id.find(R"("i":42)");
+    ASSERT_NE(numeric_order_id, std::string::npos);
+    nonnumeric_order_id.replace(numeric_order_id, std::string(R"("i":42)").size(),
+                                R"("i":"alpha-7")");
+    EXPECT_EQ(p.parse(nonnumeric_order_id, out), execution_parse_result::malformed);
+    auto empty_fee = update("NEW", "NEW");
+    const auto empty = empty_fee.find(R"("n":"0.0")");
+    ASSERT_NE(empty, std::string::npos);
+    empty_fee.replace(empty, std::string(R"("n":"0.0")").size(),
+                      R"("n":"")");
+    EXPECT_EQ(p.parse(empty_fee, out), execution_parse_result::malformed);
+    auto overflow_ts = update("NEW", "NEW");
+    const auto timestamp = overflow_ts.find("1700000000000");
+    ASSERT_NE(timestamp, std::string::npos);
+    overflow_ts.replace(timestamp, std::string("1700000000000").size(),
+                        "9223372036854775807");
+    EXPECT_EQ(p.parse(overflow_ts, out), execution_parse_result::malformed);
+    EXPECT_EQ(out.symbol, "sentinel");
+    EXPECT_EQ(out.client_order_id, "keep");
+}
+
+TEST(BinanceFuturesUserDataParser, NullableCommissionAssetIsAccepted)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_exec out;
+    auto j = update("NEW", "NEW");
+    const auto field = j.find(R"("N":"USDT")");
+    ASSERT_NE(field, std::string::npos);
+    j.replace(field, std::string(R"("N":"USDT")").size(), R"("N":null)");
+
+    ASSERT_EQ(p.parse(j, out), execution_parse_result::valid);
+    EXPECT_TRUE(out.commission_asset.empty());
+}
+
+TEST(BinanceFuturesUserDataParser, NonzeroCommissionRequiresAsset)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_exec out;
+    auto j = update("TRADE", "FILLED", "1", "100", "1", "tt-1",
+                    "BUY", "42", "0.01", "USDT");
+    const auto field = j.find(R"("N":"USDT")");
+    ASSERT_NE(field, std::string::npos);
+    j.replace(field, std::string(R"("N":"USDT")").size(), R"("N":null)");
+
+    EXPECT_EQ(p.parse(j, out), execution_parse_result::malformed);
+}
+
+TEST(BinanceFuturesUserDataParser, FundingParserDoesNotPreemptOrderText)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_funding_update funding;
+    const auto order = update("NEW", "NEW", "0", "0", "0",
+                              "FUNDING_FEE-client");
+
+    EXPECT_EQ(p.parse_funding_update(order, funding),
+              funding_parse_result::not_funding);
+}
+
+TEST(BinanceFuturesUserDataParser, FundingTimestampMustFitSystemClock)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_funding_update funding;
+    const std::string overflow =
+        R"({"e":"ACCOUNT_UPDATE","E":9223372036854775807,"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","bc":"-0.5"}]}})";
+
+    EXPECT_EQ(p.parse_funding_update(overflow, funding),
+              funding_parse_result::invalid);
 }
 
 TEST(BinanceFuturesUserDataParser, AccountUpdateOrderReasonWithPositionAndBalance)
@@ -178,7 +298,7 @@ TEST(BinanceFuturesUserDataParser, NewAck)
     parsed_exec out;
     auto j = update("NEW", "NEW");
 
-    ASSERT_TRUE(p.parse(j, out));
+    ASSERT_EQ(p.parse(j, out), execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::ack);
     EXPECT_EQ(out.symbol, "BTCUSDT");
     EXPECT_EQ(out.client_order_id, "tt-1");
@@ -194,7 +314,7 @@ TEST(BinanceFuturesUserDataParser, PartialTrade)
     auto j = update("TRADE", "PARTIALLY_FILLED",
                     "0.4", "60000.0", "0.4");
 
-    ASSERT_TRUE(p.parse(j, out));
+    ASSERT_EQ(p.parse(j, out), execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::partial_fill);
     EXPECT_DOUBLE_EQ(out.last_fill_qty, 0.4);
     EXPECT_DOUBLE_EQ(out.last_fill_price, 60000.0);
@@ -210,7 +330,7 @@ TEST(BinanceFuturesUserDataParser, FullTrade)
                     "tt-9", "SELL", "77",
                     "0.06", "USDT");
 
-    ASSERT_TRUE(p.parse(j, out));
+    ASSERT_EQ(p.parse(j, out), execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::full_fill);
     EXPECT_EQ(out.side, order_side::sell);
     EXPECT_EQ(out.client_order_id, "tt-9");
@@ -226,7 +346,8 @@ TEST(BinanceFuturesUserDataParser, Canceled)
 {
     BinanceFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(update("CANCELED", "CANCELED"), out));
+    ASSERT_EQ(p.parse(update("CANCELED", "CANCELED"), out),
+              execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::canceled);
 }
 
@@ -237,7 +358,7 @@ TEST(BinanceFuturesUserDataParser, Rejected)
     auto j = update("REJECTED", "REJECTED", "0", "0", "0",
                     "tt-2", "BUY", "0", "0", "USDT",
                     "INSUFFICIENT_MARGIN");
-    ASSERT_TRUE(p.parse(j, out));
+    ASSERT_EQ(p.parse(j, out), execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::rejected);
     EXPECT_EQ(out.error, "INSUFFICIENT_MARGIN");
 }
@@ -246,15 +367,52 @@ TEST(BinanceFuturesUserDataParser, Expired)
 {
     BinanceFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(update("EXPIRED", "EXPIRED"), out));
+    ASSERT_EQ(p.parse(update("EXPIRED", "EXPIRED"), out),
+              execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::expired);
+}
+
+TEST(BinanceFuturesUserDataParser, StpExpiryRemainsValid)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_exec out;
+
+    ASSERT_EQ(p.parse(update("EXPIRED", "EXPIRED_IN_MATCH"), out),
+              execution_parse_result::valid);
+    EXPECT_EQ(out.k, parsed_exec::kind::expired);
+}
+
+TEST(BinanceFuturesUserDataParser, CalculatedLiquidationFillRemainsValid)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_exec out;
+
+    ASSERT_EQ(p.parse(update("CALCULATED", "FILLED", "1", "100", "1"), out),
+              execution_parse_result::valid);
+    EXPECT_EQ(out.k, parsed_exec::kind::full_fill);
+}
+
+TEST(BinanceFuturesUserDataParser, UnsupportedConditionalLifecyclesFailClosed)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_exec out;
+
+    EXPECT_EQ(p.parse(
+                  R"({"e":"CONDITIONAL_ORDER_TRIGGER_REJECT","E":1700000000000})",
+                  out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(R"({"e":"ALGO_UPDATE","E":1700000000000})", out),
+              execution_parse_result::malformed);
+    EXPECT_EQ(p.parse(R"({"e":"TRADE_LITE","E":1700000000000})", out),
+              execution_parse_result::malformed);
 }
 
 TEST(BinanceFuturesUserDataParser, TimestampFromWrapperEventMillis)
 {
     BinanceFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_TRUE(p.parse(update("NEW", "NEW"), out));
+    ASSERT_EQ(p.parse(update("NEW", "NEW"), out),
+              execution_parse_result::valid);
 
     // Wrapper `E`, not inner `T`, drives the timestamp (matches spot).
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -262,13 +420,13 @@ TEST(BinanceFuturesUserDataParser, TimestampFromWrapperEventMillis)
     EXPECT_EQ(ms, 1700000000000LL);
 }
 
-TEST(BinanceFuturesUserDataParser, StringExchangeIdFallback)
+TEST(BinanceFuturesUserDataParser, NumericStringExchangeIdIsAccepted)
 {
     BinanceFuturesUserDataParser p;
     parsed_exec out;
     std::string j = R"({"e":"ORDER_TRADE_UPDATE","E":1,"o":{)"
                     R"("s":"X","c":"c1","S":"BUY","x":"NEW","X":"NEW",)"
-                    R"("i":"alpha-7","l":"0","L":"0","z":"0","n":"0","N":"USDT"}})";
-    ASSERT_TRUE(p.parse(j, out));
-    EXPECT_EQ(out.exchange_order_id, "alpha-7");
+                    R"("i":"77","l":"0","L":"0","z":"0","n":"0","N":"USDT"}})";
+    ASSERT_EQ(p.parse(j, out), execution_parse_result::valid);
+    EXPECT_EQ(out.exchange_order_id, "77");
 }

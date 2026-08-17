@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -25,39 +26,32 @@ public:
     funding_parse_result parse_funding_update(
         std::string_view raw, parsed_funding_update& out) noexcept override
     {
-        constexpr std::string_view marker = "\"FUNDING_FEE\"";
-        const bool funding_like = raw.find(marker) != std::string_view::npos;
         if (!provider_recovery::is_authoritative_object(raw))
-            return funding_like ? funding_parse_result::invalid
-                                : funding_parse_result::not_funding;
+            return funding_parse_result::not_funding;
 
         std::string_view event;
         if (!provider_recovery::top_level_plain_string(raw, "e", event))
-            return funding_like ? funding_parse_result::invalid
-                                : funding_parse_result::not_funding;
+            return funding_parse_result::not_funding;
         if (event != "ACCOUNT_UPDATE")
-            return funding_like ? funding_parse_result::invalid
-                                : funding_parse_result::not_funding;
+            return funding_parse_result::not_funding;
 
         std::string_view account;
         if (!provider_recovery::top_level_member(raw, "a", account)
             || !provider_recovery::is_authoritative_object(account))
-            return funding_like ? funding_parse_result::invalid
-                                : funding_parse_result::not_funding;
+            return funding_parse_result::invalid;
 
         std::string_view reason;
         if (!provider_recovery::top_level_plain_string(account, "m", reason))
-            return funding_like ? funding_parse_result::invalid
-                                : funding_parse_result::not_funding;
+            return funding_parse_result::invalid;
         if (reason != "FUNDING_FEE")
-            return funding_like ? funding_parse_result::invalid
-                                : funding_parse_result::not_funding;
+            return funding_parse_result::not_funding;
 
         std::string_view event_time;
         std::int64_t event_time_ms = 0;
         if (!provider_recovery::top_level_scalar_text(raw, "E", event_time)
             || !parse_int64(event_time, event_time_ms)
-            || event_time_ms <= 0)
+            || event_time_ms <= 0
+            || !system_clock_millis_is_representable(event_time_ms))
             return funding_parse_result::invalid;
 
         std::string_view balances;
@@ -146,54 +140,169 @@ public:
         return true;
     }
 
-    bool parse(std::string_view raw, parsed_exec& out) override
+    execution_parse_result parse(std::string_view raw,
+                                 parsed_exec& out) override
     {
-        std::string json(raw);
+        // The private transport may forward WebSocket keepalives verbatim.
+        // They carry no execution identity and are deliberately harmless.
+        if (raw == "ping" || raw == "pong")
+            return execution_parse_result::unrelated;
+        if (!provider_recovery::is_authoritative_object(raw))
+            return execution_parse_result::malformed;
 
-        auto event_type = binance::extract_string(json, "e");
+        std::string_view event_type;
+        const auto event_member = provider_recovery::payload_parser(raw)
+            .inspect_top_level_member("e", event_type);
+        if (event_member
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+            return execution_parse_result::malformed;
+        if (event_member == provider_recovery::payload_parser::member_result::missing)
+            return looks_like_execution_envelope(raw)
+                ? execution_parse_result::malformed
+                : execution_parse_result::unrelated;
+        if (!provider_recovery::top_level_plain_string(raw, "e", event_type))
+            return execution_parse_result::malformed;
+        // Losing the listen token makes the private stream non-authoritative.
+        // Never keep live admission open after either documented termination
+        // notification.
+        if (event_type == "listenKeyExpired"
+            || event_type == "eventStreamTerminated")
+            return execution_parse_result::malformed;
+        // These are authenticated order-lifecycle feeds for conditional legs
+        // that this slice cannot yet carry into the engine.  Ignoring one
+        // would leave a locally armed stop/TP falsely marked as protective.
+        // Until Slice 3 supplies the typed lifecycle ingress, fail closed.
+        if (event_type == "CONDITIONAL_ORDER_TRIGGER_REJECT"
+            || event_type == "ALGO_UPDATE"
+            || event_type == "TRADE_LITE")
+            return execution_parse_result::malformed;
         if (event_type != "ORDER_TRADE_UPDATE")
-            return false;
+            return looks_like_execution_envelope(raw)
+                ? execution_parse_result::malformed
+                : execution_parse_result::unrelated;
 
-        auto o_pos = json.find("\"o\":{");
-        if (o_pos == std::string::npos) return false;
-        std::string_view inner(json.data() + o_pos, json.size() - o_pos);
+        std::string_view inner;
+        if (!provider_recovery::top_level_member(raw, "o", inner)
+            || !provider_recovery::is_authoritative_object(inner))
+            return execution_parse_result::malformed;
 
-        out = parsed_exec{};
+        std::string_view symbol;
+        std::string_view client;
+        std::string_view exchange;
+        std::string_view side;
+        std::string_view execution_type;
+        std::string_view order_status;
+        if (!required_plain_string(inner, "s", symbol)
+            || !optional_plain_string(inner, "c", client)
+            || !required_numeric_order_id(inner, "i", exchange)
+            || !required_plain_string(inner, "S", side)
+            || !required_plain_string(inner, "x", execution_type)
+            || !required_plain_string(inner, "X", order_status))
+            return execution_parse_result::malformed;
+        const auto parsed_kind = classify(execution_type, order_status);
 
-        out.symbol            = std::string(binance::extract_sv_string(inner, "s"));
-        out.client_order_id   = std::string(binance::extract_sv_string(inner, "c"));
-        out.exchange_order_id = take_id(inner, "i");
+        std::int64_t event_ms = 0;
+        if (symbol.empty() || (client.empty() && exchange.empty())
+            || (side != "BUY" && side != "SELL")
+            || !parsed_kind
+            || !parse_int64_required(raw, "E", event_ms)
+            || event_ms <= 0
+            || !system_clock_millis_is_representable(event_ms))
+            return execution_parse_result::malformed;
 
-        auto side = binance::extract_sv_string(inner, "S");
-        out.side = (side == "SELL") ? order_side::sell : order_side::buy;
+        parsed_exec candidate;
+        candidate.k = *parsed_kind;
+        candidate.symbol.assign(symbol.data(), symbol.size());
+        candidate.client_order_id.assign(client.data(), client.size());
+        candidate.exchange_order_id.assign(exchange.data(), exchange.size());
+        candidate.side = side == "SELL" ? order_side::sell : order_side::buy;
+        candidate.ts = std::chrono::system_clock::time_point(
+            std::chrono::milliseconds(event_ms));
 
-        out.last_fill_qty    = to_double(binance::extract_sv_string(inner, "l"));
-        out.last_fill_price  = to_double(binance::extract_sv_string(inner, "L"));
-        out.cumulative_qty   = to_double(binance::extract_sv_string(inner, "z"));
-        out.commission       = to_double(binance::extract_sv_string(inner, "n"));
-        out.commission_asset = std::string(binance::extract_sv_string(inner, "N"));
+        bool has_last_qty = false;
+        bool has_last_price = false;
+        bool has_cumulative = false;
+        bool has_commission = false;
+        if (!parse_optional_finite(inner, "l", candidate.last_fill_qty,
+                                   has_last_qty)
+            || !parse_optional_finite(inner, "L", candidate.last_fill_price,
+                                      has_last_price)
+            || !parse_optional_finite(inner, "z", candidate.cumulative_qty,
+                                      has_cumulative)
+            || !parse_optional_finite(inner, "n", candidate.commission,
+                                      has_commission)
+            || candidate.cumulative_qty < 0.0)
+            return execution_parse_result::malformed;
 
-        // Wrapper-level event time (matches spot, which uses `E`).
-        auto ts_ms = binance::extract_number(json, "E");
-        if (!ts_ms.empty())
+        if (candidate.k == parsed_exec::kind::partial_fill
+            || candidate.k == parsed_exec::kind::full_fill)
         {
-            auto ms = std::strtoll(ts_ms.c_str(), nullptr, 10);
-            out.ts = std::chrono::system_clock::time_point(
-                std::chrono::milliseconds(ms));
+            if (!has_last_qty || !has_last_price || !has_cumulative
+                || !has_commission
+                || candidate.last_fill_qty <= 0.0
+                || candidate.last_fill_price <= 0.0
+                || candidate.cumulative_qty < candidate.last_fill_qty)
+                return execution_parse_result::malformed;
         }
 
-        auto x_str = std::string(binance::extract_sv_string(inner, "x"));
-        auto X_str = std::string(binance::extract_sv_string(inner, "X"));
+        std::string_view commission_asset;
+        if (!optional_nullable_plain_string(inner, "N", commission_asset))
+            return execution_parse_result::malformed;
+        candidate.commission_asset.assign(
+            commission_asset.data(), commission_asset.size());
+        if ((candidate.k == parsed_exec::kind::partial_fill
+             || candidate.k == parsed_exec::kind::full_fill)
+            && candidate.commission != 0.0
+            && candidate.commission_asset.empty())
+            return execution_parse_result::malformed;
+        if (candidate.k == parsed_exec::kind::rejected)
+        {
+            std::string_view error;
+            if (!optional_plain_string(inner, "r", error))
+                return execution_parse_result::malformed;
+            candidate.error.assign(error.data(), error.size());
+        }
 
-        out.k = classify(x_str, X_str);
-
-        if (out.k == parsed_exec::kind::rejected)
-            out.error = std::string(binance::extract_sv_string(inner, "r"));
-
-        return true;
+        out = std::move(candidate);
+        return execution_parse_result::valid;
     }
 
 private:
+    static bool looks_like_execution_envelope(std::string_view wrapper) noexcept
+    {
+        std::string_view inner;
+        const auto outer = provider_recovery::payload_parser(wrapper)
+            .inspect_top_level_member("o", inner);
+        if (outer == provider_recovery::payload_parser::member_result::missing)
+            return false;
+        if (outer != provider_recovery::payload_parser::member_result::unique
+            || !provider_recovery::is_authoritative_object(inner))
+            return true;
+
+        for (const auto key : {std::string_view{"x"}, std::string_view{"X"},
+                               std::string_view{"l"}, std::string_view{"L"},
+                               std::string_view{"z"}, std::string_view{"n"}})
+        {
+            std::string_view ignored;
+            if (provider_recovery::payload_parser(inner)
+                    .inspect_top_level_member(key, ignored)
+                != provider_recovery::payload_parser::member_result::missing)
+                return true;
+        }
+
+        std::size_t identity_members = 0;
+        for (const auto key : {std::string_view{"s"}, std::string_view{"c"},
+                               std::string_view{"S"}, std::string_view{"i"}})
+        {
+            std::string_view ignored;
+            if (provider_recovery::payload_parser(inner)
+                    .inspect_top_level_member(key, ignored)
+                != provider_recovery::payload_parser::member_result::missing)
+                ++identity_members;
+        }
+        return identity_members >= 2;
+    }
+
     static bool parse_int64(std::string_view text, std::int64_t& out) noexcept
     {
         const auto [end, ec] = std::from_chars(
@@ -203,6 +312,7 @@ private:
 
     static bool parse_double(std::string_view text, double& out) noexcept
     {
+        if (text.empty()) return false;
         const auto [end, ec] = std::from_chars(
             text.data(), text.data() + text.size(), out,
             std::chars_format::general);
@@ -210,19 +320,139 @@ private:
             && std::isfinite(out);
     }
 
+    static bool required_plain_string(std::string_view object,
+                                      std::string_view key,
+                                      std::string_view& out) noexcept
+    {
+        return provider_recovery::top_level_plain_string(object, key, out)
+            && !out.empty();
+    }
+
+    static bool optional_plain_string(std::string_view object,
+                                      std::string_view key,
+                                      std::string_view& out) noexcept
+    {
+        const auto result = provider_recovery::payload_parser(object)
+            .inspect_top_level_member(key, out);
+        if (result == provider_recovery::payload_parser::member_result::missing)
+        {
+            out = {};
+            return true;
+        }
+        if (result
+            != provider_recovery::payload_parser::member_result::unique)
+            return false;
+        return provider_recovery::top_level_plain_string(object, key, out);
+    }
+
+    static bool optional_nullable_plain_string(std::string_view object,
+                                               std::string_view key,
+                                               std::string_view& out) noexcept
+    {
+        const auto result = provider_recovery::payload_parser(object)
+            .inspect_top_level_member(key, out);
+        if (result == provider_recovery::payload_parser::member_result::missing)
+        {
+            out = {};
+            return true;
+        }
+        if (result
+            != provider_recovery::payload_parser::member_result::unique)
+            return false;
+        if (provider_recovery::is_exact_null(out))
+        {
+            out = {};
+            return true;
+        }
+        return provider_recovery::top_level_plain_string(object, key, out);
+    }
+
+    static bool optional_scalar(std::string_view object,
+                                std::string_view key,
+                                std::string_view& out) noexcept
+    {
+        const auto result = provider_recovery::payload_parser(object)
+            .inspect_top_level_member(key, out);
+        if (result == provider_recovery::payload_parser::member_result::missing)
+        {
+            out = {};
+            return true;
+        }
+        if (result
+            != provider_recovery::payload_parser::member_result::unique)
+            return false;
+        return provider_recovery::top_level_scalar_text(object, key, out);
+    }
+
+    static bool required_scalar(std::string_view object,
+                                std::string_view key,
+                                std::string_view& out) noexcept
+    {
+        return provider_recovery::top_level_scalar_text(object, key, out)
+            && !out.empty();
+    }
+
+    // Futures' `i` is a numeric venue order ID. Numeric JSON strings are
+    // tolerated for wire compatibility; arbitrary identity text is not.
+    static bool required_numeric_order_id(std::string_view object,
+                                          std::string_view key,
+                                          std::string_view& out) noexcept
+    {
+        if (!required_scalar(object, key, out)) return false;
+        std::uint64_t ignored = 0;
+        const auto [end, ec] = std::from_chars(
+            out.data(), out.data() + out.size(), ignored);
+        return ec == std::errc{} && end == out.data() + out.size();
+    }
+
+    static bool parse_int64_required(std::string_view object,
+                                     std::string_view key,
+                                     std::int64_t& out) noexcept
+    {
+        std::string_view text;
+        if (!provider_recovery::top_level_scalar_text(object, key, text)
+            || text.empty())
+            return false;
+        return parse_int64(text, out);
+    }
+
+    static bool parse_optional_finite(std::string_view object,
+                                      std::string_view key,
+                                      double& out,
+                                      bool& present) noexcept
+    {
+        std::string_view text;
+        const auto result = provider_recovery::payload_parser(object)
+            .inspect_top_level_member(key, text);
+        if (result
+            == provider_recovery::payload_parser::member_result::missing)
+        {
+            present = false;
+            out = 0.0;
+            return true;
+        }
+        if (result
+            != provider_recovery::payload_parser::member_result::unique
+            || !provider_recovery::top_level_scalar_text(object, key, text)
+            || text.empty())
+            return false;
+        present = true;
+        return parse_double(text, out);
+    }
+
+    static bool parse_optional_finite(std::string_view object,
+                                      std::string_view key,
+                                      double& out) noexcept
+    {
+        bool ignored = false;
+        return parse_optional_finite(object, key, out, ignored);
+    }
+
     static double to_double(std::string_view sv)
     {
         if (sv.empty()) return 0.0;
         std::string s(sv);
         return std::strtod(s.c_str(), nullptr);
-    }
-
-    static std::string take_id(std::string_view inner, std::string_view key)
-    {
-        auto n = binance::extract_sv_number(inner, key);
-        if (!n.empty()) return std::string(n);
-        auto s = binance::extract_sv_string(inner, key);
-        return std::string(s);
     }
 
     // Walk a JSON array nested under `array_key` inside `body`. Calls
@@ -298,24 +528,35 @@ private:
         return std::string(sv);
     }
 
-    static parsed_exec::kind classify(const std::string& x,
-                                      const std::string& X)
+    static std::optional<parsed_exec::kind>
+    classify(std::string_view x, std::string_view X) noexcept
     {
         if (x == "TRADE")
         {
             if (X == "FILLED")           return parsed_exec::kind::full_fill;
             if (X == "PARTIALLY_FILLED") return parsed_exec::kind::partial_fill;
-            return parsed_exec::kind::partial_fill;
+            return std::nullopt;
         }
-        if (x == "NEW")      return parsed_exec::kind::ack;
-        if (x == "CANCELED") return parsed_exec::kind::canceled;
-        if (x == "REJECTED") return parsed_exec::kind::rejected;
-        if (x == "EXPIRED")  return parsed_exec::kind::expired;
-
-        if (X == "CANCELED") return parsed_exec::kind::canceled;
-        if (X == "REJECTED") return parsed_exec::kind::rejected;
-        if (X == "EXPIRED")  return parsed_exec::kind::expired;
-
-        return parsed_exec::kind::other;
+        // A liquidation CALCULATED update carries the same economic fields
+        // as a normal fill.  Route it through fill validation rather than
+        // misclassifying a genuine venue execution as malformed.
+        if (x == "CALCULATED")
+        {
+            if (X == "FILLED")           return parsed_exec::kind::full_fill;
+            if (X == "PARTIALLY_FILLED") return parsed_exec::kind::partial_fill;
+            return std::nullopt;
+        }
+        if (x == "NEW" && X == "NEW")
+            return parsed_exec::kind::ack;
+        if (x == "CANCELED" && X == "CANCELED")
+            return parsed_exec::kind::canceled;
+        if (x == "REJECTED" && X == "REJECTED")
+            return parsed_exec::kind::rejected;
+        // Futures STP can expire an order with EXPIRED_IN_MATCH.  It is a
+        // terminal expiry, not a malformed order update.
+        if (x == "EXPIRED"
+            && (X == "EXPIRED" || X == "EXPIRED_IN_MATCH"))
+            return parsed_exec::kind::expired;
+        return std::nullopt;
     }
 };

@@ -14,6 +14,7 @@
 
 #include <chrono>
 #include <memory>
+#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -56,12 +57,12 @@ struct FakeEncoder : public IOrderEncoder
 struct ScriptedParser : public IFillParser
 {
     parsed_exec next;
-    bool        will_parse = true;
+    execution_parse_result result = execution_parse_result::valid;
 
-    bool parse(std::string_view, parsed_exec& out) override
+    execution_parse_result parse(std::string_view, parsed_exec& out) override
     {
         out = next;
-        return will_parse;
+        return result;
     }
 };
 
@@ -138,7 +139,7 @@ TEST(ExecutionBridgeUnknownFill, HandlerInvokedAndFillEnqueued)
     EXPECT_FALSE(bridge.poll_fills(fills));
 }
 
-TEST(ExecutionBridgeUnknownFill, HandlerReturningNulloptDropsMessage)
+TEST(ExecutionBridgeUnknownFill, UnresolvedEconomicFillClosesAdmission)
 {
     auto fill_tx  = std::make_shared<FakeFillTransport>();
     auto order_tx = std::make_shared<FakeOrderTransport>();
@@ -150,8 +151,11 @@ TEST(ExecutionBridgeUnknownFill, HandlerReturningNulloptDropsMessage)
     d.fill_tx  = fill_tx;
     d.encoder  = encoder;
     d.parser   = parser;
+    int execution_failures = 0;
+    d.execution_failure_handler = [&] { ++execution_failures; };
 
     ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
 
     int handler_calls = 0;
     bridge.set_unknown_fill_handler(
@@ -159,7 +163,7 @@ TEST(ExecutionBridgeUnknownFill, HandlerReturningNulloptDropsMessage)
             -> std::optional<ExecutionBridge::synth_result>
         {
             ++handler_calls;
-            return std::nullopt;  // not one of ours
+            return std::nullopt;  // not one of ours: reconcile is required
         });
 
     parser->next = parsed_exec{};
@@ -171,9 +175,52 @@ TEST(ExecutionBridgeUnknownFill, HandlerReturningNulloptDropsMessage)
     fill_tx->inject("{}");
 
     EXPECT_EQ(handler_calls, 1);
+    EXPECT_EQ(execution_failures, 1);
+    EXPECT_FALSE(bridge.cancel_order(999));
 
     std::vector<ExecutionBridge::synth_meta> meta;
     EXPECT_FALSE(bridge.poll_synth_meta(meta));
+    std::vector<fill_event> fills;
+    EXPECT_FALSE(bridge.poll_fills(fills));
+}
+
+TEST(ExecutionBridgeUnknownFill, ThrowingResolverClosesAdmission)
+{
+    auto fill_tx  = std::make_shared<FakeFillTransport>();
+    auto order_tx = std::make_shared<FakeOrderTransport>();
+    auto encoder  = std::make_shared<FakeEncoder>();
+    auto parser   = std::make_shared<ScriptedParser>();
+
+    ExecutionBridge::deps d;
+    d.order_tx = order_tx;
+    d.fill_tx  = fill_tx;
+    d.encoder  = encoder;
+    d.parser   = parser;
+    int execution_failures = 0;
+    d.execution_failure_handler = [&] { ++execution_failures; };
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    bridge.set_unknown_fill_handler(
+        [](const parsed_exec&, std::uint64_t)
+            -> std::optional<ExecutionBridge::synth_result>
+        {
+            throw std::bad_alloc{};
+        });
+
+    parser->next = parsed_exec{};
+    parser->next.k = parsed_exec::kind::full_fill;
+    parser->next.client_order_id = "unknown";
+    parser->next.exchange_order_id = "999";
+    parser->next.symbol = "BTCUSDT";
+    parser->next.last_fill_qty = 1.0;
+    parser->next.last_fill_price = 100.0;
+
+    EXPECT_NO_THROW(fill_tx->inject("{}"));
+    EXPECT_EQ(execution_failures, 1);
+    EXPECT_FALSE(bridge.cancel_order(999));
+
     std::vector<fill_event> fills;
     EXPECT_FALSE(bridge.poll_fills(fills));
 }

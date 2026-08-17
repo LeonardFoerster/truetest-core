@@ -4,6 +4,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <limits>
+#include <ratio>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -90,6 +92,39 @@ enum class funding_parse_result : std::uint8_t
     invalid,
 };
 
+// Parsing private order/fill traffic is a safety boundary, not a best-effort
+// classifier.  In particular, a malformed message for a known execution
+// envelope must never be conflated with an unrelated control or account
+// message: the former closes live order admission, the latter may be routed
+// to another parser.
+enum class execution_parse_result : std::uint8_t
+{
+    unrelated,
+    valid,
+    malformed,
+};
+
+// `system_clock::duration` is commonly nanoseconds.  Constructing a time
+// point directly from an arbitrary positive int64 millisecond count can then
+// overflow during the implicit duration conversion.  Validate the exact
+// conversion domain before any parser creates the timestamp.
+inline bool system_clock_millis_is_representable(
+    std::int64_t milliseconds) noexcept
+{
+    using target_duration = std::chrono::system_clock::duration;
+    using target_rep = target_duration::rep;
+    using scale = std::ratio_divide<std::chrono::milliseconds::period,
+                                    target_duration::period>;
+    const long double target_ticks =
+        static_cast<long double>(milliseconds)
+        * static_cast<long double>(scale::num)
+        / static_cast<long double>(scale::den);
+    return target_ticks
+        >= static_cast<long double>(std::numeric_limits<target_rep>::lowest())
+        && target_ticks
+        <= static_cast<long double>(std::numeric_limits<target_rep>::max());
+}
+
 // Allocation-free handoff from the venue parser to the provider-owned SPSC
 // ingress. Venue parsers must return invalid for funding-like frames whose
 // envelope, timestamp, asset, or delta is not authoritative.
@@ -104,7 +139,8 @@ class IFillParser
 public:
     virtual ~IFillParser() = default;
 
-    virtual bool parse(std::string_view raw, parsed_exec& out) = 0;
+    [[nodiscard]] virtual execution_parse_result
+    parse(std::string_view raw, parsed_exec& out) = 0;
 
     virtual funding_parse_result parse_funding_update(
         std::string_view /*raw*/, parsed_funding_update& /*out*/) noexcept
@@ -115,9 +151,9 @@ public:
     // Optional: parse server-pushed position/balance snapshots not tied
     // to a specific order (e.g. futures ACCOUNT_UPDATE). Default returns
     // false - spot's user-data parser doesn't surface snapshots through
-    // this channel. Callers should invoke this only after `parse()`
-    // declines, since one event can be relevant to one path or the
-    // other but not both.
+    // this channel. Callers invoke this only after `parse()` returns
+    // execution_parse_result::unrelated; malformed known execution
+    // envelopes are terminal and must not be reinterpreted as snapshots.
     virtual bool parse_position_snapshot(std::string_view /*raw*/,
                                          parsed_position_snapshot& /*out*/)
     {

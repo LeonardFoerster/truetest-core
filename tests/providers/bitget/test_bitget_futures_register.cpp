@@ -154,7 +154,7 @@ TEST(BitgetFuturesRegister, FundingParserSeparatesRowsAndRefusesAmbiguity)
 
     EXPECT_EQ(parser.parse_funding_update(
         R"({"arg":{"topic":"account"},"data":[{"coin":"USDT","balanceChange":"7","bizType":"transfer"}],"ts":1700000000000})",
-        parsed), funding_parse_result::not_funding);
+        parsed), funding_parse_result::invalid);
 }
 
 TEST(BitgetFuturesRegister, DepthStreamEnablesEventStream)
