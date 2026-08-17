@@ -77,6 +77,7 @@ struct bar_record
 class CsvBarParser : public IDataParser<bar_record>
 {
 public:
+	bool header_frame_contains_records() const override { return false; }
 	bool parse_header(const std::string& line) override
 	{
 		std::stringstream ss(line);
@@ -179,6 +180,7 @@ private:
 class CsvTickParser : public IDataParser<tick_record>
 {
 public:
+	bool header_frame_contains_records() const override { return false; }
 	std::optional<tick_record> parse_record(const std::string& line) override
 	{
 		if (line.empty()) return std::nullopt;

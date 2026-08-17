@@ -3,6 +3,7 @@
 
 #include "providers/binance/binance_auth.h"
 #include "providers/binance/binance_parser.h"
+#include "providers/bounded_ws_open.h"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -67,9 +68,13 @@ public:
     {
         // Cleanly close any persistent connection
         close_connection_locked();
+        close_safety_connection_locked();
 
-        SSL_SESSION* sess = cached_session_.exchange(
-            nullptr, std::memory_order_acq_rel);
+        SSL_SESSION* sess = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(session_mu_);
+            sess = std::exchange(cached_session_, nullptr);
+        }
         if (sess) SSL_SESSION_free(sess);
     }
 
@@ -94,7 +99,17 @@ public:
         int status;
         std::string body;
         int used_weight = 0;
+        // True once an HTTP write was initiated; after that, a zero-byte
+        // completion cannot prove that no encrypted bytes reached the peer.
+        // A missing response after this point is an ambiguous venue mutation.
+        bool request_written = false;
     };
+
+    static bool request_may_have_been_written(
+        const beast::error_code& ec, std::size_t bytes_transferred) noexcept
+    {
+        return !ec || bytes_transferred > 0;
+    }
 
     response post(const std::string& endpoint, const std::string& params)
     {
@@ -109,6 +124,38 @@ public:
     response del(const std::string& endpoint, const std::string& params)
     {
         return do_signed_request(http::verb::delete_, endpoint, params, /*in_query=*/true);
+    }
+
+    // Safety operations use a separately serialized keep-alive connection.
+    // Each call performs one signed attempt under one wall-clock deadline:
+    // no clock resync, weight throttling, 429 retry, or replay after a
+    // pre-write failure. Normal order traffic may use this same bounded lane
+    // so shutdown cannot race a late order onto the venue.
+    response safety_post(const std::string& endpoint,
+                         const std::string& params,
+                         std::chrono::milliseconds deadline,
+                         const std::atomic<bool>* cancelled = nullptr)
+    {
+        return do_safety_signed_request(
+            http::verb::post, endpoint, params, false, deadline, cancelled);
+    }
+
+    response safety_get(const std::string& endpoint,
+                        const std::string& params,
+                        std::chrono::milliseconds deadline,
+                        const std::atomic<bool>* cancelled = nullptr)
+    {
+        return do_safety_signed_request(
+            http::verb::get, endpoint, params, true, deadline, cancelled);
+    }
+
+    response safety_del(const std::string& endpoint,
+                        const std::string& params,
+                        std::chrono::milliseconds deadline,
+                        const std::atomic<bool>* cancelled = nullptr)
+    {
+        return do_safety_signed_request(
+            http::verb::delete_, endpoint, params, true, deadline, cancelled);
     }
 
     response post_unsigned(const std::string& endpoint)
@@ -186,6 +233,12 @@ public:
                                    std::memory_order_release);
     }
 
+    std::chrono::milliseconds per_call_timeout() const
+    {
+        return std::chrono::milliseconds(
+            per_call_timeout_ms_.load(std::memory_order_acquire));
+    }
+
     // Signed requests stamp timestamp = local + clock_offset, learned from
     // /api/v3/time. Without this, drift past recvWindow (5s) -> -1021 on
     // every call. Refreshed lazily and reactively on -1021.
@@ -218,6 +271,29 @@ public:
         return true;
     }
 
+    bool ensure_clock_fresh_for_order(std::chrono::milliseconds deadline)
+    {
+        if (!resync_due(steady_now_ms(),
+                        last_sync_steady_ms_.load(std::memory_order_acquire),
+                        sync_interval_ms_))
+            return true;
+        const auto expires_at = std::chrono::steady_clock::now() + deadline;
+        std::unique_lock<std::timed_mutex> lk(clock_sync_mu_, std::defer_lock);
+        if (!lk.try_lock_until(expires_at)) return false;
+        if (!resync_due(steady_now_ms(),
+                        last_sync_steady_ms_.load(std::memory_order_acquire),
+                        sync_interval_ms_))
+            return true;
+        const auto prior = per_call_timeout();
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= expires_at) return false;
+        set_per_call_timeout(std::chrono::duration_cast<std::chrono::milliseconds>(
+            expires_at - now));
+        const bool ok = resync_clock_now();
+        set_per_call_timeout(prior);
+        return ok;
+    }
+
     // last_sync_ms_ <= 0 = never synced -> always due. Pure for tests.
     static bool resync_due(long long now_steady_ms,
                            long long last_sync_steady_ms,
@@ -248,6 +324,210 @@ public:
     }
 
 private:
+    response do_safety_signed_request(http::verb method,
+                                      const std::string& endpoint,
+                                      const std::string& params,
+                                      bool in_query,
+                                      std::chrono::milliseconds deadline,
+                                      const std::atomic<bool>* cancelled)
+    {
+        if (deadline <= std::chrono::milliseconds::zero())
+            return {0, "", 0};
+        const auto expires_at = std::chrono::steady_clock::now() + deadline;
+
+        std::unique_lock<std::timed_mutex> io_lock(
+            safety_io_mu_, std::defer_lock);
+        if (!io_lock.try_lock_until(expires_at)
+            || (cancelled && cancelled->load(std::memory_order_acquire)))
+            return {0, "", 0};
+
+        std::string signed_params = params;
+        char timestamp[64];
+        const auto ts = static_cast<long long>(binance::server_time_ms())
+                      + clock_offset_ms_.load(std::memory_order_acquire);
+        const int n = std::snprintf(timestamp, sizeof(timestamp),
+                                    "&timestamp=%lld&recvWindow=5000", ts);
+        signed_params.append(timestamp, static_cast<std::size_t>(n));
+
+        unsigned char digest[32];
+        {
+            std::unique_lock<std::timed_mutex> lk(signer_mu_, std::defer_lock);
+            if (!lk.try_lock_until(expires_at)) return {0, "", 0};
+            signer_.sign(signed_params, digest);
+        }
+        char hex[64];
+        binance::bytes_to_hex_lower(digest, 32, hex);
+        signed_params.append("&signature=", 11);
+        signed_params.append(hex, 64);
+
+        const std::string target = in_query
+            ? endpoint + "?" + signed_params
+            : endpoint;
+        const std::string body = in_query ? std::string{} : signed_params;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= expires_at) return {0, "", 0};
+        return execute_safety_once(
+            method, target, body,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                expires_at - now));
+    }
+
+    response execute_safety_once(http::verb method,
+                                 const std::string& target,
+                                 const std::string& body,
+                                 std::chrono::milliseconds deadline)
+    {
+        const bool warm = safety_connected_ && safety_ioc_ && safety_stream_
+            && beast::get_lowest_layer(*safety_stream_).socket().is_open();
+        if (!warm)
+        {
+            close_safety_connection_locked();
+            safety_ioc_.emplace();
+            safety_stream_.emplace(*safety_ioc_, ctx_);
+            if (!provider_ws::configure_tls_peer_identity(
+                    safety_stream_->native_handle(), host_))
+            {
+                close_safety_connection_locked();
+                return {0, "", 0};
+            }
+            if (SSL_SESSION* sess = acquire_cached_session())
+            {
+                SSL_set_session(safety_stream_->native_handle(), sess);
+                SSL_SESSION_free(sess);
+            }
+        }
+
+        auto& ioc = *safety_ioc_;
+        auto& stream = *safety_stream_;
+        std::optional<tcp::resolver> resolver;
+        if (!warm) resolver.emplace(ioc);
+        std::optional<net::steady_timer> timer;
+        timer.emplace(ioc);
+        beast::flat_buffer buffer;
+        http::request<http::string_body> req{method, target, 11};
+        http::response<http::string_body> res;
+        beast::error_code terminal_ec;
+        bool completed = false;
+        bool timed_out = false;
+        bool request_written = false;
+
+        req.set(http::field::host, host_);
+        req.set(http::field::user_agent, "TrueTest/1.0 safety");
+        req.set("X-MBX-APIKEY", api_key_);
+        if (!body.empty())
+        {
+            req.set(http::field::content_type,
+                    "application/x-www-form-urlencoded");
+            req.body() = body;
+            req.prepare_payload();
+        }
+
+        auto finish = [&](beast::error_code ec) {
+            if (completed) return;
+            completed = true;
+            terminal_ec = ec;
+            timer->cancel();
+        };
+        auto start_request = [&] {
+            request_written = true;
+            http::async_write(
+                stream, req,
+                [&](beast::error_code ec, std::size_t bytes_transferred) {
+                    request_written = request_written
+                        || request_may_have_been_written(ec, bytes_transferred);
+                    if (ec || completed) { finish(ec); return; }
+                    http::async_read(
+                        stream, buffer, res,
+                        [&](beast::error_code read_ec, std::size_t) {
+                            finish(read_ec);
+                        });
+                });
+        };
+
+        timer->expires_after(deadline);
+        timer->async_wait([&](beast::error_code ec) {
+            if (ec || completed) return;
+            timed_out = true;
+            if (resolver) resolver->cancel();
+            beast::error_code ignored;
+            beast::get_lowest_layer(stream).socket().close(ignored);
+            finish(net::error::timed_out);
+        });
+
+        if (warm)
+        {
+            start_request();
+        }
+        else
+        {
+            resolver->async_resolve(
+                host_, port_,
+                [&](beast::error_code ec,
+                    tcp::resolver::results_type results) {
+                    if (ec || completed) { finish(ec); return; }
+                    beast::get_lowest_layer(stream).async_connect(
+                        results,
+                        [&](beast::error_code connect_ec,
+                            const tcp::resolver::results_type::endpoint_type&) {
+                            if (connect_ec || completed)
+                            { finish(connect_ec); return; }
+                            stream.async_handshake(
+                                ssl::stream_base::client,
+                                [&](beast::error_code handshake_ec) {
+                                    if (handshake_ec || completed)
+                                    { finish(handshake_ec); return; }
+                                    start_request();
+                                });
+                        });
+                });
+        }
+
+        ioc.restart();
+        ioc.run_for(deadline + std::chrono::milliseconds(100));
+        if (!completed)
+        {
+            timed_out = true;
+            if (resolver) resolver->cancel();
+            beast::error_code ignored;
+            beast::get_lowest_layer(stream).socket().close(ignored);
+            terminal_ec = net::error::timed_out;
+            ioc.stop();
+        }
+
+        if (timed_out || terminal_ec)
+        {
+            std::cerr << "BinanceRestClient: safety request failed once: "
+                      << (timed_out ? "deadline elapsed"
+                                    : terminal_ec.message()) << "\n";
+            // Destroy the resolver before its execution context. Any queued
+            // handlers are then discarded with the owned safety io_context;
+            // none can observe this function's stack after return.
+            timer.reset();
+            resolver.reset();
+            close_safety_connection_locked();
+            return {0, "", 0, request_written};
+        }
+        safety_connected_ = res.keep_alive();
+
+        response out{static_cast<int>(res.result_int()), res.body(), 0, true};
+        auto weight_it = res.find("X-MBX-USED-WEIGHT-1M");
+        if (weight_it != res.end())
+        {
+            try { out.used_weight = std::stoi(std::string(weight_it->value())); }
+            catch (...) {}
+        }
+        if (!safety_connected_)
+        {
+            // Objects bound to the safety io_context must be destroyed before
+            // the context itself. This also covers cold 2xx responses that
+            // explicitly close the connection.
+            timer.reset();
+            resolver.reset();
+            close_safety_connection_locked();
+        }
+        return out;
+    }
+
     // Allocated once across all BinanceRestClient instances; OpenSSL
     // hands out monotonically-increasing indexes via get_ex_new_index.
     static int ex_data_index()
@@ -268,8 +548,11 @@ private:
         auto* self = static_cast<BinanceRestClient*>(
             SSL_CTX_get_ex_data(ctx, ex_data_index()));
         if (!self) return 0;
-        SSL_SESSION* old = self->cached_session_.exchange(
-            session, std::memory_order_acq_rel);
+        SSL_SESSION* old = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(self->session_mu_);
+            old = std::exchange(self->cached_session_, session);
+        }
         if (old) SSL_SESSION_free(old);
         return 1;
     }
@@ -280,9 +563,22 @@ private:
     std::string port_;
     std::string time_path_;
     ssl::context ctx_;
-    std::atomic<SSL_SESSION*> cached_session_{nullptr};
+    SSL_SESSION* cached_session_ = nullptr;
+    std::mutex session_mu_;
+
+    SSL_SESSION* acquire_cached_session()
+    {
+        std::lock_guard<std::mutex> lk(session_mu_);
+        SSL_SESSION* sess = cached_session_;
+        if (sess) SSL_SESSION_up_ref(sess);
+        return sess;
+    }
     binance::HmacSha256Signer signer_;
-    std::mutex signer_mu_;
+    std::timed_mutex signer_mu_;
+    std::timed_mutex safety_io_mu_;
+    std::optional<net::io_context> safety_ioc_;
+    std::optional<beast::ssl_stream<beast::tcp_stream>> safety_stream_;
+    bool safety_connected_ = false;
     std::atomic<int> last_used_weight_{0};
     std::atomic<long long> window_anchor_ms_{0};
     int weight_cap_ = 6000;
@@ -293,6 +589,7 @@ private:
     std::atomic<long long> last_sync_steady_ms_{0};
     long long sync_interval_ms_ = 5 * 60 * 1000;
     std::atomic<bool> sync_failed_logged_{false};
+    std::timed_mutex clock_sync_mu_;
 
     // === Persistent HTTP connection state for Keep-Alive ===
     // Replaces the previous "new ioc + stream per request" pattern.
@@ -344,7 +641,7 @@ private:
 
             unsigned char digest[32];
             {
-                std::lock_guard<std::mutex> lk(signer_mu_);
+                std::lock_guard<std::timed_mutex> lk(signer_mu_);
                 signer_.sign(out, digest);
             }
 
@@ -456,6 +753,10 @@ private:
                     bool write_done = false;
                     bool io_done = false;
 
+                    // Once the composed write is initiated, a zero-byte error
+                    // cannot prove that no encrypted request bytes reached the
+                    // peer. Never replay this attempt as definitely pre-write.
+                    request_sent = true;
                     http::async_write(stream, req,
                         [&](beast::error_code ec, std::size_t)
                         {
@@ -479,7 +780,7 @@ private:
 
                     // write_done tells the retry below whether the request
                     // reached the wire.
-                    request_sent = write_done;
+                    request_sent = request_sent || write_done;
 
                     if (!io_done || op_ec)
                     {
@@ -607,6 +908,19 @@ private:
         persistent_ioc_.reset();
     }
 
+    // Caller holds safety_io_mu_, except during single-threaded destruction.
+    void close_safety_connection_locked()
+    {
+        safety_connected_ = false;
+        if (safety_stream_)
+        {
+            beast::error_code ec;
+            beast::get_lowest_layer(*safety_stream_).socket().close(ec);
+        }
+        safety_stream_.reset();
+        safety_ioc_.reset();
+    }
+
     // Caller must hold connection_mu_.
     void ensure_connected_locked()
     {
@@ -628,11 +942,67 @@ private:
         auto& stream = *persistent_stream_;
         auto& lowest = beast::get_lowest_layer(stream);
 
-        if (!SSL_set_tlsext_host_name(stream.native_handle(), host_.c_str()))
-            throw std::runtime_error("SNI setup failed");
+        if (!provider_ws::configure_tls_peer_identity(
+                stream.native_handle(), host_))
+            throw std::runtime_error("TLS peer identity setup failed");
 
-        if (SSL_SESSION* sess = cached_session_.load(std::memory_order_acquire))
+        if (SSL_SESSION* sess = acquire_cached_session())
+        {
             SSL_set_session(stream.native_handle(), sess);
+            SSL_SESSION_free(sess);
+        }
+
+        const auto timeout = per_call_timeout();
+        if (timeout > std::chrono::milliseconds::zero())
+        {
+            auto resolver = std::make_shared<tcp::resolver>(*persistent_ioc_);
+            auto results = std::make_shared<tcp::resolver::results_type>();
+            if (!provider_ws::run_bounded(
+                    *persistent_ioc_, timeout,
+                    [resolver, results, host = host_, port = port_](auto done) {
+                        resolver->async_resolve(
+                            host, port,
+                            [resolver, results, done](
+                                beast::error_code ec,
+                                tcp::resolver::results_type found) mutable {
+                                if (!ec) *results = std::move(found);
+                                done(ec);
+                            });
+                    },
+                    [resolver] { resolver->cancel(); }))
+                throw std::runtime_error("bounded DNS resolve failed");
+            if (!provider_ws::run_bounded(
+                    *persistent_ioc_, timeout,
+                    [&, results](auto done) {
+                        net::async_connect(
+                            lowest, *results,
+                            [results, done](beast::error_code ec,
+                                            const tcp::endpoint&) mutable {
+                                done(ec);
+                            });
+                    },
+                    [&] {
+                        beast::error_code ignored;
+                        lowest.cancel(ignored);
+                        lowest.close(ignored);
+                    }))
+                throw std::runtime_error("bounded TCP connect failed");
+            if (!provider_ws::run_bounded(
+                    *persistent_ioc_, timeout,
+                    [&](auto done) {
+                        stream.async_handshake(
+                            ssl::stream_base::client,
+                            [done](beast::error_code ec) mutable { done(ec); });
+                    },
+                    [&] {
+                        beast::error_code ignored;
+                        lowest.cancel(ignored);
+                        lowest.close(ignored);
+                    }))
+                throw std::runtime_error("bounded TLS handshake failed");
+            connected_ = true;
+            return;
+        }
 
         // Re-resolve on every (re)connect. api.binance.com is a rotating
         // GSLB/round-robin record; caching the result for the whole process

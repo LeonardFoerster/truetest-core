@@ -18,12 +18,12 @@
 // Layered with kill-switch:
 //   - Orderly shutdown: kill-switch cancel+flatten; DMS disarm(countdown=0).
 //   - Catastrophic death: venue cancels orders when countdown expires.
-//   - Positions stay open after auto-cancel (orders only) unless
-//     dms_attempt_position_close fires close-positions on 2 consecutive
-//     heartbeat failures while this thread is still alive.
+//   - First heartbeat failure latches a terminal engine halt. The centralized
+//     exact-once kill session owns flattening.
 // Routes through post_fn (tests inject fake; production wraps post_json).
 
 #include "providers/bitget/bitget_rest_client.h"
+#include "providers/recovery_payload.h"
 #include "threading/worker_watchdog.h"
 
 #include <algorithm>
@@ -51,7 +51,7 @@ public:
 
     using post_fn = std::function<response(std::string_view endpoint,
                                            std::string_view json_body)>;
-    using close_position_fn = std::function<void()>;
+    using failure_fn = std::function<void(std::string_view)>;
 
     // countdown_ms: operator config in ms. Converted to seconds and clamped
     // to [5, 60]. Values in (0, 5000) WARN+clamp to 5s; > 60000 WARN+clamp
@@ -62,12 +62,8 @@ public:
     // is WARN-reduced to max(1000, countdown_ms_/3).
     BitgetFuturesDeadMansSwitch(post_fn post,
                                 int64_t countdown_ms,
-                                int64_t heartbeat_interval_ms,
-                                bool attempt_close = false,
-                                close_position_fn closer = nullptr)
+                                int64_t heartbeat_interval_ms)
         : post_(std::move(post))
-        , attempt_position_close_on_failure_(attempt_close)
-        , close_position_fn_(std::move(closer))
     {
         countdown_sec_ = clamp_countdown_sec(countdown_ms);
         countdown_ms_ = countdown_sec_ * 1000;
@@ -109,7 +105,15 @@ public:
     // the initial arm fails — refuse to go live without protection.
     bool start()
     {
+        const auto restart_refused = [this] {
+            if (!failure_latched_.load(std::memory_order_acquire)) return false;
+            std::cerr << "BitgetFuturesDeadMansSwitch: terminal heartbeat "
+                         "failure is latched; refusing to restart.\n";
+            return true;
+        };
+        if (restart_refused()) return false;
         if (running_.load(std::memory_order_acquire)) return true;
+        if (restart_refused()) return false;
 
         if (!post_countdown(countdown_sec_))
         {
@@ -123,7 +127,6 @@ public:
 
         last_beat_ms_.store(WorkerWatchdog::now_monotonic_ms(),
                             std::memory_order_release);
-        consecutive_fails_ = 0;
         running_.store(true, std::memory_order_release);
         thread_ = std::thread([this] { run(); });
         return true;
@@ -133,9 +136,14 @@ public:
     // for orderly cleanup. Uncontrolled death leaves the timer running.
     void stop()
     {
-        if (!running_.exchange(false, std::memory_order_acq_rel)) return;
-        cv_.notify_all();
+        request_stop();
         if (thread_.joinable()) thread_.join();
+    }
+
+    void request_stop() noexcept
+    {
+        running_.store(false, std::memory_order_release);
+        cv_.notify_all();
     }
 
     // POST countdown=0. Idempotent on success.
@@ -150,13 +158,25 @@ public:
     int64_t countdown_ms() const { return countdown_ms_; }
     int64_t countdown_sec() const { return countdown_sec_; }
 
-    void set_attempt_position_close(bool v)
+    void set_failure_callback(failure_fn fn)
     {
-        attempt_position_close_on_failure_ = v;
+        failure_fn deliver;
+        {
+            std::lock_guard<std::mutex> lk(failure_mu_);
+            failure_cb_ = std::move(fn);
+            if (failure_latched_.load(std::memory_order_acquire)
+                && !failure_delivered_ && failure_cb_)
+            {
+                failure_delivered_ = true;
+                deliver = failure_cb_;
+            }
+        }
+        if (deliver) deliver("bitget futures DMS heartbeat failed");
     }
-    void set_close_position_fn(close_position_fn fn)
+
+    bool failure_latched() const
     {
-        close_position_fn_ = std::move(fn);
+        return failure_latched_.load(std::memory_order_acquire);
     }
 
     // Pure helper for tests / provider: convert operator ms → seconds [5,60].
@@ -198,7 +218,13 @@ private:
         last_body_ = resp.body;
 
         const bool ok = resp.status >= 200 && resp.status < 300
-                     && bitget::is_business_success(resp.status, resp.body);
+                     && provider_recovery::is_authoritative_object(resp.body)
+                     && provider_recovery::top_level_exact_string(
+                            resp.body, "code", "00000")
+                     && provider_recovery::top_level_exact_string(
+                            resp.body, "msg", "success")
+                     && provider_recovery::top_level_exact_string(
+                            resp.body, "data", "success");
         if (!ok)
             log_bd_enablement_hint_if_needed(resp.body);
         return ok;
@@ -223,11 +249,26 @@ private:
                      "Bitget to unlock POST /api/v3/trade/countdown-cancel-all.\n";
     }
 
+    void latch_failure() noexcept
+    {
+        if (failure_latched_.exchange(true, std::memory_order_acq_rel)) return;
+        failure_fn cb;
+        try
+        {
+            std::lock_guard<std::mutex> lk(failure_mu_);
+            if (!failure_delivered_ && failure_cb_)
+            {
+                cb = failure_cb_;
+                failure_delivered_ = true;
+            }
+        }
+        catch (...) { return; }
+        try { if (cb) cb("bitget futures DMS heartbeat failed"); }
+        catch (...) {}
+    }
+
     void run()
     {
-        // No mid-cycle retry: rate limit is 1/s. Count consecutive cycle
-        // failures; on the second, optional close-positions then go silent
-        // (liveness atomic stops advancing → WorkerWatchdog can halt).
         while (running_.load(std::memory_order_acquire))
         {
             {
@@ -240,33 +281,21 @@ private:
             }
             if (!running_.load(std::memory_order_acquire)) break;
 
-            if (post_countdown(countdown_sec_))
+            bool heartbeat_ok = false;
+            try { heartbeat_ok = post_countdown(countdown_sec_); }
+            catch (...) { heartbeat_ok = false; }
+            if (heartbeat_ok)
             {
                 last_beat_ms_.store(WorkerWatchdog::now_monotonic_ms(),
                                     std::memory_order_release);
-                consecutive_fails_ = 0;
-                // Recovered after a close episode — allow another last-resort
-                // close if a later dual-failure streak occurs.
-                close_attempted_ = false;
                 continue;
             }
 
-            ++consecutive_fails_;
             std::cerr << "BitgetFuturesDeadMansSwitch: heartbeat failed "
-                         "(consecutive=" << consecutive_fails_
-                      << "); watchdog will halt engine if persistent.\n";
-
-            if (consecutive_fails_ >= 2
-                && attempt_position_close_on_failure_
-                && close_position_fn_
-                && !close_attempted_)
-            {
-                close_attempted_ = true;
-                std::cerr << "BitgetFuturesDeadMansSwitch: 2 consecutive HB "
-                             "fails — invoking close-positions last resort\n";
-                close_position_fn_();
-            }
+                         "once; latching terminal halt.\n";
+            latch_failure();
             // Don't update last_beat_ms_ on failure.
+            running_.store(false, std::memory_order_release);
         }
     }
 
@@ -275,10 +304,10 @@ private:
     int64_t countdown_ms_ = 5000;
     int64_t heartbeat_interval_ms_ = 1000;
 
-    bool attempt_position_close_on_failure_ = false;
-    close_position_fn close_position_fn_{};
-    bool close_attempted_ = false;
-    int consecutive_fails_ = 0;
+    std::atomic<bool> failure_latched_{false};
+    std::mutex failure_mu_;
+    failure_fn failure_cb_{};
+    bool failure_delivered_ = false;
     std::string last_body_;
 
     std::atomic<int64_t> last_beat_ms_{0};
@@ -292,9 +321,7 @@ inline std::shared_ptr<BitgetFuturesDeadMansSwitch>
 make_bitget_futures_dead_mans_switch(
     std::shared_ptr<BitgetRestClient> client,
     int64_t countdown_ms,
-    int64_t heartbeat_interval_ms,
-    bool attempt_close = false,
-    BitgetFuturesDeadMansSwitch::close_position_fn closer = nullptr)
+    int64_t heartbeat_interval_ms)
 {
     BitgetFuturesDeadMansSwitch::post_fn post;
     if (client)
@@ -302,13 +329,14 @@ make_bitget_futures_dead_mans_switch(
         post = [client](std::string_view ep, std::string_view body)
             -> BitgetFuturesDeadMansSwitch::response
         {
-            auto r = client->post_json(std::string(ep), std::string(body));
+            auto r = client->safety_post_json(
+                std::string(ep), std::string(body),
+                std::chrono::milliseconds(1500));
             return {r.status, std::move(r.body)};
         };
     }
     return std::make_shared<BitgetFuturesDeadMansSwitch>(
-        std::move(post), countdown_ms, heartbeat_interval_ms,
-        attempt_close, std::move(closer));
+        std::move(post), countdown_ms, heartbeat_interval_ms);
 }
 
 #endif // HAS_BITGET

@@ -15,6 +15,7 @@
 
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -75,6 +76,19 @@ public:
                          "Phase 0–1 is market-data + paper/shadow only. "
                          "Live orders (encoder, private WS, DMS) are deferred "
                          "to Phase 2–4. Use engine_shadow or backtest mode.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
+
+        // The public transport can subscribe to ticker/depth names, but this
+        // provider currently emits only trade events. Refuse unsupported
+        // streams before a socket is opened rather than silently discarding
+        // every received frame in the trade-only parser.
+        if (!is_trade_stream())
+        {
+            std::cerr << "BitunixFuturesProvider: refusing unsupported public "
+                         "stream '" << stream_type_ << "' — only trade is "
+                         "implemented by the event parser\n";
             state_ = lifecycle::error;
             return false;
         }
@@ -145,11 +159,36 @@ public:
         return executor_;
     }
 
-    bool supports_event_stream() const override { return true; }
+    bool supports_event_stream() const override { return is_trade_stream(); }
 
     std::shared_ptr<IDataParser<provider::event>> get_event_parser() override
     {
         return event_parser_;
+    }
+
+    std::optional<MarketDataFeed> get_market_data_feed() override
+    {
+        auto feed = IProvider::get_market_data_feed();
+        if (!feed)
+            return std::nullopt;
+
+        // `open()` has already rejected every other channel before creating
+        // the public transport. This declares only what the current parser
+        // can actually emit; it is not a claim about unimplemented venue
+        // channels such as depth or kline.
+        feed->request = market_data_request{
+            .symbol = symbol_,
+            .channels = {{market_data_channel_kind::trades}},
+        };
+        feed->capabilities = market_data_capabilities{
+            .trades = true,
+            .candles = false,
+            .l2_snapshots = false,
+            .l2_deltas = false,
+            .max_l2_depth = 0,
+            .event_order_is_receive_order = true,
+        };
+        return feed;
     }
 
     void set_halt_callback(
@@ -169,6 +208,11 @@ public:
     }
 
 private:
+    bool is_trade_stream() const
+    {
+        return bitunix::map_stream_to_channel(stream_type_) == "trade";
+    }
+
     std::string symbol_;
     std::string stream_type_;
     std::string api_key_;

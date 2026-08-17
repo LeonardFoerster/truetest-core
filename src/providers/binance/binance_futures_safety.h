@@ -2,6 +2,7 @@
 #ifdef HAS_BINANCE
 
 #include "providers/binance/binance_parser.h"
+#include "providers/recovery_payload.h"
 
 #include <cctype>
 #include <cmath>
@@ -45,9 +46,14 @@ inline char ascii_upper(char c)
 inline std::string normalize_margin_type(std::string_view s)
 {
     if (s.empty()) return {};
-    char first = ascii_upper(s[0]);
-    if (first == 'I') return "ISOLATED";
-    if (first == 'C') return "CROSSED";
+    const auto equals_ci = [](std::string_view lhs, std::string_view rhs) {
+        if (lhs.size() != rhs.size()) return false;
+        for (std::size_t i = 0; i < lhs.size(); ++i)
+            if (ascii_upper(lhs[i]) != ascii_upper(rhs[i])) return false;
+        return true;
+    };
+    if (equals_ci(s, "isolated")) return "ISOLATED";
+    if (equals_ci(s, "cross") || equals_ci(s, "crossed")) return "CROSSED";
     return std::string(s);
 }
 
@@ -184,6 +190,87 @@ inline std::optional<std::string> first_strict_refusal(
                 return a.note;
         }
     }
+    return std::nullopt;
+}
+
+// Strict startup is an evidence gate, not an advisory.  When enabled, every
+// way in which the scoped positionRisk response fails to prove the configured
+// margin mode returns a refusal reason. Even a flat scoped account returns a
+// symbol row, so an empty array is missing evidence rather than proof. Any row
+// must be uniquely scoped and complete even when positionAmt is zero.
+inline std::optional<std::string> strict_margin_probe_refusal(
+    int http_status,
+    std::string_view body,
+    std::string_view target_symbol,
+    std::string_view expected_margin_type,
+    bool strict)
+{
+    if (!strict) return std::nullopt;
+
+    const auto expected = detail::normalize_margin_type(expected_margin_type);
+    if (expected != "ISOLATED" && expected != "CROSSED")
+        return "strict margin mode requires ISOLATED or CROSSED expectation";
+    if (http_status < 200 || http_status >= 300)
+        return "positionRisk HTTP response did not prove strict margin mode";
+    if (!provider_recovery::is_authoritative_object_array(body))
+        return "positionRisk payload is not an authoritative object array";
+
+    std::size_t rows = 0;
+    std::string failure;
+    const bool valid = provider_recovery::every_top_level_object(
+        body, [&](std::string_view row) {
+            ++rows;
+            if (rows > 1)
+            {
+                failure = "positionRisk returned multiple rows for a scoped symbol";
+                return false;
+            }
+
+            std::string_view symbol;
+            std::string_view position_amt;
+            std::string_view margin_type;
+            double parsed_position = 0.0;
+            if (!provider_recovery::top_level_plain_string(row, "symbol", symbol)
+                || symbol != target_symbol)
+            {
+                failure = "positionRisk row is missing the configured symbol identity";
+                return false;
+            }
+            if (!provider_recovery::top_level_scalar_text(
+                    row, "positionAmt", position_amt)
+                || !binance::parse_double_sv(position_amt, parsed_position)
+                || !std::isfinite(parsed_position))
+            {
+                failure = "positionRisk row has no authoritative positionAmt";
+                return false;
+            }
+            if (!provider_recovery::top_level_plain_string(
+                    row, "marginType", margin_type))
+            {
+                failure = "positionRisk row has no authoritative marginType";
+                return false;
+            }
+            const auto actual = detail::normalize_margin_type(margin_type);
+            if (actual != "ISOLATED" && actual != "CROSSED")
+            {
+                failure = "positionRisk row contains an unsupported marginType";
+                return false;
+            }
+            if (actual != expected)
+            {
+                failure = std::string(target_symbol) + " margin mode is "
+                    + actual + ", operator configured " + expected;
+                return false;
+            }
+            return true;
+        });
+    if (!valid)
+        return failure.empty()
+            ? std::optional<std::string>{
+                  "positionRisk payload could not be validated"}
+            : std::optional<std::string>{std::move(failure)};
+    if (rows == 0)
+        return "positionRisk returned no row for the configured symbol";
     return std::nullopt;
 }
 

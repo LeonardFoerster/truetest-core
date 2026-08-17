@@ -5,9 +5,12 @@
 #include "execution/portfolio.h"
 #include "providers/binance/binance_parser.h"
 #include "providers/binance/binance_rest_client.h"
+#include "providers/recovery_payload.h"
 
 #include <cmath>
+#include <chrono>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -19,6 +22,11 @@
 class BinanceReconciler : public IReconciler
 {
 public:
+    using get_fn = std::function<BinanceRestClient::response(
+        const std::string&, const std::string&)>;
+    struct injected_get_t {};
+    static constexpr injected_get_t injected_get{};
+
     BinanceReconciler(std::shared_ptr<BinanceRestClient> rest,
                       std::string symbol,
                       std::string base_asset,
@@ -31,11 +39,26 @@ public:
         , is_testnet_(is_testnet)
     {}
 
+    BinanceReconciler(injected_get_t, get_fn get,
+                      std::string symbol,
+                      std::string base_asset,
+                      std::string quote_asset,
+                      bool is_testnet = false)
+        : get_(std::move(get))
+        , symbol_(std::move(symbol))
+        , base_asset_(std::move(base_asset))
+        , quote_asset_(std::move(quote_asset))
+        , is_testnet_(is_testnet)
+    {}
+
     std::string reconcile(const portfolio& local, double tolerance_bps) override
     {
-        if (!rest_) return "BinanceReconciler: no REST client";
+        if (!rest_ && !get_) return "BinanceReconciler: no REST client";
 
-        auto resp = rest_->get("/api/v3/account", "");
+        auto resp = rest_
+            ? rest_->safety_get(
+                  "/api/v3/account", "", std::chrono::seconds(5))
+            : get_("/api/v3/account", "");
         if (resp.status < 200 || resp.status >= 300)
         {
             const auto body = binance::redact_for_log(resp.body);
@@ -81,34 +104,32 @@ public:
 
         const auto& positions = local.get_positions();
         auto it = positions.find(symbol_);
-        if (it != positions.end() && std::abs(it->second.qty) > 1e-12)
+        const double local_base =
+            (it != positions.end()) ? it->second.qty : 0.0;
+        double ex_base_free = 0.0, ex_base_locked = 0.0;
+        if (!extract_balance(resp.body, base_asset_, ex_base_free, ex_base_locked))
         {
-            double ex_base_free = 0.0, ex_base_locked = 0.0;
-            if (!extract_balance(resp.body, base_asset_, ex_base_free, ex_base_locked))
+            return "BinanceReconciler: base asset '" + base_asset_
+                   + "' not found in /api/v3/account response";
+        }
+        const double ex_base_total = ex_base_free + ex_base_locked;
+        if (!within_tolerance(local_base, ex_base_total, tolerance_bps))
+        {
+            if (is_testnet_ && looks_like_reset(ex_base_total, local_base))
             {
-                return "BinanceReconciler: base asset '" + base_asset_
-                       + "' not found in /api/v3/account response but local "
-                         "position is non-zero";
+                std::fprintf(stderr,
+                    "  [TESTNET-RESET] venue %s=%.8f, local=%.8f - "
+                    "treating as account reset, position drift skipped.\n",
+                    base_asset_.c_str(), ex_base_total, local_base);
+                return {};
             }
-            const double ex_base_total = ex_base_free + ex_base_locked;
-            if (!within_tolerance(it->second.qty, ex_base_total, tolerance_bps))
-            {
-                if (is_testnet_ && looks_like_reset(ex_base_total, it->second.qty))
-                {
-                    std::fprintf(stderr,
-                        "  [TESTNET-RESET] venue %s=%.8f, local=%.8f - "
-                        "treating as account reset, position drift skipped.\n",
-                        base_asset_.c_str(), ex_base_total, it->second.qty);
-                    return {};
-                }
-                char buf[256];
-                std::snprintf(buf, sizeof(buf),
-                    "position drift: local=%.8f %s exchange=%.8f %s (> %.2f bps)",
-                    it->second.qty, base_asset_.c_str(),
-                    ex_base_total, base_asset_.c_str(),
-                    tolerance_bps);
-                return buf;
-            }
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                "position drift: local=%.8f %s exchange=%.8f %s (> %.2f bps)",
+                local_base, base_asset_.c_str(),
+                ex_base_total, base_asset_.c_str(),
+                tolerance_bps);
+            return buf;
         }
 
         return {};
@@ -121,22 +142,40 @@ public:
                                 double& free_out,
                                 double& locked_out)
     {
-        std::string needle;
-        needle.reserve(asset.size() + 12);
-        needle += "\"asset\":\"";
-        needle += asset;
-        needle += "\"";
+        std::string_view balances;
+        if (!provider_recovery::top_level_member(
+                json, "balances", balances)
+            || !provider_recovery::is_authoritative_object_array(balances))
+            return false;
 
-        auto hit = json.find(needle);
-        if (hit == std::string_view::npos) return false;
-
-        auto rest = json.substr(hit);
-        auto free_sv   = binance::extract_sv_string(rest, "free");
-        auto locked_sv = binance::extract_sv_string(rest, "locked");
-
-        if (!binance::parse_double_sv(free_sv, free_out))   return false;
-        if (!binance::parse_double_sv(locked_sv, locked_out)) return false;
-        return true;
+        bool found = false;
+        bool schema_ok = provider_recovery::every_top_level_object(
+            balances, [&](std::string_view row) {
+                std::string_view row_asset;
+                std::string_view free_sv;
+                std::string_view locked_sv;
+                if (!provider_recovery::top_level_plain_string(
+                        row, "asset", row_asset)
+                    || !provider_recovery::top_level_scalar_text(
+                        row, "free", free_sv)
+                    || !provider_recovery::top_level_scalar_text(
+                        row, "locked", locked_sv))
+                    return false;
+                double parsed_free = 0.0;
+                double parsed_locked = 0.0;
+                if (!binance::parse_double_sv(free_sv, parsed_free)
+                    || !binance::parse_double_sv(locked_sv, parsed_locked))
+                    return false;
+                if (row_asset == asset)
+                {
+                    if (found) return false;
+                    free_out = parsed_free;
+                    locked_out = parsed_locked;
+                    found = true;
+                }
+                return true;
+            });
+        return schema_ok && found;
     }
 
 private:
@@ -157,6 +196,7 @@ private:
     }
 
     std::shared_ptr<BinanceRestClient> rest_;
+    get_fn get_;
     std::string symbol_;
     std::string base_asset_;
     std::string quote_asset_;

@@ -5,12 +5,11 @@
 // LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md)
 // Any edit requires explicit two-person CCB review + 4 h
 // mainnet shadow run on engine_shadow before merge.
-// Files in this set: tt_target.h, engine.{h,cpp}, all
-// *kill_switch*, *dead_mans_switch*, *reconciler* under
-// providers/binance/, risk/*, ExecutionBridge, live_safety.h
+// Authoritative path list: scripts/check-live-safety-freeze.sh
 // ============================================================
 
 #include "providers/binance/binance_rest_client.h"
+#include "providers/recovery_payload.h"
 #include "threading/worker_watchdog.h"
 
 #include <atomic>
@@ -40,16 +39,9 @@
 // Critically: this only cancels ORDERS. Open futures positions stay
 // open after auto-cancel; operator must close manually. The DMS is
 // half a safety net; the kill-switch's flatten step is the other half.
-// With the Phase 3 extension, when persistent heartbeat failure is
-// detected (and attempt_position_close_on_failure_ is set), the
-// close_position_fn is invoked on this thread before the liveness
-// timestamp goes permanently stale. The provider-supplied fn performs
-// a fresh /fapi/v2/positionRisk query + reduceOnly MARKET close.
-// This turns DMS into a full in-process last-resort flattener for
-// cases where the heartbeat thread is still alive but the broader
-// engine is compromised; the external tt_watchdog covers total process
-// death. The kill-switch remains the canonical clean path on orderly
-// shutdown (DMS is disarmed first).
+// The first heartbeat failure is terminal for the process. It is latched and
+// delivered to the engine halt callback even if the callback is registered
+// after the failure. Flattening remains owned by the exact-once kill session.
 // The class itself doesn't touch a socket — it routes everything
 // through a `post_fn` callable, matching the bracket adapter's pattern.
 // `make_binance_futures_dead_mans_switch(rest_client, ...)` is the
@@ -65,20 +57,16 @@ public:
 
     using post_fn = std::function<response(std::string_view endpoint,
                                            std::string_view params)>;
-    using close_position_fn = std::function<void(const std::string& symbol)>;
+    using failure_fn = std::function<void(std::string_view reason)>;
 
     BinanceFuturesDeadMansSwitch(post_fn post,
                                  std::string symbol,
                                  int64_t countdown_ms,
-                                 int64_t heartbeat_interval_ms,
-                                 bool attempt_close = false,
-                                 close_position_fn closer = nullptr)
+                                 int64_t heartbeat_interval_ms)
         : post_(std::move(post))
         , symbol_(std::move(symbol))
         , countdown_ms_(countdown_ms)
         , heartbeat_interval_ms_(heartbeat_interval_ms)
-        , attempt_position_close_on_failure_(attempt_close)
-        , close_position_fn_(std::move(closer))
     {}
 
     ~BinanceFuturesDeadMansSwitch() { stop(); }
@@ -95,7 +83,15 @@ public:
     // arm.
     bool start()
     {
+        const auto restart_refused = [this] {
+            if (!failure_latched_.load(std::memory_order_acquire)) return false;
+            std::cerr << "BinanceFuturesDeadMansSwitch: terminal heartbeat "
+                         "failure is latched; refusing to restart.\n";
+            return true;
+        };
+        if (restart_refused()) return false;
         if (running_.load(std::memory_order_acquire)) return true;
+        if (restart_refused()) return false;
 
         if (!post_countdown(countdown_ms_))
         {
@@ -120,9 +116,14 @@ public:
     // (engine death) leaves the timer to expire on its own.
     void stop()
     {
-        if (!running_.exchange(false, std::memory_order_acq_rel)) return;
-        cv_.notify_all();
+        request_stop();
         if (thread_.joinable()) thread_.join();
+    }
+
+    void request_stop() noexcept
+    {
+        running_.store(false, std::memory_order_release);
+        cv_.notify_all();
     }
 
     // POST countdownTime=0. Idempotent — returns true on 2xx, including
@@ -140,14 +141,26 @@ public:
     int64_t heartbeat_interval_ms() const { return heartbeat_interval_ms_; }
     int64_t countdown_ms() const { return countdown_ms_; }
 
-    // Phase 3: enable optional position flattening when the DMS
-    // detects persistent failure to refresh the server-side countdown.
-    // The fn (typically a lambda capturing the provider's REST client +
-    // encoder) is called from the heartbeat thread on the second
-    // consecutive post failure. It is the caller's responsibility to
-    // query fresh position and issue a reduceOnly MARKET.
-    void set_attempt_position_close(bool v) { attempt_position_close_on_failure_ = v; }
-    void set_close_position_fn(close_position_fn fn) { close_position_fn_ = std::move(fn); }
+    void set_failure_callback(failure_fn fn)
+    {
+        failure_fn deliver;
+        {
+            std::lock_guard<std::mutex> lk(failure_mu_);
+            failure_cb_ = std::move(fn);
+            if (failure_latched_.load(std::memory_order_acquire)
+                && !failure_delivered_ && failure_cb_)
+            {
+                failure_delivered_ = true;
+                deliver = failure_cb_;
+            }
+        }
+        if (deliver) deliver("binance futures DMS heartbeat failed");
+    }
+
+    bool failure_latched() const
+    {
+        return failure_latched_.load(std::memory_order_acquire);
+    }
 
 private:
     bool post_countdown(int64_t ms)
@@ -158,17 +171,37 @@ private:
         binance::append_param(params, "countdownTime", std::to_string(ms));
 
         const auto resp = post_("/fapi/v1/countdownCancelAll", params);
-        return resp.status >= 200 && resp.status < 300;
+        if (resp.status < 200 || resp.status >= 300
+            || !provider_recovery::is_authoritative_object(resp.body)
+            || !provider_recovery::top_level_exact_string(
+                resp.body, "symbol", symbol_))
+            return false;
+        std::string_view returned_countdown;
+        return provider_recovery::top_level_scalar_text(
+                   resp.body, "countdownTime", returned_countdown)
+            && returned_countdown == std::to_string(ms);
+    }
+
+    void latch_failure() noexcept
+    {
+        if (failure_latched_.exchange(true, std::memory_order_acq_rel)) return;
+        failure_fn cb;
+        try
+        {
+            std::lock_guard<std::mutex> lk(failure_mu_);
+            if (!failure_delivered_ && failure_cb_)
+            {
+                cb = failure_cb_;
+                failure_delivered_ = true;
+            }
+        }
+        catch (...) { return; }
+        try { if (cb) cb("binance futures DMS heartbeat failed"); }
+        catch (...) {}
     }
 
     void run()
     {
-        // Heartbeat retry budget: one extra attempt after a brief pause
-        // before declaring the cycle a miss. A single transient network
-        // hiccup is forgivable; persistent failure goes silent and the
-        // external watchdog catches it.
-        constexpr auto retry_pause = std::chrono::milliseconds(500);
-
         while (running_.load(std::memory_order_acquire))
         {
             {
@@ -181,23 +214,10 @@ private:
             }
             if (!running_.load(std::memory_order_acquire)) break;
 
-            if (post_countdown(countdown_ms_))
-            {
-                last_beat_ms_.store(WorkerWatchdog::now_monotonic_ms(),
-                                    std::memory_order_release);
-                continue;
-            }
-
-            // First attempt failed. One retry before falling silent.
-            {
-                std::unique_lock<std::mutex> lk(cv_mu_);
-                if (cv_.wait_for(lk, retry_pause, [this] {
-                        return !running_.load(std::memory_order_acquire);
-                    }))
-                    break;
-            }
-
-            if (post_countdown(countdown_ms_))
+            bool heartbeat_ok = false;
+            try { heartbeat_ok = post_countdown(countdown_ms_); }
+            catch (...) { heartbeat_ok = false; }
+            if (heartbeat_ok)
             {
                 last_beat_ms_.store(WorkerWatchdog::now_monotonic_ms(),
                                     std::memory_order_release);
@@ -205,22 +225,14 @@ private:
             }
 
             std::cerr << "BinanceFuturesDeadMansSwitch: heartbeat failed "
-                         "twice for symbol=" << symbol_
-                      << "; watchdog will halt engine if persistent.\n";
+                         "once for symbol=" << symbol_
+                      << "; latching terminal halt.\n";
 
-            // Phase 3: if configured, attempt position close from this
-            // still-living thread before we go permanently silent. The
-            // provider fn will query positionRisk fresh and POST the
-            // reduceOnly MARKET. This complements (does not replace) the
-            // kill-switch on orderly shutdown and the external watchdog
-            // for total process death.
-            if (attempt_position_close_on_failure_ && close_position_fn_)
-            {
-                close_position_fn_(symbol_);
-            }
+            latch_failure();
 
             // Don't update last_beat_ms_ — watchdog reads it, sees the
             // stale value, halts when deadline elapses.
+            running_.store(false, std::memory_order_release);
         }
     }
 
@@ -229,8 +241,10 @@ private:
     int64_t countdown_ms_;
     int64_t heartbeat_interval_ms_;
 
-    bool attempt_position_close_on_failure_ = false;
-    close_position_fn close_position_fn_{};
+    std::atomic<bool> failure_latched_{false};
+    std::mutex failure_mu_;
+    failure_fn failure_cb_{};
+    bool failure_delivered_ = false;
 
     std::atomic<int64_t> last_beat_ms_{0};
     std::atomic<bool>    running_{false};
@@ -244,21 +258,19 @@ make_binance_futures_dead_mans_switch(
     std::shared_ptr<BinanceRestClient> client,
     std::string symbol,
     int64_t countdown_ms,
-    int64_t heartbeat_interval_ms,
-    bool attempt_close = false,
-    BinanceFuturesDeadMansSwitch::close_position_fn closer = nullptr)
+    int64_t heartbeat_interval_ms)
 {
     auto post = [client](std::string_view ep, std::string_view p)
         -> BinanceFuturesDeadMansSwitch::response
     {
         // countdownCancelAll is signed (TRADE endpoint).
-        auto r = client->post(std::string(ep), std::string(p));
+        auto r = client->safety_post(
+            std::string(ep), std::string(p), std::chrono::milliseconds(1500));
         return {r.status, r.body};
     };
     return std::make_shared<BinanceFuturesDeadMansSwitch>(
         std::move(post), std::move(symbol),
-        countdown_ms, heartbeat_interval_ms,
-        attempt_close, std::move(closer));
+        countdown_ms, heartbeat_interval_ms);
 }
 
 #endif // HAS_BINANCE

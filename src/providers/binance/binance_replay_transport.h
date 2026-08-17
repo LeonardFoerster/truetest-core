@@ -3,7 +3,10 @@
 #include "providers/transport.h"
 
 #include <chrono>
+#include <atomic>
+#include <condition_variable>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -18,11 +21,14 @@ public:
 
     bool open() override
     {
+        std::lock_guard<std::mutex> file_lock(file_mu_);
         in_.open(path_, std::ios::in);
         if (!in_.is_open())
             return false;
 
-        open_ = true;
+        open_.store(true, std::memory_order_release);
+        stop_requested_.store(false, std::memory_order_release);
+        clean_eof_.store(false, std::memory_order_release);
         first_record_ts_ = 0;
         replay_start_ = std::chrono::steady_clock::now();
         return true;
@@ -30,14 +36,15 @@ public:
 
     void close() override
     {
-        open_ = false;
+        open_.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> file_lock(file_mu_);
         if (in_.is_open())
             in_.close();
     }
 
     bool is_open() const override
     {
-        return open_;
+        return open_.load(std::memory_order_acquire);
     }
 
     std::optional<std::string> read_line() override
@@ -57,29 +64,49 @@ public:
 
     void request_stop() override
     {
-        open_ = false;
-        close();
+        stop_requested_.store(true, std::memory_order_release);
+        open_.store(false, std::memory_order_release);
+        pace_cv_.notify_all();
+    }
+
+    transport_terminal_status terminal_status() const override
+    {
+        if (stop_requested_.load(std::memory_order_acquire))
+            return transport_terminal_status::operator_stop;
+        if (clean_eof_.load(std::memory_order_acquire))
+            return transport_terminal_status::clean_eof;
+        return transport_terminal_status::unknown;
     }
 
 private:
     std::string path_;
     bool pace_;
     std::ifstream in_;
-    bool open_ = false;
+    std::atomic<bool> open_{false};
+    std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> clean_eof_{false};
+    std::mutex file_mu_;
+    std::mutex pace_mu_;
+    std::condition_variable pace_cv_;
 
     int64_t first_record_ts_ = 0;
     std::chrono::steady_clock::time_point replay_start_;
 
     std::optional<std::string> read_next(bool apply_pacing)
     {
-        if (!open_ || !in_.is_open())
+        if (!open_.load(std::memory_order_acquire)
+            || stop_requested_.load(std::memory_order_acquire))
             return std::nullopt;
 
         std::string line;
-        if (!std::getline(in_, line))
         {
-            open_ = false;
-            return std::nullopt;
+            std::lock_guard<std::mutex> file_lock(file_mu_);
+            if (!in_.is_open() || !std::getline(in_, line))
+            {
+                open_.store(false, std::memory_order_release);
+                clean_eof_.store(true, std::memory_order_release);
+                return std::nullopt;
+            }
         }
 
         if (line.empty())
@@ -105,7 +132,13 @@ private:
             auto now = std::chrono::steady_clock::now();
 
             if (target > now)
-                std::this_thread::sleep_until(target);
+            {
+                std::unique_lock<std::mutex> pace_lock(pace_mu_);
+                if (pace_cv_.wait_until(pace_lock, target, [this] {
+                        return stop_requested_.load(std::memory_order_acquire);
+                    }))
+                    return std::nullopt;
+            }
         }
 
         return payload;

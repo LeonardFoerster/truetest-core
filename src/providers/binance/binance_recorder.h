@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 
 class RecordingTransport : public IDataTransport
 {
@@ -57,6 +58,11 @@ public:
         return inner_->is_streaming();
     }
 
+    transport_terminal_status terminal_status() const override
+    {
+        return inner_->terminal_status();
+    }
+
     std::optional<std::string> read_line_blocking() override
     {
         auto line = inner_->read_line_blocking();
@@ -70,12 +76,27 @@ public:
         inner_->request_stop();
     }
 
+    bool supports_bounded_idle_read() const override
+    {
+        return inner_->supports_bounded_idle_read();
+    }
+
+    transport_read_result read_frame_until(
+        std::string_view& out,
+        std::chrono::steady_clock::time_point deadline) override
+    {
+        const auto result = inner_->read_frame_until(out, deadline);
+        if (result == transport_read_result::frame)
+            record(out);
+        return result;
+    }
+
 private:
     std::shared_ptr<IDataTransport> inner_;
     std::ofstream out_;
     std::mutex mu_;
 
-    void record(const std::string& msg)
+    void record(std::string_view msg)
     {
         auto now = std::chrono::system_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(

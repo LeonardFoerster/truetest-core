@@ -36,15 +36,36 @@
 #include "providers/binance/binance_time_sync.h"
 #include "providers/binance/binance_user_data_transport.h"
 #include "providers/binance/hybrid_executor.h"
+#include "providers/recovery_payload.h"
 #include "orderbook/orderbook.h"
 
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
+
+namespace binance
+{
+inline std::optional<bool> authoritative_dual_side_position(
+    std::string_view body)
+{
+    if (!provider_recovery::is_authoritative_object(body))
+        return std::nullopt;
+    std::string_view raw;
+    if (!provider_recovery::top_level_member(
+            body, "dualSidePosition", raw))
+        return std::nullopt;
+    raw = provider_recovery::trim_json_ws(raw);
+    if (raw == "true") return true;
+    if (raw == "false") return false;
+    return std::nullopt;
+}
+} // namespace binance
 
 // USDT-M futures sibling of BinanceProvider. This step (PR 2) wires up
 // streaming data + paper/shadow execution only. Live order routing is
@@ -115,11 +136,6 @@ public:
     void set_dead_man_countdown_ms(int64_t v)        { dead_man_countdown_ms_ = v; }
     void set_dead_man_heartbeat_ms(int64_t v)        { dead_man_heartbeat_ms_ = v; }
 
-    // Phase 3 DMS hardening: when true and DMS is armed, the DMS will
-    // invoke a provider-supplied close fn on persistent heartbeat
-    // failure (in addition to the venue-side order cancel countdown).
-    void set_dms_attempt_position_close(bool v)      { dms_attempt_position_close_ = v; }
-
     void set_endpoints(binance::endpoints ep)
     {
         endpoints_ = std::move(ep);
@@ -159,6 +175,34 @@ public:
     bool open() override
     {
         state_ = lifecycle::opening;
+
+        if (mode_ == engine_mode::live &&
+            (api_key_.empty() || api_secret_.empty()))
+        {
+            std::cerr << "BinanceFuturesProvider: refusing live open — "
+                         "complete API credentials are required.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
+        if (!std::isfinite(rc_cfg_.min_liquidation_distance_pct) ||
+            rc_cfg_.min_liquidation_distance_pct < 0.0 ||
+            rc_cfg_.min_liquidation_distance_pct > 1.0)
+        {
+            std::cerr << "BinanceFuturesProvider: refusing open — minimum "
+                         "liquidation distance must be a fraction in [0,1].\n";
+            state_ = lifecycle::error;
+            return false;
+        }
+        if (dead_man_countdown_ms_ < 0 || dead_man_heartbeat_ms_ < 0
+            || (dead_man_countdown_ms_ == 0 && dead_man_heartbeat_ms_ > 0)
+            || (dead_man_countdown_ms_ > 0 && dead_man_heartbeat_ms_ > 0
+                && dead_man_heartbeat_ms_ >= dead_man_countdown_ms_))
+        {
+            std::cerr << "BinanceFuturesProvider: refusing open — invalid "
+                         "dead-man countdown/heartbeat relationship.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
 
         // Construct the futures risk check before mode dispatch so it
         // applies in shadow / paper / live alike. The engine queries
@@ -248,6 +292,7 @@ public:
             rest_ = std::make_shared<BinanceRestClient>(
                 api_key_, api_secret_, rest_host, endpoints_.rest_port,
                 "/fapi/v1/time");
+            rest_->set_per_call_timeout(std::chrono::seconds(3));
 
             (void)rest_->resync_clock_now();
 
@@ -315,8 +360,8 @@ public:
                     state_ = lifecycle::error;
                     return false;
                 }
-                auto dual = binance::extract_sv_optional_bool(
-                    resp.body, "dualSidePosition");
+                auto dual = binance::authoritative_dual_side_position(
+                    resp.body);
                 if (!dual.has_value())
                 {
                     // Malformed / missing field: refuse rather than
@@ -350,6 +395,15 @@ public:
             {
                 auto pr = rest_->get("/fapi/v2/positionRisk",
                                      "symbol=" + binance::url_encode(upper(symbol_)));
+                if (auto refuse = binance::futures::strict_margin_probe_refusal(
+                        pr.status, pr.body, upper(symbol_),
+                        expected_margin_type_, margin_type_strict_))
+                {
+                    std::cerr << "BinanceFuturesProvider: refusing to go live — "
+                              << *refuse << "\n";
+                    state_ = lifecycle::error;
+                    return false;
+                }
                 if (pr.status >= 200 && pr.status < 300)
                 {
                     auto advisories = binance::futures::compute_advisories(
@@ -373,7 +427,7 @@ public:
                     std::cerr << "BinanceFuturesProvider: positionRisk "
                                  "advisory probe HTTP " << pr.status
                               << " — skipping margin/liquidation checks "
-                                 "(reconciler will retry)\n";
+                                 "(non-strict advisory mode)\n";
                 }
             }
 
@@ -389,10 +443,13 @@ public:
                 rest_, upper(symbol_), endpoints_.is_testnet);
             kill_switch_ = std::make_shared<BinanceFuturesKillSwitch>(
                 rest_, upper(symbol_), minter_);
-            bracket_adapter_ = make_binance_futures_bracket_adapter(rest_);
+            live_mutations_cancelled_->store(false, std::memory_order_release);
+            bracket_adapter_ = make_binance_futures_bracket_adapter(
+                rest_, live_mutations_cancelled_, upper(symbol_));
 
             ExecutionBridge::deps d;
-            d.order_tx = make_binance_rest_order_transport(rest_);  // actual I/O now happens async inside ExecutionBridge on bg thread
+            d.order_tx = make_binance_rest_order_transport(
+                rest_, live_mutations_cancelled_);  // actual I/O now happens async inside ExecutionBridge on bg thread
             binance_user_data_ = std::make_shared<BinanceUserDataTransport>(
                              rest_, endpoints_.ws_host, endpoints_.ws_port,
                              binance_keepalive_policy{},
@@ -403,40 +460,25 @@ public:
             d.parser   = std::make_shared<BinanceFuturesUserDataParser>();
             d.order_rate_limiter = order_rate_limiter_;
             d.client_id_fn = [m = minter_](uint64_t) { return m->next(); };
-            // ACCOUNT_UPDATE handler: log to stderr, scoped to this
-            // provider's symbol. Intentionally does NOT mutate the
-            // local portfolio yet — snap-to-venue races with in-flight
-            // orders the engine hasn't confirmed; that needs a design
-            // pass before it becomes safe to take action automatically.
-            // Surfacing the events is the value-add here.
+            // The parser's fixed funding fast path runs before the allocating
+            // diagnostic snapshot path. The private reader may only enqueue;
+            // the engine thread owns pool acquisition and accounting mutation.
+            const auto funding_symbol = upper(symbol_);
+            d.funding_update_handler =
+                [this, sym = funding_symbol](
+                    const parsed_funding_update& update) noexcept {
+                    return funding_ingress_.try_publish(
+                        std::chrono::system_clock::time_point(
+                            std::chrono::milliseconds(update.event_time_ms)),
+                        sym, update.cash_delta);
+                };
+            d.funding_failure_handler = [this]() noexcept {
+                funding_ingress_.latch_failure();
+                fail_funding_ingress();
+            };
             d.position_snapshot_handler =
-                [this, sym = upper(symbol_)](const parsed_position_snapshot& s) {
+                [this, sym = funding_symbol](const parsed_position_snapshot& s) {
                     log_position_snapshot(s, sym);
-
-                    // Phase 2 funding path
-                    if (s.r == parsed_position_snapshot::reason::funding_fee)
-                    {
-                        for (const auto& b : s.balances)
-                        {
-                            if (b.asset == "USDT" && b.balance_change != 0.0)
-                            {
-                                std::shared_ptr<funding_event> fe;
-                                if (funding_event_factory_)
-                                    fe = funding_event_factory_(
-                                        s.ts, sym, b.balance_change, "FUNDING_FEE");
-                                else
-                                    fe = std::make_shared<funding_event>(
-                                        s.ts, sym, 0.0, b.balance_change, "FUNDING_FEE");
-
-                                if (event_publisher_)
-                                    event_publisher_(fe);
-                                else
-                                    std::cerr << "  [FUNDING] " << sym
-                                              << " cash_delta=" << b.balance_change
-                                              << " (no publisher wired yet)\n";
-                            }
-                        }
-                    }
                 };
 
             bridge_ = std::make_shared<ExecutionBridge>(std::move(d));
@@ -458,65 +500,9 @@ public:
                     ? dead_man_heartbeat_ms_
                     : dead_man_countdown_ms_ / 3;
 
-                // Phase 3: if opted-in, build a close fn that the DMS
-                // will call from its heartbeat thread on persistent
-                // refresh failure. The fn queries fresh positionRisk
-                // (safer than last snapshot) and issues reduceOnly
-                // MARKET — exactly the flatten half of the kill-switch.
-                BinanceFuturesDeadMansSwitch::close_position_fn closer = nullptr;
-                if (dms_attempt_position_close_)
-                {
-                    closer = [rest = rest_, sym = upper(symbol_), minter = minter_](const std::string& /*s*/)
-                    {
-                        if (!rest) return;
-                        auto pr = rest->get("/fapi/v2/positionRisk",
-                                            "symbol=" + binance::url_encode(sym));
-                        if (pr.status < 200 || pr.status >= 300)
-                        {
-                            std::cerr << "  [DMS-CLOSE] positionRisk HTTP "
-                                      << pr.status << " "
-                                      << binance::redact_for_log(pr.body, 80)
-                                      << "\n";
-                            return;
-                        }
-                        double pos_amt = 0.0;
-                        if (!BinanceFuturesReconciler::extract_position_amt(pr.body, pos_amt) ||
-                            std::abs(pos_amt) < 1e-9)
-                            return;
-
-                        const char* side = (pos_amt > 0.0) ? "SELL" : "BUY";
-                        char qbuf[32];
-                        std::snprintf(qbuf, sizeof(qbuf), "%.8f", std::abs(pos_amt));
-                        std::string params;
-                        binance::append_param(params, "symbol", sym);
-                        binance::append_param(params, "side", side);
-                        binance::append_param(params, "type", "MARKET");
-                        binance::append_param(params, "reduceOnly", "true");
-                        binance::append_param(params, "quantity", qbuf);
-                        if (minter)
-                            binance::append_param(params, "newClientOrderId", minter->next());
-
-                        auto r = rest->post("/fapi/v1/order", params);
-                        if (r.status >= 200 && r.status < 300)
-                        {
-                            std::cerr << "  [DMS-CLOSE] emergency reduceOnly MARKET "
-                                      << sym << " side=" << side << " qty=" << qbuf << "\n";
-                        }
-                        else
-                        {
-                            std::cerr << "  [DMS-CLOSE] order failed HTTP "
-                                      << r.status << " "
-                                      << binance::redact_for_log(r.body, 120)
-                                      << "\n";
-                        }
-                    };
-                }
-
                 dms_ = make_binance_futures_dead_mans_switch(
                     rest_, upper(symbol_),
-                    dead_man_countdown_ms_, hb,
-                    /*attempt_close=*/dms_attempt_position_close_,
-                    /*closer=*/std::move(closer));
+                    dead_man_countdown_ms_, hb);
                 if (!dms_->start())
                 {
                     std::cerr << "BinanceFuturesProvider: dead-man's switch "
@@ -527,10 +513,7 @@ public:
                 }
                 std::cerr << "  BinanceFuturesProvider: dead-man's switch "
                              "armed (countdown=" << dead_man_countdown_ms_
-                          << "ms, heartbeat=" << hb << "ms";
-                if (dms_attempt_position_close_)
-                    std::cerr << ", position-close=ON";
-                std::cerr << ")\n";
+                          << "ms, heartbeat=" << hb << "ms)\n";
             }
         }
         else if (mode_ == engine_mode::shadow)
@@ -562,21 +545,39 @@ public:
 
     void close() override
     {
-        // Stop the heartbeat thread first so it doesn't refresh the
-        // countdown while we're trying to disarm. Then disarm — best
-        // effort; failure logs but doesn't block shutdown, since the
-        // server-side timer will expire on its own anyway.
-        if (dms_)
-        {
-            dms_->stop();
-            if (!dms_->disarm())
-                std::cerr << "BinanceFuturesProvider: dead-man's-switch "
-                             "disarm failed; relying on countdown to "
-                             "expire server-side.\n";
-        }
-        if (transport_) transport_->close();
-        if (bridge_)    bridge_->close();
+        quiesce_for_live_shutdown();
+        // Public close has no proof that flatten succeeded. Preserve the
+        // venue countdown; only LiveSafetySession may pass disarm_after_kill.
+        finish_live_shutdown(live_shutdown_disposition::preserve_dead_man_switch);
+    }
+
+    void quiesce_for_live_shutdown() override
+    {
+        quiesce_futures_live_resources(
+            live_mutations_cancelled_, dms_, bridge_,
+            std::shared_ptr<IDataTransport>{}, transport_);
+    }
+
+    void finish_live_shutdown(live_shutdown_disposition disposition) override
+    {
+        const bool disarm_succeeded = finish_futures_live_resources(
+            dms_, bridge_, std::shared_ptr<IDataTransport>{}, transport_,
+            disposition);
         state_ = lifecycle::closed;
+        if (!disarm_succeeded)
+        {
+            std::cerr << "BinanceFuturesProvider: shutdown finish or "
+                         "dead-man's-switch disarm failed; relying on the "
+                         "countdown where available.\n";
+            throw std::runtime_error(
+                "BinanceFuturesProvider: live shutdown finish failed");
+        }
+        if (dms_ && disposition ==
+                        live_shutdown_disposition::preserve_dead_man_switch)
+        {
+            std::cerr << "BinanceFuturesProvider: kill failed or was ambiguous; "
+                         "leaving dead-man's-switch countdown armed.\n";
+        }
     }
 
     std::shared_ptr<IDataTransport> get_transport() override
@@ -608,14 +609,13 @@ public:
     void set_halt_callback(
         std::function<void(std::string_view reason)> cb) override
     {
-        halt_cb_ = std::move(cb);
+        halt_cb_.store(std::move(cb));
         apply_halt_cb_to_transports();
     }
 
-    void set_event_publisher(
-        std::function<void(std::shared_ptr<event>)> fn) override
+    ProviderFundingIngress* funding_ingress() noexcept override
     {
-        event_publisher_ = std::move(fn);
+        return mode_ == engine_mode::live ? &funding_ingress_ : nullptr;
     }
 
     std::vector<liveness_source> get_liveness_sources() override
@@ -682,6 +682,8 @@ private:
     std::shared_ptr<HybridExecutor> hybrid_exec_;
     std::shared_ptr<TradeTapeShadowAdapter> shadow_exec_;
     std::shared_ptr<ExecutionBridge> bridge_;
+    std::shared_ptr<std::atomic<bool>> live_mutations_cancelled_ =
+        std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<IExecutionAdapter> executor_;
 
     // Live-only; null in shadow/backtest so accessors return nullptr
@@ -709,7 +711,6 @@ private:
 
     int64_t dead_man_countdown_ms_ = 0;        // 0 disables DMS
     int64_t dead_man_heartbeat_ms_ = 0;        // 0 = countdown / 3
-    bool    dms_attempt_position_close_ = false; // Phase 3: enable DMS close_fn path
     std::shared_ptr<BinanceFuturesDeadMansSwitch> dms_;
 
     // Concrete handles so set_halt_callback can route the engine's halt
@@ -718,18 +719,39 @@ private:
     std::shared_ptr<BinanceTransport>          binance_transport_;
     std::shared_ptr<BinanceCombinedTransport>  binance_combined_transport_;
     std::shared_ptr<BinanceUserDataTransport>  binance_user_data_;
-    std::function<void(std::string_view)>      halt_cb_;
-    std::function<void(std::shared_ptr<event>)>  event_publisher_;   // Phase 2 funding etc.
+    ThreadSafeCallback<void(std::string_view)> halt_cb_;
+    ProviderFundingIngress funding_ingress_;
+
+    void fail_funding_ingress() noexcept
+    {
+        if (auto halt = halt_cb_.load())
+        {
+            try { (*halt)("binance funding ingress overflow or malformed update"); }
+            catch (...) {}
+        }
+        // Wake the engine-owned public stream so it observes the latched
+        // failure and enters the exact-once shutdown path.
+        if (transport_)
+        {
+            try { transport_->request_stop(); }
+            catch (...) {}
+        }
+    }
 
     void apply_halt_cb_to_transports()
     {
-        if (!halt_cb_) return;
+        auto halt = halt_cb_.load();
+        if (!halt) return;
         if (binance_transport_)
-            binance_transport_->set_fatal_disconnect_callback(halt_cb_);
+            binance_transport_->set_fatal_disconnect_callback(*halt);
         if (binance_combined_transport_)
-            binance_combined_transport_->set_fatal_disconnect_callback(halt_cb_);
+            binance_combined_transport_->set_fatal_disconnect_callback(*halt);
         if (binance_user_data_)
-            binance_user_data_->set_fatal_disconnect_callback(halt_cb_);
+            binance_user_data_->set_fatal_disconnect_callback(*halt);
+        if (dms_)
+        {
+            wire_dms_failure_to_engine(dms_, *halt, transport_);
+        }
     }
 
     static std::string upper(const std::string& s)

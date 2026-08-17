@@ -2,8 +2,12 @@
 
 #include "transport.h"
 
+#include <chrono>
+#include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -68,6 +72,30 @@ public:
 			return true;
 		}
 		return inner_ ? inner_->read_frame_blocking(out) : false;
+	}
+
+	bool supports_bounded_idle_read() const override
+	{
+		return inner_ && inner_->supports_bounded_idle_read();
+	}
+
+	transport_read_result read_frame_until(
+		std::string_view& out,
+		std::chrono::steady_clock::time_point deadline) override
+	{
+		if (idx_ < prepend_.size())
+		{
+			out = prepend_[idx_++];
+			return transport_read_result::frame;
+		}
+		return inner_ ? inner_->read_frame_until(out, deadline)
+		              : transport_read_result::terminal;
+	}
+
+	transport_terminal_status terminal_status() const override
+	{
+		return inner_ ? inner_->terminal_status()
+		              : transport_terminal_status::failed;
 	}
 
 	void request_stop() override

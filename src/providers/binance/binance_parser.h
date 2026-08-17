@@ -6,6 +6,7 @@
 
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <optional>
@@ -227,14 +228,15 @@ inline bool parse_double_sv(std::string_view sv, double& out)
 {
     if (sv.empty()) return false;
     auto [p, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), out);
-    return ec == std::errc();
+    return ec == std::errc() && p == sv.data() + sv.size()
+        && std::isfinite(out);
 }
 
 inline bool parse_int64_sv(std::string_view sv, int64_t& out)
 {
     if (sv.empty()) return false;
     auto [p, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), out);
-    return ec == std::errc();
+    return ec == std::errc() && p == sv.data() + sv.size();
 }
 
 inline std::string extract_string(const std::string& json, const std::string& key)

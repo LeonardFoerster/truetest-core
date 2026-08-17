@@ -4,6 +4,9 @@
 #include "providers/bitget/bitget_endpoints.h"
 #include "providers/bitget/bitget_transport.h"
 #include "providers/transport.h"
+#include "providers/thread_safe_callback.h"
+#include "providers/bounded_ws_open.h"
+#include "providers/bounded_ws_frame_reader.h"
 #include "utils/retry.h"
 
 #include <boost/asio.hpp>
@@ -13,6 +16,7 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -21,6 +25,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -87,62 +92,62 @@ public:
                 return false;
             }
 
-            tcp::resolver resolver(ioc_);
-            auto results = resolver.resolve(host_, port_);
-
-            ws_ = std::make_unique<
-                websocket::stream<beast::ssl_stream<tcp::socket>>>(ioc_, ctx_);
-
-            auto& lowest = beast::get_lowest_layer(*ws_);
-            // No wall-clock bound on resolve/connect/TLS/WS upgrade (pure-sync).
-            net::connect(lowest, results);
-
-            const int fd = lowest.native_handle();
+            ws_ = std::make_shared<
+                websocket::stream<beast::ssl_stream<tcp::socket>>>(*ioc_, ctx_);
 
             // TCP keepalive — see BitgetTransport for rationale.
-            {
+            const bool opened = provider_ws::open_tls_websocket(
+                *ioc_, *ws_, host_, port_, path_, std::chrono::seconds(3),
+                [&](auto& socket) {
+                auto& lowest = beast::get_lowest_layer(socket);
+                const int fd = lowest.native_handle();
                 const int yes = 1;
                 const int idle = 1, intvl = 1, cnt = 2;
                 ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
-            }
-
-            if (!SSL_set_tlsext_host_name(
-                    ws_->next_layer().native_handle(), host_.c_str()))
-            {
-                std::cerr << "BitgetCombinedTransport: SNI setup failed\n";
-                return false;
-            }
-
-            ws_->next_layer().handshake(ssl::stream_base::client);
-
-            // Beast stream_base::timeout is async-only — leave none().
-            {
+                },
+                [&](auto& socket) {
                 websocket::stream_base::timeout opt;
                 opt.handshake_timeout = websocket::stream_base::none();
                 opt.idle_timeout = websocket::stream_base::none();
                 opt.keep_alive_pings = false;
-                ws_->set_option(opt);
-            }
-
-            ws_->set_option(websocket::stream_base::decorator(
+                socket.set_option(opt);
+                socket.set_option(websocket::stream_base::decorator(
                 [](websocket::request_type& req) {
                     req.set(boost::beast::http::field::user_agent, "TrueTest/1.0");
                 }));
-
-            ws_->control_callback(
+                socket.control_callback(
                 [](websocket::frame_type kind, beast::string_view) {
                     (void)kind;
                 });
-
-            ws_->handshake(host_ + ":" + port_, path_);
+                });
+            if (!opened) return false;
 
             const std::string sub =
                 build_subscribe_json_for_streams(symbol_, streams_);
-            ws_->write(net::buffer(sub));
-            last_ping_ = std::chrono::steady_clock::now();
+            auto subscription = std::make_shared<std::string>(sub);
+            const bool subscribed = provider_ws::run_bounded(
+                *ioc_, std::chrono::seconds(3),
+                [&, subscription](auto done) {
+                    ws_->async_write(net::buffer(*subscription),
+                        [subscription, done](beast::error_code ec,
+                                             std::size_t) mutable {
+                            done(ec);
+                        });
+                },
+                [&] {
+                    beast::error_code ignored;
+                    auto& lowest = beast::get_lowest_layer(*ws_);
+                    lowest.cancel(ignored);
+                    lowest.close(ignored);
+                });
+            if (!subscribed) return false;
+            socket_interrupt_.publish(
+                beast::get_lowest_layer(*ws_).native_handle());
+            heartbeat_.reset(std::chrono::steady_clock::now());
+            frame_reader_.reset();
 
             open_ = true;
             stopped_ = false;
@@ -156,29 +161,26 @@ public:
         }
     }
 
-    // Foreign-thread stop: flags first, then lowest-layer socket cancel/close
-    // only. Do not call protocol-level ws_->close() while a reader may still
-    // be in read_frame_blocking (Beast stream is not thread-safe). Stream
-    // reset happens on reconnect / open after stop.
+    // Owner-thread finalization after request_stop() has woken the read via
+    // native shutdown. Boost.Asio socket methods remain on the owner thread.
     void close() override
     {
         stopped_.store(true);
         open_.store(false);
 
-        std::lock_guard<std::mutex> lk(mu_);
-        if (ws_)
         {
-            try
+            std::lock_guard<std::mutex> lk(mu_);
+            socket_interrupt_.clear();
+            if (ws_)
             {
                 beast::error_code ec;
                 auto& lowest = beast::get_lowest_layer(*ws_);
                 lowest.cancel(ec);
                 lowest.close(ec);
             }
-            catch (...)
-            {
-            }
         }
+        (void)frame_reader_.drain_after_cancel(
+            ioc_, std::chrono::steady_clock::now() + std::chrono::milliseconds{250});
     }
 
     bool is_open() const override
@@ -215,14 +217,18 @@ public:
         {
             try
             {
-                maybe_send_ping();
+                if (!maybe_send_ping())
+                    throw std::runtime_error(
+                        "Bitget combined heartbeat pong timeout");
 
                 // poll-before-read — see BitgetTransport / poll helpers.
                 if (!wait_ready_for_read())
                 {
                     if (stopped_.load())
                         return false;
-                    maybe_send_ping(/*force=*/true);
+                    if (!maybe_send_ping(/*force=*/true))
+                        throw std::runtime_error(
+                            "Bitget combined heartbeat ping failed");
                     continue;
                 }
 
@@ -241,7 +247,10 @@ public:
                     const_buf.size());
 
                 if (is_pong_text(out))
+                {
+                    heartbeat_.pong_received();
                     continue;
+                }
                 if (is_ping_text(out))
                 {
                     send_text("pong");
@@ -262,13 +271,13 @@ public:
                 if (stopped_.load())
                     return false;
 
-                if (fatal_cb_)
+                if (auto fatal = fatal_cb_.load())
                 {
                     char buf[160];
                     std::snprintf(buf, sizeof(buf),
                                   "bitget combined WS lost: %s",
                                   se.code().message().c_str());
-                    fatal_cb_(buf);
+                    (*fatal)(buf);
                     stopped_ = true;
                     return false;
                 }
@@ -287,12 +296,12 @@ public:
                 if (stopped_.load())
                     return false;
 
-                if (fatal_cb_)
+                if (auto fatal = fatal_cb_.load())
                 {
                     char buf[160];
                     std::snprintf(buf, sizeof(buf),
                                   "bitget combined WS lost: %s", e.what());
-                    fatal_cb_(buf);
+                    (*fatal)(buf);
                     stopped_ = true;
                     return false;
                 }
@@ -306,17 +315,63 @@ public:
         return false;
     }
 
+    bool supports_bounded_idle_read() const override { return true; }
+
+    transport_read_result read_frame_until(
+        std::string_view& out,
+        std::chrono::steady_clock::time_point deadline) override
+    {
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (!ws_ || stopped_.load()) return transport_read_result::terminal;
+            if (!maybe_send_ping())
+                return fail_heartbeat("bitget combined heartbeat failed");
+            const auto result = frame_reader_.read_until(ioc_, ws_, out, deadline);
+            if (result == transport_read_result::idle) return result;
+            if (result == transport_read_result::frame)
+            {
+                if (is_pong_text(out))
+                {
+                    heartbeat_.pong_received();
+                    continue;
+                }
+                if (is_ping_text(out))
+                {
+                    send_text("pong");
+                    continue;
+                }
+                return result;
+            }
+
+            open_ = false;
+            if (stopped_.load()) return result;
+            if (auto fatal = fatal_cb_.load())
+            {
+                const auto ec = frame_reader_.last_error();
+                char buf[160];
+                std::snprintf(buf, sizeof(buf), "bitget combined WS lost: %s",
+                              ec ? ec.message().c_str() : "bounded read failed");
+                (*fatal)(buf);
+                stopped_ = true;
+                return result;
+            }
+            if (!reconnect()) return result;
+        }
+        return transport_read_result::idle;
+    }
+
     void request_stop() override
     {
         stopped_ = true;
-        close();
+        open_ = false;
+        (void)socket_interrupt_.request_shutdown();
     }
 
     // Engine wires this in live mode — see BitgetTransport for semantics.
     void set_fatal_disconnect_callback(
         std::function<void(std::string_view reason)> cb)
     {
-        fatal_cb_ = std::move(cb);
+        fatal_cb_.store(std::move(cb));
     }
 
 private:
@@ -326,21 +381,22 @@ private:
     std::string port_;
     std::string path_;
 
-    net::io_context ioc_;
+    std::shared_ptr<net::io_context> ioc_ = std::make_shared<net::io_context>();
     ssl::context ctx_;
-    std::unique_ptr<websocket::stream<beast::ssl_stream<tcp::socket>>> ws_;
+    std::shared_ptr<websocket::stream<beast::ssl_stream<tcp::socket>>> ws_;
+    provider_ws::BoundedFrameReader<
+        websocket::stream<beast::ssl_stream<tcp::socket>>> frame_reader_;
 
     beast::flat_buffer frame_buffer_;
 
     std::mutex mu_;
+    provider_io::native_socket_interrupt socket_interrupt_;
     std::atomic<bool> open_{false};
     std::atomic<bool> stopped_{false};
 
-    std::function<void(std::string_view)> fatal_cb_;
+    ThreadSafeCallback<void(std::string_view)> fatal_cb_;
 
-    std::chrono::steady_clock::time_point last_ping_{};
-
-    static constexpr auto kPingInterval = std::chrono::seconds(30);
+    TextHeartbeat heartbeat_;
     static constexpr auto kPollWake = std::chrono::seconds(25);
     static constexpr unsigned MAX_RECONNECTS = 5;
 
@@ -351,23 +407,39 @@ private:
         ws_->write(net::buffer(text.data(), text.size()));
     }
 
-    void maybe_send_ping(bool force = false)
+    bool maybe_send_ping(bool force = false)
     {
         if (!ws_ || stopped_.load())
-            return;
+            return false;
         const auto now = std::chrono::steady_clock::now();
-        if (!force && (now - last_ping_) < kPingInterval)
-            return;
+        const auto action = heartbeat_.poll(now, force);
+        if (action == TextHeartbeat::action::failed) return false;
+        if (action == TextHeartbeat::action::idle)
+            return true;
         try
         {
             send_text("ping");
-            last_ping_ = now;
+            heartbeat_.ping_sent(now);
+            return true;
         }
         catch (const std::exception& e)
         {
             std::cerr << "BitgetCombinedTransport: ping failed: " << e.what()
                       << "\n";
+            return false;
         }
+    }
+
+    transport_read_result fail_heartbeat(std::string_view reason) noexcept
+    {
+        open_ = false;
+        stopped_ = true;
+        if (auto fatal = fatal_cb_.load())
+        {
+            try { (*fatal)(reason); }
+            catch (...) {}
+        }
+        return transport_read_result::terminal;
     }
 
     bool wait_ready_for_read()
@@ -376,10 +448,14 @@ private:
             return false;
         if (ssl_has_pending_app_data(ws_->next_layer().native_handle()))
             return true;
+        const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(
+            kPollWake);
         const int fd = beast::get_lowest_layer(*ws_).native_handle();
-        const auto pr = poll_fd_readable(fd, kPollWake);
+        const auto pr = poll_fd_readable(fd, wait);
         if (pr == poll_wait_result::timeout)
+        {
             return false;
+        }
         return true;
     }
 
@@ -389,7 +465,8 @@ private:
             [this]() {
                 if (stopped_.load())
                     return true;
-                ioc_.restart();
+                ioc_->restart();
+                socket_interrupt_.clear();
                 ws_.reset();
                 return open();
             },

@@ -5,28 +5,33 @@
 #include "exits/exit_intent.h"
 #include "providers/binance/binance_parser.h"
 #include "providers/binance/binance_rest_client.h"
+#include "providers/recovery_payload.h"
 
 #include <cstdio>
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 // USDT-M futures bracket adapter. Places SL+TP as two SEPARATE conditional
-// orders (STOP_MARKET + TAKE_PROFIT_MARKET), both with closePosition=true
-// and reduceOnly=true. Binance has no /fapi/v1/order/oco endpoint, so
+// algo orders (STOP_MARKET + TAKE_PROFIT_MARKET), both with
+// closePosition=true. Binance forbids quantity/reduceOnly in that shape.
+// There is no futures OCO endpoint, so
 // placement is NOT atomic - if the second POST fails after the first
 // succeeds, we have a hanging leg that cancel() must clean up.
-// Cancel-other-when-fires is delivered by Binance's `closePosition=true`
-// semantics: when a closePosition order triggers and brings the position
-// to zero, the venue automatically cancels every other closePosition
-// order on that symbol. So once both legs are placed, fill-of-one ->
-// cancellation-of-other is exchange-side, exactly like spot OCO.
+// `closePosition=true` prevents either leg from intentionally opening reverse
+// exposure, but it is not treated as an OCO/sibling-cancel guarantee. Engine
+// handling and restart reconciliation must still account for both venue IDs.
 // Constraint: closePosition=true requires the order to close the entire
 // position. Partial brackets (qty_fraction < 1.0 for TP1/TP2 scale-outs)
 // cannot use closePosition=true without splitting into a different
@@ -47,20 +52,20 @@ public:
 
     BinanceFuturesBracketAdapter(request_fn post,
                                  request_fn del,
-                                 request_fn get = nullptr)
+                                 request_fn get = nullptr,
+                                 std::string configured_symbol = {})
         : post_(std::move(post))
         , del_(std::move(del))
         , get_(std::move(get))
+        , configured_symbol_(upper(std::move(configured_symbol)))
     {}
 
     truetest::exits::bracket_caps capabilities() const override
     {
         truetest::exits::bracket_caps c;
         c.stop_market = true;
-        // oco intentionally false: placement is two separate POSTs, not
-        // atomic. The cancel-other-when-fires guarantee from
-        // closePosition=true does not require advertising oco capability,
-        // which the engine reads as "atomic placement available".
+        // oco intentionally false: placement is two separate POSTs and the
+        // venue contract does not prove atomic sibling cancellation.
         c.oco           = false;
         c.stop_limit    = false;
         c.trailing_stop = false;
@@ -110,8 +115,22 @@ public:
         handles.symbol = symbol;  // populated even on partial-leg success
                                   // so cancel() can scrub a hanging SL
 
-        auto tp_id = place_leg("TAKE_PROFIT_MARKET", symbol, side,
-                               *intent.take_profit, tp_cli, opener_order_id);
+        std::string tp_id;
+        try
+        {
+            tp_id = place_leg("TAKE_PROFIT_MARKET", symbol, side,
+                              *intent.take_profit, tp_cli, opener_order_id);
+        }
+        catch (...)
+        {
+            // A 2xx response without an authoritative identity may mean the
+            // venue accepted the TP even though we cannot track it. Scrub the
+            // already-known SL once, then preserve the placement ambiguity by
+            // rethrowing so the live engine enters its terminal halt path.
+            try { cancel(opener_order_id, handles); }
+            catch (...) {}
+            throw;
+        }
         if (tp_id.empty())
         {
             // Hanging SL after TP failure: log loudly, return what we have.
@@ -142,52 +161,76 @@ public:
             {&handles.sl_exchange_id, "SL"},
             {&handles.tp_exchange_id, "TP"},
         };
+        bool cancel_failed = false;
         for (const auto& l : legs)
         {
             if (!*l.id) continue;
-            // /fapi/v1/order DELETE requires symbol. handles.symbol is
-            // populated by place() and list_open(); empty here means
-            // the caller constructed the handles themselves without
-            // the field set, in which case we fall through to a
-            // symbol-less request and let the venue surface 4xx.
             std::string params;
-            if (!handles.symbol.empty())
+            binance::append_param(params, "algoId", **l.id);
+            try
             {
-                params.reserve(handles.symbol.size() + 32);
-                binance::append_param(params, "symbol", handles.symbol);
+                auto resp = del_("/fapi/v1/algoOrder", params);
+                if (resp.status >= 200 && resp.status < 300)
+                {
+                    std::uint64_t returned_id = 0;
+                    std::uint64_t expected_id = 0;
+                    const std::string expected_client = std::string(
+                        std::string_view{l.tag} == "SL"
+                            ? "tt-fb-sl-" : "tt-fb-tp-")
+                        + std::to_string(opener_order_id);
+                    std::string_view returned_client;
+                    if (provider_recovery::parse_positive_u64(
+                            **l.id, expected_id)
+                        && provider_recovery::top_level_positive_u64(
+                            resp.body, "algoId", returned_id)
+                        && returned_id == expected_id
+                        && provider_recovery::top_level_plain_string(
+                            resp.body, "clientAlgoId", returned_client)
+                        && returned_client == expected_client
+                        && provider_recovery::has_exact_top_level_code(
+                            resp.body, 200)
+                        && provider_recovery::top_level_exact_string(
+                            resp.body, "msg", "success"))
+                        continue;
+                    cancel_failed = true;
+                    continue;
+                }
+                if (provider_recovery::has_exact_top_level_code(
+                        resp.body, -2011)
+                    || provider_recovery::has_exact_top_level_code(
+                        resp.body, -2013))
+                    continue;
+                cancel_failed = true;
             }
-            binance::append_param(params, "orderId", **l.id);
-            auto resp = del_("/fapi/v1/order", params);
-            if (resp.status >= 400 &&
-                resp.body.find("-2011") == std::string::npos &&
-                resp.body.find("-2013") == std::string::npos)
-            {
-                std::cerr << "BinanceFuturesBracketAdapter: cancel "
-                          << l.tag << " (orderId=" << **l.id
-                          << ") for opener=" << opener_order_id
-                          << " HTTP " << resp.status << " body="
-                          << binance::redact_for_log(resp.body, 240) << "\n";
-            }
+            catch (...) { cancel_failed = true; }
         }
+        if (cancel_failed)
+            throw std::runtime_error(
+                "Binance futures bracket cancel did not prove every venue cancellation");
     }
 
     std::vector<truetest::exits::IBracketAdapter::recovered_bracket>
     list_open() override
     {
         std::vector<truetest::exits::IBracketAdapter::recovered_bracket> out;
-        if (!get_) return out;
+        if (!get_)
+            throw std::runtime_error(
+                "Binance futures bracket recovery unavailable: missing GET transport");
 
-        // Futures /fapi/v1/openOrders returns a flat array of orders;
-        // conditional orders (STOP_MARKET, TAKE_PROFIT_MARKET) are
-        // included alongside regular ones. Filter by the tt-fb- prefix.
-        auto resp = get_("/fapi/v1/openOrders", "");
+        std::string query;
+        binance::append_param(query, "algoType", "CONDITIONAL");
+        if (!configured_symbol_.empty())
+            binance::append_param(query, "symbol", configured_symbol_);
+        auto resp = get_("/fapi/v1/openAlgoOrders", query);
         if (resp.status < 200 || resp.status >= 300)
         {
-            std::cerr << "BinanceFuturesBracketAdapter: openOrders HTTP "
-                      << resp.status << " - restart recovery skipped\n";
-            return out;
+            throw std::runtime_error(
+                "Binance futures bracket recovery failed: openAlgoOrders HTTP "
+                + std::to_string(resp.status));
         }
-
+        if (!provider_recovery::is_authoritative_object_array(resp.body))
+            throw std::runtime_error(
+                "Binance futures bracket recovery failed: malformed openAlgoOrders payload");
         // Walk the array, parse one object at a time, group SL/TP per
         // opener_id we extract from the clientOrderId suffix.
         struct partial
@@ -197,78 +240,113 @@ public:
             bool tp_seen = false;
         };
         std::unordered_map<std::uint64_t, partial> by_opener;
+        std::unordered_set<std::string> recovered_order_ids;
 
-        const std::string& body = resp.body;
-        std::size_t i = 0;
         const std::string sl_pref = "tt-fb-sl-";
         const std::string tp_pref = "tt-fb-tp-";
-        while (i < body.size())
-        {
-            auto open = body.find('{', i);
-            if (open == std::string::npos) break;
-            int depth = 0;
-            std::size_t j = open;
-            for (; j < body.size(); ++j)
-            {
-                if (body[j] == '{') ++depth;
-                else if (body[j] == '}')
-                {
-                    --depth;
-                    if (depth == 0) { ++j; break; }
-                }
-            }
-            std::string obj(body, open, j - open);
-            i = j;
-
-            auto cli = binance::extract_string(obj, "clientOrderId");
+        const bool rows_ok = provider_recovery::every_top_level_object(
+            resp.body, [&](std::string_view obj) {
+            std::string_view cli_sv;
+            if (!provider_recovery::top_level_plain_string(
+                    obj, "clientAlgoId", cli_sv)) return false;
+            std::string cli(cli_sv);
             bool is_sl = cli.size() > sl_pref.size() &&
                          cli.compare(0, sl_pref.size(), sl_pref) == 0;
             bool is_tp = cli.size() > tp_pref.size() &&
                          cli.compare(0, tp_pref.size(), tp_pref) == 0;
-            if (!is_sl && !is_tp) continue;
+            if (!is_sl && !is_tp) return true;
 
             std::uint64_t opener = 0;
-            try
+            const auto& pref = is_sl ? sl_pref : tp_pref;
+            if (!provider_recovery::parse_positive_u64(
+                    std::string_view(cli).substr(pref.size()), opener))
             {
-                const auto& pref = is_sl ? sl_pref : tp_pref;
-                opener = std::stoull(cli.substr(pref.size()));
+                throw std::runtime_error(
+                    "Binance futures bracket recovery failed: invalid TrueTest clientAlgoId");
             }
-            catch (...) { continue; }
 
             auto& p = by_opener[opener];
+            if ((is_sl && p.sl_seen) || (is_tp && p.tp_seen))
+                throw std::runtime_error(
+                    "Binance futures bracket recovery failed: duplicate TrueTest protection leg");
             auto& rb = p.rb;
 
-            auto symbol = binance::extract_string(obj, "symbol");
-            auto side   = binance::extract_string(obj, "side");
-            auto stop   = binance::extract_string(obj, "stopPrice");
-            auto qty    = binance::extract_string(obj, "origQty");
-            auto id     = binance::extract_number(obj, "orderId");
-            if (id.empty()) id = binance::extract_string(obj, "orderId");
+            std::string_view symbol_view;
+            std::string_view side_view;
+            std::string_view trigger;
+            std::string_view order_type;
+            std::uint64_t parsed_id = 0;
+            if (!provider_recovery::top_level_plain_string(
+                    obj, "symbol", symbol_view)
+                || !provider_recovery::top_level_plain_string(
+                    obj, "side", side_view)
+                || !provider_recovery::top_level_scalar_text(
+                    obj, "triggerPrice", trigger)
+                || !provider_recovery::top_level_plain_string(
+                    obj, "orderType", order_type)
+                || !provider_recovery::top_level_positive_u64(
+                    obj, "algoId", parsed_id)
+                || !provider_recovery::top_level_exact_string(
+                    obj, "algoType", "CONDITIONAL")
+                || !provider_recovery::top_level_exact_string(
+                    obj, "algoStatus", "NEW")
+                || !provider_recovery::top_level_exact_string(
+                    obj, "positionSide", "BOTH")
+                || !top_level_bool(obj, "closePosition", true)
+                || !top_level_bool(obj, "reduceOnly", false))
+                throw std::runtime_error(
+                    "Binance futures bracket recovery failed: incomplete TrueTest algo order");
+            const std::string symbol(symbol_view);
+            const std::string side(side_view);
+            if (!configured_symbol_.empty() && symbol != configured_symbol_)
+                throw std::runtime_error(
+                    "Binance futures bracket recovery returned an unexpected symbol");
+            const std::string id = std::to_string(parsed_id);
+            if (side != "BUY" && side != "SELL")
+                throw std::runtime_error(
+                    "Binance futures bracket recovery failed: invalid close side");
+            if (!recovered_order_ids.insert(id).second)
+                throw std::runtime_error(
+                    "Binance futures bracket recovery failed: duplicate venue algoId");
+            if (!rb.symbol.empty()
+                && (rb.symbol != symbol
+                    || rb.close_side != ((side == "SELL")
+                        ? order_side::sell : order_side::buy)))
+                throw std::runtime_error(
+                    "Binance futures bracket recovery failed: inconsistent TrueTest legs");
 
             rb.opener_order_id = opener;
             rb.symbol = symbol;
             rb.handles.symbol = symbol;
             rb.close_side = (side == "SELL") ? order_side::sell : order_side::buy;
-            // closePosition=true emits qty=0 in openOrders; only believe
-            // it if non-zero to avoid clobbering a legitimate value from
-            // the other leg.
-            double qty_d = std::strtod(qty.c_str(), nullptr);
-            if (qty_d > 0.0) rb.qty = qty_d;
-            double stop_d = std::strtod(stop.c_str(), nullptr);
+            double stop_d = 0.0;
+            if (!binance::parse_double_sv(trigger, stop_d) || stop_d <= 0.0)
+                throw std::runtime_error(
+                    "Binance futures bracket recovery failed: invalid trigger price");
 
             if (is_sl)
             {
+                if (order_type != "STOP_MARKET")
+                    throw std::runtime_error(
+                        "Binance futures bracket recovery failed: invalid stop order type");
                 rb.stop_loss = stop_d;
                 if (!id.empty()) rb.handles.sl_exchange_id = id;
                 p.sl_seen = true;
             }
             else
             {
+                if (order_type != "TAKE_PROFIT_MARKET")
+                    throw std::runtime_error(
+                        "Binance futures bracket recovery failed: invalid take-profit order type");
                 rb.take_profit = stop_d;
                 if (!id.empty()) rb.handles.tp_exchange_id = id;
                 p.tp_seen = true;
             }
-        }
+            return true;
+        });
+        if (!rows_ok)
+            throw std::runtime_error(
+                "Binance futures bracket recovery failed: ambiguous order schema");
 
         for (auto& [opener, p] : by_opener)
         {
@@ -287,8 +365,11 @@ private:
     request_fn post_;
     request_fn del_;
     request_fn get_;
+    std::string configured_symbol_;
 
-    // Returns the orderId on success, "" on failure (caller treats as decline).
+    // Returns the algoId on authoritative success, "" on a known venue
+    // decline, and throws when a 2xx response cannot prove the accepted
+    // order's identity.
     std::string place_leg(const char* type,
                           const std::string& symbol,
                           const std::string& side,
@@ -297,21 +378,19 @@ private:
                           std::uint64_t opener_order_id)
     {
         // closePosition=true means quantity is omitted (Binance derives
-        // it from current position size at trigger time). reduceOnly is
-        // implied by closePosition but keeping it explicit makes the
-        // intent self-documenting and survives if Binance ever loosens
-        // the implication.
+        // it from current position size at trigger time) and already carries
+        // close-only semantics. Binance forbids also sending reduceOnly.
         std::string params;
         params.reserve(192);
+        binance::append_param(params, "algoType", "CONDITIONAL");
         binance::append_param(params, "symbol", symbol);
         binance::append_param(params, "side", side);
         binance::append_param(params, "type", type);
-        binance::append_param(params, "stopPrice", fmt_double(trigger_price));
+        binance::append_param(params, "triggerPrice", fmt_double(trigger_price));
         binance::append_param(params, "closePosition", "true");
-        binance::append_param(params, "reduceOnly", "true");
-        binance::append_param(params, "newClientOrderId", client_id);
+        binance::append_param(params, "clientAlgoId", client_id);
 
-        auto resp = post_("/fapi/v1/order", params);
+        auto resp = post_("/fapi/v1/algoOrder", params);
         if (resp.status < 200 || resp.status >= 300)
         {
             std::cerr << "BinanceFuturesBracketAdapter: " << type
@@ -322,9 +401,53 @@ private:
             return {};
         }
 
-        auto id = binance::extract_number(resp.body, "orderId");
-        if (id.empty()) id = binance::extract_string(resp.body, "orderId");
-        return id;
+        if (!provider_recovery::is_authoritative_object(resp.body))
+            throw std::runtime_error(
+                "Binance futures bracket placement returned malformed 2xx payload");
+
+        std::uint64_t parsed_id = 0;
+        std::string_view returned_client_id;
+        if (!provider_recovery::top_level_positive_u64(
+                resp.body, "algoId", parsed_id)
+            || !provider_recovery::top_level_plain_string(
+                resp.body, "clientAlgoId", returned_client_id)
+            || returned_client_id != client_id
+            || !provider_recovery::top_level_exact_string(
+                resp.body, "algoType", "CONDITIONAL")
+            || !provider_recovery::top_level_exact_string(
+                resp.body, "orderType", type)
+            || !provider_recovery::top_level_exact_string(
+                resp.body, "symbol", symbol)
+            || !provider_recovery::top_level_exact_string(
+                resp.body, "side", side)
+            || !provider_recovery::top_level_exact_string(
+                resp.body, "positionSide", "BOTH")
+            || !provider_recovery::top_level_exact_string(
+                resp.body, "algoStatus", "NEW")
+            || !top_level_bool(resp.body, "closePosition", true)
+            || !top_level_bool(resp.body, "reduceOnly", false))
+            throw std::runtime_error(
+                "Binance futures bracket placement returned ambiguous order identity");
+        std::string_view returned_trigger;
+        double parsed_trigger = 0.0;
+        if (!provider_recovery::top_level_scalar_text(
+                resp.body, "triggerPrice", returned_trigger)
+            || !binance::parse_double_sv(returned_trigger, parsed_trigger)
+            || std::abs(parsed_trigger - trigger_price) > 1e-9)
+            throw std::runtime_error(
+                "Binance futures bracket placement returned ambiguous trigger price");
+        return std::to_string(parsed_id);
+    }
+
+    static bool top_level_bool(std::string_view object,
+                               std::string_view key,
+                               bool expected)
+    {
+        std::string_view raw;
+        if (!provider_recovery::top_level_member(object, key, raw))
+            return false;
+        raw = provider_recovery::trim_json_ws(raw);
+        return raw == (expected ? "true" : "false");
     }
 
     static std::string upper(std::string s)
@@ -348,28 +471,47 @@ private:
 };
 
 inline std::shared_ptr<BinanceFuturesBracketAdapter>
-make_binance_futures_bracket_adapter(std::shared_ptr<BinanceRestClient> client)
+make_binance_futures_bracket_adapter(
+    std::shared_ptr<BinanceRestClient> client,
+    std::shared_ptr<std::atomic<bool>> cancelled =
+        std::make_shared<std::atomic<bool>>(false),
+    std::string configured_symbol = {})
 {
-    auto post = [client](std::string_view ep, std::string_view p)
+    constexpr auto deadline = std::chrono::milliseconds{1500};
+    auto post = [client, cancelled](std::string_view ep, std::string_view p)
         -> BinanceFuturesBracketAdapter::response
     {
-        auto r = client->post(std::string(ep), std::string(p));
+        if (!client->ensure_clock_fresh_for_order(std::chrono::milliseconds{500}))
+            throw std::runtime_error("clock refresh failed before futures bracket placement");
+        auto r = client->safety_post(
+            std::string(ep), std::string(p), deadline, cancelled.get());
+        if (r.request_written && (r.status == 0 || r.status >= 500))
+            throw std::runtime_error("ambiguous post-write futures bracket placement");
         return {r.status, r.body};
     };
-    auto del = [client](std::string_view ep, std::string_view p)
+    auto del = [client, cancelled](std::string_view ep, std::string_view p)
         -> BinanceFuturesBracketAdapter::response
     {
-        auto r = client->del(std::string(ep), std::string(p));
+        if (!client->ensure_clock_fresh_for_order(std::chrono::milliseconds{500}))
+            throw std::runtime_error("clock refresh failed before futures bracket cancellation");
+        auto r = client->safety_del(
+            std::string(ep), std::string(p), deadline, cancelled.get());
+        if (r.request_written && (r.status == 0 || r.status >= 500))
+            throw std::runtime_error("ambiguous post-write futures bracket cancellation");
         return {r.status, r.body};
     };
-    auto get = [client](std::string_view ep, std::string_view p)
+    auto get = [client, cancelled](std::string_view ep, std::string_view p)
         -> BinanceFuturesBracketAdapter::response
     {
-        auto r = client->get(std::string(ep), std::string(p));
+        if (!client->ensure_clock_fresh_for_order(std::chrono::milliseconds{500}))
+            throw std::runtime_error("clock refresh failed before futures bracket query");
+        auto r = client->safety_get(
+            std::string(ep), std::string(p), deadline, cancelled.get());
         return {r.status, r.body};
     };
     return std::make_shared<BinanceFuturesBracketAdapter>(
-        std::move(post), std::move(del), std::move(get));
+        std::move(post), std::move(del), std::move(get),
+        std::move(configured_symbol));
 }
 
 #endif // HAS_BINANCE

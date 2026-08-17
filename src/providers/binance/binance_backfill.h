@@ -81,9 +81,12 @@ private:
         net::io_context ioc;
         ssl::context ctx(ssl::context::tlsv12_client);
         ctx.set_default_verify_paths();
+        ctx.set_verify_mode(ssl::verify_peer);
 
         ssl::stream<tcp::socket> stream(ioc, ctx);
-        SSL_set_tlsext_host_name(stream.native_handle(), host_.c_str());
+        if (!provider_ws::configure_tls_peer_identity(
+                stream.native_handle(), host_))
+            return {};
 
         tcp::resolver resolver(ioc);
         auto results = resolver.resolve(host_, port_);

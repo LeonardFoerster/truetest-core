@@ -1,13 +1,14 @@
 #pragma once
 
-#include "provider.h"
-
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
-#include <stdexcept>
+
+class IProvider;
 
 using provider_config = std::unordered_map<std::string, std::string>;
 using provider_factory = std::function<
@@ -57,9 +58,12 @@ private:
 	std::unordered_map<std::string, provider_factory> factories_;
 };
 
+#define TT_PROVIDER_CONCAT_INNER(a, b) a##b
+#define TT_PROVIDER_CONCAT(a, b) TT_PROVIDER_CONCAT_INNER(a, b)
+
 #define REGISTER_PROVIDER(name, factory) \
 	namespace { \
-		static const bool _reg_##__LINE__ = []() { \
+		static const bool TT_PROVIDER_CONCAT(_reg_, __LINE__) = []() { \
 			ProviderRegistry::instance().register_provider(name, factory); \
 			return true; \
 		}(); \

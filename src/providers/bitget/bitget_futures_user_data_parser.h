@@ -3,7 +3,9 @@
 
 #include "execution/fill_parser.h"
 #include "providers/bitget/bitget_parser.h"
+#include "providers/recovery_payload.h"
 
+#include <charconv>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -19,6 +21,140 @@
 class BitgetFuturesUserDataParser : public IFillParser
 {
 public:
+    funding_parse_result parse_funding_update(
+        std::string_view raw, parsed_funding_update& out) noexcept override
+    {
+        const bool funding_like = contains_fund(raw);
+        if (!provider_recovery::is_authoritative_object(raw))
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+
+        std::string_view arg;
+        std::string_view topic;
+        if (!provider_recovery::top_level_member(raw, "arg", arg)
+            || !provider_recovery::is_authoritative_object(arg)
+            || !provider_recovery::top_level_plain_string(
+                arg, "topic", topic))
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+        if (topic != "account")
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+
+        std::string_view data;
+        if (!provider_recovery::top_level_member(raw, "data", data)
+            || !provider_recovery::is_authoritative_object_array(data))
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+
+        std::size_t funding_rows = 0;
+        bool non_funding_row = false;
+        double delta = 0.0;
+        const bool valid_rows = provider_recovery::every_top_level_object(
+            data, [&](std::string_view row) noexcept {
+                std::string_view reason;
+                std::size_t reason_fields = 0;
+                for (const auto key : {std::string_view{"bizType"},
+                                       std::string_view{"type"},
+                                       std::string_view{"changeType"}})
+                {
+                    std::string_view raw_reason;
+                    const auto result = provider_recovery::payload_parser(row)
+                        .inspect_top_level_member(key, raw_reason);
+                    if (result == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+                        return false;
+                    if (result == provider_recovery::payload_parser::member_result::unique)
+                    {
+                        ++reason_fields;
+                        if (!provider_recovery::top_level_plain_string(
+                                row, key, reason))
+                            return false;
+                    }
+                }
+                if (reason_fields == 0)
+                {
+                    if (contains_fund(row)) return false;
+                    non_funding_row = true;
+                    return true;
+                }
+                if (reason_fields != 1) return false;
+                if (reason != "funding_fee")
+                {
+                    if (contains_fund(reason)) return false;
+                    non_funding_row = true;
+                    return true;
+                }
+
+                std::string_view asset;
+                std::size_t asset_fields = 0;
+                for (const auto key : {std::string_view{"coin"},
+                                       std::string_view{"asset"}})
+                {
+                    std::string_view ignored;
+                    const auto result = provider_recovery::payload_parser(row)
+                        .inspect_top_level_member(key, ignored);
+                    if (result == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+                        return false;
+                    if (result == provider_recovery::payload_parser::member_result::unique)
+                    {
+                        ++asset_fields;
+                        if (!provider_recovery::top_level_plain_string(
+                                row, key, asset))
+                            return false;
+                    }
+                }
+
+                std::string_view raw_delta;
+                std::size_t delta_fields = 0;
+                for (const auto key : {std::string_view{"balanceChange"},
+                                       std::string_view{"change"},
+                                       std::string_view{"delta"}})
+                {
+                    std::string_view ignored;
+                    const auto result = provider_recovery::payload_parser(row)
+                        .inspect_top_level_member(key, ignored);
+                    if (result == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+                        return false;
+                    if (result == provider_recovery::payload_parser::member_result::unique)
+                    {
+                        ++delta_fields;
+                        if (!provider_recovery::top_level_scalar_text(
+                                row, key, raw_delta))
+                            return false;
+                    }
+                }
+
+                double parsed = 0.0;
+                if (asset_fields != 1 || delta_fields != 1
+                    || !is_usdt(asset)
+                    || !parse_finite_double(raw_delta, parsed)
+                    || parsed == 0.0)
+                    return false;
+                ++funding_rows;
+                delta = parsed;
+                return true;
+            });
+
+        if (!valid_rows)
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+        if (funding_rows == 0)
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+        if (funding_rows != 1 || non_funding_row)
+            return funding_parse_result::invalid;
+
+        std::string_view raw_ts;
+        std::int64_t event_time_ms = 0;
+        if (!provider_recovery::top_level_scalar_text(raw, "ts", raw_ts)
+            || !parse_int64(raw_ts, event_time_ms)
+            || event_time_ms <= 0)
+            return funding_parse_result::invalid;
+
+        out = parsed_funding_update{event_time_ms, delta};
+        return funding_parse_result::valid;
+    }
+
     bool parse(std::string_view raw, parsed_exec& out) override
     {
         auto arg = bitget::detail::extract_object(raw, "arg");
@@ -381,6 +517,48 @@ public:
     }
 
 private:
+    static bool contains_fund(std::string_view text) noexcept
+    {
+        if (text.size() < 4) return false;
+        for (std::size_t i = 0; i + 4 <= text.size(); ++i)
+        {
+            const auto lower = [](char c) noexcept {
+                return static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(c)));
+            };
+            if (lower(text[i]) == 'f' && lower(text[i + 1]) == 'u'
+                && lower(text[i + 2]) == 'n' && lower(text[i + 3]) == 'd')
+                return true;
+        }
+        return false;
+    }
+
+    static bool is_usdt(std::string_view asset) noexcept
+    {
+        return asset.size() == 4
+            && (asset[0] == 'U' || asset[0] == 'u')
+            && (asset[1] == 'S' || asset[1] == 's')
+            && (asset[2] == 'D' || asset[2] == 'd')
+            && (asset[3] == 'T' || asset[3] == 't');
+    }
+
+    static bool parse_int64(std::string_view text, std::int64_t& out) noexcept
+    {
+        const auto [end, ec] = std::from_chars(
+            text.data(), text.data() + text.size(), out);
+        return ec == std::errc{} && end == text.data() + text.size();
+    }
+
+    static bool parse_finite_double(
+        std::string_view text, double& out) noexcept
+    {
+        const auto [end, ec] = std::from_chars(
+            text.data(), text.data() + text.size(), out,
+            std::chars_format::general);
+        return ec == std::errc{} && end == text.data() + text.size()
+            && std::isfinite(out);
+    }
+
     static double to_double(std::string_view sv)
     {
         if (sv.empty())

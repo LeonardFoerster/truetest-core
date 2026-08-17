@@ -6,6 +6,9 @@
 #include "providers/bitget/bitget_endpoints.h"
 #include "providers/bitget/bitget_parser.h"
 #include "providers/bitget/bitget_transport.h"
+#include "providers/bounded_ws_open.h"
+#include "providers/recovery_payload.h"
+#include "providers/thread_safe_callback.h"
 #include "utils/retry.h"
 
 #include <boost/asio.hpp>
@@ -15,6 +18,7 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -110,35 +114,105 @@ inline std::string build_private_subscribe_json()
 // Login ack: event=="login" (or op=="login") and code 0 / "0" / "00000".
 inline bool is_login_success(std::string_view msg)
 {
-    if (msg.empty()) return false;
-
-    auto event = extract_sv_string(msg, "event");
-    auto op = extract_sv_string(msg, "op");
-    if (event != "login" && op != "login")
+    if (!provider_recovery::is_authoritative_object(msg)) return false;
+    std::string_view event;
+    std::string_view op;
+    const bool has_event = provider_recovery::top_level_plain_string(
+        msg, "event", event);
+    const bool has_op = provider_recovery::top_level_plain_string(msg, "op", op);
+    if (has_event == has_op || (has_event ? event : op) != "login")
         return false;
 
-    auto code = extract_sv_string(msg, "code");
-    if (code.empty())
-        code = extract_sv_number(msg, "code");
+    std::string_view code;
+    if (!provider_recovery::top_level_scalar_text(msg, "code", code))
+        return false;
     return code == "0" || code == "00000";
 }
 
 // Login rejected (event/op login with non-zero code).
 inline bool is_login_failure(std::string_view msg)
 {
-    if (msg.empty()) return false;
-
-    auto event = extract_sv_string(msg, "event");
-    auto op = extract_sv_string(msg, "op");
-    if (event != "login" && op != "login")
+    if (!provider_recovery::is_authoritative_object(msg)) return false;
+    std::string_view event;
+    std::string_view op;
+    const bool has_event = provider_recovery::top_level_plain_string(
+        msg, "event", event);
+    const bool has_op = provider_recovery::top_level_plain_string(msg, "op", op);
+    if (has_event == has_op || (has_event ? event : op) != "login")
         return false;
 
-    auto code = extract_sv_string(msg, "code");
-    if (code.empty())
-        code = extract_sv_number(msg, "code");
-    if (code.empty()) return false;
+    std::string_view code;
+    if (!provider_recovery::top_level_scalar_text(msg, "code", code))
+        return false;
     return code != "0" && code != "00000";
 }
+
+enum class subscription_ack { unrelated, accepted, rejected };
+
+inline subscription_ack classify_private_subscription_ack(
+    std::string_view msg, std::string_view& topic_out)
+{
+    topic_out = {};
+    if (!provider_recovery::is_authoritative_object(msg))
+        return subscription_ack::unrelated;
+
+    std::string_view event;
+    if (!provider_recovery::top_level_plain_string(msg, "event", event))
+        return subscription_ack::unrelated;
+    if (event == "error") return subscription_ack::rejected;
+    if (event != "subscribe") return subscription_ack::unrelated;
+
+    std::string_view code_raw;
+    const auto code_state = provider_recovery::payload_parser(msg)
+        .inspect_top_level_member("code", code_raw);
+    if (code_state == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+        return subscription_ack::rejected;
+    if (code_state == provider_recovery::payload_parser::member_result::unique)
+    {
+        std::string_view code;
+        if (!provider_recovery::top_level_scalar_text(msg, "code", code)
+            || (!code.empty() && code != "0" && code != "00000"))
+            return subscription_ack::rejected;
+    }
+
+    std::string_view arg;
+    if (!provider_recovery::top_level_member(msg, "arg", arg)
+        || !provider_recovery::is_authoritative_object(arg)
+        || !provider_recovery::top_level_exact_string(arg, "instType", "UTA")
+        || !provider_recovery::top_level_plain_string(arg, "topic", topic_out))
+        return subscription_ack::rejected;
+
+    if (topic_out != "order" && topic_out != "fill"
+        && topic_out != "position" && topic_out != "account")
+        return subscription_ack::rejected;
+    return subscription_ack::accepted;
+}
+
+enum class subscription_progress { waiting, ready, rejected };
+
+class private_subscription_tracker
+{
+public:
+    subscription_progress consume(std::string_view frame)
+    {
+        std::string_view topic;
+        const auto ack = classify_private_subscription_ack(frame, topic);
+        if (ack == subscription_ack::rejected)
+            return subscription_progress::rejected;
+        if (ack == subscription_ack::accepted)
+        {
+            if (topic == "order") seen_[0] = true;
+            else if (topic == "fill") seen_[1] = true;
+            else if (topic == "position") seen_[2] = true;
+            else if (topic == "account") seen_[3] = true;
+        }
+        return seen_[0] && seen_[1] && seen_[2] && seen_[3]
+            ? subscription_progress::ready : subscription_progress::waiting;
+    }
+
+private:
+    std::array<bool, 4> seen_{};
+};
 
 // ---------------------------------------------------------------------------
 // BitgetPrivateWsTransport — IFillTransport for UTA private WS
@@ -317,7 +391,7 @@ public:
     void set_fatal_disconnect_callback(
         std::function<void(std::string_view reason)> cb) override
     {
-        fatal_cb_ = std::move(cb);
+        fatal_cb_.store(std::move(cb));
     }
 
 private:
@@ -338,7 +412,10 @@ private:
                 open_cv_.notify_all();
         }
         if (status_cb_)
-            status_cb_(s, note);
+        {
+            try { status_cb_(s, note); }
+            catch (...) {}
+        }
     }
 
     int64_t login_timestamp_ms() const
@@ -354,6 +431,27 @@ private:
         if (!ws_)
             return;
         ws_->write(net::buffer(text.data(), text.size()));
+    }
+
+    bool send_text_bounded(std::string text,
+                           std::chrono::milliseconds timeout)
+    {
+        if (!ws_) return false;
+        auto payload = std::make_shared<std::string>(std::move(text));
+        return provider_ws::run_bounded(
+            ioc_, timeout,
+            [this, payload](auto done) {
+                ws_->async_write(
+                    net::buffer(*payload),
+                    [payload, done](beast::error_code ec,
+                                    std::size_t) mutable { done(ec); });
+            },
+            [this] {
+                beast::error_code ignored;
+                auto& lowest = beast::get_lowest_layer(*ws_);
+                lowest.cancel(ignored);
+                lowest.close(ignored);
+            });
     }
 
     void maybe_send_ping(bool force = false)
@@ -410,7 +508,21 @@ private:
             if (frame_buffer_.size() > 0)
                 frame_buffer_.consume(frame_buffer_.size());
 
-            ws_->read(frame_buffer_);
+            const bool read = provider_ws::run_bounded(
+                ioc_, kPollWake,
+                [this](auto done) {
+                    ws_->async_read(
+                        frame_buffer_,
+                        [done](beast::error_code ec,
+                               std::size_t) mutable { done(ec); });
+                },
+                [this] {
+                    beast::error_code ignored;
+                    auto& lowest = beast::get_lowest_layer(*ws_);
+                    lowest.cancel(ignored);
+                    lowest.close(ignored);
+                });
+            if (!read) return false;
 
             if (stop_flag_.load())
                 return false;
@@ -466,7 +578,26 @@ private:
             if (frame_buffer_.size() > 0)
                 frame_buffer_.consume(frame_buffer_.size());
 
-            ws_->read(frame_buffer_);
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+            if (remaining.count() <= 0)
+                return false;
+            const bool read = provider_ws::run_bounded(
+                ioc_, remaining,
+                [this](auto done) {
+                    ws_->async_read(
+                        frame_buffer_,
+                        [done](beast::error_code ec,
+                               std::size_t) mutable { done(ec); });
+                },
+                [this] {
+                    beast::error_code ignored;
+                    auto& lowest = beast::get_lowest_layer(*ws_);
+                    lowest.cancel(ignored);
+                    lowest.close(ignored);
+                });
+            if (!read) return false;
             if (stop_flag_.load())
                 return false;
 
@@ -495,6 +626,83 @@ private:
         return false;
     }
 
+    bool await_private_subscriptions()
+    {
+        const auto deadline =
+            std::chrono::steady_clock::now() + kLoginTimeout;
+        private_subscription_tracker tracker;
+
+        while (!stop_flag_.load(std::memory_order_acquire))
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+            {
+                std::cerr << "BitgetPrivateWsTransport: subscribe timeout\n";
+                return false;
+            }
+
+            if (ws_ && !ssl_has_pending_app_data(
+                            ws_->next_layer().native_handle()))
+            {
+                const int fd = beast::get_lowest_layer(*ws_).native_handle();
+                const auto remaining =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        deadline - now);
+                const auto wait = remaining < kLoginPoll
+                    ? remaining : kLoginPoll;
+                if (wait.count() <= 0) return false;
+                const auto pr = poll_fd_readable(fd, wait);
+                if (pr == poll_wait_result::timeout) continue;
+                if (pr == poll_wait_result::error) return false;
+            }
+
+            if (frame_buffer_.size() > 0)
+                frame_buffer_.consume(frame_buffer_.size());
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now());
+            if (remaining.count() <= 0) return false;
+            const bool read = provider_ws::run_bounded(
+                ioc_, remaining,
+                [this](auto done) {
+                    ws_->async_read(
+                        frame_buffer_,
+                        [done](beast::error_code ec,
+                               std::size_t) mutable { done(ec); });
+                },
+                [this] {
+                    beast::error_code ignored;
+                    auto& lowest = beast::get_lowest_layer(*ws_);
+                    lowest.cancel(ignored);
+                    lowest.close(ignored);
+                });
+            if (!read || stop_flag_.load(std::memory_order_acquire))
+                return false;
+
+            const auto const_buf = frame_buffer_.data();
+            const std::string_view view(
+                static_cast<const char*>(const_buf.data()), const_buf.size());
+            if (is_pong_text(view)) continue;
+            if (is_ping_text(view))
+            {
+                send_text("pong");
+                continue;
+            }
+
+            const auto progress = tracker.consume(view);
+            if (progress == subscription_progress::rejected)
+            {
+                std::cerr << "BitgetPrivateWsTransport: subscribe rejected: "
+                          << view.substr(0, 200) << "\n";
+                return false;
+            }
+            if (progress == subscription_progress::ready)
+                return true;
+            // Ignore unrelated frames until all four authoritative acks arrive.
+        }
+        return false;
+    }
+
     run_result run_once()
     {
         bool reached_open = false;
@@ -509,51 +717,42 @@ private:
                                                                       ctx_);
             }
 
-            tcp::resolver resolver(ioc_);
-            auto results = resolver.resolve(host_, port_);
-
-            auto& lowest = beast::get_lowest_layer(*ws_);
-            net::connect(lowest, results);
-
-            const int fd = lowest.native_handle();
-            {
-                const int yes = 1;
-                const int idle = 1, intvl = 1, cnt = 2;
-                ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
-                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
-                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl,
-                             sizeof(intvl));
-                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
-            }
-
-            if (!SSL_set_tlsext_host_name(ws_->next_layer().native_handle(),
-                                          host_.c_str()))
-            {
-                return run_result::handshake_error;
-            }
-
-            ws_->next_layer().handshake(ssl::stream_base::client);
-
-            {
-                websocket::stream_base::timeout opt;
-                opt.handshake_timeout = websocket::stream_base::none();
-                opt.idle_timeout = websocket::stream_base::none();
-                opt.keep_alive_pings = false;
-                ws_->set_option(opt);
-            }
-
-            ws_->set_option(websocket::stream_base::decorator(
-                [](websocket::request_type& req) {
-                    req.set(boost::beast::http::field::user_agent,
-                            "TrueTest/1.0");
-                }));
-
-            ws_->control_callback(
-                [](websocket::frame_type kind, beast::string_view) {
-                    (void)kind;
+            constexpr auto open_stage_timeout = std::chrono::seconds(3);
+            const bool opened = provider_ws::open_tls_websocket(
+                ioc_, *ws_, host_, port_, path_, open_stage_timeout,
+                [](auto& socket) {
+                    auto& lowest = beast::get_lowest_layer(socket);
+                    const int yes = 1;
+                    const int idle = 1, intvl = 1, cnt = 2;
+                    const int fd = lowest.native_handle();
+                    ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes,
+                                 sizeof(yes));
+                    ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle,
+                                 sizeof(idle));
+                    ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl,
+                                 sizeof(intvl));
+                    ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt,
+                                 sizeof(cnt));
+                },
+                [](auto& socket) {
+                    websocket::stream_base::timeout opt;
+                    opt.handshake_timeout = websocket::stream_base::none();
+                    opt.idle_timeout = websocket::stream_base::none();
+                    opt.keep_alive_pings = false;
+                    socket.set_option(opt);
+                    socket.set_option(websocket::stream_base::decorator(
+                        [](websocket::request_type& req) {
+                            req.set(boost::beast::http::field::user_agent,
+                                    "TrueTest/1.0");
+                        }));
+                    socket.control_callback(
+                        [](websocket::frame_type kind, beast::string_view) {
+                            (void)kind;
+                        });
                 });
-
-            ws_->handshake(host_ + ":" + port_, path_);
+            if (!opened)
+                return stop_flag_.load(std::memory_order_acquire)
+                    ? run_result::stopped : run_result::handshake_error;
 
             // Login.
             const std::string ts = std::to_string(login_timestamp_ms());
@@ -566,7 +765,9 @@ private:
             }
             const std::string login =
                 build_login_json(api_key_, passphrase_, ts, sign);
-            send_text(login);
+            if (!send_text_bounded(login, open_stage_timeout))
+                return stop_flag_.load(std::memory_order_acquire)
+                    ? run_result::stopped : run_result::login_error;
 
             if (!await_login())
             {
@@ -576,7 +777,13 @@ private:
             }
 
             // Subscribe order / fill / position.
-            send_text(build_private_subscribe_json());
+            if (!send_text_bounded(build_private_subscribe_json(),
+                                   open_stage_timeout))
+                return stop_flag_.load(std::memory_order_acquire)
+                    ? run_result::stopped : run_result::login_error;
+            if (!await_private_subscriptions())
+                return stop_flag_.load(std::memory_order_acquire)
+                    ? run_result::stopped : run_result::login_error;
             last_ping_ = std::chrono::steady_clock::now();
 
             reached_open = true;
@@ -669,26 +876,16 @@ private:
                 return;
             }
 
-            // Live path: fatal disconnect → halt, no reconnect.
-            if (fatal_cb_)
-            {
-                char buf[192];
-                std::snprintf(buf, sizeof(buf),
-                              "bitget private WS lost: %s", what);
-                fatal_cb_(buf);
-                stop_flag_.store(true);
-                set_state(lifecycle::error, buf);
-                return;
-            }
-
-            if (++attempt >= k_max_attempts)
-            {
-                set_state(lifecycle::error,
-                          "private WS: giving up after "
-                              + std::to_string(k_max_attempts)
-                              + " reconnect attempts");
-                return;
-            }
+            // Any post-ready loss is terminal. If the engine has not yet
+            // registered its callback, latch and synchronously deliver it
+            // from set_fatal_disconnect_callback.
+            char buf[192];
+            std::snprintf(buf, sizeof(buf),
+                          "bitget private WS lost: %s", what);
+            stop_flag_.store(true);
+            set_state(lifecycle::error, buf);
+            fatal_cb_.publish(buf);
+            return;
         }
     }
 
@@ -710,7 +907,7 @@ private:
 
     message_cb message_cb_;
     status_cb status_cb_;
-    std::function<void(std::string_view)> fatal_cb_;
+    LatchedFailureCallback fatal_cb_;
 
     std::thread reader_;
     std::atomic<bool> stop_flag_{false};

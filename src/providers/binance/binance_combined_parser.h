@@ -5,6 +5,7 @@
 #include "providers/binance/binance_parser.h"
 #include "providers/binance/binance_depth_parser.h"
 #include "providers/footprint/decimal_ticks.h"
+#include "providers/recovery_payload.h"
 
 #include <cstdlib>
 #include <optional>
@@ -128,6 +129,30 @@ public:
         }
 
         return std::nullopt;
+    }
+
+    empty_parse_status classify_empty_frame(std::string_view line) const override
+    {
+        // Binance subscription acknowledgements have a null result and an id.
+        // Everything else that produced no market event is malformed/unknown.
+        if (!provider_recovery::is_authoritative_object(line)
+            || !provider_recovery::decision_members_are_unique(
+                line, {"result", "id", "data"}))
+            return empty_parse_status::malformed;
+        std::string_view result;
+        std::string_view id;
+        std::string_view data;
+        const auto data_state = provider_recovery::payload_parser(line)
+            .inspect_top_level_member("data", data);
+        std::uint64_t subscription_id = 0;
+        if (provider_recovery::top_level_member(line, "result", result)
+            && provider_recovery::is_exact_null(result)
+            && provider_recovery::top_level_member(line, "id", id)
+            && provider_recovery::parse_positive_u64(id, subscription_id)
+            && data_state
+                == provider_recovery::payload_parser::member_result::missing)
+            return empty_parse_status::ignored;
+        return empty_parse_status::malformed;
     }
 
 private:

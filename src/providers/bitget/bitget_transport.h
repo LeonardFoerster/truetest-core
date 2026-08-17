@@ -3,6 +3,10 @@
 
 #include "providers/bitget/bitget_endpoints.h"
 #include "providers/transport.h"
+#include "providers/thread_safe_callback.h"
+#include "providers/bounded_ws_open.h"
+#include "providers/bounded_ws_frame_reader.h"
+#include "providers/socket_readiness.h"
 #include "utils/retry.h"
 
 #include <boost/asio.hpp>
@@ -12,6 +16,7 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -22,6 +27,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -193,6 +199,46 @@ inline bool is_pong_text(std::string_view msg)
     return msg == "pong";
 }
 
+class TextHeartbeat
+{
+public:
+    enum class action { idle, send_ping, failed };
+
+    void reset(std::chrono::steady_clock::time_point now) noexcept
+    {
+        last_ping_ = now;
+        pong_deadline_ = {};
+        awaiting_pong_ = false;
+    }
+
+    action poll(std::chrono::steady_clock::time_point now,
+                bool force = false) const noexcept
+    {
+        if (awaiting_pong_ && now >= pong_deadline_)
+            return action::failed;
+        if (force || now - last_ping_ >= ping_interval)
+            return action::send_ping;
+        return action::idle;
+    }
+
+    void ping_sent(std::chrono::steady_clock::time_point now) noexcept
+    {
+        last_ping_ = now;
+        pong_deadline_ = now + pong_timeout;
+        awaiting_pong_ = true;
+    }
+
+    void pong_received() noexcept { awaiting_pong_ = false; }
+
+    static constexpr auto ping_interval = std::chrono::seconds(30);
+    static constexpr auto pong_timeout = std::chrono::seconds(10);
+
+private:
+    std::chrono::steady_clock::time_point last_ping_{};
+    std::chrono::steady_clock::time_point pong_deadline_{};
+    bool awaiting_pong_ = false;
+};
+
 // ---------------------------------------------------------------------------
 // Pure-sync WS wake helpers (poll-before-read)
 // ---------------------------------------------------------------------------
@@ -214,48 +260,8 @@ inline bool is_pong_text(std::string_view msg)
 //   until more bytes arrive; poll only guards the *start* of each message.
 // - Single consumer thread owns read + write (no concurrent Beast writes).
 
-enum class poll_wait_result
-{
-    ready,   // POLLIN / POLLHUP — caller should read
-    timeout, // no socket activity within timeout
-    error,   // poll failure or POLLERR/POLLNVAL
-};
-
-// Unit-testable poll wrapper (pass any fd; transports use the WS socket).
-inline poll_wait_result poll_fd_readable(int fd, std::chrono::milliseconds timeout)
-{
-    if (fd < 0)
-        return poll_wait_result::error;
-
-    pollfd pfd{};
-    pfd.fd = fd;
-    pfd.events = POLLIN;
-
-    int ms = static_cast<int>(timeout.count());
-    if (ms < 0)
-        ms = 0;
-
-    for (;;)
-    {
-        const int rc = ::poll(&pfd, 1, ms);
-        if (rc < 0)
-        {
-            if (errno == EINTR)
-                continue;
-            return poll_wait_result::error;
-        }
-        if (rc == 0)
-            return poll_wait_result::timeout;
-
-        // Error conditions on the fd.
-        if (pfd.revents & (POLLERR | POLLNVAL))
-            return poll_wait_result::error;
-        // Readable data or peer hangup (read will surface clean close).
-        if (pfd.revents & (POLLIN | POLLHUP))
-            return poll_wait_result::ready;
-        return poll_wait_result::error;
-    }
-}
+using provider_io::poll_fd_readable;
+using provider_io::poll_wait_result;
 
 // True when OpenSSL already holds decrypted app bytes (poll would miss them).
 inline bool ssl_has_pending_app_data(SSL* ssl)
@@ -307,69 +313,65 @@ public:
     {
         try
         {
-            tcp::resolver resolver(ioc_);
-            auto results = resolver.resolve(host_, port_);
-
-            ws_ = std::make_unique<
-                websocket::stream<beast::ssl_stream<tcp::socket>>>(ioc_, ctx_);
-
-            auto& lowest = beast::get_lowest_layer(*ws_);
-            // No wall-clock bound on resolve/connect/TLS/WS upgrade on this
-            // pure-sync path (Asio sync I/O + SO_*TIMEO are ineffective;
-            // see poll helpers comment). Kernel TCP retransmit is the floor.
-            net::connect(lowest, results);
-
-            const int fd = lowest.native_handle();
+            ws_ = std::make_shared<
+                websocket::stream<beast::ssl_stream<tcp::socket>>>(*ioc_, ctx_);
 
             // TCP keepalive: kernel-side cable-pull detection (~3s) when the
             // app-level text ping path is itself wedged. Best-effort.
-            {
+            const bool opened = provider_ws::open_tls_websocket(
+                *ioc_, *ws_, host_, port_, path_, std::chrono::seconds(3),
+                [&](auto& socket) {
+                auto& lowest = beast::get_lowest_layer(socket);
+                const int fd = lowest.native_handle();
                 const int yes = 1;
                 const int idle = 1, intvl = 1, cnt = 2;
                 ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
-            }
-
-            if (!SSL_set_tlsext_host_name(
-                    ws_->next_layer().native_handle(), host_.c_str()))
-            {
-                std::cerr << "BitgetTransport: SNI setup failed\n";
-                return false;
-            }
-
-            ws_->next_layer().handshake(ssl::stream_base::client);
-
-            // Beast stream_base::timeout is async-only — leave none() so it is
-            // never mistaken for a real bound on sync tcp::socket ops.
-            {
+                },
+                [&](auto& socket) {
                 websocket::stream_base::timeout opt;
                 opt.handshake_timeout = websocket::stream_base::none();
                 opt.idle_timeout = websocket::stream_base::none();
                 opt.keep_alive_pings = false;
-                ws_->set_option(opt);
-            }
-
-            ws_->set_option(websocket::stream_base::decorator(
+                socket.set_option(opt);
+                socket.set_option(websocket::stream_base::decorator(
                 [](websocket::request_type& req) {
                     req.set(boost::beast::http::field::user_agent, "TrueTest/1.0");
                 }));
-
-            ws_->control_callback(
+                socket.control_callback(
                 [](websocket::frame_type kind, beast::string_view) {
                     (void)kind;
                 });
-
-            // Path-based URL (not Binance /ws/symbol@stream).
-            ws_->handshake(host_ + ":" + port_, path_);
+                });
+            if (!opened) return false;
 
             // Subscribe after handshake.
             const auto mapped = map_stream_to_topic(stream_type_);
             const std::string sub =
                 build_subscribe_json(symbol_, mapped.topic, mapped.interval);
-            ws_->write(net::buffer(sub));
-            last_ping_ = std::chrono::steady_clock::now();
+            auto subscription = std::make_shared<std::string>(sub);
+            const bool subscribed = provider_ws::run_bounded(
+                *ioc_, std::chrono::seconds(3),
+                [&, subscription](auto done) {
+                    ws_->async_write(net::buffer(*subscription),
+                        [subscription, done](beast::error_code ec,
+                                             std::size_t) mutable {
+                            done(ec);
+                        });
+                },
+                [&] {
+                    beast::error_code ignored;
+                    auto& lowest = beast::get_lowest_layer(*ws_);
+                    lowest.cancel(ignored);
+                    lowest.close(ignored);
+                });
+            if (!subscribed) return false;
+            socket_interrupt_.publish(
+                beast::get_lowest_layer(*ws_).native_handle());
+            heartbeat_.reset(std::chrono::steady_clock::now());
+            frame_reader_.reset();
 
             open_ = true;
             stopped_ = false;
@@ -382,29 +384,26 @@ public:
         }
     }
 
-    // Foreign-thread stop: set flags, then interrupt via lowest-layer socket
-    // cancel/close only. Beast websocket::stream is NOT thread-safe — do not
-    // call ws_->close() while a reader may still be in read_frame_blocking.
-    // Stream reset happens on reconnect / open after stop.
+    // Owner-thread finalization after request_stop() has woken the read via
+    // native shutdown. Boost.Asio socket methods remain on the owner thread.
     void close() override
     {
         stopped_.store(true);
         open_.store(false);
 
-        std::lock_guard<std::mutex> lk(mu_);
-        if (ws_)
         {
-            try
+            std::lock_guard<std::mutex> lk(mu_);
+            socket_interrupt_.clear();
+            if (ws_)
             {
                 beast::error_code ec;
                 auto& lowest = beast::get_lowest_layer(*ws_);
                 lowest.cancel(ec);
                 lowest.close(ec);
             }
-            catch (...)
-            {
-            }
         }
+        (void)frame_reader_.drain_after_cancel(
+            ioc_, std::chrono::steady_clock::now() + std::chrono::milliseconds{250});
     }
 
     bool is_open() const override
@@ -442,7 +441,8 @@ public:
             try
             {
                 // Continuous markets: still need text "ping" every ~30s.
-                maybe_send_ping();
+                if (!maybe_send_ping())
+                    throw std::runtime_error("Bitget heartbeat pong timeout");
 
                 // Silent markets: do not call blocking ws_->read until the
                 // socket (or TLS buffer) has data — otherwise we cannot ping.
@@ -451,7 +451,9 @@ public:
                     if (stopped_.load())
                         return false;
                     // poll timeout → app ping, re-enter (not a disconnect).
-                    maybe_send_ping(/*force=*/true);
+                    if (!maybe_send_ping(/*force=*/true))
+                        throw std::runtime_error(
+                            "Bitget heartbeat ping failed");
                     continue;
                 }
 
@@ -471,7 +473,10 @@ public:
 
                 // Bitget heartbeat: ignore pong; answer server ping with pong.
                 if (is_pong_text(out))
+                {
+                    heartbeat_.pong_received();
                     continue;
+                }
                 if (is_ping_text(out))
                 {
                     send_text("pong");
@@ -492,13 +497,13 @@ public:
                 if (stopped_.load())
                     return false;
 
-                if (fatal_cb_)
+                if (auto fatal = fatal_cb_.load())
                 {
                     char buf[160];
                     std::snprintf(buf, sizeof(buf),
                                   "bitget market-data WS lost: %s",
                                   se.code().message().c_str());
-                    fatal_cb_(buf);
+                    (*fatal)(buf);
                     stopped_ = true;
                     return false;
                 }
@@ -516,12 +521,12 @@ public:
                 if (stopped_.load())
                     return false;
 
-                if (fatal_cb_)
+                if (auto fatal = fatal_cb_.load())
                 {
                     char buf[160];
                     std::snprintf(buf, sizeof(buf),
                                   "bitget market-data WS lost: %s", e.what());
-                    fatal_cb_(buf);
+                    (*fatal)(buf);
                     stopped_ = true;
                     return false;
                 }
@@ -535,10 +540,56 @@ public:
         return false;
     }
 
+    bool supports_bounded_idle_read() const override { return true; }
+
+    transport_read_result read_frame_until(
+        std::string_view& out,
+        std::chrono::steady_clock::time_point deadline) override
+    {
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (!ws_ || stopped_.load()) return transport_read_result::terminal;
+            if (!maybe_send_ping())
+                return fail_heartbeat("bitget market-data heartbeat failed");
+            const auto result = frame_reader_.read_until(ioc_, ws_, out, deadline);
+            if (result == transport_read_result::idle) return result;
+            if (result == transport_read_result::frame)
+            {
+                if (is_pong_text(out))
+                {
+                    heartbeat_.pong_received();
+                    continue;
+                }
+                if (is_ping_text(out))
+                {
+                    send_text("pong");
+                    continue;
+                }
+                return result;
+            }
+
+            open_ = false;
+            if (stopped_.load()) return result;
+            if (auto fatal = fatal_cb_.load())
+            {
+                const auto ec = frame_reader_.last_error();
+                char buf[160];
+                std::snprintf(buf, sizeof(buf), "bitget market-data WS lost: %s",
+                              ec ? ec.message().c_str() : "bounded read failed");
+                (*fatal)(buf);
+                stopped_ = true;
+                return result;
+            }
+            if (!reconnect()) return result;
+        }
+        return transport_read_result::idle;
+    }
+
     void request_stop() override
     {
         stopped_ = true;
-        close();
+        open_ = false;
+        (void)socket_interrupt_.request_shutdown();
     }
 
     bool reconnect_stream(const std::string& new_symbol,
@@ -549,7 +600,8 @@ public:
         symbol_ = to_upper_ascii(new_symbol);
         stream_type_ = new_stream_type;
         stopped_ = false;
-        ioc_.restart();
+        ioc_->restart();
+        socket_interrupt_.clear();
         ws_.reset();
         return open();
     }
@@ -559,7 +611,7 @@ public:
     void set_fatal_disconnect_callback(
         std::function<void(std::string_view reason)> cb)
     {
-        fatal_cb_ = std::move(cb);
+        fatal_cb_.store(std::move(cb));
     }
 
 private:
@@ -569,21 +621,22 @@ private:
     std::string port_;
     std::string path_;
 
-    net::io_context ioc_;
+    std::shared_ptr<net::io_context> ioc_ = std::make_shared<net::io_context>();
     ssl::context ctx_;
-    std::unique_ptr<websocket::stream<beast::ssl_stream<tcp::socket>>> ws_;
+    std::shared_ptr<websocket::stream<beast::ssl_stream<tcp::socket>>> ws_;
+    provider_ws::BoundedFrameReader<
+        websocket::stream<beast::ssl_stream<tcp::socket>>> frame_reader_;
 
     beast::flat_buffer frame_buffer_;
 
     std::mutex mu_;
+    provider_io::native_socket_interrupt socket_interrupt_;
     std::atomic<bool> open_{false};
     std::atomic<bool> stopped_{false};
 
-    std::function<void(std::string_view)> fatal_cb_;
+    ThreadSafeCallback<void(std::string_view)> fatal_cb_;
 
-    std::chrono::steady_clock::time_point last_ping_{};
-
-    static constexpr auto kPingInterval = std::chrono::seconds(30);
+    TextHeartbeat heartbeat_;
     // poll() timeout when waiting for the next frame under silence.
     static constexpr auto kPollWake = std::chrono::seconds(25);
     static constexpr unsigned MAX_RECONNECTS = 30;
@@ -595,22 +648,38 @@ private:
         ws_->write(net::buffer(text.data(), text.size()));
     }
 
-    void maybe_send_ping(bool force = false)
+    bool maybe_send_ping(bool force = false)
     {
         if (!ws_ || stopped_.load())
-            return;
+            return false;
         const auto now = std::chrono::steady_clock::now();
-        if (!force && (now - last_ping_) < kPingInterval)
-            return;
+        const auto action = heartbeat_.poll(now, force);
+        if (action == TextHeartbeat::action::failed) return false;
+        if (action == TextHeartbeat::action::idle)
+            return true;
         try
         {
             send_text("ping");
-            last_ping_ = now;
+            heartbeat_.ping_sent(now);
+            return true;
         }
         catch (const std::exception& e)
         {
             std::cerr << "BitgetTransport: ping failed: " << e.what() << "\n";
+            return false;
         }
+    }
+
+    transport_read_result fail_heartbeat(std::string_view reason) noexcept
+    {
+        open_ = false;
+        stopped_ = true;
+        if (auto fatal = fatal_cb_.load())
+        {
+            try { (*fatal)(reason); }
+            catch (...) {}
+        }
+        return transport_read_result::terminal;
     }
 
     // true  → safe to call ws_->read() (socket readable, TLS pending, or
@@ -625,10 +694,14 @@ private:
         if (ssl_has_pending_app_data(ws_->next_layer().native_handle()))
             return true;
 
+        const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(
+            kPollWake);
         const int fd = beast::get_lowest_layer(*ws_).native_handle();
-        const auto pr = poll_fd_readable(fd, kPollWake);
+        const auto pr = poll_fd_readable(fd, wait);
         if (pr == poll_wait_result::timeout)
+        {
             return false;
+        }
         // ready or error → let ws_->read report disconnect / deliver data.
         return true;
     }
@@ -650,7 +723,8 @@ private:
             [this]() {
                 if (stopped_.load())
                     return true; // bail out of retry loop
-                ioc_.restart();
+                ioc_->restart();
+                socket_interrupt_.clear();
                 ws_.reset();
                 return open();
             },

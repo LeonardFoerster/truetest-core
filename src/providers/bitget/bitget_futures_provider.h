@@ -4,7 +4,8 @@
 // Bitget UTA v3 USDT-M futures provider.
 // Public market data + HybridExecutor / TradeTapeShadowAdapter for non-live.
 // Live: REST clock/instruments/one-way gate + ExecutionBridge + reconciler
-// + kill-switch (cancel-symbol-order + close-positions) + optional DMS.
+// + kill-switch (regular/strategy order readback + flat-position proof)
+// + optional DMS.
 
 #include "engine/engine_config.h"
 #include "execution/execution_bridge.h"
@@ -36,6 +37,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -108,8 +110,13 @@ inline std::string check_one_way_hold_mode(std::string_view body)
         note.append(code.empty() ? "<missing>" : code);
         return note;
     }
-    auto hold = extract_sv_string(body, "holdMode");
-    if (hold.empty())
+    std::string_view data;
+    std::string_view hold;
+    if (!provider_recovery::top_level_member(body, "data", data)
+        || !provider_recovery::is_authoritative_object(data)
+        || !provider_recovery::top_level_plain_string(
+            data, "holdMode", hold)
+        || hold.empty())
         return "account/settings missing holdMode";
     if (hold == "hedge_mode" || hold == "hedge" || hold == "dual_long_short_mode")
         return "account is in hedge mode (holdMode=" + std::string(hold)
@@ -132,12 +139,7 @@ inline std::string canonical_margin_mode(std::string_view mode)
         return "CROSSED";
     if (lower == "isolated" || lower == "isola" || lower == "i")
         return "ISOLATED";
-    // Already canonical or unknown — upper-case for compare.
-    std::string up;
-    up.reserve(mode.size());
-    for (unsigned char c : mode)
-        up.push_back(static_cast<char>(std::toupper(c)));
-    return up;
+    return {};
 }
 
 // Extract marginMode for symbol from account/settings body
@@ -145,19 +147,51 @@ inline std::string canonical_margin_mode(std::string_view mode)
 inline std::string extract_symbol_margin_mode(std::string_view body,
                                               std::string_view want_symbol)
 {
-    auto arr = detail::extract_array(body, "symbolConfigList");
-    if (arr.empty()) return {};
+    if (!is_business_success(200, body)) return {};
+    std::string_view data;
+    std::string_view arr;
+    if (!provider_recovery::top_level_member(body, "data", data)
+        || !provider_recovery::is_authoritative_object(data)
+        || !provider_recovery::top_level_member(
+            data, "symbolConfigList", arr)
+        || !provider_recovery::is_authoritative_object_array(arr))
+        return {};
     std::string found;
-    detail::for_each_array_object(arr, [&](std::string_view obj) {
-        if (!found.empty()) return;
-        auto sym = extract_sv_string(obj, "symbol");
-        if (sym != want_symbol) return;
-        auto mm = extract_sv_string(obj, "marginMode");
-        if (mm.empty())
-            mm = extract_sv_string(obj, "marginType");
-        found.assign(mm.data(), mm.size());
-    });
-    return found;
+    bool duplicate_match = false;
+    const bool rows_ok = provider_recovery::every_top_level_object(
+        arr, [&](std::string_view obj) {
+            std::string_view sym;
+            if (!provider_recovery::top_level_plain_string(
+                    obj, "symbol", sym))
+                return false;
+
+            std::string_view margin;
+            const auto margin_state = provider_recovery::payload_parser(obj)
+                .inspect_top_level_member("marginMode", margin);
+            if (margin_state
+                == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+                return false;
+            if (margin_state
+                == provider_recovery::payload_parser::member_result::unique)
+            {
+                if (!provider_recovery::top_level_plain_string(
+                        obj, "marginMode", margin))
+                    return false;
+            }
+            else if (!provider_recovery::top_level_plain_string(
+                         obj, "marginType", margin))
+                return false;
+
+            if (sym != want_symbol) return true;
+            if (!found.empty())
+            {
+                duplicate_match = true;
+                return false;
+            }
+            found.assign(margin);
+            return true;
+        });
+    return rows_ok && !duplicate_match ? found : std::string{};
 }
 
 // Strict margin gate. Empty = pass. Non-empty = refuse reason.
@@ -168,7 +202,11 @@ inline std::string check_margin_type_strict(std::string_view settings_body,
 {
     if (expected_margin.empty()) return {};
     const std::string want = canonical_margin_mode(expected_margin);
-    if (want.empty()) return {};
+    if (want.empty())
+    {
+        return "margin-type-strict: unsupported expected margin mode '"
+             + std::string(expected_margin) + "'";
+    }
 
     const std::string raw = extract_symbol_margin_mode(settings_body, symbol);
     if (raw.empty())
@@ -179,6 +217,11 @@ inline std::string check_margin_type_strict(std::string_view settings_body,
              + want + ")";
     }
     const std::string got = canonical_margin_mode(raw);
+    if (got.empty())
+    {
+        return "margin-type-strict: symbol '" + std::string(symbol)
+             + "' returned unsupported venue marginMode='" + raw + "'";
+    }
     if (got != want)
     {
         return "margin-type-strict: symbol '" + std::string(symbol)
@@ -256,7 +299,6 @@ public:
     // DMS knobs: countdown_ms > 0 arms UTA countdown-cancel-all on live open.
     void set_dead_man_countdown_ms(int64_t v)        { dead_man_countdown_ms_ = v; }
     void set_dead_man_heartbeat_ms(int64_t v)        { dead_man_heartbeat_ms_ = v; }
-    void set_dms_attempt_position_close(bool v)      { dms_attempt_position_close_ = v; }
 
     void set_endpoints(bitget::endpoints ep)
     {
@@ -297,6 +339,34 @@ public:
     bool open() override
     {
         state_ = lifecycle::opening;
+
+        if (mode_ == engine_mode::live &&
+            (api_key_.empty() || api_secret_.empty() || api_passphrase_.empty()))
+        {
+            std::cerr << "BitgetFuturesProvider: refusing live open — API key, "
+                         "secret, and passphrase are all required.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
+        if (!std::isfinite(rc_cfg_.min_liquidation_distance_pct) ||
+            rc_cfg_.min_liquidation_distance_pct < 0.0 ||
+            rc_cfg_.min_liquidation_distance_pct > 1.0)
+        {
+            std::cerr << "BitgetFuturesProvider: refusing open — minimum "
+                         "liquidation distance must be a fraction in [0,1].\n";
+            state_ = lifecycle::error;
+            return false;
+        }
+        if (dead_man_countdown_ms_ < 0 || dead_man_heartbeat_ms_ < 0
+            || (dead_man_countdown_ms_ == 0 && dead_man_heartbeat_ms_ > 0)
+            || (dead_man_countdown_ms_ > 0 && dead_man_heartbeat_ms_ > 0
+                && dead_man_heartbeat_ms_ >= dead_man_countdown_ms_))
+        {
+            std::cerr << "BitgetFuturesProvider: refusing open — invalid "
+                         "dead-man countdown/heartbeat relationship.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
 
         // Classic mix/v2 remains unsupported (no countdown DMS; dual surface
         // is documented only). Only empty/"uta" allowed.
@@ -396,11 +466,11 @@ public:
         {
             if (!open_live_path())
             {
-                // Partial live setup (bridge / private WS / DMS arm) must not
-                // leak: main.inc only installs the close-guard after open()
-                // returns true. close() stops+disarms DMS and tears down
-                // bridge/private/public transports.
-                close();
+                // Partial live setup is already owned by LiveSafetySession.
+                // Stop new mutations here; the session performs the single
+                // kill-before-finish sequence and decides whether DMS may be
+                // disarmed from the kill result.
+                quiesce_for_live_shutdown();
                 state_ = lifecycle::error;
                 return false;
             }
@@ -426,10 +496,10 @@ public:
 
         if (!live_transport->open())
         {
-            // Public WS fail after open_live_path() (DMS may already be armed)
-            // would leave the account-wide countdown running unless we
-            // stop+disarm here. Same full teardown as close().
-            close();
+            // Public WS failed after live setup (DMS may already be armed).
+            // Quiesce locally; LiveSafetySession retains responsibility for
+            // kill, transport finish, and preserve-vs-disarm disposition.
+            quiesce_for_live_shutdown();
             state_ = lifecycle::error;
             return false;
         }
@@ -440,23 +510,38 @@ public:
 
     void close() override
     {
-        // Stop heartbeat first so it cannot refresh while we disarm.
-        // Disarm is best-effort; failure leaves the server timer to expire.
-        if (dms_)
-        {
-            dms_->stop();
-            if (!dms_->disarm())
-                std::cerr << "BitgetFuturesProvider: dead-man's-switch "
-                             "disarm failed; relying on countdown to "
-                             "expire server-side.\n";
-        }
-        if (bridge_)
-            bridge_->close();
-        if (bitget_private_ws_)
-            bitget_private_ws_->close();
-        if (transport_)
-            transport_->close();
+        quiesce_for_live_shutdown();
+        // Public close has no proof that flatten succeeded. Preserve the
+        // venue countdown; only LiveSafetySession may pass disarm_after_kill.
+        finish_live_shutdown(live_shutdown_disposition::preserve_dead_man_switch);
+    }
+
+    void quiesce_for_live_shutdown() override
+    {
+        quiesce_futures_live_resources(
+            live_mutations_cancelled_, dms_, bridge_, bitget_private_ws_,
+            transport_);
+    }
+
+    void finish_live_shutdown(live_shutdown_disposition disposition) override
+    {
+        const bool disarm_succeeded = finish_futures_live_resources(
+            dms_, bridge_, bitget_private_ws_, transport_, disposition);
         state_ = lifecycle::closed;
+        if (!disarm_succeeded)
+        {
+            std::cerr << "BitgetFuturesProvider: shutdown finish or "
+                         "dead-man's-switch disarm failed; relying on the "
+                         "countdown where available.\n";
+            throw std::runtime_error(
+                "BitgetFuturesProvider: live shutdown finish failed");
+        }
+        if (dms_ && disposition ==
+                        live_shutdown_disposition::preserve_dead_man_switch)
+        {
+            std::cerr << "BitgetFuturesProvider: kill failed or was ambiguous; "
+                         "leaving dead-man's-switch countdown armed.\n";
+        }
     }
 
     std::shared_ptr<IDataTransport> get_transport() override
@@ -520,14 +605,13 @@ public:
     void set_halt_callback(
         std::function<void(std::string_view reason)> cb) override
     {
-        halt_cb_ = std::move(cb);
+        halt_cb_.store(std::move(cb));
         apply_halt_cb_to_transports();
     }
 
-    void set_event_publisher(
-        std::function<void(std::shared_ptr<event>)> fn) override
+    ProviderFundingIngress* funding_ingress() noexcept override
     {
-        event_publisher_ = std::move(fn);
+        return mode_ == engine_mode::live ? &funding_ingress_ : nullptr;
     }
 
     bool supports_event_stream() const override
@@ -579,6 +663,8 @@ private:
     std::shared_ptr<BitgetHybridExecutor> hybrid_exec_;
     std::shared_ptr<TradeTapeShadowAdapter> shadow_exec_;
     std::shared_ptr<ExecutionBridge> bridge_;
+    std::shared_ptr<std::atomic<bool>> live_mutations_cancelled_ =
+        std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<IExecutionAdapter> executor_;
 
     // Live-only
@@ -606,14 +692,13 @@ private:
 
     int64_t dead_man_countdown_ms_ = 0;
     int64_t dead_man_heartbeat_ms_ = 0;
-    bool    dms_attempt_position_close_ = false;
 
     int backfill_bars_ = 0;
     std::string backfill_interval_;
     std::string backfill_host_override_;
 
-    std::function<void(std::string_view)> halt_cb_;
-    std::function<void(std::shared_ptr<event>)> event_publisher_;
+    ThreadSafeCallback<void(std::string_view)> halt_cb_;
+    ProviderFundingIngress funding_ingress_;
 
     // Live refuse checklist (plan Phase 2 / Task 9).
     // Returns false → caller sets state=error.
@@ -750,7 +835,7 @@ private:
                 std::cerr << "BitgetFuturesProvider: position advisory probe "
                              "HTTP " << pr.status
                           << " — skipping margin/liq advisories "
-                             "(reconciler will retry)\n";
+                             "(startup refuses; operator reconciliation required)\n";
             }
         }
 
@@ -766,11 +851,13 @@ private:
         kill_switch_ = make_bitget_futures_kill_switch(
             rest_, category_, upper(symbol_));
 
+        live_mutations_cancelled_->store(false, std::memory_order_release);
         bracket_adapter_ = make_bitget_futures_bracket_adapter(
-            rest_, category_);
+            rest_, category_, live_mutations_cancelled_, upper(symbol_));
 
         ExecutionBridge::deps d;
-        d.order_tx = make_bitget_rest_order_transport(rest_);
+        d.order_tx = make_bitget_rest_order_transport(
+            rest_, live_mutations_cancelled_);
         bitget_private_ws_ = std::make_shared<BitgetPrivateWsTransport>(
             api_key_, api_secret_, api_passphrase_, endpoints_);
         bitget_private_ws_->set_time_offset_ms(rest_->clock_offset_ms());
@@ -795,27 +882,24 @@ private:
         d.order_rate_limiter = order_rate_limiter_;
         d.client_id_fn = [m = minter_](uint64_t) { return m->next(); };
 
-        // Position/account snapshots: log + funding → event_publisher.
+        const auto funding_symbol = upper(symbol_);
+        d.funding_update_handler =
+            [this, sym = funding_symbol](
+                const parsed_funding_update& update) noexcept {
+                return funding_ingress_.try_publish(
+                    std::chrono::system_clock::time_point(
+                        std::chrono::milliseconds(update.event_time_ms)),
+                    sym, update.cash_delta);
+            };
+        d.funding_failure_handler = [this]() noexcept {
+            funding_ingress_.latch_failure();
+            fail_funding_ingress();
+        };
+
+        // Non-funding position/account snapshots remain diagnostic only.
         d.position_snapshot_handler =
-            [this, sym = upper(symbol_)](const parsed_position_snapshot& s) {
+            [this, sym = funding_symbol](const parsed_position_snapshot& s) {
                 log_position_snapshot(s, sym);
-                if (s.r != parsed_position_snapshot::reason::funding_fee)
-                    return;
-                for (const auto& b : s.balances)
-                {
-                    if (b.asset != "USDT" && b.asset != "usdt")
-                        continue;
-                    if (b.balance_change == 0.0)
-                        continue;
-                    auto fe = std::make_shared<funding_event>(
-                        s.ts, sym, 0.0, b.balance_change, "FUNDING_FEE");
-                    if (event_publisher_)
-                        event_publisher_(fe);
-                    else
-                        std::cerr << "  [FUNDING] " << sym
-                                  << " cash_delta=" << b.balance_change
-                                  << " (no publisher wired yet)\n";
-                }
             };
 
         bridge_ = std::make_shared<ExecutionBridge>(std::move(d));
@@ -837,43 +921,8 @@ private:
             // Binance-style ms values cannot leave HB ≥ venue timer.
             const int64_t hb = dead_man_heartbeat_ms_;
 
-            BitgetFuturesDeadMansSwitch::close_position_fn closer = nullptr;
-            if (dms_attempt_position_close_)
-            {
-                closer = [rest = rest_,
-                          cat = category_,
-                          sym = upper(symbol_)]()
-                {
-                    if (!rest) return;
-                    std::string body = "{\"category\":\"";
-                    body.append(cat);
-                    body.append("\",\"symbol\":\"");
-                    body.append(sym);
-                    body.append("\"}");
-                    auto r = rest->post_json(
-                        "/api/v3/trade/close-positions", body);
-                    if (r.status >= 200 && r.status < 300
-                        && (r.business_ok
-                            || BitgetFuturesKillSwitch::is_close_noop_code(
-                                   bitget::extract_business_code(r.body))))
-                    {
-                        std::cerr << "  [DMS-CLOSE] close-positions OK "
-                                  << sym << " category=" << cat << "\n";
-                    }
-                    else
-                    {
-                        std::cerr << "  [DMS-CLOSE] close-positions failed HTTP "
-                                  << r.status << " "
-                                  << bitget::truncate_for_log(r.body, 120)
-                                  << "\n";
-                    }
-                };
-            }
-
             dms_ = make_bitget_futures_dead_mans_switch(
-                rest_, dead_man_countdown_ms_, hb,
-                /*attempt_close=*/dms_attempt_position_close_,
-                /*closer=*/std::move(closer));
+                rest_, dead_man_countdown_ms_, hb);
             if (!dms_->start())
             {
                 std::cerr << "BitgetFuturesProvider: dead-man's switch "
@@ -884,10 +933,7 @@ private:
             std::cerr << "  BitgetFuturesProvider: dead-man's switch armed "
                          "(countdown=" << dms_->countdown_sec()
                       << "s, heartbeat=" << dms_->heartbeat_interval_ms()
-                      << "ms";
-            if (dms_attempt_position_close_)
-                std::cerr << ", position-close=ON";
-            std::cerr << ")\n";
+                      << "ms)\n";
         }
 
         std::cerr << "  BitgetFuturesProvider: live path open "
@@ -903,14 +949,33 @@ private:
     // Paper/shadow: same — no fatal until engine wires halt.
     void apply_halt_cb_to_transports()
     {
-        if (!halt_cb_)
+        auto halt = halt_cb_.load();
+        if (!halt)
             return;
         if (bitget_transport_)
-            bitget_transport_->set_fatal_disconnect_callback(halt_cb_);
+            bitget_transport_->set_fatal_disconnect_callback(*halt);
         if (bitget_combined_transport_)
-            bitget_combined_transport_->set_fatal_disconnect_callback(halt_cb_);
+            bitget_combined_transport_->set_fatal_disconnect_callback(*halt);
         if (bitget_private_ws_)
-            bitget_private_ws_->set_fatal_disconnect_callback(halt_cb_);
+            bitget_private_ws_->set_fatal_disconnect_callback(*halt);
+        if (dms_)
+        {
+            wire_dms_failure_to_engine(dms_, *halt, transport_);
+        }
+    }
+
+    void fail_funding_ingress() noexcept
+    {
+        if (auto halt = halt_cb_.load())
+        {
+            try { (*halt)("bitget funding ingress overflow or malformed update"); }
+            catch (...) {}
+        }
+        if (transport_)
+        {
+            try { transport_->request_stop(); }
+            catch (...) {}
+        }
     }
 
     // Empty or "uta" (any case) → allowed. Everything else → refuse.

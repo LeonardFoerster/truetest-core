@@ -2,6 +2,7 @@
 #ifdef HAS_BITUNIX
 
 #include "providers/bitunix/bitunix_endpoints.h"
+#include "providers/bounded_ws_open.h"
 #include "providers/transport.h"
 #include "utils/retry.h"
 
@@ -112,11 +113,10 @@ public:
                 ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
             }
 
-            if (!SSL_set_tlsext_host_name(
-                    ws_->next_layer().native_handle(),
-                    ep_.ws_public_host.c_str()))
+            if (!provider_ws::configure_tls_peer_identity(
+                    ws_->next_layer().native_handle(), ep_.ws_public_host))
             {
-                std::cerr << "BitunixTransport: SNI setup failed\n";
+                std::cerr << "BitunixTransport: TLS peer identity setup failed\n";
                 return false;
             }
 

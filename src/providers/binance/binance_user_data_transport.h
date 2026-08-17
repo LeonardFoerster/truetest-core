@@ -4,6 +4,9 @@
 #include "../../execution/fill_transport.h"
 #include "binance_parser.h"
 #include "binance_rest_client.h"
+#include "providers/bounded_ws_open.h"
+#include "providers/recovery_payload.h"
+#include "providers/thread_safe_callback.h"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -38,6 +41,16 @@ struct binance_keepalive_policy
 };
 
 namespace binance_keepalive_detail {
+
+inline std::string authoritative_listen_key(std::string_view body)
+{
+    if (!provider_recovery::is_authoritative_object(body)) return {};
+    std::string_view key;
+    if (!provider_recovery::top_level_plain_string(body, "listenKey", key)
+        || key.empty())
+        return {};
+    return std::string(key);
+}
 
 struct ka_response
 {
@@ -109,6 +122,16 @@ inline tick_result keepalive_tick(const binance_keepalive_policy& pol,
 class BinanceUserDataTransport : public IFillTransport
 {
 public:
+    enum class run_result { stopped, network_error, handshake_error };
+    enum class next_step  { retry_after, give_up, stop };
+    using create_listen_key_fn =
+        std::function<BinanceRestClient::response()>;
+    using delete_listen_key_fn =
+        std::function<void(const std::string&)>;
+    using run_once_fn = std::function<run_result(std::atomic<bool>& stop)>;
+    using keepalive_once_fn =
+        std::function<binance_keepalive_detail::tick_result()>;
+
     BinanceUserDataTransport(std::shared_ptr<BinanceRestClient> rest,
                              std::string ws_host = "stream.binance.com",
                              std::string ws_port = "9443",
@@ -134,6 +157,36 @@ public:
             raw, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
         SSL_CTX_set_ex_data(raw, ex_data_index(), this);
         SSL_CTX_sess_set_new_cb(raw, &BinanceUserDataTransport::on_new_session);
+        if (rest_)
+        {
+            const auto path = listen_key_path_;
+            create_listen_key_ = [client = rest_, path] {
+                return client->post_unsigned(path);
+            };
+            delete_listen_key_ = [client = rest_, path](const std::string& key) {
+                (void)client->safety_del(
+                    path, "listenKey=" + binance::url_encode(key),
+                    std::chrono::seconds(1));
+            };
+        }
+    }
+
+    // Deterministic seam for readiness/teardown tests. Production always uses
+    // the REST-backed constructor above.
+    BinanceUserDataTransport(create_listen_key_fn create_key,
+                             delete_listen_key_fn delete_key,
+                             run_once_fn run_once,
+                             keepalive_once_fn keepalive_once = {},
+                             binance_keepalive_policy policy = {},
+                             bool override_reports_ready = false)
+        : BinanceUserDataTransport(nullptr, "localhost", "1")
+    {
+        create_listen_key_ = std::move(create_key);
+        delete_listen_key_ = std::move(delete_key);
+        run_once_override_ = std::move(run_once);
+        keepalive_once_override_ = std::move(keepalive_once);
+        keepalive_policy_ = policy;
+        override_reports_ready_ = override_reports_ready;
     }
 
     ~BinanceUserDataTransport() override
@@ -159,14 +212,16 @@ public:
 
         set_state(lifecycle::connecting, "creating listenKey");
 
-        if (!rest_)
+        if (!create_listen_key_)
         {
             set_state(lifecycle::error, "no REST client");
             return false;
         }
 
-        auto resp = rest_->post_unsigned(listen_key_path_);
-        if (resp.status < 200 || resp.status >= 300)
+        auto resp = create_listen_key_();
+        const auto created_key =
+            binance_keepalive_detail::authoritative_listen_key(resp.body);
+        if (resp.status < 200 || resp.status >= 300 || created_key.empty())
         {
             set_state(lifecycle::error,
                       "listenKey create HTTP " + std::to_string(resp.status));
@@ -175,7 +230,7 @@ public:
 
         {
             std::lock_guard<std::mutex> lk(listen_key_mu_);
-            listen_key_ = binance::extract_string(resp.body, "listenKey");
+            listen_key_ = created_key;
         }
         if (current_listen_key().empty())
         {
@@ -184,28 +239,62 @@ public:
         }
 
         stop_flag_ = false;
+        ever_open_.store(false, std::memory_order_release);
         reader_    = std::thread([this] { run(); });
         keepalive_ = std::thread([this] { keepalive_loop(); });
-        return true;
+
+        {
+            std::unique_lock<std::mutex> lk(state_mu_);
+            open_cv_.wait_for(lk, std::chrono::seconds(5), [this] {
+                return state_ == lifecycle::open
+                    || state_ == lifecycle::error
+                    || stop_flag_.load(std::memory_order_acquire);
+            });
+            if (state_ == lifecycle::open) return true;
+        }
+
+        close();
+        return false;
     }
 
     void close() override
     {
         stop_flag_ = true;
+        stop_flag_.notify_all();
         cv_.notify_all();
 
-        if (ws_)
         {
-            try
+            std::lock_guard<std::mutex> lk(ws_mu_);
+            if (ws_)
             {
-                boost::beast::error_code ec;
-                ws_->close(boost::beast::websocket::close_code::normal, ec);
+                try
+                {
+                    boost::beast::error_code ec;
+                    auto& lowest = boost::beast::get_lowest_layer(*ws_);
+                    lowest.cancel(ec);
+                    lowest.close(ec);
+                }
+                catch (...) {}
             }
-            catch (...) {}
         }
 
         if (reader_.joinable())    reader_.join();
         if (keepalive_.joinable()) keepalive_.join();
+
+        {
+            std::lock_guard<std::mutex> lk(ws_mu_);
+            if (ws_)
+            {
+                try
+                {
+                    boost::beast::error_code ec;
+                    ws_->close(boost::beast::websocket::close_code::normal, ec);
+                }
+                catch (...) {}
+            }
+            ws_.reset();
+            ioc_.restart();
+        }
 
         std::string key_to_delete;
         {
@@ -213,13 +302,9 @@ public:
             key_to_delete = listen_key_;
             listen_key_.clear();
         }
-        if (rest_ && !key_to_delete.empty())
+        if (delete_listen_key_ && !key_to_delete.empty())
         {
-            try
-            {
-                rest_->del(listen_key_path_,
-                           "listenKey=" + binance::url_encode(key_to_delete));
-            }
+            try { delete_listen_key_(key_to_delete); }
             catch (...) {}
         }
 
@@ -243,7 +328,7 @@ public:
     void set_fatal_disconnect_callback(
         std::function<void(std::string_view reason)> cb) override
     {
-        fatal_cb_ = std::move(cb);
+        fatal_cb_.store(std::move(cb));
     }
 
     std::string listen_key() const
@@ -252,8 +337,6 @@ public:
         return listen_key_;
     }
 
-    enum class run_result { stopped, network_error, handshake_error };
-    enum class next_step  { retry_after, give_up, stop };
     struct reconnect_state
     {
         int attempt = 0;
@@ -309,8 +392,14 @@ private:
         {
             std::lock_guard<std::mutex> lk(state_mu_);
             state_ = s;
+            if (s == lifecycle::open || s == lifecycle::error)
+                open_cv_.notify_all();
         }
-        if (status_cb_) status_cb_(s, note);
+        if (status_cb_)
+        {
+            try { status_cb_(s, note); }
+            catch (...) {}
+        }
     }
 
     run_result run_once()
@@ -324,73 +413,60 @@ private:
         bool reached_open = false;
         try
         {
-            net::io_context ioc;
-
-            tcp::resolver resolver(ioc);
-            auto results = resolver.resolve(ws_host_, ws_port_);
-
-            ws_ = std::make_unique<
-                websocket::stream<beast::ssl_stream<tcp::socket>>>(ioc, ws_ctx_);
-
-            auto& lowest = beast::get_lowest_layer(*ws_);
-            net::connect(lowest, results);
-
-            // TCP keepalive on the underlying socket - see BinanceTransport
-            // for rationale. 1s idle / 1s probe / 2 probes -> kernel-side
-            // detection within ~3s when WS pings themselves are wedged.
-            // Best-effort.
+            constexpr auto connect_deadline = std::chrono::seconds(3);
             {
-                const int yes = 1;
-                const int idle = 1, intvl = 1, cnt = 2;
-                const int fd = lowest.native_handle();
-                ::setsockopt(fd, SOL_SOCKET,  SO_KEEPALIVE,  &yes,   sizeof(yes));
-                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE,  &idle,  sizeof(idle));
-                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
-                ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT,   &cnt,   sizeof(cnt));
+                std::lock_guard<std::mutex> lk(ws_mu_);
+                ws_ = std::make_unique<
+                    websocket::stream<beast::ssl_stream<tcp::socket>>>(ioc_, ws_ctx_);
             }
-
-            if (!SSL_set_tlsext_host_name(
-                    ws_->next_layer().native_handle(), ws_host_.c_str()))
-            {
-                return run_result::handshake_error;
-            }
-
-            // Apply the cached session, if any. SSL_set_session up_refs.
-            if (SSL_SESSION* sess = cached_session_.load(std::memory_order_acquire))
-                SSL_set_session(ws_->next_layer().native_handle(), sess);
-
-            ws_->next_layer().handshake(ssl::stream_base::client);
-
-            // WS idle/handshake timeout: dead user-data stream errors out
-            // within idle_timeout (Beast pings on idle, treats no-pong as
-            // failure). The user-data stream is normally quiet - fills
-            // are bursty, listenKey keepalive is server->client every
-            // ~30 min - so without this, an unplugged cable would only
-            // be detected when the next REST listenKey refresh fails.
-            {
-                websocket::stream_base::timeout opt;
-                opt.handshake_timeout = std::chrono::seconds(3);
-                opt.idle_timeout      = std::chrono::milliseconds(1500);
-                opt.keep_alive_pings  = true;
-                ws_->set_option(opt);
-            }
-
-            ws_->set_option(websocket::stream_base::decorator(
-                [](websocket::request_type& req) {
-                    req.set(boost::beast::http::field::user_agent, "TrueTest/1.0");
-                }));
-
             std::string target = "/ws/" + current_listen_key();
-            ws_->handshake(ws_host_ + ":" + ws_port_, target);
+            const bool ws_ready = provider_ws::open_tls_websocket(
+                ioc_, *ws_, ws_host_, ws_port_, target, connect_deadline,
+                [&](auto& socket) {
+                    auto& lowest = beast::get_lowest_layer(socket);
+                    const int yes = 1;
+                    const int idle = 1, intvl = 1, cnt = 2;
+                    const int fd = lowest.native_handle();
+                    ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes));
+                    ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+                    ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+                    ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+                    if (SSL_SESSION* sess =
+                            cached_session_.load(std::memory_order_acquire))
+                        SSL_set_session(socket.next_layer().native_handle(), sess);
+                },
+                [&](auto& socket) {
+                    websocket::stream_base::timeout opt;
+                    opt.handshake_timeout = std::chrono::seconds(3);
+                    opt.idle_timeout = std::chrono::milliseconds(1500);
+                    opt.keep_alive_pings = true;
+                    socket.set_option(opt);
+                    socket.set_option(websocket::stream_base::decorator(
+                        [](websocket::request_type& req) {
+                            req.set(boost::beast::http::field::user_agent,
+                                    "TrueTest/1.0");
+                        }));
+                });
+            if (!ws_ready || stop_flag_.load(std::memory_order_acquire))
+                return stop_flag_.load(std::memory_order_acquire)
+                    ? run_result::stopped : run_result::handshake_error;
 
             reached_open = true;
+            ever_open_.store(true, std::memory_order_release);
             set_state(lifecycle::open, "user-data stream open");
 
             beast::flat_buffer buf;
             while (!stop_flag_.load())
             {
                 buf.consume(buf.size());
-                ws_->read(buf);
+                beast::error_code read_ec;
+                if (ioc_.stopped()) ioc_.restart();
+                ws_->async_read(buf, [&](beast::error_code ec, std::size_t) {
+                    read_ec = ec;
+                });
+                ioc_.run();
+                if (read_ec)
+                    throw beast::system_error(read_ec);
 
                 if (stop_flag_.load()) break;
 
@@ -418,118 +494,32 @@ private:
 
     void run()
     {
-        constexpr int k_max_attempts = 10;
-        constexpr long long k_reset_threshold_ms = 5 * 60 * 1000;
-        auto initial = std::chrono::seconds(1);
-        auto max_delay = std::chrono::seconds(30);
-
-        int attempt = 0;
-        long long last_open_ms = 0;
-        auto delay = initial;
-
-        while (!stop_flag_.load())
+        if (stop_flag_.load()) return;
+        if (run_once_override_ && override_reports_ready_)
         {
-            if (attempt > 0)
-            {
-                set_state(lifecycle::connecting,
-                          "reconnecting user-data stream (attempt "
-                          + std::to_string(attempt + 1) + "/"
-                          + std::to_string(k_max_attempts) + ")");
-                std::unique_lock<std::mutex> lk(cv_mu_);
-                if (cv_.wait_for(lk, delay,
-                                 [this] { return stop_flag_.load(); }))
-                    break;
-                delay = std::min(delay * 2, max_delay);
-
-                // Rotate the listenKey if the reconnect sleep may have
-                // outlived its expiration window.
-                auto now_ms = static_cast<long long>(binance::server_time_ms());
-                if (last_open_ms > 0 &&
-                    (now_ms - last_open_ms) >
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        keepalive_policy_.interval).count())
-                {
-                    refresh_listen_key_best_effort();
-                }
-            }
-
-            auto open_start_ms =
-                static_cast<long long>(binance::server_time_ms());
-            auto r = run_once();
-            auto open_end_ms =
-                static_cast<long long>(binance::server_time_ms());
-
-            if (r == run_result::stopped) return;
-
-            // In live mode the engine cannot tolerate a multi-second
-            // reconnect schedule on this stream - fills would arrive
-            // late or not at all. Fire the halt callback on the first
-            // network/handshake error and exit the loop immediately.
-            if (fatal_cb_)
-            {
-                const char* what =
-                    (r == run_result::network_error) ? "network error"
-                                                     : "handshake error";
-                char buf[160];
-                std::snprintf(buf, sizeof(buf),
-                              "binance user-data WS lost: %s", what);
-                fatal_cb_(buf);
-                stop_flag_.store(true);
-                return;
-            }
-
-            if (r == run_result::network_error &&
-                (open_end_ms - open_start_ms) > k_reset_threshold_ms)
-            {
-                // Long-running stream hiccuped - reset backoff.
-                attempt = 0;
-                delay = initial;
-                last_open_ms = open_end_ms;
-                continue;
-            }
-
-            last_open_ms = open_end_ms;
-
-            reconnect_state rs{attempt, open_end_ms, false};
-            auto step = decide_next(rs, r, k_max_attempts,
-                                    open_end_ms, k_reset_threshold_ms);
-            if (step == next_step::stop) return;
-            if (step == next_step::give_up)
-            {
-                set_state(lifecycle::error,
-                          "user-data stream: giving up after "
-                          + std::to_string(k_max_attempts)
-                          + " reconnect attempts");
-                return;
-            }
-            ++attempt;
+            ever_open_.store(true, std::memory_order_release);
+            set_state(lifecycle::open, "test user-data stream open");
         }
-    }
-
-    void refresh_listen_key_best_effort()
-    {
-        if (!rest_) return;
-        std::string current = current_listen_key();
-        if (current.empty()) return;
-        try
+        auto r = run_once_override_ ? run_once_override_(stop_flag_)
+                                    : run_once();
+        if (r == run_result::stopped) return;
+        if (!ever_open_.load(std::memory_order_acquire))
         {
-            auto r = rest_->put_unsigned(
-                listen_key_path_, "listenKey=" + binance::url_encode(current));
-            if (r.status < 200 || r.status >= 300)
-            {
-                auto post = rest_->post_unsigned(listen_key_path_);
-                if (post.status >= 200 && post.status < 300)
-                {
-                    auto key = binance::extract_string(post.body, "listenKey");
-                    if (!key.empty())
-                    {
-                        std::lock_guard<std::mutex> lk(listen_key_mu_);
-                        listen_key_ = std::move(key);
-                    }
-                }
-            }
+            set_state(lifecycle::error,
+                      "initial user-data stream handshake failed");
+            return;
         }
-        catch (...) {}
+
+        const char* what =
+            (r == run_result::network_error) ? "network error"
+                                             : "handshake error";
+        char fatal_reason[160];
+        std::snprintf(fatal_reason, sizeof(fatal_reason),
+                      "binance user-data WS lost: %s", what);
+        stop_flag_.store(true);
+        stop_flag_.notify_all();
+        set_state(lifecycle::error, fatal_reason);
+        fatal_cb_.publish(fatal_reason);
     }
 
     void keepalive_loop()
@@ -543,40 +533,55 @@ private:
             }
             if (stop_flag_.load()) break;
 
-            if (!rest_) continue;
-
-            std::string current;
+            binance_keepalive_detail::tick_result out;
+            try
             {
-                std::lock_guard<std::mutex> lk(listen_key_mu_);
-                current = listen_key_;
-            }
-            if (current.empty()) continue;
-
-            using binance_keepalive_detail::ka_response;
-            auto put_call = [this](const std::string& key) {
-                auto r = rest_->put_unsigned(
-                    listen_key_path_, "listenKey=" + binance::url_encode(key));
-                return ka_response{r.status};
-            };
-            auto post_call = [this](std::string& out_key) {
-                auto r = rest_->post_unsigned(listen_key_path_);
-                if (r.status >= 200 && r.status < 300)
+                if (keepalive_once_override_)
                 {
-                    out_key = binance::extract_string(r.body, "listenKey");
+                    out = keepalive_once_override_();
                 }
-                return ka_response{r.status};
-            };
+                else
+                {
+                    if (!rest_) continue;
+                    std::string current;
+                    {
+                        std::lock_guard<std::mutex> lk(listen_key_mu_);
+                        current = listen_key_;
+                    }
+                    if (current.empty()) continue;
 
-            auto wait_fn = [this](std::chrono::seconds delay,
-                                  std::atomic<bool>& stop) -> bool {
-                std::unique_lock<std::mutex> lk(cv_mu_);
-                return cv_.wait_for(
-                    lk, delay, [&stop] { return stop.load(); });
-            };
-
-            auto out = binance_keepalive_detail::keepalive_tick(
-                keepalive_policy_, current, put_call, post_call,
-                stop_flag_, wait_fn);
+                    using binance_keepalive_detail::ka_response;
+                    auto put_call = [this](const std::string& key) {
+                        auto r = rest_->put_unsigned(
+                            listen_key_path_,
+                            "listenKey=" + binance::url_encode(key));
+                        return ka_response{r.status};
+                    };
+                    auto post_call = [this](std::string& out_key) {
+                        auto r = rest_->post_unsigned(listen_key_path_);
+                        if (r.status >= 200 && r.status < 300)
+                        {
+                            out_key = binance_keepalive_detail::
+                                authoritative_listen_key(r.body);
+                        }
+                        return ka_response{r.status};
+                    };
+                    auto wait_fn = [this](std::chrono::seconds delay,
+                                          std::atomic<bool>& stop) -> bool {
+                        std::unique_lock<std::mutex> lk(cv_mu_);
+                        return cv_.wait_for(
+                            lk, delay, [&stop] { return stop.load(); });
+                    };
+                    out = binance_keepalive_detail::keepalive_tick(
+                        keepalive_policy_, current, put_call, post_call,
+                        stop_flag_, wait_fn);
+                }
+            }
+            catch (...)
+            {
+                out.k = binance_keepalive_detail::tick_result::kind::error;
+                out.note = "listenKey keepalive threw";
+            }
 
             using K = binance_keepalive_detail::tick_result::kind;
             if (out.k == K::ok)
@@ -594,11 +599,33 @@ private:
             else if (out.k == K::error)
             {
                 set_state(lifecycle::error, out.note);
-                stop_flag_.store(true);
+                stop_flag_.store(true, std::memory_order_release);
+                stop_flag_.notify_all();
                 cv_.notify_all();
+                fatal_cb_.publish(out.note.empty()
+                    ? std::string_view{"binance listenKey keepalive failed"}
+                    : std::string_view{out.note});
+                interrupt_websocket();
                 break;
             }
         }
+    }
+
+    void interrupt_websocket() noexcept
+    {
+        try
+        {
+            std::lock_guard<std::mutex> lk(ws_mu_);
+            if (ws_)
+            {
+                boost::beast::error_code ec;
+                auto& lowest = boost::beast::get_lowest_layer(*ws_);
+                lowest.cancel(ec);
+                lowest.close(ec);
+            }
+            ioc_.stop();
+        }
+        catch (...) {}
     }
 
     std::shared_ptr<BinanceRestClient> rest_;
@@ -608,24 +635,34 @@ private:
     mutable std::mutex listen_key_mu_;
     std::string listen_key_;
     binance_keepalive_policy keepalive_policy_;
+    boost::asio::io_context ioc_;
     boost::asio::ssl::context ws_ctx_;
     std::atomic<SSL_SESSION*> cached_session_{nullptr};
 
     std::unique_ptr<boost::beast::websocket::stream<
         boost::beast::ssl_stream<boost::asio::ip::tcp::socket>>> ws_;
+    std::mutex ws_mu_;
 
     message_cb message_cb_;
     status_cb  status_cb_;
-    std::function<void(std::string_view)> fatal_cb_;
+    LatchedFailureCallback fatal_cb_;
 
     std::thread reader_;
     std::thread keepalive_;
     std::atomic<bool> stop_flag_{false};
+    std::atomic<bool> ever_open_{false};
+
+    create_listen_key_fn create_listen_key_;
+    delete_listen_key_fn delete_listen_key_;
+    run_once_fn run_once_override_;
+    keepalive_once_fn keepalive_once_override_;
+    bool override_reports_ready_ = false;
 
     std::mutex cv_mu_;
     std::condition_variable cv_;
 
     mutable std::mutex state_mu_;
+    std::condition_variable open_cv_;
     lifecycle state_ = lifecycle::closed;
 };
 

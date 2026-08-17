@@ -8,6 +8,7 @@
 #include "providers/parser.h"
 #include "providers/provider_event.h"
 #include "providers/local/csv_parser.h"
+#include "providers/recovery_payload.h"
 
 #include <chrono>
 #include <cstdio>
@@ -407,6 +408,24 @@ public:
         for (auto& rec : bitunix::parse_all_trades(line))
             out.emplace_back(bitunix::to_provider_tick(rec));
         return out;
+    }
+
+    empty_parse_status classify_empty_frame(std::string_view line) const override
+    {
+        if (!provider_recovery::is_authoritative_object(line)
+            || !provider_recovery::decision_members_are_unique(
+                line, {"ch", "op", "data"}))
+            return empty_parse_status::malformed;
+        const auto ch = bitunix::extract_channel(line);
+        std::string_view data;
+        const bool no_data = provider_recovery::payload_parser(line)
+            .inspect_top_level_member("data", data)
+            == provider_recovery::payload_parser::member_result::missing;
+        auto op = bitunix::detail::extract_string(line, "op");
+        if ((!ch.empty() && ch != "trade")
+            || (no_data && op && (*op == "pong" || *op == "subscribe")))
+            return empty_parse_status::ignored;
+        return empty_parse_status::malformed;
     }
 };
 

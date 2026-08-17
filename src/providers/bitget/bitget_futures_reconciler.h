@@ -12,8 +12,10 @@
 #include "execution/portfolio.h"
 #include "providers/bitget/bitget_parser.h"
 #include "providers/bitget/bitget_rest_client.h"
+#include "providers/recovery_payload.h"
 
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -37,12 +39,6 @@ public:
         , category_(std::move(category))
         , is_demo_(is_demo)
     {
-        if (rest_)
-        {
-            get_ = [r = rest_](const std::string& ep, const std::string& q) {
-                return r->get(ep, q);
-            };
-        }
     }
 
     // Test seam: inject canned HTTP without a live REST client.
@@ -58,18 +54,34 @@ public:
 
     std::string reconcile(const portfolio& local, double tolerance_bps) override
     {
-        if (!get_)
+        if (!rest_ && !get_)
             return "BitgetFuturesReconciler: no REST client";
+
+        const auto expires_at = std::chrono::steady_clock::now()
+                              + std::chrono::seconds(5);
+        const auto request = [&](const std::string& endpoint,
+                                 const std::string& query) {
+            if (rest_)
+            {
+                const auto now = std::chrono::steady_clock::now();
+                const auto remaining = now >= expires_at
+                    ? std::chrono::milliseconds{0}
+                    : std::chrono::duration_cast<std::chrono::milliseconds>(
+                          expires_at - now);
+                return rest_->safety_get(endpoint, query, remaining);
+            }
+            return get_(endpoint, query);
+        };
 
         // Positions first (matches Binance futures order: position then cash).
         const std::string pos_q =
             "category=" + category_ + "&symbol=" + symbol_;
-        auto pos_resp = get_("/api/v3/position/current-position", pos_q);
+        auto pos_resp = request("/api/v3/position/current-position", pos_q);
         if (auto err = http_business_error(
                 "current-position", pos_resp))
             return *err;
 
-        auto acct_resp = get_("/api/v3/account/assets", "");
+        auto acct_resp = request("/api/v3/account/assets", "");
         if (auto err = http_business_error("account/assets", acct_resp))
             return *err;
 
@@ -115,26 +127,30 @@ public:
     // `availableEquity`. First USDT match wins.
     static bool extract_available_usdt(std::string_view json, double& out)
     {
-        auto arr = bitget::detail::extract_array(json, "assets");
-        if (arr.empty())
-        {
-            // Some envelopes nest under data already walked by needle scan;
-            // also accept a top-level single-object with coin=USDT.
-            auto coin = bitget::extract_sv_string(json, "coin");
-            if (coin == "USDT" || coin == "usdt")
-                return parse_available_field(json, out);
+        std::string_view data;
+        std::string_view arr;
+        if (!provider_recovery::top_level_member(json, "data", data)
+            || !provider_recovery::is_authoritative_object(data)
+            || !provider_recovery::top_level_member(data, "assets", arr)
+            || !provider_recovery::is_authoritative_object_array(arr))
             return false;
-        }
 
         bool found = false;
-        bitget::detail::for_each_array_object(arr, [&](std::string_view obj) {
-            if (found) return;
-            auto coin = bitget::extract_sv_string(obj, "coin");
-            if (coin != "USDT" && coin != "usdt") return;
-            if (parse_available_field(obj, out))
-                found = true;
+        const bool schema_ok = provider_recovery::every_top_level_object(
+            arr, [&](std::string_view obj) {
+            std::string_view coin;
+            double parsed = 0.0;
+            if (!provider_recovery::top_level_plain_string(
+                    obj, "coin", coin)
+                || !parse_available_field(obj, parsed))
+                return false;
+            if (coin != "USDT" && coin != "usdt") return true;
+            if (found) return false;
+            out = parsed;
+            found = true;
+            return true;
         });
-        return found;
+        return schema_ok && found;
     }
 
     // Signed qty from current-position body. Empty list → 0.0 (flat is valid
@@ -146,54 +162,45 @@ public:
                                      std::string_view want_symbol = {})
     {
         out = 0.0;
+        std::string_view data;
+        if (!provider_recovery::top_level_member(json, "data", data)
+            || !provider_recovery::is_authoritative_object(data))
+            return false;
 
-        // Prefer data.list[]; fall back to data[] array of rows.
-        auto arr = bitget::detail::extract_array(json, "list");
-        if (arr.empty())
-            arr = bitget::detail::extract_array(json, "data");
-
-        if (arr.empty())
-        {
-            // Single object under data, or empty envelope (flat).
-            auto data_obj = bitget::detail::extract_object(json, "data");
-            if (data_obj.empty())
-                return true; // empty / flat
-            // data may be {} with no list — flat.
-            if (bitget::extract_sv_string(data_obj, "symbol").empty()
-                && bitget::extract_sv_string(data_obj, "size").empty()
-                && bitget::extract_sv_string(data_obj, "total").empty()
-                && bitget::extract_sv_number(data_obj, "size").empty()
-                && bitget::extract_sv_number(data_obj, "total").empty())
-                return true;
-            // Wrong-symbol single object: parse_position_row returns false.
-            return parse_position_row(data_obj, out, want_symbol);
-        }
+        std::string_view arr;
+        const auto list_state = provider_recovery::payload_parser(data)
+            .inspect_top_level_member("list", arr);
+        if (list_state
+            == provider_recovery::payload_parser::member_result::missing)
+            return parse_position_row(data, out, want_symbol);
+        if (list_state
+            != provider_recovery::payload_parser::member_result::unique)
+            return false;
+        if (!provider_recovery::is_authoritative_object_array(arr))
+            return false;
 
         bool matched = false;
         bool parse_ok = true;
         int row_count = 0;
-        bitget::detail::for_each_array_object(arr, [&](std::string_view obj) {
+        const bool schema_ok = provider_recovery::every_top_level_object(
+            arr, [&](std::string_view obj) {
             ++row_count;
-            if (matched || !parse_ok) return;
-            auto sym = bitget::extract_sv_string(obj, "symbol");
-            if (!want_symbol.empty() && !sym.empty() && sym != want_symbol)
-                return;
+            if (matched || !parse_ok) return false;
             double qty = 0.0;
-            if (!parse_position_row(obj, qty, /*want=*/{}))
+            if (!parse_position_row(obj, qty, want_symbol))
             {
                 parse_ok = false;
-                return;
+                return false;
             }
             out = qty;
             matched = true;
+            return true;
         });
 
-        if (!parse_ok) return false;
+        if (!schema_ok || !parse_ok) return false;
         // Empty list → flat 0. Non-empty without a match for want_symbol → refuse
         // (symbol form mismatch or unexpected multi-symbol payload).
-        if (!matched && row_count > 0 && !want_symbol.empty())
-            return false;
-        return true;
+        return row_count == 0 || (row_count == 1 && matched);
     }
 
     bool is_demo() const { return is_demo_; }
@@ -230,54 +237,71 @@ private:
 
     static bool parse_available_field(std::string_view obj, double& out)
     {
-        auto sv = bitget::extract_sv_string(obj, "available");
-        if (sv.empty())
-            sv = bitget::extract_sv_number(obj, "available");
-        if (sv.empty())
-            sv = bitget::extract_sv_string(obj, "availableEquity");
-        if (sv.empty())
-            sv = bitget::extract_sv_number(obj, "availableEquity");
-        if (sv.empty()) return false;
-        return bitget::parse_double_sv(sv, out);
+        std::string_view raw;
+        auto state = provider_recovery::payload_parser(obj)
+            .inspect_top_level_member("available", raw);
+        if (state == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+            return false;
+        if (state == provider_recovery::payload_parser::member_result::missing)
+        {
+            state = provider_recovery::payload_parser(obj)
+                .inspect_top_level_member("availableEquity", raw);
+            if (state != provider_recovery::payload_parser::member_result::unique)
+                return false;
+            return provider_recovery::top_level_scalar_text(
+                       obj, "availableEquity", raw)
+                && bitget::parse_double_sv(raw, out);
+        }
+        return provider_recovery::top_level_scalar_text(
+                   obj, "available", raw)
+            && bitget::parse_double_sv(raw, out);
     }
 
     static bool parse_position_row(std::string_view obj, double& out,
                                    std::string_view want_symbol)
     {
-        if (!want_symbol.empty())
-        {
-            auto sym = bitget::extract_sv_string(obj, "symbol");
-            if (!sym.empty() && sym != want_symbol)
-                return false;
-        }
+        std::string_view sym;
+        if (!provider_recovery::top_level_plain_string(obj, "symbol", sym)
+            || (!want_symbol.empty() && sym != want_symbol))
+            return false;
 
-        auto size_sv = bitget::extract_sv_string(obj, "total");
-        if (size_sv.empty())
-            size_sv = bitget::extract_sv_number(obj, "total");
-        if (size_sv.empty())
-            size_sv = bitget::extract_sv_string(obj, "size");
-        if (size_sv.empty())
-            size_sv = bitget::extract_sv_number(obj, "size");
-        // available (position size free to reduce) as last resort
-        if (size_sv.empty())
-            size_sv = bitget::extract_sv_string(obj, "available");
-        if (size_sv.empty())
-            size_sv = bitget::extract_sv_number(obj, "available");
+        auto optional_scalar = [&](std::string_view key,
+                                   std::string_view& value) -> int {
+            const auto state = provider_recovery::payload_parser(obj)
+                .inspect_top_level_member(key, value);
+            if (state == provider_recovery::payload_parser::member_result::missing)
+                return 0;
+            if (state != provider_recovery::payload_parser::member_result::unique
+                || !provider_recovery::top_level_scalar_text(obj, key, value))
+                return -1;
+            return 1;
+        };
 
-        if (size_sv.empty())
-        {
-            // Row present but no size fields → treat as flat.
-            out = 0.0;
-            return true;
-        }
+        std::string_view size_sv;
+        int size_state = optional_scalar("total", size_sv);
+        if (size_state == 0) size_state = optional_scalar("size", size_sv);
+        if (size_state == 0) size_state = optional_scalar("available", size_sv);
+        if (size_state != 1) return false;
 
         double size = 0.0;
         if (!bitget::parse_double_sv(size_sv, size))
             return false;
 
-        auto pos_side = bitget::extract_sv_string(obj, "posSide");
-        if (pos_side.empty())
-            pos_side = bitget::extract_sv_string(obj, "holdSide");
+        std::string_view pos_side;
+        auto optional_string = [&](std::string_view key,
+                                   std::string_view& value) -> int {
+            const auto state = provider_recovery::payload_parser(obj)
+                .inspect_top_level_member(key, value);
+            if (state == provider_recovery::payload_parser::member_result::missing)
+                return 0;
+            if (state != provider_recovery::payload_parser::member_result::unique
+                || !provider_recovery::top_level_plain_string(obj, key, value))
+                return -1;
+            return 1;
+        };
+        int side_state = optional_string("posSide", pos_side);
+        if (side_state == 0) side_state = optional_string("holdSide", pos_side);
+        if (side_state < 0) return false;
 
         const bool short_side =
             pos_side == "short" || pos_side == "SHORT"

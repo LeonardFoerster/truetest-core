@@ -4,6 +4,8 @@
 #include "execution/instrument.h"
 #include "providers/bitget/bitget_auth.h"
 #include "providers/bitget/bitget_parser.h"
+#include "providers/bounded_ws_open.h"
+#include "providers/recovery_payload.h"
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -44,23 +46,23 @@ inline int64_t local_time_ms()
         .count();
 }
 
+inline std::string_view extract_business_code(std::string_view body);
+
 // Bitget envelope: success iff HTTP 2xx AND "code":"00000".
 // Fail-closed when code is missing/malformed (Bitget always sends it).
 inline bool is_business_success(int http_status, std::string_view body)
 {
     if (http_status < 200 || http_status >= 300) return false;
-    auto code = extract_sv_string(body, "code");
-    if (code.empty())
-        code = extract_sv_number(body, "code");
-    return code == "00000";
+    return extract_business_code(body) == "00000";
 }
 
 // Extract business code string ("00000" on success). Empty if absent.
 inline std::string_view extract_business_code(std::string_view body)
 {
-    auto code = extract_sv_string(body, "code");
-    if (!code.empty()) return code;
-    return extract_sv_number(body, "code");
+    if (!provider_recovery::is_authoritative_object(body)) return {};
+    std::string_view code;
+    return provider_recovery::top_level_scalar_text(body, "code", code)
+        ? code : std::string_view{};
 }
 
 // Parse server time from GET /api/v2/public/time body.
@@ -173,24 +175,35 @@ inline instrument_probe parse_instruments_response(
         return out;
     }
 
-    auto arr = detail::extract_array(body, "data");
-    if (arr.empty())
+    std::string_view arr;
+    if (!provider_recovery::top_level_member(body, "data", arr)
+        || !provider_recovery::is_authoritative_object_array(arr))
     {
         out.note = "instruments: missing data array";
         return out;
     }
 
     std::string_view matched;
-    detail::for_each_array_object(arr, [&](std::string_view obj) {
-        if (!matched.empty()) return;
-        auto sym = extract_sv_string(obj, "symbol");
+    std::size_t matches = 0;
+    const bool rows_ok = provider_recovery::every_top_level_object(
+        arr, [&](std::string_view obj) {
+        std::string_view sym;
+        if (!provider_recovery::top_level_plain_string(
+                obj, "symbol", sym))
+            return false;
         if (want_symbol.empty() || sym == want_symbol)
+        {
+            ++matches;
             matched = obj;
+        }
+        return true;
     });
 
-    if (matched.empty())
+    if (!rows_ok || matches != 1 || matched.empty())
     {
-        out.note = "instruments: symbol not found";
+        out.note = rows_ok && matches == 0
+            ? "instruments: symbol not found"
+            : "instruments: ambiguous or malformed symbol rows";
         if (!want_symbol.empty())
         {
             out.note.push_back(' ');
@@ -201,30 +214,69 @@ inline instrument_probe parse_instruments_response(
 
     out.found = true;
     {
-        auto sym = extract_sv_string(matched, "symbol");
+        std::string_view sym;
+        if (!provider_recovery::top_level_plain_string(
+                matched, "symbol", sym))
+        {
+            out.note = "instruments: malformed symbol";
+            return out;
+        }
         out.spec.symbol.assign(sym.data(), sym.size());
     }
 
-    auto st = extract_sv_string(matched, "status");
+    std::string_view st;
+    if (!provider_recovery::top_level_plain_string(
+            matched, "status", st))
+    {
+        out.note = "instruments: missing status";
+        return out;
+    }
     out.status.assign(st.data(), st.size());
     // UTA instruments: "online" = tradable. Other states refuse live.
     out.trading = (st == "online");
 
-    auto parse_d = [](std::string_view obj, std::string_view key, double& dst) {
-        auto sv = extract_sv_string(obj, key);
-        if (sv.empty()) sv = extract_sv_number(obj, key);
+    auto parse_required_d = [](std::string_view obj, std::string_view key,
+                               double& dst) {
+        std::string_view sv;
         double v = 0.0;
-        if (!sv.empty() && parse_double_sv(sv, v))
-            dst = v;
+        if (!provider_recovery::top_level_scalar_text(obj, key, sv)
+            || !parse_double_sv(sv, v))
+            return false;
+        dst = v;
+        return true;
+    };
+    auto parse_optional_d = [](std::string_view obj, std::string_view key,
+                               double& dst) {
+        std::string_view raw;
+        const auto state = provider_recovery::payload_parser(obj)
+            .inspect_top_level_member(key, raw);
+        if (state == provider_recovery::payload_parser::member_result::missing)
+            return true;
+        if (state
+            != provider_recovery::payload_parser::member_result::unique)
+            return false;
+        std::string_view sv;
+        double v = 0.0;
+        if (!provider_recovery::top_level_scalar_text(obj, key, sv)
+            || !parse_double_sv(sv, v))
+            return false;
+        dst = v;
+        return true;
     };
 
     // UTA v3: priceMultiplier = tick step; quantityMultiplier = lot step.
-    parse_d(matched, "priceMultiplier", out.spec.tick_size);
-    parse_d(matched, "quantityMultiplier", out.spec.lot_size);
-    parse_d(matched, "minOrderQty", out.spec.min_qty);
-    parse_d(matched, "minOrderAmount", out.spec.min_notional);
-    parse_d(matched, "makerFeeRate", out.spec.maker_rate);
-    parse_d(matched, "takerFeeRate", out.spec.taker_rate);
+    if (!parse_required_d(matched, "priceMultiplier", out.spec.tick_size)
+        || !parse_required_d(
+            matched, "quantityMultiplier", out.spec.lot_size)
+        || !parse_optional_d(matched, "minOrderQty", out.spec.min_qty)
+        || !parse_optional_d(
+            matched, "minOrderAmount", out.spec.min_notional)
+        || !parse_optional_d(matched, "makerFeeRate", out.spec.maker_rate)
+        || !parse_optional_d(matched, "takerFeeRate", out.spec.taker_rate))
+    {
+        out.note = "instruments: malformed instrument precision fields";
+        return out;
+    }
 
     if (!out.trading)
     {
@@ -292,8 +344,12 @@ public:
     ~BitgetRestClient()
     {
         close_connection_locked();
-        SSL_SESSION* sess = cached_session_.exchange(
-            nullptr, std::memory_order_acq_rel);
+        close_safety_connection_locked();
+        SSL_SESSION* sess = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(session_mu_);
+            sess = std::exchange(cached_session_, nullptr);
+        }
         if (sess) SSL_SESSION_free(sess);
     }
 
@@ -315,7 +371,16 @@ public:
         std::string body;
         // True only when HTTP 2xx AND Bitget code == "00000".
         bool business_ok = false;
+        // True once an HTTP write was initiated; after that, a zero-byte
+        // completion cannot prove that no encrypted bytes reached the peer.
+        bool request_written = false;
     };
+
+    static bool request_may_have_been_written(
+        const beast::error_code& ec, std::size_t bytes_transferred) noexcept
+    {
+        return !ec || bytes_transferred > 0;
+    }
 
     // Signed GET: query string without leading '?'; path is bare endpoint.
     response get(const std::string& endpoint, const std::string& query = "")
@@ -327,6 +392,24 @@ public:
     response post_json(const std::string& endpoint, const std::string& json_body)
     {
         return do_signed_request(http::verb::post, endpoint, /*query=*/"", json_body);
+    }
+
+    response safety_get(const std::string& endpoint,
+                        const std::string& query,
+                        std::chrono::milliseconds deadline,
+                        const std::atomic<bool>* cancelled = nullptr)
+    {
+        return do_safety_signed_request(
+            http::verb::get, endpoint, query, "", deadline, cancelled);
+    }
+
+    response safety_post_json(const std::string& endpoint,
+                              const std::string& json_body,
+                              std::chrono::milliseconds deadline,
+                              const std::atomic<bool>* cancelled = nullptr)
+    {
+        return do_safety_signed_request(
+            http::verb::post, endpoint, "", json_body, deadline, cancelled);
     }
 
     response get_unsigned(const std::string& endpoint,
@@ -420,6 +503,29 @@ public:
         return true;
     }
 
+    bool ensure_clock_fresh_for_order(std::chrono::milliseconds deadline)
+    {
+        if (!resync_due(steady_now_ms(),
+                        last_sync_steady_ms_.load(std::memory_order_acquire),
+                        sync_interval_ms_))
+            return true;
+        const auto expires_at = std::chrono::steady_clock::now() + deadline;
+        std::unique_lock<std::timed_mutex> lk(clock_sync_mu_, std::defer_lock);
+        if (!lk.try_lock_until(expires_at)) return false;
+        if (!resync_due(steady_now_ms(),
+                        last_sync_steady_ms_.load(std::memory_order_acquire),
+                        sync_interval_ms_))
+            return true;
+        const auto prior = per_call_timeout();
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= expires_at) return false;
+        set_per_call_timeout(std::chrono::duration_cast<std::chrono::milliseconds>(
+            expires_at - now));
+        const bool ok = resync_clock_now();
+        set_per_call_timeout(prior);
+        return ok;
+    }
+
     // last_sync <= 0 = never synced → always due. Pure for tests.
     static bool resync_due(long long now_steady_ms,
                            long long last_sync_steady_ms,
@@ -433,6 +539,193 @@ public:
     bool paptrading() const { return paptrading_; }
 
 private:
+    response do_safety_signed_request(http::verb method,
+                                      const std::string& endpoint,
+                                      const std::string& query,
+                                      const std::string& body,
+                                      std::chrono::milliseconds deadline,
+                                      const std::atomic<bool>* cancelled)
+    {
+        if (deadline <= std::chrono::milliseconds::zero()) return {};
+        const auto expires_at = std::chrono::steady_clock::now() + deadline;
+        std::unique_lock<std::timed_mutex> io_lock(
+            safety_io_mu_, std::defer_lock);
+        if (!io_lock.try_lock_until(expires_at)
+            || (cancelled && cancelled->load(std::memory_order_acquire)))
+            return {};
+        const std::string sorted_query = bitget::sort_query_string(query);
+        const long long ts = static_cast<long long>(bitget::local_time_ms())
+                           + clock_offset_ms_.load(std::memory_order_acquire);
+        char ts_buf[32];
+        const int ts_n = std::snprintf(ts_buf, sizeof(ts_buf), "%lld", ts);
+        const std::string timestamp(
+            ts_buf, static_cast<std::size_t>(ts_n > 0 ? ts_n : 0));
+        std::string signature;
+        {
+            std::unique_lock<std::timed_mutex> lk(signer_mu_, std::defer_lock);
+            if (!lk.try_lock_until(expires_at)) return {};
+            signature = signer_.sign(bitget::build_prehash(
+                timestamp, verb_name(method), endpoint, sorted_query, body));
+        }
+        const std::string target = sorted_query.empty()
+            ? endpoint : endpoint + "?" + sorted_query;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= expires_at) return {};
+        return execute_safety_once(
+            method, target, body, timestamp, signature,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                expires_at - now));
+    }
+
+    response execute_safety_once(http::verb method,
+                                 const std::string& target,
+                                 const std::string& body,
+                                 const std::string& timestamp,
+                                 const std::string& signature,
+                                 std::chrono::milliseconds deadline)
+    {
+        const bool warm = safety_connected_ && safety_ioc_ && safety_stream_
+            && beast::get_lowest_layer(*safety_stream_).socket().is_open();
+        if (!warm)
+        {
+            close_safety_connection_locked();
+            safety_ioc_.emplace();
+            safety_stream_.emplace(*safety_ioc_, ctx_);
+            if (!provider_ws::configure_tls_peer_identity(
+                    safety_stream_->native_handle(), host_))
+            {
+                close_safety_connection_locked();
+                return {};
+            }
+            if (SSL_SESSION* sess = acquire_cached_session())
+            {
+                SSL_set_session(safety_stream_->native_handle(), sess);
+                SSL_SESSION_free(sess);
+            }
+        }
+
+        auto& ioc = *safety_ioc_;
+        auto& stream = *safety_stream_;
+        std::optional<tcp::resolver> resolver;
+        if (!warm) resolver.emplace(ioc);
+        std::optional<net::steady_timer> timer;
+        timer.emplace(ioc);
+        beast::flat_buffer buffer;
+        http::request<http::string_body> req{method, target, 11};
+        http::response<http::string_body> res;
+        beast::error_code terminal_ec;
+        bool completed = false;
+        bool timed_out = false;
+        bool request_written = false;
+
+        req.set(http::field::host, host_);
+        req.set(http::field::user_agent, "TrueTest/1.0 safety");
+        req.set(http::field::content_type, "application/json");
+        req.set("locale", "en-US");
+        if (paptrading_) req.set("paptrading", "1");
+        req.set("ACCESS-KEY", api_key_);
+        req.set("ACCESS-SIGN", signature);
+        req.set("ACCESS-TIMESTAMP", timestamp);
+        req.set("ACCESS-PASSPHRASE", api_passphrase_);
+        if (!body.empty()) req.body() = body;
+        if (!body.empty() || method == http::verb::post) req.prepare_payload();
+
+        auto finish = [&](beast::error_code ec) {
+            if (completed) return;
+            completed = true;
+            terminal_ec = ec;
+            timer->cancel();
+        };
+        timer->expires_after(deadline);
+        timer->async_wait([&](beast::error_code ec) {
+            if (ec || completed) return;
+            timed_out = true;
+            if (resolver) resolver->cancel();
+            beast::error_code ignored;
+            beast::get_lowest_layer(stream).socket().close(ignored);
+            finish(net::error::timed_out);
+        });
+        auto start_request = [&] {
+            request_written = true;
+            http::async_write(
+                stream, req,
+                [&](beast::error_code ec, std::size_t bytes_transferred) {
+                    request_written = request_written
+                        || request_may_have_been_written(ec, bytes_transferred);
+                    if (ec || completed) { finish(ec); return; }
+                    http::async_read(
+                        stream, buffer, res,
+                        [&](beast::error_code read_ec, std::size_t) {
+                            finish(read_ec);
+                        });
+                });
+        };
+        if (warm)
+        {
+            start_request();
+        }
+        else
+        {
+            resolver->async_resolve(
+                host_, port_,
+                [&](beast::error_code ec,
+                    tcp::resolver::results_type results) {
+                    if (ec || completed) { finish(ec); return; }
+                    beast::get_lowest_layer(stream).async_connect(
+                        results,
+                        [&](beast::error_code connect_ec,
+                            const tcp::resolver::results_type::endpoint_type&) {
+                            if (connect_ec || completed)
+                            { finish(connect_ec); return; }
+                            stream.async_handshake(
+                                ssl::stream_base::client,
+                                [&](beast::error_code handshake_ec) {
+                                    if (handshake_ec || completed)
+                                    { finish(handshake_ec); return; }
+                                    start_request();
+                                });
+                        });
+                });
+        }
+        ioc.restart();
+        ioc.run_for(deadline + std::chrono::milliseconds(100));
+        if (!completed)
+        {
+            timed_out = true;
+            if (resolver) resolver->cancel();
+            beast::error_code ignored;
+            beast::get_lowest_layer(stream).socket().close(ignored);
+            terminal_ec = net::error::timed_out;
+            ioc.stop();
+        }
+
+        if (timed_out || terminal_ec)
+        {
+            std::cerr << "BitgetRestClient: safety request failed once: "
+                      << (timed_out ? "deadline elapsed"
+                                    : terminal_ec.message()) << "\n";
+            timer.reset();
+            resolver.reset();
+            close_safety_connection_locked();
+            response failed;
+            failed.request_written = request_written;
+            return failed;
+        }
+        safety_connected_ = res.keep_alive();
+        response out;
+        out.status = static_cast<int>(res.result_int());
+        out.body = res.body();
+        out.business_ok = bitget::is_business_success(out.status, out.body);
+        out.request_written = true;
+        if (!safety_connected_)
+        {
+            timer.reset();
+            resolver.reset();
+            close_safety_connection_locked();
+        }
+        return out;
+    }
+
     static int ex_data_index()
     {
         static const int idx = SSL_CTX_get_ex_new_index(
@@ -447,8 +740,11 @@ private:
         auto* self = static_cast<BitgetRestClient*>(
             SSL_CTX_get_ex_data(ctx, ex_data_index()));
         if (!self) return 0;
-        SSL_SESSION* old = self->cached_session_.exchange(
-            session, std::memory_order_acq_rel);
+        SSL_SESSION* old = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(self->session_mu_);
+            old = std::exchange(self->cached_session_, session);
+        }
         if (old) SSL_SESSION_free(old);
         return 1;
     }
@@ -461,15 +757,29 @@ private:
     std::string time_path_;
     bool paptrading_ = false;
     ssl::context ctx_;
-    std::atomic<SSL_SESSION*> cached_session_{nullptr};
+    SSL_SESSION* cached_session_ = nullptr;
+    std::mutex session_mu_;
+
+    SSL_SESSION* acquire_cached_session()
+    {
+        std::lock_guard<std::mutex> lk(session_mu_);
+        SSL_SESSION* sess = cached_session_;
+        if (sess) SSL_SESSION_up_ref(sess);
+        return sess;
+    }
     bitget::HmacSha256Base64Signer signer_;
-    std::mutex signer_mu_;
+    std::timed_mutex signer_mu_;
+    std::timed_mutex safety_io_mu_;
+    std::optional<net::io_context> safety_ioc_;
+    std::optional<beast::ssl_stream<beast::tcp_stream>> safety_stream_;
+    bool safety_connected_ = false;
     std::atomic<long long> per_call_timeout_ms_{0};
 
     std::atomic<long long> clock_offset_ms_{0};
     std::atomic<long long> last_sync_steady_ms_{0};
     long long sync_interval_ms_ = 5 * 60 * 1000;
     std::atomic<bool> sync_failed_logged_{false};
+    std::timed_mutex clock_sync_mu_;
 
     std::optional<net::io_context> persistent_ioc_;
     std::optional<beast::ssl_stream<tcp::socket>> persistent_stream_;
@@ -521,7 +831,7 @@ private:
 
         std::string sign;
         {
-            std::lock_guard<std::mutex> lk(signer_mu_);
+            std::lock_guard<std::timed_mutex> lk(signer_mu_);
             sign = signer_.sign(bitget::build_prehash(
                 ts_sv, verb_name(method), endpoint, sorted_query, body));
         }
@@ -599,6 +909,7 @@ private:
                     bool write_done = false;
                     bool io_done = false;
 
+                    request_sent = true;
                     http::async_write(stream, req,
                         [&](beast::error_code ec, std::size_t)
                         {
@@ -620,7 +931,7 @@ private:
                     else
                         ioc.run();
 
-                    request_sent = write_done;
+                    request_sent = request_sent || write_done;
 
                     if (!io_done || op_ec)
                     {
@@ -704,6 +1015,19 @@ private:
         persistent_ioc_.reset();
     }
 
+    // Caller holds safety_io_mu_, except during single-threaded destruction.
+    void close_safety_connection_locked()
+    {
+        safety_connected_ = false;
+        if (safety_stream_)
+        {
+            beast::error_code ec;
+            beast::get_lowest_layer(*safety_stream_).socket().close(ec);
+        }
+        safety_stream_.reset();
+        safety_ioc_.reset();
+    }
+
     void ensure_connected_locked()
     {
         if (connected_ && persistent_stream_ && persistent_ioc_)
@@ -721,11 +1045,67 @@ private:
         auto& stream = *persistent_stream_;
         auto& lowest = beast::get_lowest_layer(stream);
 
-        if (!SSL_set_tlsext_host_name(stream.native_handle(), host_.c_str()))
-            throw std::runtime_error("SNI setup failed");
+        if (!provider_ws::configure_tls_peer_identity(
+                stream.native_handle(), host_))
+            throw std::runtime_error("TLS peer identity setup failed");
 
-        if (SSL_SESSION* sess = cached_session_.load(std::memory_order_acquire))
+        if (SSL_SESSION* sess = acquire_cached_session())
+        {
             SSL_set_session(stream.native_handle(), sess);
+            SSL_SESSION_free(sess);
+        }
+
+        const auto timeout = per_call_timeout();
+        if (timeout > std::chrono::milliseconds::zero())
+        {
+            auto resolver = std::make_shared<tcp::resolver>(*persistent_ioc_);
+            auto results = std::make_shared<tcp::resolver::results_type>();
+            if (!provider_ws::run_bounded(
+                    *persistent_ioc_, timeout,
+                    [resolver, results, host = host_, port = port_](auto done) {
+                        resolver->async_resolve(
+                            host, port,
+                            [resolver, results, done](
+                                beast::error_code ec,
+                                tcp::resolver::results_type found) mutable {
+                                if (!ec) *results = std::move(found);
+                                done(ec);
+                            });
+                    },
+                    [resolver] { resolver->cancel(); }))
+                throw std::runtime_error("bounded DNS resolve failed");
+            if (!provider_ws::run_bounded(
+                    *persistent_ioc_, timeout,
+                    [&, results](auto done) {
+                        net::async_connect(
+                            lowest, *results,
+                            [results, done](beast::error_code ec,
+                                            const tcp::endpoint&) mutable {
+                                done(ec);
+                            });
+                    },
+                    [&] {
+                        beast::error_code ignored;
+                        lowest.cancel(ignored);
+                        lowest.close(ignored);
+                    }))
+                throw std::runtime_error("bounded TCP connect failed");
+            if (!provider_ws::run_bounded(
+                    *persistent_ioc_, timeout,
+                    [&](auto done) {
+                        stream.async_handshake(
+                            ssl::stream_base::client,
+                            [done](beast::error_code ec) mutable { done(ec); });
+                    },
+                    [&] {
+                        beast::error_code ignored;
+                        lowest.cancel(ignored);
+                        lowest.close(ignored);
+                    }))
+                throw std::runtime_error("bounded TLS handshake failed");
+            connected_ = true;
+            return;
+        }
 
         // Re-resolve on every reconnect (CDN / GSLB can shift IPs).
         tcp::resolver resolver(*persistent_ioc_);

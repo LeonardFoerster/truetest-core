@@ -5,8 +5,10 @@
 #include "providers/local/csv_parser.h"
 #include "providers/parser.h"
 #include "providers/provider_event.h"
+#include "providers/recovery_payload.h"
 
 #include <charconv>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <optional>
@@ -166,14 +168,15 @@ inline bool parse_double_sv(std::string_view sv, double& out)
 {
     if (sv.empty()) return false;
     auto [p, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), out);
-    return ec == std::errc();
+    return ec == std::errc() && p == sv.data() + sv.size()
+        && std::isfinite(out);
 }
 
 inline bool parse_int64_sv(std::string_view sv, int64_t& out)
 {
     if (sv.empty()) return false;
     auto [p, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), out);
-    return ec == std::errc();
+    return ec == std::errc() && p == sv.data() + sv.size();
 }
 
 // Span of a balanced {...} or [...] starting at open brace/bracket.
@@ -972,6 +975,52 @@ public:
         if (auto ev = bitget::parse_ws_message(line))
             out.push_back(std::move(*ev));
         return out;
+    }
+
+    empty_parse_status classify_empty_frame(std::string_view line) const override
+    {
+        if (!provider_recovery::is_authoritative_object(line))
+            return empty_parse_status::malformed;
+        std::string_view arg;
+        std::string_view topic;
+        const bool has_arg = provider_recovery::top_level_member(
+                                 line, "arg", arg)
+            && provider_recovery::is_authoritative_object(arg);
+        if (has_arg)
+            (void)provider_recovery::top_level_plain_string(
+                arg, "topic", topic);
+        if ((topic == "kline" || topic.empty()) && bitget::parse_kline(line))
+            return empty_parse_status::ignored;
+        std::string_view data;
+        const bool no_data = provider_recovery::payload_parser(line)
+            .inspect_top_level_member("data", data)
+            == provider_recovery::payload_parser::member_result::missing;
+        std::string_view event;
+        if (!provider_recovery::top_level_plain_string(
+                line, "event", event))
+            return empty_parse_status::malformed;
+        if (no_data && event == "subscribe" && has_arg && !topic.empty())
+        {
+            std::string_view code_raw;
+            const auto code_state = provider_recovery::payload_parser(line)
+                .inspect_top_level_member("code", code_raw);
+            if (code_state
+                == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+                return empty_parse_status::malformed;
+            if (code_state
+                == provider_recovery::payload_parser::member_result::unique)
+            {
+                std::string_view code;
+                if (!provider_recovery::top_level_scalar_text(
+                        line, "code", code)
+                    || (!code.empty() && code != "0" && code != "00000"))
+                    return empty_parse_status::malformed;
+            }
+            return empty_parse_status::ignored;
+        }
+        if (no_data && event == "pong")
+            return empty_parse_status::ignored;
+        return empty_parse_status::malformed;
     }
 
 private:

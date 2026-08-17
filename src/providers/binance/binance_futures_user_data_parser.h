@@ -2,8 +2,11 @@
 
 #include "../../execution/fill_parser.h"
 #include "binance_parser.h"
+#include "providers/recovery_payload.h"
 
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -19,6 +22,76 @@
 class BinanceFuturesUserDataParser : public IFillParser
 {
 public:
+    funding_parse_result parse_funding_update(
+        std::string_view raw, parsed_funding_update& out) noexcept override
+    {
+        constexpr std::string_view marker = "\"FUNDING_FEE\"";
+        const bool funding_like = raw.find(marker) != std::string_view::npos;
+        if (!provider_recovery::is_authoritative_object(raw))
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+
+        std::string_view event;
+        if (!provider_recovery::top_level_plain_string(raw, "e", event))
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+        if (event != "ACCOUNT_UPDATE")
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+
+        std::string_view account;
+        if (!provider_recovery::top_level_member(raw, "a", account)
+            || !provider_recovery::is_authoritative_object(account))
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+
+        std::string_view reason;
+        if (!provider_recovery::top_level_plain_string(account, "m", reason))
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+        if (reason != "FUNDING_FEE")
+            return funding_like ? funding_parse_result::invalid
+                                : funding_parse_result::not_funding;
+
+        std::string_view event_time;
+        std::int64_t event_time_ms = 0;
+        if (!provider_recovery::top_level_scalar_text(raw, "E", event_time)
+            || !parse_int64(event_time, event_time_ms)
+            || event_time_ms <= 0)
+            return funding_parse_result::invalid;
+
+        std::string_view balances;
+        if (!provider_recovery::top_level_member(account, "B", balances)
+            || !provider_recovery::is_authoritative_object_array(balances))
+            return funding_parse_result::invalid;
+
+        std::size_t usdt_rows = 0;
+        double delta = 0.0;
+        const bool valid_rows = provider_recovery::every_top_level_object(
+            balances, [&](std::string_view row) noexcept {
+                std::string_view asset;
+                std::string_view raw_delta;
+                if (!provider_recovery::top_level_plain_string(
+                        row, "a", asset)
+                    || !provider_recovery::top_level_scalar_text(
+                        row, "bc", raw_delta))
+                    return false;
+                double parsed = 0.0;
+                if (!parse_double(raw_delta, parsed)) return false;
+                if (asset == "USDT")
+                {
+                    ++usdt_rows;
+                    delta = parsed;
+                }
+                return true;
+            });
+        if (!valid_rows || usdt_rows != 1 || delta == 0.0)
+            return funding_parse_result::invalid;
+
+        out = parsed_funding_update{event_time_ms, delta};
+        return funding_parse_result::valid;
+    }
+
     bool parse_position_snapshot(std::string_view raw,
                                  parsed_position_snapshot& out) override
     {
@@ -121,6 +194,22 @@ public:
     }
 
 private:
+    static bool parse_int64(std::string_view text, std::int64_t& out) noexcept
+    {
+        const auto [end, ec] = std::from_chars(
+            text.data(), text.data() + text.size(), out);
+        return ec == std::errc{} && end == text.data() + text.size();
+    }
+
+    static bool parse_double(std::string_view text, double& out) noexcept
+    {
+        const auto [end, ec] = std::from_chars(
+            text.data(), text.data() + text.size(), out,
+            std::chars_format::general);
+        return ec == std::errc{} && end == text.data() + text.size()
+            && std::isfinite(out);
+    }
+
     static double to_double(std::string_view sv)
     {
         if (sv.empty()) return 0.0;

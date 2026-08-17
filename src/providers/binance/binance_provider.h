@@ -106,6 +106,15 @@ public:
     {
         state_ = lifecycle::opening;
 
+        if (mode_ == engine_mode::live &&
+            (api_key_.empty() || api_secret_.empty()))
+        {
+            std::cerr << "BinanceProvider: refusing live open — complete API "
+                         "credentials are required.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
+
         std::cerr << "  BinanceProvider: "
                   << (endpoints_.is_testnet ? "[TESTNET] " : "")
                   << "ws=" << endpoints_.ws_host << ":" << endpoints_.ws_port
@@ -176,6 +185,7 @@ public:
         {
             rest_ = std::make_shared<BinanceRestClient>(
                 api_key_, api_secret_, rest_host, endpoints_.rest_port);
+            rest_->set_per_call_timeout(std::chrono::seconds(3));
 
             // Prime offset cache so the first signed req doesn't resync.
             // verify_clock_skew below is the authoritative gate.
@@ -236,10 +246,13 @@ public:
                 endpoints_.is_testnet);
             kill_switch_ = std::make_shared<BinanceKillSwitch>(
                 rest_, upper(symbol_), assets.base, minter_);
-            bracket_adapter_ = make_binance_oco_bracket_adapter(rest_);
+            live_mutations_cancelled_->store(false, std::memory_order_release);
+            bracket_adapter_ = make_binance_oco_bracket_adapter(
+                rest_, live_mutations_cancelled_);
 
             ExecutionBridge::deps d;
-            d.order_tx = make_binance_rest_order_transport(rest_);
+            d.order_tx = make_binance_rest_order_transport(
+                rest_, live_mutations_cancelled_);
             binance_user_data_ = std::make_shared<BinanceUserDataTransport>(
                              rest_, endpoints_.ws_host, endpoints_.ws_port);
             d.fill_tx  = binance_user_data_;
@@ -288,8 +301,21 @@ public:
 
     void close() override
     {
+        quiesce_for_live_shutdown();
+        finish_live_shutdown(live_shutdown_disposition::preserve_dead_man_switch);
+    }
+
+    void quiesce_for_live_shutdown() override
+    {
+        live_mutations_cancelled_->store(true, std::memory_order_release);
+        if (transport_) transport_->request_stop();
+        if (bridge_)    bridge_->quiesce();
+    }
+
+    void finish_live_shutdown(live_shutdown_disposition) override
+    {
+        if (bridge_) bridge_->close();
         if (transport_) transport_->close();
-        if (bridge_)    bridge_->close();
         state_ = lifecycle::closed;
     }
 
@@ -325,7 +351,7 @@ public:
     void set_halt_callback(
         std::function<void(std::string_view reason)> cb) override
     {
-        halt_cb_ = std::move(cb);
+        halt_cb_.store(std::move(cb));
         apply_halt_cb_to_transports();
     }
 
@@ -379,23 +405,26 @@ private:
     std::shared_ptr<BinanceTransport>          binance_transport_;
     std::shared_ptr<BinanceCombinedTransport>  binance_combined_transport_;
     std::shared_ptr<BinanceUserDataTransport>  binance_user_data_;
-    std::function<void(std::string_view)>      halt_cb_;
+    ThreadSafeCallback<void(std::string_view)> halt_cb_;
 
     void apply_halt_cb_to_transports()
     {
-        if (!halt_cb_) return;
+        auto halt = halt_cb_.load();
+        if (!halt) return;
         if (binance_transport_)
-            binance_transport_->set_fatal_disconnect_callback(halt_cb_);
+            binance_transport_->set_fatal_disconnect_callback(*halt);
         if (binance_combined_transport_)
-            binance_combined_transport_->set_fatal_disconnect_callback(halt_cb_);
+            binance_combined_transport_->set_fatal_disconnect_callback(*halt);
         if (binance_user_data_)
-            binance_user_data_->set_fatal_disconnect_callback(halt_cb_);
+            binance_user_data_->set_fatal_disconnect_callback(*halt);
     }
 
     std::shared_ptr<BinanceExecutor> binance_exec_;
     std::shared_ptr<HybridExecutor> hybrid_exec_;
     std::shared_ptr<TradeTapeShadowAdapter> shadow_exec_;
     std::shared_ptr<ExecutionBridge> bridge_;
+    std::shared_ptr<std::atomic<bool>> live_mutations_cancelled_ =
+        std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<IExecutionAdapter> executor_;
 
     // Live-only; null in shadow/backtest so accessors return nullptr

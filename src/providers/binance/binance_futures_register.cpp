@@ -4,6 +4,7 @@
 #include "providers/binance/binance_futures_provider.h"
 #include "providers/binance/binance_endpoints.h"
 
+#include <cmath>
 #include <stdexcept>
 
 REGISTER_PROVIDER("binance-futures", [](const provider_config& cfg) {
@@ -70,35 +71,44 @@ REGISTER_PROVIDER("binance-futures", [](const provider_config& cfg) {
     if (strict == "1" || strict == "true")
         provider->set_margin_type_strict(true);
 
-    // Position-based risk caps. Each is independent; absent / malformed
-    // input leaves the cap at 0 (= disabled).
+    // Position-based risk caps. Supplied malformed values are configuration
+    // errors; silently disabling a requested live risk cap is fail-open.
     auto parse_double = [&](const char* key, void(BinanceFuturesProvider::*set)(double)) {
         auto raw = get(key);
         if (raw.empty()) return;
-        try { (provider.get()->*set)(std::stod(raw)); }
-        catch (...) {}
+        std::size_t used = 0;
+        double value = 0.0;
+        try { value = std::stod(raw, &used); }
+        catch (...) { throw std::runtime_error(std::string(key) + " must be a number"); }
+        if (used != raw.size() || !std::isfinite(value) || value < 0.0)
+            throw std::runtime_error(std::string(key) + " must be finite and non-negative");
+        if (std::string_view(key) == "min_liquidation_distance_pct" && value > 1.0)
+            throw std::runtime_error(std::string(key) + " must be in [0,1]");
+        (provider.get()->*set)(value);
     };
     parse_double("max_notional_usdt",            &BinanceFuturesProvider::set_max_notional_usdt);
     parse_double("max_leverage",                 &BinanceFuturesProvider::set_max_leverage);
     parse_double("min_liquidation_distance_pct", &BinanceFuturesProvider::set_min_liquidation_distance_pct);
     parse_double("maintenance_margin_pct",       &BinanceFuturesProvider::set_maintenance_margin_pct);
 
-    auto parse_int64 = [&](const char* key, void(BinanceFuturesProvider::*set)(int64_t)) {
+    auto parse_int64 = [&](const char* key) -> std::optional<int64_t> {
         auto raw = get(key);
-        if (raw.empty()) return;
-        try { (provider.get()->*set)(static_cast<int64_t>(std::stoll(raw))); }
-        catch (...) {}
+        if (raw.empty()) return std::nullopt;
+        std::size_t used = 0;
+        long long value = 0;
+        try { value = std::stoll(raw, &used); }
+        catch (...) { throw std::runtime_error(std::string(key) + " must be an integer"); }
+        if (used != raw.size() || value < 0)
+            throw std::runtime_error(std::string(key) + " must be non-negative");
+        return static_cast<int64_t>(value);
     };
-    parse_int64("dead_man_countdown_ms",  &BinanceFuturesProvider::set_dead_man_countdown_ms);
-    parse_int64("dead_man_heartbeat_ms",  &BinanceFuturesProvider::set_dead_man_heartbeat_ms);
-
-    auto parse_bool = [&](const char* key, void(BinanceFuturesProvider::*set)(bool)) {
-        auto raw = get(key);
-        if (raw.empty()) return;
-        bool v = (raw == "1" || raw == "true" || raw == "on" || raw == "yes");
-        (provider.get()->*set)(v);
-    };
-    parse_bool("dms_attempt_position_close", &BinanceFuturesProvider::set_dms_attempt_position_close);
+    auto countdown = parse_int64("dead_man_countdown_ms");
+    auto heartbeat = parse_int64("dead_man_heartbeat_ms");
+    if (heartbeat && *heartbeat > 0
+        && (!countdown || *countdown == 0 || *heartbeat >= *countdown))
+        throw std::runtime_error("dead_man_heartbeat_ms must be below a positive dead_man_countdown_ms");
+    if (countdown) provider->set_dead_man_countdown_ms(*countdown);
+    if (heartbeat) provider->set_dead_man_heartbeat_ms(*heartbeat);
 
     return provider;
 });
