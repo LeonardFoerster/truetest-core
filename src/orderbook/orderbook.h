@@ -14,7 +14,6 @@
 class ControlBlockPool;
 
 class order;
-class order_modify;
 
 enum class ob_order_type
 {
@@ -63,7 +62,6 @@ public:
     side get_side() const;
     Price get_price() const;
     ob_order_type get_order_type() const;
-    quantity get_initial_quantity() const;
     quantity get_remaining_quantity() const;
     quantity get_filled_quantity() const;
     bool is_filled() const;
@@ -76,24 +74,6 @@ private:
     Price price_;
     quantity initial_quantity_;
     quantity remaining_quantity;
-};
-
-class order_modify
-{
-public:
-    order_modify(order_id order_id, side side, Price price, quantity quantity);
-
-    order_id get_order_id() const;
-    Price get_price() const;
-    side get_side() const;
-    quantity get_quantity() const;
-    order_pointer to_order_pointer(ob_order_type type) const;
-
-private:
-    order_id orderId_;
-    Price price_;
-    side side_;
-    quantity quantity_;
 };
 
 struct trade_info
@@ -167,7 +147,6 @@ public:
 
     trades add_order(order_pointer order);
     void cancel_order(order_id order_id);
-    trades match_order(order_modify order);
     bool modify_order(order_id id, Price new_price, quantity new_qty);
     // Live book body for id after add/modify (nullptr if unknown). Used by
     // LocalBookAdapter to re-bind resting_ after amend (FR-local-modify).

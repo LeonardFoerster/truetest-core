@@ -2,8 +2,9 @@
 #ifdef HAS_DEBUG
 
 #include "debug_log.h"
-#include <cstdint>
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 
 namespace debug {
 
@@ -31,7 +32,9 @@ struct ring_diagnostics
 
     double avg_occupancy() const
     {
-        return samples > 0 ? static_cast<double>(occupancy_sum) / samples : 0.0;
+        return samples > 0
+            ? static_cast<double>(occupancy_sum) / static_cast<double>(samples)
+            : 0.0;
     }
 
     void log() const
@@ -42,7 +45,10 @@ struct ring_diagnostics
             return;
         }
 
-        double hwm_pct = capacity > 0 ? (high_water_mark * 100.0 / capacity) : 0.0;
+        const double hwm_pct = capacity > 0
+            ? static_cast<double>(high_water_mark) * 100.0 /
+                  static_cast<double>(capacity)
+            : 0.0;
 
         if (hwm_pct > 50.0 || drop_count > 0)
             DBG_WARN("  %-18s  cap=%-6lu  push=%-8lu  pop=%-8lu  drops=%-4lu  HWM=%-6lu (%.1f%%)  avg=%.1f",

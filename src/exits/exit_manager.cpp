@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 namespace truetest::exits {
@@ -463,6 +464,9 @@ void ExitManager::rehydrate(const IBracketAdapter::recovered_bracket& rb)
 {
     if (rb.opener_order_id == 0) return;
     if (rb.handles.empty())      return;
+    if (!(rb.qty > 0.0) || !std::isfinite(rb.qty))
+        throw std::runtime_error(
+            "ExitManager: recovered venue bracket has no authoritative quantity");
 
     exit_intent ei;
     ei.symbol           = rb.symbol;
@@ -507,19 +511,50 @@ void ExitManager::rehydrate(const IBracketAdapter::recovered_bracket& rb)
 void ExitManager::release_venue_bracket(std::uint64_t opener_order_id)
 {
     bracket_handles handles;
+    exchange_leg retained_leg{opener_order_id, ""};
     {
         std::lock_guard<std::mutex> lk(venue_mu_);
         auto it = handles_.find(opener_order_id);
         if (it == handles_.end()) return;
         handles = std::move(it->second);
         handles_.erase(it);
+        if (handles.sl_exchange_id)
+        {
+            const auto leg_it = exchange_to_leg_.find(*handles.sl_exchange_id);
+            if (leg_it != exchange_to_leg_.end()) retained_leg = leg_it->second;
+        }
+        else if (handles.tp_exchange_id)
+        {
+            const auto leg_it = exchange_to_leg_.find(*handles.tp_exchange_id);
+            if (leg_it != exchange_to_leg_.end()) retained_leg = leg_it->second;
+        }
         if (handles.sl_exchange_id) exchange_to_leg_.erase(*handles.sl_exchange_id);
         if (handles.tp_exchange_id) exchange_to_leg_.erase(*handles.tp_exchange_id);
     }
     // Adapter call OUTSIDE the mutex - adapters do REST I/O and we don't
     // want WS-thread lookups blocked behind a network round-trip.
     if (bracket_adapter_)
-        bracket_adapter_->cancel(opener_order_id, handles);
+    {
+        try
+        {
+            bracket_adapter_->cancel(opener_order_id, handles);
+        }
+        catch (...)
+        {
+            // Cancellation was not authoritative. Restore the handles so a
+            // later shutdown/restart can retry/reconcile rather than silently
+            // orphaning venue protection after a malformed success response.
+            std::lock_guard<std::mutex> lk(venue_mu_);
+            handles_.insert_or_assign(opener_order_id, handles);
+            if (handles.sl_exchange_id)
+                exchange_to_leg_.insert_or_assign(
+                    *handles.sl_exchange_id, retained_leg);
+            if (handles.tp_exchange_id)
+                exchange_to_leg_.insert_or_assign(
+                    *handles.tp_exchange_id, retained_leg);
+            throw;
+        }
+    }
 }
 
 void ExitManager::untrack_opener(std::uint64_t opener_order_id,

@@ -4,11 +4,30 @@
 #include <cstddef>
 #include <cstdint>
 
-// Phase 3: lock-free Treiber stack for pool free slots. Single consumer
-// (engine acquire path) pops; producers push after draining deferred returns.
+// Lock-free Treiber stack for pool free slots. Returners may push from many
+// threads; exactly one pop operation is serialized by PoolSingleConsumerGate.
 struct pool_free_node
 {
     pool_free_node* next = nullptr;
+};
+
+class PoolSingleConsumerGate
+{
+public:
+    void lock() noexcept
+    {
+        while (locked_.test_and_set(std::memory_order_acquire))
+            locked_.wait(true, std::memory_order_relaxed);
+    }
+
+    void unlock() noexcept
+    {
+        locked_.clear(std::memory_order_release);
+        locked_.notify_one();
+    }
+
+private:
+    std::atomic_flag locked_ = ATOMIC_FLAG_INIT;
 };
 
 class PoolFreeStack
@@ -38,7 +57,7 @@ public:
             pool_free_node* next = old->next;
             if (head_.compare_exchange_weak(old, next,
                                             std::memory_order_acquire,
-                                            std::memory_order_relaxed))
+                                            std::memory_order_acquire))
                 return old;
         }
     }

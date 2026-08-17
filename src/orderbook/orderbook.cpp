@@ -22,16 +22,9 @@ order_id order::get_order_id() const { return order_id_; }
 side order::get_side() const { return side_; }
 Price order::get_price() const { return price_; }
 ob_order_type order::get_order_type() const { return order_type_; }
-quantity order::get_initial_quantity() const { return initial_quantity_; }
 quantity order::get_remaining_quantity() const { return remaining_quantity; }
 quantity order::get_filled_quantity() const { return initial_quantity_ - remaining_quantity; }
 bool order::is_filled() const { return remaining_quantity == 0; }
-
-order_pointer order_modify::to_order_pointer(ob_order_type type) const
-{
-    // Cold path (modify/replay): heap fallback when no orderbook pool is wired.
-    return std::make_shared<order>(type, get_order_id(), get_side(), get_price(), get_quantity());
-}
 
 void orderbook::configure_order_pool(ControlBlockPool* cb_pool,
                                      std::size_t min_blocks,
@@ -60,14 +53,6 @@ order_pointer orderbook::create_order(ob_order_type type, order_id id, side s,
     ensure_order_pool_ready();
     return order_pool_.acquire(type, id, s, price, qty);
 }
-
-order_id order_modify::get_order_id() const { return orderId_; }
-Price order_modify::get_price() const { return price_; }
-side order_modify::get_side() const { return side_; }
-quantity order_modify::get_quantity() const { return quantity_; }
-
-order_modify::order_modify(order_id order_id, side side, Price price, quantity quantity)
-    : orderId_(order_id), price_(price), side_(side), quantity_(quantity) {}
 
 trade::trade(const trade_info& bid_trade, const trade_info& ask_trade)
     : bid_trade_(bid_trade), ask_trade_(ask_trade) {}
@@ -329,17 +314,6 @@ void orderbook::cancel_order(order_id oid)
     free_node(n);
 
     remove_level_if_empty(levels, price);
-}
-
-trades orderbook::match_order(order_modify order)
-{
-    if (order_map_.find(order.get_order_id()) == order_map_.end())
-        return {};
-
-    auto existing_node = order_map_[order.get_order_id()];
-    auto existing_type = existing_node->order->get_order_type();
-    cancel_order(order.get_order_id());
-    return add_order(order.to_order_pointer(existing_type));
 }
 
 bool orderbook::modify_order(order_id id, Price new_price, quantity new_qty)

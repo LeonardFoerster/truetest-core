@@ -1,205 +1,239 @@
 #pragma once
 
-#include "types/deferred_return_queue.h"
 #include "types/pool_exhausted.h"
 #include "types/pool_free_stack.h"
 
 #include <atomic>
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <new>
 #include <vector>
 
+template<typename T>
+class control_block_allocator;
+
 // Fixed-size slots for std::shared_ptr control blocks (Phase 2 hot-path).
 // libstdc++ counted_ptr + deleter typically fits in 48–64 bytes for our
-// event types; 64 bytes is the conservative slot size.
+// event types; rebinding guards below fall back to std::allocator for any
+// implementation-specific control block that does not fit this contract.
 class ControlBlockPool
 {
     struct node : pool_free_node
     {};
 
     static constexpr std::size_t SlotSize = 64;
+    static constexpr std::size_t SlotAlignment = 64;
     static constexpr std::size_t BlockSize = 4096;
     static_assert(SlotSize >= sizeof(node));
 
-    struct alignas(64) block
+    struct alignas(SlotAlignment) block
     {
-        alignas(64) unsigned char storage[SlotSize * BlockSize];
+        alignas(SlotAlignment) unsigned char storage[SlotSize * BlockSize];
     };
 
-    mutable std::mutex grow_mutex_;
-    std::vector<std::unique_ptr<block>> blocks_;
-
-    PoolFreeStack free_stack_;
-    DeferredReturnQueue<> deferred_returns_;
-
-    std::atomic<std::size_t> block_count_atomic_{0};
-    std::atomic<std::size_t> in_use_atomic_{0};
-    std::atomic<std::size_t> grow_count_atomic_{0};
-    std::atomic<std::size_t> deferred_overflow_atomic_{0};
-
-    bool forbid_runtime_grow_ = false;
-    const char* pool_name_ = "control_block_pool";
-
-    void push_nodes_to_stack(node* head)
+    // The facade is intentionally separate from the backing state. Rebound
+    // allocators stored in shared_ptr control blocks retain State, so the
+    // control-block bytes outlive an engine/facade that has already been
+    // destroyed.
+    struct State
     {
-        while (head)
+        mutable std::mutex grow_mutex;
+        std::vector<std::unique_ptr<block>> blocks;
+
+        PoolFreeStack free_stack;
+        PoolSingleConsumerGate pop_gate;
+
+        std::atomic<std::size_t> block_count_atomic{0};
+        std::atomic<std::size_t> in_use_atomic{0};
+        std::atomic<std::size_t> grow_count_atomic{0};
+        std::atomic<std::size_t> fallback_allocations_atomic{0};
+
+        bool forbid_runtime_grow = false;
+        const char* pool_name = "control_block_pool";
+
+        State() { grow(false); }
+
+        void push_nodes_to_stack(node* head) noexcept
         {
-            node* next = static_cast<node*>(head->next);
-            free_stack_.push(head);
-            head = next;
-        }
-    }
-
-    void grow(bool count_runtime_grow)
-    {
-        if (count_runtime_grow)
-            grow_count_atomic_.fetch_add(1, std::memory_order_relaxed);
-
-        auto blk = std::make_unique<block>();
-        unsigned char* base = blk->storage;
-
-        node* batch_head = nullptr;
-        for (std::size_t i = 0; i < BlockSize; ++i)
-        {
-            auto* n = reinterpret_cast<node*>(base + i * SlotSize);
-            n->next = batch_head;
-            batch_head = n;
+            while (head)
+            {
+                node* next = static_cast<node*>(head->next);
+                free_stack.push(head);
+                head = next;
+            }
         }
 
-        blocks_.push_back(std::move(blk));
-        block_count_atomic_.store(blocks_.size(), std::memory_order_release);
-        push_nodes_to_stack(batch_head);
-    }
-
-    void defer_release(void* ptr) noexcept
-    {
-        if (!deferred_returns_.try_push(ptr))
+        void grow(bool count_runtime_grow)
         {
-            deferred_overflow_atomic_.fetch_add(1, std::memory_order_relaxed);
-            free_stack_.push(static_cast<node*>(ptr));
-        }
-    }
+            auto blk = std::make_unique<block>();
+            unsigned char* base = blk->storage;
 
-    void* pop()
-    {
-        drain_deferred_returns();
+            node* batch_head = nullptr;
+            for (std::size_t i = 0; i < BlockSize; ++i)
+            {
+                auto* n = std::construct_at(
+                    reinterpret_cast<node*>(base + i * SlotSize));
+                n->next = batch_head;
+                batch_head = n;
+            }
 
-        if (auto* n = static_cast<node*>(free_stack_.pop()))
-            return static_cast<void*>(n);
-
-        std::lock_guard<std::mutex> lock(grow_mutex_);
-        if (free_stack_.empty())
-        {
-            if (forbid_runtime_grow_)
-                throw pool_exhausted(pool_name_);
-            grow(true);
+            blocks.push_back(std::move(blk));
+            block_count_atomic.store(blocks.size(), std::memory_order_release);
+            push_nodes_to_stack(batch_head);
+            if (count_runtime_grow)
+                grow_count_atomic.fetch_add(1, std::memory_order_relaxed);
         }
 
-        if (auto* n = static_cast<node*>(free_stack_.pop()))
-            return static_cast<void*>(n);
+        void* pop()
+        {
+            std::lock_guard<PoolSingleConsumerGate> consumer_lock(pop_gate);
 
-        throw pool_exhausted(pool_name_);
-    }
+            if (auto* n = static_cast<node*>(free_stack.pop()))
+                return static_cast<void*>(n);
 
-    void push(void* ptr) noexcept
-    {
-        defer_release(ptr);
-    }
+            std::lock_guard<std::mutex> lock(grow_mutex);
+            if (free_stack.empty())
+            {
+                if (forbid_runtime_grow)
+                    throw pool_exhausted(pool_name);
+                grow(true);
+            }
+
+            if (auto* n = static_cast<node*>(free_stack.pop()))
+                return static_cast<void*>(n);
+
+            throw pool_exhausted(pool_name);
+        }
+
+        void acquire_slot(void*& slot)
+        {
+            slot = pop();
+            in_use_atomic.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        void release_slot(void* ptr) noexcept
+        {
+            if (!ptr)
+                return;
+            // The shared_ptr control block (or direct raw-slot user) ended the
+            // prior object lifetime before returning this storage.
+            free_stack.push(std::construct_at(static_cast<node*>(ptr)));
+            in_use_atomic.fetch_sub(1, std::memory_order_relaxed);
+        }
+
+#ifdef HAS_DEBUG
+        std::size_t debug_footprint_bytes() const
+        {
+            std::lock_guard<std::mutex> lock(grow_mutex);
+            return blocks.size() * BlockSize * SlotSize;
+        }
+#endif
+    };
+
+    std::shared_ptr<State> state_ = std::make_shared<State>();
+
+    template<typename T>
+    friend class control_block_allocator;
 
 public:
-    void drain_deferred_returns() noexcept
-    {
-        void* ptr = nullptr;
-        while (deferred_returns_.try_pop(ptr))
-            free_stack_.push(static_cast<node*>(ptr));
-    }
-
-    std::size_t deferred_pending() const noexcept
-    {
-        return deferred_returns_.pending();
-    }
-
-    std::size_t deferred_overflow() const noexcept
-    {
-        return deferred_overflow_atomic_.load(std::memory_order_relaxed);
-    }
-
-    ControlBlockPool() { grow(false); }
+    ControlBlockPool() = default;
 
     ControlBlockPool(const ControlBlockPool&) = delete;
     ControlBlockPool& operator=(const ControlBlockPool&) = delete;
 
-    static constexpr std::size_t slot_size() { return SlotSize; }
-    static constexpr std::size_t slots_per_block() { return BlockSize; }
+    static constexpr std::size_t slot_size() noexcept { return SlotSize; }
+    static constexpr std::size_t slot_alignment() noexcept { return SlotAlignment; }
+    static constexpr std::size_t slots_per_block() noexcept { return BlockSize; }
+
+    void drain_deferred_returns() noexcept
+    {
+        // Returns are pushed directly into the MPSC free stack. Kept as an
+        // API-compatible no-op for existing engine cleanup call sites.
+    }
+
+    std::size_t deferred_pending() const noexcept
+    {
+        return 0;
+    }
+
+    std::size_t deferred_overflow() const noexcept
+    {
+        return 0;
+    }
+
+    std::size_t fallback_allocations() const noexcept
+    {
+        return state_->fallback_allocations_atomic.load(
+            std::memory_order_relaxed);
+    }
 
     void* acquire_slot()
     {
-        void* slot = pop();
-        in_use_atomic_.fetch_add(1, std::memory_order_relaxed);
+        void* slot = nullptr;
+        state_->acquire_slot(slot);
         return slot;
     }
 
     void release_slot(void* ptr) noexcept
     {
-        if (!ptr) return;
-        push(ptr);
-        in_use_atomic_.fetch_sub(1, std::memory_order_relaxed);
+        state_->release_slot(ptr);
     }
 
-    std::size_t in_use() const
+    std::size_t in_use() const noexcept
     {
-        return in_use_atomic_.load(std::memory_order_relaxed);
+        return state_->in_use_atomic.load(std::memory_order_relaxed);
     }
 
-    std::size_t grow_count() const
+    std::size_t grow_count() const noexcept
     {
-        return grow_count_atomic_.load(std::memory_order_relaxed);
+        return state_->grow_count_atomic.load(std::memory_order_relaxed);
     }
 
-    std::size_t block_count() const
+    std::size_t block_count() const noexcept
     {
-        return block_count_atomic_.load(std::memory_order_acquire);
+        return state_->block_count_atomic.load(std::memory_order_acquire);
     }
 
-    std::size_t capacity_slots() const
+    std::size_t capacity_slots() const noexcept
     {
         return block_count() * BlockSize;
     }
 
     void set_pool_name(const char* name) noexcept
     {
-        pool_name_ = (name && name[0]) ? name : "control_block_pool";
+        state_->pool_name = (name && name[0]) ? name : "control_block_pool";
     }
 
     void set_forbid_runtime_grow(bool forbid) noexcept
     {
-        forbid_runtime_grow_ = forbid;
+        state_->forbid_runtime_grow = forbid;
     }
 
     void ensure_min_blocks(std::size_t min_blocks)
     {
-        std::lock_guard<std::mutex> lock(grow_mutex_);
-        while (blocks_.size() < min_blocks)
-            grow(false);
+        std::lock_guard<std::mutex> lock(state_->grow_mutex);
+        while (state_->blocks.size() < min_blocks)
+            state_->grow(false);
     }
 
 #ifdef HAS_DEBUG
     std::size_t debug_footprint_bytes() const
     {
-        std::lock_guard<std::mutex> lock(grow_mutex_);
-        return blocks_.size() * BlockSize * SlotSize;
+        return state_->debug_footprint_bytes();
     }
 #endif
 };
 
 // STL allocator facade; std::shared_ptr(ptr, deleter, alloc) uses this for
-// the control block only (C++20).
+// the control block only. It owns the backing State, never a facade pointer.
 template<typename T>
 class control_block_allocator
 {
+    static constexpr bool FitsPoolSlot =
+        sizeof(T) <= ControlBlockPool::slot_size() &&
+        alignof(T) <= ControlBlockPool::slot_alignment();
+
 public:
     using value_type = T;
 
@@ -209,44 +243,71 @@ public:
         using other = control_block_allocator<U>;
     };
 
-    control_block_allocator() noexcept : pool_(nullptr) {}
+    control_block_allocator() noexcept = default;
 
     explicit control_block_allocator(ControlBlockPool* pool) noexcept
-        : pool_(pool)
+        : state_(pool ? pool->state_ : nullptr)
     {}
 
     template<typename U>
     explicit control_block_allocator(const control_block_allocator<U>& other) noexcept
-        : pool_(other.pool())
+        : state_(other.state_)
     {}
 
     T* allocate(std::size_t n)
     {
-        if (!pool_ || n != 1)
-            throw std::bad_alloc();
-        return static_cast<T*>(pool_->acquire_slot());
+        if constexpr (FitsPoolSlot)
+        {
+            if (state_ && n == 1)
+            {
+                void* slot = nullptr;
+                state_->acquire_slot(slot);
+                return static_cast<T*>(slot);
+            }
+        }
+
+        if (state_ && state_->forbid_runtime_grow)
+            throw pool_exhausted("control_block_pool_fallback");
+
+        T* result = std::allocator<T>{}.allocate(n);
+        if (state_)
+            state_->fallback_allocations_atomic.fetch_add(
+                1, std::memory_order_relaxed);
+        return result;
     }
 
     void deallocate(T* p, std::size_t n) noexcept
     {
-        if (pool_ && p && n == 1)
-            pool_->release_slot(p);
+        if (!p)
+            return;
+
+        if constexpr (FitsPoolSlot)
+        {
+            if (state_ && n == 1)
+            {
+                state_->release_slot(p);
+                return;
+            }
+        }
+
+        std::allocator<T>{}.deallocate(p, n);
     }
 
-    ControlBlockPool* pool() const noexcept { return pool_; }
+    bool has_pool() const noexcept { return static_cast<bool>(state_); }
+    const void* state_identity() const noexcept { return state_.get(); }
 
     template<typename U>
     friend class control_block_allocator;
 
 private:
-    ControlBlockPool* pool_;
+    std::shared_ptr<typename ControlBlockPool::State> state_;
 };
 
 template<typename T, typename U>
 bool operator==(const control_block_allocator<T>& a,
                 const control_block_allocator<U>& b) noexcept
 {
-    return a.pool() == b.pool();
+    return a.state_identity() == b.state_identity();
 }
 
 template<typename T, typename U>

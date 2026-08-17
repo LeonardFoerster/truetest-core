@@ -194,8 +194,10 @@ void hardware_info::log() const
         DBG_HW("  %-16s: %s", labels.c_str(), cache_str.c_str());
     }
 
-    double total_gib = total_ram_bytes / (1024.0 * 1024.0 * 1024.0);
-    double avail_gib = available_ram_bytes / (1024.0 * 1024.0 * 1024.0);
+    const double total_gib =
+        static_cast<double>(total_ram_bytes) / (1024.0 * 1024.0 * 1024.0);
+    const double avail_gib =
+        static_cast<double>(available_ram_bytes) / (1024.0 * 1024.0 * 1024.0);
     DBG_HW("  System RAM      : %.1f GiB (%.1f GiB available)", total_gib, avail_gib);
 
     DBG_HW("  Page size       : %lu", page_size);

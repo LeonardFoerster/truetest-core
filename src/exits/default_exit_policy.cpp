@@ -1,6 +1,7 @@
 #include "exits/default_exit_policy.h"
 
 #include <cmath>
+#include <utility>
 
 namespace truetest::exits {
 namespace {
@@ -122,19 +123,27 @@ std::vector<exit_intent> apply_default_exit_policy(
 
     if (p.mode == exit_policy_mode::union_mode)
     {
-        if (platform && platform->stop_loss && !intents_have_stop_loss(strategy_intents))
+        if (!platform)
+            return strategy_intents;
+        if (strategy_intents.empty())
+            return {*platform};
+
+        bool have_sl = false;
+        bool have_tp = false;
+        bool have_trail = false;
+        for (const auto& intent : strategy_intents)
         {
-            // Append SL-only floor intent; keep strategy TP/trail legs.
-            exit_intent sl_only = *platform;
-            sl_only.take_profit.reset();
-            sl_only.trailing_pct = platform->trailing_pct; // optional trail on floor leg
-            if (!intents_have_stop_loss(strategy_intents))
-                strategy_intents.push_back(std::move(sl_only));
+            have_sl = have_sl || intent.stop_loss.has_value();
+            have_tp = have_tp || intent.take_profit.has_value();
+            have_trail = have_trail || intent.trailing_pct.has_value();
         }
-        else if (strategy_intents.empty() && platform)
-        {
-            strategy_intents.push_back(*platform);
-        }
+
+        exit_intent missing = std::move(*platform);
+        if (have_sl) missing.stop_loss.reset();
+        if (have_tp) missing.take_profit.reset();
+        if (have_trail) missing.trailing_pct.reset();
+        if (missing.stop_loss || missing.take_profit || missing.trailing_pct)
+            strategy_intents.push_back(std::move(missing));
         return strategy_intents;
     }
 

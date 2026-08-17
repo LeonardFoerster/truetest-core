@@ -59,6 +59,113 @@ void apply_execution_cost_params(IStrategy& strategy, const McRunConfig& cfg) {
 
 } // anonymous namespace
 
+void summarize_monte_carlo_trials(McAggregate& aggregate) {
+    aggregate.n_trials = aggregate.trials.size();
+    aggregate.mean_pnl = 0.0;
+    aggregate.median_pnl = 0.0;
+    aggregate.p5_pnl = 0.0;
+    aggregate.p95_pnl = 0.0;
+    aggregate.mean_sharpe = 0.0;
+    aggregate.median_sharpe = 0.0;
+    aggregate.mean_max_dd = 0.0;
+    aggregate.worst_max_dd = 0.0;
+    aggregate.profit_factor_pooled = 0.0;
+    aggregate.profit_factor_mean = 0.0;
+    aggregate.median_profit_factor = 0.0;
+    aggregate.profit_factor_mean_valid = 0.0;
+    aggregate.median_profit_factor_valid = 0.0;
+    aggregate.profit_factor_pooled_unbounded = false;
+    aggregate.win_rate_mean = 0.0;
+    aggregate.median_win_rate = 0.0;
+    aggregate.trials_with_positive_pnl = 0;
+    aggregate.trials_with_profit_factor_gt_1 = 0;
+    aggregate.valid_profit_factor_trials = 0;
+    aggregate.unbounded_profit_factor_trials = 0;
+
+    if (aggregate.trials.empty()) return;
+
+    std::vector<double> pnls;
+    std::vector<double> sharpes;
+    std::vector<double> maxdds;
+    std::vector<double> win_rates;
+    std::vector<double> profit_factors;
+    std::vector<double> valid_profit_factors;
+    pnls.reserve(aggregate.trials.size());
+    sharpes.reserve(aggregate.trials.size());
+    maxdds.reserve(aggregate.trials.size());
+    win_rates.reserve(aggregate.trials.size());
+    profit_factors.reserve(aggregate.trials.size());
+    valid_profit_factors.reserve(aggregate.trials.size());
+
+    double pooled_win = 0.0;
+    double pooled_loss = 0.0;
+    for (const auto& trial : aggregate.trials) {
+        pnls.push_back(trial.total_pnl);
+        sharpes.push_back(trial.sharpe_ratio);
+        maxdds.push_back(trial.max_drawdown);
+        win_rates.push_back(trial.win_rate);
+        profit_factors.push_back(trial.profit_factor);
+        pooled_win += trial.total_win;
+        pooled_loss += trial.total_loss;
+
+        if (trial.total_loss > 0.0) {
+            valid_profit_factors.push_back(trial.total_win / trial.total_loss);
+            ++aggregate.valid_profit_factor_trials;
+        } else if (trial.total_win > 0.0) {
+            ++aggregate.unbounded_profit_factor_trials;
+        }
+        if (trial.total_pnl > 0.0) ++aggregate.trials_with_positive_pnl;
+        if (trial.profit_factor > 1.0)
+            ++aggregate.trials_with_profit_factor_gt_1;
+    }
+
+    std::sort(pnls.begin(), pnls.end());
+    std::sort(sharpes.begin(), sharpes.end());
+    std::sort(maxdds.begin(), maxdds.end());
+    std::sort(win_rates.begin(), win_rates.end());
+    std::sort(profit_factors.begin(), profit_factors.end());
+    std::sort(valid_profit_factors.begin(), valid_profit_factors.end());
+
+    const auto mean = [](const std::vector<double>& values) {
+        if (values.empty()) return 0.0;
+        double sum = 0.0;
+        for (const double value : values) sum += value;
+        return sum / static_cast<double>(values.size());
+    };
+
+    const auto percentile_index = [](std::size_t size,
+                                     std::size_t percentile) {
+        return (size / 100U) * percentile +
+               ((size % 100U) * percentile) / 100U;
+    };
+
+    aggregate.mean_pnl = mean(pnls);
+    aggregate.median_pnl = pnls[pnls.size() / 2];
+    aggregate.p5_pnl = pnls[percentile_index(pnls.size(), 5U)];
+    aggregate.p95_pnl = pnls[percentile_index(pnls.size(), 95U)];
+
+    aggregate.mean_sharpe = mean(sharpes);
+    aggregate.median_sharpe = sharpes[sharpes.size() / 2];
+    aggregate.mean_max_dd = mean(maxdds);
+    aggregate.worst_max_dd = *std::max_element(maxdds.begin(), maxdds.end());
+    aggregate.win_rate_mean = mean(win_rates);
+    aggregate.median_win_rate = win_rates[win_rates.size() / 2];
+
+    if (pooled_loss > 0.0) {
+        aggregate.profit_factor_pooled = pooled_win / pooled_loss;
+    } else if (pooled_win > 0.0) {
+        aggregate.profit_factor_pooled = 1e9;
+        aggregate.profit_factor_pooled_unbounded = true;
+    }
+    aggregate.profit_factor_mean = mean(profit_factors);
+    aggregate.median_profit_factor = profit_factors[profit_factors.size() / 2];
+    aggregate.profit_factor_mean_valid = mean(valid_profit_factors);
+    if (!valid_profit_factors.empty()) {
+        aggregate.median_profit_factor_valid =
+            valid_profit_factors[valid_profit_factors.size() / 2];
+    }
+}
+
 MonteCarloController::MonteCarloController(const McRunConfig& run_config)
     : config_(run_config)
 {
@@ -242,6 +349,8 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
     result.winning_trades  = report.winning_trades;
     result.win_rate        = report.win_rate;
     result.profit_factor   = report.profit_factor;
+    result.total_win       = analytics.gross_profit();
+    result.total_loss      = analytics.gross_loss();
 
     return result;
 }
@@ -319,70 +428,17 @@ McAggregate MonteCarloController::run() {
     }
 
     auto end = std::chrono::steady_clock::now();
-    aggregate.wall_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    aggregate.wall_time_ms = static_cast<double>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
 
     if (config_.reuse_objects_between_trials) {
         std::cout << "  [MC Reuse] Wall time with object reuse: " 
                   << aggregate.wall_time_ms << " ms\n";
     }
 
-    // Compute aggregate statistics (always serial, after collection)
-    if (!aggregate.trials.empty()) {
-        // Recompute positive count safely
-        aggregate.trials_with_positive_pnl = 0;
-        aggregate.trials_with_profit_factor_gt_1 = 0;
-
-        std::vector<double> pnls;
-        std::vector<double> sharpes;
-        std::vector<double> maxdds;
-        std::vector<double> win_rates;
-        std::vector<double> profit_factors;
-        pnls.reserve(aggregate.trials.size());
-        sharpes.reserve(aggregate.trials.size());
-        maxdds.reserve(aggregate.trials.size());
-        win_rates.reserve(aggregate.trials.size());
-        profit_factors.reserve(aggregate.trials.size());
-
-        for (const auto& t : aggregate.trials) {
-            pnls.push_back(t.total_pnl);
-            sharpes.push_back(t.sharpe_ratio);
-            maxdds.push_back(t.max_drawdown);
-            win_rates.push_back(t.win_rate);
-            profit_factors.push_back(t.profit_factor);
-
-            if (t.total_pnl > 0.0) ++aggregate.trials_with_positive_pnl;
-            if (t.profit_factor > 1.0) ++aggregate.trials_with_profit_factor_gt_1;
-        }
-
-        // Simple mean / median (Phase 2 — can upgrade to proper quantile later)
-        std::sort(pnls.begin(), pnls.end());
-        std::sort(sharpes.begin(), sharpes.end());
-        std::sort(maxdds.begin(), maxdds.end());
-        std::sort(win_rates.begin(), win_rates.end());
-        std::sort(profit_factors.begin(), profit_factors.end());
-
-        auto mean = [](const std::vector<double>& v) {
-            if (v.empty()) return 0.0;
-            double s = 0.0; for (double x : v) s += x; return s / v.size();
-        };
-
-        aggregate.mean_pnl     = mean(pnls);
-        aggregate.median_pnl   = pnls[pnls.size() / 2];
-        aggregate.p5_pnl       = pnls[static_cast<size_t>(pnls.size() * 0.05)];
-        aggregate.p95_pnl      = pnls[static_cast<size_t>(pnls.size() * 0.95)];
-
-        aggregate.mean_sharpe  = mean(sharpes);
-        aggregate.median_sharpe = sharpes[sharpes.size() / 2];
-
-        aggregate.mean_max_dd  = mean(maxdds);
-        aggregate.worst_max_dd = *std::max_element(maxdds.begin(), maxdds.end());
-
-        aggregate.win_rate_mean   = mean(win_rates);
-        aggregate.median_win_rate = win_rates[win_rates.size() / 2];
-
-        aggregate.profit_factor_mean   = mean(profit_factors);
-        aggregate.median_profit_factor = profit_factors[profit_factors.size() / 2];
-    }
+    // Compute aggregate statistics serially after the parallel path has been
+    // restored to canonical trial_id order.
+    summarize_monte_carlo_trials(aggregate);
 
     return aggregate;
 }

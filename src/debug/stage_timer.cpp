@@ -4,27 +4,6 @@
 
 namespace debug {
 
-namespace {
-
-const char* stage_name(stage s)
-{
-    switch (s)
-    {
-    case stage::market_create:   return "market_create";
-    case stage::strategy:        return "strategy";
-    case stage::orderbook:       return "orderbook";
-    case stage::fill_processing: return "fill_processing";
-    case stage::ring_publish:    return "ring_publish";
-    case stage::risk_check:      return "risk_check";
-    case stage::mm_replenish:    return "mm_replenish";
-    case stage::stop_check:      return "stop_check";
-    case stage::pending_drain:   return "pending_drain";
-    default:                     return "unknown";
-    }
-}
-
-}
-
 void StageTimer::record(stage s, std::chrono::high_resolution_clock::time_point start)
 {
     auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -58,7 +37,7 @@ void StageTimer::log() const
         const auto& st = stats_[i];
         if (st.call_count == 0) continue;
 
-        double total_ms = st.total_ns / 1e6;
+        const double total_ms = static_cast<double>(st.total_ns) / 1e6;
         uint64_t avg_ns = st.total_ns / st.call_count;
         uint64_t min_display = (st.min_ns == UINT64_MAX) ? 0 : st.min_ns;
 

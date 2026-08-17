@@ -1,12 +1,16 @@
 #pragma once
+
+#include <cstddef>
 #include <iostream>
 #include <chrono>
 #include <string>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 #include <array>
 #include <cstdint>
 #include <algorithm>
+#include <string_view>
 
 #ifdef HAS_DEBUG
 #include "debug/copy_tracker.h"
@@ -213,6 +217,12 @@ public:
         uint64_t get_order_id() const { return order_id_; }
         void set_order_id(uint64_t id) { order_id_ = id; }
 
+        // Engine-stamped before the candidate enters the active lifecycle.
+        // Worker-side risk rechecks use this immutable decision snapshot,
+        // rather than racing the current global lifecycle count.
+        std::size_t get_pretrade_open_order_count() const { return pretrade_open_order_count_; }
+        void set_pretrade_open_order_count(std::size_t count) { pretrade_open_order_count_ = count; }
+
         const std::string& get_symbol() const { return symbol_; }
         order_type get_order_type() const { return order_type_; }
         order_side get_side() const { return side_; }
@@ -252,6 +262,7 @@ public:
 
 private:
         uint64_t order_id_ = 0;
+        std::size_t pretrade_open_order_count_ = 0;
         std::string symbol_;
         order_type order_type_;
         order_side side_;
@@ -615,40 +626,63 @@ private:
         std::string reason_;
 };
 
-// Funding settlement from the exchange (e.g. ACCOUNT_UPDATE with reason FUNDING_FEE).
-// This is a non-hot-path event. It updates cash/equity but does not close lots
-// (unlike fill_event). See Phase 2 of prod.md.
+// Funding settlement from the exchange (e.g. ACCOUNT_UPDATE with reason
+// FUNDING_FEE). Construction is allocation-free because provider ingress is
+// drained at the event-loop boundary. It updates cash/equity but does not
+// close lots (unlike fill_event). See Phase 2 of prod.md.
 class funding_event : public event
 {
 public:
+    static constexpr std::size_t text_capacity = 31;
+
     funding_event(std::chrono::system_clock::time_point ts,
-                  const std::string& symbol,
+                  std::string_view symbol,
                   double qty_change,          // signed asset quantity (usually 0 for USDT-M)
                   double cash_delta,          // the actual USDT funding credit/debit
-                  const std::string& reason = "FUNDING_FEE")
+                  std::string_view reason = "FUNDING_FEE")
         : event(event_type::funding, ts)
-        , symbol_(symbol)
         , qty_change_(qty_change)
         , cash_delta_(cash_delta)
-        , reason_(reason)
-    {}
+    {
+        symbol_size_ = assign_text(symbol_, symbol);
+        reason_size_ = assign_text(reason_, reason);
+    }
 
-    const std::string& get_symbol() const { return symbol_; }
+    std::string_view get_symbol() const
+    {
+        return {symbol_.data(), symbol_size_};
+    }
     double get_qty_change() const { return qty_change_; }
     double get_cash_delta() const { return cash_delta_; }
-    const std::string& get_reason() const { return reason_; }
+    std::string_view get_reason() const
+    {
+        return {reason_.data(), reason_size_};
+    }
 
     std::string to_string() const override
     {
-        return "FundingEvent[" + symbol_ +
+        return "FundingEvent[" + std::string(get_symbol()) +
                " qty=" + std::to_string(qty_change_) +
                " cash=" + std::to_string(cash_delta_) +
-               " reason=" + reason_ + "]";
+               " reason=" + std::string(get_reason()) + "]";
     }
 
 private:
-    std::string symbol_;
+    template<std::size_t N>
+    static std::uint8_t assign_text(std::array<char, N>& target,
+                                    std::string_view value)
+    {
+        if (value.empty() || value.size() >= N)
+            throw std::length_error("funding event text is empty or too long");
+        std::copy(value.begin(), value.end(), target.begin());
+        target[value.size()] = '\0';
+        return static_cast<std::uint8_t>(value.size());
+    }
+
+    std::array<char, text_capacity + 1> symbol_{};
+    std::array<char, text_capacity + 1> reason_{};
+    std::uint8_t symbol_size_ = 0;
+    std::uint8_t reason_size_ = 0;
     double qty_change_;
     double cash_delta_;
-    std::string reason_;
 };

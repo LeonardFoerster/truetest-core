@@ -58,7 +58,7 @@ void MemorySampler::log() const
 
     auto fmt_bytes = [](uint64_t bytes) -> std::string
     {
-        double mib = bytes / (1024.0 * 1024.0);
+        const double mib = static_cast<double>(bytes) / (1024.0 * 1024.0);
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%.1f MiB", mib);
         return buf;
@@ -66,7 +66,7 @@ void MemorySampler::log() const
 
     auto fmt_delta = [](int64_t delta) -> std::string
     {
-        double mib = delta / (1024.0 * 1024.0);
+        const double mib = static_cast<double>(delta) / (1024.0 * 1024.0);
         char buf[32];
         std::snprintf(buf, sizeof(buf), "%+.1f MiB", mib);
         return buf;

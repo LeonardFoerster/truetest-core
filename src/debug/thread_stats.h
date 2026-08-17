@@ -2,7 +2,6 @@
 #ifdef HAS_DEBUG
 
 #include "debug_log.h"
-#include <chrono>
 #include <cstdint>
 
 namespace debug {
@@ -18,12 +17,18 @@ struct thread_utilization
     double busy_pct() const
     {
         uint64_t total = busy_ns + idle_ns;
-        return total > 0 ? (busy_ns * 100.0 / total) : 0.0;
+        return total > 0
+            ? static_cast<double>(busy_ns) * 100.0 /
+                  static_cast<double>(total)
+            : 0.0;
     }
 
     double hit_pct() const
     {
-        return poll_attempts > 0 ? (poll_hits * 100.0 / poll_attempts) : 0.0;
+        return poll_attempts > 0
+            ? static_cast<double>(poll_hits) * 100.0 /
+                  static_cast<double>(poll_attempts)
+            : 0.0;
     }
 
     void log(const char* thread_name) const

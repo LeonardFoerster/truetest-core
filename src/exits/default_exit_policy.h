@@ -18,7 +18,7 @@ enum class exit_policy_mode : std::uint8_t
     floor = 0,           // ensure min SL; fill empty strategy plans
     strategy_only = 1,   // only strategy intents (legacy / research)
     engine_only = 2,     // discard strategy intents; platform only
-    union_mode = 3,      // keep strategy intents; append platform SL if missing
+    union_mode = 3,      // keep strategy intents; append globally missing platform legs
 };
 
 struct default_exit_params

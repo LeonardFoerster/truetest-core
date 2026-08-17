@@ -110,6 +110,8 @@ struct TrialResult {
 
     double win_rate = 0.0;       // 0-100 (matches AnalyticsReport convention)
     double profit_factor = 0.0;
+    double total_win = 0.0;      // Gross positive closed-trade P&L
+    double total_loss = 0.0;     // Absolute gross negative closed-trade P&L
 
     // Full analytics available for detailed reporting
     // (populated when controller is configured to keep full reports)
@@ -131,13 +133,22 @@ struct McAggregate {
     double mean_max_dd = 0.0;
     double worst_max_dd = 0.0;
 
-    double profit_factor_mean = 0.0;
-    double median_profit_factor = 0.0;
+    // Campaign PF pools the underlying trade ledger across trials. The v1
+    // mean/median fields retain their original all-trial sentinel semantics;
+    // corrected valid-trial statistics are additive and explicitly counted.
+    double profit_factor_pooled = 0.0;
+    double profit_factor_mean = 0.0;          // mc_aggregate_v1 compatibility
+    double median_profit_factor = 0.0;        // mc_aggregate_v1 compatibility
+    double profit_factor_mean_valid = 0.0;
+    double median_profit_factor_valid = 0.0;
+    bool profit_factor_pooled_unbounded = false;
     double win_rate_mean = 0.0;
     double median_win_rate = 0.0;
 
     std::size_t trials_with_positive_pnl = 0;
     std::size_t trials_with_profit_factor_gt_1 = 0;
+    std::size_t valid_profit_factor_trials = 0;
+    std::size_t unbounded_profit_factor_trials = 0;
 
     // Performance (Phase 5)
     double wall_time_ms = 0.0;

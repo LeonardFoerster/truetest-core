@@ -23,7 +23,14 @@ std::string MonteCarloReporter::render_text_summary(const McAggregate& agg,
 
     oss << "\n";
     oss << "Win Rate (mean / median): " << agg.win_rate_mean << " / " << agg.median_win_rate << "\n";
-    oss << "Profit Factor (mean / median): " << agg.profit_factor_mean << " / " << agg.median_profit_factor << "\n";
+    oss << "Profit Factor (pooled / valid-trial mean / valid-trial median): "
+        << agg.profit_factor_pooled << " / " << agg.profit_factor_mean_valid
+        << " / " << agg.median_profit_factor_valid;
+    if (agg.profit_factor_pooled_unbounded) oss << " (pooled unbounded)";
+    oss << "\n";
+    oss << "Profit Factor trial coverage (valid / unbounded / total): "
+        << agg.valid_profit_factor_trials << " / "
+        << agg.unbounded_profit_factor_trials << " / " << agg.n_trials << "\n";
     oss << "Trials with PF > 1: " << agg.trials_with_profit_factor_gt_1 << " / " << agg.n_trials << "\n";
 
     oss << "Profitable trials: " << agg.trials_with_positive_pnl << " / " << agg.n_trials << "\n";
@@ -48,8 +55,19 @@ std::string MonteCarloReporter::render_json(const McAggregate& agg,
     oss << "  \"worst_max_dd\": " << agg.worst_max_dd << ",\n";
     oss << "  \"win_rate_mean\": " << agg.win_rate_mean << ",\n";
     oss << "  \"median_win_rate\": " << agg.median_win_rate << ",\n";
+    oss << "  \"profit_factor_pooled\": " << agg.profit_factor_pooled << ",\n";
+    oss << "  \"profit_factor_pooled_unbounded\": "
+        << (agg.profit_factor_pooled_unbounded ? "true" : "false") << ",\n";
     oss << "  \"profit_factor_mean\": " << agg.profit_factor_mean << ",\n";
     oss << "  \"median_profit_factor\": " << agg.median_profit_factor << ",\n";
+    oss << "  \"profit_factor_mean_valid\": "
+        << agg.profit_factor_mean_valid << ",\n";
+    oss << "  \"median_profit_factor_valid\": "
+        << agg.median_profit_factor_valid << ",\n";
+    oss << "  \"valid_profit_factor_trials\": "
+        << agg.valid_profit_factor_trials << ",\n";
+    oss << "  \"unbounded_profit_factor_trials\": "
+        << agg.unbounded_profit_factor_trials << ",\n";
     oss << "  \"trials_with_pf_gt_1\": " << agg.trials_with_profit_factor_gt_1 << ",\n";
     oss << "  \"profitable_trials\": " << agg.trials_with_positive_pnl << ",\n";
     oss << "  \"trials\": [\n";
@@ -63,6 +81,8 @@ std::string MonteCarloReporter::render_json(const McAggregate& agg,
             << ", \"max_drawdown\": " << t.max_drawdown
             << ", \"win_rate\": " << t.win_rate
             << ", \"profit_factor\": " << t.profit_factor
+            << ", \"total_win\": " << t.total_win
+            << ", \"total_loss\": " << t.total_loss
             << ", \"total_trades\": " << t.total_trades << "}";
         if (i + 1 < agg.trials.size()) oss << ",";
         oss << "\n";

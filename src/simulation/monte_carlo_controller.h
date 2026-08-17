@@ -17,6 +17,10 @@
 
 namespace truetest::simulation {
 
+// Pure serial reduction used by MonteCarloController and cheap metric tests.
+// Trial order is retained so callers can drill down by trial_id afterwards.
+void summarize_monte_carlo_trials(McAggregate& aggregate);
+
 /**
  * High-level orchestrator for running Monte Carlo campaigns.
  *
