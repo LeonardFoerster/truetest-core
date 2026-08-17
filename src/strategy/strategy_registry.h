@@ -1,13 +1,14 @@
 #pragma once
 
-#include "strategy_interface.h"
-
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
-#include <stdexcept>
+
+class IStrategy;
 
 using strategy_factory = std::function<std::shared_ptr<IStrategy>()>;
 
@@ -53,9 +54,12 @@ private:
     std::unordered_map<std::string, strategy_factory> factories_;
 };
 
+#define TT_STRATEGY_CONCAT_INNER(a, b) a##b
+#define TT_STRATEGY_CONCAT(a, b) TT_STRATEGY_CONCAT_INNER(a, b)
+
 #define REGISTER_STRATEGY(name, factory) \
     namespace { \
-        static const bool _strat_reg_##__LINE__ = []() { \
+        static const bool TT_STRATEGY_CONCAT(_strat_reg_, __LINE__) = []() { \
             StrategyRegistry::instance().register_strategy(name, factory); \
             return true; \
         }(); \
