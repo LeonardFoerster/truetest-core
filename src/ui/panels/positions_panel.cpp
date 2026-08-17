@@ -8,7 +8,6 @@
 
 #include <ncurses.h>
 
-#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -26,7 +25,7 @@ int signed_pair(double v)
 
 std::string fmt_age(std::int64_t s)
 {
-    char buf[16];
+    char buf[32];
     if (s < 60)        std::snprintf(buf, sizeof(buf), "%llds",
                                      static_cast<long long>(s));
     else if (s < 3600) std::snprintf(buf, sizeof(buf), "%lldm%02llds",

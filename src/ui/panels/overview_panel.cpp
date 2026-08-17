@@ -45,13 +45,6 @@ std::string fmt_money(double v)
     return buf;
 }
 
-std::string fmt_price(double v, int dec = 2)
-{
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.*f", dec, v);
-    return buf;
-}
-
 std::string fmt_qty(double v)
 {
     char buf[32];
@@ -110,13 +103,9 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     const int x_value2 = std::max(54, width / 2);
 
     // Decode atomics once.
-    const auto state    = static_cast<connection_state>(s.state.load(std::memory_order_acquire));
     const std::uint64_t events = s.events_total.load(std::memory_order_relaxed);
     const std::uint64_t fills  = s.fills_total.load(std::memory_order_relaxed);
     const std::uint64_t trades = s.trades_total.load(std::memory_order_relaxed);
-    const std::int64_t  last_fp8 = s.last_price_fp8.load(std::memory_order_relaxed);
-    const std::int64_t  bid_fp8  = s.best_bid_fp8.load(std::memory_order_relaxed);
-    const std::int64_t  ask_fp8  = s.best_ask_fp8.load(std::memory_order_relaxed);
     const std::uint32_t open_ord = s.open_orders.load(std::memory_order_relaxed);
     const std::int64_t  pnl_fp4    = s.realized_pnl_fp4.load(std::memory_order_relaxed);
     const std::int64_t  unreal_fp4 = s.unrealized_pnl_fp4.load(std::memory_order_relaxed);
@@ -133,14 +122,9 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     const std::uint64_t drops_mm     = s.ring_drops_mm.load(std::memory_order_relaxed);
     const std::uint64_t drops_total  = drops_log + drops_risk + drops_stats
                                      + drops_obs + drops_rs + drops_mm;
-    const bool halted = s.halt_flag.load(std::memory_order_acquire);
     const std::uint32_t bf_done  = s.backfill_done.load(std::memory_order_relaxed);
     const std::uint32_t bf_total = s.backfill_total.load(std::memory_order_relaxed);
 
-    // Decode fp prices.
-    const double last  = (last_fp8 < 0) ? 0.0 : static_cast<double>(last_fp8) / 1e8;
-    const double bid   = (bid_fp8  < 0) ? 0.0 : static_cast<double>(bid_fp8)  / 1e8;
-    const double ask   = (ask_fp8  < 0) ? 0.0 : static_cast<double>(ask_fp8)  / 1e8;
     const double pnl   = static_cast<double>(pnl_fp4)    / 1e4;
     const double unrl  = static_cast<double>(unreal_fp4) / 1e4;
     const double pos   = static_cast<double>(pos_fp8)    / 1e8;
@@ -229,7 +213,7 @@ void OverviewPanel::draw(int body_y0, int width, int height,
         int pct = static_cast<int>(wr_bps / 100);
         Color c = (pct >= 55) ? Color::Positive : (pct >= 45 ? Color::Neutral : Color::Warning);
         set_color_bold(c);
-        char b[8];
+        char b[16];
         std::snprintf(b, sizeof(b), "%d%%", pct);
         mvaddstr(y, x_value, b);
         unset_color_bold(c);

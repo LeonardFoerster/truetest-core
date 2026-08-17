@@ -165,7 +165,9 @@ void StrategyPanel::draw(int body_y0, int width, int height,
                 tot_brkts  += s.armed_brackets;
             }
             const double agg_wr = tot_trades > 0
-                ? static_cast<double>(tot_wins) / tot_trades * 100.0 : 0.0;
+                ? static_cast<double>(tot_wins) /
+                      static_cast<double>(tot_trades) * 100.0
+                : 0.0;
             const double agg_pf = tot_loss > 0.0 ? tot_win / tot_loss : 0.0;
             char b[256];
             std::snprintf(b, sizeof(b),

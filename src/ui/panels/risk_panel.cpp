@@ -8,7 +8,6 @@
 
 #include <ncurses.h>
 
-#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -49,28 +48,6 @@ std::string fmt_hhmmss(std::chrono::system_clock::time_point tp)
     std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d",
                   tm.tm_hour, tm.tm_min, tm.tm_sec);
     return buf;
-}
-
-
-
-// Draw a horizontal usage gauge using the new style system.
-// Color escalates based on usage.
-void draw_gauge(int y, int x, double frac)
-{
-    if (frac < 0.0) frac = 0.0;
-    if (frac > 1.0) frac = 1.0;
-
-    Color bar_color = Color::Positive;
-    if (frac >= 0.9)      bar_color = Color::Danger;
-    else if (frac >= 0.7) bar_color = Color::Danger;
-    else if (frac >= 0.5) bar_color = Color::Warning;
-    else if (frac >= 0.3) bar_color = Color::Warning;
-
-    draw_bar(y, x, kBarWidth, frac, bar_color);
-
-    char b[16];
-    std::snprintf(b, sizeof(b), " %4.0f%%", frac * 100.0);
-    mvaddstr(y, x + kBarWidth + 3, b);
 }
 
 }

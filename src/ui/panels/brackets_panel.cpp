@@ -19,7 +19,7 @@ namespace {
 
 std::string fmt_age(std::int64_t s)
 {
-    char b[16];
+    char b[32];
     if (s < 60)        std::snprintf(b, sizeof(b), "%llds", (long long)s);
     else if (s < 3600) std::snprintf(b, sizeof(b), "%lldm%llds", (long long)(s/60), (long long)(s%60));
     else               std::snprintf(b, sizeof(b), "%lldh%lldm",  (long long)(s/3600), (long long)((s%3600)/60));

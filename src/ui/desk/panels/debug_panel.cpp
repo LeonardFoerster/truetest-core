@@ -40,7 +40,7 @@ void draw_debug_panel(const dashboard_snapshot& snap)
     ImGui::Text("target %s   mode %s",
                 snap.debug.target.empty() ? "N/A" : snap.debug.target.c_str(),
                 snap.debug.mode.empty() ? "N/A" : snap.debug.mode.c_str());
-    ImGui::Text("features  binance %s  questdb %s  debug %s  live-data %s",
+    ImGui::Text("features  binance %s  questdb %s  debug %s  venue-data %s",
                 snap.debug.has_binance ? "on" : "off",
                 snap.debug.has_questdb ? "on" : "off",
                 snap.debug.has_debug ? "on" : "off",
@@ -83,8 +83,9 @@ void draw_debug_panel(const dashboard_snapshot& snap)
                 ImGui::Text("%zu", ring.size);
             ImGui::TableNextColumn();
             const auto bounded_hwm = std::min(ring.hwm, ring.capacity);
-            ImGui::Text("%zu (%.1f%%)", ring.hwm,
-                        100.0 * static_cast<double>(bounded_hwm) / ring.capacity);
+            const double hwm_pct = 100.0 * static_cast<double>(bounded_hwm)
+                / static_cast<double>(ring.capacity);
+            ImGui::Text("%zu (%.1f%%)", ring.hwm, hwm_pct);
             ImGui::TableNextColumn();
             ImGui::Text("%zu", ring.capacity);
             ImGui::TableNextColumn();
@@ -115,7 +116,8 @@ void draw_debug_panel(const dashboard_snapshot& snap)
             ImGui::Text("%zu", pool.capacity);
             ImGui::TableNextColumn();
             const double fill = pool.capacity
-                ? 100.0 * static_cast<double>(pool.in_use) / pool.capacity
+                ? 100.0 * static_cast<double>(pool.in_use)
+                      / static_cast<double>(pool.capacity)
                 : 0.0;
             ImGui::Text("%.1f%%", fill);
             ImGui::TableNextColumn();

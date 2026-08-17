@@ -817,11 +817,18 @@ void draw_liquidity_panel(const ResearchPresentation* research,
     constexpr std::size_t max_liquidation_markers = 2'048;
     const std::size_t first_liquidation = research->liquidations.size()
         > max_liquidation_markers ? research->liquidations.size() - max_liquidation_markers : 0;
+    const long double heatmap_start_ms =
+        static_cast<long double>(research->heatmap_start_ms);
+    const long double heatmap_span_ms = std::max(
+        1.0L,
+        static_cast<long double>(research->heatmap_end_ms) - heatmap_start_ms);
     for (std::size_t i = first_liquidation; i < research->liquidations.size(); ++i)
     {
         const auto& liq = research->liquidations[i];
-        const double tx = static_cast<double>(liq.ts_ms - research->heatmap_start_ms)
-            / std::max<std::int64_t>(1, research->heatmap_end_ms - research->heatmap_start_ms);
+        const long double liquidation_offset_ms =
+            static_cast<long double>(liq.ts_ms) - heatmap_start_ms;
+        const double tx =
+            static_cast<double>(liquidation_offset_ms / heatmap_span_ms);
         const double py = (liq.price - research->heatmap_min_price)
             / std::max(1.0, research->heatmap_max_price - research->heatmap_min_price);
         const ImVec2 p(origin.x + static_cast<float>(tx) * avail.x,

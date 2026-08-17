@@ -20,11 +20,6 @@ constexpr bool has_rich_tui = true;
 #else
 constexpr bool has_rich_tui = false;
 #endif
-#ifdef HAS_LIVE_DATA
-constexpr bool has_live_data = true;
-#else
-constexpr bool has_live_data = false;
-#endif
 #ifdef HAS_BINANCE
 constexpr bool has_binance = true;
 #else
@@ -40,6 +35,7 @@ constexpr bool has_bitunix = true;
 #else
 constexpr bool has_bitunix = false;
 #endif
+constexpr bool has_live_data = has_binance || has_bitget || has_bitunix;
 #ifdef HAS_QUESTDB
 constexpr bool has_questdb = true;
 #else
@@ -65,7 +61,7 @@ struct Feature
 constexpr std::array compiled_features = {
     Feature{"ImGui desk", true},
     Feature{"Rich TUI", has_rich_tui},
-    Feature{"Live-data transports", has_live_data},
+    Feature{"Venue live-data", has_live_data},
     Feature{"Binance", has_binance},
     Feature{"Bitget", has_bitget},
     Feature{"Bitunix", has_bitunix},

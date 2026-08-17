@@ -9,7 +9,6 @@
 #include <ncurses.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <string>
 

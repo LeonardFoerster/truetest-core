@@ -69,7 +69,7 @@ void DebugPanel::draw(int body_y0, int width, int height,
     put_def(y, x_l_label, x_l_value,        "HAS_BINANCE",   d.has_binance);
     put_def(y, x_l_label + 18, x_l_value + 16, "HAS_QUESTDB",  d.has_questdb);
     put_def(y, x_r_label, x_r_value,        "HAS_DEBUG",     d.has_debug);
-    put_def(y, x_r_label + 16, x_r_value + 14, "HAS_LIVE_DATA", d.has_live_data);
+    put_def(y, x_r_label + 16, x_r_value + 14, "VENUE_DATA", d.has_live_data);
     ++y;
 
     // ── Threading ──
@@ -109,7 +109,8 @@ void DebugPanel::draw(int body_y0, int width, int height,
         {
             mvprintw(y, x_l_label, "%-12s %10zu", r.name, r.size);
             // HWM color: yellow > 50% capacity, red > 90%.
-            const double frac = static_cast<double>(r.hwm) / r.capacity;
+            const double frac = static_cast<double>(r.hwm) /
+                                static_cast<double>(r.capacity);
             int hwm_pair = (frac > 0.9) ? kPairRed
                          : (frac > 0.5) ? kPairYellow : kPairWhite;
             attron(COLOR_PAIR(hwm_pair));
@@ -233,8 +234,8 @@ void DebugPanel::draw(int body_y0, int width, int height,
             ++y;
             auto fmt_ns = [](std::uint64_t ns) -> std::string {
                 char b[32];
-                if (ns >= 1'000'000)      std::snprintf(b, sizeof(b), "%.2f ms", ns / 1e6);
-                else if (ns >= 1'000)     std::snprintf(b, sizeof(b), "%.2f µs", ns / 1e3);
+                if (ns >= 1'000'000)      std::snprintf(b, sizeof(b), "%.2f ms", static_cast<double>(ns) / 1e6);
+                else if (ns >= 1'000)     std::snprintf(b, sizeof(b), "%.2f µs", static_cast<double>(ns) / 1e3);
                 else                       std::snprintf(b, sizeof(b), "%llu ns", (unsigned long long)ns);
                 return b;
             };
@@ -272,9 +273,11 @@ void DebugPanel::draw(int body_y0, int width, int height,
             auto fmt_mb = [](std::uint64_t b) -> std::string {
                 char buf[32];
                 if (b >= 1024 * 1024)
-                    std::snprintf(buf, sizeof(buf), "%.1f MB", b / (1024.0 * 1024.0));
+                    std::snprintf(buf, sizeof(buf), "%.1f MB",
+                                  static_cast<double>(b) / (1024.0 * 1024.0));
                 else if (b >= 1024)
-                    std::snprintf(buf, sizeof(buf), "%.1f KB", b / 1024.0);
+                    std::snprintf(buf, sizeof(buf), "%.1f KB",
+                                  static_cast<double>(b) / 1024.0);
                 else
                     std::snprintf(buf, sizeof(buf), "%llu B", (unsigned long long)b);
                 return buf;
@@ -286,7 +289,9 @@ void DebugPanel::draw(int body_y0, int width, int height,
             const std::uint64_t denom_rss =
                 std::max<std::uint64_t>(m.peak_rss_bytes, m.rss_bytes);
             const double rss_frac = denom_rss > 0
-                ? static_cast<double>(m.rss_bytes) / denom_rss : 0.0;
+                ? static_cast<double>(m.rss_bytes) /
+                      static_cast<double>(denom_rss)
+                : 0.0;
 
             label(y, x_l_label, "RSS");
             char rb[64];
@@ -317,7 +322,9 @@ void DebugPanel::draw(int body_y0, int width, int height,
                 (m.rss_bytes > known) ? (m.rss_bytes - known) : 0;
             const std::uint64_t total = std::max<std::uint64_t>(m.rss_bytes, known);
             const auto frac = [&](std::uint64_t v) {
-                return total > 0 ? static_cast<double>(v) / total : 0.0;
+                return total > 0
+                    ? static_cast<double>(v) / static_cast<double>(total)
+                    : 0.0;
             };
             const int w_pools = static_cast<int>(std::lround(frac(m.pool_bytes_total) * bar_w));
             const int w_rings = static_cast<int>(std::lround(frac(m.ring_bytes_total) * bar_w));
@@ -379,7 +386,8 @@ void DebugPanel::draw(int body_y0, int width, int height,
                     for (std::size_t i = 0; i < m.other_breakdown.size(); ++i)
                     {
                         const auto& seg = m.other_breakdown[i];
-                        const double f = static_cast<double>(seg.bytes) / other_total;
+                        const double f = static_cast<double>(seg.bytes) /
+                                         static_cast<double>(other_total);
                         const int w = std::min(bar_w - (x_cur - bar_x - 1),
                                                static_cast<int>(std::lround(f * bar_w)));
                         const int p = seg_pairs[i % (sizeof(seg_pairs)/sizeof(int))];
@@ -438,7 +446,9 @@ void DebugPanel::draw(int body_y0, int width, int height,
                 if (y >= y_end) break;
                 mvprintw(y, x_l_label, "%-13s", p.name);
                 const double uf = (p.capacity_slots > 0)
-                    ? static_cast<double>(p.in_use) / p.capacity_slots : 0.0;
+                    ? static_cast<double>(p.in_use) /
+                          static_cast<double>(p.capacity_slots)
+                    : 0.0;
                 const int pw = std::min(bar_w,
                     static_cast<int>(std::lround(uf * bar_w)));
                 int u_pair = (uf > 0.85) ? kPairRed
@@ -482,7 +492,9 @@ void DebugPanel::draw(int body_y0, int width, int height,
                 else
                 {
                     const double rf = m.ring_bytes_total > 0
-                        ? static_cast<double>(r.bytes) / m.ring_bytes_total : 0.0;
+                        ? static_cast<double>(r.bytes) /
+                              static_cast<double>(m.ring_bytes_total)
+                        : 0.0;
                     const int rw = static_cast<int>(std::lround(rf * bar_w));
                     mvaddch(y, bar_x, '[');
                     attron(COLOR_PAIR(kPairYellow));

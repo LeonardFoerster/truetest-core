@@ -101,7 +101,8 @@ std::string fmt_duration(std::chrono::seconds s)
     long long h = total / 3600;
     long long m = (total / 60) % 60;
     long long sec = total % 60;
-    char buf[16];
+    // int64 seconds can produce a 16-digit hour count plus separators.
+    char buf[32];
     std::snprintf(buf, sizeof(buf), "%02lld:%02lld:%02lld", h, m, sec);
     return buf;
 }

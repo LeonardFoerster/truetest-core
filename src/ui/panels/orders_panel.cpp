@@ -8,7 +8,6 @@
 
 #include <ncurses.h>
 
-#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -32,7 +31,7 @@ const char* type_str(char t)
 
 std::string fmt_age(std::int64_t s)
 {
-    char buf[16];
+    char buf[32];
     if (s < 60)        std::snprintf(buf, sizeof(buf), "%llds",
                                      static_cast<long long>(s));
     else if (s < 3600) std::snprintf(buf, sizeof(buf), "%lldm%02llds",

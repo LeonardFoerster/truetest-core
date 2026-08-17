@@ -481,7 +481,7 @@ void TabbedDashboard::draw_chrome(int width, int height, int active)
             const int badge_pair = flashing ? 1 : 4;   // green : cyan
             const auto extra = flashing ? (A_REVERSE | A_BOLD) : A_BOLD;
             attron(COLOR_PAIR(badge_pair) | extra);
-            char b[16];
+            char b[32];
             std::snprintf(b, sizeof(b), "[%zu]", count);
             mvaddstr(0, x, b);
             attroff(COLOR_PAIR(badge_pair) | extra);
@@ -685,7 +685,7 @@ void TabbedDashboard::draw_status_bar(int width,
                       tm.tm_hour, tm.tm_min, tm.tm_sec);
 
         // Uptime (since dashboard started).
-        char up_b[24] = {0};
+        char up_b[40] = {0};
         if (start_time_.time_since_epoch().count() > 0)
         {
             const auto secs =

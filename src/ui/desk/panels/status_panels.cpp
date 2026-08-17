@@ -28,7 +28,7 @@ void draw_account_strip(const dashboard_snapshot& snap,
     const std::size_t rows = (metric_count + columns - 1) / columns;
     const float card_width = (available - gap * static_cast<float>(columns - 1))
         / static_cast<float>(columns);
-    const float strip_height = rows * card_height
+    const float strip_height = static_cast<float>(rows) * card_height
         + static_cast<float>(rows - 1) * gap;
 
     char equity_value[64];
@@ -225,7 +225,8 @@ void draw_risk_panel(const dashboard_snapshot& snap)
     const bool exposure_warning = snap.risk.exposure_limit > 0.0
         && snap.risk.exposure / snap.risk.exposure_limit > theme::kWarnFraction;
     const bool orders_warning = snap.risk.open_orders_limit > 0
-        && static_cast<double>(snap.risk.open_orders) / snap.risk.open_orders_limit
+        && static_cast<double>(snap.risk.open_orders)
+               / static_cast<double>(snap.risk.open_orders_limit)
                > theme::kWarnFraction;
     theme::section_header("RISK ENVELOPE", "reported limits and terminal state",
                           snap.risk.halted ? theme::danger()
@@ -383,9 +384,9 @@ void draw_health_panel(const dashboard_snapshot& snap,
     {
         section_label("MEMORY");
         ImGui::Text("RSS %.1f MiB   data-segment estimate %.1f MiB   peak RSS %.1f MiB",
-                    snap.memory.rss_bytes / (1024.0 * 1024.0),
-                    snap.memory.heap_bytes / (1024.0 * 1024.0),
-                    snap.memory.peak_rss_bytes / (1024.0 * 1024.0));
+                    static_cast<double>(snap.memory.rss_bytes) / (1024.0 * 1024.0),
+                    static_cast<double>(snap.memory.heap_bytes) / (1024.0 * 1024.0),
+                    static_cast<double>(snap.memory.peak_rss_bytes) / (1024.0 * 1024.0));
     }
     section_label("ENGINE");
     ImGui::Text("preset %s   wired worker rings %zu   pin %s   spin %s",
