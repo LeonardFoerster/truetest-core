@@ -3,18 +3,40 @@
 #include <zstd.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <new>
 #include <sstream>
+#include <stdexcept>
 #include <system_error>
 #include <unordered_set>
+#include <utility>
 
 namespace truetest::footprint {
 
 namespace {
 
 constexpr char kMagic[8] = {'T', 'T', 'F', 'P', 'S', 'E', 'G', '1'};
+constexpr std::size_t kSegmentHeaderBytes =
+    sizeof(kMagic) + sizeof(std::uint32_t) + 2 * sizeof(std::uint16_t)
+    + 10 * sizeof(std::uint64_t);
+constexpr unsigned char kEmptyByte = 0;
+constexpr std::size_t kWriterReserveChunkBytes = 64U * 1024U;
+
+static_assert(kSegmentHeaderBytes == 96,
+              "The on-disk footprint segment header must stay explicitly sized");
+
+std::size_t effective_max_uncompressed_bytes(std::size_t requested) noexcept
+{
+    return std::min(requested, kHardMaxSegmentUncompressedBytes);
+}
+
+std::size_t max_trade_count(std::size_t max_uncompressed_bytes) noexcept
+{
+    return effective_max_uncompressed_bytes(max_uncompressed_bytes) / sizeof(PublicTrade);
+}
 
 std::uint64_t fnv1a64(const unsigned char* data, std::size_t size) noexcept
 {
@@ -41,7 +63,7 @@ public:
 
     bool try_bytes(void* out, std::size_t n) noexcept
     {
-        if (pos_ + n > size_)
+        if (n > size_ - pos_)
             return false;
         std::memcpy(out, data_ + pos_, n);
         pos_ += n;
@@ -53,7 +75,6 @@ public:
     bool try_i64(std::int64_t& v) noexcept { return try_bytes(&v, sizeof(v)); }
 
     std::size_t remaining() const noexcept { return size_ - pos_; }
-    const unsigned char* cursor() const noexcept { return data_ + pos_; }
 
 private:
     const unsigned char* data_;
@@ -61,44 +82,38 @@ private:
     std::size_t pos_ = 0;
 };
 
-} // namespace
-
-FootprintSegmentWriter::FootprintSegmentWriter(std::uint16_t venue_id, std::uint16_t symbol_id)
-    : venue_id_(venue_id)
-    , symbol_id_(symbol_id)
+bool read_exact(std::istream& in, void* out, std::size_t size)
 {
+    if (size == 0)
+        return true;
+    in.read(static_cast<char*>(out), static_cast<std::streamsize>(size));
+    return static_cast<bool>(in);
 }
 
-void FootprintSegmentWriter::append(const PublicTrade& trade)
-{
-    trades_.push_back(trade);
-}
-
-std::optional<SegmentMetadata> FootprintSegmentWriter::finalize(
-    const std::filesystem::path& finalized_path)
+SegmentMetadata metadata_for(std::uint16_t venue_id, std::uint16_t symbol_id,
+                             const std::vector<PublicTrade>& trades)
 {
     SegmentMetadata meta;
-    meta.venue_id = venue_id_;
-    meta.symbol_id = symbol_id_;
-    meta.record_count = trades_.size();
+    meta.venue_id = venue_id;
+    meta.symbol_id = symbol_id;
+    meta.record_count = trades.size();
 
-    if (!trades_.empty())
+    if (!trades.empty())
     {
-        meta.time_range_start_ns = trades_.front().event_ns;
-        meta.time_range_end_ns = trades_.front().event_ns;
+        meta.time_range_start_ns = trades.front().event_ns;
+        meta.time_range_end_ns = trades.front().event_ns;
 
         // A legitimate session_id/native_trade_id of exactly 0 is valid
-        // data (e.g. a venue's first session), so "0 == unset" can't be
-        // used as the running-min sentinel while accumulating - it would
-        // wrongly latch onto 0 forever the moment a real 0 is seen even if
-        // a later trade's id is smaller. Track "has any" separately instead
-        // and only apply the header's documented "0 = none of this kind"
-        // convention once, at the end.
-        bool has_native = false, has_session = false;
-        std::uint64_t native_min = std::numeric_limits<std::uint64_t>::max(), native_max = 0;
-        std::uint64_t session_min = std::numeric_limits<std::uint64_t>::max(), session_max = 0;
+        // data. Track presence separately and use the header's "0 = none"
+        // convention only after all trades have been inspected.
+        bool has_native = false;
+        bool has_session = false;
+        std::uint64_t native_min = std::numeric_limits<std::uint64_t>::max();
+        std::uint64_t native_max = 0;
+        std::uint64_t session_min = std::numeric_limits<std::uint64_t>::max();
+        std::uint64_t session_max = 0;
 
-        for (const auto& t : trades_)
+        for (const auto& t : trades)
         {
             meta.time_range_start_ns = std::min(meta.time_range_start_ns, t.event_ns);
             meta.time_range_end_ns = std::max(meta.time_range_end_ns, t.event_ns);
@@ -116,16 +131,118 @@ std::optional<SegmentMetadata> FootprintSegmentWriter::finalize(
             }
         }
 
-        if (has_native) { meta.native_id_min = native_min; meta.native_id_max = native_max; }
-        if (has_session) { meta.session_id_min = session_min; meta.session_id_max = session_max; }
+        if (has_native)
+        {
+            meta.native_id_min = native_min;
+            meta.native_id_max = native_max;
+        }
+        if (has_session)
+        {
+            meta.session_id_min = session_min;
+            meta.session_id_max = session_max;
+        }
     }
 
-    const auto* raw = reinterpret_cast<const unsigned char*>(trades_.data());
-    const std::size_t raw_size = trades_.size() * sizeof(PublicTrade);
-    meta.checksum = fnv1a64(raw, raw_size);
+    const auto* raw = trades.empty()
+        ? &kEmptyByte
+        : reinterpret_cast<const unsigned char*>(trades.data());
+    meta.checksum = fnv1a64(raw, trades.size() * sizeof(PublicTrade));
+    return meta;
+}
 
-    const auto partial_path = finalized_path.string() + ".partial";
+bool payload_metadata_matches(const SegmentMetadata& header,
+                              const SegmentMetadata& decoded) noexcept
+{
+    // Non-empty segments bind venue/symbol separately by checking every
+    // decoded PublicTrade before this function. Validate every remaining
+    // metadata field that is derived from the raw payload, so a damaged range
+    // or identity span cannot silently poison manifest queries. A fully
+    // authenticated empty-header format is a schema-v2 decision.
+    return header.time_range_start_ns == decoded.time_range_start_ns
+        && header.time_range_end_ns == decoded.time_range_end_ns
+        && header.record_count == decoded.record_count
+        && header.native_id_min == decoded.native_id_min
+        && header.native_id_max == decoded.native_id_max
+        && header.session_id_min == decoded.session_id_min
+        && header.session_id_max == decoded.session_id_max
+        && header.checksum == decoded.checksum;
+}
+
+bool trades_match_segment_identity(const std::vector<PublicTrade>& trades,
+                                   std::uint16_t venue_id,
+                                   std::uint16_t symbol_id) noexcept
+{
+    return std::all_of(trades.begin(), trades.end(), [venue_id, symbol_id](const PublicTrade& trade) {
+        return trade.venue_id == venue_id && trade.symbol_id == symbol_id;
+    });
+}
+
+} // namespace
+
+FootprintSegmentWriter::FootprintSegmentWriter(std::uint16_t venue_id, std::uint16_t symbol_id,
+                                               std::size_t max_uncompressed_bytes)
+    : venue_id_(venue_id)
+    , symbol_id_(symbol_id)
+    , max_buffered_trades_(max_trade_count(max_uncompressed_bytes))
+{
+}
+
+segment_append_status FootprintSegmentWriter::append(const PublicTrade& trade) noexcept
+{
+    if (trade.venue_id != venue_id_ || trade.symbol_id != symbol_id_)
+        return segment_append_status::identity_mismatch;
+    if (max_buffered_trades_ == 0)
+        return segment_append_status::trade_too_large;
+    if (trades_.size() >= max_buffered_trades_)
+        return segment_append_status::full;
+
+    try
     {
+        // Grow in small capped chunks rather than asking every newly active
+        // symbol for the entire segment budget. Explicit reserve() requests
+        // also avoid vector's uncontrolled geometric growth near the limit.
+        // This remains cold-path allocation only.
+        if (trades_.size() == trades_.capacity())
+        {
+            const std::size_t remaining = max_buffered_trades_ - trades_.size();
+            const std::size_t chunk_trades = std::max(
+                std::size_t{1}, kWriterReserveChunkBytes / sizeof(PublicTrade));
+            trades_.reserve(trades_.size() + std::min(remaining, chunk_trades));
+        }
+        trades_.push_back(trade);
+        return segment_append_status::appended;
+    }
+    catch (const std::bad_alloc&)
+    {
+        return segment_append_status::resource_exhausted;
+    }
+    catch (const std::length_error&)
+    {
+        return segment_append_status::resource_exhausted;
+    }
+}
+
+std::optional<SegmentMetadata> FootprintSegmentWriter::finalize(
+    const std::filesystem::path& finalized_path)
+{
+    try
+    {
+        const SegmentMetadata meta = metadata_for(venue_id_, symbol_id_, trades_);
+        const auto* raw = trades_.empty()
+            ? &kEmptyByte
+            : reinterpret_cast<const unsigned char*>(trades_.data());
+        const std::size_t raw_size = trades_.size() * sizeof(PublicTrade);
+        const std::size_t bound = ZSTD_compressBound(raw_size);
+        if (ZSTD_isError(bound) || bound == 0)
+            return std::nullopt;
+
+        std::vector<unsigned char> compressed(bound);
+        const std::size_t compressed_size =
+            ZSTD_compress(compressed.data(), bound, raw, raw_size, /*level=*/1);
+        if (ZSTD_isError(compressed_size))
+            return std::nullopt;
+
+        const auto partial_path = finalized_path.string() + ".partial";
         std::ofstream out(partial_path, std::ios::binary | std::ios::trunc);
         if (!out)
             return std::nullopt;
@@ -142,42 +259,64 @@ std::optional<SegmentMetadata> FootprintSegmentWriter::finalize(
         write_u64(out, meta.session_id_min);
         write_u64(out, meta.session_id_max);
         write_u64(out, meta.checksum);
-
-        const std::size_t bound = ZSTD_compressBound(raw_size);
-        std::vector<unsigned char> compressed(bound);
-        const std::size_t compressed_size =
-            ZSTD_compress(compressed.data(), bound, raw, raw_size, /*level=*/1);
-        if (ZSTD_isError(compressed_size))
-            return std::nullopt;
-
         write_u64(out, static_cast<std::uint64_t>(raw_size));
         write_u64(out, static_cast<std::uint64_t>(compressed_size));
         out.write(reinterpret_cast<const char*>(compressed.data()),
                   static_cast<std::streamsize>(compressed_size));
         if (!out)
             return std::nullopt;
+
+        out.close();
+        if (!out)
+            return std::nullopt;
+
+        std::error_code ec;
+        std::filesystem::rename(partial_path, finalized_path, ec);
+        if (ec)
+            return std::nullopt;
+
+        // A successful atomic rename publishes the raw batch. Release the
+        // bounded backing storage rather than retaining a high-water capacity
+        // for the next segment. Power-loss durability requires a separate
+        // file-and-directory fsync protocol.
+        std::vector<PublicTrade>{}.swap(trades_);
+        return meta;
     }
-
-    std::error_code ec;
-    std::filesystem::rename(partial_path, finalized_path, ec);
-    if (ec)
+    catch (const std::bad_alloc&)
+    {
         return std::nullopt;
-
-    return meta;
+    }
+    catch (const std::length_error&)
+    {
+        return std::nullopt;
+    }
 }
 
 segment_read_status read_segment(const std::filesystem::path& path,
                                   SegmentMetadata& out_meta,
                                   std::vector<PublicTrade>& out_trades)
 {
+    return read_segment(path, out_meta, out_trades, SegmentReadLimits{});
+}
+
+segment_read_status read_segment(const std::filesystem::path& path,
+                                  SegmentMetadata& out_meta,
+                                  std::vector<PublicTrade>& out_trades,
+                                  SegmentReadLimits limits)
+{
     std::ifstream in(path, std::ios::binary);
     if (!in)
         return segment_read_status::not_found;
 
-    std::vector<unsigned char> all(
-        (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // Never materialize the whole input before looking at its bounded header:
+    // a corrupt/sparse segment must not be able to turn a cache read into an
+    // unbounded allocation. The header declares the bounded payload buffers
+    // we will make, and those declarations are checked before payload reads.
+    std::array<unsigned char, kSegmentHeaderBytes> header{};
+    if (!read_exact(in, header.data(), header.size()))
+        return segment_read_status::truncated;
 
-    ByteReader r(all.data(), all.size());
+    ByteReader r(header.data(), header.size());
 
     char magic[sizeof(kMagic)];
     if (!r.try_bytes(magic, sizeof(magic)))
@@ -202,46 +341,72 @@ segment_read_status read_segment(const std::filesystem::path& path,
     std::uint64_t raw_size = 0, compressed_size = 0;
     if (!r.try_u64(raw_size)) return segment_read_status::truncated;
     if (!r.try_u64(compressed_size)) return segment_read_status::truncated;
-    if (r.remaining() < compressed_size) return segment_read_status::truncated;
+    if (r.remaining() != 0) return segment_read_status::truncated;
 
-    // Sanity-check the claimed decompressed size BEFORE allocating for it -
-    // an on-disk header is untrusted input (corruption or a hostile file),
-    // and ZSTD_decompress's declared output size is not otherwise bounded
-    // by the (small) compressed input on disk. Cross-checking against
-    // record_count also catches corruption that changed raw_size alone.
-    // Reject rather than risk an unbounded/failing allocation - the
-    // documented behavior is "quarantine and report", never crash.
-    constexpr std::uint64_t kMaxReasonableRawSize = 512ULL * 1024 * 1024; // far beyond any real 5-minute segment
-    if (raw_size > kMaxReasonableRawSize)
-        return segment_read_status::truncated;
+    const std::size_t max_raw_size =
+        effective_max_uncompressed_bytes(limits.max_uncompressed_bytes);
+    if (raw_size > max_raw_size)
+        return segment_read_status::resource_limit;
     if (raw_size % sizeof(PublicTrade) != 0)
         return segment_read_status::checksum_mismatch; // structurally impossible unless corrupt
-    // Guard the multiplication itself before comparing - record_count is
-    // equally untrusted input, and could otherwise overflow into a value
-    // that coincidentally matches the (already-bounded) raw_size.
-    if (meta.record_count > kMaxReasonableRawSize / sizeof(PublicTrade))
-        return segment_read_status::checksum_mismatch;
+    if (meta.record_count > max_raw_size / sizeof(PublicTrade))
+        return segment_read_status::resource_limit;
     if (raw_size != meta.record_count * sizeof(PublicTrade))
         return segment_read_status::checksum_mismatch;
 
-    std::vector<unsigned char> raw(raw_size);
-    if (raw_size > 0)
+    const std::size_t raw_bytes = static_cast<std::size_t>(raw_size);
+    const std::size_t max_compressed_size = ZSTD_compressBound(raw_bytes);
+    if (ZSTD_isError(max_compressed_size)
+        || compressed_size > static_cast<std::uint64_t>(max_compressed_size))
+        return segment_read_status::resource_limit;
+
+    try
     {
-        const std::size_t decompressed =
-            ZSTD_decompress(raw.data(), raw_size, r.cursor(), compressed_size);
+        std::vector<unsigned char> compressed(static_cast<std::size_t>(compressed_size));
+        if (!read_exact(in, compressed.data(), compressed.size()))
+            return segment_read_status::truncated;
+
+        char unexpected_trailer = 0;
+        if (in.get(unexpected_trailer))
+            return segment_read_status::trailing_data;
+        if (!in.eof())
+            return segment_read_status::truncated;
+
+        unsigned char empty_byte = 0;
+        const auto* compressed_data = compressed.empty() ? &empty_byte : compressed.data();
+        const std::size_t frame_size =
+            ZSTD_findFrameCompressedSize(compressed_data, compressed.size());
+        if (ZSTD_isError(frame_size) || frame_size != compressed.size())
+            return segment_read_status::truncated;
+
+        std::vector<PublicTrade> decoded(static_cast<std::size_t>(meta.record_count));
+        void* decoded_data = decoded.empty()
+            ? static_cast<void*>(&empty_byte)
+            : static_cast<void*>(decoded.data());
+        const std::size_t decompressed = ZSTD_decompress(
+            decoded_data, decoded.empty() ? 1U : raw_bytes,
+            compressed_data, compressed.size());
         if (ZSTD_isError(decompressed) || decompressed != raw_size)
             return segment_read_status::truncated;
+
+        if (!trades_match_segment_identity(decoded, meta.venue_id, meta.symbol_id))
+            return segment_read_status::checksum_mismatch;
+        const SegmentMetadata decoded_meta = metadata_for(meta.venue_id, meta.symbol_id, decoded);
+        if (!payload_metadata_matches(meta, decoded_meta))
+            return segment_read_status::checksum_mismatch;
+
+        out_trades = std::move(decoded);
+        out_meta = meta;
+        return segment_read_status::ok;
     }
-
-    if (fnv1a64(raw.data(), raw.size()) != meta.checksum)
-        return segment_read_status::checksum_mismatch;
-
-    const std::size_t n = raw_size / sizeof(PublicTrade);
-    out_trades.resize(n);
-    if (n > 0)
-        std::memcpy(out_trades.data(), raw.data(), raw_size);
-    out_meta = meta;
-    return segment_read_status::ok;
+    catch (const std::bad_alloc&)
+    {
+        return segment_read_status::resource_limit;
+    }
+    catch (const std::length_error&)
+    {
+        return segment_read_status::resource_limit;
+    }
 }
 
 std::optional<std::filesystem::path> quarantine_segment(const std::filesystem::path& path)

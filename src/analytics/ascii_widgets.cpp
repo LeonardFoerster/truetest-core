@@ -81,7 +81,8 @@ std::string hbar(double value, double max_value, std::size_t width)
         return repeat(BAR_EMPTY, width);
 
     double frac = std::max(0.0, std::min(1.0, value / max_value));
-    std::size_t eighths = static_cast<std::size_t>(std::round(frac * width * 8.0));
+    std::size_t eighths = static_cast<std::size_t>(
+        std::round(frac * static_cast<double>(width) * 8.0));
     std::size_t full = eighths / 8;
     std::size_t rem = eighths % 8;
     if (full > width) { full = width; rem = 0; }
@@ -108,8 +109,9 @@ std::string sparkline(const std::vector<double>& values, std::size_t max_width)
         double step = static_cast<double>(values.size()) / static_cast<double>(max_width);
         for (std::size_t i = 0; i < max_width; ++i)
         {
-            std::size_t a = static_cast<std::size_t>(i * step);
-            std::size_t b = static_cast<std::size_t>((i + 1) * step);
+            std::size_t a = static_cast<std::size_t>(static_cast<double>(i) * step);
+            std::size_t b = static_cast<std::size_t>(
+                static_cast<double>(i + 1) * step);
             if (b <= a) b = a + 1;
             if (b > values.size()) b = values.size();
             double sum = 0.0;

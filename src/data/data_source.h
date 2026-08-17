@@ -20,6 +20,9 @@ public:
 	virtual bool load_data(std::shared_ptr<data_handler> handler) = 0;
 
 	// IMarketSource default: if sink is a MarketSeries, route via load_data.
+	// This compatibility path receives the real series; implementations used
+	// through DataWrapper must therefore honor IMarketSource's append-only
+	// contract even though legacy load_data exposes the concrete type.
 	bool load_into(IMarketSink& sink, LoadStats* stats = nullptr) override
 	{
 		auto* series = dynamic_cast<MarketSeries*>(&sink);

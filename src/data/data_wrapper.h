@@ -3,17 +3,20 @@
 // DataWrapper — single programmatic façade for multi-format market load
 // (docs/internal/data-pipeline.md §5.5). Composition root; not a second buffer.
 
-#include "data/market_series.h"
 #include "data/market_source.h"
 #include "data/market_sink.h"
 
 #include <atomic>
+#include <chrono>
+#include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+class MarketSeries;
 
 struct DataLoadOptions
 {
@@ -44,7 +47,7 @@ public:
 	bool load(MarketSeries& out);
 
 	// Stream into arbitrary sink
-	bool stream(IMarketSink& sink, std::atomic<bool>* halt = nullptr);
+	StreamResult stream(IMarketSink& sink, std::atomic<bool>* halt = nullptr);
 
 	IMarketSource& source();
 	const DataLoadOptions& options() const { return opt_; }

@@ -37,6 +37,23 @@ public:
 	void clear();                         // MC reuse: clear content, keep capacity
 	void reset() { clear(); }             // legacy alias
 
+	// Cold-path batch loaders can use this marker to fail atomically without
+	// staging a second copy of a potentially large series. It is valid only
+	// while the series has received append-only mutations since it was taken.
+	struct AppendCheckpoint
+	{
+		std::size_t bar_count = 0;
+		std::size_t tick_count = 0;
+		std::size_t validation_errors = 0;
+	};
+	[[nodiscard]] AppendCheckpoint append_checkpoint() const noexcept;
+	void rollback_appends(AppendCheckpoint checkpoint) noexcept;
+	void filter_appended_window(
+		AppendCheckpoint checkpoint,
+		std::optional<std::chrono::system_clock::time_point> from,
+		std::optional<std::chrono::system_clock::time_point> to,
+		const std::vector<std::string>& symbols);
+
 	// ── Ordering ───────────────────────────────────────────────────────────
 	// Primary: bar_ts ascending; secondary: symbol. Falls back to date string
 	// when timestamps are equal/default.
@@ -45,6 +62,9 @@ public:
 	// Sort ticks by timestamp ascending (stable). Call after multi-file or
 	// out-of-order tick loads so the engine never sees a silently truncated tape.
 	void sort_ticks_by_time();
+	// Prepare both permutations before changing either store. Batch facades use
+	// this when a load can contain bars and ticks and needs one rollback boundary.
+	void sort_all_by_time();
 
 	// DR-REPLAY-04: drop bars/ticks outside [from,to] and not in symbols
 	// (empty symbols = keep all). Applied after load in DataWrapper.
@@ -94,6 +114,10 @@ private:
 	bool validate_and_append_bar(std::string date, std::string symbol,
 	                             std::chrono::system_clock::time_point ts,
 	                             double o, double h, double l, double c, int64_t v);
+	std::vector<std::size_t> sorted_bar_indices() const;
+	std::vector<std::size_t> sorted_tick_indices() const;
+	void apply_bar_permutation(std::vector<std::size_t>& source_for_dest);
+	void apply_tick_permutation(std::vector<std::size_t>& source_for_dest);
 
 	size_t validation_error_count_ = 0;
 

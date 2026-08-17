@@ -39,7 +39,10 @@ QuestdbStore::HttpExecFn make_default_http_exec(const std::string& host,
 
 QuestdbStore::QuestdbStore(StoreConfig cfg)
     : cfg_(std::move(cfg))
-    , ilp_(std::make_unique<IlpWriter>(cfg_.host, cfg_.ilp_port))
+    , ilp_(std::make_unique<IlpWriter>(cfg_.host, cfg_.ilp_port,
+          /*flush_every_n_lines=*/1000,
+          /*flush_every=*/std::chrono::milliseconds(50),
+          cfg_.max_pending_bytes))
     , http_exec_(make_default_http_exec(cfg_.host, cfg_.http_port))
 {
     if (!cfg_.fallback_path.empty())
@@ -52,6 +55,8 @@ QuestdbStore::QuestdbStore(StoreConfig cfg)
         else
         {
             std::cerr << "[questdb] WARNING: could not open fallback file " << cfg_.fallback_path << "\n";
+            if (cfg_.strict)
+                setup_failure_latched_.store(true, std::memory_order_release);
         }
     }
 }
@@ -73,6 +78,8 @@ QuestdbStore::QuestdbStore(StoreConfig cfg,
         else
         {
             std::cerr << "[questdb] WARNING: could not open fallback file " << cfg_.fallback_path << "\n";
+            if (cfg_.strict)
+                setup_failure_latched_.store(true, std::memory_order_release);
         }
     }
 }
@@ -145,6 +152,8 @@ const char* QuestdbStore::status_str(order_status s)
 
 bool QuestdbStore::begin()
 {
+    if (cfg_.strict && setup_failure_latched_.load(std::memory_order_acquire))
+        return false;
     if (!is_valid_run_tag(cfg_.run_tag))
     {
         std::cerr << "[questdb] begin() aborted: invalid run_tag '"
@@ -183,9 +192,8 @@ bool QuestdbStore::begin()
     lb.add_field_double("initial_equity", cfg_.initial_equity);
     lb.add_field_str("notes", cfg_.notes);
     std::lock_guard<std::mutex> lk(mu_);
-    ilp_->enqueue(lb.finish(ns_from(started_at_)));
-    ilp_->flush();
-    return true;
+    if (!ilp_->enqueue(lb.finish(ns_from(started_at_)))) return false;
+    return ilp_->flush() && !ilp_->failure_latched();
 }
 
 void QuestdbStore::end(double final_equity,
@@ -357,8 +365,10 @@ void QuestdbStore::record_funding(const funding_event& fe, const std::string& /*
 {
     LineBuilder lb(table_name("funding"));
     lb.add_tag("run_tag", cfg_.run_tag);
-    lb.add_tag("symbol", fe.get_symbol().empty() ? "unknown" : fe.get_symbol());
-    lb.add_tag("reason", fe.get_reason().empty() ? "FUNDING_FEE" : fe.get_reason());
+    lb.add_tag("symbol", fe.get_symbol().empty()
+        ? std::string_view{"unknown"} : fe.get_symbol());
+    lb.add_tag("reason", fe.get_reason().empty()
+        ? std::string_view{"FUNDING_FEE"} : fe.get_reason());
 
     lb.add_field_double("qty_change", fe.get_qty_change());
     lb.add_field_double("cash_delta", fe.get_cash_delta());
@@ -451,6 +461,20 @@ QuestdbStore::Health QuestdbStore::health() const
         h.last_flush     = ilp_->last_successful_flush();
     }
     return h;
+}
+
+bool QuestdbStore::strict_failure_latched() const
+{
+    if (!cfg_.strict) return false;
+    if (setup_failure_latched_.load(std::memory_order_acquire)) return true;
+    std::lock_guard<std::mutex> lk(mu_);
+    return ilp_ && ilp_->failure_latched();
+}
+
+void QuestdbStore::set_strict_failure_callback(std::function<void()> callback)
+{
+    std::lock_guard<std::mutex> lk(mu_);
+    if (ilp_) ilp_->set_failure_callback(std::move(callback));
 }
 
 }

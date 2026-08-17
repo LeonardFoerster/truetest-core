@@ -4,11 +4,20 @@
 #include <algorithm>
 #include <iostream>
 #include <numeric>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace {
+
+// The in-place sort application is deliberately the non-allocating commit
+// phase after its index plans have been built. Keep that exception-safety
+// boundary explicit if the domain records ever gain custom members.
+static_assert(std::is_nothrow_move_constructible_v<std::string>);
+static_assert(std::is_nothrow_move_assignable_v<std::string>);
+static_assert(std::is_nothrow_move_constructible_v<Tick>);
+static_assert(std::is_nothrow_move_assignable_v<Tick>);
 
 std::chrono::system_clock::time_point parse_or_epoch(const std::string& date)
 {
@@ -104,64 +113,124 @@ bool MarketSeries::add_tick(tick_record rec)
 
 void MarketSeries::sort_bars_by_time()
 {
-	const std::size_t n = bar_symbol_.size();
-	if (n < 2) return;
-
-	std::vector<std::size_t> idx(n);
-	std::iota(idx.begin(), idx.end(), 0u);
-	std::stable_sort(idx.begin(), idx.end(),
-	                 [this](std::size_t a, std::size_t b) {
-		                 if (bar_ts_[a] != bar_ts_[b])
-			                 return bar_ts_[a] < bar_ts_[b];
-		                 if (bar_symbol_[a] != bar_symbol_[b])
-			                 return bar_symbol_[a] < bar_symbol_[b];
-		                 return bar_date_[a] < bar_date_[b];
-	                 });
-
-	auto reorder_str = [&](std::vector<std::string>& v) {
-		std::vector<std::string> out;
-		out.reserve(n);
-		for (auto i : idx) out.push_back(std::move(v[i]));
-		v = std::move(out);
-	};
-	auto reorder_double = [&](std::vector<double>& v) {
-		std::vector<double> out;
-		out.reserve(n);
-		for (auto i : idx) out.push_back(v[i]);
-		v = std::move(out);
-	};
-	auto reorder_int = [&](std::vector<int64_t>& v) {
-		std::vector<int64_t> out;
-		out.reserve(n);
-		for (auto i : idx) out.push_back(v[i]);
-		v = std::move(out);
-	};
-	auto reorder_tp = [&](std::vector<std::chrono::system_clock::time_point>& v) {
-		std::vector<std::chrono::system_clock::time_point> out;
-		out.reserve(n);
-		for (auto i : idx) out.push_back(v[i]);
-		v = std::move(out);
-	};
-
-	reorder_tp(bar_ts_);
-	reorder_str(bar_date_);
-	reorder_str(bar_symbol_);
-	reorder_double(bar_open_);
-	reorder_double(bar_high_);
-	reorder_double(bar_low_);
-	reorder_double(bar_close_);
-	reorder_int(bar_volume_);
+	auto source_for_dest = sorted_bar_indices();
+	apply_bar_permutation(source_for_dest);
 }
 
 void MarketSeries::sort_ticks_by_time()
 {
-	if (ticks_.size() < 2) return;
-	std::stable_sort(ticks_.begin(), ticks_.end(),
-	                 [](const Tick& a, const Tick& b) {
-		                 if (a.timestamp != b.timestamp)
-			                 return a.timestamp < b.timestamp;
-		                 return a.symbol < b.symbol;
+	auto source_for_dest = sorted_tick_indices();
+	apply_tick_permutation(source_for_dest);
+}
+
+void MarketSeries::sort_all_by_time()
+{
+	// Build both potentially allocating sort plans before changing either
+	// backing store. Once those plans exist, the cycle applications below only
+	// move standard library values in place.
+	auto bar_source_for_dest = sorted_bar_indices();
+	auto tick_source_for_dest = sorted_tick_indices();
+	apply_bar_permutation(bar_source_for_dest);
+	apply_tick_permutation(tick_source_for_dest);
+}
+
+std::vector<std::size_t> MarketSeries::sorted_bar_indices() const
+{
+	const std::size_t n = bar_symbol_.size();
+	if (n < 2) return {};
+
+	std::vector<std::size_t> source_for_dest(n);
+	std::iota(source_for_dest.begin(), source_for_dest.end(), 0u);
+	std::stable_sort(source_for_dest.begin(), source_for_dest.end(),
+	                 [this](std::size_t a, std::size_t b) {
+	                 if (bar_ts_[a] != bar_ts_[b])
+		                 return bar_ts_[a] < bar_ts_[b];
+	                 if (bar_symbol_[a] != bar_symbol_[b])
+		                 return bar_symbol_[a] < bar_symbol_[b];
+	                 return bar_date_[a] < bar_date_[b];
 	                 });
+	return source_for_dest;
+}
+
+std::vector<std::size_t> MarketSeries::sorted_tick_indices() const
+{
+	const std::size_t n = ticks_.size();
+	if (n < 2) return {};
+
+	std::vector<std::size_t> source_for_dest(n);
+	std::iota(source_for_dest.begin(), source_for_dest.end(), 0u);
+	std::stable_sort(source_for_dest.begin(), source_for_dest.end(),
+	                 [this](std::size_t a, std::size_t b) {
+	                 if (ticks_[a].timestamp != ticks_[b].timestamp)
+		                 return ticks_[a].timestamp < ticks_[b].timestamp;
+	                 return ticks_[a].symbol < ticks_[b].symbol;
+	                 });
+	return source_for_dest;
+}
+
+void MarketSeries::apply_bar_permutation(std::vector<std::size_t>& source_for_dest)
+{
+	for (std::size_t dest = 0; dest < source_for_dest.size(); ++dest)
+	{
+		if (source_for_dest[dest] == dest)
+			continue;
+
+		auto ts = std::move(bar_ts_[dest]);
+		auto date = std::move(bar_date_[dest]);
+		auto symbol = std::move(bar_symbol_[dest]);
+		const double open = bar_open_[dest];
+		const double high = bar_high_[dest];
+		const double low = bar_low_[dest];
+		const double close = bar_close_[dest];
+		const int64_t volume = bar_volume_[dest];
+
+		std::size_t current = dest;
+		while (source_for_dest[current] != dest)
+		{
+			const std::size_t source = source_for_dest[current];
+			bar_ts_[current] = std::move(bar_ts_[source]);
+			bar_date_[current] = std::move(bar_date_[source]);
+			bar_symbol_[current] = std::move(bar_symbol_[source]);
+			bar_open_[current] = bar_open_[source];
+			bar_high_[current] = bar_high_[source];
+			bar_low_[current] = bar_low_[source];
+			bar_close_[current] = bar_close_[source];
+			bar_volume_[current] = bar_volume_[source];
+			source_for_dest[current] = current;
+			current = source;
+		}
+
+		bar_ts_[current] = std::move(ts);
+		bar_date_[current] = std::move(date);
+		bar_symbol_[current] = std::move(symbol);
+		bar_open_[current] = open;
+		bar_high_[current] = high;
+		bar_low_[current] = low;
+		bar_close_[current] = close;
+		bar_volume_[current] = volume;
+		source_for_dest[current] = current;
+	}
+}
+
+void MarketSeries::apply_tick_permutation(std::vector<std::size_t>& source_for_dest)
+{
+	for (std::size_t dest = 0; dest < source_for_dest.size(); ++dest)
+	{
+		if (source_for_dest[dest] == dest)
+			continue;
+
+		Tick saved = std::move(ticks_[dest]);
+		std::size_t current = dest;
+		while (source_for_dest[current] != dest)
+		{
+			const std::size_t source = source_for_dest[current];
+			ticks_[current] = std::move(ticks_[source]);
+			source_for_dest[current] = current;
+			current = source;
+		}
+		ticks_[current] = std::move(saved);
+		source_for_dest[current] = current;
+	}
 }
 
 void MarketSeries::filter_window(
@@ -169,6 +238,18 @@ void MarketSeries::filter_window(
 	std::optional<std::chrono::system_clock::time_point> to,
 	const std::vector<std::string>& symbols)
 {
+	filter_appended_window({0, 0, validation_error_count_}, from, to, symbols);
+}
+
+void MarketSeries::filter_appended_window(
+	AppendCheckpoint checkpoint,
+	std::optional<std::chrono::system_clock::time_point> from,
+	std::optional<std::chrono::system_clock::time_point> to,
+	const std::vector<std::string>& symbols)
+{
+	if (checkpoint.bar_count > bar_count() || checkpoint.tick_count > tick_count())
+		return;
+
 	std::unordered_set<std::string> sym_set(symbols.begin(), symbols.end());
 	const bool filter_sym = !sym_set.empty();
 
@@ -189,63 +270,52 @@ void MarketSeries::filter_window(
 		return true;
 	};
 
-	if (!bar_symbol_.empty())
+	const std::size_t original_bar_count = bar_count();
+	if (checkpoint.bar_count < original_bar_count)
 	{
-		const std::size_t n = bar_symbol_.size();
-		std::vector<std::size_t> keep;
-		keep.reserve(n);
-		for (std::size_t i = 0; i < n; ++i)
+		std::size_t write = checkpoint.bar_count;
+		for (std::size_t read = checkpoint.bar_count; read < original_bar_count; ++read)
 		{
-			if (in_window(bar_ts_[i], bar_symbol_[i]))
-				keep.push_back(i);
+			if (!in_window(bar_ts_[read], bar_symbol_[read]))
+				continue;
+
+			if (write != read)
+			{
+				bar_ts_[write] = bar_ts_[read];
+				bar_date_[write] = std::move(bar_date_[read]);
+				bar_symbol_[write] = std::move(bar_symbol_[read]);
+				bar_open_[write] = bar_open_[read];
+				bar_high_[write] = bar_high_[read];
+				bar_low_[write] = bar_low_[read];
+				bar_close_[write] = bar_close_[read];
+				bar_volume_[write] = bar_volume_[read];
+			}
+			++write;
 		}
-		if (keep.size() != n)
-		{
-			auto pick_str = [&](std::vector<std::string>& v) {
-				std::vector<std::string> out;
-				out.reserve(keep.size());
-				for (auto i : keep) out.push_back(std::move(v[i]));
-				v = std::move(out);
-			};
-			auto pick_d = [&](std::vector<double>& v) {
-				std::vector<double> out;
-				out.reserve(keep.size());
-				for (auto i : keep) out.push_back(v[i]);
-				v = std::move(out);
-			};
-			auto pick_i = [&](std::vector<int64_t>& v) {
-				std::vector<int64_t> out;
-				out.reserve(keep.size());
-				for (auto i : keep) out.push_back(v[i]);
-				v = std::move(out);
-			};
-			auto pick_tp = [&](std::vector<std::chrono::system_clock::time_point>& v) {
-				std::vector<std::chrono::system_clock::time_point> out;
-				out.reserve(keep.size());
-				for (auto i : keep) out.push_back(v[i]);
-				v = std::move(out);
-			};
-			pick_tp(bar_ts_);
-			pick_str(bar_date_);
-			pick_str(bar_symbol_);
-			pick_d(bar_open_);
-			pick_d(bar_high_);
-			pick_d(bar_low_);
-			pick_d(bar_close_);
-			pick_i(bar_volume_);
-		}
+
+		bar_ts_.resize(write);
+		bar_date_.resize(write);
+		bar_symbol_.resize(write);
+		bar_open_.resize(write);
+		bar_high_.resize(write);
+		bar_low_.resize(write);
+		bar_close_.resize(write);
+		bar_volume_.resize(write);
 	}
 
-	if (!ticks_.empty())
+	const std::size_t original_tick_count = tick_count();
+	if (checkpoint.tick_count < original_tick_count)
 	{
-		std::vector<Tick> kept;
-		kept.reserve(ticks_.size());
-		for (auto& t : ticks_)
+		std::size_t write = checkpoint.tick_count;
+		for (std::size_t read = checkpoint.tick_count; read < original_tick_count; ++read)
 		{
-			if (in_window(t.timestamp, t.symbol))
-				kept.push_back(std::move(t));
+			if (!in_window(ticks_[read].timestamp, ticks_[read].symbol))
+				continue;
+			if (write != read)
+				ticks_[write] = std::move(ticks_[read]);
+			++write;
 		}
-		ticks_ = std::move(kept);
+		ticks_.resize(write);
 	}
 }
 
@@ -318,4 +388,32 @@ void MarketSeries::reserve_bars(std::size_t n)
 void MarketSeries::reserve_ticks(std::size_t n)
 {
 	ticks_.reserve(n);
+}
+
+MarketSeries::AppendCheckpoint MarketSeries::append_checkpoint() const noexcept
+{
+	return {bar_count(), tick_count(), validation_error_count_};
+}
+
+void MarketSeries::rollback_appends(AppendCheckpoint checkpoint) noexcept
+{
+	// IMarketSource receives only the append-only IMarketSink interface, so a
+	// checkpoint made immediately before load_into() can always be restored by
+	// truncation. Reject an invalid external marker rather than accidentally
+	// growing a column during an error path.
+	if (checkpoint.bar_count > bar_count()
+		|| checkpoint.tick_count > tick_count()
+		|| checkpoint.validation_errors > validation_error_count_)
+		return;
+
+	bar_ts_.resize(checkpoint.bar_count);
+	bar_date_.resize(checkpoint.bar_count);
+	bar_symbol_.resize(checkpoint.bar_count);
+	bar_open_.resize(checkpoint.bar_count);
+	bar_high_.resize(checkpoint.bar_count);
+	bar_low_.resize(checkpoint.bar_count);
+	bar_close_.resize(checkpoint.bar_count);
+	bar_volume_.resize(checkpoint.bar_count);
+	ticks_.resize(checkpoint.tick_count);
+	validation_error_count_ = checkpoint.validation_errors;
 }

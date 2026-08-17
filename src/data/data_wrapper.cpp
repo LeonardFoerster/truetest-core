@@ -1,5 +1,6 @@
 #include "data_wrapper.h"
 #include "csv_data_source.h"
+#include "market_series.h"
 #include "tick_csv_data_source.h"
 
 #include <iostream>
@@ -18,35 +19,57 @@ public:
 	{
 		LoadStats total;
 		bool any = false;
+		bool had_partial_failure = false;
+		std::string first_failure;
+		auto* series = dynamic_cast<MarketSeries*>(&sink);
 		for (auto& p : parts_)
 		{
+			const auto checkpoint = series ? series->append_checkpoint()
+			                               : MarketSeries::AppendCheckpoint{};
 			LoadStats part;
 			if (!p->load_into(sink, &part))
+			{
+				// Partial mode means a failed input is skipped, not that a
+				// source may leave a prefix of its failed batch in the series.
+				// Native sources receive an append-only MarketSeries here; the
+				// outer DataWrapper remains the exception rollback boundary.
+				if (series)
+					series->rollback_appends(checkpoint);
+				had_partial_failure = true;
+				if (first_failure.empty())
+				{
+					first_failure = part.message.empty()
+						? "multi-source partial failure"
+						: part.message;
+				}
+			}
+			else
+			{
+				total.accepted += part.accepted;
+				total.rejected += part.rejected;
+				if (part.accepted > 0) any = true;
+			}
+			if (had_partial_failure && !allow_partial_)
 			{
 				if (stats)
 				{
 					*stats = total;
-					const std::string detail = part.message.empty()
-						? "multi-source partial failure"
-						: part.message;
 					// DR-REPLAY-03: default fail-closed so multi-file portfolios
 					// never run green with missing legs. Callers that relied on
 					// the old soft-success default must now opt in explicitly.
-					stats->message = allow_partial_
-						? detail
-						: detail + " (fail-closed default; set "
-						  "DataLoadOptions::allow_partial_sources=true to keep "
-						  "rows accepted so far)";
+					stats->message = first_failure + " (fail-closed default; set "
+						"DataLoadOptions::allow_partial_sources=true to keep "
+						"rows accepted so far)";
 				}
-				if (allow_partial_)
-					return any;
 				return false;
 			}
-			total.accepted += part.accepted;
-			total.rejected += part.rejected;
-			if (part.accepted > 0) any = true;
 		}
-		if (stats) *stats = total;
+		if (stats)
+		{
+			*stats = total;
+			if (had_partial_failure)
+				stats->message = first_failure;
+		}
 		return any;
 	}
 
@@ -155,23 +178,78 @@ bool DataWrapper::load(MarketSeries& out)
 	if (opt_.reserve_hint > 0)
 		out.reserve(opt_.reserve_hint);
 
+	const auto checkpoint = out.append_checkpoint();
+	auto preserves_append_boundary = [&]() noexcept {
+		return out.bar_count() >= checkpoint.bar_count
+			&& out.tick_count() >= checkpoint.tick_count
+			&& out.validation_errors() >= checkpoint.validation_errors;
+	};
 	LoadStats stats;
-	const bool ok = source_->load_into(out, &stats);
+	bool ok = false;
+	try
+	{
+		ok = source_->load_into(out, &stats);
+	}
+	catch (...)
+	{
+		if (!preserves_append_boundary())
+		{
+			throw std::logic_error(
+				"DataWrapper: source violated the append-only IMarketSource contract");
+		}
+		// Source failures are allowed to be reported as false, but an
+		// exception is never an opt-in partial-source result. Restore the
+		// append-only marker before preserving the source's exception.
+		out.rollback_appends(checkpoint);
+		throw;
+	}
+	if (!preserves_append_boundary())
+	{
+		// Do not perform suffix arithmetic after a source has invalidated its
+		// checkpoint. The façade cannot reconstruct pre-existing rows without
+		// an unacceptable full copy, so make the contract violation loud.
+		throw std::logic_error(
+			"DataWrapper: source violated the append-only IMarketSource contract");
+	}
 	if (!ok)
 	{
+		// allow_partial_sources is resolved inside MultiSource: a successful
+		// partial result returns true. Any false result is a failed batch and
+		// must never leave a direct or multi-source prefix behind.
+		out.rollback_appends(checkpoint);
 		if (!stats.message.empty())
 			std::cerr << "  ! DataWrapper load failed: " << stats.message << "\n";
 		return false;
 	}
+	if (!stats.message.empty())
+	{
+		// MultiSource records the first skipped source when partial mode is
+		// explicitly enabled. A successful partial result must still be loud.
+		std::cerr << "  ! DataWrapper partial source failure: " << stats.message << "\n";
+	}
 
 	// DR-REPLAY-04: apply declared from/to/symbols filters (were previously no-ops).
+	// Existing rows belong to the caller, not this batch; only filter the
+	// suffix accepted since the checkpoint so a failed/empty load cannot erase
+	// a reusable series' earlier data.
 	if (opt_.from || opt_.to || !opt_.symbols.empty())
 	{
-		const std::size_t before_bars = out.bar_count();
-		const std::size_t before_ticks = out.tick_count();
-		out.filter_window(opt_.from, opt_.to, opt_.symbols);
+		const std::size_t before_bars = out.bar_count() - checkpoint.bar_count;
+		const std::size_t before_ticks = out.tick_count() - checkpoint.tick_count;
+		try
+		{
+			out.filter_appended_window(checkpoint, opt_.from, opt_.to, opt_.symbols);
+		}
+		catch (...)
+		{
+			// The filter operates only on the appended suffix, so truncation is
+			// still sufficient if its cold-path symbol set cannot be allocated.
+			out.rollback_appends(checkpoint);
+			throw;
+		}
 		const std::size_t dropped =
-			(before_bars - out.bar_count()) + (before_ticks - out.tick_count());
+			(before_bars - (out.bar_count() - checkpoint.bar_count))
+			+ (before_ticks - (out.tick_count() - checkpoint.tick_count));
 		if (dropped > 0)
 		{
 			std::cerr << "  · DataWrapper: filtered " << dropped
@@ -179,26 +257,37 @@ bool DataWrapper::load(MarketSeries& out)
 		}
 	}
 
-	if (opt_.fail_if_empty && out.empty())
+	const bool appended_empty = out.bar_count() == checkpoint.bar_count
+		&& out.tick_count() == checkpoint.tick_count;
+	if (opt_.fail_if_empty && appended_empty)
 	{
+		out.rollback_appends(checkpoint);
 		std::cerr << "  ! DataWrapper: load produced no records\n";
 		return false;
 	}
 
-	if (opt_.sort_after_load && out.has_bar_data())
-		out.sort_bars_by_time();
-	// Tick tapes may arrive multi-file / out-of-order; sort when requested
-	// (same contract as bars — never silently truncate OOO ticks).
-	if (opt_.sort_after_load && out.has_tick_data())
-		out.sort_ticks_by_time();
+	if (opt_.sort_after_load && !appended_empty)
+	{
+		try
+		{
+			// Build all sort plans before either store changes. See
+			// MarketSeries::sort_all_by_time for the in-place application.
+			out.sort_all_by_time();
+		}
+		catch (...)
+		{
+			out.rollback_appends(checkpoint);
+			throw;
+		}
+	}
 
 	return true;
 }
 
-bool DataWrapper::stream(IMarketSink& sink, std::atomic<bool>* halt)
+StreamResult DataWrapper::stream(IMarketSink& sink, std::atomic<bool>* halt)
 {
 	if (!source_->supports_stream())
-		return false;
+		return {stream_termination::unsupported};
 	return source_->stream_into(sink, halt, nullptr);
 }
 

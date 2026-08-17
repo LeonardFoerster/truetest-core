@@ -112,17 +112,21 @@ public:
 
         if (both_filled > 0)
         {
-            double avg_slippage = total_slippage / both_filled;
-            double avg_abs_slippage = total_abs_slippage / both_filled;
-            double avg_latency = static_cast<double>(total_latency) / both_filled;
+            const double both_filled_count = static_cast<double>(both_filled);
+            double avg_slippage = total_slippage / both_filled_count;
+            double avg_abs_slippage = total_abs_slippage / both_filled_count;
+            double avg_latency = static_cast<double>(total_latency) / both_filled_count;
 
             std::cout << std::fixed << std::setprecision(6);
             std::cout << "    Avg slippage:            " << avg_slippage << "\n";
             std::cout << "    Avg |slippage|:          " << avg_abs_slippage << "\n";
             std::cout << "    Avg latency (ms):        " << avg_latency << "\n";
 
-            double sim_fill_rate = static_cast<double>(both_filled + sim_only) / total * 100.0;
-            double exch_fill_rate = static_cast<double>(both_filled + exchange_only) / total * 100.0;
+            const double total_count = static_cast<double>(total);
+            double sim_fill_rate = static_cast<double>(both_filled + sim_only) /
+                                   total_count * 100.0;
+            double exch_fill_rate = static_cast<double>(both_filled + exchange_only) /
+                                    total_count * 100.0;
             std::cout << std::fixed << std::setprecision(1);
             std::cout << "    Sim fill rate:           " << sim_fill_rate << "%\n";
             std::cout << "    Exchange fill rate:       " << exch_fill_rate << "%\n";

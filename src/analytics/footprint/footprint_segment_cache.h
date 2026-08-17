@@ -2,6 +2,7 @@
 
 #include "types/public_trade.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -19,6 +20,20 @@
 namespace truetest::footprint {
 
 inline constexpr std::uint32_t kSegmentSchemaVersion = 1;
+
+// Segment persistence is cold-path work, but it reads data that may have
+// been damaged or supplied by an operator. Keep a deliberately small default
+// memory budget: the reader's newly allocated staging is one compressed buffer
+// plus one decoded PublicTrade vector. Existing caller-owned output and Zstd
+// internals add to the process peak. Callers can explicitly raise the limit
+// for a known workload, but never beyond the compiled hard ceiling.
+inline constexpr std::size_t kDefaultMaxSegmentUncompressedBytes = 8U * 1024U * 1024U;
+inline constexpr std::size_t kHardMaxSegmentUncompressedBytes = 32U * 1024U * 1024U;
+
+struct SegmentReadLimits
+{
+    std::size_t max_uncompressed_bytes = kDefaultMaxSegmentUncompressedBytes;
+};
 
 struct SegmentMetadata
 {
@@ -44,22 +59,36 @@ enum class segment_read_status : std::uint8_t
     bad_magic,
     schema_mismatch,
     checksum_mismatch,
+    resource_limit,
+    trailing_data,
+};
+
+enum class segment_append_status : std::uint8_t
+{
+    appended,
+    full,
+    trade_too_large,
+    identity_mismatch,
+    resource_exhausted,
 };
 
 // Accumulates trades for one rolling segment (footprint.md "rolling every
-// five minutes or at a fixed maximum uncompressed size" - the caller
-// decides when to roll by watching elapsed time/buffered_count() and
-// calling finalize()).
+// five minutes or at a fixed maximum uncompressed size". Only `full` means
+// the caller should finalize and retry the same whole trade. The other
+// non-appended results are fail-closed: they leave state unchanged and must be
+// surfaced rather than causing an empty-segment retry loop or silent loss.
 class FootprintSegmentWriter
 {
 public:
-    FootprintSegmentWriter(std::uint16_t venue_id, std::uint16_t symbol_id);
+    FootprintSegmentWriter(std::uint16_t venue_id, std::uint16_t symbol_id,
+                           std::size_t max_uncompressed_bytes = kDefaultMaxSegmentUncompressedBytes);
 
     // A venue trade is never split between segments, matching the
     // aggregation rule elsewhere - append() only ever adds a whole trade.
-    void append(const PublicTrade& trade);
+    [[nodiscard]] segment_append_status append(const PublicTrade& trade) noexcept;
 
     std::size_t buffered_count() const noexcept { return trades_.size(); }
+    std::size_t max_buffered_count() const noexcept { return max_buffered_trades_; }
     bool empty() const noexcept { return trades_.empty(); }
 
     // Writes the compressed payload + metadata to `<finalized_path>.partial`
@@ -73,6 +102,7 @@ public:
 private:
     std::uint16_t venue_id_;
     std::uint16_t symbol_id_;
+    std::size_t max_buffered_trades_ = 0;
     std::vector<PublicTrade> trades_;
 };
 
@@ -83,6 +113,15 @@ private:
 segment_read_status read_segment(const std::filesystem::path& path,
                                   SegmentMetadata& out_meta,
                                   std::vector<PublicTrade>& out_trades);
+
+// Limit-aware overload for low-memory callers and deterministic tests. The
+// effective limit is clamped to kHardMaxSegmentUncompressedBytes, so a caller
+// cannot accidentally reintroduce an unbounded reader by supplying a huge
+// value. Outputs are changed only after the entire segment has verified.
+segment_read_status read_segment(const std::filesystem::path& path,
+                                  SegmentMetadata& out_meta,
+                                  std::vector<PublicTrade>& out_trades,
+                                  SegmentReadLimits limits);
 
 // Moves a corrupt/unreadable segment aside to `<path>.quarantined` (never
 // deleted outright - "report them instead of accepting partial contents").

@@ -7,7 +7,6 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <numeric>
 
 namespace {
 static const bool kAnalyticsPnlDebug = [] {
@@ -149,6 +148,7 @@ void Analytics::on_event(const event_pointer& ev)
             on_fill(*std::static_pointer_cast<fill_event>(ev));
             break;
         case event_type::signal:
+            break;
         case event_type::l2_snapshot:
             on_l2_snapshot(*std::static_pointer_cast<l2_snapshot_event>(ev));
             break;
@@ -293,6 +293,10 @@ void Analytics::on_order(const order_event& o)
 
 void Analytics::on_fill(const fill_event& f)
 {
+    const double filled_qty = f.get_filled_quantity();
+    if (!(filled_qty > 0.0) || !std::isfinite(filled_qty))
+        return;
+
     total_fills_++;
 
     if (f.get_latency_ns() > 0)
@@ -337,7 +341,6 @@ void Analytics::on_fill(const fill_event& f)
     rec.symbol = f.get_symbol();
     rec.strategy_name = strat_name;
 
-    const double filled_qty = f.get_filled_quantity();
     const double fill_price = f.get_fill_price();
     const double commission = f.get_commission();
     const double side_sign = (f.get_side() == order_side::buy) ? +1.0 : -1.0;

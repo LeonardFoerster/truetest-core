@@ -289,6 +289,8 @@ public:
     }
 
     double realized_pnl() const { return total_win_ - total_loss_; }
+    double gross_profit() const { return total_win_; }
+    double gross_loss() const { return total_loss_; }
     double max_drawdown_pct() const { return max_drawdown_ * 100.0; }
     double win_rate_pct() const
     {

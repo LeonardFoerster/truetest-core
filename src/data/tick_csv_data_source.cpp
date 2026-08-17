@@ -78,11 +78,6 @@ bool TickCsvDataSource::load_into(IMarketSink& sink, LoadStats* stats)
 			++rejected;
 	}
 
-	// add_tick() tolerates out-of-order rows without dropping them (DR-03); the
-	// tape must be re-sorted here or the engine will iterate ticks non-monotonically.
-	if (series)
-		series->sort_ticks_by_time();
-
 	if (stats)
 	{
 		stats->accepted = accepted;
@@ -96,5 +91,11 @@ bool TickCsvDataSource::load_into(IMarketSink& sink, LoadStats* stats)
 bool TickCsvDataSource::load_data(std::shared_ptr<data_handler> handler)
 {
 	if (!handler) return false;
-	return load_into(*handler, nullptr);
+	const bool ok = load_into(*handler, nullptr);
+	// Direct legacy users retain the historical sorted-tape contract. The
+	// DataWrapper owns sorting for multi-source loads, once every source has
+	// succeeded, so a later failure cannot reorder pre-existing ticks.
+	if (ok)
+		handler->sort_ticks_by_time();
+	return ok;
 }

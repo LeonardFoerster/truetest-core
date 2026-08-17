@@ -6,8 +6,11 @@
 #include "ilp_writer.h"
 
 #include <chrono>
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iosfwd>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -37,6 +40,11 @@ struct StoreConfig
     // Phase 4: Optional retention for per-run tables (e.g. 90 for 90 days)
     // When > 0, DDLs will include "TTL <value> DAYS"
     int ttl_days = 0;
+
+    // Hard limit for retained, not-yet-persisted ILP payload. Zero disables
+    // buffering and rejects each line fail-closed rather than permitting an
+    // unbounded queue.
+    std::size_t max_pending_bytes = IlpWriter::kDefaultMaxPendingBytes;
 };
 
 class QuestdbStore
@@ -136,6 +144,8 @@ public:
     };
 
     Health health() const;
+    bool strict_failure_latched() const;
+    void set_strict_failure_callback(std::function<void()> callback);
 
 private:
     StoreConfig cfg_;
@@ -146,6 +156,7 @@ private:
     // Phase 2 fallback support
     std::unique_ptr<std::ofstream> fallback_file_;
     std::size_t fallback_lines_written_ = 0;
+    std::atomic<bool> setup_failure_latched_{false};
 
     // Serialises access to ilp_ across engine capture-point callers.
     mutable std::mutex mu_;
