@@ -199,6 +199,129 @@ TEST(DefaultExitPolicy, UnionAppendsSlWhenMissing)
     EXPECT_TRUE(intents_have_take_profit(out));
 }
 
+TEST(BacktestDefects, BF04_UnionModeInjectsTpWhenStrategyHasOnlySl)
+{
+    auto o = make_order(order_side::buy, 10, 100);
+    exit_intent strat;
+    strat.symbol = "TEST";
+    strat.close_side = order_side::sell;
+    strat.qty = 10;
+    strat.stop_loss = 95.0;
+
+    default_exit_params p;
+    p.mode = exit_policy_mode::union_mode;
+    p.sl_pct = 0.0;
+    p.tp_pct = 0.02;
+    p.trail_pct = 0.0;
+
+    auto out = apply_default_exit_policy(p, o, 0.0, {strat});
+    ASSERT_EQ(out.size(), 2u);
+    ASSERT_TRUE(out[0].stop_loss);
+    EXPECT_DOUBLE_EQ(*out[0].stop_loss, 95.0);
+    EXPECT_FALSE(out[1].stop_loss);
+    ASSERT_TRUE(out[1].take_profit);
+    EXPECT_DOUBLE_EQ(*out[1].take_profit, 102.0);
+    EXPECT_FALSE(out[1].trailing_pct);
+    ASSERT_TRUE(out[1].reference_entry);
+    EXPECT_DOUBLE_EQ(*out[1].reference_entry, 100.0);
+}
+
+TEST(BacktestDefects, BF04_UnionModeInjectsTrailWhenStrategyHasOnlySl)
+{
+    auto o = make_order(order_side::buy, 10, 100);
+    exit_intent strat;
+    strat.symbol = "TEST";
+    strat.close_side = order_side::sell;
+    strat.qty = 10;
+    strat.stop_loss = 95.0;
+
+    default_exit_params p;
+    p.mode = exit_policy_mode::union_mode;
+    p.sl_pct = 0.0;
+    p.tp_pct = 0.0;
+    p.trail_pct = 0.01;
+
+    auto out = apply_default_exit_policy(p, o, 0.0, {strat});
+    ASSERT_EQ(out.size(), 2u);
+    ASSERT_TRUE(out[0].stop_loss);
+    EXPECT_DOUBLE_EQ(*out[0].stop_loss, 95.0);
+    EXPECT_FALSE(out[1].stop_loss);
+    EXPECT_FALSE(out[1].take_profit);
+    ASSERT_TRUE(out[1].trailing_pct);
+    EXPECT_DOUBLE_EQ(*out[1].trailing_pct, 0.01);
+    ASSERT_TRUE(out[1].reference_entry);
+    EXPECT_DOUBLE_EQ(*out[1].reference_entry, 100.0);
+}
+
+TEST(BacktestDefects, BF04_UnionModeEmptyStrategyKeepsFullPlatformPlan)
+{
+    auto o = make_order(order_side::sell, 5, 200);
+    default_exit_params p;
+    p.mode = exit_policy_mode::union_mode;
+    p.sl_pct = 0.01;
+    p.tp_pct = 0.02;
+    p.trail_pct = 0.005;
+
+    auto out = apply_default_exit_policy(p, o, 0.0, {});
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_TRUE(out[0].stop_loss);
+    ASSERT_TRUE(out[0].take_profit);
+    ASSERT_TRUE(out[0].trailing_pct);
+    EXPECT_DOUBLE_EQ(*out[0].stop_loss, 202.0);
+    EXPECT_DOUBLE_EQ(*out[0].take_profit, 196.0);
+    EXPECT_DOUBLE_EQ(*out[0].trailing_pct, 0.005);
+}
+
+TEST(BacktestDefects, BF04_UnionModeAppendsOnlyMissingConfiguredLegs)
+{
+    auto o = make_order(order_side::buy, 10, 100);
+    exit_intent strat;
+    strat.symbol = "TEST";
+    strat.close_side = order_side::sell;
+    strat.qty = 10;
+    strat.stop_loss = 95.0;
+
+    default_exit_params p;
+    p.mode = exit_policy_mode::union_mode;
+    p.sl_pct = 0.01;
+    p.tp_pct = 0.02;
+    p.trail_pct = 0.01;
+
+    auto out = apply_default_exit_policy(p, o, 0.0, {strat});
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_FALSE(out[1].stop_loss);
+    ASSERT_TRUE(out[1].take_profit);
+    EXPECT_DOUBLE_EQ(*out[1].take_profit, 102.0);
+    ASSERT_TRUE(out[1].trailing_pct);
+    EXPECT_DOUBLE_EQ(*out[1].trailing_pct, 0.01);
+}
+
+TEST(BacktestDefects, BF04_UnionModeDoesNotDuplicateLegTypesGlobally)
+{
+    auto o = make_order(order_side::buy, 10, 100);
+    exit_intent sl;
+    sl.stop_loss = 95.0;
+    exit_intent tp;
+    tp.take_profit = 120.0;
+    exit_intent trail;
+    trail.trailing_pct = 0.02;
+
+    default_exit_params p;
+    p.mode = exit_policy_mode::union_mode;
+    p.sl_pct = 0.01;
+    p.tp_pct = 0.02;
+    p.trail_pct = 0.01;
+
+    auto out = apply_default_exit_policy(p, o, 0.0, {sl, tp, trail});
+    ASSERT_EQ(out.size(), 3u);
+    ASSERT_TRUE(out[0].stop_loss);
+    ASSERT_TRUE(out[1].take_profit);
+    ASSERT_TRUE(out[2].trailing_pct);
+    EXPECT_DOUBLE_EQ(*out[0].stop_loss, 95.0);
+    EXPECT_DOUBLE_EQ(*out[1].take_profit, 120.0);
+    EXPECT_DOUBLE_EQ(*out[2].trailing_pct, 0.02);
+}
+
 TEST(DefaultExitPolicy, ZeroPctsYieldEmpty)
 {
     auto o = make_order(order_side::buy, 10, 100);

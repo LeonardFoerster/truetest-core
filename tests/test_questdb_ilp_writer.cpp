@@ -4,13 +4,18 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <memory>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <streambuf>
 #include <vector>
 
 using truetest::questdb::IIlpTransport;
 using truetest::questdb::IlpWriter;
+using truetest::questdb::IlpWriteOutcome;
 using truetest::questdb::LineBuilder;
 
 namespace {
@@ -32,26 +37,87 @@ public:
     }
     bool write_all(std::string_view data) override
     {
-        write_calls++;
-        if (fail_write_n_times > 0)
-        {
-            fail_write_n_times--;
-            return false;
-        }
-        writes.emplace_back(data);
-        return true;
+        return do_write(data) == IlpWriteOutcome::complete;
+    }
+    IlpWriteOutcome write_attempt(std::string_view data) override
+    {
+        return do_write(data);
     }
     void close() override { connected_ = false; }
     bool is_connected() const override { return connected_; }
 
     std::vector<std::string> writes;
+    std::vector<std::string> attempts;
     int connect_calls = 0;
     int write_calls = 0;
     int fail_connect_n_times = 0;
     int fail_write_n_times = 0;
+    int ambiguous_write_n_times = 0;
+
+private:
+    IlpWriteOutcome do_write(std::string_view data)
+    {
+        write_calls++;
+        attempts.emplace_back(data);
+        if (ambiguous_write_n_times > 0)
+        {
+            ambiguous_write_n_times--;
+            return IlpWriteOutcome::delivery_ambiguous;
+        }
+        if (fail_write_n_times > 0)
+        {
+            fail_write_n_times--;
+            return IlpWriteOutcome::no_bytes_sent;
+        }
+        writes.emplace_back(data);
+        return IlpWriteOutcome::complete;
+    }
+
+    bool connected_ = false;
+};
+
+class LegacyBoolOnlyTransport final : public IIlpTransport
+{
+public:
+    bool connect(const std::string& /*host*/, std::uint16_t /*port*/) override
+    {
+        connected_ = true;
+        ++connect_calls;
+        return true;
+    }
+    bool write_all(std::string_view /*data*/) override
+    {
+        ++write_calls;
+        return false;
+    }
+    void close() override { connected_ = false; }
+    bool is_connected() const override { return connected_; }
+
+    int connect_calls = 0;
+    int write_calls = 0;
 
 private:
     bool connected_ = false;
+};
+
+class ThrowingStream final : public std::ostream
+{
+private:
+    class ThrowingBuffer final : public std::streambuf
+    {
+    protected:
+        std::streamsize xsputn(const char*, std::streamsize) override
+        {
+            throw std::runtime_error("fallback stream failure");
+        }
+    } buffer_;
+
+public:
+    ThrowingStream()
+        : std::ostream(&buffer_)
+    {
+        exceptions(std::ios::badbit);
+    }
 };
 
 }
@@ -167,6 +233,7 @@ TEST(QuestdbIlpWriter, FlushFailureRetainsBuffer)
     w.enqueue("a\n");
     w.enqueue("b\n");
     EXPECT_FALSE(w.flush());
+    EXPECT_TRUE(w.failure_latched());
     EXPECT_EQ(w.pending_lines(), 2u);
     EXPECT_EQ(fake_raw->writes.size(), 0u);
 }
@@ -183,9 +250,242 @@ TEST(QuestdbIlpWriter, ReconnectAfterFailure)
     EXPECT_FALSE(w.flush());
     // After failure: socket was closed; next flush reconnects + writes.
     EXPECT_TRUE(w.flush());
+    EXPECT_TRUE(w.failure_latched());
     ASSERT_EQ(fake_raw->writes.size(), 1u);
     EXPECT_EQ(fake_raw->writes[0], "hello\n");
     EXPECT_GE(fake_raw->connect_calls, 2);
+}
+
+TEST(QuestdbIlpWriter, FailedBufferIsBoundedAndRetainedLinesRecoverInFifoOrder)
+{
+    auto fake = std::make_unique<FakeTransport>();
+    auto* fake_raw = fake.get();
+    IlpWriter w("h", 9009, std::move(fake),
+                /*flush_every_n_lines=*/1000,
+                std::chrono::hours{1},
+                /*max_pending_bytes=*/8);
+    std::size_t callbacks = 0;
+    w.set_failure_callback([&] { ++callbacks; });
+    ASSERT_TRUE(w.connect());
+
+    w.enqueue("a\n");
+    w.enqueue("b\n");
+    w.enqueue("c\n");
+    w.enqueue("d\n");
+    ASSERT_EQ(w.pending_bytes(), 8u);
+
+    fake_raw->fail_write_n_times = 1;
+    EXPECT_FALSE(w.flush());
+    EXPECT_TRUE(w.failure_latched());
+
+    for (int i = 0; i < 96; ++i)
+    {
+        w.enqueue("x\n");
+        EXPECT_LE(w.pending_bytes(), 8u);
+    }
+
+    EXPECT_EQ(w.pending_lines(), 4u);
+    EXPECT_EQ(w.pending_bytes(), 8u);
+    EXPECT_EQ(w.dropped_lines(), 96u);
+    EXPECT_EQ(callbacks, 1u);
+    EXPECT_EQ(fake_raw->connect_calls, 1);
+    EXPECT_TRUE(fake_raw->writes.empty());
+
+    EXPECT_TRUE(w.flush());
+    ASSERT_EQ(fake_raw->writes.size(), 1u);
+    EXPECT_EQ(fake_raw->writes[0], "a\nb\nc\nd\n");
+    EXPECT_EQ(w.pending_lines(), 0u);
+    EXPECT_EQ(w.pending_bytes(), 0u);
+    EXPECT_EQ(w.dropped_lines(), 96u);
+    EXPECT_EQ(callbacks, 1u);
+}
+
+TEST(QuestdbIlpWriter, FullBufferUsesHealthyFallbackBeforeDroppingIncomingLine)
+{
+    auto fake = std::make_unique<FakeTransport>();
+    auto* fake_raw = fake.get();
+    IlpWriter w("h", 9009, std::move(fake),
+                /*flush_every_n_lines=*/1000,
+                std::chrono::hours{1},
+                /*max_pending_bytes=*/8);
+    std::size_t callbacks = 0;
+    w.set_failure_callback([&] { ++callbacks; });
+    ASSERT_TRUE(w.connect());
+
+    auto fallback = std::make_unique<std::ostringstream>();
+    auto* fallback_raw = fallback.get();
+    w.enable_fallback(std::move(fallback));
+
+    w.enqueue("a\n");
+    w.enqueue("b\n");
+    w.enqueue("c\n");
+    w.enqueue("d\n");
+    fake_raw->fail_write_n_times = 1;
+    w.enqueue("e\n");
+
+    EXPECT_EQ(fallback_raw->str(), "a\nb\nc\nd\n");
+    EXPECT_EQ(w.fallback_lines(), 4u);
+    EXPECT_EQ(w.pending_lines(), 1u);
+    EXPECT_EQ(w.pending_bytes(), 2u);
+    EXPECT_EQ(w.dropped_lines(), 0u);
+    EXPECT_TRUE(w.failure_latched());
+    EXPECT_EQ(callbacks, 1u);
+
+    EXPECT_TRUE(w.flush());
+    ASSERT_EQ(fake_raw->writes.size(), 1u);
+    EXPECT_EQ(fake_raw->writes[0], "e\n");
+}
+
+TEST(QuestdbIlpWriter, AmbiguousWriteQuarantinesTheBatchWithoutReplay)
+{
+    auto fake = std::make_unique<FakeTransport>();
+    auto* fake_raw = fake.get();
+    IlpWriter w("h", 9009, std::move(fake),
+                /*flush_every_n_lines=*/1000,
+                std::chrono::milliseconds{0},
+                /*max_pending_bytes=*/8);
+    ASSERT_TRUE(w.connect());
+    auto fallback = std::make_unique<std::ostringstream>();
+    auto* fallback_raw = fallback.get();
+    w.enable_fallback(std::move(fallback));
+    w.enqueue("a\n");
+    w.enqueue("b\n");
+    w.enqueue("c\n");
+    w.enqueue("d\n");
+
+    fake_raw->ambiguous_write_n_times = 1;
+    EXPECT_FALSE(w.flush());
+    EXPECT_TRUE(w.failure_latched());
+    EXPECT_TRUE(w.delivery_ambiguous());
+    EXPECT_FALSE(w.is_connected());
+    EXPECT_EQ(w.pending_lines(), 4u);
+    EXPECT_EQ(w.pending_bytes(), 8u);
+    EXPECT_EQ(fallback_raw->str(), "");
+    ASSERT_EQ(fake_raw->attempts.size(), 1u);
+    EXPECT_EQ(fake_raw->attempts[0], "a\nb\nc\nd\n");
+
+    EXPECT_FALSE(w.flush());
+    w.maybe_time_flush();
+    EXPECT_FALSE(w.enqueue("e\n"));
+    EXPECT_EQ(w.dropped_lines(), 1u);
+    EXPECT_EQ(w.pending_lines(), 4u);
+    EXPECT_EQ(fake_raw->connect_calls, 1);
+    EXPECT_EQ(fake_raw->attempts.size(), 1u);
+}
+
+TEST(QuestdbIlpWriter, LegacyBoolTransportFailureIsQuarantinedConservatively)
+{
+    auto legacy = std::make_unique<LegacyBoolOnlyTransport>();
+    auto* legacy_raw = legacy.get();
+    IlpWriter w("h", 9009, std::move(legacy),
+                /*flush_every_n_lines=*/1000,
+                std::chrono::hours{1},
+                /*max_pending_bytes=*/8);
+    ASSERT_TRUE(w.connect());
+    auto fallback = std::make_unique<std::ostringstream>();
+    auto* fallback_raw = fallback.get();
+    w.enable_fallback(std::move(fallback));
+    ASSERT_TRUE(w.enqueue("a\n"));
+
+    EXPECT_FALSE(w.flush());
+    EXPECT_TRUE(w.failure_latched());
+    EXPECT_TRUE(w.delivery_ambiguous());
+    EXPECT_EQ(w.pending_lines(), 1u);
+    EXPECT_EQ(w.pending_bytes(), 2u);
+    EXPECT_EQ(legacy_raw->connect_calls, 1);
+    EXPECT_EQ(legacy_raw->write_calls, 1);
+    EXPECT_EQ(fallback_raw->str(), "");
+
+    EXPECT_FALSE(w.flush());
+    EXPECT_FALSE(w.enqueue("b\n"));
+    EXPECT_EQ(w.dropped_lines(), 1u);
+    EXPECT_EQ(legacy_raw->connect_calls, 1);
+    EXPECT_EQ(legacy_raw->write_calls, 1);
+}
+
+TEST(QuestdbIlpWriter, OversizedLineIsRejectedWithoutGrowingTheBuffer)
+{
+    auto fake = std::make_unique<FakeTransport>();
+    auto* fake_raw = fake.get();
+    IlpWriter w("h", 9009, std::move(fake),
+                /*flush_every_n_lines=*/1000,
+                std::chrono::hours{1},
+                /*max_pending_bytes=*/4);
+    std::size_t callbacks = 0;
+    w.set_failure_callback([&] { ++callbacks; });
+    ASSERT_TRUE(w.connect());
+
+    w.enqueue("oversized\n");
+
+    EXPECT_EQ(w.pending_lines(), 0u);
+    EXPECT_EQ(w.pending_bytes(), 0u);
+    EXPECT_EQ(w.dropped_lines(), 1u);
+    EXPECT_TRUE(w.failure_latched());
+    EXPECT_EQ(callbacks, 1u);
+    EXPECT_TRUE(fake_raw->writes.empty());
+}
+
+TEST(QuestdbIlpWriter, ThrowingFailureCallbackDoesNotSkipCloseOrFallback)
+{
+    auto fake = std::make_unique<FakeTransport>();
+    auto* fake_raw = fake.get();
+    fake_raw->fail_write_n_times = 1;
+    IlpWriter w("h", 9009, std::move(fake), 1000);
+    ASSERT_TRUE(w.connect());
+    auto fallback = std::make_unique<std::ostringstream>();
+    auto* fallback_raw = fallback.get();
+    w.enable_fallback(std::move(fallback));
+    w.set_failure_callback([] { throw std::runtime_error("callback failure"); });
+
+    w.enqueue("a\n");
+
+    EXPECT_FALSE(w.flush());
+    EXPECT_TRUE(w.failure_latched());
+    EXPECT_FALSE(w.is_connected());
+    EXPECT_EQ(fallback_raw->str(), "a\n");
+    EXPECT_EQ(w.fallback_lines(), 1u);
+    EXPECT_EQ(w.pending_lines(), 0u);
+}
+
+TEST(QuestdbIlpWriter, ThrowingFallbackIsLatchedAndRetainsTheBuffer)
+{
+    auto fake = std::make_unique<FakeTransport>();
+    auto* fake_raw = fake.get();
+    fake_raw->fail_write_n_times = 1;
+    IlpWriter w("h", 9009, std::move(fake), 1000);
+    ASSERT_TRUE(w.connect());
+    w.enable_fallback(std::make_unique<ThrowingStream>());
+    w.enqueue("a\n");
+
+    EXPECT_FALSE(w.flush());
+    EXPECT_TRUE(w.failure_latched());
+    EXPECT_FALSE(w.is_connected());
+    EXPECT_EQ(w.fallback_lines(), 0u);
+    EXPECT_EQ(w.pending_lines(), 1u);
+    EXPECT_EQ(w.pending_bytes(), 2u);
+}
+
+TEST(QuestdbIlpWriter, BadFallbackDoesNotClaimOrDiscardBufferedLines)
+{
+    auto fake = std::make_unique<FakeTransport>();
+    auto* fake_raw = fake.get();
+    IlpWriter w("h", 9009, std::move(fake),
+                /*flush_every_n_lines=*/1000,
+                std::chrono::hours{1},
+                /*max_pending_bytes=*/4);
+    ASSERT_TRUE(w.connect());
+    auto fallback = std::make_unique<std::ostringstream>();
+    fallback->setstate(std::ios::badbit);
+    w.enable_fallback(std::move(fallback));
+    w.enqueue("a\n");
+    w.enqueue("b\n");
+    fake_raw->fail_write_n_times = 1;
+    w.enqueue("c\n");
+    EXPECT_TRUE(w.failure_latched());
+    EXPECT_EQ(w.fallback_lines(), 0u);
+    EXPECT_EQ(w.pending_lines(), 2u);
+    EXPECT_EQ(w.pending_bytes(), 4u);
+    EXPECT_EQ(w.dropped_lines(), 1u);
 }
 
 #endif // HAS_QUESTDB

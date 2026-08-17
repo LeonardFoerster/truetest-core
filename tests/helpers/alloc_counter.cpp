@@ -61,7 +61,45 @@ void* operator new[](std::size_t n, const std::nothrow_t&) noexcept
     return std::malloc(n);
 }
 
+void* operator new(std::size_t n, std::align_val_t alignment)
+{
+    truetest::test::alloc::record(n);
+    void* p = nullptr;
+    if (::posix_memalign(&p, static_cast<std::size_t>(alignment),
+                         n == 0 ? 1 : n) == 0)
+        return p;
+    throw std::bad_alloc();
+}
+
+void* operator new[](std::size_t n, std::align_val_t alignment)
+{
+    return ::operator new(n, alignment);
+}
+
+void* operator new(std::size_t n, std::align_val_t alignment,
+                   const std::nothrow_t&) noexcept
+{
+    try { return ::operator new(n, alignment); }
+    catch (...) { return nullptr; }
+}
+
+void* operator new[](std::size_t n, std::align_val_t alignment,
+                     const std::nothrow_t&) noexcept
+{
+    return ::operator new(n, alignment, std::nothrow);
+}
+
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept
+{
+    std::free(p);
+}
+void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t, std::align_val_t) noexcept
+{
+    std::free(p);
+}

@@ -18,6 +18,11 @@ using namespace truetest::footprint;
 namespace {
 
 constexpr std::int64_t kSecond = 1'000'000'000LL;
+constexpr std::streamoff kSegmentHeaderBytes = 96;
+constexpr std::streamoff kVenueIdOffset = 12;
+constexpr std::streamoff kTimeRangeStartOffset = 16;
+constexpr std::streamoff kRawSizeOffset = 80;
+constexpr std::streamoff kCompressedSizeOffset = 88;
 
 // RAII scratch directory - unique per test process invocation via a
 // monotonic counter (Date.now()/random device use is fine here, this is a
@@ -40,7 +45,8 @@ private:
     std::filesystem::path path_;
 };
 
-PublicTrade make_native(std::int64_t event_ns, std::uint64_t native_id)
+PublicTrade make_native(std::int64_t event_ns, std::uint64_t native_id,
+                        std::uint16_t venue_id = 1, std::uint16_t symbol_id = 1)
 {
     PublicTrade t;
     t.event_ns = event_ns;
@@ -49,10 +55,13 @@ PublicTrade make_native(std::int64_t event_ns, std::uint64_t native_id)
     t.flags = provenance_native_id;
     t.price_ticks = 100;
     t.base_qty_atoms = 1;
+    t.venue_id = venue_id;
+    t.symbol_id = symbol_id;
     return t;
 }
 
-PublicTrade make_session(std::int64_t event_ns, std::uint64_t session_id, std::uint64_t obs_seq)
+PublicTrade make_session(std::int64_t event_ns, std::uint64_t session_id, std::uint64_t obs_seq,
+                         std::uint16_t venue_id = 1, std::uint16_t symbol_id = 1)
 {
     PublicTrade t;
     t.event_ns = event_ns;
@@ -62,7 +71,22 @@ PublicTrade make_session(std::int64_t event_ns, std::uint64_t session_id, std::u
     t.flags = provenance_session_only;
     t.price_ticks = 100;
     t.base_qty_atoms = 1;
+    t.venue_id = venue_id;
+    t.symbol_id = symbol_id;
     return t;
+}
+
+void seed_outputs(SegmentMetadata& meta, std::vector<PublicTrade>& trades)
+{
+    meta.venue_id = 77;
+    meta.symbol_id = 88;
+    meta.record_count = 99;
+    trades = {make_native(-kSecond, 777)};
+}
+
+bool append_ok(FootprintSegmentWriter& writer, const PublicTrade& trade)
+{
+    return writer.append(trade) == segment_append_status::appended;
 }
 
 } // namespace
@@ -73,9 +97,9 @@ TEST(FootprintSegmentCache, WriteFinalizeReadRoundTrip)
     const auto path = dir.path() / "seg1.bin";
 
     FootprintSegmentWriter writer(/*venue=*/1, /*symbol=*/2);
-    writer.append(make_native(0, 10));
-    writer.append(make_native(kSecond, 11));
-    writer.append(make_native(2 * kSecond, 12));
+    ASSERT_TRUE(append_ok(writer, make_native(0, 10, /*venue=*/1, /*symbol=*/2)));
+    ASSERT_TRUE(append_ok(writer, make_native(kSecond, 11, /*venue=*/1, /*symbol=*/2)));
+    ASSERT_TRUE(append_ok(writer, make_native(2 * kSecond, 12, /*venue=*/1, /*symbol=*/2)));
 
     auto meta = writer.finalize(path);
     ASSERT_TRUE(meta.has_value());
@@ -127,8 +151,8 @@ TEST(FootprintSegmentCache, CorruptedPayloadFailsChecksumNotPartiallyAccepted)
     ScratchDir dir;
     const auto path = dir.path() / "seg.bin";
     FootprintSegmentWriter writer(1, 1);
-    writer.append(make_native(0, 1));
-    writer.append(make_native(kSecond, 2));
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
+    ASSERT_TRUE(append_ok(writer, make_native(kSecond, 2)));
     ASSERT_TRUE(writer.finalize(path).has_value());
 
     // Flip a byte near the end of the file (inside the compressed payload).
@@ -156,7 +180,7 @@ TEST(FootprintSegmentCache, TruncatedFileIsDetected)
     ScratchDir dir;
     const auto path = dir.path() / "seg.bin";
     FootprintSegmentWriter writer(1, 1);
-    writer.append(make_native(0, 1));
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
     ASSERT_TRUE(writer.finalize(path).has_value());
 
     const auto size = std::filesystem::file_size(path);
@@ -172,7 +196,7 @@ TEST(FootprintSegmentCache, BadMagicIsDetected)
     ScratchDir dir;
     const auto path = dir.path() / "seg.bin";
     FootprintSegmentWriter writer(1, 1);
-    writer.append(make_native(0, 1));
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
     ASSERT_TRUE(writer.finalize(path).has_value());
 
     {
@@ -190,7 +214,7 @@ TEST(FootprintSegmentCache, SchemaVersionMismatchIsDetected)
     ScratchDir dir;
     const auto path = dir.path() / "seg.bin";
     FootprintSegmentWriter writer(1, 1);
-    writer.append(make_native(0, 1));
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
     ASSERT_TRUE(writer.finalize(path).has_value());
 
     {
@@ -210,7 +234,7 @@ TEST(FootprintSegmentCache, QuarantineMovesFileAsideAndReportsThePath)
     ScratchDir dir;
     const auto path = dir.path() / "seg.bin";
     FootprintSegmentWriter writer(1, 1);
-    writer.append(make_native(0, 1));
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
     ASSERT_TRUE(writer.finalize(path).has_value());
 
     auto quarantined = quarantine_segment(path);
@@ -233,8 +257,8 @@ TEST(FootprintSegmentCache, SessionIdMinReportsTrueZeroNotSentinelCollision)
     ScratchDir dir;
     const auto path = dir.path() / "seg.bin";
     FootprintSegmentWriter writer(1, 1);
-    writer.append(make_session(0, /*session_id=*/0, /*obs_seq=*/0));
-    writer.append(make_session(kSecond, /*session_id=*/1, /*obs_seq=*/0));
+    ASSERT_TRUE(append_ok(writer, make_session(0, /*session_id=*/0, /*obs_seq=*/0)));
+    ASSERT_TRUE(append_ok(writer, make_session(kSecond, /*session_id=*/1, /*obs_seq=*/0)));
     ASSERT_TRUE(writer.finalize(path).has_value());
 
     SegmentMetadata meta;
@@ -249,8 +273,8 @@ TEST(FootprintSegmentCache, NativeIdMinReportsTrueZeroNotSentinelCollision)
     ScratchDir dir;
     const auto path = dir.path() / "seg.bin";
     FootprintSegmentWriter writer(1, 1);
-    writer.append(make_native(0, /*native_id=*/0));
-    writer.append(make_native(kSecond, /*native_id=*/5));
+    ASSERT_TRUE(append_ok(writer, make_native(0, /*native_id=*/0)));
+    ASSERT_TRUE(append_ok(writer, make_native(kSecond, /*native_id=*/5)));
     ASSERT_TRUE(writer.finalize(path).has_value());
 
     SegmentMetadata meta;
@@ -265,14 +289,13 @@ TEST(FootprintSegmentCache, CorruptedRawSizeIsRejectedNotAllocatedBlindly)
     ScratchDir dir;
     const auto path = dir.path() / "seg.bin";
     FootprintSegmentWriter writer(1, 1);
-    writer.append(make_native(0, 1));
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
     ASSERT_TRUE(writer.finalize(path).has_value());
 
     // raw_size is the first uint64 after the 11-field metadata block:
     // magic(8) + schema(4) + venue(2) + symbol(2) + start(8) + end(8) +
     // count(8) + native_min(8) + native_max(8) + session_min(8) +
     // session_max(8) + checksum(8) = 80 bytes in.
-    constexpr std::streamoff kRawSizeOffset = 80;
     {
         std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
         f.seekp(kRawSizeOffset, std::ios::beg);
@@ -282,10 +305,221 @@ TEST(FootprintSegmentCache, CorruptedRawSizeIsRejectedNotAllocatedBlindly)
 
     SegmentMetadata meta;
     std::vector<PublicTrade> trades;
+    seed_outputs(meta, trades);
     // Must fail gracefully (quarantine-worthy status), never crash/throw
-    // trying to allocate for the corrupted size.
+    // trying to allocate for the corrupted size or overwrite prior outputs.
+    EXPECT_EQ(read_segment(path, meta, trades), segment_read_status::resource_limit);
+    EXPECT_EQ(meta.venue_id, 77u);
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades.front().native_trade_id, 777u);
+}
+
+TEST(FootprintSegmentCache, ReaderHonorsTightLimitBeforeAllocatingPayload)
+{
+    ScratchDir dir;
+    const auto path = dir.path() / "seg.bin";
+    FootprintSegmentWriter writer(1, 1);
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
+    ASSERT_TRUE(writer.finalize(path).has_value());
+
+    SegmentMetadata meta;
+    std::vector<PublicTrade> trades;
+    seed_outputs(meta, trades);
+    SegmentReadLimits limits;
+    limits.max_uncompressed_bytes = sizeof(PublicTrade) - 1;
+
+    EXPECT_EQ(read_segment(path, meta, trades, limits), segment_read_status::resource_limit);
+    EXPECT_EQ(meta.venue_id, 77u);
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades.front().native_trade_id, 777u);
+}
+
+TEST(FootprintSegmentCache, OversizedCompressedClaimIsRejectedBeforePayloadRead)
+{
+    ScratchDir dir;
+    const auto path = dir.path() / "seg.bin";
+    FootprintSegmentWriter writer(1, 1);
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
+    ASSERT_TRUE(writer.finalize(path).has_value());
+
+    {
+        std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(f);
+        f.seekp(kCompressedSizeOffset, std::ios::beg);
+        const std::uint64_t absurd_compressed_size = std::numeric_limits<std::uint64_t>::max();
+        f.write(reinterpret_cast<const char*>(&absurd_compressed_size),
+                sizeof(absurd_compressed_size));
+    }
+
+    SegmentMetadata meta;
+    std::vector<PublicTrade> trades;
+    seed_outputs(meta, trades);
+    EXPECT_EQ(read_segment(path, meta, trades), segment_read_status::resource_limit);
+    EXPECT_EQ(meta.venue_id, 77u);
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades.front().native_trade_id, 777u);
+}
+
+TEST(FootprintSegmentCache, TrailerIsRejectedWithoutMutatingOutputs)
+{
+    ScratchDir dir;
+    const auto path = dir.path() / "seg.bin";
+    FootprintSegmentWriter writer(1, 1);
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
+    ASSERT_TRUE(writer.finalize(path).has_value());
+    {
+        std::ofstream f(path, std::ios::binary | std::ios::app);
+        ASSERT_TRUE(f);
+        f.put('x');
+    }
+
+    SegmentMetadata meta;
+    std::vector<PublicTrade> trades;
+    seed_outputs(meta, trades);
+    EXPECT_EQ(read_segment(path, meta, trades), segment_read_status::trailing_data);
+    EXPECT_EQ(meta.venue_id, 77u);
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades.front().native_trade_id, 777u);
+}
+
+TEST(FootprintSegmentCache, EmptySegmentStillRequiresValidZstdFrame)
+{
+    ScratchDir dir;
+    const auto path = dir.path() / "empty.bin";
+    FootprintSegmentWriter writer(1, 1);
+    ASSERT_TRUE(writer.finalize(path).has_value());
+    ASSERT_GT(std::filesystem::file_size(path), static_cast<std::uintmax_t>(kSegmentHeaderBytes));
+
+    {
+        std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(f);
+        f.seekg(kSegmentHeaderBytes, std::ios::beg);
+        char byte = 0;
+        ASSERT_TRUE(f.read(&byte, 1));
+        byte = static_cast<char>(~byte);
+        f.seekp(kSegmentHeaderBytes, std::ios::beg);
+        f.write(&byte, 1);
+    }
+
+    SegmentMetadata meta;
+    std::vector<PublicTrade> trades;
+    seed_outputs(meta, trades);
     EXPECT_NE(read_segment(path, meta, trades), segment_read_status::ok);
-    EXPECT_TRUE(trades.empty());
+    EXPECT_EQ(meta.venue_id, 77u);
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades.front().native_trade_id, 777u);
+}
+
+TEST(FootprintSegmentCache, PayloadDerivedMetadataTamperingIsRejected)
+{
+    ScratchDir dir;
+    const auto path = dir.path() / "seg.bin";
+    FootprintSegmentWriter writer(1, 1);
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
+    ASSERT_TRUE(writer.finalize(path).has_value());
+
+    {
+        std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(f);
+        f.seekp(kTimeRangeStartOffset, std::ios::beg);
+        const std::int64_t bogus_start = 12345;
+        f.write(reinterpret_cast<const char*>(&bogus_start), sizeof(bogus_start));
+    }
+
+    SegmentMetadata meta;
+    std::vector<PublicTrade> trades;
+    seed_outputs(meta, trades);
+    EXPECT_EQ(read_segment(path, meta, trades), segment_read_status::checksum_mismatch);
+    EXPECT_EQ(meta.venue_id, 77u);
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades.front().native_trade_id, 777u);
+}
+
+TEST(FootprintSegmentCache, EmbeddedTradeIdentityRejectsTamperedHeaderIdentity)
+{
+    ScratchDir dir;
+    const auto path = dir.path() / "seg.bin";
+    FootprintSegmentWriter writer(1, 1);
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
+    ASSERT_TRUE(writer.finalize(path).has_value());
+
+    {
+        std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+        ASSERT_TRUE(f);
+        f.seekp(kVenueIdOffset, std::ios::beg);
+        const std::uint16_t bogus_venue = 2;
+        f.write(reinterpret_cast<const char*>(&bogus_venue), sizeof(bogus_venue));
+    }
+
+    SegmentMetadata meta;
+    std::vector<PublicTrade> trades;
+    seed_outputs(meta, trades);
+    EXPECT_EQ(read_segment(path, meta, trades), segment_read_status::checksum_mismatch);
+    EXPECT_EQ(meta.venue_id, 77u);
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades.front().native_trade_id, 777u);
+}
+
+TEST(FootprintSegmentCache, WriterReturnsDistinctFailureReasonsWithoutMutation)
+{
+    FootprintSegmentWriter wrong_key_writer(1, 1, sizeof(PublicTrade));
+    EXPECT_EQ(wrong_key_writer.append(make_native(0, 1, /*venue=*/1, /*symbol=*/2)),
+              segment_append_status::identity_mismatch);
+    EXPECT_TRUE(wrong_key_writer.empty());
+
+    FootprintSegmentWriter too_small_writer(1, 1, sizeof(PublicTrade) - 1);
+    EXPECT_EQ(too_small_writer.append(make_native(0, 1)),
+              segment_append_status::trade_too_large);
+    EXPECT_TRUE(too_small_writer.empty());
+}
+
+TEST(FootprintSegmentCache, WriterCapsWholeTradesAndResetsOnlyAfterSuccessfulFinalize)
+{
+    ScratchDir dir;
+    const auto first_path = dir.path() / "first.bin";
+    const auto second_path = dir.path() / "second.bin";
+    FootprintSegmentWriter writer(1, 1, sizeof(PublicTrade));
+
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
+    EXPECT_EQ(writer.append(make_native(kSecond, 2)), segment_append_status::full);
+    EXPECT_EQ(writer.buffered_count(), 1u);
+    EXPECT_EQ(writer.max_buffered_count(), 1u);
+    ASSERT_TRUE(writer.finalize(first_path).has_value());
+    EXPECT_TRUE(writer.empty());
+    EXPECT_EQ(writer.buffered_count(), 0u);
+
+    ASSERT_TRUE(append_ok(writer, make_native(kSecond, 2)));
+    ASSERT_TRUE(writer.finalize(second_path).has_value());
+    EXPECT_TRUE(writer.empty());
+
+    SegmentMetadata first_meta;
+    std::vector<PublicTrade> first_trades;
+    ASSERT_EQ(read_segment(first_path, first_meta, first_trades), segment_read_status::ok);
+    ASSERT_EQ(first_trades.size(), 1u);
+    EXPECT_EQ(first_trades.front().native_trade_id, 1u);
+
+    SegmentMetadata second_meta;
+    std::vector<PublicTrade> second_trades;
+    ASSERT_EQ(read_segment(second_path, second_meta, second_trades), segment_read_status::ok);
+    ASSERT_EQ(second_trades.size(), 1u);
+    EXPECT_EQ(second_trades.front().native_trade_id, 2u);
+}
+
+TEST(FootprintSegmentCache, FailedFinalizeRetainsTradesForRetry)
+{
+    ScratchDir dir;
+    FootprintSegmentWriter writer(1, 1, sizeof(PublicTrade));
+    ASSERT_TRUE(append_ok(writer, make_native(0, 1)));
+
+    EXPECT_FALSE(writer.finalize(dir.path() / "missing-parent" / "seg.bin").has_value());
+    EXPECT_EQ(writer.buffered_count(), 1u);
+    ASSERT_TRUE(writer.finalize(dir.path() / "retry.bin").has_value());
+
+    SegmentMetadata meta;
+    std::vector<PublicTrade> trades;
+    ASSERT_EQ(read_segment(dir.path() / "retry.bin", meta, trades), segment_read_status::ok);
+    ASSERT_EQ(trades.size(), 1u);
+    EXPECT_EQ(trades.front().native_trade_id, 1u);
 }
 
 // --- Manifest ---

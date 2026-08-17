@@ -6,7 +6,7 @@
 // in. Any future code change that alters backtest outputs will fail this
 // test, surfacing unintended behavior drift.
 // Regenerating the golden file:
-//   TRUETEST_REGENERATE_GOLDEN=1 ./build/truetest_tests \
+//   TRUETEST_REGENERATE_GOLDEN=1 ./build/truetest_tests
 //       --gtest_filter='GoldenRegression.*'
 // After verifying the new numbers are intentional, commit the updated JSON.
 

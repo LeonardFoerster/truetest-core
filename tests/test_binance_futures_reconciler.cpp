@@ -3,6 +3,7 @@
 #ifdef HAS_BINANCE
 
 #include "providers/binance/binance_futures_reconciler.h"
+#include "providers/binance/binance_reconciler.h"
 
 #include <string>
 
@@ -64,6 +65,86 @@ TEST(BinanceFuturesReconciler, PositionAmtMissingReturnsFalse)
     std::string body = R"([{"symbol":"BTCUSDT","entryPrice":"30000"}])";
     double out = 42.0;
     EXPECT_FALSE(BinanceFuturesReconciler::extract_position_amt(body, out));
+}
+
+TEST(BinanceFuturesReconciler, PositionAmtWrongSymbolRefuses)
+{
+    const std::string body =
+        R"([{"symbol":"ETHUSDT","positionAmt":"0.0"}])";
+    double out = 42.0;
+    EXPECT_FALSE(BinanceFuturesReconciler::extract_position_amt(
+        body, out, "BTCUSDT"));
+}
+
+TEST(BinanceFuturesReconciler, DuplicateRowDecisionMemberRefuses)
+{
+    double out = 42.0;
+    EXPECT_FALSE(BinanceFuturesReconciler::extract_position_amt(
+        R"([{"symbol":"BTCUSDT","symbol":"ETHUSDT","positionAmt":"1"}])",
+        out, "BTCUSDT"));
+}
+
+TEST(BinanceFuturesReconciler, NestedOnlyDecisionMembersRefuse)
+{
+    double out = 42.0;
+    EXPECT_FALSE(BinanceFuturesReconciler::extract_position_amt(
+        R"([{"nested":{"symbol":"BTCUSDT","positionAmt":"0"}}])",
+        out, "BTCUSDT"));
+
+    double free = 0.0;
+    double locked = 0.0;
+    EXPECT_FALSE(BinanceReconciler::extract_balance(
+        R"({"balances":[{"nested":{"asset":"BTC","free":"0","locked":"0"}}]})",
+        "BTC", free, locked));
+}
+
+TEST(BinanceFuturesReconciler, MalformedSuccessPayloadRefuses)
+{
+    auto get = [](const std::string& endpoint, const std::string&) {
+        BinanceRestClient::response r;
+        r.status = 200;
+        r.body = endpoint.find("positionRisk") != std::string::npos
+            ? R"([{"symbol":"BTCUSDT","positionAmt":"0"}])"
+            : R"(garbage "availableBalance":"0")";
+        return r;
+    };
+    BinanceFuturesReconciler r(
+        BinanceFuturesReconciler::injected_get, get, "BTCUSDT");
+    portfolio p;
+    EXPECT_FALSE(r.reconcile(p, 10.0).empty());
+}
+
+TEST(BinanceReconciler, MalformedAccountScannerMatchRefuses)
+{
+    double free = 0.0;
+    double locked = 0.0;
+    EXPECT_FALSE(BinanceReconciler::extract_balance(
+        R"(garbage "balances":[{"asset":"USDT","free":"1000","locked":"0"}])",
+        "USDT", free, locked));
+}
+
+TEST(BinanceReconciler, DuplicateBalanceDecisionMemberRefuses)
+{
+    double free = 0.0;
+    double locked = 0.0;
+    EXPECT_FALSE(BinanceReconciler::extract_balance(
+        R"({"balances":[{"asset":"BTC","asset":"ETH","free":"1","locked":"0"}]})",
+        "BTC", free, locked));
+}
+
+TEST(BinanceReconciler, LocalFlatVenueBaseHoldingRefuses)
+{
+    auto get = [](const std::string&, const std::string&) {
+        BinanceRestClient::response r;
+        r.status = 200;
+        r.body = R"({"balances":[{"asset":"USDT","free":"1000","locked":"0"},{"asset":"BTC","free":"1","locked":"0"}]})";
+        return r;
+    };
+    BinanceReconciler r(
+        BinanceReconciler::injected_get, get,
+        "BTCUSDT", "BTC", "USDT");
+    portfolio p(1000.0);
+    EXPECT_NE(r.reconcile(p, 10.0).find("position drift"), std::string::npos);
 }
 
 TEST(BinanceFuturesReconciler, NullRestClientReturnsError)

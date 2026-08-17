@@ -570,6 +570,26 @@ TEST(BitgetParser, Combined_UnknownTopic)
     EXPECT_FALSE(parser.parse_record(std::string_view{json}).has_value());
 }
 
+TEST(BitgetParser, ControlAckRequiresAuthoritativeUniqueEnvelope)
+{
+    BitgetCombinedParser parser;
+    EXPECT_EQ(parser.classify_empty_frame(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"}})"),
+              empty_parse_status::ignored);
+    EXPECT_EQ(parser.classify_empty_frame(
+                  R"(garbage "event":"subscribe","code":"0")"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(parser.classify_empty_frame(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"},"code":"0","code":"1"})"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(parser.classify_empty_frame(
+                  R"({"nested":{"event":"subscribe","arg":{"instType":"UTA","topic":"order"},"code":"0"}})"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(parser.classify_empty_frame(
+                  R"({"event":"pong"} trailing)"),
+              empty_parse_status::malformed);
+}
+
 TEST(BitgetParser, TradeParserAdapter)
 {
     BitgetTradeParser parser;

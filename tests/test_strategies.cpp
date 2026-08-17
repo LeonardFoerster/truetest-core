@@ -3,6 +3,31 @@
 #include "strategy/mean_reversion_strategy.h"
 #include "strategy/ma_crossover_strategy.h"
 #include "strategy/breakout_strategy.h"
+#include "strategy/strategy_interface.h"
+#include "strategy/strategy_registry.h"
+#include "strategy/strategy_factory.h"
+
+REGISTER_STRATEGY("test_macro_strategy_a", []() {
+    return std::shared_ptr<IStrategy>{};
+});
+REGISTER_STRATEGY("test_macro_strategy_b", []() {
+    return std::shared_ptr<IStrategy>{};
+});
+
+TEST(StrategyRegistry, MacroSupportsMultipleRegistrationsInOneTranslationUnit)
+{
+    EXPECT_TRUE(StrategyRegistry::instance().has("test_macro_strategy_a"));
+    EXPECT_TRUE(StrategyRegistry::instance().has("test_macro_strategy_b"));
+}
+
+TEST(StrategyRegistry, AdaptiveHybridPrototypeIsNotShipped)
+{
+    EXPECT_FALSE(StrategyRegistry::instance().has("adaptive-hybrid"));
+    EXPECT_THROW(StrategyRegistry::instance().create("adaptive-hybrid"),
+                 std::runtime_error);
+    EXPECT_THROW(StrategyFactory::create("adaptive-hybrid"),
+                 std::runtime_error);
+}
 
 static auto epoch_ms(int64_t ms)
 {

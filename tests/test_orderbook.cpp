@@ -96,6 +96,45 @@ TEST(Orderbook, CancelOrder)
     ob.cancel_order(1);
 }
 
+TEST(Orderbook, ModifyOrder_ReplacesRestingOrderWithoutChangingIdentity)
+{
+    orderbook ob;
+    auto original = std::make_shared<order>(
+        ob_order_type::good_till_cancel, 1, side::buy, P(100.0), 100);
+    ob.add_order(original);
+
+    ASSERT_TRUE(ob.modify_order(1, P(99.0), 40));
+
+    const auto modified = ob.get_order(1);
+    ASSERT_NE(modified, nullptr);
+    EXPECT_NE(modified, original);
+    EXPECT_EQ(modified->get_order_id(), 1u);
+    EXPECT_EQ(modified->get_order_type(), ob_order_type::good_till_cancel);
+    EXPECT_EQ(modified->get_side(), side::buy);
+    EXPECT_EQ(modified->get_price(), P(99.0));
+    EXPECT_EQ(modified->get_remaining_quantity(), 40u);
+
+    const auto levels = ob.get_order_infos();
+    ASSERT_EQ(levels.get_bids().size(), 1u);
+    EXPECT_EQ(levels.get_bids()[0].price_, P(99.0));
+    EXPECT_EQ(levels.get_bids()[0].quantity_, 40u);
+}
+
+TEST(Orderbook, ModifyOrder_UnknownIdLeavesBookUnchanged)
+{
+    orderbook ob;
+    ob.add_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 1, side::sell, P(101.0), 25));
+
+    EXPECT_FALSE(ob.modify_order(999, P(102.0), 10));
+
+    const auto original = ob.get_order(1);
+    ASSERT_NE(original, nullptr);
+    EXPECT_EQ(original->get_price(), P(101.0));
+    EXPECT_EQ(original->get_remaining_quantity(), 25u);
+    EXPECT_EQ(ob.size(), 1u);
+}
+
 TEST(Orderbook, FillOrKill_CanMatch)
 {
     orderbook ob;

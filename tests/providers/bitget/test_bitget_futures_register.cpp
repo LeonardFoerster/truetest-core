@@ -5,6 +5,7 @@
 #include "providers/provider_registry.h"
 #include "providers/bitget/bitget_futures_order_encoder.h"
 #include "providers/bitget/bitget_futures_provider.h"
+#include "helpers/alloc_counter.h"
 
 #include <memory>
 #include <stdexcept>
@@ -88,6 +89,72 @@ TEST(BitgetFuturesRegister, AliasBitgetCreatesSameType)
     ASSERT_NE(p, nullptr);
     EXPECT_EQ(p->name(), "bitget-futures");
     EXPECT_FALSE(p->is_demo());
+}
+
+TEST(BitgetFuturesRegister, FundingParserPublishesThroughProviderIngress)
+{
+    BitgetFuturesUserDataParser parser;
+    ProviderFundingIngress ingress;
+    constexpr std::string_view frame =
+        R"({"arg":{"instType":"UTA","topic":"account"},"data":[{"coin":"usdt","balance":"99.75","balanceChange":"-0.25","bizType":"funding_fee"}],"ts":1700000000000})";
+    bool exact = true;
+    truetest::test::alloc::snapshot allocations;
+    {
+        truetest::test::alloc::measure_window window;
+        for (int i = 0; i < 1'000; ++i)
+        {
+            parsed_funding_update parsed;
+            exact = exact && parser.parse_funding_update(frame, parsed)
+                == funding_parse_result::valid;
+            exact = exact && ingress.try_publish(
+                std::chrono::system_clock::time_point(
+                    std::chrono::milliseconds(parsed.event_time_ms)),
+                "BTCUSDT", parsed.cash_delta);
+            provider_funding_update popped;
+            exact = exact && ingress.try_pop(popped)
+                && popped.cash_delta == -0.25;
+        }
+        allocations = window.total();
+    }
+    EXPECT_TRUE(exact);
+    EXPECT_EQ(allocations.count, 0U);
+    EXPECT_EQ(allocations.bytes, 0U);
+
+    parsed_funding_update parsed;
+    ASSERT_EQ(parser.parse_funding_update(frame, parsed),
+              funding_parse_result::valid);
+    ASSERT_TRUE(ingress.try_publish(
+        std::chrono::system_clock::time_point(
+            std::chrono::milliseconds(parsed.event_time_ms)),
+        "BTCUSDT", parsed.cash_delta));
+    provider_funding_update update;
+    ASSERT_TRUE(ingress.try_pop(update));
+    EXPECT_EQ(update.symbol_view(), "BTCUSDT");
+    EXPECT_DOUBLE_EQ(update.cash_delta, -0.25);
+    EXPECT_FALSE(ingress.try_pop(update));
+}
+
+TEST(BitgetFuturesRegister, FundingParserSeparatesRowsAndRefusesAmbiguity)
+{
+    BitgetFuturesUserDataParser parser;
+    parsed_funding_update parsed;
+
+    for (const auto body : {
+        R"({"arg":{"instType":"UTA","topic":"account"},"data":[{"coin":"USDT","balanceChange":"7","bizType":"transfer"},{"coin":"USDT","balanceChange":"-0.25","bizType":"funding_fee"}],"ts":1700000000000})",
+        R"({"arg":{"topic":"account"},"data":[{"coin":"USDT","balanceChange":"1","bizType":"refund"}],"ts":1700000000000})",
+        R"({"arg":{"topic":"account"},"data":[{"coin":"USDT","balanceChange":"1","memo":"funding_fee"}],"ts":1700000000000})",
+        R"({"arg":{"topic":"account"},"data":[{"coin":"USDT","balanceChange":"1junk","bizType":"funding_fee"}],"ts":1700000000000})",
+        R"({"arg":{"topic":"account"},"data":[{"coin":"USDT","balanceChange":"0","bizType":"funding_fee"}],"ts":1700000000000})",
+        R"({"arg":{"topic":"account"},"data":[{"coin":"BTC","balanceChange":"1","bizType":"funding_fee"}],"ts":1700000000000})",
+        R"({"arg":{"topic":"account"},"data":[{"coin":"USDT","balanceChange":"1","bizType":"funding_fee","type":"funding_fee"}],"ts":1700000000000})",
+        R"({"arg":{"topic":"account"},"data":[{"coin":"USDT","balanceChange":"1","bizType":"funding_fee"}],"ts":1700000000000,"ts":1700000000001})",
+        R"({"arg":{"topic":"account"},"data":[{"coin":"USDT","balanceChange":"1","bizType":"funding_fee"},{"coin":"USDT","balanceChange":"2","bizType":"funding_fee"}],"ts":1700000000000})"})
+        EXPECT_EQ(parser.parse_funding_update(body, parsed),
+                  funding_parse_result::invalid);
+
+    EXPECT_EQ(parser.parse_funding_update(
+        R"({"arg":{"topic":"account"},"data":[{"coin":"USDT","balanceChange":"7","bizType":"transfer"}],"ts":1700000000000})",
+        parsed), funding_parse_result::not_funding);
 }
 
 TEST(BitgetFuturesRegister, DepthStreamEnablesEventStream)
@@ -212,9 +279,38 @@ TEST(BitgetFuturesRegister, LiveWithKeysMissingSecretRefusesOpen)
     EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
 }
 
-// Risk caps are applied at the top of open() before the live refuse, so
-// live+keys still builds FuturesRiskCheck without touching the network.
-TEST(BitgetFuturesRegister, RiskCapsInstallRiskCheckOnOpen)
+TEST(BitgetFuturesRegister, DirectLiveOpenRefusesEveryIncompleteCredentialTuple)
+{
+    for (unsigned mask = 0; mask < 7; ++mask)
+    {
+        provider_config cfg;
+        cfg["symbol"] = "BTCUSDT";
+        if (mask & 1u) cfg["api_key"] = "key";
+        if (mask & 2u) cfg["api_secret"] = "secret";
+        if (mask & 4u) cfg["api_passphrase"] = "passphrase";
+        auto p = create(cfg);
+        ASSERT_NE(p, nullptr);
+        engine_config ec;
+        ec.mode = engine_mode::live;
+        p->configure(ec);
+        EXPECT_FALSE(p->open()) << "mask=" << mask;
+        EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
+    }
+}
+
+TEST(BitgetFuturesRegister, RejectsMalformedOrPercentageScaleLiquidationCap)
+{
+    for (const char* value : {"oops", "nan", "7"})
+    {
+        provider_config cfg;
+        cfg["symbol"] = "BTCUSDT";
+        cfg["min_liquidation_distance_pct"] = value;
+        EXPECT_THROW(create(cfg), std::runtime_error) << value;
+    }
+}
+
+// Credential completeness is checked before any risk/network setup.
+TEST(BitgetFuturesRegister, MissingCredentialsRefuseBeforeRiskCheckConstruction)
 {
     provider_config cfg;
     cfg["symbol"]            = "BTCUSDT";
@@ -229,9 +325,9 @@ TEST(BitgetFuturesRegister, RiskCapsInstallRiskCheckOnOpen)
     ec.mode = engine_mode::live;
     p->configure(ec);
 
-    EXPECT_FALSE(p->open()); // missing secret/passphrase after risk_check
+    EXPECT_FALSE(p->open());
     EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
-    EXPECT_NE(p->get_risk_check(), nullptr);
+    EXPECT_EQ(p->get_risk_check(), nullptr);
 }
 
 TEST(BitgetOneWayHoldMode, AcceptsOneWay)
@@ -251,6 +347,12 @@ TEST(BitgetOneWayHoldMode, RefusesMissing)
 {
     auto note = bitget::check_one_way_hold_mode(
         R"({"code":"00000","data":{}})");
+    EXPECT_NE(note.find("holdMode"), std::string::npos);
+    note = bitget::check_one_way_hold_mode(
+        R"({"code":"00000","data":{"nested":{"holdMode":"one_way_mode"}}})");
+    EXPECT_NE(note.find("holdMode"), std::string::npos);
+    note = bitget::check_one_way_hold_mode(
+        R"({"code":"00000","data":{"holdMode":"one_way_mode","holdMode":"hedge_mode"}})");
     EXPECT_NE(note.find("holdMode"), std::string::npos);
 }
 
@@ -275,12 +377,47 @@ TEST(BitgetMarginTypeStrict, MismatchRefuses)
     EXPECT_NE(note.find("ISOLATED"), std::string::npos);
 }
 
+TEST(BitgetMarginTypeStrict, UnsupportedExpectedOrVenueModeRefuses)
+{
+    const char* portfolio =
+        R"({"code":"00000","data":{"symbolConfigList":[)"
+        R"({"symbol":"BTCUSDT","marginMode":"portfolio"}]}})";
+    auto note = bitget::check_margin_type_strict(
+        portfolio, "BTCUSDT", "portfolio");
+    EXPECT_NE(note.find("unsupported expected"), std::string::npos);
+
+    note = bitget::check_margin_type_strict(
+        portfolio, "BTCUSDT", "CROSSED");
+    EXPECT_NE(note.find("unsupported venue"), std::string::npos);
+}
+
 TEST(BitgetMarginTypeStrict, MissingSymbolRefuses)
 {
     const char* body =
         R"({"code":"00000","data":{"symbolConfigList":[)"
         R"({"symbol":"ETHUSDT","marginMode":"crossed"}]}})";
     auto note = bitget::check_margin_type_strict(body, "BTCUSDT", "CROSSED");
+    EXPECT_NE(note.find("not found"), std::string::npos);
+
+    const char* nested =
+        R"({"code":"00000","data":{"nested":{"symbolConfigList":[)"
+        R"({"symbol":"BTCUSDT","marginMode":"crossed"}]}}})";
+    note = bitget::check_margin_type_strict(nested, "BTCUSDT", "CROSSED");
+    EXPECT_NE(note.find("not found"), std::string::npos);
+
+    const char* nested_row =
+        R"({"code":"00000","data":{"symbolConfigList":[)"
+        R"({"nested":{"symbol":"BTCUSDT","marginMode":"crossed"}}]}})";
+    note = bitget::check_margin_type_strict(
+        nested_row, "BTCUSDT", "CROSSED");
+    EXPECT_NE(note.find("not found"), std::string::npos);
+
+    const char* duplicate_symbol =
+        R"({"code":"00000","data":{"symbolConfigList":[)"
+        R"({"symbol":"BTCUSDT","marginMode":"crossed"},)"
+        R"({"symbol":"BTCUSDT","marginMode":"crossed"}]}})";
+    note = bitget::check_margin_type_strict(
+        duplicate_symbol, "BTCUSDT", "CROSSED");
     EXPECT_NE(note.find("not found"), std::string::npos);
 }
 

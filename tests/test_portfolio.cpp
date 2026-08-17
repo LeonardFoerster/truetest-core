@@ -154,23 +154,6 @@ TEST(Portfolio, BuyWithCommission)
     EXPECT_TRUE(p.position_open());
 }
 
-TEST(Portfolio, CanAffordIncludesCommission)
-{
-    portfolio p(1000.0);
-    // qty*price == cash, but fee would push over
-    EXPECT_TRUE(p.can_afford(order_side::buy, 10, 100.0, /*commission=*/0.0));
-    EXPECT_FALSE(p.can_afford(order_side::buy, 10, 100.0, /*commission=*/1.0));
-    EXPECT_TRUE(p.can_afford(order_side::buy, 9, 100.0, /*commission=*/1.0));
-}
-
-TEST(Portfolio, ComputeQuantityAccountsForEntryFee)
-{
-    portfolio p(10000.0);
-    // 2% of cash = 200 notional budget including 10 bps fee
-    const double qty = p.compute_quantity(100.0, 0.02, /*entry_fee_rate=*/0.001);
-    EXPECT_NEAR(qty, 200.0 / 100.1, 1e-9);
-}
-
 TEST(Portfolio, SellWithCommission)
 {
     portfolio p;

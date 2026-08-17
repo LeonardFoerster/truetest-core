@@ -10,7 +10,6 @@
 #include "data/market_source.h"
 #include "engine/engine.h"
 #include "engine/engine_config.h"
-#include "engine/execution_router.h"
 #include "execution/execution_adapter.h"
 #include "execution/hybrid_paper_adapter.h"
 #include "execution/latency_model.h"

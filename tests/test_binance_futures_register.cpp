@@ -4,6 +4,7 @@
 
 #include "providers/provider_registry.h"
 #include "providers/binance/binance_futures_provider.h"
+#include "helpers/alloc_counter.h"
 
 #include <memory>
 #include <stdexcept>
@@ -77,6 +78,128 @@ TEST(BinanceFuturesRegister, MainnetHostStaysMainnet)
     auto p = create(cfg);
     ASSERT_NE(p, nullptr);
     EXPECT_FALSE(p->is_testnet());
+}
+
+TEST(BinanceFuturesRegister, FundingParserPublishesThroughProviderIngress)
+{
+    BinanceFuturesUserDataParser parser;
+    ProviderFundingIngress ingress;
+    constexpr std::string_view frame =
+        R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","wb":"99.5","bc":"-0.5"}],"P":[]}})";
+    bool exact = true;
+    truetest::test::alloc::snapshot allocations;
+    {
+        truetest::test::alloc::measure_window window;
+        for (int i = 0; i < 1'000; ++i)
+        {
+            parsed_funding_update parsed;
+            exact = exact && parser.parse_funding_update(frame, parsed)
+                == funding_parse_result::valid;
+            exact = exact && ingress.try_publish(
+                std::chrono::system_clock::time_point(
+                    std::chrono::milliseconds(parsed.event_time_ms)),
+                "BTCUSDT", parsed.cash_delta);
+            provider_funding_update popped;
+            exact = exact && ingress.try_pop(popped)
+                && popped.cash_delta == -0.5;
+        }
+        allocations = window.total();
+    }
+    EXPECT_TRUE(exact);
+    EXPECT_EQ(allocations.count, 0U);
+    EXPECT_EQ(allocations.bytes, 0U);
+
+    parsed_funding_update parsed;
+    ASSERT_EQ(parser.parse_funding_update(frame, parsed),
+              funding_parse_result::valid);
+    ASSERT_TRUE(ingress.try_publish(
+        std::chrono::system_clock::time_point(
+            std::chrono::milliseconds(parsed.event_time_ms)),
+        "BTCUSDT", parsed.cash_delta));
+    provider_funding_update update;
+    ASSERT_TRUE(ingress.try_pop(update));
+    EXPECT_EQ(update.symbol_view(), "BTCUSDT");
+    EXPECT_DOUBLE_EQ(update.cash_delta, -0.5);
+    EXPECT_FALSE(ingress.try_pop(update));
+}
+
+TEST(BinanceFuturesRegister, FundingParserRefusesAmbiguousAccountingEvidence)
+{
+    BinanceFuturesUserDataParser parser;
+    parsed_funding_update parsed;
+    for (const auto body : {
+        R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"FUNDING_FEE","B":[]}})",
+        R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","bc":"1junk"}]}})",
+        R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","bc":"0"}]}})",
+        R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"FUNDING_FEE","m":"ORDER","B":[{"a":"USDT","bc":"1"}]}})",
+        R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","bc":"1","bc":"2"}]}})",
+        R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","bc":"1"},{"a":"USDT","bc":"2"}]}})"})
+        EXPECT_EQ(parser.parse_funding_update(body, parsed),
+                  funding_parse_result::invalid);
+
+    EXPECT_EQ(parser.parse_funding_update(
+        R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"ORDER","B":[{"a":"USDT","bc":"1"}]}})",
+        parsed), funding_parse_result::not_funding);
+}
+
+TEST(BinanceFuturesRegister, PositionModeResponseIsAuthoritativeTopLevelBool)
+{
+    auto one_way = binance::authoritative_dual_side_position(
+        R"({"dualSidePosition":false})");
+    ASSERT_TRUE(one_way.has_value());
+    EXPECT_FALSE(*one_way);
+
+    auto hedge = binance::authoritative_dual_side_position(
+        R"({"dualSidePosition":true})");
+    ASSERT_TRUE(hedge.has_value());
+    EXPECT_TRUE(*hedge);
+
+    EXPECT_FALSE(binance::authoritative_dual_side_position(
+        R"({"nested":{"dualSidePosition":false},"dualSidePosition":true}) trailing)").has_value());
+    EXPECT_FALSE(binance::authoritative_dual_side_position(
+        R"({"nested":{"dualSidePosition":false}})").has_value());
+    EXPECT_FALSE(binance::authoritative_dual_side_position(
+        R"({"dualSidePosition":false,"dualSidePosition":true})").has_value());
+    EXPECT_FALSE(binance::authoritative_dual_side_position(
+        R"({"dualSidePosition":"false"})").has_value());
+
+    auto top_level_true = binance::authoritative_dual_side_position(
+        R"({"nested":{"dualSidePosition":false},"dualSidePosition":true})");
+    ASSERT_TRUE(top_level_true.has_value());
+    EXPECT_TRUE(*top_level_true);
+    auto top_level_false = binance::authoritative_dual_side_position(
+        R"({"nested":{"dualSidePosition":true},"dualSidePosition":false})");
+    ASSERT_TRUE(top_level_false.has_value());
+    EXPECT_FALSE(*top_level_false);
+}
+
+TEST(BinanceFuturesRegister, DirectLiveOpenRefusesEveryIncompleteCredentialPair)
+{
+    for (unsigned mask = 0; mask < 3; ++mask)
+    {
+        provider_config cfg;
+        cfg["symbol"] = "btcusdt";
+        if (mask & 1u) cfg["api_key"] = "key";
+        if (mask & 2u) cfg["api_secret"] = "secret";
+        auto p = create(cfg);
+        ASSERT_NE(p, nullptr);
+        engine_config ec;
+        ec.mode = engine_mode::live;
+        p->configure(ec);
+        EXPECT_FALSE(p->open()) << "mask=" << mask;
+        EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
+    }
+}
+
+TEST(BinanceFuturesRegister, RejectsMalformedOrPercentageScaleLiquidationCap)
+{
+    for (const char* value : {"oops", "nan", "7"})
+    {
+        provider_config cfg;
+        cfg["symbol"] = "btcusdt";
+        cfg["min_liquidation_distance_pct"] = value;
+        EXPECT_THROW(create(cfg), std::runtime_error) << value;
+    }
 }
 
 #endif // HAS_BINANCE

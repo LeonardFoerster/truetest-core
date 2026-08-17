@@ -2,22 +2,19 @@
 #include "types/object_pool.h"
 #include "types/pool_exhausted.h"
 
+#include <array>
+#include <atomic>
+#include <barrier>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <semaphore>
 #include <set>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
-#include <string>
-
-// LSan helpers for intentional late-drop leaks (see LateDropNonTrivialAfterDtorIsSafe).
-#if defined(__has_feature)
-#  if __has_feature(address_sanitizer)
-#    include <sanitizer/lsan_interface.h>
-#    define TT_OBJECT_POOL_HAS_LSAN 1
-#  endif
-#endif
-#if defined(__SANITIZE_ADDRESS__) && !defined(TT_OBJECT_POOL_HAS_LSAN)
-#  include <sanitizer/lsan_interface.h>
-#  define TT_OBJECT_POOL_HAS_LSAN 1
-#endif
 
 // Simple test type
 struct Widget
@@ -113,8 +110,7 @@ TEST(ObjectPool, MultipleAcquiresDistinct)
     EXPECT_EQ(w3->x, 3);
 }
 
-// Phase 3: engine thread acquires; worker threads only release via deferred queue.
-TEST(ObjectPool, DeferredReturnWorkerRelease)
+TEST(ObjectPool, WorkerReleaseReturnsDirectlyToFreeStack)
 {
     ObjectPool<Widget, 64> pool;
     constexpr int total = 256;
@@ -138,9 +134,8 @@ TEST(ObjectPool, DeferredReturnWorkerRelease)
     for (auto& th : workers)
         th.join();
 
-    EXPECT_GT(pool.deferred_pending(), 0u);
-    pool.drain_deferred_returns();
     EXPECT_EQ(pool.deferred_pending(), 0u);
+    EXPECT_EQ(pool.in_use(), 0u);
 
     auto w = pool.acquire(999, 1.5);
     EXPECT_EQ(w->x, 999);
@@ -175,7 +170,6 @@ TEST(ObjectPool, ThreadSafety)
     for (auto& th : workers)
         th.join();
 
-    pool.drain_deferred_returns();
     EXPECT_EQ(released.load(), total);
 
     for (int i = 0; i < total; ++i)
@@ -198,6 +192,39 @@ TEST(ObjectPool, SharedPtrKeepsAlive)
     EXPECT_DOUBLE_EQ(copy->y, 0.5);
 }
 
+TEST(ObjectPool, ConcurrentAcquireConsumersReceiveDistinctSlots)
+{
+    constexpr std::size_t per_consumer = 64;
+    ObjectPool<Widget, per_consumer * 2> pool;
+    pool.set_forbid_runtime_grow(true);
+
+    std::array<std::shared_ptr<Widget>, per_consumer> first;
+    std::array<std::shared_ptr<Widget>, per_consumer> second;
+    std::barrier start{3};
+
+    std::thread a([&] {
+        start.arrive_and_wait();
+        for (std::size_t i = 0; i < per_consumer; ++i)
+            first[i] = pool.acquire(static_cast<int>(i), 1.0);
+    });
+    std::thread b([&] {
+        start.arrive_and_wait();
+        for (std::size_t i = 0; i < per_consumer; ++i)
+            second[i] = pool.acquire(static_cast<int>(i + per_consumer), 2.0);
+    });
+
+    start.arrive_and_wait();
+    a.join();
+    b.join();
+
+    std::set<Widget*> slots;
+    for (const auto& value : first)
+        ASSERT_TRUE(slots.insert(value.get()).second);
+    for (const auto& value : second)
+        ASSERT_TRUE(slots.insert(value.get()).second);
+    EXPECT_EQ(pool.in_use(), per_consumer * 2);
+}
+
 // Test with a type that has non-trivial construction (std::string member)
 struct StringWidget
 {
@@ -205,6 +232,68 @@ struct StringWidget
     int value;
     StringWidget(const std::string& n, int v) : name(n), value(v) {}
 };
+
+namespace {
+
+struct GatedPoolProbe
+{
+    std::binary_semaphore* entered;
+    std::binary_semaphore* resume;
+    std::atomic<unsigned>* destructors;
+    volatile std::uint32_t sentinel{0};
+
+    GatedPoolProbe(std::binary_semaphore* entered_,
+                   std::binary_semaphore* resume_,
+                   std::atomic<unsigned>* destructors_)
+        : entered(entered_), resume(resume_), destructors(destructors_) {}
+
+    ~GatedPoolProbe()
+    {
+        auto* const entered_gate = entered;
+        auto* const resume_gate = resume;
+        auto* const destructor_count = destructors;
+        entered_gate->release();
+        resume_gate->acquire();
+
+        // Deliberately touch object storage after the gate. A safe pool-state
+        // owner keeps this slot alive while the destructor is in flight.
+        sentinel = 0xC0FFEEu;
+        destructor_count->fetch_add(1, std::memory_order_relaxed);
+    }
+};
+
+struct ThreeWordProbe
+{
+    std::uint32_t words[3]{};
+};
+
+static_assert(sizeof(ThreeWordProbe) == 3 * sizeof(std::uint32_t));
+
+struct MaybeThrowProbe
+{
+    explicit MaybeThrowProbe(bool should_throw)
+    {
+        if (should_throw)
+            throw std::runtime_error("constructor failure");
+    }
+};
+
+struct NonTrivialLifetimeProbe
+{
+    std::string value;
+    std::atomic<unsigned>* destructors;
+
+    NonTrivialLifetimeProbe(std::string value_,
+                            std::atomic<unsigned>* destructors_)
+        : value(std::move(value_)), destructors(destructors_) {}
+
+    ~NonTrivialLifetimeProbe()
+    {
+        destructors->fetch_add(1, std::memory_order_relaxed);
+    }
+};
+
+} // namespace
 
 TEST(ObjectPool, ForbidRuntimeGrowThrowsWithoutGrowing)
 {
@@ -230,6 +319,38 @@ TEST(ObjectPool, EnsureMinBlocksPreallocates)
     EXPECT_EQ(pool.grow_count(), 0u);
 }
 
+TEST(ObjectPool, SlotStridePreservesFreeNodeAlignment)
+{
+    ObjectPool<ThreeWordProbe, 4> pool;
+    std::array<std::shared_ptr<ThreeWordProbe>, 4> held;
+
+    for (auto& value : held)
+    {
+        value = pool.acquire();
+        EXPECT_EQ(reinterpret_cast<std::uintptr_t>(value.get()) %
+                      alignof(void*),
+                  0u);
+    }
+
+    for (auto& value : held)
+        value.reset();
+    EXPECT_EQ(pool.in_use(), 0u);
+}
+
+TEST(ObjectPool, ThrowingConstructorReturnsSlotAndAccounting)
+{
+    ObjectPool<MaybeThrowProbe, 1> pool;
+    pool.set_forbid_runtime_grow(true);
+
+    EXPECT_THROW((void)pool.acquire(true), std::runtime_error);
+    EXPECT_EQ(pool.in_use(), 0u);
+    EXPECT_EQ(pool.grow_count(), 0u);
+
+    auto value = pool.acquire(false);
+    EXPECT_NE(value, nullptr);
+    EXPECT_EQ(pool.in_use(), 1u);
+}
+
 TEST(ObjectPool, NonTrivialType)
 {
     ObjectPool<StringWidget, 8> pool;
@@ -245,9 +366,8 @@ TEST(ObjectPool, NonTrivialType)
 }
 
 // ---------------------------------------------------------------------------
-// Direct safety tests for late-drop hardening (alive_ + Returner struct)
-// These verify that shared_ptrs dropped after pool destruction (or during
-// shutdown with escaped references via rings/workers/MC) are safe no-ops.
+// Direct safety tests for escaped shared_ptrs. Pool State remains owned by
+// every live Returner, so objects stay valid through their last strong drop.
 // ---------------------------------------------------------------------------
 
 TEST(ObjectPool, LateDropAfterDtorIsSafe)
@@ -257,71 +377,92 @@ TEST(ObjectPool, LateDropAfterDtorIsSafe)
         ObjectPool<Widget, 4> pool;
         survivor = pool.acquire(123, 4.56);
 
-        // Also send one through deferred path
+        // Also return one from the temporary strong owner.
         auto temp = pool.acquire(7, 7.7);
-        temp.reset();  // -> deferred_returns_
-    }
-    // pool destroyed here: ~ObjectPool sets alive_=false
-
-    // Dropping the survivor (and any pending deferred) must not UAF/crash
-    // (the Returner checks alive_ and early-exits).
-    survivor.reset();
-
-    SUCCEED();  // reached without fault (ASAN would have reported otherwise)
-}
-
-// Extended per 2026-07-18 memory-check remediation (Phase 2):
-// Use non-trivial T (has std::string dtor) for late-drop scenario.
-// Documents that for escaped drops after dtor/rearm we intentionally leak
-// (do not invoke ~T) to avoid UAF into pool storage. ASAN + manual inspection
-// must not see use-after-free or double-free.
-TEST(ObjectPool, LateDropNonTrivialAfterDtorIsSafe)
-{
-    std::shared_ptr<StringWidget> survivor;
-    // Captured while the pool (and thus StringWidget storage) is still live.
-    // After ~pool, reading survivor->name would itself be UAF.
-    const void* intentional_string_heap = nullptr;
-    {
-        ObjectPool<StringWidget, 4> pool;
-        // Long enough to force a heap std::string buffer (beyond SSO) so the
-        // intentional late-drop leak is a real external allocation.
-        survivor = pool.acquire("late-drop-target", 777);
-        intentional_string_heap = survivor->name.data();
-
-        // one via deferred too
-        auto temp = pool.acquire("deferred-late", 1);
         temp.reset();
     }
-    // ~pool disarms lifetime_ here.
+    // The facade is gone, but survivor owns the backing State through its
+    // Returner and remains a valid strong shared_ptr.
+    EXPECT_EQ(survivor->x, 123);
+    EXPECT_DOUBLE_EQ(survivor->y, 4.56);
 
-    // Drop must be a safe no-op: running ~T would UAF into freed pool storage,
-    // so heap owned by T (std::string buffer) is intentionally abandoned until
-    // process exit. Quarantine that expected allocation so full ASan+LSan
-    // suites stay fail-closed green without weakening the late-drop contract.
-#if defined(TT_OBJECT_POOL_HAS_LSAN)
-    if (intentional_string_heap)
-        __lsan_ignore_object(intentional_string_heap);
-#endif
     survivor.reset();
-
     SUCCEED();
+}
+
+TEST(ObjectPool, LateDropNonTrivialAfterDtorIsSafe)
+{
+    std::atomic<unsigned> destructors{0};
+    std::shared_ptr<NonTrivialLifetimeProbe> survivor;
+    {
+        ObjectPool<NonTrivialLifetimeProbe, 4> pool;
+        survivor = pool.acquire("late-drop-target", &destructors);
+
+        // one additional direct return
+        auto temp = pool.acquire("deferred-late", &destructors);
+        temp.reset();
+    }
+
+    EXPECT_EQ(survivor->value, "late-drop-target");
+    EXPECT_EQ(destructors.load(std::memory_order_relaxed), 1u);
+    survivor.reset();
+    EXPECT_EQ(destructors.load(std::memory_order_relaxed), 2u);
+}
+
+TEST(ObjectPool, ConcurrentLastDropDoesNotTouchReusedOwner)
+{
+    using Pool = ObjectPool<GatedPoolProbe, 1>;
+
+    alignas(Pool) std::array<std::byte, sizeof(Pool)> owner_storage{};
+    auto* first = std::construct_at(
+        reinterpret_cast<Pool*>(owner_storage.data()));
+
+    std::binary_semaphore entered{0};
+    std::binary_semaphore resume{0};
+    std::atomic<unsigned> destructors{0};
+    auto held = first->acquire(&entered, &resume, &destructors);
+
+    std::thread dropper([owned = std::move(held)]() mutable {
+        owned.reset();
+    });
+
+    // The Returner has already admitted the old pool and is blocked inside
+    // T::~T(). Replace the facade at the same address before it continues.
+    if (!entered.try_acquire_for(std::chrono::seconds(5)))
+    {
+        // Keep the test failure bounded even if a future regression prevents
+        // the destructor from reaching its synchronization point.
+        resume.release();
+        dropper.join();
+        FAIL() << "last-drop destructor did not reach the synchronization point";
+        return;
+    }
+    std::destroy_at(first);
+    auto* replacement = std::construct_at(
+        reinterpret_cast<Pool*>(owner_storage.data()));
+    resume.release();
+    dropper.join();
+
+    EXPECT_EQ(destructors.load(std::memory_order_relaxed), 1u);
+    EXPECT_EQ(replacement->in_use(), 0u)
+        << "late return must target the old backing state, not a reused facade";
+    std::destroy_at(replacement);
 }
 
 TEST(ObjectPool, RearmForReuseRestoresPoolAfterSimulatedMCReset)
 {
     ObjectPool<Widget, 8> pool;
 
-    // Use the pool
-    {
-        auto w = pool.acquire(1, 1.0);
-        EXPECT_EQ(w->x, 1);
-    }
-    pool.drain_deferred_returns();
+    auto old_trial_handle = pool.acquire(1, 1.0);
+    EXPECT_EQ(pool.in_use(), 1u);
 
-    // Simulate MC reuse path (engine calls this on pools during reset_for_next_trial)
+    // Simulate the MC reset seam. An escaped old-trial handle remains valid
+    // and keeps its slot reserved until it returns; it must not be leaked.
     pool.rearm_for_reuse();
+    EXPECT_EQ(old_trial_handle->x, 1);
+    old_trial_handle.reset();
+    EXPECT_EQ(pool.in_use(), 0u);
 
-    // Pool must be usable again
     auto w2 = pool.acquire(42, 2.0);
     EXPECT_EQ(w2->x, 42);
 
@@ -329,17 +470,15 @@ TEST(ObjectPool, RearmForReuseRestoresPoolAfterSimulatedMCReset)
     EXPECT_NE(w2.get(), w3.get());
 }
 
-TEST(ObjectPool, DrainAfterDtorIsNoop)
+TEST(ObjectPool, DirectReturnsNeedNoDeferredDrain)
 {
     ObjectPool<Widget, 4> pool;
     auto w = pool.acquire(9, 9.0);
-    w.reset();  // deferred
-    EXPECT_GT(pool.deferred_pending(), 0u);
+    w.reset();
+    EXPECT_EQ(pool.deferred_pending(), 0u);
 
-    // Destroy pool (disarms)
-    // (we can't easily dtor early here; instead force the guard path)
-    // Call drain after manually disarming is not public, but we can at least
-    // ensure normal drain after all releases is safe (already covered).
+    // Existing engine cleanup call sites may still invoke this method; it is
+    // intentionally harmless after direct MPSC returns.
     pool.drain_deferred_returns();
     EXPECT_EQ(pool.deferred_pending(), 0u);
 }

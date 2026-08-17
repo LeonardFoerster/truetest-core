@@ -57,4 +57,15 @@ TEST(ProviderEventStreamContract, BinanceWithDepthStreamIsOn)
     ASSERT_TRUE(ev.has_value());
     EXPECT_TRUE(std::holds_alternative<provider::l2_snapshot>(*ev));
 }
+
+TEST(ProviderEventStreamContract, BinanceDirectLiveOpenRequiresCompleteCredentials)
+{
+    BinanceProvider p("btcusdt", "trade");
+    engine_config cfg;
+    cfg.mode = engine_mode::live;
+    p.configure(cfg);
+
+    EXPECT_FALSE(p.open());
+    EXPECT_EQ(p.lifecycle_state(), IProvider::lifecycle::error);
+}
 #endif

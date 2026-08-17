@@ -1,6 +1,7 @@
 #ifdef HAS_QUESTDB
 
 #include "data/questdb/store.h"
+#include "data/questdb/tcp_client.h"
 #include "core/event.h"
 
 #include <gtest/gtest.h>
@@ -11,6 +12,14 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <atomic>
+#include <future>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 using truetest::questdb::IIlpTransport;
 using truetest::questdb::IlpWriter;
@@ -29,6 +38,7 @@ public:
     }
     bool write_all(std::string_view data) override
     {
+        if (fail_writes) return false;
         // Each write may contain >1 line - split on '\n'.
         std::string buf;
         for (char c : data)
@@ -50,6 +60,7 @@ public:
     bool is_connected() const override { return connected_; }
 
     std::vector<std::string> lines;
+    bool fail_writes = false;
 
 private:
     bool connected_ = false;
@@ -124,6 +135,43 @@ TEST(QuestdbStore, BeginIssuesDdlsInOrder)
     EXPECT_TRUE(contains(f.ddls_seen[6], "tt_test_rejections"));
     EXPECT_TRUE(contains(f.ddls_seen[7], "tt_test_cancellations"));
     EXPECT_TRUE(contains(f.ddls_seen[8], "tt_test_amendments"));
+}
+
+TEST(QuestdbStore, StrictRuntimeWriteFailureLatches)
+{
+    StoreConfig cfg{};
+    cfg.run_tag = "tt_strict_failure";
+    cfg.strict = true;
+    auto transport = std::make_unique<RecordingTransport>();
+    auto* raw = transport.get();
+    auto writer = std::make_unique<IlpWriter>(
+        cfg.host, cfg.ilp_port, std::move(transport), 1);
+    QuestdbStore store(cfg, std::move(writer),
+                       [](const std::string&) { return true; });
+    ASSERT_TRUE(store.begin());
+    raw->fail_writes = true;
+    auto order = make_order();
+    store.record_order_submitted(*order, "pending");
+    EXPECT_TRUE(store.strict_failure_latched());
+}
+
+TEST(QuestdbStore, BeginFailsWhenInitialMetadataCannotBeBuffered)
+{
+    StoreConfig cfg{};
+    cfg.run_tag = "tt_zero_pending_cap";
+    cfg.max_pending_bytes = 0;
+    auto transport = std::make_unique<RecordingTransport>();
+    auto* raw = transport.get();
+    auto writer = std::make_unique<IlpWriter>(
+        cfg.host, cfg.ilp_port, std::move(transport),
+        /*flush_every_n_lines=*/1000,
+        std::chrono::milliseconds{50},
+        cfg.max_pending_bytes);
+    QuestdbStore store(cfg, std::move(writer),
+                       [](const std::string&) { return true; });
+
+    EXPECT_FALSE(store.begin());
+    EXPECT_TRUE(raw->lines.empty());
 }
 
 TEST(QuestdbStore, BeginRejectsInvalidRunTagBeforeDdl)
@@ -432,6 +480,87 @@ TEST(QuestdbStore, TimeBasedFlushFiresViaTick)
         EXPECT_TRUE(starts_with(line, "tt_time_flush_orders,"));
         EXPECT_TRUE(contains(line, "order_id=999i"));
     }
+}
+
+TEST(QuestdbTcpClient, PartialWriteToBlockedPeerHonorsTotalDeadline)
+{
+    const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_GE(listener, 0);
+    const int small_buffer = 4096;
+    ASSERT_EQ(::setsockopt(listener, SOL_SOCKET, SO_RCVBUF,
+                          &small_buffer, sizeof(small_buffer)), 0);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    ASSERT_EQ(::bind(listener, reinterpret_cast<sockaddr*>(&addr),
+                     sizeof(addr)), 0);
+    ASSERT_EQ(::listen(listener, 1), 0);
+    socklen_t addr_len = sizeof(addr);
+    ASSERT_EQ(::getsockname(listener, reinterpret_cast<sockaddr*>(&addr),
+                            &addr_len), 0);
+
+    std::promise<void> accepted;
+    auto accepted_future = accepted.get_future();
+    std::promise<void> release;
+    auto release_future = release.get_future();
+    std::atomic<std::size_t> received{0};
+    std::thread peer([&] {
+        pollfd listener_poll{listener, POLLIN, 0};
+        if (::poll(&listener_poll, 1, 1000) <= 0) return;
+        const int fd = ::accept(listener, nullptr, nullptr);
+        if (fd < 0) return;
+        accepted.set_value();
+        release_future.wait();
+        char buffer[8192];
+        for (;;)
+        {
+            const auto n = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (n <= 0) break;
+            received.fetch_add(static_cast<std::size_t>(n),
+                               std::memory_order_relaxed);
+        }
+        ::close(fd);
+    });
+
+    truetest::questdb::TcpClient client;
+    if (!client.connect("127.0.0.1", ntohs(addr.sin_port), 500))
+    {
+        release.set_value();
+        ::shutdown(listener, SHUT_RDWR);
+        ::close(listener);
+        peer.join();
+        FAIL() << "loopback client failed to connect";
+        return;
+    }
+    if (accepted_future.wait_for(std::chrono::seconds(1))
+        != std::future_status::ready)
+    {
+        client.close();
+        release.set_value();
+        ::shutdown(listener, SHUT_RDWR);
+        ::close(listener);
+        peer.join();
+        FAIL() << "loopback peer did not accept the client";
+        return;
+    }
+    const std::string payload(8 * 1024 * 1024, 'x');
+    const auto start = std::chrono::steady_clock::now();
+    const auto write = client.write_attempt(payload, 50);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    client.close();
+    release.set_value();
+    peer.join();
+    ::close(listener);
+
+    EXPECT_LT(elapsed, std::chrono::milliseconds(500));
+    EXPECT_EQ(write.state,
+              truetest::questdb::TcpClient::WriteState::delivery_ambiguous);
+    EXPECT_GT(write.bytes_sent, 0u);
+    EXPECT_LT(write.bytes_sent, payload.size());
+    EXPECT_GT(received.load(std::memory_order_relaxed), 0u);
+    EXPECT_LT(received.load(std::memory_order_relaxed), payload.size());
 }
 
 #endif // HAS_QUESTDB

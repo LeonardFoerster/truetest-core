@@ -262,8 +262,153 @@ TEST(RiskManager, MaxOpenOrders_Reject)
     portfolio port;
 
     order_event ord(epoch_ms(0), "AAPL", order_type::limit, order_side::buy, 10, 100.0);
-    // 10 orders sent, 5 filled -> 5 open = at limit
-    auto snap = make_snap(0.0, 10, 5);
+    auto snap = make_snap(0.0, 10, 5);  // reporting counters are irrelevant
 
-    EXPECT_EQ(rm.check_order(ord, port, snap), risk_action::reject);
+    EXPECT_EQ(rm.check_order(ord, port, snap, 5), risk_action::reject);
+}
+
+TEST(RiskManager, MaxOpenOrdersUsesExplicitCountAndAllowsDisabledLimit)
+{
+    portfolio port;
+    order_event ord(epoch_ms(0), "AAPL", order_type::limit, order_side::buy, 1, 100.0);
+    auto snap = make_snap(0.0, 1000, 0);
+
+    risk_limits capped;
+    capped.max_open_orders = 2;
+    RiskManager capped_rm(capped);
+    EXPECT_EQ(capped_rm.check_order(ord, port, snap, 1), risk_action::pass);
+    EXPECT_EQ(capped_rm.check_order(ord, port, snap, 2), risk_action::reject);
+
+    risk_limits disabled;
+    disabled.max_open_orders = 0;
+    RiskManager disabled_rm(disabled);
+    EXPECT_EQ(disabled_rm.check_order(ord, port, snap, 1000), risk_action::pass);
+}
+
+TEST(RiskManager, SpreadAndFundingFlipsAreNewExposure)
+{
+    portfolio port;
+    fill_event open_long(epoch_ms(0), "AAPL", 1, order_side::buy, 10, 100.0, 0.0);
+    port.on_fill(open_long);
+    order_event flip(epoch_ms(1), "AAPL", order_type::limit, order_side::sell, 15, 100.0);
+
+    risk_limits spread;
+    spread.max_spread_bps = 50.0;
+    RiskManager spread_rm(spread);
+    risk_snapshot nonsevere_spread;
+    nonsevere_spread.current_spread_bps = 75.0;
+    EXPECT_EQ(spread_rm.check_order(flip, port, nonsevere_spread, 0), risk_action::reject);
+    nonsevere_spread.current_spread_bps = 101.0;
+    EXPECT_EQ(spread_rm.check_order(flip, port, nonsevere_spread, 0), risk_action::halt);
+
+    risk_limits funding;
+    funding.max_funding_8h_rate = 0.001;
+    RiskManager funding_rm(funding);
+    risk_snapshot nonsevere_funding;
+    nonsevere_funding.current_funding_8h_rate = 0.0012;
+    EXPECT_EQ(funding_rm.check_order(flip, port, nonsevere_funding, 0), risk_action::reject);
+    nonsevere_funding.current_funding_8h_rate = 0.0016;
+    EXPECT_EQ(funding_rm.check_order(flip, port, nonsevere_funding, 0), risk_action::halt);
+}
+
+TEST(RiskManager, ExactCloseRemainsAllowedDuringCircuitBreaker)
+{
+    portfolio port;
+    fill_event open_short(epoch_ms(0), "AAPL", 1, order_side::sell, 10, 100.0, 0.0);
+    port.on_fill(open_short);
+    order_event close(epoch_ms(1), "AAPL", order_type::limit, order_side::buy, 10, 100.0);
+
+    risk_limits lim;
+    lim.max_spread_bps = 50.0;
+    lim.max_funding_8h_rate = 0.001;
+    RiskManager rm(lim);
+    risk_snapshot snap;
+    snap.current_spread_bps = 500.0;
+    snap.current_funding_8h_rate = 0.01;
+    EXPECT_EQ(rm.check_order(close, port, snap, 0), risk_action::pass);
+}
+
+// BF-01: spread and funding circuit breakers must exempt reduce-only orders,
+// exactly like the drawdown check does — an exit is precisely what must still
+// go through when the book blows out, not the moment it gets blocked.
+TEST(RiskManager, SpreadCircuitBreaker_SevereBreach_BlocksNewRisk_AllowsReduction)
+{
+    risk_limits lim;
+    lim.max_spread_bps = 50.0;   // severe = > 100 bps
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    // Open inventory so a sell is recognized as reduce-only.
+    fill_event open_long(epoch_ms(0), "AAPL", 1, order_side::buy, 10, 100.0, 0.0);
+    port.on_fill(open_long);
+
+    risk_snapshot snap;
+    snap.current_spread_bps = 500.0;  // 10x the limit -> severe breach
+
+    order_event new_risk(epoch_ms(1), "AAPL", order_type::limit, order_side::buy, 5, 100.0);
+    EXPECT_EQ(rm.check_order(new_risk, port, snap), risk_action::halt);
+
+    order_event reduce(epoch_ms(2), "AAPL", order_type::limit, order_side::sell, 5, 100.0);
+    EXPECT_EQ(rm.check_order(reduce, port, snap), risk_action::pass);
+}
+
+TEST(RiskManager, FundingCircuitBreaker_SevereBreach_BlocksNewRisk_AllowsReduction)
+{
+    risk_limits lim;
+    lim.max_funding_8h_rate = 0.001;   // severe = > 0.0015
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    fill_event open_short(epoch_ms(0), "AAPL", 1, order_side::sell, 10, 100.0, 0.0);
+    port.on_fill(open_short);
+
+    risk_snapshot snap;
+    snap.current_funding_8h_rate = 0.01;  // 10x the limit -> severe breach
+
+    order_event new_risk(epoch_ms(1), "AAPL", order_type::limit, order_side::sell, 5, 100.0);
+    EXPECT_EQ(rm.check_order(new_risk, port, snap), risk_action::halt);
+
+    order_event reduce(epoch_ms(2), "AAPL", order_type::limit, order_side::buy, 5, 100.0);
+    EXPECT_EQ(rm.check_order(reduce, port, snap), risk_action::pass);
+}
+
+// BF-02: reporting counters may diverge under multi-fill execution; only the
+// explicit engine lifecycle count may decide capacity.
+TEST(RiskManager, MaxOpenOrdersIgnoresAnalyticsCounters)
+{
+    risk_limits lim;
+    lim.max_open_orders = 3;
+
+    RiskManager rm(lim);
+    portfolio port;
+
+    // Multi-fill reporting: fills (5) already exceed orders (2), but the
+    // authoritative count still says two active orders.
+    order_event ord1(epoch_ms(0), "AAPL", order_type::limit, order_side::buy, 10, 100.0);
+    auto snap_after_multifill = make_snap(0.0, 2, 5);
+    EXPECT_EQ(rm.check_order(ord1, port, snap_after_multifill, 2), risk_action::pass);
+
+    // The cap trips only when the explicit active count reaches the bound.
+    order_event ord2(epoch_ms(1), "AAPL", order_type::limit, order_side::buy, 10, 100.0);
+    auto snap_open_high = make_snap(0.0, 10, 6);  // 4 open >= limit of 3
+    EXPECT_EQ(rm.check_order(ord2, port, snap_open_high, 3), risk_action::reject);
+}
+
+TEST(RiskManager, ShortFlipIsNewExposureDuringCircuitBreaker)
+{
+    portfolio port;
+    fill_event open_short(epoch_ms(0), "AAPL", 1, order_side::sell, 10, 100.0, 0.0);
+    port.on_fill(open_short);
+    order_event flip(epoch_ms(1), "AAPL", order_type::limit, order_side::buy, 15, 100.0);
+
+    risk_limits lim;
+    lim.max_spread_bps = 50.0;
+    RiskManager rm(lim);
+    risk_snapshot snap;
+    snap.current_spread_bps = 75.0;
+    EXPECT_EQ(rm.check_order(flip, port, snap, 0), risk_action::reject);
+    snap.current_spread_bps = 101.0;
+    EXPECT_EQ(rm.check_order(flip, port, snap, 0), risk_action::halt);
 }

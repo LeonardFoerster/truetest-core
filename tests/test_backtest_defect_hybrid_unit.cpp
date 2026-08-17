@@ -316,3 +316,111 @@ TEST(BacktestDefects, FR_BarSweep_VolumeCapsFullRemaining)
     EXPECT_NEAR(fills[0].get_remaining_qty(), 0.0, 1e-9);
 }
 
+TEST(BacktestDefects, BF11_VolumeCappedSweepFillsInSubmitOrder)
+{
+    for (int repeat = 0; repeat < 16; ++repeat)
+    {
+        SCOPED_TRACE(repeat);
+        auto ob = std::make_shared<orderbook>();
+        LocalBookAdapter a(ob, nullptr, nullptr, 42, 1.1, 1.0);
+
+        const uint64_t first_id = (repeat % 2 == 0) ? 20 : 10;
+        const uint64_t second_id = (repeat % 2 == 0) ? 10 : 20;
+        const uint64_t third_id = 30;
+        const auto submit = [&](uint64_t id, auto ts, const char* symbol = "X") {
+            order_event o(ts, symbol, order_type::limit,
+                          order_side::buy, 3.0, 99.5);
+            o.set_order_id(id);
+            o.set_earliest_eligible_ts(ts);
+            a.submit_order(o);
+        };
+
+        submit(first_id, t_at(10));
+        if (repeat % 2 != 0)
+        {
+            for (uint64_t i = 0; i < 32; ++i)
+                submit(1000 + i, t_at(11), "NOISE");
+            for (uint64_t i = 0; i < 32; ++i)
+                ASSERT_TRUE(a.cancel_order(1000 + i));
+        }
+        submit(second_id, t_at(20));
+        submit(third_id, t_at(30));
+
+        ASSERT_TRUE(a.sweep_resting_range(
+            "X", 99.0, 100.5, t_at(100), /*bar_volume=*/4.0));
+        std::vector<fill_event> fills;
+        ASSERT_TRUE(a.poll_fills(fills));
+        ASSERT_EQ(fills.size(), 2u);
+        EXPECT_EQ(fills[0].get_order_id(), first_id);
+        EXPECT_NEAR(fills[0].get_filled_quantity(), 3.0, 1e-9);
+        EXPECT_NEAR(fills[0].get_remaining_qty(), 0.0, 1e-9);
+        EXPECT_EQ(fills[1].get_order_id(), second_id);
+        EXPECT_NEAR(fills[1].get_filled_quantity(), 1.0, 1e-9);
+        EXPECT_NEAR(fills[1].get_remaining_qty(), 2.0, 1e-9);
+        EXPECT_NEAR(a.last_sweep_fill_qty(), 4.0, 1e-9);
+
+        fills.clear();
+        ASSERT_TRUE(a.sweep_resting_range(
+            "X", 99.0, 100.5, t_at(200), /*bar_volume=*/3.0));
+        ASSERT_TRUE(a.poll_fills(fills));
+        ASSERT_EQ(fills.size(), 2u);
+        EXPECT_EQ(fills[0].get_order_id(), second_id);
+        EXPECT_NEAR(fills[0].get_filled_quantity(), 2.0, 1e-9);
+        EXPECT_NEAR(fills[0].get_remaining_qty(), 0.0, 1e-9);
+        EXPECT_EQ(fills[1].get_order_id(), third_id);
+        EXPECT_NEAR(fills[1].get_filled_quantity(), 1.0, 1e-9);
+        EXPECT_NEAR(fills[1].get_remaining_qty(), 2.0, 1e-9);
+        EXPECT_NEAR(a.last_sweep_fill_qty(), 3.0, 1e-9);
+    }
+}
+
+TEST(BacktestDefects, BF11_ModifyMovesRestingOrderToFifoBack)
+{
+    auto ob = std::make_shared<orderbook>();
+    LocalBookAdapter a(ob, nullptr, nullptr, 42, 1.1, 1.0);
+    const auto submit = [&](uint64_t id, auto ts) {
+        order_event o(ts, "X", order_type::limit,
+                      order_side::buy, 3.0, 99.5);
+        o.set_order_id(id);
+        o.set_earliest_eligible_ts(ts);
+        a.submit_order(o);
+    };
+    submit(20, t_at(10));
+    submit(10, t_at(20));
+    ASSERT_TRUE(a.modify_order(20, 99.5, 3.0));
+
+    ASSERT_TRUE(a.sweep_resting_range(
+        "X", 99.0, 100.5, t_at(100), /*bar_volume=*/4.0));
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(a.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 2u);
+    EXPECT_EQ(fills[0].get_order_id(), 10u);
+    EXPECT_NEAR(fills[0].get_filled_quantity(), 3.0, 1e-9);
+    EXPECT_EQ(fills[1].get_order_id(), 20u);
+    EXPECT_NEAR(fills[1].get_filled_quantity(), 1.0, 1e-9);
+}
+
+TEST(BacktestDefects, BF11_CancelUnlinksWithoutReorderingSurvivors)
+{
+    auto ob = std::make_shared<orderbook>();
+    LocalBookAdapter a(ob, nullptr, nullptr, 42, 1.1, 1.0);
+    for (const uint64_t id : {30u, 20u, 10u})
+    {
+        order_event o(t0(), "X", order_type::limit,
+                      order_side::buy, 3.0, 99.5);
+        o.set_order_id(id);
+        o.set_earliest_eligible_ts(t0());
+        a.submit_order(o);
+    }
+    ASSERT_TRUE(a.cancel_order(20));
+
+    ASSERT_TRUE(a.sweep_resting_range(
+        "X", 99.0, 100.5, t_at(100), /*bar_volume=*/4.0));
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(a.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 2u);
+    EXPECT_EQ(fills[0].get_order_id(), 30u);
+    EXPECT_NEAR(fills[0].get_filled_quantity(), 3.0, 1e-9);
+    EXPECT_EQ(fills[1].get_order_id(), 10u);
+    EXPECT_NEAR(fills[1].get_filled_quantity(), 1.0, 1e-9);
+}

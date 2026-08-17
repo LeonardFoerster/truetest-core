@@ -66,6 +66,12 @@ public:
         t.side = static_cast<uint8_t>(std::stoi(side_s));
         return t;
     }
+
+    empty_parse_status classify_empty_frame(std::string_view line) const override
+    {
+        return line == "header" ? empty_parse_status::ignored
+                                : empty_parse_status::malformed;
+    }
 };
 
 } // namespace

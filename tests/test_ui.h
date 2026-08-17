@@ -92,7 +92,8 @@ public:
 
         std::cout << "    " << status << "  " << name;
         if (ms > 1000)
-            std::cout << std::fixed << std::setprecision(1) << (ms / 1000.0) << " ms";
+            std::cout << std::fixed << std::setprecision(1)
+                      << (static_cast<double>(ms) / 1000.0) << " ms";
         std::cout << "\n";
 
         if (!ok)

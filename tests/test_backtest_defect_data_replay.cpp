@@ -147,6 +147,71 @@ TEST(BacktestDefects, DataWrapper_SortAfterLoadOrdersTicks)
     EXPECT_EQ(out.tick_at(1).timestamp, t_at(500));
 }
 
+TEST(BacktestDefects, DR_DataWrapperSortAllKeepsRowsAndTicksAligned)
+{
+    class ThreeRowsAndTicks final : public IMarketSource {
+    public:
+        bool load_into(IMarketSink& sink, LoadStats* stats) override
+        {
+            // Sorted sources form a 3-cycle, a separate 2-cycle, and a
+            // fixed point: [2, 0, 1, 4, 3, 5].
+            for (const auto ms : {200, 300, 100, 500, 400, 600})
+            {
+                Bar bar;
+                bar.ts = t_at(ms);
+                bar.date = std::to_string(ms);
+                bar.symbol = "BAR" + std::to_string(ms);
+                bar.open = static_cast<double>(ms) + 0.1;
+                bar.high = static_cast<double>(ms) + 0.2;
+                bar.low = static_cast<double>(ms) - 0.3;
+                bar.close = static_cast<double>(ms) + 0.4;
+                bar.volume = ms * 10;
+                EXPECT_TRUE(sink.on_bar(bar));
+
+                Tick tick;
+                tick.timestamp = t_at(ms);
+                tick.symbol = "TICK" + std::to_string(ms);
+                tick.price = static_cast<double>(ms);
+                tick.quantity = ms * 100;
+                tick.side = (ms == 300 || ms == 400)
+                    ? data_tick_side::ask : data_tick_side::bid;
+                EXPECT_TRUE(sink.on_tick(tick));
+            }
+            if (stats) stats->accepted = 12;
+            return true;
+        }
+    };
+
+    SilenceOutput silence;
+    auto wrapper = DataWrapper::from_source(std::make_unique<ThreeRowsAndTicks>());
+    MarketSeries series;
+    ASSERT_TRUE(wrapper.load(series));
+
+    ASSERT_EQ(series.bar_count(), 6u);
+    ASSERT_EQ(series.tick_count(), 6u);
+    for (std::size_t i = 0; i < 6; ++i)
+    {
+        const int ms = static_cast<int>((i + 1) * 100);
+        const auto bar = series.bar_at(i);
+        EXPECT_EQ(bar.ts, t_at(ms));
+        EXPECT_EQ(bar.date, std::to_string(ms));
+        EXPECT_EQ(bar.symbol, "BAR" + std::to_string(ms));
+        EXPECT_DOUBLE_EQ(bar.open, static_cast<double>(ms) + 0.1);
+        EXPECT_DOUBLE_EQ(bar.high, static_cast<double>(ms) + 0.2);
+        EXPECT_DOUBLE_EQ(bar.low, static_cast<double>(ms) - 0.3);
+        EXPECT_DOUBLE_EQ(bar.close, static_cast<double>(ms) + 0.4);
+        EXPECT_EQ(bar.volume, ms * 10);
+
+        const auto& tick = series.tick_at(i);
+        EXPECT_EQ(tick.timestamp, t_at(ms));
+        EXPECT_EQ(tick.symbol, "TICK" + std::to_string(ms));
+        EXPECT_DOUBLE_EQ(tick.price, static_cast<double>(ms));
+        EXPECT_EQ(tick.quantity, ms * 100);
+        EXPECT_EQ(tick.side, (ms == 300 || ms == 400)
+            ? data_tick_side::ask : data_tick_side::bid);
+    }
+}
+
 // ── EL-MULTISYM-MID: delayed fill mid tracks order symbol marks ────────────
 
 TEST(BacktestDefects, DR_StreamingBarTs_FromOpenTimeNotWallClock)
@@ -221,6 +286,154 @@ TEST(BacktestDefects, DR_MultiSource_FailClosedOnPartFailure)
     EXPECT_TRUE(series.empty());
 }
 
+TEST(BacktestDefects, DR_MultiSource_FailClosedRollsBackEarlierRows)
+{
+    SilenceOutput silence;
+    MarketSeries series;
+    ASSERT_TRUE(series.load_into_queue(
+        "2024-01-01", "PREEXISTING", 10.0, 11.0, 9.0, 10.0, 1));
+
+    const auto fixture = std::filesystem::path(TEST_FIXTURES_DIR) / "sample_ohlcv.csv";
+    const auto missing = std::filesystem::path(TEST_FIXTURES_DIR)
+        / "missing_datawrapper_transaction_fixture.csv";
+
+    auto wrapper = DataWrapper::from_paths({fixture, missing});
+    EXPECT_FALSE(wrapper.load(series));
+
+    ASSERT_EQ(series.bar_count(), 1u);
+    EXPECT_EQ(series.bar_symbol_at(0), "PREEXISTING");
+    EXPECT_EQ(series.validation_errors(), 0u);
+}
+
+TEST(BacktestDefects, DR_MultiSource_PartialModeContinuesAfterFailure)
+{
+    SilenceOutput silence;
+    const auto fixture = std::filesystem::path(TEST_FIXTURES_DIR) / "sample_ohlcv.csv";
+    const auto missing = std::filesystem::path(TEST_FIXTURES_DIR)
+        / "missing_datawrapper_partial_fixture.csv";
+
+    DataLoadOptions opt;
+    opt.allow_partial_sources = true;
+    auto wrapper = DataWrapper::from_paths({fixture, missing, fixture}, opt);
+    MarketSeries series;
+
+    ASSERT_TRUE(wrapper.load(series));
+    ASSERT_EQ(series.bar_count(), 4u);
+    EXPECT_EQ(series.bar_symbol_at(0), "AAPL");
+    EXPECT_EQ(series.bar_symbol_at(2), "AAPL");
+}
+
+TEST(BacktestDefects, DR_MultiSourceTickFailurePreservesPriorOrder)
+{
+    SilenceOutput silence;
+    MarketSeries series;
+    tick_record late;
+    late.timestamp = t_at(200);
+    late.symbol = "PREEXISTING";
+    late.price = 2.0;
+    late.quantity = 1;
+    tick_record early = late;
+    early.timestamp = t_at(100);
+    early.price = 1.0;
+    ASSERT_TRUE(series.add_tick(late));
+    ASSERT_TRUE(series.add_tick(early));
+
+    const auto fixture = std::filesystem::path(TEST_FIXTURES_DIR) / "sample_ticks.csv";
+    const auto missing = std::filesystem::path(TEST_FIXTURES_DIR)
+        / "missing_datawrapper_transaction_ticks.csv";
+    auto wrapper = DataWrapper::from_paths({fixture, missing});
+
+    EXPECT_FALSE(wrapper.load(series));
+    ASSERT_EQ(series.tick_count(), 2u);
+    EXPECT_EQ(series.tick_at(0).timestamp, t_at(200));
+    EXPECT_EQ(series.tick_at(1).timestamp, t_at(100));
+}
+
+TEST(BacktestDefects, DR_DataWrapperRollbackSurvivesThrowAfterAppend)
+{
+    class AppendsThenThrows final : public IMarketSource {
+    public:
+        bool load_into(IMarketSink& sink, LoadStats*) override
+        {
+            Bar good;
+            good.date = "2024-01-02";
+            good.symbol = "NEW";
+            good.open = good.high = good.low = good.close = 20.0;
+            good.volume = 1;
+            EXPECT_TRUE(sink.on_bar(good));
+
+            Bar invalid = good;
+            invalid.open = 0.0;
+            EXPECT_FALSE(sink.on_bar(invalid));
+            throw std::runtime_error("synthetic source failure");
+        }
+    };
+
+    SilenceOutput silence;
+    MarketSeries series;
+    ASSERT_TRUE(series.load_into_queue(
+        "2024-01-01", "PREEXISTING", 10.0, 11.0, 9.0, 10.0, 1));
+    auto wrapper = DataWrapper::from_source(std::make_unique<AppendsThenThrows>());
+
+    EXPECT_THROW(wrapper.load(series), std::runtime_error);
+    ASSERT_EQ(series.bar_count(), 1u);
+    EXPECT_EQ(series.bar_symbol_at(0), "PREEXISTING");
+    EXPECT_EQ(series.validation_errors(), 0u);
+}
+
+TEST(BacktestDefects, DR_DataWrapperFalseAfterAppendRollsBack)
+{
+    class AppendsThenFails final : public IMarketSource {
+    public:
+        bool load_into(IMarketSink& sink, LoadStats* stats) override
+        {
+            Bar bar;
+            bar.date = "2024-01-02";
+            bar.symbol = "NEW";
+            bar.open = bar.high = bar.low = bar.close = 20.0;
+            bar.volume = 1;
+            EXPECT_TRUE(sink.on_bar(bar));
+            if (stats) stats->accepted = 1;
+            return false;
+        }
+    };
+
+    SilenceOutput silence;
+    MarketSeries series;
+    ASSERT_TRUE(series.load_into_queue(
+        "2024-01-01", "PREEXISTING", 10.0, 11.0, 9.0, 10.0, 1));
+    DataLoadOptions opt;
+    opt.allow_partial_sources = true;
+    auto wrapper = DataWrapper::from_source(std::make_unique<AppendsThenFails>(), opt);
+
+    EXPECT_FALSE(wrapper.load(series));
+    ASSERT_EQ(series.bar_count(), 1u);
+    EXPECT_EQ(series.bar_symbol_at(0), "PREEXISTING");
+}
+
+TEST(BacktestDefects, DR_DataWrapperRejectsShrinkingSource)
+{
+    class ClearsSeries final : public IMarketSource {
+    public:
+        bool load_into(IMarketSink& sink, LoadStats*) override
+        {
+            auto* series = dynamic_cast<MarketSeries*>(&sink);
+            EXPECT_NE(series, nullptr);
+            if (!series) return false;
+            series->clear();
+            return true;
+        }
+    };
+
+    SilenceOutput silence;
+    MarketSeries series;
+    ASSERT_TRUE(series.load_into_queue(
+        "2024-01-01", "PREEXISTING", 10.0, 11.0, 9.0, 10.0, 1));
+    auto wrapper = DataWrapper::from_source(std::make_unique<ClearsSeries>());
+
+    EXPECT_THROW(wrapper.load(series), std::logic_error);
+}
+
 TEST(BacktestDefects, DR_DataLoadOptions_FromToSymbolsApplied)
 {
     // DR-REPLAY-04: from/to/symbols must filter after load.
@@ -255,3 +468,67 @@ TEST(BacktestDefects, DR_DataLoadOptions_FromToSymbolsApplied)
     EXPECT_EQ(series.bar_symbol_at(0), "AAA");
 }
 
+TEST(BacktestDefects, DR_DataWrapperFilterPreservesPreexistingRows)
+{
+    class AddsKeepAndDrop final : public IMarketSource {
+    public:
+        bool load_into(IMarketSink& sink, LoadStats* stats) override
+        {
+            Bar keep;
+            keep.date = "2024-01-02";
+            keep.symbol = "KEEP";
+            keep.open = keep.high = keep.low = keep.close = 20.0;
+            keep.volume = 1;
+            Bar drop = keep;
+            drop.symbol = "DROP";
+            EXPECT_TRUE(sink.on_bar(keep));
+            EXPECT_TRUE(sink.on_bar(drop));
+            if (stats) stats->accepted = 2;
+            return true;
+        }
+    };
+
+    SilenceOutput silence;
+    MarketSeries series;
+    ASSERT_TRUE(series.load_into_queue(
+        "2024-01-01", "PREEXISTING", 10.0, 11.0, 9.0, 10.0, 1));
+    DataLoadOptions opt;
+    opt.symbols = {"KEEP"};
+    auto wrapper = DataWrapper::from_source(std::make_unique<AddsKeepAndDrop>(), opt);
+
+    ASSERT_TRUE(wrapper.load(series));
+    ASSERT_EQ(series.bar_count(), 2u);
+    EXPECT_EQ(series.bar_symbol_at(0), "PREEXISTING");
+    EXPECT_EQ(series.bar_symbol_at(1), "KEEP");
+}
+
+TEST(BacktestDefects, DR_DataWrapperFilterFailurePreservesPreexistingRows)
+{
+    class AddsOnlyDrop final : public IMarketSource {
+    public:
+        bool load_into(IMarketSink& sink, LoadStats* stats) override
+        {
+            Bar drop;
+            drop.date = "2024-01-02";
+            drop.symbol = "DROP";
+            drop.open = drop.high = drop.low = drop.close = 20.0;
+            drop.volume = 1;
+            EXPECT_TRUE(sink.on_bar(drop));
+            if (stats) stats->accepted = 1;
+            return true;
+        }
+    };
+
+    SilenceOutput silence;
+    MarketSeries series;
+    ASSERT_TRUE(series.load_into_queue(
+        "2024-01-01", "PREEXISTING", 10.0, 11.0, 9.0, 10.0, 1));
+    DataLoadOptions opt;
+    opt.symbols = {"KEEP"};
+    opt.fail_if_empty = true;
+    auto wrapper = DataWrapper::from_source(std::make_unique<AddsOnlyDrop>(), opt);
+
+    EXPECT_FALSE(wrapper.load(series));
+    ASSERT_EQ(series.bar_count(), 1u);
+    EXPECT_EQ(series.bar_symbol_at(0), "PREEXISTING");
+}

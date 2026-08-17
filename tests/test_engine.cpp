@@ -101,6 +101,34 @@ TEST(Engine, RunCompletes)
     EXPECT_NO_THROW(eng.run());
 }
 
+TEST(Engine, PreexistingTerminalHaltIsNotClearedByRunStartup)
+{
+    SilenceCout quiet;
+    auto dh = make_bar_data(5);
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<TestStrategy>();
+    engine eng(dh, ob, strat);
+
+    eng.trigger_halt("test pre-start halt");
+    eng.run();
+
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+    EXPECT_EQ(strat->get_call_count(), 0);
+}
+
+TEST(Engine, DirectTerminalHaltFlagCannotReportSuccess)
+{
+    auto dh = make_bar_data(1);
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<TestStrategy>();
+    engine eng(dh, ob, strat);
+
+    eng.trigger_halt("test pre-halt");
+
+    EXPECT_FALSE(eng.run_succeeded());
+}
+
 TEST(Engine, StrategyReceivesEvents)
 {
     SilenceCout quiet;
@@ -279,7 +307,7 @@ TEST(Engine, HaltChannel_StopsEngine)
     // Inject halt after a short delay from another thread
     std::thread injector([&]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        eng.get_halt_flag().store(true, std::memory_order_release);
+        eng.trigger_halt("test requested halt");
     });
 
     eng.run();

@@ -43,6 +43,27 @@ wrap(std::shared_ptr<fake_caller> f)
     };
 }
 
+std::string algo_ack(std::uint64_t id, std::string_view client,
+                     std::string_view type, std::string_view side,
+                     std::string_view trigger)
+{
+    return "{\"algoId\":" + std::to_string(id)
+        + ",\"clientAlgoId\":\"" + std::string(client)
+        + "\",\"algoType\":\"CONDITIONAL\",\"orderType\":\""
+        + std::string(type) + "\",\"symbol\":\"BTCUSDT\",\"side\":\""
+        + std::string(side)
+        + "\",\"positionSide\":\"BOTH\",\"algoStatus\":\"NEW\""
+          ",\"triggerPrice\":\"" + std::string(trigger)
+        + "\",\"closePosition\":true,\"reduceOnly\":false}";
+}
+
+std::string cancel_ack(std::uint64_t id, std::string_view client)
+{
+    return "{\"algoId\":" + std::to_string(id)
+        + ",\"clientAlgoId\":\"" + std::string(client)
+        + "\",\"code\":\"200\",\"msg\":\"success\"}";
+}
+
 truetest::exits::exit_intent make_long_intent(std::uint64_t opener,
                                               double sl, double tp,
                                               double qty = 0.5,
@@ -79,8 +100,8 @@ TEST(BinanceFuturesBracketAdapter, PlacePostsTwoLegsWithClosePosition)
 {
     auto post = std::make_shared<fake_caller>();
     post->responses = {
-        {200, R"({"orderId":111,"clientOrderId":"tt-fb-sl-7"})"},
-        {200, R"({"orderId":222,"clientOrderId":"tt-fb-tp-7"})"},
+        {200, algo_ack(111, "tt-fb-sl-7", "STOP_MARKET", "SELL", "100")},
+        {200, algo_ack(222, "tt-fb-tp-7", "TAKE_PROFIT_MARKET", "SELL", "110")},
     };
     auto del = std::make_shared<fake_caller>();
 
@@ -89,26 +110,27 @@ TEST(BinanceFuturesBracketAdapter, PlacePostsTwoLegsWithClosePosition)
 
     ASSERT_EQ(post->log.size(), 2u);
 
-    // Both legs hit /fapi/v1/order.
-    EXPECT_EQ(post->log[0].first, "/fapi/v1/order");
-    EXPECT_EQ(post->log[1].first, "/fapi/v1/order");
+    EXPECT_EQ(post->log[0].first, "/fapi/v1/algoOrder");
+    EXPECT_EQ(post->log[1].first, "/fapi/v1/algoOrder");
 
-    // SL leg: STOP_MARKET, stopPrice=100, closePosition+reduceOnly.
+    // SL leg: STOP_MARKET, triggerPrice=100, closePosition only. Binance
+    // forbids reduceOnly together with closePosition.
     const auto& sl_p = post->log[0].second;
     EXPECT_NE(sl_p.find("symbol=BTCUSDT"),     std::string::npos);
     EXPECT_NE(sl_p.find("side=SELL"),          std::string::npos);
     EXPECT_NE(sl_p.find("type=STOP_MARKET"),   std::string::npos);
-    EXPECT_NE(sl_p.find("stopPrice=100"),      std::string::npos);
+    EXPECT_NE(sl_p.find("algoType=CONDITIONAL"), std::string::npos);
+    EXPECT_NE(sl_p.find("triggerPrice=100"),   std::string::npos);
     EXPECT_NE(sl_p.find("closePosition=true"), std::string::npos);
-    EXPECT_NE(sl_p.find("reduceOnly=true"),    std::string::npos);
+    EXPECT_EQ(sl_p.find("reduceOnly"),         std::string::npos);
     EXPECT_EQ(sl_p.find("quantity="),          std::string::npos);
-    EXPECT_NE(sl_p.find("newClientOrderId=tt-fb-sl-7"), std::string::npos);
+    EXPECT_NE(sl_p.find("clientAlgoId=tt-fb-sl-7"), std::string::npos);
 
-    // TP leg: TAKE_PROFIT_MARKET at stopPrice=110.
+    // TP leg: TAKE_PROFIT_MARKET at triggerPrice=110.
     const auto& tp_p = post->log[1].second;
     EXPECT_NE(tp_p.find("type=TAKE_PROFIT_MARKET"), std::string::npos);
-    EXPECT_NE(tp_p.find("stopPrice=110"),           std::string::npos);
-    EXPECT_NE(tp_p.find("newClientOrderId=tt-fb-tp-7"), std::string::npos);
+    EXPECT_NE(tp_p.find("triggerPrice=110"),        std::string::npos);
+    EXPECT_NE(tp_p.find("clientAlgoId=tt-fb-tp-7"), std::string::npos);
 
     EXPECT_EQ(h.sl_exchange_id.value_or(""), "111");
     EXPECT_EQ(h.tp_exchange_id.value_or(""), "222");
@@ -118,7 +140,10 @@ TEST(BinanceFuturesBracketAdapter, PlacePostsTwoLegsWithClosePosition)
 TEST(BinanceFuturesBracketAdapter, PlaceShortIntentSetsBuySide)
 {
     auto post = std::make_shared<fake_caller>();
-    post->default_resp = {200, R"({"orderId":1})"};
+    post->responses = {
+        {200, algo_ack(1, "tt-fb-sl-8", "STOP_MARKET", "BUY", "100")},
+        {200, algo_ack(2, "tt-fb-tp-8", "TAKE_PROFIT_MARKET", "BUY", "90")},
+    };
     auto del = std::make_shared<fake_caller>();
 
     BinanceFuturesBracketAdapter a(wrap(post), wrap(del));
@@ -179,7 +204,7 @@ TEST(BinanceFuturesBracketAdapter, PlaceSecondLegFailureLeavesSlOnly)
 {
     auto post = std::make_shared<fake_caller>();
     post->responses = {
-        {200, R"({"orderId":111})"},
+        {200, algo_ack(111, "tt-fb-sl-12", "STOP_MARKET", "SELL", "100")},
         {400, R"({"code":-2010})"},
     };
     auto del = std::make_shared<fake_caller>();
@@ -192,11 +217,41 @@ TEST(BinanceFuturesBracketAdapter, PlaceSecondLegFailureLeavesSlOnly)
     EXPECT_EQ(post->log.size(), 2u);
 }
 
+TEST(BinanceFuturesBracketAdapter, PlaceMalformedSuccessThrowsAndScrubsKnownLeg)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del = std::make_shared<fake_caller>();
+    del->default_resp = {200, cancel_ack(111, "tt-fb-sl-13")};
+
+    post->responses = {{200, R"({"nested":{"algoId":111,"clientAlgoId":"tt-fb-sl-13"}})"}};
+    BinanceFuturesBracketAdapter first_bad(wrap(post), wrap(del));
+    EXPECT_THROW(
+        first_bad.place(13, make_long_intent(13, 100.0, 110.0), 105.0),
+        std::runtime_error);
+    EXPECT_TRUE(del->log.empty());
+
+    post->log.clear();
+    del->log.clear();
+    post->responses = {
+        {200, algo_ack(111, "tt-fb-sl-13", "STOP_MARKET", "SELL", "100")},
+        {200, R"({"algoId":222,"algoId":333,"clientAlgoId":"tt-fb-tp-13"})"},
+    };
+    BinanceFuturesBracketAdapter second_bad(wrap(post), wrap(del));
+    EXPECT_THROW(
+        second_bad.place(13, make_long_intent(13, 100.0, 110.0), 105.0),
+        std::runtime_error);
+    ASSERT_EQ(del->log.size(), 1u);
+    EXPECT_NE(del->log.front().second.find("algoId=111"), std::string::npos);
+}
+
 TEST(BinanceFuturesBracketAdapter, CancelHitsBothLegEndpointsWithSymbol)
 {
     auto post = std::make_shared<fake_caller>();
     auto del  = std::make_shared<fake_caller>();
-    del->default_resp = {200, "{}"};
+    del->responses = {
+        {200, cancel_ack(111, "tt-fb-sl-7")},
+        {200, cancel_ack(222, "tt-fb-tp-7")},
+    };
 
     BinanceFuturesBracketAdapter a(wrap(post), wrap(del));
 
@@ -209,20 +264,53 @@ TEST(BinanceFuturesBracketAdapter, CancelHitsBothLegEndpointsWithSymbol)
     a.cancel(7, h);
 
     ASSERT_EQ(del->log.size(), 2u);
-    EXPECT_EQ(del->log[0].first, "/fapi/v1/order");
-    EXPECT_EQ(del->log[1].first, "/fapi/v1/order");
-    EXPECT_NE(del->log[0].second.find("symbol=BTCUSDT"), std::string::npos);
-    EXPECT_NE(del->log[1].second.find("symbol=BTCUSDT"), std::string::npos);
-    EXPECT_NE(del->log[0].second.find("orderId=111"),    std::string::npos);
-    EXPECT_NE(del->log[1].second.find("orderId=222"),    std::string::npos);
+    EXPECT_EQ(del->log[0].first, "/fapi/v1/algoOrder");
+    EXPECT_EQ(del->log[1].first, "/fapi/v1/algoOrder");
+    EXPECT_NE(del->log[0].second.find("algoId=111"), std::string::npos);
+    EXPECT_NE(del->log[1].second.find("algoId=222"), std::string::npos);
+}
+
+TEST(BinanceFuturesBracketAdapter, CancelMalformedSuccessThrows)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    del->responses = {
+        {200, R"({"nested":{"algoId":111,"clientAlgoId":"tt-fb-sl-7","code":"200","msg":"success"}})"},
+    };
+    BinanceFuturesBracketAdapter a(wrap(post), wrap(del));
+    truetest::exits::bracket_handles h;
+    h.sl_exchange_id = "111";
+    h.symbol = "BTCUSDT";
+    EXPECT_THROW(a.cancel(7, h), std::runtime_error);
+}
+
+TEST(BinanceFuturesBracketAdapter, CancelExceptionStillAttemptsOtherLeg)
+{
+    auto post = std::make_shared<fake_caller>();
+    int calls = 0;
+    BinanceFuturesBracketAdapter a(
+        wrap(post),
+        [&](std::string_view, std::string_view params) -> response {
+            ++calls;
+            if (calls == 1) throw std::runtime_error("ambiguous SL cancel");
+            EXPECT_NE(params.find("algoId=222"), std::string_view::npos);
+            return {200, cancel_ack(222, "tt-fb-tp-7")};
+        });
+    truetest::exits::bracket_handles h;
+    h.sl_exchange_id = "111";
+    h.tp_exchange_id = "222";
+    h.symbol = "BTCUSDT";
+
+    EXPECT_THROW(a.cancel(7, h), std::runtime_error);
+    EXPECT_EQ(calls, 2);
 }
 
 TEST(BinanceFuturesBracketAdapter, PlacePopulatesHandlesSymbol)
 {
     auto post = std::make_shared<fake_caller>();
     post->responses = {
-        {200, R"({"orderId":111,"clientOrderId":"tt-fb-sl-7"})"},
-        {200, R"({"orderId":222,"clientOrderId":"tt-fb-tp-7"})"},
+        {200, algo_ack(111, "tt-fb-sl-7", "STOP_MARKET", "SELL", "100")},
+        {200, algo_ack(222, "tt-fb-tp-7", "TAKE_PROFIT_MARKET", "SELL", "110")},
     };
     auto del = std::make_shared<fake_caller>();
 
@@ -273,34 +361,29 @@ TEST(BinanceFuturesBracketAdapter, ListOpenRecoversByPrefix)
     auto del  = std::make_shared<fake_caller>();
     auto get  = std::make_shared<fake_caller>();
 
-    // Two pairs of brackets: opener=10 (SL+TP) and opener=11 (SL only).
-    // One unrelated order from another tool - must be ignored.
+    // One configured-symbol pair plus an unrelated client id.
     get->responses = {{200, R"([
-        {"clientOrderId":"tt-fb-sl-10","symbol":"BTCUSDT","side":"SELL",
-         "stopPrice":"95.5","origQty":"0","orderId":1001},
-        {"clientOrderId":"tt-fb-tp-10","symbol":"BTCUSDT","side":"SELL",
-         "stopPrice":"110.0","origQty":"0","orderId":1002},
-        {"clientOrderId":"tt-fb-sl-11","symbol":"ETHUSDT","side":"BUY",
-         "stopPrice":"3500.0","origQty":"0","orderId":2001},
-        {"clientOrderId":"some-other-tool","symbol":"BTCUSDT","side":"BUY",
-         "stopPrice":"50000","origQty":"0.1","orderId":9999}
+        {"algoId":1001,"clientAlgoId":"tt-fb-sl-10","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"95.5","closePosition":true,"reduceOnly":false},
+        {"algoId":1002,"clientAlgoId":"tt-fb-tp-10","algoType":"CONDITIONAL","orderType":"TAKE_PROFIT_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"110.0","closePosition":true,"reduceOnly":false},
+        {"algoId":9999,"clientAlgoId":"some-other-tool","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"BUY","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"50000","closePosition":true,"reduceOnly":false}
     ])"}};
 
-    BinanceFuturesBracketAdapter a(wrap(post), wrap(del), wrap(get));
+    BinanceFuturesBracketAdapter a(
+        wrap(post), wrap(del), wrap(get), "BTCUSDT");
     auto recovered = a.list_open();
+    ASSERT_EQ(get->log.front().first, "/fapi/v1/openAlgoOrders");
+    EXPECT_NE(get->log.front().second.find("algoType=CONDITIONAL"),
+              std::string::npos);
 
-    ASSERT_EQ(recovered.size(), 2u);
+    ASSERT_EQ(recovered.size(), 1u);
 
     // Find the BTCUSDT bracket
     const truetest::exits::IBracketAdapter::recovered_bracket* btc = nullptr;
-    const truetest::exits::IBracketAdapter::recovered_bracket* eth = nullptr;
     for (const auto& b : recovered)
     {
         if (b.symbol == "BTCUSDT") btc = &b;
-        if (b.symbol == "ETHUSDT") eth = &b;
     }
     ASSERT_NE(btc, nullptr);
-    ASSERT_NE(eth, nullptr);
 
     EXPECT_EQ(btc->opener_order_id, 10u);
     ASSERT_TRUE(btc->stop_loss.has_value());
@@ -311,18 +394,111 @@ TEST(BinanceFuturesBracketAdapter, ListOpenRecoversByPrefix)
     EXPECT_EQ(btc->handles.tp_exchange_id.value_or(""), "1002");
     EXPECT_EQ(btc->close_side, order_side::sell);
 
-    EXPECT_EQ(eth->opener_order_id, 11u);
-    ASSERT_TRUE(eth->stop_loss.has_value());
-    EXPECT_FALSE(eth->take_profit.has_value());
-    EXPECT_EQ(eth->close_side, order_side::buy);
 }
 
-TEST(BinanceFuturesBracketAdapter, ListOpenWithoutGetCallableReturnsEmpty)
+TEST(BinanceFuturesBracketAdapter, ListOpenRefusesUnexpectedConfiguredSymbol)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del = std::make_shared<fake_caller>();
+    auto get = std::make_shared<fake_caller>();
+    get->responses = {{200, R"([{"algoId":1,"clientAlgoId":"tt-fb-sl-7","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"ETHUSDT","side":"SELL","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"90","closePosition":true,"reduceOnly":false}])"}};
+    BinanceFuturesBracketAdapter a(
+        wrap(post), wrap(del), wrap(get), "BTCUSDT");
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceFuturesBracketAdapter, ListOpenWithoutGetCallableRefusesRecovery)
 {
     auto post = std::make_shared<fake_caller>();
     auto del  = std::make_shared<fake_caller>();
     BinanceFuturesBracketAdapter a(wrap(post), wrap(del));
-    EXPECT_TRUE(a.list_open().empty());
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceFuturesBracketAdapter, ListOpenHttpFailureRefusesRecovery)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    auto get  = std::make_shared<fake_caller>();
+    get->responses = {{503, R"({"msg":"unavailable"})"}};
+    BinanceFuturesBracketAdapter a(wrap(post), wrap(del), wrap(get));
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceFuturesBracketAdapter, ListOpenMalformedSuccessRefusesRecovery)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    auto get  = std::make_shared<fake_caller>();
+    get->responses = {{200, R"({"unexpected":[]})"}};
+    BinanceFuturesBracketAdapter a(wrap(post), wrap(del), wrap(get));
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceFuturesBracketAdapter, ListOpenMissingIdentityRefusesRecovery)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    auto get  = std::make_shared<fake_caller>();
+    get->responses = {{200, R"([{"nested":{"algoId":1,"clientAlgoId":"tt-fb-sl-7","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"90","closePosition":true,"reduceOnly":false}}])"}};
+    BinanceFuturesBracketAdapter a(wrap(post), wrap(del), wrap(get));
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceFuturesBracketAdapter, ListOpenDuplicateRowOrLegRefusesRecovery)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    auto get  = std::make_shared<fake_caller>();
+    get->responses = {{200, R"([
+        {"algoId":1,"clientAlgoId":"tt-fb-sl-7","clientAlgoId":"tt-fb-tp-7","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"90","closePosition":true,"reduceOnly":false}
+    ])"}};
+    BinanceFuturesBracketAdapter a(wrap(post), wrap(del), wrap(get));
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+
+    get->log.clear();
+    get->responses = {{200, R"([
+        {"algoId":1,"clientAlgoId":"tt-fb-sl-7","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"90","closePosition":true,"reduceOnly":false},
+        {"algoId":2,"clientAlgoId":"tt-fb-sl-7","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"91","closePosition":true,"reduceOnly":false}
+    ])"}};
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceFuturesBracketAdapter, ListOpenInvalidSemanticFieldsRefusesRecovery)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    auto get  = std::make_shared<fake_caller>();
+    get->responses = {{200, R"([
+        {"algoId":1,"clientAlgoId":"tt-fb-sl-7","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"UNKNOWN","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"junk","closePosition":true,"reduceOnly":false}
+    ])"}};
+    BinanceFuturesBracketAdapter a(wrap(post), wrap(del), wrap(get));
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceFuturesBracketAdapter, ListOpenTrailingIdentityRefusesRecovery)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    auto get  = std::make_shared<fake_caller>();
+    get->responses = {{200, R"([{
+      "algoId":1,"clientAlgoId":"tt-fb-sl-7evil","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"90","closePosition":true,"reduceOnly":false
+    }])"}};
+    BinanceFuturesBracketAdapter a(wrap(post), wrap(del), wrap(get));
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceFuturesBracketAdapter, ListOpenDuplicateVenueOrderIdRefusesRecovery)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del = std::make_shared<fake_caller>();
+    auto get = std::make_shared<fake_caller>();
+    get->responses = {{200, R"([
+      {"algoId":1,"clientAlgoId":"tt-fb-sl-7","algoType":"CONDITIONAL","orderType":"STOP_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"90","closePosition":true,"reduceOnly":false},
+      {"algoId":1,"clientAlgoId":"tt-fb-tp-8","algoType":"CONDITIONAL","orderType":"TAKE_PROFIT_MARKET","symbol":"BTCUSDT","side":"SELL","positionSide":"BOTH","algoStatus":"NEW","triggerPrice":"110","closePosition":true,"reduceOnly":false}
+    ])"}};
+    BinanceFuturesBracketAdapter a(wrap(post), wrap(del), wrap(get));
+    EXPECT_THROW(a.list_open(), std::runtime_error);
 }
 
 #endif // HAS_BINANCE

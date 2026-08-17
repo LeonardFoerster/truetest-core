@@ -3,9 +3,13 @@
 #include "providers/transport.h"
 
 #include <condition_variable>
+#include <cstddef>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
+#include <utility>
+#include <vector>
 
 // MockStreamingTransport: a streaming transport backed by a thread-safe queue.
 // Useful for testing DataBridge streaming mode and transport contracts.
@@ -17,6 +21,7 @@ public:
 		std::lock_guard<std::mutex> lk(mu_);
 		open_ = true;
 		stopped_ = false;
+		blocking_reads_ = 0;
 		return true;
 	}
 
@@ -49,6 +54,8 @@ public:
 	std::optional<std::string> read_line_blocking() override
 	{
 		std::unique_lock<std::mutex> lk(mu_);
+		++blocking_reads_;
+		cv_.notify_all();
 		cv_.wait(lk, [this] { return !lines_.empty() || stopped_; });
 		if (lines_.empty())
 		{
@@ -62,6 +69,12 @@ public:
 		return line;
 	}
 
+	void wait_for_blocking_reads(std::size_t count)
+	{
+		std::unique_lock<std::mutex> lk(mu_);
+		cv_.wait(lk, [this, count] { return blocking_reads_ >= count; });
+	}
+
 	void request_stop() override
 	{
 		std::lock_guard<std::mutex> lk(mu_);
@@ -70,6 +83,13 @@ public:
 		if (lines_.empty())
 			open_ = false;
 		cv_.notify_all();
+	}
+
+	transport_terminal_status terminal_status() const override
+	{
+		std::lock_guard<std::mutex> lk(mu_);
+		return stopped_ ? transport_terminal_status::operator_stop
+		                : transport_terminal_status::unknown;
 	}
 
 	// Enqueue a line for the consumer to read.
@@ -86,6 +106,7 @@ private:
 	std::queue<std::string> lines_;
 	bool open_ = false;
 	bool stopped_ = false;
+	std::size_t blocking_reads_ = 0;
 };
 
 // MockBatchTransport: a non-streaming transport backed by a vector of lines.
@@ -104,6 +125,13 @@ public:
 		if (idx_ < lines_.size())
 			return lines_[idx_++];
 		return std::nullopt;
+	}
+
+	transport_terminal_status terminal_status() const override
+	{
+		return idx_ >= lines_.size()
+			? transport_terminal_status::clean_eof
+			: transport_terminal_status::unknown;
 	}
 
 private:

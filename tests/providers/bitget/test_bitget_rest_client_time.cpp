@@ -8,12 +8,134 @@
 #include <climits>
 #include <cstdlib>
 #include <functional>
+#include <memory>
+#include <atomic>
+#include <chrono>
+#include <stdexcept>
+#include <thread>
 #include <string>
+#include <vector>
+
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rsa.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 namespace {
 
 using response = BitgetRestClient::response;
 using get_fn_t = std::function<response(const std::string&, const std::string&)>;
+
+std::pair<std::string, std::string> make_self_signed_cert()
+{
+    EVP_PKEY* pkey = nullptr;
+    EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
+    EVP_PKEY_keygen_init(pctx);
+    EVP_PKEY_CTX_set_rsa_keygen_bits(pctx, 2048);
+    EVP_PKEY_keygen(pctx, &pkey);
+    EVP_PKEY_CTX_free(pctx);
+
+    X509* x509 = X509_new();
+    ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
+    X509_gmtime_adj(X509_getm_notBefore(x509), 0);
+    X509_gmtime_adj(X509_getm_notAfter(x509), 60 * 60 * 24);
+    X509_set_pubkey(x509, pkey);
+    X509_NAME* name = X509_get_subject_name(x509);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               reinterpret_cast<const unsigned char*>("127.0.0.1"),
+                               -1, -1, 0);
+    X509_set_issuer_name(x509, name);
+    char subject_alt_name[] = "IP:127.0.0.1";
+    X509_EXTENSION* san = X509V3_EXT_conf_nid(
+        nullptr, nullptr, NID_subject_alt_name, subject_alt_name);
+    if (!san) throw std::runtime_error("failed to create certificate SAN");
+    X509_add_ext(x509, san, -1);
+    X509_EXTENSION_free(san);
+    X509_sign(x509, pkey, EVP_sha256());
+
+    const auto to_string = [](BIO* bio) {
+        char* data = nullptr;
+        const long len = BIO_get_mem_data(bio, &data);
+        return std::string(data, static_cast<std::size_t>(len));
+    };
+    BIO* cert_bio = BIO_new(BIO_s_mem());
+    BIO* key_bio = BIO_new(BIO_s_mem());
+    PEM_write_bio_X509(cert_bio, x509);
+    PEM_write_bio_PrivateKey(key_bio, pkey, nullptr, nullptr, 0, nullptr, nullptr);
+    auto cert = to_string(cert_bio);
+    auto key = to_string(key_bio);
+    BIO_free(cert_bio);
+    BIO_free(key_bio);
+    X509_free(x509);
+    EVP_PKEY_free(pkey);
+    return {std::move(cert), std::move(key)};
+}
+
+class TlsSafetyServer
+{
+public:
+    TlsSafetyServer(const std::string& cert, const std::string& key,
+                    int stall_ms, std::string response_body = "{\"code\":\"00000\"}",
+                    bool keep_alive = true)
+        : acceptor_(ioc_, tcp::endpoint(tcp::v4(), 0))
+        , ctx_(ssl::context::tlsv12_server)
+        , stall_ms_(stall_ms)
+        , response_body_(std::move(response_body))
+        , keep_alive_(keep_alive)
+    {
+        ctx_.use_certificate_chain(net::buffer(cert.data(), cert.size()));
+        ctx_.use_private_key(net::buffer(key.data(), key.size()), ssl::context::pem);
+    }
+
+    unsigned short port() const { return acceptor_.local_endpoint().port(); }
+    int request_count() const { return request_count_.load(std::memory_order_acquire); }
+    void start() { thread_ = std::thread([this] { run(); }); }
+    ~TlsSafetyServer()
+    {
+        beast::error_code ec;
+        acceptor_.close(ec);
+        if (thread_.joinable()) thread_.join();
+    }
+
+private:
+    void run()
+    {
+        try
+        {
+            tcp::socket socket(ioc_);
+            beast::error_code ec;
+            acceptor_.accept(socket, ec);
+            if (ec) return;
+            ssl::stream<tcp::socket> stream(std::move(socket), ctx_);
+            stream.handshake(ssl::stream_base::server, ec);
+            if (ec) return;
+            beast::flat_buffer buffer;
+            http::request<http::string_body> request;
+            http::read(stream, buffer, request, ec);
+            if (ec) return;
+            request_count_.fetch_add(1, std::memory_order_release);
+            if (stall_ms_ > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(stall_ms_));
+            http::response<http::string_body> response{http::status::ok, request.version()};
+            response.set(http::field::content_type, "application/json");
+            response.keep_alive(keep_alive_);
+            response.body() = response_body_;
+            response.prepare_payload();
+            http::write(stream, response, ec);
+        }
+        catch (...) {}
+    }
+
+    net::io_context ioc_;
+    tcp::acceptor acceptor_;
+    ssl::context ctx_;
+    int stall_ms_;
+    std::string response_body_;
+    bool keep_alive_;
+    std::atomic<int> request_count_{0};
+    std::thread thread_;
+};
 
 // Bitget /api/v2/public/time envelope (serverTime as string, as live).
 get_fn_t make_time_ok(long long server_ms, int status = 200,
@@ -73,6 +195,18 @@ TEST(BitgetBusinessCode, Http4xxIsFail)
 TEST(BitgetBusinessCode, MissingCodeFailClosed)
 {
     EXPECT_FALSE(bitget::is_business_success(200, R"({"msg":"nope"})"));
+}
+
+TEST(BitgetBusinessCode, DuplicateOrMalformedCodeFailsClosed)
+{
+    EXPECT_FALSE(bitget::is_business_success(
+        200, R"({"code":"00000","code":"50000"})"));
+    EXPECT_TRUE(bitget::extract_business_code(
+        R"({"code":"00000","code":"50000"})").empty());
+    EXPECT_FALSE(bitget::is_business_success(
+        200, R"(garbage "code":"00000")"));
+    EXPECT_TRUE(bitget::extract_business_code(
+        R"(garbage "code":"00000")").empty());
 }
 
 // --- server time parse -------------------------------------------------------
@@ -215,6 +349,111 @@ TEST(BitgetClockResyncDue, NonPositiveIntervalDisablesLazySync)
     EXPECT_FALSE(BitgetRestClient::resync_due(10'000'000, 1, -5));
 }
 
+TEST(BitgetRestClientSafetyLane, TimeoutAfterWriteIsSingleAttempt)
+{
+    auto [cert, key] = make_self_signed_cert();
+    TlsSafetyServer server(cert, key, /*stall_ms=*/1000);
+    server.start();
+
+    BitgetRestClient client("key", "secret", "pass", "127.0.0.1",
+                            std::to_string(server.port()));
+    client.add_trusted_ca_for_testing(cert);
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto response = client.safety_post_json(
+        "/api/v3/trade/place-order", "{}", std::chrono::milliseconds{100});
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start).count();
+
+    EXPECT_EQ(response.status, 0);
+    EXPECT_FALSE(response.business_ok);
+    EXPECT_TRUE(response.request_written);
+    EXPECT_LT(elapsed, 800);
+    EXPECT_EQ(server.request_count(), 1);
+}
+
+TEST(BitgetRestClientSafetyLane, PartialWriteErrorIsAmbiguous)
+{
+    const beast::error_code aborted = net::error::operation_aborted;
+    EXPECT_FALSE(BitgetRestClient::request_may_have_been_written(aborted, 0));
+    EXPECT_TRUE(BitgetRestClient::request_may_have_been_written(aborted, 1));
+    EXPECT_TRUE(BitgetRestClient::request_may_have_been_written({}, 0));
+}
+
+TEST(BitgetRestClientSafetyLane, HttpSuccessBusinessFailureRemainsFailure)
+{
+    auto [cert, key] = make_self_signed_cert();
+    TlsSafetyServer server(cert, key, /*stall_ms=*/0,
+                           R"({"code":"40001","msg":"rejected"})");
+    server.start();
+
+    BitgetRestClient client("key", "secret", "pass", "127.0.0.1",
+                            std::to_string(server.port()));
+    client.add_trusted_ca_for_testing(cert);
+    const auto response = client.safety_post_json(
+        "/api/v3/trade/place-order", "{}", std::chrono::seconds{1});
+
+    EXPECT_EQ(response.status, 200);
+    EXPECT_FALSE(response.business_ok);
+    EXPECT_TRUE(response.request_written);
+    EXPECT_EQ(server.request_count(), 1);
+}
+
+TEST(BitgetRestClientSafetyLane, ConnectionCloseSuccessCleansUpSafetyIoState)
+{
+    auto [cert, key] = make_self_signed_cert();
+    TlsSafetyServer server(
+        cert, key, /*stall_ms=*/0,
+        R"({"code":"00000","msg":"success","data":null})",
+        /*keep_alive=*/false);
+    server.start();
+
+    BitgetRestClient client("key", "secret", "pass", "127.0.0.1",
+                            std::to_string(server.port()));
+    client.add_trusted_ca_for_testing(cert);
+    const auto response = client.safety_post_json(
+        "/api/v3/trade/place-order", "{}", std::chrono::seconds{1});
+
+    EXPECT_EQ(response.status, 200);
+    EXPECT_TRUE(response.business_ok);
+    EXPECT_TRUE(response.request_written);
+    EXPECT_EQ(server.request_count(), 1);
+}
+
+TEST(BitgetRestClientColdConnect, SafetyAndNormalTlsHandshakeAreBounded)
+{
+    net::io_context server_ioc;
+    tcp::acceptor acceptor(server_ioc,
+        tcp::endpoint(net::ip::address_v4::loopback(), 0));
+    auto socket = std::make_shared<tcp::socket>(server_ioc);
+    acceptor.async_accept(*socket, [](beast::error_code) {});
+    std::thread server([&] { server_ioc.run(); });
+
+    BitgetRestClient client(
+        "key", "secret", "pass", "127.0.0.1",
+        std::to_string(acceptor.local_endpoint().port()), "/api/v2/public/time");
+    const auto safety_started = std::chrono::steady_clock::now();
+    const auto safety = client.safety_post_json(
+        "/api/v3/trade/place-order", "{}", std::chrono::milliseconds(30));
+    EXPECT_EQ(safety.status, 0);
+    EXPECT_FALSE(safety.request_written);
+    EXPECT_LT(std::chrono::steady_clock::now() - safety_started,
+              std::chrono::seconds(1));
+
+    client.set_per_call_timeout(std::chrono::milliseconds(30));
+    const auto normal_started = std::chrono::steady_clock::now();
+    const auto normal = client.get_unsigned("/api/v2/public/time");
+    EXPECT_EQ(normal.status, 0);
+    EXPECT_LT(std::chrono::steady_clock::now() - normal_started,
+              std::chrono::seconds(1));
+
+    beast::error_code ignored;
+    socket->close(ignored);
+    acceptor.close(ignored);
+    server_ioc.stop();
+    server.join();
+}
+
 // --- instruments probe (canned JSON) ----------------------------------------
 
 namespace {
@@ -293,6 +532,24 @@ TEST(BitgetInstruments, ParseEmptyData)
         R"({"code":"00000","data":[]})", "BTCUSDT");
     EXPECT_FALSE(p.ok);
     EXPECT_FALSE(p.found);
+}
+
+TEST(BitgetInstruments, RefusesNestedDuplicateAndMalformedDecisionFields)
+{
+    const std::vector<std::string> malformed = {
+        R"({"code":"00000","msg":"success","nested":{"data":[{"symbol":"BTCUSDT","status":"online","priceMultiplier":"0.1","quantityMultiplier":"0.001"}]}})",
+        R"({"code":"00000","msg":"success","data":[{"nested":{"symbol":"BTCUSDT"},"status":"online","priceMultiplier":"0.1","quantityMultiplier":"0.001"}]})",
+        R"({"code":"00000","msg":"success","data":[{"symbol":"BTCUSDT","symbol":"ETHUSDT","status":"online","priceMultiplier":"0.1","quantityMultiplier":"0.001"}]})",
+        R"({"code":"00000","msg":"success","data":[{"symbol":"BTCUSDT","status":"online","priceMultiplier":"0.1","priceMultiplier":"0.2","quantityMultiplier":"0.001"}]})",
+        R"({"code":"00000","msg":"success","data":[{"symbol":"BTCUSDT","status":"online","priceMultiplier":"junk","quantityMultiplier":"0.001"}]})",
+        R"({"code":"00000","msg":"success","data":[{"symbol":"BTCUSDT","status":"online","priceMultiplier":"0.1","quantityMultiplier":"0.001"},{"symbol":"BTCUSDT","status":"online","priceMultiplier":"0.2","quantityMultiplier":"0.002"}]})",
+    };
+    for (const auto& body : malformed)
+    {
+        const auto probe = bitget::parse_instruments_response(
+            body, "BTCUSDT");
+        EXPECT_FALSE(probe.ok) << body;
+    }
 }
 
 #endif // HAS_BITGET

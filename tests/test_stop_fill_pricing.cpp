@@ -12,6 +12,7 @@
 #include "engine/engine.h"
 #include "engine/engine_config.h"
 #include "data/data_handler.h"
+#include "execution/latency_model.h"
 #include "strategy/strategy_interface.h"
 
 #include <array>
@@ -54,6 +55,23 @@ public:
     }
 
     void set_position_open(const std::string&, bool) override {}
+};
+
+class EveryBarBuyer : public IStrategy
+{
+public:
+    std::optional<order_event> on_market(const market_event& mkt) override
+    {
+        ++call_count_;
+        return order_event(mkt.get_timestamp(), mkt.get_symbol(),
+                           order_type::market, order_side::buy,
+                           1.0, mkt.get_close());
+    }
+    void set_position_open(const std::string&, bool) override {}
+    int call_count() const noexcept { return call_count_; }
+
+private:
+    int call_count_ = 0;
 };
 
 double first_fill_price(engine& eng)
@@ -208,4 +226,54 @@ TEST(StopFillPricing, RestingLimitFillsOnIntrabarTraversal)
     ASSERT_GT(px, 0.0) << "traversed resting limit must fill";
     EXPECT_NEAR(px, 95.0, 1e-9)
         << "resting limit fills at its own limit price on traversal";
+}
+
+TEST(EngineOpenOrderCapacity, QueuedOrderReservesSlotBeforeVenueSubmission)
+{
+    SilenceCout quiet;
+    auto dh = make_bars({{100, 101, 99, 100},
+                         {100, 101, 99, 100},
+                         {100, 101, 99, 100},
+                         {100, 101, 99, 100},
+                         {100, 101, 99, 100}});
+    auto cfg = make_cfg();
+    cfg.risk.max_open_orders = 1;
+    // Keep the first candidate queued across every input bar.  The legacy
+    // execution_bar_delay flag only means "next timestamp" regardless of its
+    // numeric value, so it cannot establish this capacity precondition.
+    cfg.latency_model = std::make_shared<FixedLatencyModel>(
+        std::chrono::hours(1));
+    cfg.show_progress = false;
+    auto strat = std::make_shared<EveryBarBuyer>();
+
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.run();
+
+    ASSERT_EQ(strat->call_count(), 5);
+    // Batch EOF force-drains the one accepted candidate, so it is filled by
+    // the time run() returns.  The four later candidates must nevertheless
+    // have observed its reserved pending slot and been rejected.
+    EXPECT_EQ(eng.get_order_tracker().active_count(), 0u);
+    EXPECT_EQ(eng.total_audit_rejections(), 4u)
+        << "later candidates must be rejected while the first order is queued";
+}
+
+TEST(EngineOpenOrderCapacity, TriggeredStopReusesItsReservedSlot)
+{
+    SilenceCout quiet;
+    auto dh = make_bars({{100, 101, 99, 100},
+                         {100, 101, 99, 100},
+                         {103, 115, 102, 114}});
+    auto cfg = make_cfg();
+    cfg.risk.max_open_orders = 1;
+    cfg.show_progress = false;
+    auto strat = std::make_shared<StopPlacer>(
+        order_type::stop, order_side::buy, 104.0);
+
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.run();
+
+    EXPECT_GT(first_fill_price(eng), 0.0)
+        << "stop-to-market conversion must not consume a second slot";
+    EXPECT_EQ(eng.total_audit_rejections(), 0u);
 }

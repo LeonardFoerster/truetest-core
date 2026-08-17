@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+
 #include "ui/console_format.h"
 #include "ui/console_dashboard.h"   // for enums
 
@@ -36,6 +38,12 @@ TEST(ConsoleFormat, FmtPosition)
     EXPECT_EQ(truetest::ui::fmt_position_fp8(0), "flat");
     EXPECT_EQ(truetest::ui::fmt_position_fp8(100000000), "long 1.0000");
     EXPECT_EQ(truetest::ui::fmt_position_fp8(-25000000), "short 0.2500");
+}
+
+TEST(ConsoleFormat, FmtDurationDoesNotTruncateInt64Range)
+{
+    EXPECT_EQ(truetest::ui::fmt_duration(std::chrono::seconds::max()),
+              "2562047788015215:30:07");
 }
 
 TEST(ConsoleFormat, VisibleWidthAndPad)

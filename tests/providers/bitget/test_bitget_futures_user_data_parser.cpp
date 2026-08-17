@@ -6,6 +6,8 @@
 #include "providers/bitget/bitget_private_ws_transport.h"
 
 #include <string>
+#include <memory>
+#include <thread>
 
 namespace {
 
@@ -122,6 +124,87 @@ TEST(BitgetPrivateWsTransportHelpers, LoginSuccessCodes)
     EXPECT_FALSE(bitget::is_login_success(R"({"event":"subscribe"})"));
     EXPECT_TRUE(bitget::is_login_failure(
         R"({"event":"login","code":"40001","msg":"bad"})"));
+    EXPECT_FALSE(bitget::is_login_success(
+        R"(garbage {"event":"login","code":"0"})"));
+    EXPECT_FALSE(bitget::is_login_success(
+        R"({"event":"login","code":"0","code":"30001"})"));
+    EXPECT_FALSE(bitget::is_login_success(
+        R"({"nested":{"event":"login","code":"0"}})"));
+    EXPECT_FALSE(bitget::is_login_success(
+        R"({"event":"login","op":"login","code":"0"})"));
+}
+
+TEST(BitgetPrivateWsTransportHelpers, SubscriptionAckIsAuthoritativeAndTopicBound)
+{
+    std::string_view topic;
+    EXPECT_EQ(bitget::classify_private_subscription_ack(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"},"connId":"x"})",
+                  topic),
+              bitget::subscription_ack::accepted);
+    EXPECT_EQ(topic, "order");
+
+    EXPECT_EQ(bitget::classify_private_subscription_ack(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"fill"},"code":"0"})",
+                  topic),
+              bitget::subscription_ack::accepted);
+    EXPECT_EQ(topic, "fill");
+
+    EXPECT_EQ(bitget::classify_private_subscription_ack(
+                  R"({"event":"error","arg":{"instType":"UTA","topic":"order"},"code":"30001"})",
+                  topic),
+              bitget::subscription_ack::rejected);
+    EXPECT_EQ(bitget::classify_private_subscription_ack(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"},"code":"0","code":"1"})",
+                  topic),
+              bitget::subscription_ack::rejected);
+    EXPECT_EQ(bitget::classify_private_subscription_ack(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"unknown"}})",
+                  topic),
+              bitget::subscription_ack::rejected);
+    EXPECT_EQ(bitget::classify_private_subscription_ack(
+                  R"({"event":"subscribe","nested":{"arg":{"instType":"UTA","topic":"order"}}})",
+                  topic),
+              bitget::subscription_ack::rejected);
+    EXPECT_EQ(bitget::classify_private_subscription_ack(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"}} trailing)",
+                  topic),
+              bitget::subscription_ack::unrelated);
+}
+
+TEST(BitgetPrivateWsTransportHelpers, SubscriptionTrackerRequiresAllFourTopics)
+{
+    bitget::private_subscription_tracker tracker;
+    EXPECT_EQ(tracker.consume(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"fill"}})"),
+              bitget::subscription_progress::waiting);
+    EXPECT_EQ(tracker.consume(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"}})"),
+              bitget::subscription_progress::waiting);
+    EXPECT_EQ(tracker.consume(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"fill"}})"),
+              bitget::subscription_progress::waiting)
+        << "a duplicate ACK must not advance readiness";
+    EXPECT_EQ(tracker.consume(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"account"}})"),
+              bitget::subscription_progress::waiting);
+    EXPECT_EQ(tracker.consume(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"position"}})"),
+              bitget::subscription_progress::ready);
+}
+
+TEST(BitgetPrivateWsTransportHelpers, SubscriptionTrackerRejectsAndIgnoresSafely)
+{
+    bitget::private_subscription_tracker tracker;
+    EXPECT_EQ(tracker.consume(R"({"event":"info","msg":"connected"})"),
+              bitget::subscription_progress::waiting);
+    EXPECT_EQ(tracker.consume(
+                  R"({"event":"subscribe","nested":{"arg":{"instType":"UTA","topic":"order"}}})"),
+              bitget::subscription_progress::rejected);
+
+    bitget::private_subscription_tracker rejection;
+    EXPECT_EQ(rejection.consume(
+                  R"({"event":"error","code":"30001","msg":"denied"})"),
+              bitget::subscription_progress::rejected);
 }
 
 TEST(BitgetPrivateWsTransport, ConstructDoesNotOpen)
@@ -135,6 +218,33 @@ TEST(BitgetPrivateWsTransport, OpenWithoutCredentialsErrors)
     BitgetPrivateWsTransport tx("", "", "");
     EXPECT_FALSE(tx.open());
     EXPECT_EQ(tx.state(), IFillTransport::lifecycle::error);
+}
+
+TEST(BitgetPrivateWsTransport, InitialSocketFailureRefusesAndCleansUp)
+{
+    net::io_context server_ioc;
+    tcp::acceptor acceptor(server_ioc,
+        tcp::endpoint(net::ip::address_v4::loopback(), 0));
+    auto socket = std::make_shared<tcp::socket>(server_ioc);
+    acceptor.async_accept(*socket, [socket](beast::error_code) {
+        beast::error_code ignored;
+        socket->close(ignored);
+    });
+    std::thread server([&] { server_ioc.run(); });
+
+    BitgetPrivateWsTransport tx(
+        "key", "secret", "pass", "127.0.0.1",
+        std::to_string(acceptor.local_endpoint().port()), "/v3/ws/private");
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_FALSE(tx.open());
+    EXPECT_LT(std::chrono::steady_clock::now() - started,
+              std::chrono::seconds(2));
+    EXPECT_EQ(tx.state(), IFillTransport::lifecycle::closed);
+
+    beast::error_code ignored;
+    acceptor.close(ignored);
+    server_ioc.stop();
+    server.join();
 }
 
 // --- orderStatus → kind (plan §9.4) ---

@@ -60,6 +60,20 @@ TEST(BitunixParser, EmptyDataYieldsNothing)
         R"({"ch":"trade","symbol":"BTCUSDT","ts":1,"data":[]})").empty());
 }
 
+TEST(BitunixParser, ControlAckRequiresAuthoritativeUniqueEnvelope)
+{
+    BitunixCombinedParser parser;
+    EXPECT_EQ(parser.classify_empty_frame(R"({"op":"pong","pong":1})"),
+              empty_parse_status::ignored);
+    EXPECT_EQ(parser.classify_empty_frame(R"(garbage "op":"pong")"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(parser.classify_empty_frame(
+                  R"({"op":"pong","op":"subscribe"})"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(parser.classify_empty_frame(R"({"op":"pong"} trailing)"),
+              empty_parse_status::malformed);
+}
+
 #else
 
 TEST(BitunixParser, SkippedWithoutHasBitunix)

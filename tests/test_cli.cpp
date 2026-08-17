@@ -2,35 +2,40 @@
 #include <cstdlib>
 #include <cstdio>
 #include <array>
-#include <ctime>
 #include <string>
 #include <fstream>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
-// Resolve engine binary across common CMake output layouts (ad-hoc
-// ./build and preset out/build/linux-tests). Prefer the newer mtime.
+static bool is_executable_file(const std::string& path)
+{
+    struct stat st{};
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode)
+        && (st.st_mode & S_IXUSR);
+}
+
+// A configured test target must exercise binaries from its own build tree.
+// Falling back to another tree by mtime can silently test a different source
+// fingerprint. Ordered fallbacks exist only for ad-hoc/manual test binaries.
 static std::string resolve_engine_binary(const std::string& binary)
 {
+#ifdef TRUETEST_ENGINE_DIR
+    const std::string configured =
+        std::string(TRUETEST_ENGINE_DIR) + "/" + binary;
+    if (is_executable_file(configured)) return configured;
+#endif
+
     const char* candidates[] = {
         "./out/build/linux-tests/",
         "./build/",
         "./out/build/linux-release-native/",
     };
-    std::string best;
-    std::time_t best_mtime = 0;
     for (const char* dir : candidates)
     {
         const std::string path = std::string(dir) + binary;
-        struct stat st{};
-        if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
-            (st.st_mode & S_IXUSR) && st.st_mtime >= best_mtime)
-        {
-            best = path;
-            best_mtime = st.st_mtime;
-        }
+        if (is_executable_file(path)) return path;
     }
-    return best.empty() ? (std::string("./build/") + binary) : best;
+    return std::string("./build/") + binary;
 }
 
 // Helper: run engine binary with args, capture stdout+stderr, return exit code
@@ -101,6 +106,41 @@ TEST(CLI, InvalidModeDetectedByDryRun)
     int rc = run_truetest("--dry-run --mode foobar", out);
     EXPECT_EQ(rc, 1);
     EXPECT_NE(out.find("Unknown mode"), std::string::npos);
+}
+
+TEST(CLI, FuturesPhase0PresetUsesFractionalLiquidationDistance)
+{
+    std::string out;
+    int rc = run_truetest("--preset futures-phase0 --dump-config", out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("\"min_liquidation_distance_pct\": 0.07"),
+              std::string::npos);
+}
+
+TEST(CLI, RejectsPercentageScaleLiquidationDistance)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--provider synthetic --min-liq-distance-pct 7", out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("use 0.07 for 7%"), std::string::npos);
+}
+
+TEST(CLI, RejectsNonFiniteLiquidationDistance)
+{
+    std::string out;
+    int rc = run_truetest(
+        "--provider synthetic --min-liq-distance-pct nan", out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("finite fraction"), std::string::npos);
+}
+
+TEST(CLI, RejectsCheckpointResumeV1BeforeRun)
+{
+    std::string out;
+    int rc = run_truetest("--resume any-v1-checkpoint.bin --dry-run", out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("diagnostic portfolio snapshots"), std::string::npos);
 }
 
 // --simple-tui opts ConsoleDashboard's ANSI-box TUI over TabbedDashboard on
@@ -475,7 +515,11 @@ TEST(CLI, QuestdbPortsAccepted)
 
 TEST(CLI, PersistFlagRejectedWhenQuestDbDisabled)
 {
-    GTEST_SKIP() << "Build has HAS_QUESTDB defined; skipping rejection test.";
+    std::string out;
+    int rc = run_truetest("--persist --dump-config", out);
+    EXPECT_NE(rc, 0);
+    EXPECT_NE(out.find("--persist"), std::string::npos);
+    EXPECT_NE(out.find("not expected"), std::string::npos);
 }
 
 #endif // HAS_QUESTDB

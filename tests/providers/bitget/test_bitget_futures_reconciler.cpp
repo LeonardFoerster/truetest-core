@@ -133,6 +133,52 @@ TEST(BitgetFuturesReconciler, PositionAmtWrongSymbolSingleObjectRefuses)
         body, out, "BTCUSDT"));
 }
 
+TEST(BitgetFuturesReconciler, PositionAmtMissingOrNullDataRefuses)
+{
+    double out = 99.0;
+    EXPECT_FALSE(BitgetFuturesReconciler::extract_position_amt(
+        R"({"code":"00000"})", out, "BTCUSDT"));
+    EXPECT_FALSE(BitgetFuturesReconciler::extract_position_amt(
+        R"({"code":"00000","data":null})", out, "BTCUSDT"));
+}
+
+TEST(BitgetFuturesReconciler, PositionAmtIncompleteObjectOrRowRefuses)
+{
+    double out = 99.0;
+    EXPECT_FALSE(BitgetFuturesReconciler::extract_position_amt(
+        R"({"code":"00000","data":{}})", out, "BTCUSDT"));
+    EXPECT_FALSE(BitgetFuturesReconciler::extract_position_amt(
+        R"({"code":"00000","data":{"list":[{}]}})", out,
+        "BTCUSDT"));
+    EXPECT_FALSE(BitgetFuturesReconciler::extract_position_amt(
+        R"({"code":"00000","data":{"list":[{"nested":{"symbol":"BTCUSDT","total":"0","posSide":"long"}}]}})",
+        out, "BTCUSDT"));
+}
+
+TEST(BitgetFuturesReconciler, DuplicateDecisionMemberRefuses)
+{
+    double out = 99.0;
+    EXPECT_FALSE(BitgetFuturesReconciler::extract_position_amt(
+        R"({"code":"00000","data":{"list":[]},"data":{"list":[{"symbol":"BTCUSDT","total":"1"}]}})",
+        out, "BTCUSDT"));
+}
+
+TEST(BitgetFuturesReconciler, DuplicateRowDecisionMemberRefuses)
+{
+    double out = 99.0;
+    EXPECT_FALSE(BitgetFuturesReconciler::extract_position_amt(
+        R"({"code":"00000","data":{"list":[{"symbol":"BTCUSDT","symbol":"ETHUSDT","total":"1"}]}})",
+        out, "BTCUSDT"));
+}
+
+TEST(BitgetFuturesReconciler, DuplicateNestedListRefuses)
+{
+    double out = 99.0;
+    EXPECT_FALSE(BitgetFuturesReconciler::extract_position_amt(
+        R"({"code":"00000","data":{"list":[],"list":[{"symbol":"BTCUSDT","total":"1"}]}})",
+        out, "BTCUSDT"));
+}
+
 TEST(BitgetFuturesReconciler, PositionAmtZeroIsParseable)
 {
     double out = 99.0;

@@ -26,6 +26,8 @@ public:
         submissions_.emplace_back(std::string(endpoint), std::string(payload));
         result r;
         r.ok = submit_ok_;
+        r.uncertain = submit_uncertain_;
+        r.fatal = submit_fatal_;
         r.exchange_order_id = next_exchange_id_;
         r.raw_response = "fake-ok";
         if (!submit_ok_) r.error = "fake-rejected";
@@ -37,16 +39,82 @@ public:
         cancels_.emplace_back(std::string(endpoint), std::string(payload));
         result r;
         r.ok = cancel_ok_;
+        r.uncertain = cancel_uncertain_;
+        r.fatal = cancel_fatal_;
         if (!cancel_ok_) r.error = "fake-cancel-fail";
         return r;
     }
 
     bool opened_ = false;
     bool submit_ok_ = true;
+    bool submit_uncertain_ = false;
+    bool submit_fatal_ = false;
     bool cancel_ok_ = true;
+    bool cancel_uncertain_ = false;
+    bool cancel_fatal_ = false;
     std::string next_exchange_id_ = "EX-1";
     std::vector<std::pair<std::string, std::string>> submissions_;
     std::vector<std::pair<std::string, std::string>> cancels_;
+};
+
+class BlockingOrderTransport final : public FakeOrderTransport
+{
+public:
+    result submit(std::string_view endpoint, std::string_view payload) override
+    {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            entered_ = true;
+        }
+        entered_cv_.notify_all();
+        std::unique_lock<std::mutex> lock(mu_);
+        const bool released = release_cv_.wait_for(
+            lock, std::chrono::seconds(2), [this] { return released_; });
+        lock.unlock();
+        if (!released)
+        {
+            result timed_out;
+            timed_out.fatal = true;
+            timed_out.error = "test transport release timed out";
+            completed_.store(true, std::memory_order_release);
+            return timed_out;
+        }
+        auto result = FakeOrderTransport::submit(endpoint, payload);
+        completed_.store(true, std::memory_order_release);
+        return result;
+    }
+
+    bool wait_until_entered()
+    {
+        std::unique_lock<std::mutex> lock(mu_);
+        return entered_cv_.wait_for(
+            lock, std::chrono::seconds(2), [this] { return entered_; });
+    }
+
+    void release() { { std::lock_guard<std::mutex> lock(mu_); released_ = true; } release_cv_.notify_all(); }
+    bool completed() const { return completed_.load(std::memory_order_acquire); }
+
+private:
+    std::mutex mu_;
+    std::condition_variable entered_cv_;
+    std::condition_variable release_cv_;
+    bool entered_ = false;
+    bool released_ = false;
+    std::atomic<bool> completed_{false};
+};
+
+class NonStdThrowingOrderTransport final : public FakeOrderTransport
+{
+public:
+    result submit(std::string_view endpoint,
+                  std::string_view payload) override
+    {
+        const int call = calls.fetch_add(1, std::memory_order_acq_rel);
+        if (call == 0) throw 7;
+        return FakeOrderTransport::submit(endpoint, payload);
+    }
+
+    std::atomic<int> calls{0};
 };
 
 class FakeFillTransport : public IFillTransport
@@ -144,6 +212,24 @@ public:
         out.last_fill_price   = std::stod(parts[6]);
         out.ts                = std::chrono::system_clock::now();
         return true;
+    }
+};
+
+class FakeFundingParser : public IFillParser
+{
+public:
+    bool parse(std::string_view, parsed_exec&) override { return false; }
+
+    funding_parse_result parse_funding_update(
+        std::string_view raw, parsed_funding_update& out) noexcept override
+    {
+        if (raw == "funding")
+        {
+            out = parsed_funding_update{1'700'000'000'000LL, -0.5};
+            return funding_parse_result::valid;
+        }
+        if (raw == "malformed") return funding_parse_result::invalid;
+        return funding_parse_result::not_funding;
     }
 };
 
@@ -517,6 +603,78 @@ TEST(ExecutionBridge, AsyncSubmitFailure)
     EXPECT_FALSE(results[0].error.empty());
 }
 
+TEST(ExecutionBridge, AsyncSubmitPreservesAmbiguousAndFatalSafetySignals)
+{
+    bridge_harness h;
+    h.tx->submit_ok_ = false;
+    h.tx->submit_uncertain_ = true;
+    h.tx->submit_fatal_ = true;
+    ASSERT_TRUE(h.bridge->open());
+
+    h.bridge->submit_order(make_order(105));
+    std::vector<ExecutionBridge::submit_result> results;
+    ASSERT_TRUE(wait_submit_results(*h.bridge, results));
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_FALSE(results[0].ok);
+    EXPECT_TRUE(results[0].uncertain);
+    EXPECT_TRUE(results[0].fatal);
+}
+
+TEST(ExecutionBridge, TerminalSubmitOutcomeDropsAlreadyQueuedMutation)
+{
+    bridge_harness h;
+    h.tx->submit_ok_ = false;
+    h.tx->submit_uncertain_ = true;
+    h.tx->submit_fatal_ = true;
+    ASSERT_TRUE(h.bridge->open());
+
+    h.bridge->submit_order(make_order(107));
+    h.bridge->submit_order(make_order(108));
+    h.bridge->drain_outbound_for_test();
+
+    std::vector<ExecutionBridge::submit_result> results;
+    ASSERT_TRUE(h.bridge->poll_submit_results(results));
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_EQ(results.front().engine_id, 107u);
+    EXPECT_TRUE(results.front().uncertain);
+    EXPECT_TRUE(results.front().fatal);
+    EXPECT_EQ(h.tx->submissions_.size(), 1u);
+    EXPECT_FALSE(h.bridge->cancel_order(108));
+}
+
+TEST(ExecutionBridge, NonStdTransportExceptionClosesAdmissionBeforeNextMutation)
+{
+    auto tx = std::make_shared<NonStdThrowingOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<FakeEncoder>();
+    auto pa = std::make_shared<FakeParser>();
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.encoder = en;
+    d.parser = pa;
+    d.start_transport_thread = true;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    bridge.submit_order(make_order(109));
+    bridge.submit_order(make_order(110));
+
+    std::vector<ExecutionBridge::submit_result> results;
+    for (int i = 0; i < 10000 && results.empty(); ++i)
+    {
+        (void)bridge.poll_submit_results(results);
+        std::this_thread::yield();
+    }
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_EQ(results.front().engine_id, 109u);
+    EXPECT_TRUE(results.front().uncertain);
+    EXPECT_TRUE(results.front().fatal);
+    EXPECT_EQ(tx->calls.load(std::memory_order_acquire), 1);
+    EXPECT_FALSE(bridge.cancel_order(110));
+    bridge.close();
+}
+
 TEST(ExecutionBridge, AsyncCancelReportsTypedResult)
 {
     bridge_harness h;
@@ -556,6 +714,28 @@ TEST(ExecutionBridge, AsyncCancelFailureReportsCancelOp)
     EXPECT_EQ(results[0].symbol, "BAR");
     EXPECT_EQ(results[0].op, ExecutionBridge::submit_result::operation::cancel);
     EXPECT_FALSE(results[0].error.empty());
+}
+
+TEST(ExecutionBridge, AsyncCancelPreservesAmbiguousAndFatalSafetySignals)
+{
+    bridge_harness h;
+    h.tx->cancel_ok_ = false;
+    h.tx->cancel_uncertain_ = true;
+    h.tx->cancel_fatal_ = true;
+    ASSERT_TRUE(h.bridge->open());
+
+    h.bridge->submit_order(make_order(106, "BAR", 1.0, 100.0));
+    std::vector<ExecutionBridge::submit_result> results;
+    ASSERT_TRUE(wait_submit_results(*h.bridge, results));
+    results.clear();
+
+    ASSERT_TRUE(h.bridge->cancel_order(106));
+    ASSERT_TRUE(wait_submit_results(*h.bridge, results));
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_EQ(results[0].op, ExecutionBridge::submit_result::operation::cancel);
+    EXPECT_FALSE(results[0].ok);
+    EXPECT_TRUE(results[0].uncertain);
+    EXPECT_TRUE(results[0].fatal);
 }
 
 TEST(ExecutionBridge, PreAckCancelUsesClientId)
@@ -601,4 +781,91 @@ TEST(ExecutionBridge, SlowTransportStillNonBlocking)
 
     // Now let it process
     h.bridge->drain_outbound_for_test();
+}
+
+TEST(ExecutionBridge, FundingFastPathEnqueuesOrLatchesFailure)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.parser = std::make_shared<FakeFundingParser>();
+    d.start_transport_thread = false;
+    int accepted = 0;
+    int failures = 0;
+    d.funding_update_handler = [&](const parsed_funding_update& update) {
+        ++accepted;
+        return update.event_time_ms == 1'700'000'000'000LL
+            && update.cash_delta == -0.5;
+    };
+    d.funding_failure_handler = [&] { ++failures; };
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    ft->deliver("funding");
+    EXPECT_EQ(accepted, 1);
+    EXPECT_EQ(failures, 0);
+    ft->deliver("malformed");
+    EXPECT_EQ(accepted, 1);
+    EXPECT_EQ(failures, 1);
+}
+
+TEST(ExecutionBridge, QuiesceWaitsForAdmittedCallAndRejectsQueuedAndLateMutations)
+{
+    auto tx = std::make_shared<BlockingOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    auto en = std::make_shared<FakeEncoder>();
+    auto pa = std::make_shared<FakeParser>();
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.encoder = en;
+    d.parser = pa;
+    d.start_transport_thread = true;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    bridge.submit_order(make_order(701));
+    ASSERT_TRUE(tx->wait_until_entered());
+    bridge.submit_order(make_order(702));
+
+    std::atomic<bool> quiesced{false};
+    std::atomic<bool> quiesce_saw_completion{false};
+    std::thread shutdown([&] {
+        bridge.quiesce();
+        quiesce_saw_completion.store(tx->completed(), std::memory_order_release);
+        quiesced.store(true, std::memory_order_release);
+    });
+
+    // Do not release the admitted venue call until quiesce has actually
+    // closed admission. A thread-start notification is insufficient here:
+    // the worker could otherwise process request 702 before the shutdown
+    // thread gets scheduled (ASAN makes that race easy to reproduce).
+    bool admission_closed = false;
+    const auto admission_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < admission_deadline)
+    {
+        if (!bridge.cancel_order(701))
+        {
+            admission_closed = true;
+            break;
+        }
+        std::this_thread::yield();
+    }
+    tx->release();
+    shutdown.join();
+    ASSERT_TRUE(admission_closed);
+    EXPECT_TRUE(quiesced.load(std::memory_order_acquire));
+    EXPECT_TRUE(quiesce_saw_completion.load(std::memory_order_acquire));
+    EXPECT_EQ(tx->submissions_.size(), 1u);
+    EXPECT_TRUE(tx->cancels_.empty());
+
+    bridge.drain_outbound_for_test();
+    EXPECT_EQ(tx->submissions_.size(), 1u);
+    bridge.submit_order(make_order(703));
+    bridge.drain_outbound_for_test();
+    EXPECT_EQ(tx->submissions_.size(), 1u);
+    EXPECT_FALSE(bridge.cancel_order(701));
 }

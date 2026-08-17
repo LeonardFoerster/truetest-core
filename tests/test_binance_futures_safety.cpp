@@ -244,4 +244,48 @@ TEST(BinanceFuturesSafety, BothChecksCombineAcrossRows)
     EXPECT_TRUE(saw_liq);
 }
 
+TEST(BinanceFuturesSafety, StrictMarginProbeRequiresAuthoritativeEvidence)
+{
+    using binance::futures::strict_margin_probe_refusal;
+    EXPECT_TRUE(strict_margin_probe_refusal(
+        503, R"([])", "BTCUSDT", "ISOLATED", true).has_value());
+
+    for (const std::string_view body : {
+             std::string_view{"not-json"},
+             std::string_view{R"({"symbol":"BTCUSDT"})"},
+             std::string_view{R"([{"symbol":"BTCUSDT","positionAmt":"0"}])"},
+             std::string_view{R"([{"symbol":"BTCUSDT","positionAmt":"0","marginType":"isolated","marginType":"cross"}])"},
+             std::string_view{R"([{"nested":{"symbol":"BTCUSDT","positionAmt":"0","marginType":"isolated"}}])"},
+             std::string_view{R"([{"symbol":"ETHUSDT","positionAmt":"0","marginType":"isolated"}])"}})
+    {
+        EXPECT_TRUE(strict_margin_probe_refusal(
+            200, body, "BTCUSDT", "ISOLATED", true).has_value()) << body;
+    }
+}
+
+TEST(BinanceFuturesSafety, StrictMarginProbeAcceptsOnlyMatchingScopedRow)
+{
+    using binance::futures::strict_margin_probe_refusal;
+    EXPECT_TRUE(strict_margin_probe_refusal(
+        200, R"([])", "BTCUSDT", "ISOLATED", true).has_value());
+    EXPECT_FALSE(strict_margin_probe_refusal(
+        200,
+        R"([{"symbol":"BTCUSDT","positionAmt":"0","marginType":"isolated"}])",
+        "BTCUSDT", "ISOLATED", true).has_value());
+    EXPECT_TRUE(strict_margin_probe_refusal(
+        200,
+        R"([{"symbol":"BTCUSDT","positionAmt":"1","marginType":"cross"}])",
+        "BTCUSDT", "ISOLATED", true).has_value());
+    EXPECT_TRUE(strict_margin_probe_refusal(
+        200,
+        R"([{"symbol":"BTCUSDT","positionAmt":"0","marginType":"incorrect"}])",
+        "BTCUSDT", "ISOLATED", true).has_value());
+    EXPECT_TRUE(strict_margin_probe_refusal(
+        200,
+        R"([{"symbol":"BTCUSDT","positionAmt":"0","marginType":"isolated"}])",
+        "BTCUSDT", "INVALID", true).has_value());
+    EXPECT_FALSE(strict_margin_probe_refusal(
+        503, "broken", "BTCUSDT", "ISOLATED", false).has_value());
+}
+
 #endif // HAS_BINANCE

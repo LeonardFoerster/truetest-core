@@ -4,6 +4,7 @@
 #include "simulation/monte_carlo_types.h"
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <stdexcept>
 
@@ -39,9 +40,12 @@ TEST(MonteCarloController, RunsMultipleTrials) {
 
     // New MC-02 robustness metrics (Phase 2 fields now populated; see docs/todos/03-MC-simulation.md#MC-02)
     EXPECT_TRUE(std::isfinite(agg.win_rate_mean));
+    EXPECT_TRUE(std::isfinite(agg.profit_factor_pooled));
     EXPECT_TRUE(std::isfinite(agg.profit_factor_mean));
+    EXPECT_TRUE(std::isfinite(agg.profit_factor_mean_valid));
     EXPECT_TRUE(std::isfinite(agg.median_win_rate));
     EXPECT_TRUE(std::isfinite(agg.median_profit_factor));
+    EXPECT_TRUE(std::isfinite(agg.median_profit_factor_valid));
     EXPECT_LE(agg.win_rate_mean, 100.0);
     EXPECT_GE(agg.win_rate_mean, 0.0);
     EXPECT_GE(agg.trials_with_profit_factor_gt_1, 0u);
@@ -51,6 +55,101 @@ TEST(MonteCarloController, RunsMultipleTrials) {
     EXPECT_NE(summary.find("Win Rate"), std::string::npos);
     EXPECT_NE(summary.find("Profit Factor"), std::string::npos);
     EXPECT_NE(summary.find("PF > 1"), std::string::npos);
+
+    for (const auto& trial : agg.trials) {
+        EXPECT_GE(trial.total_win, 0.0);
+        EXPECT_GE(trial.total_loss, 0.0);
+        if (trial.total_loss > 0.0) {
+            EXPECT_DOUBLE_EQ(trial.profit_factor,
+                             trial.total_win / trial.total_loss);
+        }
+    }
+}
+
+TEST(BacktestDefects, BF05_McProfitFactorMetricsIsolateZeroLossSentinel) {
+    TrialResult zero_loss;
+    zero_loss.total_pnl = 100.0;
+    zero_loss.total_win = 100.0;
+    zero_loss.profit_factor = 1e9;
+
+    TrialResult ordinary;
+    ordinary.total_pnl = 25.0;
+    ordinary.total_win = 50.0;
+    ordinary.total_loss = 25.0;
+    ordinary.profit_factor = 2.0;
+
+    McAggregate aggregate;
+    aggregate.trials = {zero_loss, ordinary};
+    summarize_monte_carlo_trials(aggregate);
+
+    EXPECT_EQ(aggregate.n_trials, 2u);
+    EXPECT_DOUBLE_EQ(aggregate.profit_factor_pooled, 6.0);
+    EXPECT_FALSE(aggregate.profit_factor_pooled_unbounded);
+    EXPECT_DOUBLE_EQ(aggregate.profit_factor_mean, 500000001.0);
+    EXPECT_DOUBLE_EQ(aggregate.median_profit_factor, 1e9);
+    EXPECT_DOUBLE_EQ(aggregate.profit_factor_mean_valid, 2.0);
+    EXPECT_DOUBLE_EQ(aggregate.median_profit_factor_valid, 2.0);
+    EXPECT_EQ(aggregate.valid_profit_factor_trials, 1u);
+    EXPECT_EQ(aggregate.unbounded_profit_factor_trials, 1u);
+    EXPECT_EQ(aggregate.trials_with_profit_factor_gt_1, 2u);
+
+    const auto json = nlohmann::json::parse(
+        MonteCarloReporter::render_json(aggregate, McRunConfig{}));
+    EXPECT_DOUBLE_EQ(json.at("profit_factor_pooled").get<double>(), 6.0);
+    EXPECT_FALSE(json.at("profit_factor_pooled_unbounded").get<bool>());
+    EXPECT_NEAR(json.at("profit_factor_mean").get<double>(),
+                aggregate.profit_factor_mean, 1.0);
+    EXPECT_DOUBLE_EQ(json.at("median_profit_factor").get<double>(), 1e9);
+    EXPECT_DOUBLE_EQ(json.at("profit_factor_mean_valid").get<double>(), 2.0);
+    EXPECT_DOUBLE_EQ(json.at("median_profit_factor_valid").get<double>(), 2.0);
+    EXPECT_EQ(json.at("valid_profit_factor_trials").get<std::size_t>(), 1u);
+    EXPECT_EQ(json.at("unbounded_profit_factor_trials").get<std::size_t>(),
+              1u);
+    EXPECT_DOUBLE_EQ(json.at("trials").at(0).at("total_win").get<double>(),
+                     100.0);
+    EXPECT_DOUBLE_EQ(json.at("trials").at(0).at("total_loss").get<double>(),
+                     0.0);
+}
+
+TEST(BacktestDefects, BF05_PooledProfitFactorUnboundedPolicyIsExplicit) {
+    TrialResult winner;
+    winner.total_pnl = 10.0;
+    winner.total_win = 10.0;
+    winner.profit_factor = 1e9;
+
+    McAggregate winning_campaign;
+    winning_campaign.trials = {winner};
+    summarize_monte_carlo_trials(winning_campaign);
+    EXPECT_DOUBLE_EQ(winning_campaign.profit_factor_pooled, 1e9);
+    EXPECT_TRUE(winning_campaign.profit_factor_pooled_unbounded);
+    EXPECT_DOUBLE_EQ(winning_campaign.profit_factor_mean, 1e9);
+    EXPECT_DOUBLE_EQ(winning_campaign.median_profit_factor, 1e9);
+    EXPECT_DOUBLE_EQ(winning_campaign.profit_factor_mean_valid, 0.0);
+    EXPECT_DOUBLE_EQ(winning_campaign.median_profit_factor_valid, 0.0);
+    EXPECT_EQ(winning_campaign.valid_profit_factor_trials, 0u);
+    EXPECT_EQ(winning_campaign.unbounded_profit_factor_trials, 1u);
+
+    const auto winning_json = nlohmann::json::parse(
+        MonteCarloReporter::render_json(winning_campaign, McRunConfig{}));
+    EXPECT_TRUE(
+        winning_json.at("profit_factor_pooled_unbounded").get<bool>());
+    EXPECT_EQ(
+        winning_json.at("unbounded_profit_factor_trials").get<std::size_t>(),
+        1u);
+    EXPECT_NE(
+        MonteCarloReporter::render_text_summary(winning_campaign, McRunConfig{})
+            .find("pooled unbounded"),
+        std::string::npos);
+
+    McAggregate empty_campaign;
+    summarize_monte_carlo_trials(empty_campaign);
+    EXPECT_DOUBLE_EQ(empty_campaign.profit_factor_pooled, 0.0);
+    EXPECT_FALSE(empty_campaign.profit_factor_pooled_unbounded);
+    EXPECT_DOUBLE_EQ(empty_campaign.profit_factor_mean, 0.0);
+    EXPECT_DOUBLE_EQ(empty_campaign.profit_factor_mean_valid, 0.0);
+    EXPECT_DOUBLE_EQ(empty_campaign.median_profit_factor_valid, 0.0);
+    EXPECT_EQ(empty_campaign.valid_profit_factor_trials, 0u);
+    EXPECT_EQ(empty_campaign.unbounded_profit_factor_trials, 0u);
 }
 
 TEST(MonteCarloController, DeterministicWithSameSeed) {
@@ -106,7 +205,9 @@ TEST(MonteCarloController, ReuseObjectsProducesPlausibleResults) {
 
     // MC-02 fields also finite under reuse (see docs/todos/03-MC-simulation.md)
     EXPECT_TRUE(std::isfinite(agg_reuse.win_rate_mean));
+    EXPECT_TRUE(std::isfinite(agg_reuse.profit_factor_pooled));
     EXPECT_TRUE(std::isfinite(agg_reuse.profit_factor_mean));
+    EXPECT_TRUE(std::isfinite(agg_reuse.profit_factor_mean_valid));
 
     // Very loose bounds for this micro-benchmark.
     // Full bit-identical results are not yet guaranteed with reuse.

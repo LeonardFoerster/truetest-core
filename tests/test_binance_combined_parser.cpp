@@ -181,6 +181,32 @@ TEST(BinanceCombinedParser, UnknownFrame_ReturnsNullopt)
     EXPECT_FALSE(ev.has_value());
 }
 
+TEST(BinanceCombinedParser, ControlAckRequiresAuthoritativeUniqueEnvelope)
+{
+    auto p = make_parser();
+    EXPECT_EQ(p.classify_empty_frame(R"({"result":null,"id":1})"),
+              empty_parse_status::ignored);
+    EXPECT_EQ(p.classify_empty_frame(
+                  R"(garbage "result":null,"id":1)"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(p.classify_empty_frame(
+                  R"({"result":null,"id":1,"id":2})"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(p.classify_empty_frame(
+                  R"({"result":null,"id":1} trailing)"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(p.classify_empty_frame(R"({"result":null,"id":null})"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(p.classify_empty_frame(R"({"result":null,"id":{}})"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(p.classify_empty_frame(R"({"result":null,"id":[]})"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(p.classify_empty_frame(R"({"result":null,"id":-1})"),
+              empty_parse_status::malformed);
+    EXPECT_EQ(p.classify_empty_frame(R"({"result":null,"id":"1"})"),
+              empty_parse_status::malformed);
+}
+
 TEST(BinanceCombinedParser, PartialBookWithMixedCaseStream_UppercasesSymbol)
 {
     auto p = make_parser();

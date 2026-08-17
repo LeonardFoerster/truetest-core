@@ -499,6 +499,7 @@ struct FakeAdapter : public IBracketAdapter
     std::vector<std::uint64_t> placed_openers;
     std::vector<std::uint64_t> cancelled_openers;
     bracket_handles next_handles;
+    bool throw_cancel = false;
 
     bracket_caps capabilities() const override { return caps_state; }
 
@@ -516,6 +517,7 @@ struct FakeAdapter : public IBracketAdapter
     {
         ++cancel_calls;
         cancelled_openers.push_back(opener);
+        if (throw_cancel) throw std::runtime_error("ambiguous cancel");
     }
 };
 
@@ -593,6 +595,30 @@ TEST(ExitManagerAdapter, ManualCancelCancelsVenueBracket)
     EXPECT_EQ(fake->cancel_calls, 1);
 }
 
+TEST(ExitManagerAdapter, FailedVenueCancelRestoresHandlesAndReverseIdentity)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-88";
+    fake->next_handles.tp_exchange_id = "tp-88";
+    fake->throw_cancel = true;
+    m.set_bracket_adapter(fake);
+
+    m.register_pending(make_long_intent("s", "X", 88, 95.0, 110.0));
+    m.on_fill(make_opener_fill(88, "X", order_side::buy, 1.0, 100.0));
+    ASSERT_EQ(m.opener_for_exchange_order("sl-88"), 88u);
+    ASSERT_EQ(m.strategy_name_for_exchange_order("sl-88"), "s");
+
+    EXPECT_THROW(m.cancel(88u), std::runtime_error);
+    EXPECT_EQ(m.opener_for_exchange_order("sl-88"), 88u);
+    EXPECT_EQ(m.strategy_name_for_exchange_order("sl-88"), "s");
+
+    fake->throw_cancel = false;
+    EXPECT_NO_THROW(m.cancel(88u));
+    EXPECT_EQ(fake->cancel_calls, 2);
+    EXPECT_EQ(m.opener_for_exchange_order("sl-88"), 0u);
+}
+
 TEST(ExitManagerAdapter, BulkCancelByStrategySymbolCancelsAllVenueBrackets)
 {
     ExitManager m;
@@ -657,6 +683,18 @@ TEST(ExitManagerAdapter, RehydrateRejectsEmptyHandlesOrZeroOpener)
     bad.opener_order_id = 1;
     bad.handles = {};                  // empty handles -> adapter declined
     m.rehydrate(bad);
+    EXPECT_EQ(m.armed_count(), 0u);
+}
+
+TEST(ExitManagerAdapter, RehydrateRefusesZeroQuantityVenueState)
+{
+    ExitManager m;
+    IBracketAdapter::recovered_bracket rb;
+    rb.opener_order_id = 7;
+    rb.symbol = "X";
+    rb.qty = 0.0;
+    rb.handles.sl_exchange_id = "sl";
+    EXPECT_THROW(m.rehydrate(rb), std::runtime_error);
     EXPECT_EQ(m.armed_count(), 0u);
 }
 

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "providers/provider.h"
 #include "providers/provider_registry.h"
 #include "providers/local/local_provider.h"
 
@@ -25,6 +26,19 @@ struct SilenceRegistry {
 		std::cerr.rdbuf(orig_err);
 	}
 };
+}
+
+REGISTER_PROVIDER("test_macro_provider_a", [](const provider_config&) {
+	return std::shared_ptr<IProvider>{};
+});
+REGISTER_PROVIDER("test_macro_provider_b", [](const provider_config&) {
+	return std::shared_ptr<IProvider>{};
+});
+
+TEST(ProviderRegistry, MacroSupportsMultipleRegistrationsInOneTranslationUnit)
+{
+	EXPECT_TRUE(ProviderRegistry::instance().has("test_macro_provider_a"));
+	EXPECT_TRUE(ProviderRegistry::instance().has("test_macro_provider_b"));
 }
 
 TEST(ProviderRegistry, CreateThrowsForUnregistered)

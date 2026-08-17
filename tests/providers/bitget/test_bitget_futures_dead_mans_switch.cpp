@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -33,14 +34,22 @@ struct fake_post
     std::vector<response> responses;
     std::vector<std::pair<std::string, std::string>> log;
     std::mutex mu;
+    std::condition_variable cv;
 
     response operator()(std::string_view ep, std::string_view body)
     {
         std::lock_guard<std::mutex> lk(mu);
         log.emplace_back(std::string(ep), std::string(body));
-        if (log.size() <= responses.size())
-            return responses[log.size() - 1];
-        return default_resp;
+        const auto response = log.size() <= responses.size()
+            ? responses[log.size() - 1] : default_resp;
+        cv.notify_all();
+        return response;
+    }
+
+    bool wait_for_calls(std::size_t count, std::chrono::milliseconds timeout)
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        return cv.wait_for(lk, timeout, [&] { return log.size() >= count; });
     }
 
     std::size_t call_count()
@@ -142,6 +151,28 @@ TEST(BitgetFuturesDeadMansSwitch, StartFailsIfInitialArmFails)
     EXPECT_EQ(post->call_count(), 1u);
 }
 
+TEST(BitgetFuturesDeadMansSwitch, ArmRequiresAuthoritativeSuccessEnvelope)
+{
+    SilenceStderr quiet;
+    const std::vector<std::string> malformed = {
+        R"({"code":"00000"})",
+        R"({"code":"00000","msg":"success","data":{}})",
+        R"({"code":"00000","msg":"success","nested":{"data":"success"}})",
+        R"({"code":"00000","code":"40000","msg":"success","data":"success"})",
+        R"({"code":"00000","msg":"success","data":"wrong"})",
+        R"({"code":"00000","msg":"success","data":"success"} trailing)",
+    };
+
+    for (const auto& body : malformed)
+    {
+        auto post = std::make_shared<fake_post>();
+        post->responses = {{200, body}};
+        BitgetFuturesDeadMansSwitch dms(wrap(post), 30000, 1000);
+        EXPECT_FALSE(dms.start()) << body;
+        EXPECT_EQ(post->call_count(), 1u);
+    }
+}
+
 TEST(BitgetFuturesDeadMansSwitch, PermissionFailureLogsBdHint)
 {
     SilenceStderr quiet;
@@ -168,7 +199,7 @@ TEST(BitgetFuturesDeadMansSwitch, HeartbeatRefreshes)
                                     /*heartbeat_ms=*/1000);
 
     ASSERT_TRUE(dms.start());
-    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    ASSERT_TRUE(post->wait_for_calls(3, std::chrono::milliseconds(4000)));
     dms.stop();
 
     EXPECT_GE(post->call_count(), 3u)
@@ -192,8 +223,22 @@ TEST(BitgetFuturesDeadMansSwitch, LivenessTsAdvancesOnHeartbeat)
     EXPECT_GT(initial, 0)
         << "initial arm should bump liveness for WorkerWatchdog";
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-    const int64_t later = dms.liveness_ts().load(std::memory_order_acquire);
+    // Wait for a call observed strictly after the liveness snapshot. Under a
+    // loaded monolithic run the first heartbeat may already have completed
+    // before this test thread resumes; a fixed wait_for_calls(2) would then
+    // return immediately and compare the same timestamp twice.
+    const auto calls_after_snapshot = post->call_count();
+    ASSERT_TRUE(post->wait_for_calls(
+        calls_after_snapshot + 1, std::chrono::milliseconds(2500)));
+    const auto publish_deadline = std::chrono::steady_clock::now()
+                                + std::chrono::milliseconds(500);
+    int64_t later = dms.liveness_ts().load(std::memory_order_acquire);
+    while (later <= initial
+           && std::chrono::steady_clock::now() < publish_deadline)
+    {
+        std::this_thread::yield();
+        later = dms.liveness_ts().load(std::memory_order_acquire);
+    }
     EXPECT_GT(later, initial);
 
     dms.stop();
@@ -267,16 +312,9 @@ TEST(BitgetFuturesDeadMansSwitch, Sub5sCountdownClampedWithWarn)
     EXPECT_NE(quiet.sink.str().find("clamping to 5s"), std::string::npos);
 }
 
-// Two consecutive HB cycle failures invoke close_position_fn once.
-TEST(BitgetFuturesDeadMansSwitch, PersistentFailureInvokesCloseFn)
+TEST(BitgetFuturesDeadMansSwitch, FirstFailureLatchesAndLateCallbackFires)
 {
     SilenceStderr quiet;
-
-    struct CloseRecorder
-    {
-        int call_count = 0;
-        void operator()() { ++call_count; }
-    };
 
     auto post = std::make_shared<fake_post>();
     // Initial arm OK, then every heartbeat fails.
@@ -288,23 +326,65 @@ TEST(BitgetFuturesDeadMansSwitch, PersistentFailureInvokesCloseFn)
     };
     post->default_resp = {500, R"({"code":"50000","msg":"down"})"};
 
-    CloseRecorder recorder;
     BitgetFuturesDeadMansSwitch dms(
         wrap(post),
         /*countdown_ms=*/30000,
-        /*heartbeat_ms=*/1000,
-        /*attempt_close=*/true,
-        /*closer=*/[&recorder]() { recorder(); });
+        /*heartbeat_ms=*/1000);
 
     ASSERT_TRUE(dms.start());
 
-    // arm + wait for ≥2 failed heartbeat cycles (each 1000ms).
-    std::this_thread::sleep_for(std::chrono::milliseconds(2800));
+    ASSERT_TRUE(post->wait_for_calls(2, std::chrono::milliseconds(2500)));
+    const auto latch_deadline = std::chrono::steady_clock::now()
+                              + std::chrono::milliseconds(500);
+    while (!dms.failure_latched()
+           && std::chrono::steady_clock::now() < latch_deadline)
+        std::this_thread::yield();
+    ASSERT_TRUE(dms.failure_latched());
+    int callback_count = 0;
+    dms.set_failure_callback([&](std::string_view) { ++callback_count; });
     dms.stop();
 
-    EXPECT_GE(post->call_count(), 3u) << "arm + at least two failed HBs";
-    EXPECT_EQ(recorder.call_count, 1)
-        << "close fn must fire exactly once on 2 consecutive fails";
+    EXPECT_EQ(post->call_count(), 2u);
+    EXPECT_TRUE(dms.failure_latched());
+    EXPECT_EQ(callback_count, 1);
+}
+
+TEST(BitgetFuturesDeadMansSwitch,
+     LatchedHeartbeatFailureRefusesRestartWithoutPosting)
+{
+    SilenceStderr quiet;
+
+    auto post = std::make_shared<fake_post>();
+    post->responses = {
+        {200, R"({"code":"00000","msg":"success","data":"success"})"},
+        {500, R"({"code":"50000","msg":"down"})"},
+    };
+
+    BitgetFuturesDeadMansSwitch dms(
+        wrap(post),
+        /*countdown_ms=*/30000,
+        /*heartbeat_ms=*/1000);
+    ASSERT_TRUE(dms.start());
+
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(2500);
+    while (!dms.failure_latched()
+           && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+
+    ASSERT_TRUE(dms.failure_latched());
+    const auto calls_after_failure = post->call_count();
+
+    EXPECT_FALSE(dms.start());
+    EXPECT_EQ(post->call_count(), calls_after_failure)
+        << "a terminally failed DMS must not re-arm the venue countdown";
+
+    dms.stop();
+    EXPECT_FALSE(dms.start());
+    EXPECT_EQ(post->call_count(), calls_after_failure)
+        << "joining the failed heartbeat thread must not clear the latch";
+    EXPECT_NE(quiet.sink.str().find("refusing to restart"),
+              std::string::npos);
 }
 
 TEST(BitgetFuturesDeadMansSwitch, BusinessCodeNot00000IsFailure)
@@ -316,6 +396,28 @@ TEST(BitgetFuturesDeadMansSwitch, BusinessCodeNot00000IsFailure)
     };
     BitgetFuturesDeadMansSwitch dms(wrap(post), 30000, 1000);
     EXPECT_FALSE(dms.start());
+}
+
+TEST(BitgetFuturesDeadMansSwitch, ThrowingHeartbeatLatchesWithoutTerminate)
+{
+    SilenceStderr quiet;
+    std::atomic<int> calls{0};
+    BitgetFuturesDeadMansSwitch dms(
+        [&](std::string_view, std::string_view) -> response {
+            if (calls.fetch_add(1, std::memory_order_acq_rel) == 0)
+                return {200, R"({"code":"00000","msg":"success","data":"success"})"};
+            throw 7;
+        },
+        5000, 1000);
+    ASSERT_TRUE(dms.start());
+    const auto deadline = std::chrono::steady_clock::now()
+                        + std::chrono::milliseconds(2500);
+    while (!dms.failure_latched()
+           && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    EXPECT_TRUE(dms.failure_latched());
+    dms.stop();
+    EXPECT_EQ(calls.load(std::memory_order_acquire), 2);
 }
 
 #endif // HAS_BITGET

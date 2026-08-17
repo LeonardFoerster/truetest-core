@@ -126,3 +126,23 @@ TEST(GBMGenerator, SyntheticPathContainsBarsAndTicks) {
     EXPECT_EQ(path.mids.size(), 10u);
     EXPECT_EQ(path.symbol, cfg.symbol);
 }
+
+TEST(GBMGenerator, SyntheticDepthUsesPositiveIntegralQuantities) {
+    GBMGenerator gen;
+    McGeneratorConfig cfg = gen.default_config();
+    cfg.n_steps = 10;
+    cfg.emit_synthetic_l2 = true;
+    cfg.depth_noise = 5.0;
+
+    const auto path = gen.generate(7, cfg);
+
+    ASSERT_EQ(path.l2_snapshots.size(), 10u);
+    for (const auto& snapshot : path.l2_snapshots) {
+        ASSERT_EQ(snapshot.bids.size(), 3u);
+        ASSERT_EQ(snapshot.asks.size(), 3u);
+        for (const auto& level : snapshot.bids)
+            EXPECT_GE(level.quantity, 1);
+        for (const auto& level : snapshot.asks)
+            EXPECT_GE(level.quantity, 1);
+    }
+}

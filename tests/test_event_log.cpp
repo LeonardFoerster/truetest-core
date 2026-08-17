@@ -7,10 +7,15 @@
 #include "market_maker/market_maker.h"
 #include "types/order_id.h"
 
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <fstream>
+#include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <unistd.h>
@@ -46,6 +51,30 @@ struct SilenceCout {
     SilenceCout() : sink(), orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceCout() { std::cout.rdbuf(orig); }
 };
+
+void write_raw_event_record(std::ostream& out,
+                            event_type type,
+                            const std::vector<uint8_t>& payload)
+{
+    event_serial::write_u8(out, static_cast<uint8_t>(type));
+    event_serial::write_u32(
+        out, event_serial::checked_u32_length(payload.size(), "test payload"));
+    out.write(reinterpret_cast<const char*>(payload.data()),
+              static_cast<std::streamsize>(payload.size()));
+}
+
+void write_event_log_preamble(std::ostream& out,
+                              bool compressed,
+                              bool finalized = false)
+{
+    out.write(reinterpret_cast<const char*>(EVENT_LOG_FILE_MAGIC.data()),
+              static_cast<std::streamsize>(EVENT_LOG_FILE_MAGIC.size()));
+    event_serial::write_u8(out, EVENT_LOG_FILE_VERSION);
+    uint8_t flags = compressed ? EVENT_LOG_FILE_FLAG_ZSTD : uint8_t{0};
+    if (finalized)
+        flags |= EVENT_LOG_FILE_FLAG_FINALIZED;
+    event_serial::write_u8(out, flags);
+}
 }
 
 // ─── Round-trip tests for each event type ───────────────────────────────────
@@ -299,9 +328,656 @@ TEST(EventLog, BadPath_Throws)
     EXPECT_THROW(EventReplayer("/nonexistent/dir/file.bin"), std::runtime_error);
 }
 
-// ─── Deterministic mode: same seed produces identical event logs ─────────────
+TEST(EventLog, LoggerRejectsWritesAfterFinalize)
+{
+    TempFile tf("logger_finalized.bin");
+    EventLogger logger(tf.path);
+    logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+    logger.finalize();
+    logger.finalize();
 
-// Test strategy: buys on bar 3, sells on bar 6
+    EXPECT_THROW(
+        logger.log(market_event(epoch_ms(2), "TEST", 1, 2, 0.5, 1.5, 10)),
+        std::logic_error);
+
+    EventReplayer replayer(tf.path);
+    const auto replayed = replayer.next();
+    ASSERT_NE(replayed, nullptr);
+    EXPECT_EQ(replayed->get_type(), event_type::market);
+    EXPECT_FALSE(replayer.has_next());
+}
+
+TEST(EventLog, LoggerRejectsUnknownEventType)
+{
+    TempFile tf("logger_unknown_type.bin");
+    EventLogger logger(tf.path);
+    const event unknown(static_cast<event_type>(0xFF), epoch_ms(1));
+
+    EXPECT_THROW(logger.log(unknown), std::runtime_error);
+}
+
+TEST(EventLog, LoggerRejectsTagDynamicTypeMismatchWithoutPoisoning)
+{
+    TempFile tf("logger_type_mismatch.bin");
+    EventLogger logger(tf.path, false);
+    const event mismatched(event_type::market, epoch_ms(1));
+    EXPECT_THROW(logger.log(mismatched), std::runtime_error);
+
+    logger.log(market_event(epoch_ms(2), "TEST", 1, 2, 0.5, 1.5, 10));
+    logger.finalize();
+
+    EventReplayer replayer(tf.path);
+    const auto replayed = replayer.next();
+    ASSERT_NE(replayed, nullptr);
+    EXPECT_EQ(replayed->get_timestamp(), epoch_ms(2));
+    EXPECT_FALSE(replayer.has_next());
+}
+
+#if defined(__linux__)
+TEST(EventLog, FinalizeFailurePoisonsLoggerWithoutTerminatingDestructor)
+{
+    ASSERT_EXIT(
+        {
+            bool first_finalize_failed = false;
+            bool repeated_finalize_failed = false;
+            bool subsequent_log_failed = false;
+            {
+                EventLogger logger("/dev/full", false);
+                try {
+                    logger.finalize();
+                } catch (const std::runtime_error&) {
+                    first_finalize_failed = true;
+                }
+                try {
+                    logger.finalize();
+                } catch (const std::runtime_error&) {
+                    repeated_finalize_failed = true;
+                }
+                try {
+                    logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+                } catch (const std::runtime_error&) {
+                    subsequent_log_failed = true;
+                }
+            }
+            ::_exit(first_finalize_failed && repeated_finalize_failed && subsequent_log_failed
+                        ? 0
+                        : 1);
+        },
+        ::testing::ExitedWithCode(0), "");
+}
+#endif
+
+TEST(EventLog, HeaderedRawPayloadStartingWithZstdMagicReplaysRaw)
+{
+    TempFile tf("headered_raw_zstd_magic.bin");
+    constexpr int64_t zstd_magic_timestamp_us = 0xFD2FB528LL;
+    const auto timestamp = std::chrono::system_clock::time_point(
+        std::chrono::microseconds(zstd_magic_timestamp_us));
+    {
+        EventLogger logger(tf.path, false);
+        logger.log(market_event(timestamp, "TEST", 1, 2, 0.5, 1.5, 10));
+    }
+
+    EventReplayer replayer(tf.path, zstd_magic_timestamp_us);
+    const auto replayed = replayer.next();
+    ASSERT_NE(replayed, nullptr);
+    EXPECT_EQ(replayed->get_timestamp(), timestamp);
+    EXPECT_FALSE(replayer.has_next());
+}
+
+TEST(EventLog, HeaderedCompressedLogDeclaresCompression)
+{
+    TempFile tf("headered_compressed.bin");
+    {
+        EventLogger logger(tf.path, true);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+    }
+
+    std::array<uint8_t, EVENT_LOG_FILE_PREAMBLE_BYTES> preamble{};
+    {
+        std::ifstream in(tf.path, std::ios::binary);
+        in.read(reinterpret_cast<char*>(preamble.data()),
+                static_cast<std::streamsize>(preamble.size()));
+        ASSERT_EQ(in.gcount(), static_cast<std::streamsize>(preamble.size()));
+    }
+    EXPECT_TRUE(std::equal(EVENT_LOG_FILE_MAGIC.begin(), EVENT_LOG_FILE_MAGIC.end(),
+                           preamble.begin()));
+    EXPECT_EQ(preamble[4], EVENT_LOG_FILE_VERSION);
+    EXPECT_EQ(preamble[5],
+              EVENT_LOG_FILE_FLAG_ZSTD | EVENT_LOG_FILE_FLAG_FINALIZED);
+
+    EventReplayer replayer(tf.path);
+    EXPECT_NE(replayer.next(), nullptr);
+}
+
+TEST(EventLog, HeaderlessRawAndCompressedLogsRemainReplayable)
+{
+    const auto decoded = event_serial::serialise(
+        market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+
+    TempFile raw_tf("legacy_raw.bin");
+    {
+        std::ofstream out(raw_tf.path, std::ios::binary | std::ios::trunc);
+        write_raw_event_record(out, event_type::market, decoded);
+    }
+    EventReplayer raw_replayer(raw_tf.path);
+    EXPECT_NE(raw_replayer.next(), nullptr);
+
+    TempFile compressed_tf("legacy_compressed.bin");
+    std::vector<uint8_t> compressed(ZSTD_compressBound(decoded.size()));
+    const auto compressed_size = ZSTD_compress(
+        compressed.data(), compressed.size(), decoded.data(), decoded.size(), 1);
+    ASSERT_FALSE(ZSTD_isError(compressed_size));
+    compressed.resize(compressed_size);
+    {
+        std::ofstream out(compressed_tf.path, std::ios::binary | std::ios::trunc);
+        write_raw_event_record(out, event_type::market, compressed);
+    }
+    EventReplayer compressed_replayer(compressed_tf.path);
+    EXPECT_NE(compressed_replayer.next(), nullptr);
+}
+
+TEST(EventLog, InvalidHeaderPreambleIsRejectedBeforeReplay)
+{
+    TempFile truncated_tf("truncated_preamble.bin");
+    {
+        std::ofstream out(truncated_tf.path, std::ios::binary | std::ios::trunc);
+        event_serial::write_u8(out, EVENT_LOG_FILE_MAGIC.front());
+    }
+    EXPECT_THROW(EventReplayer(truncated_tf.path), std::runtime_error);
+
+    TempFile version_tf("unknown_preamble_version.bin");
+    {
+        std::ofstream out(version_tf.path, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(EVENT_LOG_FILE_MAGIC.data()),
+                  static_cast<std::streamsize>(EVENT_LOG_FILE_MAGIC.size()));
+        event_serial::write_u8(out, EVENT_LOG_FILE_VERSION + 1U);
+        event_serial::write_u8(out, 0U);
+    }
+    EXPECT_THROW(EventReplayer(version_tf.path), std::runtime_error);
+
+    TempFile index_tf("preamble_index_before_data.bin");
+    {
+        std::ofstream out(index_tf.path, std::ios::binary | std::ios::trunc);
+        write_event_log_preamble(out, false, true);
+        event_serial::write_u64(out, 0U);
+        event_serial::write_u32(out, 0U);
+        event_serial::write_u32(out, EVENT_LOG_INDEX_MAGIC);
+    }
+    EXPECT_THROW(EventReplayer(index_tf.path), std::runtime_error);
+}
+
+TEST(EventLog, UnfinalizedHeaderNeverTreatsRecordTailAsIndexTrailer)
+{
+    TempFile tf("unfinalized_tail_looks_like_index.bin");
+    auto payload = event_serial::serialise(
+        market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+    ASSERT_GE(payload.size(), 16U);
+
+    const uint64_t apparent_index_offset =
+        static_cast<uint64_t>(EVENT_LOG_FILE_PREAMBLE_BYTES + 5U +
+                              payload.size() - 16U);
+    const uint32_t zero_entries = 0;
+    std::memcpy(payload.data() + payload.size() - 16U,
+                &apparent_index_offset, sizeof(apparent_index_offset));
+    std::memcpy(payload.data() + payload.size() - 8U,
+                &zero_entries, sizeof(zero_entries));
+    std::memcpy(payload.data() + payload.size() - 4U,
+                &EVENT_LOG_INDEX_MAGIC, sizeof(EVENT_LOG_INDEX_MAGIC));
+
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        write_event_log_preamble(out, false);
+        write_raw_event_record(out, event_type::market, payload);
+    }
+
+    EventReplayer replayer(tf.path);
+    EXPECT_NE(replayer.next(), nullptr);
+    EXPECT_FALSE(replayer.has_next());
+}
+
+TEST(EventLog, FinalizedHeaderRequiresAValidIndexTrailer)
+{
+    TempFile tf("finalized_without_index.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        write_event_log_preamble(out, false, true);
+    }
+    EXPECT_THROW(EventReplayer(tf.path), std::runtime_error);
+}
+
+TEST(EventLog, FinalizedIndexIsValidatedForDefaultReplay)
+{
+    TempFile tf("default_replay_invalid_index_boundary.bin");
+    const auto payload = event_serial::serialise(
+        market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+    const uint64_t record_offset =
+        static_cast<uint64_t>(EVENT_LOG_FILE_PREAMBLE_BYTES);
+    const uint64_t index_offset = record_offset + 5U + payload.size();
+
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        write_event_log_preamble(out, false, true);
+        write_raw_event_record(out, event_type::market, payload);
+        event_serial::write_i64(out, 0);
+        event_serial::write_u64(out, record_offset + 1U);
+        event_serial::write_u64(out, index_offset);
+        event_serial::write_u32(out, 1U);
+        event_serial::write_u32(out, EVENT_LOG_INDEX_MAGIC);
+    }
+
+    EXPECT_THROW(EventReplayer(tf.path), std::runtime_error);
+}
+
+// ─── Defensive parsing and allocation limits ───
+
+// Malformed inputs stay tiny: rejection must happen before allocation.
+TEST(EventLog, OversizedPayloadHeaderIsRejectedBeforeAllocation)
+{
+    TempFile tf("oversized_payload.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        event_serial::write_u8(out, static_cast<uint8_t>(event_type::market));
+        event_serial::write_u32(out, std::numeric_limits<uint32_t>::max());
+    }
+
+    EventReplayer replayer(tf.path);
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+}
+
+TEST(EventLog, TruncatedHeaderIsNotReportedAsCleanEof)
+{
+    TempFile tf("truncated_header.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        event_serial::write_u32(out, 0U);
+    }
+
+    EventReplayer replayer(tf.path);
+    ASSERT_TRUE(replayer.has_next());
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+}
+
+TEST(EventLog, TruncatedPayloadIsRejectedBeforeAllocation)
+{
+    TempFile tf("truncated_payload.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        event_serial::write_u8(out, static_cast<uint8_t>(event_type::market));
+        event_serial::write_u32(out, 8U);
+        event_serial::write_u8(out, 0U);
+    }
+
+    EventReplayer replayer(tf.path);
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+}
+
+TEST(EventLog, EmptyRawPayloadIsRejectedWithoutPointerArithmetic)
+{
+    TempFile tf("empty_raw_payload.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        event_serial::write_u8(out, static_cast<uint8_t>(event_type::market));
+        event_serial::write_u32(out, 0U);
+    }
+
+    EventReplayer replayer(tf.path);
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+}
+
+TEST(EventLog, EmptyDecodedZstdPayloadIsRejected)
+{
+    TempFile tf("empty_zstd_payload.bin");
+    std::vector<uint8_t> compressed(ZSTD_compressBound(0));
+    const uint8_t empty_source = 0;
+    const auto compressed_size = ZSTD_compress(
+        compressed.data(), compressed.size(), &empty_source, 0, 1);
+    ASSERT_FALSE(ZSTD_isError(compressed_size));
+    compressed.resize(compressed_size);
+    ASSERT_EQ(ZSTD_getFrameContentSize(compressed.data(), compressed.size()), 0U);
+
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        event_serial::write_u8(out, static_cast<uint8_t>(event_type::market));
+        event_serial::write_u32(
+            out, event_serial::checked_u32_length(compressed.size(),
+                                                  "test payload"));
+        out.write(reinterpret_cast<const char*>(compressed.data()),
+                  static_cast<std::streamsize>(compressed.size()));
+    }
+
+    EventReplayer replayer(tf.path);
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+}
+
+TEST(EventLog, MultipleZstdFramesWithinOneRecordAreRejected)
+{
+    TempFile tf("multiple_zstd_frames.bin");
+    const auto decoded = event_serial::serialise(
+        market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+
+    std::vector<uint8_t> payload(ZSTD_compressBound(decoded.size()));
+    const auto payload_size = ZSTD_compress(
+        payload.data(), payload.size(), decoded.data(), decoded.size(), 1);
+    ASSERT_FALSE(ZSTD_isError(payload_size));
+    payload.resize(payload_size);
+
+    const uint8_t empty_source = 0;
+    std::vector<uint8_t> trailing_frame(ZSTD_compressBound(0));
+    const auto trailing_size = ZSTD_compress(
+        trailing_frame.data(), trailing_frame.size(), &empty_source, 0, 1);
+    ASSERT_FALSE(ZSTD_isError(trailing_size));
+    trailing_frame.resize(trailing_size);
+    payload.insert(payload.end(), trailing_frame.begin(), trailing_frame.end());
+
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        write_raw_event_record(out, event_type::market, payload);
+    }
+
+    EventReplayer replayer(tf.path);
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+}
+
+TEST(EventLog, DeserialiseRejectsTrailingPayloadBytes)
+{
+    auto payload = event_serial::serialise(
+        market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+    payload.push_back(0xA5);
+
+    EXPECT_THROW(
+        (void)event_serial::deserialise(event_type::market,
+                                        payload.data(), payload.size()),
+        std::runtime_error);
+}
+
+TEST(EventLog, FillExtensionAcceptsOnlyCompleteHistoricShapes)
+{
+    fill_event fill(epoch_ms(1), "TEST", 42, order_side::buy,
+                    2.0, 100.0, 0.5, 3.0, 99);
+    fill.set_source(fill_source::exchange);
+    const auto current = event_serial::serialise(fill);
+    ASSERT_GE(current.size(), 17u);
+    const auto base_size = current.size() - 17U;
+
+    auto legacy = current;
+    legacy.resize(base_size);
+    const auto legacy_event = event_serial::deserialise(
+        event_type::fill, legacy.data(), legacy.size());
+    ASSERT_NE(legacy_event, nullptr);
+    const auto& legacy_fill = static_cast<const fill_event&>(*legacy_event);
+    EXPECT_DOUBLE_EQ(legacy_fill.get_remaining_qty(), 0.0);
+    EXPECT_EQ(legacy_fill.get_fill_id(), 0U);
+    EXPECT_EQ(legacy_fill.get_source(), fill_source::unknown);
+
+    auto prior_extension = current;
+    prior_extension.resize(base_size + 16U);
+    const auto prior_event = event_serial::deserialise(
+        event_type::fill, prior_extension.data(), prior_extension.size());
+    ASSERT_NE(prior_event, nullptr);
+    const auto& prior_fill = static_cast<const fill_event&>(*prior_event);
+    EXPECT_DOUBLE_EQ(prior_fill.get_remaining_qty(), 3.0);
+    EXPECT_EQ(prior_fill.get_fill_id(), 99U);
+    EXPECT_EQ(prior_fill.get_source(), fill_source::unknown);
+
+    const auto current_event = event_serial::deserialise(
+        event_type::fill, current.data(), current.size());
+    ASSERT_NE(current_event, nullptr);
+    const auto& current_fill = static_cast<const fill_event&>(*current_event);
+    EXPECT_DOUBLE_EQ(current_fill.get_remaining_qty(), 3.0);
+    EXPECT_EQ(current_fill.get_fill_id(), 99U);
+    EXPECT_EQ(current_fill.get_source(), fill_source::exchange);
+
+    for (std::size_t tail_size = 1; tail_size < 16; ++tail_size) {
+        auto partial = current;
+        partial.resize(base_size + tail_size);
+        EXPECT_THROW(
+            (void)event_serial::deserialise(event_type::fill,
+                                            partial.data(), partial.size()),
+            std::runtime_error);
+    }
+
+    auto extra_extension = current;
+    extra_extension.push_back(0x42);
+    EXPECT_THROW(
+        (void)event_serial::deserialise(event_type::fill,
+                                        extra_extension.data(), extra_extension.size()),
+        std::runtime_error);
+}
+
+TEST(EventLog, DeserialiseRejectsOutOfRangeEnumBytes)
+{
+    constexpr std::size_t prefix_size = sizeof(int64_t) + sizeof(uint16_t) + 1U;
+    const auto expect_rejected = [](event_type type,
+                                    std::vector<uint8_t> payload,
+                                    std::size_t offset) {
+        ASSERT_LT(offset, payload.size());
+        payload[offset] = 0xFF;
+        EXPECT_THROW(
+            (void)event_serial::deserialise(type, payload.data(), payload.size()),
+            std::runtime_error);
+    };
+
+    expect_rejected(
+        event_type::signal,
+        event_serial::serialise(signal_event(epoch_ms(1), "X", signal_type::buy, 1.0)),
+        prefix_size);
+
+    const auto order = order_event(epoch_ms(1), "X", order_type::limit,
+                                   order_side::buy, 1.0, 10.0,
+                                   time_in_force::gtc);
+    expect_rejected(event_type::order, event_serial::serialise(order), prefix_size);
+    expect_rejected(event_type::order, event_serial::serialise(order), prefix_size + 1U);
+    expect_rejected(event_type::order, event_serial::serialise(order), prefix_size + 18U);
+
+    const auto fill = fill_event(epoch_ms(1), "X", 1, order_side::buy,
+                                 1.0, 10.0, 0.0, 0.0, 1);
+    expect_rejected(event_type::fill, event_serial::serialise(fill), prefix_size + 8U);
+    auto fill_with_source = event_serial::serialise(fill);
+    fill_with_source.back() = 0xFF;
+    EXPECT_THROW(
+        (void)event_serial::deserialise(event_type::fill,
+                                        fill_with_source.data(), fill_with_source.size()),
+        std::runtime_error);
+
+    const auto tick = tick_event(epoch_ms(1), "X", 10.0, 1, tick_side::bid);
+    const auto tick_payload = event_serial::serialise(tick);
+    expect_rejected(event_type::tick, tick_payload, tick_payload.size() - 1U);
+
+    const auto update = l2_update_event(epoch_ms(1), "X", tick_side::bid, 10.0, 1);
+    expect_rejected(event_type::l2_update, event_serial::serialise(update), prefix_size);
+}
+
+TEST(EventLog, ReplayFailureIsTerminal)
+{
+    TempFile tf("terminal_replay_failure.bin");
+    auto corrupt = event_serial::serialise(
+        market_event(epoch_ms(1), "BAD", 1, 2, 0.5, 1.5, 10));
+    corrupt.push_back(0xA5);
+    const auto valid = event_serial::serialise(
+        market_event(epoch_ms(2), "GOOD", 1, 2, 0.5, 1.5, 10));
+
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        write_raw_event_record(out, event_type::market, corrupt);
+        write_raw_event_record(out, event_type::market, valid);
+    }
+
+    EventReplayer replayer(tf.path);
+    ASSERT_TRUE(replayer.has_next());
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+    EXPECT_FALSE(replayer.has_next());
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+}
+
+TEST(EventLog, ImpossibleIndexTrailerIsRejectedBeforeAllocation)
+{
+    TempFile tf("bad_index_count.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        event_serial::write_u64(out, 0U);
+        event_serial::write_u32(out, std::numeric_limits<uint32_t>::max());
+        event_serial::write_u32(out, EVENT_LOG_INDEX_MAGIC);
+    }
+
+    EXPECT_THROW(EventReplayer(tf.path), std::runtime_error);
+}
+
+TEST(EventLog, ConfiguredIndexScanLimitIsEnforced)
+{
+    TempFile tf("index_limit.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        event_serial::write_u8(out, 0U); // one byte of data before the index
+        event_serial::write_i64(out, 0);
+        event_serial::write_u64(out, 0U);
+        event_serial::write_i64(out, 1);
+        event_serial::write_u64(out, 0U);
+        event_serial::write_u64(out, 1U);
+        event_serial::write_u32(out, 2U);
+        event_serial::write_u32(out, EVENT_LOG_INDEX_MAGIC);
+    }
+
+    EventReplayLimits limits;
+    limits.max_index_entries = 1;
+    EXPECT_THROW(EventReplayer(tf.path, 1, INT64_MAX, limits),
+                 std::runtime_error);
+}
+
+TEST(EventLog, InvalidIndexedFileOffsetIsRejected)
+{
+    TempFile tf("bad_index_offset.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        event_serial::write_u8(out, 0U); // data_end is one; offset one is invalid
+        event_serial::write_i64(out, 0);
+        event_serial::write_u64(out, 1U);
+        event_serial::write_u64(out, 1U);
+        event_serial::write_u32(out, 1U);
+        event_serial::write_u32(out, EVENT_LOG_INDEX_MAGIC);
+    }
+
+    EXPECT_THROW(EventReplayer(tf.path, 1), std::runtime_error);
+}
+
+TEST(EventLog, DecodedPayloadLimitIsEnforcedBeforeAllocation)
+{
+    TempFile tf("decoded_limit.bin");
+    {
+        EventLogger logger(tf.path);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+    }
+
+    EventReplayLimits limits;
+    limits.max_decoded_payload_bytes = 8;
+    EventReplayer replayer(tf.path, 0, INT64_MAX, limits);
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+}
+
+TEST(EventLog, ZstdFrameWithoutContentSizeIsRejected)
+{
+    TempFile tf("unknown_zstd_size.bin");
+    const auto payload = event_serial::serialise(
+        market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+
+    std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> cctx(
+        ZSTD_createCCtx(), &ZSTD_freeCCtx);
+    ASSERT_NE(cctx, nullptr);
+    const auto parameter_result =
+        ZSTD_CCtx_setParameter(cctx.get(), ZSTD_c_contentSizeFlag, 0);
+    ASSERT_FALSE(ZSTD_isError(parameter_result));
+
+    std::vector<uint8_t> compressed(ZSTD_compressBound(payload.size()));
+    const auto compressed_size = ZSTD_compress2(
+        cctx.get(), compressed.data(), compressed.size(),
+        payload.data(), payload.size());
+    ASSERT_FALSE(ZSTD_isError(compressed_size));
+    compressed.resize(compressed_size);
+    ASSERT_EQ(ZSTD_getFrameContentSize(compressed.data(), compressed.size()),
+              ZSTD_CONTENTSIZE_UNKNOWN);
+
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        event_serial::write_u8(out, static_cast<uint8_t>(event_type::market));
+        event_serial::write_u32(
+            out, event_serial::checked_u32_length(compressed.size(),
+                                                  "test payload"));
+        out.write(reinterpret_cast<const char*>(compressed.data()),
+                  static_cast<std::streamsize>(compressed.size()));
+    }
+
+    EventReplayer replayer(tf.path);
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+}
+
+TEST(EventLog, OversizedStringFieldIsRejectedInsteadOfTruncated)
+{
+    const std::string oversized(
+        static_cast<std::size_t>(std::numeric_limits<uint16_t>::max()) + 1U,
+        'x');
+    const cancel_event cancel(epoch_ms(1), "TEST", 1U, oversized);
+    EXPECT_THROW((void)event_serial::serialise(cancel), std::length_error);
+}
+
+TEST(EventLog, FailedRecordDoesNotCorruptEmptyLogIndex)
+{
+    TempFile tf("failed_record_empty_log.bin");
+    const std::string oversized(
+        static_cast<std::size_t>(std::numeric_limits<uint16_t>::max()) + 1U,
+        'x');
+    {
+        EventLogger logger(tf.path);
+        const cancel_event cancel(epoch_ms(1), "TEST", 1U, oversized);
+        EXPECT_THROW(logger.log(cancel), std::length_error);
+    }
+
+    EventReplayer replayer(tf.path, 1);
+    EXPECT_FALSE(replayer.has_next());
+    EXPECT_EQ(replayer.next(), nullptr);
+}
+
+TEST(EventLog, FailedRecordDoesNotPreventFollowingValidRecord)
+{
+    TempFile tf("failed_then_valid.bin");
+    const std::string oversized(
+        static_cast<std::size_t>(std::numeric_limits<uint16_t>::max()) + 1U,
+        'x');
+    {
+        EventLogger logger(tf.path);
+        const cancel_event cancel(epoch_ms(1), "TEST", 1U, oversized);
+        EXPECT_THROW(logger.log(cancel), std::length_error);
+        logger.log(market_event(epoch_ms(2), "TEST", 1, 2, 0.5, 1.5, 10));
+    }
+
+    EventReplayer replayer(tf.path, 2'000);
+    const auto replayed = replayer.next();
+    ASSERT_NE(replayed, nullptr);
+    EXPECT_EQ(replayed->get_type(), event_type::market);
+    EXPECT_FALSE(replayer.has_next());
+}
+
+TEST(EventLog, IndexedReplayStartsAtOrBeforeRequestedTimestamp)
+{
+    TempFile tf("indexed_seek.bin");
+    {
+        EventLogger logger(tf.path);
+        for (int64_t i = 0; i <= 2000; ++i) {
+            logger.log(market_event(epoch_ms(i), "TEST", 1, 2, 0.5, 1.5, 10));
+        }
+    }
+
+    constexpr int64_t replay_from_us = 1'500'000;
+    EventReplayer replayer(tf.path, replay_from_us);
+    const auto replayed_event = replayer.next();
+    ASSERT_NE(replayed_event, nullptr);
+    const auto replayed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        replayed_event->get_timestamp().time_since_epoch()).count();
+    EXPECT_EQ(replayed_us, replay_from_us);
+}
+
+// ─── Deterministic mode ───
+
+// Test strategy: buys on bar 3, sells on bar 6.
 class DetTestStrategy : public IStrategy
 {
     bool position_open_ = false;

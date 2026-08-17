@@ -7,6 +7,7 @@
 #include "execution/async_support.h"
 #include "providers/provider.h"
 #include "strategy/strategy_interface.h"
+#include "ui/console_dashboard.h"
 
 #include <memory>
 #include <vector>
@@ -21,7 +22,9 @@ class FakeAsyncExecutionAdapter : public IExecutionAdapter, public IAsyncSubmitS
 public:
     int submit_count = 0;
     int cancel_count = 0;
+    std::uint64_t last_submit_id = 0;
     bool async_enabled = true;
+    std::optional<submit_result> result_on_submit;
 
     std::vector<submit_result> pending_submit_results;
     std::vector<synth_meta>    pending_synth_meta;
@@ -31,9 +34,16 @@ public:
     // --- IExecutionAdapter ---
     void submit_order(const order_event& o) override
     {
-        (void)o;
+        last_submit_id = o.get_order_id();
         ++submit_count;
-        // In real async, we would not immediately fill. We just record.
+        if (result_on_submit)
+        {
+            auto result = *result_on_submit;
+            if (result.engine_id == 0) result.engine_id = o.get_order_id();
+            if (result.symbol.empty()) result.symbol = o.get_symbol();
+            pending_submit_results.push_back(std::move(result));
+            result_on_submit.reset();
+        }
     }
 
     bool cancel_order(std::uint64_t /*order_id*/) override
@@ -135,6 +145,18 @@ public:
     void set_position_open(const std::string&, bool) override {}
 };
 
+class EveryBarStrategy : public IStrategy
+{
+public:
+    std::optional<order_event> on_market(const market_event& mkt) override
+    {
+        return order_event(mkt.get_timestamp(), mkt.get_symbol(),
+                           order_type::market, order_side::buy,
+                           1.0, mkt.get_close());
+    }
+    void set_position_open(const std::string&, bool) override {}
+};
+
 std::shared_ptr<data_handler> make_bars()
 {
     auto dh = std::make_shared<data_handler>();
@@ -196,6 +218,217 @@ TEST(EngineAsyncSupport, AsyncSubmitResultIsProcessed)
     bool had = provider->adapter->poll_submit_results(drained);
     EXPECT_TRUE(had);
     EXPECT_EQ(drained.size(), 1u);
+}
+
+TEST(EngineAsyncSupport, AmbiguousPostWriteSubmitTriggersTerminalHalt)
+{
+    auto dh = make_bars();
+    auto provider = std::make_shared<FakeAsyncProvider>();
+    auto strat = std::make_shared<OneShotStrategy>();
+    provider->adapter->result_on_submit = submit_result{
+        .engine_id = 1,
+        .symbol = "TEST",
+        .exchange_order_id = {},
+        .error = "ambiguous post-write outcome",
+        .op = submit_result::operation::submit,
+        .ok = false,
+        .uncertain = true,
+    };
+
+    engine_config cfg;
+    cfg.provider = provider;
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.run();
+
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+}
+
+TEST(EngineAsyncSupport, FatalSubmitTriggersTerminalHalt)
+{
+    auto dh = make_bars();
+    auto provider = std::make_shared<FakeAsyncProvider>();
+    auto strat = std::make_shared<OneShotStrategy>();
+    provider->adapter->result_on_submit = submit_result{
+        .engine_id = 1,
+        .symbol = "TEST",
+        .exchange_order_id = {},
+        .error = "safety prerequisite failed",
+        .op = submit_result::operation::submit,
+        .ok = false,
+        .fatal = true,
+    };
+
+    engine_config cfg;
+    cfg.provider = provider;
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.run();
+
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+}
+
+TEST(EngineAsyncSupport, AmbiguousFatalSubmitKeepsAmbiguityDiagnosis)
+{
+    auto dh = make_bars();
+    auto provider = std::make_shared<FakeAsyncProvider>();
+    auto strat = std::make_shared<OneShotStrategy>();
+    provider->adapter->result_on_submit = submit_result{
+        .engine_id = 1,
+        .symbol = "TEST",
+        .exchange_order_id = {},
+        .error = "ambiguous fatal post-write outcome",
+        .op = submit_result::operation::submit,
+        .ok = false,
+        .uncertain = true,
+        .fatal = true,
+    };
+
+    truetest::ui::dashboard_config dashboard_cfg;
+    dashboard_cfg.mode = truetest::ui::output_mode::off;
+    auto dashboard = std::make_shared<truetest::ui::ConsoleDashboard>(
+        std::move(dashboard_cfg));
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.dashboard = dashboard;
+    cfg.show_progress = false;
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.run();
+
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_EQ(dashboard->shutdown_reason(),
+              "venue order outcome is ambiguous after request write");
+}
+
+TEST(EngineAsyncSupport, AmbiguousCancelTriggersTerminalHaltAndRetainsOrder)
+{
+    auto dh = make_bars();
+    auto provider = std::make_shared<FakeAsyncProvider>();
+    auto strat = std::make_shared<OneShotStrategy>();
+    engine_config cfg;
+    cfg.provider = provider;
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.run();
+
+    const auto order_id = provider->adapter->last_submit_id;
+    ASSERT_NE(order_id, 0u);
+    ASSERT_TRUE(eng.get_order_tracker().is_active(order_id));
+    ASSERT_TRUE(eng.cancel_order("TEST", order_id, "operator"));
+    ASSERT_EQ(provider->adapter->cancel_count, 1);
+
+    provider->adapter->inject_submit_result(submit_result{
+        .engine_id = order_id,
+        .symbol = "TEST",
+        .exchange_order_id = {},
+        .error = "ambiguous post-write cancel",
+        .op = submit_result::operation::cancel,
+        .ok = false,
+        .uncertain = true,
+    });
+
+    EXPECT_FALSE(eng.cancel_order("TEST", order_id, "drain"));
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+    EXPECT_TRUE(eng.get_order_tracker().is_active(order_id));
+    EXPECT_EQ(provider->adapter->cancel_count, 1)
+        << "terminal halt must prevent a second venue mutation";
+}
+
+TEST(EngineAsyncSupport, FatalCancelTriggersTerminalHaltAndRetainsOrder)
+{
+    auto dh = make_bars();
+    auto provider = std::make_shared<FakeAsyncProvider>();
+    auto strat = std::make_shared<OneShotStrategy>();
+    engine_config cfg;
+    cfg.provider = provider;
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.run();
+
+    const auto order_id = provider->adapter->last_submit_id;
+    ASSERT_NE(order_id, 0u);
+    ASSERT_TRUE(eng.cancel_order("TEST", order_id, "operator"));
+    ASSERT_EQ(provider->adapter->cancel_count, 1);
+
+    provider->adapter->inject_submit_result(submit_result{
+        .engine_id = order_id,
+        .symbol = "TEST",
+        .exchange_order_id = {},
+        .error = "cancel safety prerequisite failed",
+        .op = submit_result::operation::cancel,
+        .ok = false,
+        .fatal = true,
+    });
+
+    EXPECT_FALSE(eng.cancel_order("TEST", order_id, "drain"));
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+    EXPECT_TRUE(eng.get_order_tracker().is_active(order_id));
+    EXPECT_EQ(provider->adapter->cancel_count, 1);
+}
+
+TEST(EngineAsyncSupport, AmbiguousFatalCancelKeepsAmbiguityDiagnosis)
+{
+    auto dh = make_bars();
+    auto provider = std::make_shared<FakeAsyncProvider>();
+    auto strat = std::make_shared<OneShotStrategy>();
+    truetest::ui::dashboard_config dashboard_cfg;
+    dashboard_cfg.mode = truetest::ui::output_mode::off;
+    auto dashboard = std::make_shared<truetest::ui::ConsoleDashboard>(
+        std::move(dashboard_cfg));
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.dashboard = dashboard;
+    cfg.show_progress = false;
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.run();
+
+    const auto order_id = provider->adapter->last_submit_id;
+    ASSERT_NE(order_id, 0u);
+    ASSERT_TRUE(eng.cancel_order("TEST", order_id, "operator"));
+    provider->adapter->inject_submit_result(submit_result{
+        .engine_id = order_id,
+        .symbol = "TEST",
+        .exchange_order_id = {},
+        .error = "ambiguous fatal post-write cancel",
+        .op = submit_result::operation::cancel,
+        .ok = false,
+        .uncertain = true,
+        .fatal = true,
+    });
+
+    EXPECT_FALSE(eng.cancel_order("TEST", order_id, "drain"));
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_EQ(dashboard->shutdown_reason(),
+              "venue cancel outcome is ambiguous after request write");
+    EXPECT_TRUE(eng.get_order_tracker().is_active(order_id));
+    EXPECT_EQ(provider->adapter->cancel_count, 1);
+}
+
+TEST(EngineAsyncSupport, FailedSubmitReleasesCapacityForNextOrder)
+{
+    auto dh = make_bars();
+    auto provider = std::make_shared<FakeAsyncProvider>();
+    auto strat = std::make_shared<EveryBarStrategy>();
+    provider->adapter->result_on_submit = submit_result{
+        .engine_id = 0,
+        .symbol = {},
+        .exchange_order_id = {},
+        .error = "venue rejected first submit",
+        .op = submit_result::operation::submit,
+        .ok = false,
+    };
+
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.risk.max_open_orders = 1;
+    cfg.execution_bar_delay = 0;
+    cfg.show_progress = false;
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.run();
+
+    EXPECT_EQ(provider->adapter->submit_count, 2)
+        << "rejecting the first async submit must release its lifecycle slot";
+    EXPECT_EQ(eng.get_order_tracker().active_count(), 1u);
 }
 
 TEST(EngineAsyncSupport, SupportsAsyncSubmitDecision)

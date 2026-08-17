@@ -88,7 +88,7 @@ TEST(HotpathAllocs, SmaSynthetic_1000Bars_PostWarmupUpperBound)
     const snapshot delta = window.total();
     maybe_print_baseline("SmaSynthetic_1000Bars", delta);
 
-    // Baseline Phase 5/6 (dashboard extraction + lifetime token safety): ~33M bytes observed
+    // Baseline Phase 5/6 (dashboard extraction + State ownership safety): ~33M bytes observed
     // (snapshot builder work during publish + safety overhead)
     EXPECT_LE(delta.count, 62000u);
     EXPECT_LE(delta.bytes, 35000000u);

@@ -5,10 +5,14 @@
 #include "providers/bitget/bitget_futures_order_encoder.h"
 #include "providers/bitget/bitget_rest_order_transport.h"
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace {
 
@@ -215,6 +219,49 @@ TEST(BitgetRestOrderTransport, CancelUsesPostNotDelete)
     EXPECT_EQ(post->calls, 1); // single post path — no separate del
 }
 
+TEST(BitgetRestOrderTransport, MalformedSuccessIsTerminallyUncertain)
+{
+    auto post = std::make_shared<fake_post>();
+    BitgetRestOrderTransport tx(
+        [post](std::string_view ep, std::string_view b) { return (*post)(ep, b); });
+
+    const std::string submit_payloads[] = {
+        R"({"code":"00000"})",
+        R"({"code":"00000","data":{}})",
+        R"({"code":"00000","data":{"orderId":"1","orderId":"2","clientOid":"tt-1"}})",
+        R"({"code":"00000","orderId":"1","data":{}})",
+        R"({"code":"00000","data":{"orderId":"1","clientOid":"wrong"}})",
+        R"({"nested":{"code":"00000","data":{"orderId":"1","clientOid":"tt-1"}}})",
+        R"({"code":"00000","data":{"nested":{"orderId":"1","clientOid":"tt-1"}}})",
+        "{\"code\":\"00000\",\"data\":{\"orderId\":\"1\",\"clientOid\":\"tt-1\"}} trailing",
+    };
+    for (const auto& body : submit_payloads)
+    {
+        post->body = body;
+        const auto r = tx.submit(
+            "/api/v3/trade/place-order", "{\"clientOid\":\"tt-1\"}");
+        EXPECT_FALSE(r.ok) << body;
+        EXPECT_TRUE(r.uncertain) << body;
+        EXPECT_TRUE(r.fatal) << body;
+    }
+
+    const std::string cancel_payloads[] = {
+        R"({"code":"00000","data":{}})",
+        R"({"code":"00000","data":{"orderId":"41"}})",
+        R"({"code":"00000","data":{"orderId":"42","orderId":"43"}})",
+        R"({"code":"00000","data":{"nested":{"orderId":"42"}}})",
+    };
+    for (const auto& body : cancel_payloads)
+    {
+        post->body = body;
+        const auto r = tx.cancel(
+            "/api/v3/trade/cancel-order", "{\"orderId\":\"42\"}");
+        EXPECT_FALSE(r.ok) << body;
+        EXPECT_TRUE(r.uncertain) << body;
+        EXPECT_TRUE(r.fatal) << body;
+    }
+}
+
 TEST(BitgetRestOrderTransport, BusinessCodeNot00000Fails)
 {
     auto post = std::make_shared<fake_post>();
@@ -243,6 +290,20 @@ TEST(BitgetRestOrderTransport, HttpNon2xxFails)
     auto r = tx.submit("/api/v3/trade/place-order", "{}");
     EXPECT_FALSE(r.ok);
     EXPECT_NE(r.error.find("HTTP 400"), std::string::npos);
+}
+
+TEST(BitgetRestOrderTransport, PostWriteServerErrorIsTerminallyUncertain)
+{
+    BitgetRestOrderTransport tx(
+        [](std::string_view, std::string_view) {
+            return BitgetRestOrderTransport::response{
+                503, R"({"code":"50000","msg":"unknown"})", true, false};
+        });
+    const auto r = tx.submit("/api/v3/trade/place-order", "{}");
+    EXPECT_FALSE(r.ok);
+    EXPECT_TRUE(r.uncertain);
+    EXPECT_TRUE(r.fatal);
+    EXPECT_NE(r.error.find("ambiguous"), std::string::npos);
 }
 
 TEST(BitgetRestOrderTransport, NullPostCallableReturnsError)
@@ -276,6 +337,74 @@ TEST(BitgetRestOrderTransport, NumericOrderIdExtracted)
     auto r = tx.submit("/api/v3/trade/place-order", "{}");
     EXPECT_TRUE(r.ok);
     EXPECT_EQ(r.exchange_order_id, "121211212122");
+}
+
+TEST(BitgetRestOrderTransport, QuiesceRejectsLateSubmitAndCancelWithoutCallingVenue)
+{
+    auto post = std::make_shared<fake_post>();
+    BitgetRestOrderTransport tx(
+        [post](std::string_view ep, std::string_view b) { return (*post)(ep, b); });
+
+    tx.quiesce();
+    const auto submit = tx.submit("/api/v3/trade/place-order", "{}");
+    const auto cancel = tx.cancel("/api/v3/trade/cancel-order", "{}");
+
+    EXPECT_FALSE(submit.ok);
+    EXPECT_FALSE(cancel.ok);
+    EXPECT_EQ(post->calls, 0);
+}
+
+TEST(BitgetRestOrderTransport, QuiesceWaitsForAdmittedMutationAndBlocksLaterCalls)
+{
+    std::mutex mu;
+    std::condition_variable entered_cv;
+    std::condition_variable release_cv;
+    bool entered = false;
+    bool release = false;
+    std::atomic<int> calls{0};
+    std::atomic<bool> mutation_completed{false};
+    BitgetRestOrderTransport tx(
+        [&](std::string_view, std::string_view) {
+            {
+                std::lock_guard<std::mutex> lock(mu);
+                entered = true;
+            }
+            entered_cv.notify_all();
+            std::unique_lock<std::mutex> lock(mu);
+            release_cv.wait(lock, [&] { return release; });
+            calls.fetch_add(1, std::memory_order_release);
+            mutation_completed.store(true, std::memory_order_release);
+            return BitgetRestOrderTransport::response{
+                200, R"({"code":"00000","data":{"orderId":"1"}})"};
+        });
+
+    std::thread submitter([&] { (void)tx.submit("/order", "{}"); });
+    {
+        std::unique_lock<std::mutex> lock(mu);
+        entered_cv.wait(lock, [&] { return entered; });
+    }
+    std::atomic<bool> quiesced{false};
+    std::atomic<bool> quiesce_saw_completion{false};
+    std::thread stopper([&] {
+        tx.quiesce();
+        quiesce_saw_completion.store(
+            mutation_completed.load(std::memory_order_acquire),
+            std::memory_order_release);
+        quiesced.store(true, std::memory_order_release);
+    });
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        release = true;
+    }
+    release_cv.notify_all();
+    submitter.join();
+    stopper.join();
+
+    EXPECT_TRUE(quiesced.load(std::memory_order_acquire));
+    EXPECT_TRUE(quiesce_saw_completion.load(std::memory_order_acquire));
+    EXPECT_EQ(calls.load(std::memory_order_acquire), 1);
+    EXPECT_FALSE(tx.submit("/order", "{}").ok);
+    EXPECT_EQ(calls.load(std::memory_order_acquire), 1);
 }
 
 #endif // HAS_BITGET

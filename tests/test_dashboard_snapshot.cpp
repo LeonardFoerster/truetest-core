@@ -28,7 +28,7 @@ struct silence_cout
     ~silence_cout() { std::cout.rdbuf(orig); }
 };
 
-static auto epoch_ms(int64_t ms)
+[[maybe_unused]] static auto epoch_ms(int64_t ms)
 {
     return std::chrono::system_clock::time_point(std::chrono::milliseconds(ms));
 }
@@ -87,6 +87,11 @@ TEST(DashboardSnapshot, PopulatesCoreFieldsAfterRun)
     // the moved logic runs without crashing and populates the structural fields.
     EXPECT_FALSE(snap.debug.pools.empty());   // memory/debug pools always added
     EXPECT_FALSE(snap.debug.rings.empty());
+#ifdef TRUETEST_VENUE_DATA_COMPILED
+    EXPECT_TRUE(snap.debug.has_live_data);
+#else
+    EXPECT_FALSE(snap.debug.has_live_data);
+#endif
 
     // Perf / risk sections are always written
     EXPECT_GE(snap.perf.total_orders, 0u);

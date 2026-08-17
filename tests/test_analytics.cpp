@@ -1,3 +1,8 @@
+#include <array>
+#include <cmath>
+#include <iterator>
+#include <limits>
+
 #include <gtest/gtest.h>
 #include "analytics/analytics.h"
 
@@ -5,6 +10,20 @@ static auto epoch_ms(int64_t ms)
 {
     return std::chrono::system_clock::time_point(std::chrono::milliseconds(ms));
 }
+
+namespace {
+
+// Keep a valid L2 dynamic type while exercising the signal switch branch, so
+// the pre-fix fallthrough is deterministic without reproducing its bad cast.
+class signal_tagged_l2_snapshot_event final : public l2_snapshot_event
+{
+public:
+    using l2_snapshot_event::l2_snapshot_event;
+
+    void retag_as_signal() noexcept { type_ = event_type::signal; }
+};
+
+} // namespace
 
 TEST(Analytics, InitialReport)
 {
@@ -122,6 +141,63 @@ TEST(Analytics, FillEvent_BuyUpdatesEquity)
     EXPECT_GT(r.equity_curve.back().equity, 100000.0);
 }
 
+TEST(Analytics, BF08_InvalidFillQuantityDoesNotMutateState)
+{
+    Analytics a(1000.0);
+    auto order = std::make_shared<order_event>(
+        epoch_ms(0), "X", order_type::limit, order_side::buy, 2.0, 100.0);
+    order->set_order_id(1);
+    order->set_strategy_name("bf08");
+    a.on_event(order);
+
+    auto open = std::make_shared<fill_event>(
+        epoch_ms(1), "X", 1, order_side::buy, 2.0, 100.0, 1.0);
+    a.on_event(open);
+
+    const auto before = a.generate_report();
+    ASSERT_EQ(before.open_positions.size(), 1u);
+
+    const std::array invalid_quantities = {
+        0.0,
+        -1.0,
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::quiet_NaN(),
+    };
+    int64_t timestamp_ms = 2;
+    for (const double quantity : invalid_quantities)
+    {
+        auto invalid = std::make_shared<fill_event>(
+            epoch_ms(timestamp_ms), "X", 1,
+            order_side::sell, quantity, 110.0, 7.0);
+        invalid->set_latency_ns(123);
+        a.on_event(invalid);
+        ++timestamp_ms;
+    }
+
+    const auto after = a.generate_report();
+    ASSERT_EQ(after.open_positions.size(), 1u);
+    EXPECT_EQ(after.total_fills, before.total_fills);
+    EXPECT_EQ(after.total_trades, before.total_trades);
+    EXPECT_EQ(after.trades.size(), before.trades.size());
+    EXPECT_DOUBLE_EQ(after.avg_slippage, before.avg_slippage);
+    EXPECT_EQ(after.tick_to_trade_samples, before.tick_to_trade_samples);
+    EXPECT_DOUBLE_EQ(after.avg_tick_to_trade_ns, before.avg_tick_to_trade_ns);
+    EXPECT_EQ(after.per_symbol.size(), before.per_symbol.size());
+    EXPECT_EQ(after.per_strategy.size(), before.per_strategy.size());
+    EXPECT_DOUBLE_EQ(after.final_equity, before.final_equity);
+    EXPECT_DOUBLE_EQ(after.realized_pnl, before.realized_pnl);
+    EXPECT_DOUBLE_EQ(after.unrealized_pnl, before.unrealized_pnl);
+    EXPECT_EQ(after.open_positions[0].symbol, before.open_positions[0].symbol);
+    EXPECT_DOUBLE_EQ(after.open_positions[0].quantity, before.open_positions[0].quantity);
+    EXPECT_DOUBLE_EQ(after.open_positions[0].avg_entry, before.open_positions[0].avg_entry);
+    EXPECT_DOUBLE_EQ(after.open_positions[0].mark, before.open_positions[0].mark);
+    EXPECT_DOUBLE_EQ(after.open_positions[0].unrealized_pnl,
+                     before.open_positions[0].unrealized_pnl);
+    EXPECT_TRUE(std::isfinite(after.final_equity));
+    EXPECT_TRUE(std::isfinite(after.realized_pnl));
+    EXPECT_TRUE(std::isfinite(after.unrealized_pnl));
+}
+
 TEST(Analytics, OpenPosition_ReportsUnrealizedPnl)
 {
     Analytics a(10000.0);
@@ -218,6 +294,36 @@ TEST(Analytics, EventDispatch_UnknownType)
     a.on_event(l2);
     auto r = a.generate_report();
     EXPECT_EQ(r.total_fills, 0u);
+}
+
+TEST(Analytics, BF06_RealSignalEventDoesNotReachL2Handler)
+{
+    Analytics a;
+    auto signal = std::make_shared<signal_event>(
+        epoch_ms(0), "X", signal_type::buy, 0.85);
+
+    a.on_event(signal);
+
+    EXPECT_DOUBLE_EQ(a.risk_view().current_spread_bps, 0.0);
+}
+
+TEST(Analytics, BF06_SignalTagDoesNotFallThroughToL2Handler)
+{
+    const l2_level bids[] = {{100.0, 10}};
+    const l2_level asks[] = {{102.0, 10}};
+
+    Analytics signal_dispatch;
+    auto signal_tagged_snapshot = std::make_shared<signal_tagged_l2_snapshot_event>(
+        epoch_ms(0), "X", bids, std::size(bids), asks, std::size(asks));
+    signal_tagged_snapshot->retag_as_signal();
+    signal_dispatch.on_event(signal_tagged_snapshot);
+    EXPECT_DOUBLE_EQ(signal_dispatch.risk_view().current_spread_bps, 0.0);
+
+    Analytics l2_dispatch;
+    auto snapshot = std::make_shared<l2_snapshot_event>(
+        epoch_ms(0), "X", bids, std::size(bids), asks, std::size(asks));
+    l2_dispatch.on_event(snapshot);
+    EXPECT_GT(l2_dispatch.risk_view().current_spread_bps, 0.0);
 }
 
 // --- Step 7: Streaming / Incremental Analytics tests ---

@@ -165,6 +165,26 @@ TEST(BitgetTransportSubscribe, PingPongTextHelpers)
     EXPECT_FALSE(bitget::is_ping_text(R"({"op":"ping"})"));
 }
 
+TEST(BitgetTransportSubscribe, HeartbeatRequiresPongBeforeDeadline)
+{
+    using action = bitget::TextHeartbeat::action;
+    bitget::TextHeartbeat heartbeat;
+    const auto start = std::chrono::steady_clock::time_point{
+        std::chrono::seconds{100}};
+    heartbeat.reset(start);
+    EXPECT_EQ(heartbeat.poll(start + std::chrono::seconds{29}), action::idle);
+    EXPECT_EQ(heartbeat.poll(start + std::chrono::seconds{30}),
+              action::send_ping);
+    heartbeat.ping_sent(start + std::chrono::seconds{30});
+    EXPECT_EQ(heartbeat.poll(start + std::chrono::seconds{39}), action::idle);
+    EXPECT_EQ(heartbeat.poll(start + std::chrono::seconds{40}), action::failed);
+
+    heartbeat.pong_received();
+    EXPECT_EQ(heartbeat.poll(start + std::chrono::seconds{40}), action::idle);
+    EXPECT_EQ(heartbeat.poll(start + std::chrono::seconds{40}, true),
+              action::send_ping);
+}
+
 TEST(BitgetTransportSubscribe, PollFdReadableTimeoutAndReady)
 {
     int fds[2] = {-1, -1};

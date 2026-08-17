@@ -24,6 +24,17 @@ struct SilenceOutput {
         std::cerr.rdbuf(orig_err);
     }
 };
+
+class TypedFailureSource final : public IMarketSource
+{
+public:
+    bool load_into(IMarketSink&, LoadStats*) override { return false; }
+    bool supports_stream() const override { return true; }
+    StreamResult stream_into(IMarketSink&, std::atomic<bool>*, LoadStats*) override
+    {
+        return {stream_termination::transport_failure, 3, 1};
+    }
+};
 }
 
 // Helper: path to test fixtures relative to the test binary
@@ -174,6 +185,28 @@ TEST(TickCsvDataSource, LoadsCorrectly)
     EXPECT_EQ(dh->tick_at(2).quantity, 200);
 }
 
+TEST(TickCsvDataSource, LoadIntoPreservesEmissionOrder)
+{
+    SilenceOutput quiet;
+    MarketSeries series;
+    TickCsvDataSource src(fixture_path("sample_ticks_ooo.csv"));
+    ASSERT_TRUE(src.load_into(series));
+    ASSERT_EQ(series.tick_count(), 3u);
+    EXPECT_LT(series.tick_at(1).timestamp, series.tick_at(0).timestamp);
+    EXPECT_LT(series.tick_at(1).timestamp, series.tick_at(2).timestamp);
+}
+
+TEST(TickCsvDataSource, LoadDataRetainsSortedTapeContract)
+{
+    SilenceOutput quiet;
+    auto dh = std::make_shared<data_handler>();
+    TickCsvDataSource src(fixture_path("sample_ticks_ooo.csv"));
+    ASSERT_TRUE(src.load_data(dh));
+    ASSERT_EQ(dh->tick_count(), 3u);
+    EXPECT_LT(dh->tick_at(0).timestamp, dh->tick_at(1).timestamp);
+    EXPECT_LT(dh->tick_at(1).timestamp, dh->tick_at(2).timestamp);
+}
+
 TEST(TickCsvDataSource, SideParsing)
 {
     SilenceOutput quiet;
@@ -211,4 +244,16 @@ TEST(DataWrapper, FromUriCsvScheme)
     auto w = DataWrapper::from_uri(uri);
     ASSERT_TRUE(w.load(series));
     EXPECT_EQ(series.bar_count(), 2u);
+}
+
+TEST(DataWrapper, PreservesTypedStreamFailure)
+{
+    MarketSeries series;
+    auto wrapper = DataWrapper::from_source(
+        std::make_unique<TypedFailureSource>());
+    auto result = wrapper.stream(series);
+    EXPECT_FALSE(result.success());
+    EXPECT_EQ(result.termination, stream_termination::transport_failure);
+    EXPECT_EQ(result.accepted, 3u);
+    EXPECT_EQ(result.rejected, 1u);
 }

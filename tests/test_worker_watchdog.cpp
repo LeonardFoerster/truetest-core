@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "threading/worker_watchdog.h"
+#include "threading/worker.h"
 
 #include <atomic>
 #include <chrono>
@@ -10,6 +11,15 @@
 
 namespace {
 
+class AlwaysThrowWorker final : public Worker
+{
+public:
+    void on_event(const event_pointer&) override
+    {
+        throw std::runtime_error("test worker failure");
+    }
+};
+
 struct SilenceStderr
 {
     std::ostringstream sink;
@@ -18,6 +28,25 @@ struct SilenceStderr
     ~SilenceStderr() { std::cerr.rdbuf(orig); }
 };
 
+}
+
+TEST(Worker, ConsecutiveErrorBudgetInvokesTerminalFailureCallback)
+{
+    SilenceStderr quiet;
+    RingBuffer<event_pointer, 8, DropOldest> ring;
+    ASSERT_TRUE(ring.try_push(event_pointer{}));
+
+    AlwaysThrowWorker worker;
+    worker.set_max_consecutive_errors(1);
+    std::atomic<unsigned> callbacks{0};
+    worker.set_failure_callback([&](std::string_view) {
+        callbacks.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    worker.run(ring);
+
+    EXPECT_TRUE(worker.has_failed());
+    EXPECT_EQ(callbacks.load(std::memory_order_relaxed), 1u);
 }
 
 // --- Pure decision logic ----------------------------------------------------

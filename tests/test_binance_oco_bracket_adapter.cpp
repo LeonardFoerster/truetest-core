@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -140,12 +141,36 @@ TEST(BinanceOcoBracketAdapter, PlaceHttpFailureReturnsEmptyHandles)
     EXPECT_TRUE(h.empty());
 }
 
+TEST(BinanceOcoBracketAdapter, PlaceMalformedOrAmbiguousSuccessThrows)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del = std::make_shared<fake_caller>();
+    BinanceOcoBracketAdapter a(
+        [post](std::string_view ep, std::string_view p) { return (*post)(ep, p); },
+        [del](std::string_view ep, std::string_view p) { return (*del)(ep, p); });
+
+    const std::string payloads[] = {
+        R"({"orderListId":42})",
+        R"({"orderListId":42,"orderListId":43,"listClientOrderId":"tt-oco-7","symbol":"BTCUSDT","orders":[],"orderReports":[]})",
+        R"({"orderListId":42,"listClientOrderId":"tt-oco-7","symbol":"BTCUSDT","orders":[{"orderId":111,"clientOrderId":"x"},{"orderId":111,"clientOrderId":"y"}],"orderReports":[{"orderId":111,"type":"STOP_LOSS_LIMIT"},{"orderId":111,"type":"LIMIT_MAKER"}]})",
+        R"({"orderListId":42,"listClientOrderId":"tt-oco-7","symbol":"BTCUSDT","orders":[{"orderId":111,"clientOrderId":"x"},{"orderId":222,"clientOrderId":"y"}],"orderReports":[{"orderId":111,"type":"STOP_LOSS_LIMIT"},{"orderId":222,"type":"UNKNOWN"}]})",
+        R"({"nested":{"orderListId":42,"listClientOrderId":"tt-oco-7","symbol":"BTCUSDT","orders":[],"orderReports":[]}})",
+    };
+    for (const auto& payload : payloads)
+    {
+        post->body = payload;
+        EXPECT_THROW(
+            a.place(7, make_long_intent(7, 95.0, 110.0), 100.0),
+            std::runtime_error) << payload;
+    }
+}
+
 TEST(BinanceOcoBracketAdapter, CancelWithListIdHitsOrderListEndpoint)
 {
     auto post = std::make_shared<fake_caller>();
     auto del  = std::make_shared<fake_caller>();
     del->status = 200;
-    del->body   = R"({"orderListId":42,"listStatusType":"ALL_DONE"})";
+    del->body   = R"({"orderListId":42,"listStatusType":"ALL_DONE","listOrderStatus":"ALL_DONE"})";
 
     BinanceOcoBracketAdapter a(
         [post](std::string_view ep, std::string_view p) { return (*post)(ep, p); },
@@ -181,6 +206,100 @@ TEST(BinanceOcoBracketAdapter, CancelFallbackToPerLegIfOrderListFails)
     a.cancel(7, h);
     // 1 orderList attempt + 2 per-leg fallback DELETEs
     EXPECT_EQ(del->calls, 3);
+}
+
+TEST(BinanceOcoBracketAdapter, CancelMalformedSuccessThrows)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    del->status = 200;
+    del->body =
+        R"({"nested":{"orderListId":42,"listStatusType":"ALL_DONE"}})";
+    BinanceOcoBracketAdapter a(
+        [post](std::string_view ep, std::string_view p) { return (*post)(ep, p); },
+        [del](std::string_view ep, std::string_view p) { return (*del)(ep, p); });
+    truetest::exits::bracket_handles h;
+    h.oco_list_id = "42";
+    EXPECT_THROW(a.cancel(7, h), std::runtime_error);
+}
+
+TEST(BinanceOcoBracketAdapter, GroupCancelRequiresExactConsistentIdentityAndState)
+{
+    const std::vector<std::string> unproven = {
+        R"({"orderListId":42,"listStatusType":"ALL_DONE","listOrderStatus":"EXECUTING"})",
+        R"({"orderListId":43,"listStatusType":"ALL_DONE","listOrderStatus":"ALL_DONE"})",
+        R"({"orderListId":42,"orderListId":43,"listStatusType":"ALL_DONE","listOrderStatus":"ALL_DONE"})",
+        R"({"orderListId":42,"listStatusType":"ALL_DONE","listStatusType":"EXEC_STARTED","listOrderStatus":"ALL_DONE"})",
+    };
+    for (const auto& body : unproven)
+    {
+        auto post = std::make_shared<fake_caller>();
+        auto del = std::make_shared<fake_caller>();
+        del->status = 200;
+        del->body = body;
+        BinanceOcoBracketAdapter a(
+            [post](std::string_view ep, std::string_view p) {
+                return (*post)(ep, p);
+            },
+            [del](std::string_view ep, std::string_view p) {
+                return (*del)(ep, p);
+            });
+        truetest::exits::bracket_handles h;
+        h.oco_list_id = "42";
+        EXPECT_THROW(a.cancel(7, h), std::runtime_error) << body;
+    }
+}
+
+TEST(BinanceOcoBracketAdapter, GroupCancelExceptionFallsBackToBothLegs)
+{
+    auto post = std::make_shared<fake_caller>();
+    int calls = 0;
+    BinanceOcoBracketAdapter a(
+        [post](std::string_view ep, std::string_view p) {
+            return (*post)(ep, p);
+        },
+        [&](std::string_view endpoint, std::string_view params)
+            -> BinanceOcoBracketAdapter::response {
+            ++calls;
+            if (endpoint == "/api/v3/orderList")
+                throw std::runtime_error("ambiguous grouped cancel");
+            if (params.find("orderId=111") != std::string_view::npos)
+                return {200, R"({"orderId":111,"status":"CANCELED"})"};
+            return {200, R"({"orderId":222,"status":"CANCELED"})"};
+        });
+    truetest::exits::bracket_handles h;
+    h.oco_list_id = "42";
+    h.sl_exchange_id = "111";
+    h.tp_exchange_id = "222";
+    h.symbol = "BTCUSDT";
+
+    EXPECT_NO_THROW(a.cancel(7, h));
+    EXPECT_EQ(calls, 3);
+}
+
+TEST(BinanceOcoBracketAdapter, FirstLegExceptionStillAttemptsSecondLeg)
+{
+    auto post = std::make_shared<fake_caller>();
+    int calls = 0;
+    BinanceOcoBracketAdapter a(
+        [post](std::string_view ep, std::string_view p) {
+            return (*post)(ep, p);
+        },
+        [&](std::string_view, std::string_view params)
+            -> BinanceOcoBracketAdapter::response {
+            ++calls;
+            if (params.find("orderId=111") != std::string_view::npos)
+                throw std::runtime_error("ambiguous SL cancel");
+            EXPECT_NE(params.find("orderId=222"), std::string_view::npos);
+            return {200, R"({"orderId":222,"status":"CANCELED"})"};
+        });
+    truetest::exits::bracket_handles h;
+    h.sl_exchange_id = "111";
+    h.tp_exchange_id = "222";
+    h.symbol = "BTCUSDT";
+
+    EXPECT_THROW(a.cancel(7, h), std::runtime_error);
+    EXPECT_EQ(calls, 2);
 }
 
 TEST(BinanceOcoBracketAdapter, CancelEmptyHandlesIsNoop)
@@ -268,7 +387,7 @@ TEST(BinanceOcoBracketAdapter, ListOpenRecoversTrueTestBracketsOnly)
     EXPECT_EQ(*rb.handles.oco_list_id, "42");
 }
 
-TEST(BinanceOcoBracketAdapter, ListOpenWithoutGetCallableReturnsEmpty)
+TEST(BinanceOcoBracketAdapter, ListOpenWithoutGetCallableRefusesRecovery)
 {
     auto post = std::make_shared<fake_caller>();
     auto del  = std::make_shared<fake_caller>();
@@ -276,8 +395,154 @@ TEST(BinanceOcoBracketAdapter, ListOpenWithoutGetCallableReturnsEmpty)
         [post](std::string_view ep, std::string_view p) { return (*post)(ep, p); },
         [del ](std::string_view ep, std::string_view p) { return (*del )(ep, p); });
 
-    auto recovered = a.list_open();
-    EXPECT_TRUE(recovered.empty());
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceOcoBracketAdapter, ListOpenHttpFailureRefusesRecovery)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    auto get  = std::make_shared<fake_caller>();
+    get->status = 503;
+    get->body = R"({"msg":"unavailable"})";
+    BinanceOcoBracketAdapter a(
+        [post](std::string_view ep, std::string_view p) { return (*post)(ep, p); },
+        [del ](std::string_view ep, std::string_view p) { return (*del )(ep, p); },
+        [get ](std::string_view ep, std::string_view p) { return (*get )(ep, p); });
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceOcoBracketAdapter, ListOpenMalformedSuccessRefusesRecovery)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    auto get  = std::make_shared<fake_caller>();
+    get->status = 200;
+    get->body = R"({"unexpected":[]})";
+    BinanceOcoBracketAdapter a(
+        [post](std::string_view ep, std::string_view p) { return (*post)(ep, p); },
+        [del ](std::string_view ep, std::string_view p) { return (*del )(ep, p); },
+        [get ](std::string_view ep, std::string_view p) { return (*get )(ep, p); });
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceOcoBracketAdapter, ListOpenMissingIdentityRefusesRecovery)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    auto get  = std::make_shared<fake_caller>();
+    get->status = 200;
+    get->body = "[{}]";
+    BinanceOcoBracketAdapter a(
+        [post](std::string_view ep, std::string_view p) { return (*post)(ep, p); },
+        [del ](std::string_view ep, std::string_view p) { return (*del )(ep, p); },
+        [get ](std::string_view ep, std::string_view p) { return (*get )(ep, p); });
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+}
+
+TEST(BinanceOcoBracketAdapter, ListOpenRejectsAmbiguousNestedLegAndDuplicateOpener)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    int call = 0;
+    auto ambiguous_leg = [&call](std::string_view, std::string_view) {
+        if (++call == 1)
+            return BinanceOcoBracketAdapter::response{200, R"([{
+              "orderListId":42,"listClientOrderId":"tt-oco-7","symbol":"BTCUSDT",
+              "orders":[{"orderId":1,"clientOrderId":"a"},{"orderId":2,"clientOrderId":"b"},{"orderId":3,"orderId":4,"clientOrderId":"c"}]
+            }])"};
+        return BinanceOcoBracketAdapter::response{200, R"([
+          {"orderId":1,"type":"STOP_LOSS_LIMIT","side":"SELL","origQty":"1","price":"89","stopPrice":"90"},
+          {"orderId":2,"type":"LIMIT_MAKER","side":"SELL","origQty":"1","price":"110","stopPrice":"0"}
+        ])"};
+    };
+    BinanceOcoBracketAdapter a(
+        [post](std::string_view e, std::string_view p) { return (*post)(e, p); },
+        [del](std::string_view e, std::string_view p) { return (*del)(e, p); },
+        ambiguous_leg);
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+
+    call = 0;
+    auto duplicate_opener = [&call](std::string_view, std::string_view) {
+        if (++call == 1)
+            return BinanceOcoBracketAdapter::response{200, R"([
+              {"orderListId":42,"listClientOrderId":"tt-oco-7","symbol":"BTCUSDT","orders":[{"orderId":1,"clientOrderId":"a"},{"orderId":2,"clientOrderId":"b"}]},
+              {"orderListId":43,"listClientOrderId":"tt-oco-7","symbol":"BTCUSDT","orders":[{"orderId":3,"clientOrderId":"c"},{"orderId":4,"clientOrderId":"d"}]}
+            ])"};
+        return BinanceOcoBracketAdapter::response{200, R"([
+          {"orderId":1,"type":"STOP_LOSS_LIMIT","side":"SELL","origQty":"1","price":"89","stopPrice":"90"},
+          {"orderId":2,"type":"LIMIT_MAKER","side":"SELL","origQty":"1","price":"110","stopPrice":"0"},
+          {"orderId":3,"type":"STOP_LOSS_LIMIT","side":"SELL","origQty":"1","price":"88","stopPrice":"89"},
+          {"orderId":4,"type":"LIMIT_MAKER","side":"SELL","origQty":"1","price":"111","stopPrice":"0"}
+        ])"};
+    };
+    BinanceOcoBracketAdapter b(
+        [post](std::string_view e, std::string_view p) { return (*post)(e, p); },
+        [del](std::string_view e, std::string_view p) { return (*del)(e, p); },
+        duplicate_opener);
+    EXPECT_THROW(b.list_open(), std::runtime_error);
+}
+
+TEST(BinanceOcoBracketAdapter, ListOpenRejectsTrailingIdentityAndBadLegSemantics)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del  = std::make_shared<fake_caller>();
+    int call = 0;
+    auto get = [&call](std::string_view, std::string_view) {
+        if (++call == 1)
+            return BinanceOcoBracketAdapter::response{200, R"([{
+              "orderListId":42,"listClientOrderId":"tt-oco-7evil","symbol":"BTCUSDT",
+              "orders":[{"orderId":1,"clientOrderId":"a"},{"orderId":2,"clientOrderId":"b"}]
+            }])"};
+        return BinanceOcoBracketAdapter::response{200, "[]"};
+    };
+    BinanceOcoBracketAdapter a(
+        [post](std::string_view e, std::string_view p) { return (*post)(e, p); },
+        [del](std::string_view e, std::string_view p) { return (*del)(e, p); },
+        get);
+    EXPECT_THROW(a.list_open(), std::runtime_error);
+
+    call = 0;
+    auto bad_semantics = [&call](std::string_view, std::string_view) {
+        if (++call == 1)
+            return BinanceOcoBracketAdapter::response{200, R"([{
+              "orderListId":42,"listClientOrderId":"tt-oco-7","symbol":"BTCUSDT",
+              "orders":[{"orderId":1,"clientOrderId":"a"},{"orderId":2,"clientOrderId":"b"}]
+            }])"};
+        return BinanceOcoBracketAdapter::response{200, R"([
+          {"orderId":1,"type":"UNKNOWN","side":"UNKNOWN","origQty":"junk","price":"junk","stopPrice":"junk"},
+          {"orderId":2,"type":"LIMIT_MAKER","side":"SELL","origQty":"1","price":"110","stopPrice":"0"}
+        ])"};
+    };
+    BinanceOcoBracketAdapter b(
+        [post](std::string_view e, std::string_view p) { return (*post)(e, p); },
+        [del](std::string_view e, std::string_view p) { return (*del)(e, p); },
+        bad_semantics);
+    EXPECT_THROW(b.list_open(), std::runtime_error);
+}
+
+TEST(BinanceOcoBracketAdapter, ListOpenDuplicateVenueOrderIdRefusesRecovery)
+{
+    auto post = std::make_shared<fake_caller>();
+    auto del = std::make_shared<fake_caller>();
+    int call = 0;
+    auto get = [&call](std::string_view, std::string_view) {
+        if (++call == 1)
+            return BinanceOcoBracketAdapter::response{200, R"([
+              {"orderListId":42,"listClientOrderId":"tt-oco-7","symbol":"BTCUSDT","orders":[{"orderId":1,"clientOrderId":"a"},{"orderId":2,"clientOrderId":"b"}]},
+              {"orderListId":43,"listClientOrderId":"tt-oco-8","symbol":"BTCUSDT","orders":[{"orderId":1,"clientOrderId":"c"},{"orderId":4,"clientOrderId":"d"}]}
+            ])"};
+        return BinanceOcoBracketAdapter::response{200, R"([
+          {"orderId":1,"type":"STOP_LOSS_LIMIT","side":"SELL","origQty":"1","price":"89","stopPrice":"90"},
+          {"orderId":2,"type":"LIMIT_MAKER","side":"SELL","origQty":"1","price":"110","stopPrice":"0"},
+          {"orderId":4,"type":"LIMIT_MAKER","side":"SELL","origQty":"1","price":"111","stopPrice":"0"}
+        ])"};
+    };
+    BinanceOcoBracketAdapter a(
+        [post](std::string_view e, std::string_view p) { return (*post)(e, p); },
+        [del](std::string_view e, std::string_view p) { return (*del)(e, p); },
+        get);
+    EXPECT_THROW(a.list_open(), std::runtime_error);
 }
 
 #endif // HAS_BINANCE
