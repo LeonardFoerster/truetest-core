@@ -169,6 +169,12 @@ public:
     void on_event(const event_pointer& ev) override;
     void on_funding(const funding_event& fe);   // Phase 2.1
 
+    // Numerical preflight for a fill.  This is intentionally allocation-free
+    // and runs before any externally visible accounting mutation in engine.
+    // on_fill() repeats the guard for direct/test callers.
+    bool can_apply_fill(const fill_event& f) const noexcept;
+    bool has_finite_state() const noexcept;
+
     // Lightweight synchronous mark-to-market for the engine's hot path when
     // full analytics runs on a worker thread: keeps risk_view()'s equity and
     // drawdown current (and identical to inline mode) without the per-event

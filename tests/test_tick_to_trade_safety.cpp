@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -46,6 +47,8 @@ public:
     int submit_count = 0;
     int poll_count = 0;
     std::optional<order_event> held;
+    std::optional<double> fill_quantity_override;
+    std::optional<double> fill_price_override;
 
     void submit_order(const order_event& o) override
     {
@@ -67,8 +70,9 @@ public:
                      o.get_symbol(),
                      o.get_order_id(),
                      o.get_side(),
-                     o.get_quantity(),
-                     o.get_price() > 0.0 ? o.get_price() : 100.0);
+                     fill_quantity_override.value_or(o.get_quantity()),
+                     fill_price_override.value_or(
+                         o.get_price() > 0.0 ? o.get_price() : 100.0));
         f.set_recv_ns(o.get_recv_ns());
         if (o.get_recv_ns() > 0)
         {
@@ -111,6 +115,7 @@ class OneShotBuyer : public IStrategy
     bool fired_ = false;
 public:
     int calls = 0;
+    int fill_calls = 0;
     std::optional<order_event> on_market(const market_event& mkt) override
     {
         ++calls;
@@ -120,6 +125,7 @@ public:
                            order_type::market, order_side::buy,
                            1.0, mkt.get_close());
     }
+    void on_fill(const fill_event&, std::uint64_t) override { ++fill_calls; }
     void set_position_open(const std::string&, bool) override {}
 };
 
@@ -267,6 +273,37 @@ TEST(TickToTradeSafety, ProviderFill_RecordsInAnalytics)
     EXPECT_GE(report.total_fills, 1u)
         << "handle_engine_fill must always call analytics_.on_event on provider fills";
     EXPECT_FALSE(eng.get_halt_flag().load(std::memory_order_acquire));
+}
+
+TEST(TickToTradeSafety, ProviderOverflowFillHaltsBeforeObserverMutation)
+{
+    silence_cout quiet;
+    auto dh = make_bars(5);
+    auto provider = std::make_shared<DeferredFillProvider>();
+    provider->adapter->fill_quantity_override = std::numeric_limits<double>::max();
+    provider->adapter->fill_price_override = 2.0;
+    auto strat = std::make_shared<OneShotBuyer>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.provider = provider;
+    cfg.initial_balance = 100000.0;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.set_primary_strategy_name("oneshot");
+    eng.run();
+
+    const auto report = eng.get_analytics().generate_report();
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_EQ(report.total_fills, 0u);
+    EXPECT_DOUBLE_EQ(report.final_equity, 100000.0);
+    EXPECT_EQ(strat->fill_calls, 0)
+        << "a rejected preflight must not invoke strategy fill observers";
+    EXPECT_EQ(eng.get_order_tracker().active_count(), 1u)
+        << "preflight must precede the fill tracker status transition";
+    EXPECT_EQ(eng.get_order_tracker().get_order_status(1), order_status::pending);
 }
 
 // ---------------------------------------------------------------------------

@@ -198,6 +198,32 @@ TEST(Analytics, BF08_InvalidFillQuantityDoesNotMutateState)
     EXPECT_TRUE(std::isfinite(after.unrealized_pnl));
 }
 
+TEST(Analytics, FiniteEconomicOverflowDoesNotMutateAccounting)
+{
+    Analytics a(1000.0);
+    auto order = std::make_shared<order_event>(
+        epoch_ms(0), "X", order_type::limit, order_side::buy, 1.0, 100.0);
+    order->set_order_id(1);
+    a.on_event(order);
+    auto open = std::make_shared<fill_event>(
+        epoch_ms(1), "X", 1, order_side::buy, 1.0, 100.0, 1.0);
+    a.on_event(open);
+    const auto before = a.generate_report();
+
+    auto overflow = std::make_shared<fill_event>(
+        epoch_ms(2), "X", 2, order_side::buy,
+        std::numeric_limits<double>::max(), 2.0, 0.0);
+    a.on_event(overflow);
+
+    const auto after = a.generate_report();
+    EXPECT_EQ(after.total_fills, before.total_fills);
+    EXPECT_EQ(after.trades.size(), before.trades.size());
+    EXPECT_EQ(after.open_positions.size(), before.open_positions.size());
+    EXPECT_DOUBLE_EQ(after.final_equity, before.final_equity);
+    EXPECT_DOUBLE_EQ(after.realized_pnl, before.realized_pnl);
+    EXPECT_TRUE(std::isfinite(after.final_equity));
+}
+
 TEST(Analytics, OpenPosition_ReportsUnrealizedPnl)
 {
     Analytics a(10000.0);

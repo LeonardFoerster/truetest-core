@@ -9,6 +9,7 @@
 #include "execution/portfolio.h"
 #include "execution/latency_model.h"
 #include "execution/async_support.h"
+#include "core/fill_validation.h"
 #include "execution/fill_parser.h"
 #include "execution/fee_model.h"
 #include "execution/queue_aware_book_adapter.h"
@@ -1860,7 +1861,12 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
             {
                 for (auto& ef : exchange_fills)
                 {
-                    stamp_fill_attribution(ef);
+                    if (!preflight_shadow_exchange_fill(ef))
+                    {
+                        trigger_halt("unsafe shadow exchange fill accounting preflight failed");
+                        halt_requested = true;
+                        return false;
+                    }
 
                     const uint64_t e_opener = ef.get_opener_order_id();
                     const std::string& e_strat = ef.get_strategy_name();
@@ -2538,6 +2544,19 @@ void engine::stamp_fill_attribution(fill_event& f)
     }
 }
 
+bool engine::preflight_shadow_exchange_fill(fill_event& f)
+{
+    stamp_fill_attribution(f);
+    if (!fill_validation::valid_fill_shape(f)) return false;
+    if (exchange_portfolio_.has_value() &&
+        !exchange_portfolio_->can_apply_fill(f, f.get_opener_order_id(),
+                                             f.get_strategy_name()))
+        return false;
+    if (exchange_analytics_.has_value() && !exchange_analytics_->can_apply_fill(f))
+        return false;
+    return true;
+}
+
 bool engine::handle_engine_fill(fill_event& f,
                                 std::size_t& event_count,
                                 bool& halt_requested,
@@ -2550,6 +2569,36 @@ bool engine::handle_engine_fill(fill_event& f,
     const uint64_t opener = f.get_opener_order_id();
     const std::string& strat = f.get_strategy_name();
 
+    // Economic admission is deliberately ahead of tracker, dashboard,
+    // audit, log, strategy and worker publication.  A finite wire fill can
+    // still overflow cash/basis/PnL; any failed preview is terminal and must
+    // leave every observer of a fill untouched.
+    if (!fill_validation::valid_fill_shape(f) ||
+        !portfolio_.can_apply_fill(f, opener, strat) ||
+        !analytics_.can_apply_fill(f))
+    {
+        trigger_halt("unsafe fill accounting preflight failed");
+        halt_requested = true;
+        return false;
+    }
+
+    // A pooled event is itself an externally visible commit dependency.  Take
+    // it before the tracker/dashboard transition so pool exhaustion cannot
+    // create a fill status without a corresponding accounting/log event.
+    std::shared_ptr<fill_event> fill_ptr;
+    try
+    {
+        fill_ptr = acquire_pooled(fill_pool_, f);
+    }
+    catch (const std::exception&)
+    {
+        // acquire_pooled already latched pool_exhausted; normalize every
+        // allocation/constructor failure to the same terminal fill failure.
+        trigger_halt("fill event reservation failed before accounting commit");
+        halt_requested = true;
+        return false;
+    }
+
     const auto new_status = f.is_partial()
         ? order_status::partially_filled : order_status::filled;
     order_tracker_.set_status(f.get_order_id(), new_status);
@@ -2560,7 +2609,6 @@ bool engine::handle_engine_fill(fill_event& f,
         else
             dashboard_builder_->erase_open_order(f.get_order_id());
     }
-    auto fill_ptr = acquire_pooled(fill_pool_, f);
     log_event(f);
     portfolio_.on_fill(f, opener, strat);
     dispatch_fill_to_strategy(f);
@@ -3177,12 +3225,16 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
             {
                 if (config_.mode == engine_mode::shadow)
                 {
+                    if (!preflight_shadow_exchange_fill(f))
+                    {
+                        trigger_halt("unsafe shadow exchange fill accounting preflight failed");
+                        return;
+                    }
                     if (shadow_tracker_)
                         shadow_tracker_->on_exchange_fill(f);
 
                     if (exchange_portfolio_.has_value())
                     {
-                        stamp_fill_attribution(f);
                         exchange_portfolio_->on_fill(f, f.get_opener_order_id(),
                                                    f.get_strategy_name());
                     }
@@ -3309,12 +3361,16 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
             {
                 if (config_.mode == engine_mode::shadow)
                 {
+                    if (!preflight_shadow_exchange_fill(f))
+                    {
+                        trigger_halt("unsafe shadow exchange fill accounting preflight failed");
+                        return;
+                    }
                     if (shadow_tracker_)
                         shadow_tracker_->on_exchange_fill(f);
 
                     if (exchange_portfolio_.has_value())
                     {
-                        stamp_fill_attribution(f);
                         exchange_portfolio_->on_fill(f, f.get_opener_order_id(),
                                                    f.get_strategy_name());
                     }
@@ -4043,11 +4099,16 @@ void engine::run()
                 {
                     if (config_.mode == engine_mode::shadow)
                     {
+                        if (!preflight_shadow_exchange_fill(f))
+                        {
+                            trigger_halt("unsafe shadow exchange fill accounting preflight failed");
+                            halt_requested = true;
+                            break;
+                        }
                         if (shadow_tracker_)
                             shadow_tracker_->on_exchange_fill(f);
                         if (exchange_portfolio_.has_value())
                         {
-                            stamp_fill_attribution(f);
                             exchange_portfolio_->on_fill(f, f.get_opener_order_id(),
                                                        f.get_strategy_name());
                         }

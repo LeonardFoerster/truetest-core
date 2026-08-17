@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 #include "execution/portfolio.h"
 
+#include <cmath>
+#include <limits>
+
 static auto now() { return std::chrono::system_clock::now(); }
 
 TEST(Portfolio, InitialState)
@@ -260,4 +263,80 @@ TEST(Portfolio, MultiSymbol_CashTracking)
     fill_event buy_b(now(), "B", 2, order_side::buy, 5, 200.0, 0.0);
     p.on_fill(buy_b);
     EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash - 1000.0 - 1000.0);
+}
+
+TEST(Portfolio, EconomicOverflowFillLeavesEveryLedgerFieldUnchanged)
+{
+    portfolio p(1000.0);
+    fill_event open(now(), "SAFE", 1, order_side::buy, 2.0, 100.0, 1.0);
+    p.on_fill(open);
+
+    const double cash_before = p.get_cash();
+    const auto position_before = p.get_positions().at("SAFE");
+    const auto lot_before = p.get_lots().at(1);
+    const auto fills_before = p.get_total_fills();
+    const auto trades_before = p.get_total_trades();
+
+    // All input fields are finite.  The unsafe product is not.
+    fill_event overflow(now(), "SAFE", 2, order_side::buy,
+                        std::numeric_limits<double>::max(), 2.0, 0.0);
+    p.on_fill(overflow);
+
+    EXPECT_DOUBLE_EQ(p.get_cash(), cash_before);
+    ASSERT_EQ(p.get_positions().size(), 1u);
+    EXPECT_DOUBLE_EQ(p.get_positions().at("SAFE").qty, position_before.qty);
+    EXPECT_DOUBLE_EQ(p.get_positions().at("SAFE").cost_basis, position_before.cost_basis);
+    ASSERT_EQ(p.get_lots().size(), 1u);
+    EXPECT_DOUBLE_EQ(p.get_lots().at(1).qty_open, lot_before.qty_open);
+    EXPECT_DOUBLE_EQ(p.get_lots().at(1).entry_price, lot_before.entry_price);
+    EXPECT_DOUBLE_EQ(p.get_lots().at(1).entry_filled_qty, lot_before.entry_filled_qty);
+    EXPECT_EQ(p.get_total_fills(), fills_before);
+    EXPECT_EQ(p.get_total_trades(), trades_before);
+    EXPECT_TRUE(std::isfinite(p.get_cash()));
+}
+
+TEST(Portfolio, CashQuantityBasisAndCommissionOverflowAreAllRejectedAtomically)
+{
+    const auto max = std::numeric_limits<double>::max();
+
+    // Cash addition overflow on a short open.
+    portfolio cash_port(max);
+    const double cash_before = cash_port.get_cash();
+    fill_event cash_overflow(now(), "CASH", 1, order_side::sell, 1.0, max, 0.0);
+    cash_port.on_fill(cash_overflow);
+    EXPECT_DOUBLE_EQ(cash_port.get_cash(), cash_before);
+    EXPECT_TRUE(cash_port.get_positions().empty());
+
+    // Position quantity overflow after one otherwise valid huge fill.
+    portfolio qty_port;
+    fill_event first_qty(now(), "QTY", 1, order_side::buy, max, 1.0, 0.0);
+    qty_port.on_fill(first_qty);
+    const auto qty_before = qty_port.get_positions().at("QTY");
+    const auto fills_before = qty_port.get_total_fills();
+    fill_event qty_overflow(now(), "QTY", 2, order_side::buy, max, 1.0, 0.0);
+    qty_port.on_fill(qty_overflow);
+    ASSERT_EQ(qty_port.get_positions().size(), 1u);
+    EXPECT_DOUBLE_EQ(qty_port.get_positions().at("QTY").qty, qty_before.qty);
+    EXPECT_DOUBLE_EQ(qty_port.get_positions().at("QTY").cost_basis, qty_before.cost_basis);
+    EXPECT_EQ(qty_port.get_total_fills(), fills_before);
+
+    // A finite notional plus a finite commission may still overflow.
+    portfolio commission_port;
+    const auto commission_cash_before = commission_port.get_cash();
+    fill_event commission_overflow(now(), "FEE", 1, order_side::buy,
+                                   1.0, max / 2.0, max);
+    commission_port.on_fill(commission_overflow);
+    EXPECT_DOUBLE_EQ(commission_port.get_cash(), commission_cash_before);
+    EXPECT_TRUE(commission_port.get_positions().empty());
+
+    // Cost basis has the same checked-add requirement.
+    portfolio basis_port;
+    fill_event basis_one(now(), "BASIS", 1, order_side::buy, 1.0, max * 0.75, 0.0);
+    basis_port.on_fill(basis_one);
+    const auto basis_before = basis_port.get_positions().at("BASIS");
+    fill_event basis_overflow(now(), "BASIS", 2, order_side::buy, 1.0, max * 0.75, 0.0);
+    basis_port.on_fill(basis_overflow);
+    ASSERT_EQ(basis_port.get_positions().size(), 1u);
+    EXPECT_DOUBLE_EQ(basis_port.get_positions().at("BASIS").qty, basis_before.qty);
+    EXPECT_DOUBLE_EQ(basis_port.get_positions().at("BASIS").cost_basis, basis_before.cost_basis);
 }

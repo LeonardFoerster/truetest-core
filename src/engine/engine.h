@@ -255,6 +255,10 @@ private:
     // consolidation.
     void stamp_fill_attribution(fill_event& f);
 
+    // Shadow exchange fills use a separate portfolio/analytics pair, but
+    // must satisfy the same pre-commit economic invariant as canonical fills.
+    bool preflight_shadow_exchange_fill(fill_event& f);
+
     // Canonical engine-book fill pipeline (tracker, portfolio, strategy,
     // exits, risk, audit, analytics, publish). Used by process_order,
     // provider async drain, and unwind so no path can skip post-fill risk.

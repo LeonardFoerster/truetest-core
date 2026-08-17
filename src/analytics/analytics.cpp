@@ -1,5 +1,6 @@
 #include "analytics.h"
 #include "report_generator.h"
+#include "../core/fill_validation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -7,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 
 namespace {
 static const bool kAnalyticsPnlDebug = [] {
@@ -293,9 +295,10 @@ void Analytics::on_order(const order_event& o)
 
 void Analytics::on_fill(const fill_event& f)
 {
-    const double filled_qty = f.get_filled_quantity();
-    if (!(filled_qty > 0.0) || !std::isfinite(filled_qty))
+    if (!can_apply_fill(f))
         return;
+
+    const double filled_qty = f.get_filled_quantity();
 
     total_fills_++;
 
@@ -449,6 +452,225 @@ void Analytics::on_fill(const fill_event& f)
     }
 
     trades_.push_back(rec);
+}
+
+bool Analytics::has_finite_state() const noexcept
+{
+    if (!fill_validation::finite(initial_cash_) || !fill_validation::finite(cash_) ||
+        !fill_validation::finite(last_close_) || !fill_validation::finite(last_equity_) ||
+        !fill_validation::finite(realized_vol_1h_) || !fill_validation::finite(last_mid_price_) ||
+        !fill_validation::finite(current_spread_bps_) ||
+        !fill_validation::finite(current_funding_8h_rate_) ||
+        !fill_validation::finite(total_funding_pnl_) ||
+        !fill_validation::finite(total_slippage_) ||
+        !fill_validation::finite(total_slippage_signed_) ||
+        !fill_validation::finite(total_adverse_slippage_) ||
+        !fill_validation::finite(total_favorable_slippage_) ||
+        !fill_validation::finite(total_holding_ms_) || !fill_validation::finite(first_price_) ||
+        !fill_validation::finite(prev_bh_equity_) || !fill_validation::finite(downside_sq_sum_) ||
+        !fill_validation::finite(peak_equity_) || !fill_validation::finite(max_drawdown_) ||
+        !fill_validation::finite(total_win_) || !fill_validation::finite(total_loss_) ||
+        !fill_validation::finite(largest_winner_) || !fill_validation::finite(largest_loser_))
+        return false;
+    for (const auto& [_, pos] : open_positions_)
+        if (!fill_validation::finite(pos.qty) || !fill_validation::finite(pos.avg_entry) ||
+            !fill_validation::finite(pos.open_commission) || !fill_validation::finite(pos.last_price))
+            return false;
+    for (const auto& [_, value] : order_prices_)
+        if (!fill_validation::finite(value)) return false;
+    for (const auto& [_, value] : per_symbol_)
+        if (!fill_validation::finite(value.total_pnl) || !fill_validation::finite(value.total_win) ||
+            !fill_validation::finite(value.total_loss))
+            return false;
+    for (const auto& [_, value] : per_strategy_)
+        if (!fill_validation::finite(value.total_pnl) || !fill_validation::finite(value.total_win) ||
+            !fill_validation::finite(value.total_loss))
+            return false;
+    return true;
+}
+
+bool Analytics::can_apply_fill(const fill_event& f) const noexcept
+{
+    using namespace fill_validation;
+    if (!valid_fill_shape(f) || !has_finite_state()) return false;
+
+    std::size_t ignored_size = 0;
+    if (!checked_size_increment(total_fills_, ignored_size) ||
+        trades_.size() == trades_.max_size())
+        return false;
+
+    const double filled_qty = f.get_filled_quantity();
+    const double fill_price = f.get_fill_price();
+    const double commission = f.get_commission();
+    const double side_sign = f.get_side() == order_side::buy ? 1.0 : -1.0;
+
+    // The slippage totals are part of the accounting state too.  Validate the
+    // same arithmetic before on_fill changes any counter or balance.
+    if (const auto it = order_prices_.find(f.get_order_id()); it != order_prices_.end())
+    {
+        double raw = 0.0;
+        double signed_slip = 0.0;
+        double magnitude = 0.0;
+        double next = 0.0;
+        if (!checked_sub(fill_price, it->second, raw) ||
+            !checked_mul(raw, side_sign, signed_slip) ||
+            !checked_abs(raw, magnitude) ||
+            !checked_add(total_slippage_, magnitude, next) ||
+            !checked_add(total_slippage_signed_, signed_slip, next))
+            return false;
+        if (signed_slip > 0.0 &&
+            !checked_add(total_adverse_slippage_, signed_slip, next))
+            return false;
+        if (signed_slip < 0.0)
+        {
+            double favorable = 0.0;
+            if (!checked_sub(0.0, signed_slip, favorable) ||
+                !checked_add(total_favorable_slippage_, favorable, next))
+                return false;
+        }
+    }
+
+    open_position pos{};
+    if (const auto it = open_positions_.find(f.get_symbol()); it != open_positions_.end())
+        pos = it->second;
+    pos.last_price = fill_price;
+    double cash = cash_;
+    double qty_left = filled_qty;
+    bool closes = false;
+    double pnl = 0.0;
+
+    if (std::abs(pos.qty) > 1e-12 && pos.qty * side_sign < 0.0)
+    {
+        const double pos_sign = pos.qty > 0.0 ? 1.0 : -1.0;
+        const double prev_abs = std::abs(pos.qty);
+        const double close_qty = std::min(prev_abs, qty_left);
+        double delta_price = 0.0;
+        double gross = 0.0;
+        double close_fraction = 0.0;
+        double close_comm = 0.0;
+        double open_fraction = 0.0;
+        double open_comm_share = 0.0;
+        double cash_notional = 0.0;
+        double cash_delta = 0.0;
+        if (!checked_sub(fill_price, pos.avg_entry, delta_price) ||
+            !checked_mul(delta_price, close_qty, gross) ||
+            !checked_mul(gross, pos_sign, gross) ||
+            !checked_div(close_qty, filled_qty, close_fraction) ||
+            !checked_mul(commission, close_fraction, close_comm) ||
+            !checked_div(close_qty, prev_abs, open_fraction) ||
+            !checked_mul(pos.open_commission, open_fraction, open_comm_share) ||
+            !checked_sub(gross, close_comm, pnl) ||
+            !checked_sub(pnl, open_comm_share, pnl) ||
+            !checked_sub(pos.open_commission, open_comm_share, pos.open_commission) ||
+            !checked_notional(close_qty, fill_price, cash_notional) ||
+            !checked_mul(-side_sign, cash_notional, cash_delta) ||
+            !checked_sub(cash_delta, close_comm, cash_delta) ||
+            !checked_add(cash, cash_delta, cash) ||
+            !checked_mul(side_sign, close_qty, cash_delta) ||
+            !checked_add(pos.qty, cash_delta, pos.qty) ||
+            !checked_sub(qty_left, close_qty, qty_left))
+            return false;
+
+        if (std::abs(pos.qty) < 1e-12)
+        {
+            pos.qty = 0.0;
+            pos.avg_entry = 0.0;
+            pos.open_commission = 0.0;
+        }
+        closes = true;
+
+        double next = 0.0;
+        if (pnl > 0.0)
+        {
+            if (!checked_add(total_win_, pnl, next)) return false;
+        }
+        else
+        {
+            double loss = 0.0;
+            if (!checked_abs(pnl, loss) || !checked_add(total_loss_, loss, next)) return false;
+        }
+
+        const auto symbol_it = per_symbol_.find(f.get_symbol());
+        const sub_analytics symbol = symbol_it == per_symbol_.end()
+            ? sub_analytics{} : symbol_it->second;
+        if (!checked_add(symbol.total_pnl, pnl, next) ||
+            symbol.trade_count == std::numeric_limits<std::size_t>::max())
+            return false;
+        if (pnl > 0.0 && !checked_add(symbol.total_win, pnl, next)) return false;
+        if (pnl <= 0.0)
+        {
+            double loss = 0.0;
+            if (!checked_abs(pnl, loss) || !checked_add(symbol.total_loss, loss, next)) return false;
+        }
+
+        if (const auto strategy_it = order_strategies_.find(f.get_order_id());
+            strategy_it != order_strategies_.end() && !strategy_it->second.empty())
+        {
+            const auto existing = per_strategy_.find(strategy_it->second);
+            const sub_analytics strategy = existing == per_strategy_.end()
+                ? sub_analytics{} : existing->second;
+            if (!checked_add(strategy.total_pnl, pnl, next) ||
+                strategy.trade_count == std::numeric_limits<std::size_t>::max())
+                return false;
+            if (pnl > 0.0 && !checked_add(strategy.total_win, pnl, next)) return false;
+            if (pnl <= 0.0)
+            {
+                double loss = 0.0;
+                if (!checked_abs(pnl, loss) || !checked_add(strategy.total_loss, loss, next)) return false;
+            }
+        }
+    }
+
+    if (qty_left > 1e-12)
+    {
+        double open_fraction = 0.0;
+        double open_commission = 0.0;
+        double prev_abs = 0.0;
+        double prior_value = 0.0;
+        double fill_value = 0.0;
+        double numerator = 0.0;
+        double denominator = 0.0;
+        double notional = 0.0;
+        double signed_notional = 0.0;
+        double cash_debit = 0.0;
+        if (!checked_div(qty_left, filled_qty, open_fraction) ||
+            !checked_mul(commission, open_fraction, open_commission) ||
+            !checked_abs(pos.qty, prev_abs) ||
+            !checked_mul(pos.avg_entry, prev_abs, prior_value) ||
+            !checked_mul(fill_price, qty_left, fill_value) ||
+            !checked_add(prior_value, fill_value, numerator) ||
+            !checked_add(prev_abs, qty_left, denominator) ||
+            !checked_div(numerator, denominator, pos.avg_entry) ||
+            !checked_mul(side_sign, qty_left, signed_notional) ||
+            !checked_add(pos.qty, signed_notional, pos.qty) ||
+            !checked_add(pos.open_commission, open_commission, pos.open_commission) ||
+            !checked_notional(qty_left, fill_price, notional) ||
+            !checked_mul(side_sign, notional, cash_debit) ||
+            !checked_add(cash_debit, open_commission, cash_debit) ||
+            !checked_sub(cash, cash_debit, cash))
+            return false;
+    }
+
+    // Mark-to-market must remain representable once this transition is
+    // committed.  Recompute it without writing to the live position map.
+    double value = 0.0;
+    for (const auto& [symbol, existing] : open_positions_)
+    {
+        const auto& candidate = symbol == f.get_symbol() ? pos : existing;
+        double component = 0.0;
+        if (!checked_mul(candidate.qty, candidate.last_price, component) ||
+            !checked_add(value, component, value))
+            return false;
+    }
+    if (open_positions_.find(f.get_symbol()) == open_positions_.end())
+    {
+        double component = 0.0;
+        if (!checked_mul(pos.qty, fill_price, component) ||
+            !checked_add(value, component, value))
+            return false;
+    }
+    double equity = 0.0;
+    return checked_add(cash, value, equity) && (!closes || std::isfinite(pnl));
 }
 
 void Analytics::on_l2_snapshot(const l2_snapshot_event& ev)

@@ -1,5 +1,6 @@
 #include "risk_manager.h"
 #include "../analytics/analytics.h"
+#include "../core/fill_validation.h"
 
 #include <cmath>
 
@@ -197,9 +198,21 @@ risk_action RiskManager::check_order(const order_event& order,
 }
 
 risk_action RiskManager::check_post_fill(const fill_event& fill,
-                                         const portfolio& /* port */,
+                                         const portfolio& port,
                                          const risk_snapshot& snap)
 {
+    // Post-fill risk is the final defense.  Comparisons against NaN otherwise
+    // evaluate false and would silently admit a poisoned accounting state.
+    if (!fill_validation::valid_fill_shape(fill) || !port.has_finite_state() ||
+        !fill_validation::finite(snap.max_drawdown) ||
+        !fill_validation::finite(snap.last_trade_pnl) ||
+        !fill_validation::finite(snap.equity) ||
+        !fill_validation::finite(snap.realized_vol_1h) ||
+        !fill_validation::finite(snap.current_spread_bps) ||
+        !fill_validation::finite(snap.current_funding_8h_rate) ||
+        !fill_validation::finite(daily_loss_))
+        return risk_action::halt;
+
     if (snap.max_drawdown / 100.0 >= limits_.max_drawdown)
         return risk_action::halt;
 
@@ -220,7 +233,13 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
             snap.last_trade_pnl < 0.0 &&
             snap.last_trade_seq != last_daily_trade_seq_added_)
         {
-            daily_loss_ += -snap.last_trade_pnl;
+            double next_daily_loss = 0.0;
+            if (!fill_validation::checked_sub(0.0, snap.last_trade_pnl,
+                                              next_daily_loss) ||
+                !fill_validation::checked_add(daily_loss_, next_daily_loss,
+                                               next_daily_loss))
+                return risk_action::halt;
+            daily_loss_ = next_daily_loss;
             last_daily_trade_seq_added_ = snap.last_trade_seq;
         }
         if (daily_loss_ >= limits_.max_daily_loss)

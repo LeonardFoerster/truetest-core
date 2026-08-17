@@ -36,6 +36,24 @@ TEST(RiskManager, OrderWithinLimits_Pass)
     EXPECT_EQ(rm.check_order(ord, port, snap), risk_action::pass);
 }
 
+TEST(RiskManager, PostFillNonFinitePortfolioOrSnapshotHalts)
+{
+    risk_limits lim;
+    lim.max_drawdown = 1.0;
+    RiskManager rm(lim);
+    portfolio port;
+    fill_event fill(epoch_ms(1), "X", 1, order_side::buy, 1.0, 100.0, 0.0);
+
+    risk_snapshot bad_snapshot;
+    bad_snapshot.equity = std::numeric_limits<double>::infinity();
+    EXPECT_EQ(rm.check_post_fill(fill, port, bad_snapshot), risk_action::halt);
+
+    port.restore_state(std::numeric_limits<double>::quiet_NaN(), 0, {});
+    risk_snapshot good_snapshot;
+    good_snapshot.equity = 1000.0;
+    EXPECT_EQ(rm.check_post_fill(fill, port, good_snapshot), risk_action::halt);
+}
+
 TEST(RiskManager, MaxPositionValue_Reject)
 {
     risk_limits lim;

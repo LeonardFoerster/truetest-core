@@ -48,6 +48,13 @@ public:
     void on_fill(const fill_event& fill, std::uint64_t opener_order_id,
                  const std::string& strategy_name = {});
 
+    // Allocation-free numerical preflight used by the engine before tracker,
+    // audit, event-log, portfolio, and analytics state are allowed to move.
+    // Public callers retain a defensive copy of the same check in on_fill().
+    bool can_apply_fill(const fill_event& fill, std::uint64_t opener_order_id,
+                        const std::string& strategy_name = {}) const noexcept;
+    bool has_finite_state() const noexcept;
+
     // Funding settlement (non-lot event). Updates cash and a separate P&L accumulator.
     // Does not affect lots (funding does not open or close positions in the bookkeeping sense).
     void on_funding(const funding_event& fe);
