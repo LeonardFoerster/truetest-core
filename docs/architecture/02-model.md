@@ -60,7 +60,7 @@ These are **non-negotiable rejects** (pre-merge checklist must confirm none intr
 
 ## Phase 1 Live-Safety Freeze (mechanical + cultural)
 
-10 files carry `LIVE-SAFETY SURFACE — Phase 1 freeze` markers (exact list in `scripts/check-live-safety-freeze.sh`, `prod.md`, `prerequisites.md`).
+The expanded engine/execution/provider safety surface is mechanically frozen; the exact list is in `scripts/check-live-safety-freeze.sh` and mirrored in `AGENTS.md` and `prerequisites.md`.
 
 - Every edit (even "docs only" describing the surface) requires the token in commit message.
 - Enforcement: pre-commit + CI script.

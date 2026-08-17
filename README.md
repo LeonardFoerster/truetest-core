@@ -34,7 +34,7 @@
 
 Three binaries share one codebase and differ only by compile-time `TT_TARGET`. Live-order paths are **physically eliminated** (DCE) in non-live targets via `src/core/tt_target.h` → `target_allows_live_orders()`.
 
-**Config precedence:** explicit CLI flags → `--config` JSON file → hard defaults. There is **no** `TRUETEST_CONFIG` environment variable.
+**Run profiles:** `--preset` selects a named bundle. Profile-owned values are applied after JSON configuration; explicit CLI flags take priority. There is **no** `TRUETEST_CONFIG` environment variable. Use `--dump-config` to inspect the resolved options.
 
 | | Binary | `TT_TARGET` | Live orders | Primary use |
 |:---:|:-------|:------------|:------------|:------------|
@@ -75,10 +75,10 @@ What exists **in this tree today** (not aspirational):
 - Compile-time live-order gate (`TT_TARGET` / DCE)
 - Reconciler, Dead Man’s Switch, kill-switch, venue `IRiskCheck`
 - Terminal `halt_flag_`, user-data WS as source of truth, `WorkerWatchdog`
-- Phase 1 mechanical freeze (10 files + `LIVE_SAFETY_CCB_APPROVED`)
+- Expanded Phase 1 mechanical freeze (`scripts/check-live-safety-freeze.sh` is the exact source of truth; frozen changes require `LIVE_SAFETY_CCB_APPROVED`)
 
 ### Strategies & indicators
-- Strategies: `sma` · `ma-crossover` · `mean-reversion` · `breakout` · `coiled-spring` · `larry_connor` · `hedge-demo` · `adaptive-hybrid` · `structure-continuation`
+- Strategies: `sma` · `ma-crossover` · `mean-reversion` · `breakout` · `coiled-spring` · `larry_connor` · `hedge-demo` · `structure-continuation`. The retired `adaptive-hybrid` prototype is not compiled or registered.
 - Indicators: SMA, EMA, RSI, Stochastic, Bollinger, ATR, swing detection, rolling extremes
 
 ### Observability & UI
@@ -97,8 +97,8 @@ Tracked in [`docs/todos/`](docs/todos/) and governance — **do not treat as ava
 | Track | Examples |
 |:------|:---------|
 | **Phase 0** | Tiny-size mainnet futures validation — **0/15** qualifying sessions ([`reports/phase0/`](reports/phase0/)) |
-| **Risk / DMS** | Further R-*/S-* items (funding analytics, DMS flatten automation, etc.) |
-| **Venues** | Bitunix live path · further Bitget freeze expansion · Bybit/Gate **archived** (not on master) · COIN-M inverse · hedge mode |
+| **Risk / DMS** | Further R-*/S-* items (funding analytics, external watchdog hardening, etc.) |
+| **Venues** | Bitunix live path · Bybit/Gate **archived** (not on master) · COIN-M inverse · hedge mode |
 | **Engine** | `engine.cpp` decomposition waves ([`docs/internal/engine-decomposition.md`](docs/internal/engine-decomposition.md)) |
 | **Data** | Parquet / external API sources deferred ([`docs/internal/data-pipeline.md`](docs/internal/data-pipeline.md)) |
 | **Ops / Go-Live** | 9-row capital gate, Prometheus drills, formal CCB size increases |
@@ -118,7 +118,7 @@ Venue design notes: [`docs/platforms/`](docs/platforms/).
 | **C++23** | GCC **13+** or Clang **16+** (Linux/macOS); MSVC **2022** (Windows) |
 | **Git** | FetchContent pulls CLI11, zstd, nlohmann/json (and GTest/Benchmark/civetweb/Abseil when enabled) |
 | **ncurses (wide)** | Required to **link** `engine_shadow` / `engine_live` (rich TUI) |
-| **Boost + OpenSSL** | Required for `ENABLE_BINANCE` / `ENABLE_BITGET` / `ENABLE_BITUNIX` / `ENABLE_LIVE_DATA` |
+| **Boost + OpenSSL** | Required for `ENABLE_BINANCE` / `ENABLE_BITGET` / `ENABLE_BITUNIX` |
 | **Node.js + npm** | Only if you build the web SPA (`ENABLE_WEB` + `web_assets`) |
 
 Core third-party headers/libs for a minimal CSV backtest are **FetchContent**-pulled (no system Boost needed). Shadow/live and venues need system packages below.
@@ -144,7 +144,7 @@ sudo pacman -S --needed base-devel cmake git ninja \
   gcc clang \
   ncurses
 
-# Venues / live networking (Binance, Bitget, Bitunix, LIVE_DATA)
+# Venues / live networking (Binance, Bitget, Bitunix)
 sudo pacman -S --needed boost openssl
 
 # Optional: web frontend build
@@ -157,11 +157,11 @@ cd truetest-core
 
 # Recommended: tests + full unit suite
 cmake --preset linux-tests
-cmake --build --preset linux-tests -j"$(nproc)"
-ctest --test-dir out/build/linux-tests --output-on-failure
+cmake --build --preset linux-tests
+ctest --preset linux-tests
 
 # Venues example (Binance + QuestDB)
-# cmake --preset linux-binance-questdb && cmake --build --preset linux-binance-questdb -j"$(nproc)"
+# cmake --preset linux-binance-questdb && cmake --build --preset linux-binance-questdb
 ```
 
 #### Debian / Ubuntu / Mint / Pop!_OS
@@ -183,7 +183,7 @@ git clone https://github.com/LeonardFoerster/truetest-core.git
 cd truetest-core
 
 cmake --preset linux-tests
-cmake --build --preset linux-tests -j"$(nproc)"
+cmake --build --preset linux-tests
 # binaries: out/build/linux-tests/engine_*
 ```
 
@@ -191,16 +191,16 @@ Daily desk/shadow (venues + ImGui) — **one** tree, not a second `build-dev/`:
 
 ```bash
 cmake --preset linux-dev
-cmake --build --preset linux-dev -j"$(nproc)" --target engine_shadow truetest_tests
-# or: ./launch-default.sh
+cmake --build --preset linux-dev --target engine_shadow truetest_tests
+# or for the shadow desk only: ./launch-desk.sh
 ```
 
 Ad-hoc `build/` is legacy/one-off only (do not keep warm next to presets):
 
 ```bash
 cmake -B build -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j"$(nproc)"
-ctest --test-dir build --output-on-failure
+cmake --build build -j1
+ctest --test-dir build -j1 --output-on-failure
 # when finished: rm -rf build   # or ./scripts/clean-builds.sh --keep linux-tests --apply
 ```
 
@@ -223,36 +223,41 @@ git clone https://github.com/LeonardFoerster/truetest-core.git
 cd truetest-core
 
 cmake --preset linux-tests
-cmake --build --preset linux-tests -j"$(nproc)"
+cmake --build --preset linux-tests
 ```
 
 #### Common Linux feature builds
 
 ```bash
 # Binance + QuestDB + tests
-cmake --preset linux-binance-questdb && cmake --build --preset linux-binance-questdb -j"$(nproc)"
+cmake --preset linux-binance-questdb && cmake --build --preset linux-binance-questdb
 
 # Bitget / Bitunix / all venues
-cmake --preset linux-bitget   && cmake --build --preset linux-bitget -j"$(nproc)"
-cmake --preset linux-bitunix  && cmake --build --preset linux-bitunix -j"$(nproc)"
-cmake --preset linux-venues   && cmake --build --preset linux-venues -j"$(nproc)"
+cmake --preset linux-bitget   && cmake --build --preset linux-bitget
+cmake --preset linux-bitunix  && cmake --build --preset linux-bitunix
+cmake --preset linux-venues   && cmake --build --preset linux-venues
 
 # Web UI (needs npm for SPA)
-cmake --preset linux-web && cmake --build --preset linux-web -j"$(nproc)"
+cmake --preset linux-web && cmake --build --preset linux-web
 cmake --build --preset linux-web --target web_assets   # if npm is available
 
 # Sanitizers / release-native
-cmake --preset linux-asan && cmake --build --preset linux-asan -j"$(nproc)"
-cmake --preset linux-release-native && cmake --build --preset linux-release-native -j"$(nproc)"
+cmake --preset linux-asan && cmake --build --preset linux-asan
+cmake --preset linux-release-native && cmake --build --preset linux-release-native
+# Portable Release + tests when link-time optimization would exceed RAM
+cmake --preset linux-release-low-memory && cmake --build --preset linux-release-low-memory
 ```
 
 | CMake option | Needs extra system deps |
 |:-------------|:------------------------|
 | (minimal) | compiler + cmake + git |
 | Shadow/live link | **ncurses** (wide) |
-| `ENABLE_BINANCE` / `BITGET` / `BITUNIX` / `LIVE_DATA` | **Boost** + **OpenSSL** |
+| `ENABLE_BINANCE` / `BITGET` / `BITUNIX` | **Boost** + **OpenSSL** |
+| `ENABLE_LIVE_DATA` | Deprecated no-op; use a concrete venue option |
 | `ENABLE_QUESTDB` | none (raw sockets) |
 | `ENABLE_WEB` | FetchContent civetweb; **npm** only for SPA assets |
+| `ENABLE_IMGUI` | **OpenGL** + **GLFW**; FetchContent ImGui/ImPlot |
+| `ENABLE_LTO` | none; disable to reduce Release link memory |
 | `BUILD_TESTS` / `ENABLE_BENCHMARKS` / `ENABLE_DEBUG` | FetchContent (GTest / Benchmark / Abseil) |
 
 ---
@@ -280,7 +285,7 @@ cmake -B build \
   -DCMAKE_BUILD_TYPE=Debug \
   -DBUILD_TESTS=ON \
   -DENABLE_BINANCE=ON   # optional; needs Boost+OpenSSL
-cmake --build build -j"$(sysctl -n hw.ncpu)"
+cmake --build build -j1
 ctest --test-dir build --output-on-failure
 ```
 
@@ -409,7 +414,7 @@ Optional hygiene: `scripts/check-credentials.sh`. Full flags: [`docs/reference/0
   --persist --run-tag my_shadow_run
 ```
 
-**5. Bitget demo / paptrading (needs `ENABLE_BITGET`; not Phase 0 qualifying)**
+**5. Bitget demo / paper trading (needs `ENABLE_BITGET`; not Phase 0 qualifying)**
 
 ```bash
 ./out/build/linux-bitget/engine_shadow \
@@ -426,7 +431,7 @@ Optional hygiene: `scripts/check-credentials.sh`. Full flags: [`docs/reference/0
 **7. Web UI (read-only; needs `ENABLE_WEB`)**
 
 ```bash
-cmake -B build -DENABLE_WEB=ON && cmake --build build -j
+cmake -B build -DENABLE_WEB=ON && cmake --build build -j1
 cd src/web/frontend && npm ci && npm run build
 ./build/engine_shadow ... --web --web-token <secret> --web-assets src/web/assets
 # → http://127.0.0.1:8080/   (shadow/live require --web-token)
@@ -444,7 +449,8 @@ cd src/web/frontend && npm ci && npm run build
 | Option | Effect |
 |:-------|:-------|
 | `-DENABLE_BINANCE` / `BITGET` / `BITUNIX` | Venue providers |
-| `-DENABLE_QUESTDB` / `WEB` / `DEBUG` | Persistence / web UI / instrumentation |
+| `-DENABLE_QUESTDB` / `WEB` / `IMGUI` / `DEBUG` | Persistence / web UI / desk / instrumentation |
+| `-DENABLE_LTO` | First-party Release LTO; disable for lower peak memory |
 | `-DENABLE_NATIVE_OPT` | `-march=native` on all three engines (Release) |
 | `-DBUILD_TESTS` / `BUILD_SHARED_LIB` | GoogleTest / `libtruetest.so` |
 
@@ -503,8 +509,8 @@ Edits need **`LIVE_SAFETY_CCB_APPROVED`**, two-person CCB, clean multi-hour `eng
 ## Testing, gates & contributing
 
 ```bash
-cmake --preset linux-tests && cmake --build --preset linux-tests -j
-ctest --test-dir out/build/linux-tests --output-on-failure
+cmake --preset linux-tests && cmake --build --preset linux-tests
+ctest --preset linux-tests
 
 # After any edit under src/
 ./scripts/check-hotpath-json.sh

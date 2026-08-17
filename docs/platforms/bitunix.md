@@ -69,7 +69,7 @@ tests/providers/bitunix/
 ## 5. CLI / env
 
 ```bash
-cmake --preset linux-bitunix && cmake --build --preset linux-bitunix -j
+cmake --preset linux-bitunix && cmake --build --preset linux-bitunix
 ./out/build/linux-bitunix/engine_shadow \
   --provider bitunix-futures --symbol BTCUSDT --stream trade \
   --mode shadow --no-pin --status-format off --no-tui

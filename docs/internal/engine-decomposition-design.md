@@ -20,7 +20,11 @@ Phase 1 of the Engine Decomposition Plan (following the exact Waves 1-5 in core/
 - `engine.cpp` <1800 LOC (stretch 1200-1500).
 - `engine.h` significantly smaller (private details behind forward decls or pimpl where safe; public contracts identical).
 - New files under `src/engine/`: `dashboard_snapshot_builder.{h,cpp}`, `pending_order_scheduler.{h,cpp}`, `worker_orchestrator.{h,cpp}` (and thin `run_event_loop` skeleton or `EventLoopCoordinator` if extraction leverage justifies).
-- Existing seams (`IOrderAuditSink` via `audit_sink_`, `ExecutionRouter` via `router_`, `InstrumentSpecCache`, `CheckpointManager`) remain the model: engine holds `unique_ptr`, delegates, never bypasses.
+- Existing complete seams (`IOrderAuditSink`, `InstrumentSpecCache`, and
+  `CheckpointManager`) remain the model. `ExecutionRouter` is partial today:
+  engine still bypasses it for async submit results, exchange-shadow dual
+  submission, and some provider-fill paths; those bypasses must be extracted
+  before it can be called complete.
 
 Net complexity reduction via deletion of duplicated run skeletons, scattered cache logic, and ad-hoc pending handling — not mere relocation.
 
@@ -41,7 +45,7 @@ Net complexity reduction via deletion of duplicated run skeletons, scattered cac
 - Call sites (engine-decomposition.md:429): src/simulation/monte_carlo_controller.cpp (reset + run variants), tests (test_hotpath_*, test_golden_regression, test_engine_*, test_monte_carlo_controller), src/api/truetest_api.cpp, providers (event_publisher, halt_callback, funding_factory via acquire_pooled), TUI/web (snapshot + request_refresh + ring getters), exit_manager callbacks.
 - Pain: Continued direct growth risks spaghetti. Duplication defeats determinism/maintainability. Header pollution exposes cold state.
 
-**Why now**: Phase 0 complete + signed off (engine-decomposition.md:450). Follows engine-decomposition skill mandates. Aligns with P1 freeze (docs/todos/02-P1-freeze.md#P1-02 references engine-decomposition.md plan), 01-prod.md (LIVE-SAFETY SURFACE), 02-prerequisites.md, architecture/04-performance.md (zero-alloc rules).
+**Why now**: Phase 0 complete + signed off (engine-decomposition.md:450). Follows engine-decomposition skill mandates. Aligns with P1 freeze (`docs/todos/02-P1-freeze.md` P1-02 references engine-decomposition.md plan), 01-prod.md (LIVE-SAFETY SURFACE), 02-prerequisites.md, architecture/04-performance.md (zero-alloc rules).
 
 ---
 
@@ -112,7 +116,9 @@ graph TD
 
 **Phase 2 (Prep, minimal low-risk)**:
 - Update top-of-file LIVE-SAFETY comments + all strategic method comments (publish_event, process_order canonical seq, reset, run*) to reference core/docs/internal/engine-decomposition.md + engine-decomposition skill.
-- Ensure seams complete (already via audit_sink_/router_ per Phase 0 grep).
+- Preserve the complete audit seam and characterize the current partial router
+  boundary; do not claim router completion until its direct engine bypasses are
+  extracted and tested.
 - Add any thin forwarding accessors if needed for future (e.g. `get_portfolio_for_snapshot()` const ref — but prefer passing at construction of builder).
 - No net LOC reduction expected.
 - Run gates (see verification).

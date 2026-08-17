@@ -25,7 +25,7 @@ export BINANCE_FUTURES_SECRET=...
   --persist --run-tag p0_$(date +%Y%m%d_%H%M) \
   --reconcile-tolerance-bps 3 \
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
-  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \
+  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 0.07 \
   --max-daily-loss 80 --risk-unwind
 ```
 
@@ -113,7 +113,7 @@ grep -i "POSITION-SNAPSHOT\|funding\|drift\|reconcile\|halt\|kill\|DMS" <log-or-
 - Full ritual + why: `docs/governance/01-prod.md` (Phase 0 section)
 - Evidence layout + process: `reports/phase0/README.md`
 - Session note template: `reports/phase0/templates/phase0-session-note.md`
-- Task: `docs/todos/01-P0-phase0.md#P0-03` (high-level pointer in `docs/governance/03-todo.md`)
+- Task: `docs/todos/01-P0-phase0.md` P0-03 (high-level pointer in `docs/governance/03-todo.md`)
 - Detailed steps + checklists: `docs/reference/01-instructions.md` (§ Phase 0 Qualifying Session Ritual)
 
 Print this page, use on every session, update after each. "Future operators cannot say 'we forgot why we were careful.'"

@@ -5,13 +5,13 @@
 **Golden Path (Vorbild):** `src/providers/binance/*` — insbesondere `binance_futures_*`  
 **Stand API-Recherche:** 2026-07 (UTA v3 primär; Classic mix/v2 als Fallback-Oberfläche dokumentiert)
 
-### Status (2026-07-30) — implemented
+### Status (2026-08-14) — implemented, acceptance pending
 
 | Surface | Location |
 |---------|----------|
 | Code | `src/providers/bitget/` (UTA v3 USDT-M; classic refused) |
 | Build | `-DENABLE_BITGET=ON`, presets `linux-bitget`, `linux-venues` |
-| Freeze | **Not yet** on mechanical Phase-1 freeze list (still Binance-era 10 files). Bitget kill/DMS/reconciler/provider are **live-capable** — treat as safety-adjacent; expand freeze + `LIVE_SAFETY_CCB_APPROVED` before attended mainnet live drills. |
+| Freeze | Bitget provider, kill/DMS/reconciler, REST client, and REST order transport are on the mechanical Phase-1 safety list. Future edits require `LIVE_SAFETY_CCB_APPROVED`, CCB review, and clean shadow evidence. |
 | Ops SOP | [`docs/operations/03-bitget-demo.md`](../operations/03-bitget-demo.md) (demo drills; **not** mainnet authorization) |
 | CLI | `--provider bitget\|bitget-futures`, `--demo`, `--api-passphrase`, env `TRUETEST_BITGET_*` |
 
@@ -70,7 +70,7 @@ Agents müssen diese Regeln **wörtlich** einhalten. Verstöße = Reject, kein M
 - DMS-Countdown **nicht** adaptiv verlängern unter Load.
 - Kill-Switch, DMS und Freeze **nicht** zu einem vagen „cancel everything“ vermischen.
 - `FuturesRiskCheck` vor `RiskManager` bleibt Engine-Verantwortung; Provider liefert nur `get_risk_check()`.
-- Bitget Safety-Header (`bitget_futures_{provider,dead_mans_switch,kill_switch,reconciler}.h`) sind **noch nicht** auf der mechanical Phase-1 Freeze-Liste (aktuell 10 Binance-era Dateien in `check-live-safety-freeze.sh`). Trotzdem **safety-adjacent** behandeln: keine stillen Retries, fail-closed. Vor attended Mainnet-Live: Freeze erweitern + `LIVE_SAFETY_CCB_APPROVED` + CCB + Shadow-Evidence (`/safety`).
+- Die Bitget Safety-Header und ihre REST-Transportpfade sind mechanisch gefroren; `scripts/check-live-safety-freeze.sh` ist die exakte Liste. Änderungen brauchen `LIVE_SAFETY_CCB_APPROVED`, CCB und Shadow-Evidence (`/safety`).
 
 ### 2.4 Geo / Operator-Precondition (kein Skip der Implementation)
 
@@ -150,7 +150,8 @@ Engine-Hooks (bereits vorhanden, nur liefern):
 - `get_reconciler()` / `get_kill_switch()` / `get_risk_check()` / `get_bracket_adapter()`
 - `get_liveness_sources()` → DMS heartbeat atomic
 - `set_halt_callback()` → fatal WS disconnect → `engine::trigger_halt`
-- `set_event_publisher()` / `set_funding_event_factory()` → funding/position snapshots
+- provider-owned bounded SPSC funding ingress → engine-thread pooled publish;
+  private WS threads never mutate engine portfolio/audit/rings directly
 
 ---
 
@@ -251,7 +252,7 @@ tests/providers/bitget/test_bitget_demo_live.cpp                 # opt-in networ
 
 ```bash
 cmake -B build -DENABLE_BITGET=ON -DENABLE_BINANCE=ON -DBUILD_TESTS=ON
-cmake --build build -j"$(nproc)"
+cmake --build build -j1
 ctest --test-dir build -R 'bitget|Bitget' --output-on-failure
 ./scripts/check-hotpath-json.sh
 ./scripts/check-layer-deps.sh
@@ -296,7 +297,6 @@ REGISTER_PROVIDER("bitget", /* same factory */);
 | `max_notional_usdt` / `max_leverage` / `min_liquidation_distance_pct` | nein | 0 | `FuturesRiskCheck` |
 | `dead_man_countdown_ms` | nein | 0 | 0 = DMS off; Bitget API in **seconds** [5,60] |
 | `dead_man_heartbeat_ms` | nein | countdown/3 | refresh interval |
-| `dms_attempt_position_close` | nein | false | on HB fail → close-positions |
 
 ### 6.2 `main.inc` Erweiterungen (cold path)
 
@@ -411,7 +411,7 @@ Sign-Pfad für WS ist **immer** `GET/user/verify` (nicht der Channel-Path).
 | place-order | 10/s/UID | `TokenBucketRateLimiter(10, 10)` oder konservativ 5/s |
 | cancel-order | 10/s/UID | shared oder eigen |
 | cancel-symbol-order | 5/s/UID | kill-switch path |
-| close-positions | 5/s/UID (UTA) | kill-switch / DMS close |
+| close-positions | 5/s/UID (UTA) | centralized kill session only |
 | countdown-cancel-all | **1/s/UID** | heartbeat ≥ 1s; prefer 2–5s |
 | WS msgs | 10/s/conn inkl. ping | ping alle 30s, subscribe bursts drosseln |
 | WS connections | 100/IP | 1 public + 1 private pro process |
@@ -540,7 +540,7 @@ Startup:
 
 - Settings/position mode abfragen.
 - Hedge → **refuse open()** mit klarer stderr-Message: Operator muss one-way setzen.
-- Encoder emittiert **kein** `posSide` im one-way Default; `reduceOnly: "yes"` für Closes vom Kill-Switch/DMS.
+- Encoder emittiert **kein** `posSide` im one-way Default; `reduceOnly: "yes"` gilt für reguläre Close-Orders. Der DMS storniert nur Orders und signalisiert die zentralisierte Kill-Session; ausschließlich diese Session darf Positionen schließen.
 
 ---
 
@@ -609,13 +609,15 @@ state=open
 
 1. **Kill-Switch** (gold path Bitget > Binance flatten half):
    1. `POST /api/v3/trade/cancel-symbol-order` mit `category=USDT-FUTURES`, `symbol=BTCUSDT` (scoped).
-   2. `POST /api/v3/trade/close-positions` mit `category` + `symbol` (kein manuelles reduceOnly-MARKET basteln nötig — **das ist der Bitget-Vorteil**).
-   3. Deadline-bounded per-call timeouts; HTTP/code fail → return false, loud log; **kein Retry-Loop**.
+   2. `GET /api/v3/trade/unfilled-orders` muss danach für Symbol/Kategorie autoritativ leer sein.
+   3. `tpsl`- und `trigger`-Strategy-Orders separat listen, canceln und leer readbacken.
+   4. `POST /api/v3/trade/close-positions` mit `category` + `symbol`, danach Position autoritativ flat readbacken (kein manuelles reduceOnly-MARKET basteln nötig — **das ist der Bitget-Vorteil**).
+   5. Alle Calls teilen eine Deadline; HTTP/code/Schema/Restzustand fail → return false, loud log; **kein Retry-Loop**.
 2. **DMS:**
    - Arm: countdown seconds clamped; heartbeat thread.
    - Disarm: `countdown=0` on orderly close (after stop thread).
    - Liveness atomic für `WorkerWatchdog` (deadline ~ 3× heartbeat).
-   - Optional `dms_attempt_position_close`: bei persistentem HB-Fail → `close-positions` (nicht nur Orders).
+   - Der erste HB-Fehler latched den terminalen Engine-Halt; nur die gemeinsame exact-once Kill-Session darf `close-positions` auslösen.
 3. Tests: fake post_fn inject; arm fail; disarm; kill-switch sequence order verified.
 
 **Vergleich Binance (Agents müssen den Unterschied kennen):**
@@ -625,7 +627,7 @@ state=open
 | Cancel all | `DELETE /fapi/v1/allOpenOrders` | `POST .../cancel-symbol-order` |
 | Flatten | positionRisk + reduceOnly MARKET | **`close-positions`** one-shot |
 | DMS | `countdownCancelAll` ms, symbol-scoped | `countdown-cancel-all` **seconds**, **account-wide orders**, BD enablement |
-| DMS close | custom reduceOnly | reuse `close-positions` |
+| DMS flatten | none; signals centralized kill | none; signals centralized kill |
 
 ### Phase 4 — Hardening + Brackets + Ops
 
@@ -832,13 +834,12 @@ no testnet-reset soft-pass (same philosophy as Binance futures)
 
 ```text
 bool cancel_all_and_flatten(deadline):
-  set per-call timeout = min(1500ms, deadline/3)
   1) POST cancel-symbol-order {category, symbol}
-     - treat "no orders" success codes as OK (map venue codes via tests)
-  2) if time expired → false
-  3) POST close-positions {category, symbol}
-     - empty position should still be OK (success with empty list or no-op code)
-  4) return true only if both steps OK
+  2) GET unfilled-orders {category, symbol}; require authoritative empty list
+  3) list/cancel/read back tpsl and trigger strategy-order surfaces
+  4) POST close-positions {category, symbol}
+  5) after a mutation ACK, GET current-position and require authoritative flat
+  6) return true only if every bounded step proved its terminal venue state
 ```
 
 **Kein** Schedule-Retry. **Kein** auto-clear halt.
@@ -853,10 +854,12 @@ start():
   post countdown=N; on fail return false
   spawn heartbeat every heartbeat_ms (min 1000ms due to 1/s limit)
   on success: last_beat_ms = now
-  on 2 consecutive fails: optional close-positions; stop refreshing; let venue timer expire
+  on first failure: latch once, signal terminal engine halt, stop refreshing;
+                    centralized LiveSafetySession performs the sole kill attempt
 
+request_stop(): stop heartbeat without disarming
 stop(): join thread
-disarm(): countdown=0
+disarm(): countdown=0 only after confirmed centralized kill success
 ```
 
 **Account-wide caveat:** Bitget DMS cancels **all UTA open orders**, not only symbol. Document loudly for multi-strategy operators. v1 single-symbol process assumption matches current engine usage.
@@ -864,7 +867,7 @@ disarm(): countdown=0
 ### 11.4 close-positions Advantage (Messaging for Agents)
 
 Binance Kill-Switch: 3 REST calls (cancel, positionRisk, reduceOnly order) with qty formatting footguns.  
-Bitget: **2 REST calls**, venue-native flatten. Prefer `close-positions` over reinventing reduceOnly unless classic surface forces it.
+Bitget: **bounded multi-call proof**, including regular/strategy-order empty readbacks and a flat-position readback. Prefer `close-positions` over reinventing reduceOnly unless classic surface forces it.
 
 ---
 
@@ -873,7 +876,7 @@ Bitget: **2 REST calls**, venue-native flatten. Prefer `close-positions` over re
 ### 12.1 Shadow (public only)
 
 ```bash
-cmake -B build -DENABLE_BITGET=ON && cmake --build build -j"$(nproc)" --target engine_shadow
+cmake -B build -DENABLE_BITGET=ON && cmake --build build -j1 --target engine_shadow
 
 ./build/engine_shadow \
   --provider bitget-futures \

@@ -39,7 +39,7 @@ UI thread (desk) ──poll 10–30 Hz────────┘
 | `Analytics::generate_report()` | Research / post-run |
 | Strategy registry | Name + `--param` only (no runtime code load) |
 
-**Freeze surface**: desk must not edit the 10 live-safety freeze files. Controls call public APIs already used by the TUI.
+**Freeze surface**: desk must not bypass the live-safety freeze. The authoritative path list is `scripts/check-live-safety-freeze.sh`; controls call public APIs already used by the TUI.
 
 Large footprint/heatmap/profile grids never enter `dashboard_snapshot`. The
 desk polls an optional research callback for a shared immutable presentation

@@ -89,7 +89,7 @@ Cross-reference work items as: `core/docs/internal/data-pipeline.md#D-03` (phase
 | `IDataSource` | `load_data(shared_ptr<data_handler>)` | Couples every source to concrete store |
 | `CsvDataSource` / `TickCsvDataSource` | Legacy direct loaders | Duplicate of DataBridge + CSV parsers |
 | `BinaryCacheSource` | TTBC bar cache decorator | Compiled, **unwired**, bypasses validation on hit |
-| `WebSocketDataSource` | Push WS under `HAS_LIVE_DATA` | **Unwired**; superseded by venue transports |
+| `WebSocketDataSource` (deleted) | No current role; the legacy push source was never wired | Superseded by venue transports in D-07 |
 | `date_parse` | String → `time_point` | Used at engine run time for bar ts when `seed==0` |
 | `questdb/*` | Order/run audit ILP | Correctly separate; **do not fold into market series** |
 
@@ -113,7 +113,9 @@ This is the **right shape** for multi-format batch/stream, but:
 |----------|------------------|
 | `engine::run` | Prefers ticks if present; else indexes bar SoA columns → `market_event` |
 | `engine::run_tick_data` | Iterates `tick_data` |
-| `engine::run_streaming` | `DataBridge::run_streaming(handler, on_record)` — still **appends** into handler |
+| `engine::run_streaming` | `DataBridge::run_streaming(handler, on_record)` — callback-first; retention is opt-in |
+
+Current contract correction (2026-08-14): streaming returns a typed `StreamResult`. Clean finite EOF and operator stop are successful terminal states; engine halt, open/header/parse/sink failure, and live transport failure are non-success. `IDataTransport::terminal_status()` supplies the clean-EOF versus disconnect distinction where the transport can know it (paced replay does); unknown termination from a streaming transport is fail-closed.
 | `MonteCarloController` | `load_into_queue` from `SyntheticPath` (bars only today); `reset` reuse |
 | `main.inc` | Owns `shared_ptr<data_handler>`; provider mode builds bridges; legacy CSV path remains |
 | `truetest_api` | Bar CSV via `CsvDataSource` only |
@@ -125,7 +127,7 @@ This is the **right shape** for multi-format batch/stream, but:
 2. Layout-as-API (`db_data_open_value[i]` everywhere).  
 3. Dual ingress stacks (legacy sources vs DataBridge).  
 4. Text-only transport assumption.  
-5. Stream path retains all records (unbounded growth).  
+5. Stream retention is opt-in; callers must bound any retained series.
 6. Dead / half-built wrappers (binary cache, generic WS source).  
 7. Timestamps as date **strings** + parse at run (fragile multi-format story).
 
@@ -270,15 +272,17 @@ class IMarketSource {
 public:
     virtual ~IMarketSource() = default;
 
-    // Batch: push all records into sink; return false on hard failure (I/O, schema)
+    // Batch: append source-order records into sink; return false on hard
+    // failure (I/O, schema). Sources must not mutate rows predating this
+    // call; batch facades own final ordering after full success.
     virtual bool load_into(IMarketSink& sink, LoadStats* stats = nullptr) = 0;
 
     // Stream: optional; default false = not supported
     virtual bool supports_stream() const { return false; }
-    virtual bool stream_into(IMarketSink& sink, std::atomic<bool>* halt = nullptr,
-                             LoadStats* stats = nullptr) {
+    virtual StreamResult stream_into(IMarketSink& sink, std::atomic<bool>* halt = nullptr,
+                                     LoadStats* stats = nullptr) {
         (void)sink; (void)halt; (void)stats;
-        return false;
+        return {stream_termination::unsupported};
     }
 };
 ```
@@ -356,7 +360,7 @@ public:
     bool load(MarketSeries& out);
 
     // Stream into arbitrary sink (engine adapter)
-    bool stream(IMarketSink& sink, std::atomic<bool>* halt = nullptr);
+    StreamResult stream(IMarketSink& sink, std::atomic<bool>* halt = nullptr);
 
     // Advanced
     IMarketSource& source();
@@ -374,6 +378,18 @@ public:
 | `synthetic:` | reserved for tests/MC helpers | Optional |
 
 CLI may keep existing flags (`--provider`, `--data`, …) and map them to `DataWrapper` factories — **do not** require operators to learn URIs on day one; URIs are the stable programmatic surface.
+
+**Multi-source failure contract:** the default `allow_partial_sources=false`
+is transactional at the `MarketSeries` boundary. If any source reports a
+hard failure or throws, rows and validation errors appended by that load are
+removed while pre-existing rows and retained capacity remain intact; the
+wrapper filters only that appended suffix without a second full copy for that
+rollback/filter operation. This guarantee requires the `IMarketSource`
+append-only contract; a legacy `IDataSource::load_data` implementation that
+mutates pre-existing `MarketSeries` rows is outside it. With
+`allow_partial_sources=true`, `false`-returning parts are explicitly skipped
+and later parts continue; an exception remains fail-closed and rolls back the
+whole load. Success still requires at least one accepted row.
 
 ### 5.6 Transport generalization (important for Parquet)
 
@@ -712,25 +728,25 @@ If wired:
 ./scripts/check-live-safety-freeze.sh
 
 cmake --preset linux-tests   # or project-equivalent
-cmake --build build -j
-ctest --test-dir build --output-on-failure
+cmake --build --preset linux-tests
+ctest --preset linux-tests
 # or:
-./build/truetest_tests
-./build/truetest_cli_tests
+./out/build/linux-tests/truetest_tests
+./out/build/linux-tests/truetest_cli_tests
 ```
 
 ### 9.2 When touching pools / engine loops / series layout
 
 ```bash
-ctest --test-dir build -R 'hotpath|Hotpath|ObjectPool|Ring|engine|Engine|provider|Provider|data|Data' --output-on-failure
+ctest --test-dir out/build/linux-tests -j1 -R 'hotpath|Hotpath|ObjectPool|Ring|engine|Engine|provider|Provider|data|Data' --output-on-failure
 # ASAN if lifetime/layout risk:
-cmake --preset linux-asan && cmake --build --preset linux-asan -j
+cmake --preset linux-asan && cmake --build --preset linux-asan
 ```
 
 ### 9.3 Behaviour parity (batch CSV)
 
 ```bash
-./build/engine_backtest \
+./out/build/linux-tests/engine_backtest \
   --provider synthetic \
   --strategy sma \
   --seed 424242 \

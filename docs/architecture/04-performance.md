@@ -69,18 +69,27 @@ Implemented in `src/types/object_pool.h` (`BlockSize = 4096` slots per block by 
 - `l2_update_pool_`, `l2_snapshot_pool_`
 - `rejection_pool_`, `cancel_pool_`, `amend_pool_`, `funding_pool_`
 
-Each event acquires a slot via placement-new; return is deferred to a `DeferredReturnQueue` (also 65536 capacity default) and drained on the engine thread.
+Each event acquires a slot via placement-new. Its final `shared_ptr` drop
+returns the slot directly to a multi-producer free stack; a small atomic gate
+serializes stack pops, so worker-side returns neither wait for a later engine
+drain nor reserve a per-pool deferred-return buffer.
 
 **Pre-warm settings** (`pool_prewarm_settings` in `engine_config` and `prewarm_object_pools()`):
 
 Default pre-warm (conservative for most workloads):
 - market/tick/fill/l2_snapshot/rejection/... : 1 block
 - order / l2_update / amend: 2 blocks
-- orderbook_order_blocks: **18** blocks (~73k order slots)
+- orderbook_order_blocks: **128** blocks (~524k order slots)
+
+The orderbook default is intentionally large and can dominate RAM when many
+books exist. It lives on the frozen engine-config surface; reducing it needs
+the CCB/T3 safety process rather than an ad-hoc low-memory tweak.
 
 `forbid_runtime_grow = true` (default): exhaustion → `pool_exhausted` exception → halt (terminal in safety modes).
 
-Control blocks for `shared_ptr<T>` are also pooled (`ControlBlockPool`, 64-byte slots, 4096 per block) and wired into all event pools.
+Control blocks for `shared_ptr<T>` are also pooled (`ControlBlockPool`, 64-byte slots, 4096 per block) and wired into the engine event pools. The rebound allocator owns the control-block backing state, while each live object deleter owns its object-pool state. This keeps escaped strong/weak handles valid across facade/engine teardown: a strong handle retains its object storage through its final drop; a weak handle retains only the control-block backing through its own final drop.
+
+Pooling is guarded by the actual rebound control-block size and alignment. A non-fitting implementation type may use the tracked standard-allocator fallback before the pool is frozen; once `forbid_runtime_grow` is enabled, that fallback fails closed with `pool_exhausted` rather than allocating on the event path. The pool-level regression covers zero fallback allocations for its representative event type; engine-wide fallback accounting is a separate observability follow-up.
 
 ### Orderbook Node Pool
 
@@ -235,8 +244,8 @@ Runtime:
 To re-verify capacities after changes:
 ```bash
 cmake -B build -DENABLE_BENCHMARKS=ON -DENABLE_DEBUG=ON -DBUILD_TESTS=ON
-cmake --build build -j
-ctest --test-dir build -R Hotpath
+cmake --build build -j1
+ctest --test-dir build -j1 -R Hotpath
 ./build/truetest_benchmarks
 ```
 

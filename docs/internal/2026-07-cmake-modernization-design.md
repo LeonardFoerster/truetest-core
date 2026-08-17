@@ -198,7 +198,7 @@ Minimum matrix (from Phase 0 Configuration Matrix subagent + skill definition):
 
 1. Configure + build (at least two generators where available):
    - `cmake -B build -DBUILD_TESTS=ON`
-   - `cmake --build build -j`
+   - `cmake --build build -j1`
 2. Common real combinations:
    - `-DENABLE_BINANCE=ON -DENABLE_QUESTDB=ON -DBUILD_TESTS=ON`
    - `-DENABLE_WEB=ON -DBUILD_TESTS=ON`

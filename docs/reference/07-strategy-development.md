@@ -14,7 +14,7 @@
 >
 > - Quant-Edge-Research, Signal-Hypothesen und Parameter-Optimierung als Research-Workflow
 > - Venue-Provider, Kill-Switch, DMS, Reconciler, Live-Capital-Ritual → siehe Governance/Safety-Docs und [AGENTS.md](../../AGENTS.md)
-> - Adaptive-Hybrid als allgemeines Strategy-Template → [06-adaptive-hybrid-strategy.md](06-adaptive-hybrid-strategy.md)
+> - Retired Adaptive-Hybrid rebuild contract → [06-adaptive-hybrid-strategy.md](06-adaptive-hybrid-strategy.md)
 > - Web-UI, Report-JSON-Schema und QuestDB-ILP-Details
 > - StrategyFactory-Wartung und dual Factory/Registry-Konvergenz
 > - strategy-validation / dual-portfolio A-B Analytics Roadmap
@@ -51,7 +51,7 @@ Dieser Guide ist der **technische Integrationsvertrag** zwischen Strategy-Code u
 **Cross-Links (nicht hier duplizieren):**
 
 - Operator-Flags: [04-flags.md](04-flags.md) (`--strategy`, `--param`, `--sl`, `--tp`, `--exit-policy`)
-- Adaptive-Hybrid (Spezialfall, **kein** Template): [06-adaptive-hybrid-strategy.md](06-adaptive-hybrid-strategy.md)
+- Adaptive-Hybrid is retired and **not** a template: [06-adaptive-hybrid-strategy.md](06-adaptive-hybrid-strategy.md)
 - Hot Path R1–R10: [AGENTS.md §4](../../AGENTS.md)
 - Master-Instructions: [01-instructions.md](01-instructions.md)
 
@@ -254,7 +254,7 @@ Breakout emittiert z. B. zwei Intents: `qty_fraction = 0.45` (SL+TP) und `0.55
 | `floor` (**Default**) | leere Intents → voller Platform-Plan; sonst fehlende SL/TP/Trail **global** prüfen (`intents_have_*` über **alle** Intents), dann nur `front()` patchen |
 | `strategy_only` | nur Strategy-Intents (keine Platform-Injection) |
 | `engine_only` | nur Platform; Strategy-Intents verworfen |
-| `union` | Strategy behalten; fehlt global ein SL und Platform hat SL → SL-only Intent **appenden**. Wenn Strategy-Plan **leer** und Platform vorhanden → **voller** Platform-Intent (nicht nur SL-Append) |
+| `union` | Strategy-Intents unverändert behalten; höchstens einen Platform-Intent mit den global fehlenden, konfigurierten SL-/TP-/Trail-Legtypen **appenden**. Ist der Strategy-Plan leer, den vollständigen Platform-Intent verwenden. |
 
 Params in `default_exit_params`: `sl_pct` (Default `0.003` = 0.3%), `tp_pct` (`0.01` = 1%), `trail_pct` (`0.0` — **kein** CLI-Flag, nur Config-Struct).
 
@@ -345,12 +345,11 @@ auto sma_value = sma.update(mkt.get_close());
 if (!sma_value) return std::nullopt;
 ```
 
-### Legacy-Namensfalle
+### SMA-Namenszuordnung
 
 | Pfad | Was es ist |
 |------|------------|
 | `indicator/sma.h` | `simple_moving_average` |
-| `strategy/sma.h` | Legacy-Klasse `strategy` + `signal_event` — **nicht** `IStrategy` |
 | `sma_strategy` + `REGISTER_STRATEGY("sma")` | Production-IStrategy |
 
 ### Production vs. Tests
@@ -427,7 +426,7 @@ REGISTER_STRATEGY("my-strategy", []() {
 | `ma-crossover` | `ma_crossover_strategy` |
 | `breakout` | `breakout_strategy` |
 | `coiled-spring` | thin Alias von `breakout_strategy` |
-| `adaptive-hybrid` | `AdaptiveHybridStrategy` (eigenes Doc 06) |
+| `adaptive-hybrid` | **Nicht verfügbar**; ehemaliger Prototyp, Anforderungen in Doc 06 |
 | `structure-continuation` | `structure_continuation_strategy` |
 | `hedge-demo` | `hedge_demo_strategy` (Multi-Lot-Demo) |
 | `larry_connor` | `larry_connor_strategy` |
@@ -526,7 +525,7 @@ reusable_strategy_->reset(result.seed_used);
 | Strategy | `IStrategy::reset` überschrieben? |
 |----------|-----------------------------------|
 | mean-reversion, structure-continuation, larry_connor | ja |
-| sma, ma-crossover, breakout, hedge-demo, adaptive-hybrid | **nein** → unsafe mit object reuse (frische Instanz pro Trial nötig) |
+| sma, ma-crossover, breakout, hedge-demo | **nein** → unsafe mit object reuse (frische Instanz pro Trial nötig) |
 
 Ohne Override: Indicator/Position/RNG-State leckt zwischen Trials.
 
@@ -640,7 +639,7 @@ Referenzmuster in `src/strategy/hedge_demo_strategy.*`:
 
 | Name | Grund |
 |------|-------|
-| `adaptive-hybrid` | Demo/L2/MM-Pfad; eigenes Doc 06 |
+| `adaptive-hybrid` | Retired/unavailable; Doc 06 ist nur noch Rebuild-Spezifikation |
 | `coiled-spring` | nur Registry-Alias von breakout |
 
 ---
@@ -652,10 +651,10 @@ Referenzmuster in `src/strategy/hedge_demo_strategy.*`:
 ```bash
 # Preset
 cmake --preset linux-tests
-cmake --build --preset linux-tests -j
+cmake --build --preset linux-tests
 
 # oder ad-hoc
-cmake -B build -DBUILD_TESTS=ON && cmake --build build -j --target engine_backtest
+cmake -B build -DBUILD_TESTS=ON && cmake --build build -j1 --target engine_backtest
 ```
 
 ### Beispiel-Lauf
@@ -708,7 +707,8 @@ Multi-Strategy:
 4. `exit_reason`-Enum existiert in `exit_intent.h`, wird vom Fire-Pfad derzeit nicht gestempelt.
 5. `default_exit_params.trail_pct` hat kein CLI-Flag.
 6. Kommentar „risk layer catches qty_fraction sum > 1“ ist in `exits/` nicht als Enforcement implementiert.
-7. AdaptiveHybrid hat keinen Strategy-Level-`exit_intent`-Pfad und kein `IStrategy::reset`.
+7. The retired Adaptive Hybrid prototype is not an implementation reference;
+   any rebuild must satisfy the reset and exit-intent contracts in Doc 06.
 
 ---
 

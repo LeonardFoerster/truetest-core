@@ -1,6 +1,6 @@
 # Bitget Futures Demo Drill & Operator Preconditions
 
-**Status**: Active operator SOP for Bitget UTA futures (Phases 0–4). Demo drills only — **not** mainnet readiness.
+**Status**: Active operator SOP for Bitget UTA futures (Phases 0–3). Demo drills only — **not** mainnet readiness.
 
 **Authoritative gates**: `docs/governance/01-prod.md`, root/core `AGENTS.md` safety red lines, plan `docs/platforms/bitget.md` §12–§14.
 
@@ -46,7 +46,7 @@ Checklist:
 
 | Surface | Support in this provider | Notes |
 |---------|--------------------------|-------|
-| **UTA v3** (default) | Full Phase 0–4 path | Public WS + private WS + REST trade + DMS + brackets + backfill |
+| **UTA v3** (default) | Full Phase 0–3 path | Public WS + private WS + REST trade + DMS + brackets + backfill |
 | Classic mix/v2 | **Refused** | No classic countdown DMS; `api_surface=classic` fails open |
 
 Registry names (both map to the same UTA factory):
@@ -58,7 +58,7 @@ Build:
 
 ```bash
 cmake -B build -DENABLE_BITGET=ON -DENABLE_BINANCE=ON -DBUILD_TESTS=ON
-cmake --build build -j"$(nproc)" --target engine_backtest engine_shadow engine_live
+cmake --build build -j1 --target engine_backtest engine_shadow engine_live
 ```
 
 ---
@@ -146,7 +146,7 @@ Suggested drill sequence:
 | 2. Clean open | Correct demo keys + one-way + DMS | Reconciler match; DMS arm log; HB advances |
 | 3. Place / cancel | Tiny limit away from market; cancel | Ack + cancel events; no leftover open order |
 | 4. Reconciler | Drift cash/pos (if injectable) or mismatch caps | Fail-closed refuse or halt; no silent continue |
-| 5. Kill-switch | SIGINT / orderly shutdown | cancel-symbol-order then close-positions; no unexpected leftover |
+| 5. Kill-switch | SIGINT / orderly shutdown | regular + strategy orders proven absent, then position proven flat; no unexpected leftover |
 | 6. DMS venue | `kill -9` or network block after arm | Venue cancels **all UTA open orders** after countdown; positions reviewed manually |
 
 Network demo live tests remain **opt-in** (env-gated unit suite); CI does not place demo orders by default.
@@ -170,7 +170,7 @@ Implications:
 
 - v1 assumes a **single-symbol process**.
 - Multi-strategy / multi-symbol operators must treat DMS expiry as process- and account-wide.
-- Positions are **not** automatically flattened by venue countdown alone (orders only), unless `dms_attempt_position_close` / close-positions path runs while the process is still alive.
+- Positions are **not** flattened by the venue countdown alone (orders only). A live process routes first-heartbeat failure to the engine-owned exact-once kill switch; process/network loss still requires operator verification.
 
 Countdown bounds (engine): operator ms → seconds clamped **[5, 60]**; heartbeat floor **1000 ms** (venue 1/s rate limit). Heartbeat is always kept **strictly below** clamped countdown.
 
@@ -188,7 +188,7 @@ Bitget private WS uses separate **order** and **fill** channels:
 **Residual (ops):** if the fill channel is silent while the order channel reports filled, the engine will not invent inventory from order status alone (anti-double-count). Mitigations:
 
 - Private WS disconnect with halt callback → process halt (after engine wires halt_cb).
-- DMS cancels **open orders** account-wide when countdown expires; positions need kill-switch / `dms_attempt_position_close` / manual review.
+- DMS cancels **open orders** account-wide when countdown expires; positions need the centralized kill switch and mandatory manual verification.
 - Operator: after any disconnect or ambiguous fill state, reconcile positions in the Bitget UI and do not assume engine lots match venue until a clean re-open/reconcile.
 
 - [ ] After demo drills with kills/disconnects, confirm venue positions flat or expected
@@ -203,7 +203,7 @@ Always complete a kill-switch drill on **demo** before any mainnet discussion:
 1. Arm demo live with tiny risk caps.
 2. Place a resting order (or hold a flat session with open path exercised).
 3. Trigger orderly kill (SIGINT / engine halt path).
-4. Verify: cancel-symbol-order succeeded (or documented noop), close-positions succeeded (or empty-position noop), no unexpected open orders.
+4. Verify: regular and strategy order readbacks are empty, close-positions succeeded (or documented no-position noop), and the position readback is flat.
 
 | Scenario | Action | Expected |
 |----------|--------|----------|

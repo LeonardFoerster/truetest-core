@@ -1,19 +1,19 @@
 # TrueTest Task List & Roadmap (todo.md) [THIN CANONICAL STUB]
 
-**Status**: Living – high-level entry point and canonical summary of record. Full detailed items + precise anchors (e.g. **P0-01**) live in `docs/todos/`. See `docs/todos/00-OVERVIEW.md` for structure, numbering, "Closes docs/todos/01-P0-phase0.md#P0-01" examples, maintenance rules, and full verbatim extraction of all P0/P1/MC/R/S/D/A/H items from this file's prior content.
+**Status**: Living – high-level entry point and canonical summary of record. Full detailed items, identified by item ID (e.g. **P0-01**), live in `docs/todos/`. See `docs/todos/00-OVERVIEW.md` for structure, numbering, file-plus-item examples, maintenance rules, and full verbatim extraction of all P0/P1/MC/R/S/D/A/H items from this file's prior content.
 
 **Post-merge note (Phase 5)**: Monte Carlo integration complete. All "active on monte-carlo" / "paused on monte-carlo" / "current branch focus" language removed from live docs (except legitimate feature names like --monte-carlo, "Monte Carlo" in capability descriptions, and historical notes in this plan / archive/). Private retail scope ("Intended Use & Scope" + "never be enterprise") established across root docs. ENGINE_AI_SUMMARY.md refs consolidated. MC-01/MC-02 marked landed. Safety freeze untouched by MC work.
 
 **Completed (Phase 8)**: Monte Carlo to master merge — all phases completed successfully. Master is the new baseline. Private retail character clearly stated. All technical safety docs remain intact. See `docs/archive/MERGE_PLAN.md` for the full historical execution record.
 
 **Last update**: 2026-07-06 (removed stale duplicated todo tail after todos/ split; this file is now a thin high-level stub only. Full details live in docs/todos/).
-**How to reference**: "Addresses todo.md #P0-03 (Phase 0 evidence scaffolding)" or "Closes #A-07" (backward compat preserved in thin file); for precision use "Closes docs/todos/01-P0-phase0.md#P0-01" or "Addresses docs/todos/02-P1-freeze.md#P1-02".
+**How to reference**: use the item ID in prose, e.g. "Addresses P0-03 (Phase 0 evidence scaffolding)"; for precision cite both file and ID: "Closes `docs/todos/01-P0-phase0.md` P0-01" or "Addresses `docs/todos/02-P1-freeze.md` P1-02".
 
 Items are grouped by theme (details in numbered docs/todos/ files). Completed items moved/stuck per-file or summarized here after phase declared done in `prod.md`.
 
 **Current focus (post monte-carlo integration)**: Monte Carlo simulation (research & strategy-robustness tool; `--monte-carlo --mc-trials N`, object reuse, experimental parallel, any strategy + realism; integrated from the monte-carlo branch). Phase 0 tiny-size mainnet futures validation (0/15 qualifying; collection was paused during monte-carlo branch priority — gates/ritual unchanged). Phase 1 Live-Safety Freeze mechanically enforced. Tiny-size validation and research only. Not suitable for meaningful capital until Phase 0/1 exit criteria satisfied. Read `01-prod.md` + root `AGENTS.md` + `02-prerequisites.md` + this + `docs/todos/00-OVERVIEW.md` before any frozen-surface work.
 
-**Read first**: `docs/governance/04-summary.md` + root `AGENTS.md` (agent rules), `01-prod.md` (central contract, phases, 9-row Go-Live Gate, Phase 0 template + ritual), `02-prerequisites.md` (mandatory pre-PR checklist for the 10 frozen files), `docs/todos/00-OVERVIEW.md`. (Historical merge context in `docs/archive/MERGE_PLAN.md`.)
+**Read first**: `docs/governance/04-summary.md` + root `AGENTS.md` (agent rules), `01-prod.md` (central contract, phases, 9-row Go-Live Gate, Phase 0 template + ritual), `02-prerequisites.md` (mandatory pre-PR checklist for the mechanically frozen safety surface), `docs/todos/00-OVERVIEW.md`. (Historical merge context in `docs/archive/MERGE_PLAN.md`.)
 
 **Full detailed task list by group**: See `docs/todos/00-OVERVIEW.md` + the numbered files below. This thin file holds only high-level status + philosophy + pointers (no duplication of full item text).
 
@@ -22,6 +22,7 @@ Items are grouped by theme (details in numbered docs/todos/ files). Completed it
 - Phase 1: Enforced (details + frozen list + P1-*: docs/todos/02-P1-freeze.md)
 - MC: Integrated; MC-01/MC-02 landed (details + standing: docs/todos/03-MC-simulation.md)
 - See docs/todos/ for R-*/S-*/D-*/A-*/H-* + Other/Go-Live (04- through 09-).
+- Backtest engine bug fixes (BF-01..BF-17, 2026-08-14 audit): docs/todos/10-BF-backtest-engine-bugfixes.md
 
 (See also: `01-prod.md`, `02-prerequisites.md`, root `AGENTS.md`, `docs/README.md`, `docs/governance/04-summary.md`.)
 
@@ -35,7 +36,7 @@ Full details: see docs/todos/01-P0-phase0.md ; see 00-OVERVIEW.md . (Status: 0/1
 
 ## Phase 1 / Live-Safety Freeze (Current enforcement active)
 
-Full details: see docs/todos/02-P1-freeze.md ; see 00-OVERVIEW.md . (Includes P1-01..P1-05 + exact Frozen Files 10-list + validation evidence + checklist.)
+Full details: see docs/todos/02-P1-freeze.md ; see 00-OVERVIEW.md . (Includes P1-01..P1-05 + the authoritative Frozen Files mirror + validation evidence + checklist.)
 
 ---
 
@@ -63,7 +64,7 @@ Full details: see docs/todos/06-D-documentation-structure.md ; see 00-OVERVIEW.m
 
 ---
 
-## Adaptive Hybrid Strategy (previous / lower-priority branch work)
+## Adaptive Hybrid Strategy (retired; rebuild requirements)
 
 Full details: see docs/todos/07-A-adaptive-hybrid.md ; see 00-OVERVIEW.md .
 
@@ -81,6 +82,12 @@ Full details: see docs/todos/09-other-future-gates.md ; see 00-OVERVIEW.md . (In
 
 ---
 
+## Backtest Engine Bug Fixes (2026-08-14 audit)
+
+Full details: see docs/todos/10-BF-backtest-engine-bugfixes.md ; see 00-OVERVIEW.md . (BF-01..BF-12 non-frozen fast track; BF-13..BF-17 frozen-surface `engine.cpp` CCB track, root-caused to opener/lot attribution.)
+
+---
+
 ## Completed / Superseded Items
 
 (High-level summary; see per-file "Completed" subsections in docs/todos/ and 00-OVERVIEW.md for moved items with context.)
@@ -88,7 +95,7 @@ Full details: see docs/todos/09-other-future-gates.md ; see 00-OVERVIEW.md . (In
 - Initial creation of `reports/phase0/` skeleton and governance root files (`prod.md`, `prerequisites.md`, `todo.md`) – Doc Phase 0 core (this cycle).
 - Phase 1 mechanical freeze markers + enforcement script (already landed).
 - Governance + status synchronization for `monte-carlo` branch Monte Carlo work (README, todo.md, AGENTS.md, prod.md, reports/phase0, instructions.md, user-manual.md).
-- Post-landing doc hygiene for new strategies (structure-continuation, adaptive-hybrid) + indicators (ema_regime, stochastic, swing_detector): updated CLI `--help`, instructions.md, flags.md, user-manual.md, AGENTS.md. Initial MC smoke campaigns executed successfully against the new strategies (MC-05 partial).
+- Historical Adaptive Hybrid smoke work is not evidence for the current build: the unsafe prototype is retired and excluded from the CLI and MC matrix. See A-* for rebuild requirements.
 - MC-02 Step A (per-trial win_rate / profit_factor distributions + enhanced reporter; tiny AnalyticsReport addition for exact `winning_trades` count; JSON + QuestDB campaign rows).
 - Multi-agent consolidation of scattered todos/docs (this update): single root `todo.md`; docs/ purged of duplicate action lists (now pointers only); historical hardening guide archived or clearly marked; stale planned refs cleaned with explicit language.
 - todos/ split (D-06 continuation): detailed items extracted verbatim to docs/todos/NN-*.md ; this file thinned to high-level stub + pointers (2026-07-03).

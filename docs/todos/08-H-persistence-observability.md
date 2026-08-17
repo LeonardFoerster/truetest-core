@@ -4,7 +4,7 @@
 
 Primary reference: `docs/reference/03-db.md` (current authoritative schema + queries + reliability + ritual) and `docs/archive/questdb-multi-week-hardening-guide.md` (historical phased log; most phases landed).
 
-- **H-01** Add `--persist-strict` / hard-fail mode + automatic retry + local checkpoint fallback for QuestDB. (See the multi-week hardening guide — Phase 2. Current: soft-fail default (warning to stderr, persistence disabled, run continues); `--persist-strict` + fallback .ilp wired in engine/main/QuestdbStore/IlpWriter + health surface (strict_mode/fallback_lines); "refuse to start when `--persist` is set but QuestDB is down" documented as follow-up.)
+- **H-01** Strict mode is fail-closed for normal engine runs: startup/runtime failure returns non-zero, and shadow/live additionally halt. Soft `--persist` still warns and continues. Monte Carlo deliberately rejects `--persist-strict` until its summary writer can propagate failures. Automatic retry is not part of the strict contract; any first write failure latches failure. Local fallback is diagnostic only.
 - **H-02** Make structured binary event logging + integrity verification mandatory in live mode.
 - **H-03** Implement reliable crash recovery (position + open-order replay from binary logs). (Richer checkpoints; crash-replay golden tests.)
 - **H-04** Add Prometheus / metrics export endpoint + structured alerting hooks (halt, large loss, DMS trigger, etc.). (IAlertSink; alerting drill — Go-Live row 6.)

@@ -3,9 +3,9 @@
 A browser dashboard for TrueTest — a live trading cockpit and a backtest-review
 report, rendering the same data as the ncurses TUI. Opt-in, off the hot path,
 and **read-only**: nothing in this surface can place, cancel, or flatten an
-order. Operator controls remain on the audited ncurses hotkeys.
+order. Operator controls remain in the ncurses and ImGui surfaces.
 
-Design by Claude Design; implemented on the `feature/web-ui` branch.
+Implemented as the optional `ENABLE_WEB` read-only surface. The ImGui desk is the primary in-process human cockpit; this browser surface remains available for snapshot/report viewing.
 
 ---
 
@@ -13,19 +13,19 @@ Design by Claude Design; implemented on the `feature/web-ui` branch.
 
 ```bash
 # Build with the web server (fetches civetweb; websockets on, no TLS/Boost)
-cmake -B build -DENABLE_WEB=ON
-cmake --build build -j$(nproc)
+cmake --preset linux-web -DENABLE_BINANCE=ON
+cmake --build --preset linux-web --target engine_shadow engine_backtest web_assets
 
-# Build the SPA bundle (Node 18+); outputs to src/web/assets/
-cd src/web/frontend && npm ci && npm run build && cd -
+# The explicit web_assets target runs npm ci + npm run build when npm is available.
 
 # Live cockpit (shadow): serve the bundle + stream live snapshots
-./build/engine_shadow --provider binance --symbol btcusdt --stream trade \
-  --web --web-port 8080 --web-assets src/web/assets
-# → open http://127.0.0.1:8080/
+./out/build/linux-web/engine_shadow --provider binance --symbol btcusdt --stream trade \
+  --web --web-port 8080 --web-token replace-with-a-local-token \
+  --web-assets src/web/assets
+# → open http://127.0.0.1:8080/?token=replace-with-a-local-token
 
 # Backtest review: serves the final report until Ctrl-C
-./build/engine_backtest --provider local --path market_data.csv --strategy sma \
+./out/build/linux-web/engine_backtest --provider local --path market_data.csv --strategy sma \
   --web --web-assets src/web/assets
 ```
 
@@ -85,8 +85,8 @@ per-symbol / per-strategy breakdowns). Connection states: Connected · HALTED
 
 ## Architecture
 
-The web layer is a third consumer of the engine's existing read-only seam — it
-adds **no** hot-path work and touches **none** of the frozen live-safety files.
+The web layer is a third consumer of the engine's existing read-only seam. It
+polls the existing snapshot seam off the per-event path.
 
 ```
 engine event loop ──(100ms)── dashboard_snapshot  ──snapshot_dashboard()──┐
@@ -129,8 +129,8 @@ sides are single chars (`'L'`/`'S'`, `'B'`/`'S'`).
 ## Safety notes
 
 - **Read-only by construction.** `web_server` registers no control routes on any
-  target, including `engine_live`. The `read_only` flag is explicit at the
-  callsite to make the intent visible.
+  target, including `engine_live`. `web_config::read_only` defaults to true;
+  the server exposes no control handlers.
 - **localhost by default.** Binds `127.0.0.1`; expose beyond the host only behind
   a reverse proxy (TLS terminates there — civetweb is built without SSL).
 - **Bounded subscribers.** `/stream` caps concurrent clients (`max_ws_clients`)
@@ -144,11 +144,9 @@ sides are single chars (`'L'`/`'S'`, `'B'`/`'S'`).
 
 ## Known limitations / follow-ups
 
-- The SPA bundle is built manually (`npm run build`); there is no CMake target
-  wiring `npm` into the C++ build yet, and `--web-assets` has no compiled-in
-  default — pass the directory explicitly.
-- No CI job yet exercises `-DENABLE_WEB=ON` (the repo has no `.github/workflows`
-  in-tree at time of writing).
+- The SPA bundle has an explicit `web_assets` CMake target when npm is found,
+  but it is deliberately not part of the default C++ build. `--web-assets` has
+  no compiled-in default, so pass the directory explicitly.
 - `/stream` writes are serial under one lock (safe against civetweb's
   connection teardown); fine for a handful of localhost operator clients, not
   designed for many remote viewers.

@@ -29,6 +29,7 @@ docs/
 ├── operations/               # Phase 0 SOP, testnet, venue demo drills
 ├── platforms/                # multi-venue status + provider design notes
 ├── internal/                 # active engineering design plans (not operator SoT)
+├── decisions/                # dated engineering decisions and acceptance criteria
 ├── skills/                   # proposed agent-skill designs (planning only)
 ├── archive/                  # historical snapshots; not current status
 └── assets/                   # static images
@@ -37,13 +38,13 @@ docs/
 | Directory | Role | Stability |
 |-----------|------|-----------|
 | **governance/** | Authoritative prod gates, freeze checklist, thin todo stub | **Do not rename** — cited by scripts + PR process |
-| **todos/** | Numbered work items with `#anchors` for PRs (`docs/todos/…#P0-01`) | **Do not rename** |
+| **todos/** | Numbered work items cited by file and item ID (e.g. `docs/todos/01-P0-phase0.md` P0-01) | **Do not rename** |
 | **reference/** | How-to and developer/operator reference | Stable numbered files |
 | **architecture/** | Extracted architecture model (not full design drafts) | Stable numbered files |
 | **operations/** | Operator SOPs and venue drills | Stable; phase0 scripts print these paths |
-| **platforms/** | Venue status (Binance golden, Bitget landed, Bitunix planned) | Renamed from `upcoming_platform/` |
+| **platforms/** | Venue status (Binance golden, Bitget landed, Bitunix MD/shadow with live refused) | Renamed from `upcoming_platform/` |
 | **internal/** | Active design plans (engine decomp, data pipeline, cmake design) | Plans may move; update AGENTS + skill refs |
-| **skills/** | Proposed Grok skills (planning artifacts only) | Renamed from `upcoming_skills/` |
+| **skills/** | Proposed Grok skills plus retained execution records | Renamed from `upcoming_skills/` |
 | **archive/** | Historical / deferred packs (Edge1, old gaps, QuestDB hardening logs) | Historical only |
 | **assets/** | Images | Stable |
 
@@ -57,7 +58,7 @@ Evidence for Phase 0 sessions lives outside this tree: **`reports/phase0/`**.
 - [`governance/01-prod.md`](governance/01-prod.md) — phases, ritual, Go-Live Gate
 - [`governance/02-prerequisites.md`](governance/02-prerequisites.md) — freeze PR checklist
 - [`governance/03-todo.md`](governance/03-todo.md) — thin high-level todo
-- [`todos/`](todos/) — detailed items (`00-OVERVIEW.md`, `01-P0-…` … `09-…`)
+- [`todos/`](todos/) — detailed items (`00-OVERVIEW.md`, `01-P0-…` … `10-BF-…`)
 - [`governance/04-summary.md`](governance/04-summary.md) — condensed status
 
 ### Reference (operators & developers)
@@ -66,8 +67,9 @@ Evidence for Phase 0 sessions lives outside this tree: **`reports/phase0/`**.
 - [`reference/03-db.md`](reference/03-db.md) — QuestDB
 - [`reference/04-flags.md`](reference/04-flags.md) — flag matrix
 - [`reference/05-web-ui.md`](reference/05-web-ui.md) — browser cockpit
-- [`reference/06-adaptive-hybrid-strategy.md`](reference/06-adaptive-hybrid-strategy.md) — specialty strategy (demo caveats)
+- [`reference/06-adaptive-hybrid-strategy.md`](reference/06-adaptive-hybrid-strategy.md) — retired prototype and rebuild contract
 - [`reference/07-strategy-development.md`](reference/07-strategy-development.md) — **IStrategy SDK** (indicators, entry, exit, TP/SL)
+- [`reference/LAUNCH_SCRIPTS.md`](reference/LAUNCH_SCRIPTS.md) — launcher inventory; see its status warning and prefer the direct commands in `01-instructions.md`
 
 ### Architecture
 - [`architecture/01-target-architecture.md`](architecture/01-target-architecture.md)
@@ -89,9 +91,13 @@ Evidence for Phase 0 sessions lives outside this tree: **`reports/phase0/`**.
 - [`internal/engine-decomposition-design.md`](internal/engine-decomposition-design.md) — Phase 1 design + PR DAG
 - [`internal/data-pipeline.md`](internal/data-pipeline.md) — market-data path redesign (`MarketSeries` / `DataWrapper`; mostly shipped)
 - [`internal/2026-07-cmake-modernization-design.md`](internal/2026-07-cmake-modernization-design.md)
+- [`internal/imgui-desk-design.md`](internal/imgui-desk-design.md) — ImGui desk status and planned research wiring
 
-### Skills (proposals only)
-- [`skills/00-OVERVIEW.md`](skills/00-OVERVIEW.md) — proposed agent skills; not installed SKILL.md files
+### Decisions
+- [`decisions/2026-08-14-live-safety-repair.md`](decisions/2026-08-14-live-safety-repair.md) — approved live-safety repair scope and acceptance criteria
+
+### Skills (proposals + execution records)
+- [`skills/00-OVERVIEW.md`](skills/00-OVERVIEW.md) — proposed agent skills and retained execution records; no matching project SKILL.md files
 
 ### Archive
 - [`archive/`](archive/) — MERGE_PLAN, production-readiness-gaps-2026-05, QuestDB hardening logs, Edge1 cointegration packs
@@ -107,7 +113,7 @@ Evidence for Phase 0 sessions lives outside this tree: **`reports/phase0/`**.
 5. **Monte Carlo / stochastic backtests** → MC section in [reference/01-instructions.md](reference/01-instructions.md) + [todos/03-MC-simulation.md](todos/03-MC-simulation.md)
 6. **AI coding agent** → [../AGENTS.md](../AGENTS.md) first, then this README + [00-INDEX.md](00-INDEX.md)
 7. **Multi-venue (Bitget / Bitunix)** → [platforms/README.md](platforms/README.md) + [operations/03-bitget-demo.md](operations/03-bitget-demo.md)
-8. **Write a strategy (`IStrategy`)** → [reference/07-strategy-development.md](reference/07-strategy-development.md) (Adaptive-Hybrid specialty: [06](reference/06-adaptive-hybrid-strategy.md))
+8. **Write a strategy (`IStrategy`)** → [reference/07-strategy-development.md](reference/07-strategy-development.md) (retired Adaptive Hybrid rebuild contract: [06](reference/06-adaptive-hybrid-strategy.md))
 9. **Engine god-class decomposition** → [internal/engine-decomposition.md](internal/engine-decomposition.md)
 10. **Data ingress / CSV / DataWrapper** → [internal/data-pipeline.md](internal/data-pipeline.md)
 
@@ -120,6 +126,6 @@ Evidence for Phase 0 sessions lives outside this tree: **`reports/phase0/`**.
 - Aspirational / unbuilt paths must say so explicitly: *“Planned … — current details live in …”*.
 - Broken links = documentation bugs.
 - Long-form phase/ritual content lives in `governance/01-prod.md` (or ops SOPs); `reference/01-instructions.md` keeps pointers + command templates.
-- Build lists: `cmake/Sources.cmake`; presets: `CMakePresets.json` (`out/build/<preset>/` vs ad-hoc `build/`). Details: [reference/01-instructions.md](reference/01-instructions.md).
+- Build lists: `cmake/Sources.cmake`; presets: `CMakePresets.json` (`out/build/<preset>/` vs ad-hoc `build/`). Build presets and test presets default to one job; `linux-release-low-memory` also disables LTO. Details: [reference/01-instructions.md](reference/01-instructions.md).
 
-**Last updated**: 2026-08-02 — docs tree refactor: root plans → `internal/`, `upcoming_platform/` → `platforms/`, `upcoming_skills/` → `skills/`; README is primary topic nav.
+**Last updated**: 2026-08-16 — serial preset defaults and low-memory build guidance.

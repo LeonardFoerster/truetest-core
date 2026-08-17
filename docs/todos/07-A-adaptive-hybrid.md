@@ -1,15 +1,15 @@
-# A: Adaptive Hybrid Strategy (previous / lower-priority branch work)
+# A: Adaptive Hybrid Strategy (retired; rebuild requirements)
 
-**See**: docs/todos/00-OVERVIEW.md for full rules, reference format, maintenance, and mapping. High-level also in thin `docs/governance/03-todo.md`. See detailed spec in `docs/reference/06-adaptive-hybrid-strategy.md`; code in `src/strategy/adaptive_hybrid_*`; test in `tests/test_adaptive_hybrid.cpp`. MC-05 context. Active development focus has shifted to Monte Carlo simulation on the `monte-carlo` branch (now integrated). Items below remain for historical context or future resumption. The strategy is registered and L2 dispatch is present (with `LIVE_SAFETY_CCB_APPROVED` comment); usable for MC backtests/experiments with caveats.
+**See**: docs/todos/00-OVERVIEW.md for full rules, reference format, maintenance, and mapping. High-level also in thin `docs/governance/03-todo.md`. The detailed requirements remain in `docs/reference/06-adaptive-hybrid-strategy.md`. The unsafe prototype source and tests were retired: the strategy is not compiled, registered, or runnable. Items below are rebuild requirements, not operator instructions. MC-05 cannot include this strategy until that rebuild lands.
 
-- **A-01** Replace v1/demo placeholders in `AdaptiveHybridStrategy` / `RiskValidator` / `OnChainMonitor` (simplified decision logic, mock OnChain thread, equity proxies, omitted L2Snapshot handling, "real version" comments) with full hot-path deterministic implementation. (Visible in `src/strategy/adaptive_hybrid_strategy.cpp:467` "Simplified decision for compilable demo — real version uses full RiskValidator + L2Snapshot"; many "placeholder", "real impl would", "v1 simplified", "for paper/backtest; production wires real feed"; `enable_onchain_mock=true` default + mock producer thread.)
-- **A-02** Add real on-chain data feed integration (TRON/Helius or equivalent) and proper spike detection instead of the current always-false stub. (Mock only; `inject_spike` test hook only; "No automatic spikes in mock".)
-- **A-03** Implement `take_pending_exit_intents` for the strategy (consistent with breakout / other strategies that use `ExitManager`).
-- **A-04** Exercise the full 9-step flow + RiskValidator gates in real backtests and shadow runs; remove "for compilable demo / harness only" limitations.
-- **A-05** Add `adaptive-hybrid` to the strategy matrix / golden tests and TUI indicators as a first-class citizen.
-- **A-06** Wire ATR (recently added) + other indicators cleanly into the adaptive regime detection.
+- **A-01** Design a new fixed-capacity, deterministic implementation with typed inventory/exposure units, complete validator inputs, and no prototype placeholders or process-global mutable state.
+- **A-02** Define a real external-signal feed contract and provenance model. Any mock producer or `inject_spike`-style hook must remain test-only and must not be enabled by a production default.
+- **A-03** Implement platform-consistent exit intents without replacing the mandatory engine exit policy or pre-trade risk chain.
+- **A-04** Prove the documented event flow and validator gates with deterministic backtests, shadow evidence, malformed-input tests, pool-exhaustion tests, and ASAN/TSan runs.
+- **A-05** Add the rebuilt strategy to the registry, CLI, golden/MC matrices, and both TUI stacks only when implementation and acceptance evidence land together.
+- **A-06** Wire ATR and other regime indicators through typed, startup-validated configuration with zero-allocation event-path tests and measured p99 latency.
 - **A-07** Any L2 dispatch or safety-surface touches for adaptive hybrid must carry `LIVE_SAFETY_CCB_APPROVED`.
 
-(See detailed spec in `docs/reference/06-adaptive-hybrid-strategy.md`; code in `src/strategy/adaptive_hybrid_*`; test in `tests/test_adaptive_hybrid.cpp`. On-chain mock + simplified gates are the main blockers.)
+(See the retained specification in `docs/reference/06-adaptive-hybrid-strategy.md`. A future implementation must add new production code and tests; the former prototype files no longer exist.)
 
-**Last updated**: 2026-07-03 (split from governance/03-todo.md per TODOS-SPLIT-SPEC; verbatim extraction + note on lower-pri/MC; see 00-OVERVIEW.md).
+**Last updated**: 2026-08-14 (unsafe prototype retired; items rewritten as new-build acceptance requirements).

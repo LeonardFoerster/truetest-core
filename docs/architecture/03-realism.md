@@ -4,7 +4,7 @@
 
 **Planned / extracted; see reference/ for current** authoritative details and flag usage. Full material lives in `docs/reference/02-user-manual.md`, `docs/reference/01-instructions.md` (§7), tests (e.g. `test_latency_model.cpp`, `test_impact_model.cpp`, `test_queue_model.cpp`, `test_fill_model.cpp`, `test_fee_model.cpp`, `test_realistic_fills.cpp`), and source (`src/execution/*_model.*`, `src/orderbook/`).
 
-**All models default off**; require explicit flags. **Completely bypassed in live** (live venue supplies truth). Realism is for backtest + shadow divergence measurement only.
+Opt-in latency, impact, queue, probabilistic-fill, and fee models require their respective flags. Passive-side fill pricing is always on, and the synthetic market-maker has default calibration. **Completely bypassed in live** (live venue supplies truth). Realism is for backtest + shadow divergence measurement only.
 
 **Last updated**: 2026-07 (new content impl — synthesized from instructions.md + user-manual.md; pointers only).
 
@@ -21,14 +21,16 @@ Realistic microstructure modeling enables honest slippage / adverse-selection an
 Used in backtest (local/synthetic) and shadow (real data + simulated fills). L2-dependent models require `--depth-stream depth20@100ms` (or equivalent) + appropriate provider.
 
 **Key flags** (see `docs/reference/04-flags.md` and instructions for full):
-- `--realistic-fills`
 - `--order-latency-us N --order-latency-stddev-us M`
-- `--impact-k-bps`
-- `--bar-spread-bps`
+- `--wire-latency-us N`
+- `--impact-k-bps N --impact-adv N`
 - `--queue-model l2-snapshot`
 - `--maker-queue-model uniform|front|back`
 - `--fee tiered --maker-rate ... --taker-rate ...`
-- `--fill-model ...`
+- `--fill-prob ... --fill-fade ... --fill-decay ...`
+- `--mm-levels ... --mm-base-depth ... --mm-spread-pct ...`
+
+`--realistic-fills` and `--bar-spread-bps` remain accepted as deprecated warn-noops.
 
 **Bypass note** (repeated): These models are **not active** for live execution. Divergence between shadow (realistic sim) and live (venue truth) is expected and measured via `shadow_tracker`.
 
@@ -51,8 +53,8 @@ See: `test_latency_model.cpp`.
 ## Impact Models
 
 - `SquareRootImpactModel` (primary): applied before aggression on market orders.
-- Walked-book impact: when real L2 depth available (`--depth-stream`), market orders "walk the book" producing one `fill_event` per level crossed (with `--realistic-fills`).
-- Bar-spread: for bar-mode (OHLCV) data, simulates realistic bid-ask spread on market orders (`--bar-spread-bps`); suppressed on L2 symbols.
+- Walked-book impact: when real L2 depth is available (`--depth-stream`), market orders can walk the book and produce one `fill_event` per crossed level (`--walked-book-impact`).
+- In bar mode, the synthetic market-maker ladder is the source of modeled spread cost; calibrate it with `--mm-spread-pct` rather than `--bar-spread-bps`.
 
 Impact is applied in execution adapter / orderbook paths. Measures slippage due to own order moving the market.
 
@@ -124,7 +126,7 @@ Funding is partially wired (events exist; full risk/P&L impact in progress — s
   --stream trade --depth-stream depth20@100ms \
   --persist --run-tag ... \
   --queue-model l2-snapshot --maker-queue-model uniform \
-  --realistic-fills --impact-k-bps 5 \
+  --walked-book-impact --impact-k-bps 5 --impact-adv 1000000 \
   --order-latency-us 2000 --order-latency-stddev-us 500 \
   --fee tiered --maker-rate 0.0002 --taker-rate 0.0004
 ```
@@ -139,6 +141,6 @@ See full flag reference and MC section in `docs/reference/01-instructions.md`.
 - Tests exercising models: `tests/test_*_model.cpp` + `test_realistic_fills.cpp`
 - Source: `src/execution/{latency,impact,queue*,fee}_model.*`, `src/execution/queue_aware...`, `src/orderbook/`
 - Target arch context: `docs/architecture/01-target-architecture.md`
-- MC caveats: `docs/reference/01-instructions.md` + root `todo.md` (MC-*)
+- MC caveats: `docs/reference/01-instructions.md` + `docs/todos/03-MC-simulation.md`
 
 Thin synthesis only. Prefer source + instructions for implementation/usage. Update pointers on changes to models.

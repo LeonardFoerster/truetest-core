@@ -7,7 +7,7 @@ These documents serve as:
 - Reference material for future implementation of project-specific (or user) skills
 - Living plans that capture "why this skill" + concrete invariants + workflows
 
-**Status**: All documents here are **planning artifacts**. No SKILL.md files have been created yet (as of 2026-07-16).
+**Status**: These are planning artifacts unless their own status says otherwise. `ui-refactor.md` records an executed 2026-08-14 refactor and is retained as historical reference. None of these proposals has a project `SKILL.md` under `.grok/skills/`.
 
 ---
 
@@ -34,7 +34,6 @@ New skills should follow the same high bar.
 |------|-----------------------|----------|----------|-----------------|
 | `phase0-ritual.md` | `phase0-ritual` | Operational / Ritual | **Critical** | Manual, error-prone Phase 0 session workflow (0/15 qualifying) |
 | `questdb-isolation.md` | `questdb-isolation` | Refactor Guardian | High | Scattered `if (questdb_active_ && ...)` guards (see (retired 2026-07-16 one-time review) 02) |
-| `ui-refactor.md` | `ui-refactor` | Refactor Guardian | High | Oversized UI files (`tabbed_dashboard.cpp`, `console_dashboard.cpp`) |
 | `doc-hygiene.md` | `doc-hygiene` | Governance / Docs | High | Cross-ref rot, "Planned for..." language, todo sync between thin + detailed files |
 | `repo-doctor.md` | `repo-doctor` | Meta / Health | High | Running all gate scripts + health checks manually is tedious |
 
@@ -63,6 +62,10 @@ New skills should follow the same high bar.
 - `trading-saas-compliance`
 - `resource-cost-model`
 
+### Executed plans retained as reference
+
+- `ui-refactor.md` — executed 2026-08-14; its proposal body is historical, not the current UI contract.
+
 ---
 
 ## How to Use These Documents
@@ -86,13 +89,13 @@ New skills should follow the same high bar.
 
 ## Related Existing Artifacts
 
-- ` (retired one-time review docs) ` — Source of many refactor skill ideas
-- `~/.grok/skills/engine-decomposition/SKILL.md` — Gold standard for a complex guardian skill
+- Retired one-time review records — source of several refactor-skill ideas
+- `engine-decomposition` skill — current guardian for the engine decomposition workflow
 - `docs/governance/01-prod.md`, `02-prerequisites.md`, `03-todo.md`
 - `docs/todos/00-OVERVIEW.md`
 - `scripts/check-*.sh` and `scripts/phase0/*.sh`
 
-**Last updated**: 2026-08-02 (directory renamed from `upcoming_skills/` → `skills/`; content still planning-only)
+**Last updated**: 2026-08-14 (`ui-refactor` moved to executed-reference status; project-skill status clarified)
 
 ---
 

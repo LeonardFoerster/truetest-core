@@ -29,7 +29,7 @@ Testnet is an operator drill and wiring check only. It has account resets, unrea
 
 ```bash
 cmake -B build -DENABLE_BINANCE=ON -DENABLE_QUESTDB=ON
-cmake --build build -j"$(nproc)"
+cmake --build build -j1
 ```
 
 - [ ] Export testnet credentials:
@@ -61,7 +61,7 @@ Use `engine_live` only when intentionally testing signed testnet order paths. Us
   --persist --run-tag testnet_$(date -u +%Y%m%d_%H%M) \
   --reconcile-tolerance-bps 3 \
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
-  --max-notional 150 --max-leverage 2.5 --min-liq-distance-pct 7 \
+  --max-notional 150 --max-leverage 2.5 --min-liq-distance-pct 0.07 \
   --max-daily-loss 5 --risk-unwind
 ```
 
@@ -75,7 +75,7 @@ Record run tag, timestamps, expected behavior, observed behavior, and artifacts 
 
 | Scenario | Action | Expected result | Pass criteria |
 |---|---|---|---|
-| A. Clean shutdown | Start testnet run, then send SIGINT. | Engine halts, kill-switch cancels open orders, DMS disarms or expires harmlessly. | No unexpected open orders or positions after shutdown. |
+| A. Clean shutdown | Start testnet run, then send SIGINT. | Engine halts; after confirmed quiesce/kill, the DMS disarms. If kill is ambiguous or fails, the countdown remains armed. | No unexpected open orders or positions after shutdown. |
 | B. SIGKILL | Start testnet run, then `kill -9` the process. | Venue DMS countdown cancels open orders after heartbeat loss. | Open orders are gone after countdown window; positions reviewed manually. |
 | C. Network loss | Temporarily block network or disconnect. | WS failure/halt is visible; DMS venue timer still protects orders. | Logs show loud halt path; orders cancel after countdown if heartbeat is lost. |
 | D. SIGSTOP | Pause process with SIGSTOP long enough for DMS expiry, then resume. | DMS should fire at venue despite local process suspension. | Orders canceled by venue; operator documents that process suspension remains a live operational foot-gun. |

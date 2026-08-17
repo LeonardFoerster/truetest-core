@@ -18,7 +18,9 @@ TrueTest (hft-engine) is a modular, high-performance C++23 trading engine that i
 - C++23, zero-allocation hot path using `ObjectPool` and lock-free SPSC `RingBuffer` (64k slots)
 - Three compile-time targets with dead-code elimination for live-order safety
 - Pluggable `IProvider` / `IStrategy` / `IExecutionAdapter` architecture
-- Advanced Binance USDT-M futures support (dead-man's switch, kill switch, position reconciler, bracket adapter with `reduceOnly` + `closePosition`)
+- Advanced Binance USDT-M futures support (dead-man's switch, kill switch,
+  position reconciler, `closePosition` conditional bracket adapter without the
+  venue-forbidden `reduceOnly` combination)
 - Rich models for latency, impact, queue position, fees, and realistic fills
 - Optional high-resolution persistence via QuestDB ILP + binary event logs (zstd compressed)
 - Lock-free multi-threaded worker architecture with CPU pinning and configurable spin policies
@@ -101,7 +103,8 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 - `HybridExecutor` and `BinanceRestOrderTransport` for order submission
 - User-data WebSocket as authoritative source of truth (ORDER_TRADE_UPDATE)
 - Position/order reconciliation at startup against `/fapi/v2/positionRisk`
-- Automatic bracket placement using futures `closePosition=true` + `reduceOnly`
+- Automatic Binance futures bracket placement using `closePosition=true`
+  conditional algo orders (no quantity/`reduceOnly` in that venue shape)
 - Dead-man's switch (crash protection with countdown)
 - Kill switch (emergency flatten with deadline)
 - Pre-trade venue risk caps (`--max-notional`, `--max-leverage`, liquidation distance)
@@ -150,7 +153,9 @@ Full details + caveats + usage in [../governance/01-prod.md](../governance/01-pr
 - `ENABLE_BITUNIX`: Bitunix futures MD/shadow (Phase 0–1)
 - `ENABLE_QUESTDB`: QuestDB ILP persistence
 - `ENABLE_WEB`: Embedded civetweb web UI
+- `ENABLE_IMGUI`: In-process ImGui desk (GLFW + OpenGL)
 - `ENABLE_DEBUG`: StageTimer + memory instrumentation
+- `ENABLE_LTO`: First-party Release LTO (disable for lower peak memory)
 - `ENABLE_NATIVE_OPT`: `-march=native` + aggressive opts on **all three** engines (Release)
 - `BUILD_TESTS`, `ENABLE_BENCHMARKS`, `BUILD_SHARED_LIB`
 
@@ -159,14 +164,14 @@ Full details + caveats + usage in [../governance/01-prod.md](../governance/01-pr
 ```bash
 # Minimal (CSV backtesting only, no network) — ad-hoc tree
 cmake -B build
-cmake --build build -j
+cmake --build build -j1
 ```
 
 Core + test source registration lives in `cmake/Sources.cmake` (the single obvious place to add new code).
 
 **Presets** write to `out/build/<presetName>` (not `build/`):
 ```bash
-cmake --preset linux-tests && cmake --build --preset linux-tests -j
+cmake --preset linux-tests && cmake --build --preset linux-tests
 cmake --preset linux-binance-questdb
 cmake --preset linux-bitget
 cmake --preset linux-bitunix
@@ -183,11 +188,11 @@ cmake --preset linux-release-native
 cmake -B build -DENABLE_BINANCE=ON -DENABLE_QUESTDB=ON \
                -DENABLE_DEBUG=ON -DENABLE_NATIVE_OPT=ON \
                -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j --target engine_backtest engine_shadow engine_live
+cmake --build build -j1 --target engine_backtest engine_shadow engine_live
 
 # With tests
 cmake -B build -DBUILD_TESTS=ON -DENABLE_BINANCE=ON
-cmake --build build -j
+cmake --build build -j1
 ctest --test-dir build --output-on-failure
 ```
 
@@ -205,7 +210,7 @@ ctest --test-dir build --output-on-failure
 **Key configuration categories**:
 - `--provider local|binance|binance-futures|bitget|bitget-futures|bitunix|bitunix-futures|synthetic` + `--path`, `--symbol`, `--stream`, `--depth-stream`
 - `--strategy name` (or comma-separated list) + `--param`
-- Realism models: `--fee`, `--fill-model`, `--latency-model`, `--impact-model`, `--queue-model`
+- Realism models: `--fee`, `--order-latency-us` / `--wire-latency-us`, `--impact-k-bps` + `--impact-adv`, `--fill-prob` / `--fill-fade` / `--fill-decay`, `--queue-model` (see [04-flags.md](04-flags.md))
 - Threading: `--thread-preset`, `--no-pin`, `--spin-policy`
 - Risk: `--max-daily-loss`, `--max-trades-per-hour`, `--risk-unwind`, futures-specific caps (`--max-notional`, `--max-leverage`, …)
 - Persistence: `--persist`, `--questdb-host`, `--log-events`, `--record`
@@ -225,7 +230,14 @@ ctest --test-dir build --output-on-failure
 
 TrueTest supports optional high-resolution persistence to a QuestDB instance using the InfluxDB Line Protocol (ILP) for ingestion (default port 9009) and HTTP for schema/DDL operations (default port 9000). Build support is enabled via the CMake flag `-DENABLE_QUESTDB=ON`.
 
-At runtime, persistence is activated with `--persist --run-tag <name>` (optionally combined with `--persist-strict` for hard-fail semantics and automatic local ILP fallback file writing on outages). The engine performs time-based flushing (default ~150 ms cadence, configurable via `--questdb-flush-ms`) from the main reporting loops in addition to count-based batching. A minimal but effective health surface is exposed in the TUI (connected state, pending lines, fallback lines written, age since last successful flush).
+At runtime, persistence is activated with `--persist --run-tag <name>`
+(optionally combined with `--persist-strict` for hard-fail semantics and a
+diagnostic local ILP fallback on outages). Headless reporting loops perform
+time-based flushing (configurable via `--questdb-flush-ms`) in addition to
+count-based batching. Dashboard streaming avoids synchronous timer-driven
+network I/O on the market callback; threshold flushes, finalization, and the
+strict failure callback still apply. The TUI exposes connection state, pending
+lines, fallback lines, and age since the last successful flush.
 
 Per-run tables (e.g. `{run_tag}_orders`, `{run_tag}_fills`, `{run_tag}_events`, `{run_tag}_rejections`) are created automatically with `PARTITION BY DAY` and a designated timestamp column. A shared `runs_meta` table (now using WEEK partitioning) records campaign summaries, including rich analytics fields such as max drawdown, Sharpe, Sortino, profit factor, and win rate written on shutdown. A generic `_events` table (Phase 3) enables capture of strategy decisions, risk actions, and other logic beyond pure order lifecycle.
 
@@ -280,7 +292,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
     --api-secret $BINANCE_API_SECRET \
     --dead-man-countdown-ms 15000 \
     --max-notional 5000 \
-    --min-liq-distance-pct 1.5 \
+    --min-liq-distance-pct 0.015 \
     --balance 5000 \
     --risk-unwind
 ```
@@ -293,7 +305,8 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - Hot path uses pre-allocated `ObjectPool` events; no `new`/`malloc` on critical path.
 - Lock-free SPSC rings (65536 slots) for inter-thread handoff; workers spin/yield/adaptive.
 - CPU pinning + thread presets reduce jitter.
-- LTO + `-O3` in Release; optional `-march=native` on live binary.
+- LTO + `-O3` in Release; optional `-march=native` on the shared engine core
+  and all three engine entry points.
 - StageTimer (ENABLE_DEBUG) provides per-stage microsecond breakdown for profiling.
 - Binary event logging with zstd compression adds minimal overhead when enabled.
 
@@ -330,10 +343,12 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 
 - TUI requires a capable terminal (ncurses); backtest falls back to simpler ANSI dashboard.
 - Live trading currently limited to Binance spot and USDT-M futures (other venues require new providers).
-- Strategy library (self-registering): SMA, mean-reversion, MA crossover, breakout/coiled-spring, adaptive-hybrid, structure-continuation (plus supporting indicators: EMA regime, stochastic, swing detector). No built-in portfolio optimization or ML inference.
+- Strategy library (self-registering): SMA, mean-reversion, MA crossover, breakout/coiled-spring, and structure-continuation (plus supporting indicators: EMA regime, stochastic, swing detector). The retired Adaptive Hybrid prototype is unavailable. No built-in portfolio optimization or ML inference.
 - Realism in backtest/shadow is only as good as the configured models and data quality; L2 replay for impact is powerful but data-intensive.
 - No native Windows GUI or installer; command-line + TUI only.
-- QuestDB is the only supported high-resolution persistence backend (soft-fail if unavailable).
+- QuestDB is the only supported high-resolution persistence backend. It is
+  soft-fail by default; `--persist-strict` makes startup/runtime failures
+  nonzero and also terminal-halts shadow/live.
 - C API exists but is minimal; full Python/Rust bindings are incomplete.
 - Documentation is extensive in `docs/` but lacks a single polished user manual (work in progress).
 - Some advanced futures features (funding rate integration into P&L, liquidation price simulation) are partially implemented.
@@ -378,7 +393,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 **Root & Build**:
 - `CMakeLists.txt` - Main build script producing three TT_TARGET binaries + optional shared library.
 - `cmake/CompilerFlags.cmake`, `Dependencies.cmake` - Centralized C++23 flags, sanitizers, and optional backend wiring.
-- `vcpkg.json` - Dependency manifest for optional features (Binance, live data).
+- No repository `vcpkg.json` manifest is provided; use FetchContent for core dependencies or supply a vcpkg toolchain when installing optional system dependencies.
 - `README.md`, `AGENTS.md` — High-level and agent-facing rules (onboarding.md is not present; use this manual + `docs/README.md`).
 
 **Core Engine** (`src/engine/`, `src/core/`):
@@ -389,14 +404,14 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 **Providers** (`src/providers/`):
 - `provider.h`, `provider_registry.h`, `data_bridge.h` — Core interfaces and registration.
 - `local/` — CSV/tick file transport + parser for backtesting and replay.
-- `binance/` — Spot + USDT-M futures: parsers, transports, executors, brackets, DMS, kill switch, reconciler, user-data, REST (freeze surface includes several futures headers).
-- `bitget/` — UTA USDT-M futures stack (parallel safety modules; not on the mechanical freeze list yet).
+- `binance/` — Spot + USDT-M futures: parsers, transports, executors, brackets, DMS, kill switch, reconciler, user-data, REST (live lifecycle and bounded REST files are mechanically frozen).
+- `bitget/` — UTA USDT-M futures stack; provider, DMS/kill/reconciler, and bounded REST order lane are mechanically frozen.
 - `bitunix/` — Futures MD + paper/shadow (Phase 0–1).
 - `synthetic/` — GBM / Monte Carlo generator registration.
 
 **Strategies & Indicators** (`src/strategy/`, `src/indicator/`):
 - `strategy_interface.h`, `strategy_registry.h`, `strategy_factory.h` — Extension points and registration.
-- Concrete strategies: `sma`, `mean-reversion`, `ma-crossover`, `breakout`, `coiled-spring`, `structure-continuation`, `adaptive-hybrid`, `larry_connor`, `hedge-demo`.
+- Concrete strategies: `sma`, `mean-reversion`, `ma-crossover`, `breakout`, `coiled-spring`, `structure-continuation`, `larry_connor`, `hedge-demo`.
 - Indicators: SMA, EMA, RSI, Bollinger, Stochastic, swing detection, etc.
 
 **Execution & Order Management** (`src/execution/`, `src/exits/`, `src/orderbook/`):
@@ -412,7 +427,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - `analytics/` (10 files): `analytics.cpp`, `report_generator`, `adverse_selection_tracker`, `shadow_tracker`, ASCII widgets.
 - `ui/` (8 + 10 panels): `tabbed_dashboard`, `console_dashboard`, specialized panels for L2, positions, brackets, risk, health, etc.
 - `data/questdb/` (12 files): ILP writer, schema, store, HTTP/TCP clients for high-resolution persistence.
-- `data/` (12 files): `csv_data_source`, `tick_csv_data_source`, `binary_cache_source`, `websocket_data_source`.
+- `data/` (16 top-level files): CSV/tick sources, `DataWrapper`, `MarketSeries`, source/sink interfaces, shared market types, and date parsing.
 
 **Threading & Types** (`src/threading/`, `src/types/`):
 - `ring_buffer.h`, `worker.h`, `worker_watchdog.h`, `thread_preset.h`, `spin_policy.h`.
@@ -425,7 +440,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - `tests/` (~40 test files + fixtures + golden): Comprehensive unit, integration, golden regression, and live testnet tests.
 
 **Documentation** (`docs/`):
-- `docs/operations/02-futures-testnet.md`, `docs/architecture/03-realism.md`, `docs/architecture/04-performance.md`, and future/planned files such as demo-trading-workflow, futures-order-lifecycle, strategy-validation, testnet, and licenses - detailed operational and design guidance.
+- `docs/operations/01-futures-phase0-operator-sop.md`, `docs/operations/02-futures-testnet.md`, `docs/architecture/03-realism.md`, `docs/architecture/04-performance.md`, and venue notes under `docs/platforms/` provide the detailed operational and design guidance.
 
 ---
 

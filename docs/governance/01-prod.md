@@ -9,7 +9,7 @@ This document defines the exact phase definitions, capital-tier gates, Go-Live c
 See also:
 - `../../AGENTS.md` (AI + human reviewer rules + live-safety freeze mechanics)
 - `02-prerequisites.md` (mandatory pre-PR checklist for the frozen safety surface)
-- `03-todo.md` (thin high-level canonical task list; every frozen-surface PR must reference items here or precise docs/todos/ e.g. docs/todos/01-P0-phase0.md#P0-01 per 00-OVERVIEW.md)
+- `03-todo.md` (thin high-level canonical task list; every frozen-surface PR must reference items here or a specific todo file and item ID, e.g. `docs/todos/01-P0-phase0.md` P0-01, per 00-OVERVIEW.md)
 - `reports/phase0/PROGRESS.md` (evidence tracker)
 - Historical snapshot: `../archive/production-readiness-gaps-2026-05.md` (May 2026 view; current gaps/status tracked in `03-todo.md` + docs/todos/ + this file)
 
@@ -28,8 +28,10 @@ See also:
 4. Hot-path discipline (no `nlohmann::json`, no allocations, lock-free SPSC only, CI-enforced).
 5. Reconciler refusal is default (drift > tolerance blocks live start).
 6. User-data WebSocket is source of truth.
-7. DMS protects orders only (Phase 3 work to add position flattening).
-8. Futures mandates (one-way mode, `reduceOnly` + `closePosition=true` brackets, venue `FuturesRiskCheck` first).
+7. Venue DMS protects orders only. Its first heartbeat failure latches terminal halt; the engine-owned exact-once kill session performs the single orderly flatten attempt before provider close. A failed/unknown kill leaves the countdown armed.
+8. Futures mandates (one-way mode, `closePosition=true` conditional brackets
+   without the venue-forbidden `reduceOnly`/quantity combination, venue
+   `FuturesRiskCheck` first).
 9. Small capital first + evidence-based gates (no tier increase without artifacts + two signatures on the full Go-Live Gate).
 
 **Intended Use & Scope**: TrueTest is a private, personal research and retail tool for the author only. It is not, and will never be, an enterprise-ready, institutional, or production trading system. Monte Carlo simulation, high-fidelity backtesting, and shadow divergence analysis are the primary mature capabilities. The live execution paths (`engine_live`) exist with unusually strong compile-time (`TT_TARGET`) and runtime safety layers (reconciler, DMS, kill-switch, venue risk checks, terminal halt, user-data source of truth, etc.). Any use of live paths is experimental, tiny-size, fully attended by the operator, and done at the author's own risk. The Phase 0/1 rituals and Go-Live language in this repository describe the author's personal evidence-gathering hygiene and self-imposed discipline — they are **not** a formal production release process or claim of readiness for others.
@@ -54,7 +56,7 @@ See also:
   --persist --run-tag p0_$(date +%Y%m%d_%H%M) \
   --reconcile-tolerance-bps 3 \
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
-  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \
+  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 0.07 \
   --max-daily-loss 80 --risk-unwind
 ```
 
@@ -79,7 +81,7 @@ Print/sign the SOP, use `new-session.sh`, keep math-captcha visible the entire s
 ### Phase 1 — Deepdive Stabilization & Live-Safety Freeze (Required before meaningful size)
 
 **Already completed in planning / mechanical artifacts**:
-- 10 files carry the `LIVE-SAFETY SURFACE — Phase 1 freeze` marker (see `scripts/check-live-safety-freeze.sh` for the exact list: `tt_target.h`, `engine.cpp`, futures provider live block, dead_mans_switch, kill_switch, reconciler, risk_manager, futures_risk_check, live_safety, worker_watchdog).
+- The engine, execution, Binance/Bitget provider, REST safety lane, risk, worker, and target-gate files that can change live halt/kill behavior are mechanically frozen. `scripts/check-live-safety-freeze.sh` is the exact source of truth; `AGENTS.md` mirrors it.
 - Enforcement script wired into pre-commit + CI.
 - AGENTS.md and reference/01-instructions.md updated with model-selection + CCB rules.
 - `02-prerequisites.md` created (mandatory pre-PR checklist).
@@ -110,8 +112,14 @@ Status notes live in `03-todo.md` + docs/todos/ (and historical `../archive/prod
 
 ### Phases 3–6 (High-Level Roadmap)
 
-- **3**: DMS attempts position flattening (`reduceOnly` MARKET) on heartbeat loss + external `tt_watchdog` binary (defense vs SIGSTOP).
-- **4**: `--persist-strict` (hard-fail), mandatory binary logging with integrity (xxhash), richer checkpoints, crash-replay golden tests.
+- **3**: Centralized exact-once kill/flatten on the first DMS heartbeat failure is
+  implemented but remains behind the CCB, clean-path, and soak evidence gates.
+  The external `tt_watchdog` defense against SIGSTOP remains future work; DMS
+  itself never submits a competing close.
+- **4**: `--persist-strict` startup/runtime failure propagation is implemented
+  for normal engine runs but still needs the required live evidence. Mandatory
+  binary-log integrity (xxhash), resumable v2 checkpoints, and crash-replay
+  golden tests remain future work.
 - **5**: Prometheus + `IAlertSink`, encrypted credential store + rotation, expanded runbooks.
 - **6**: 60+ day continuous mainnet shadow divergence report, formal incident post-mortems for every halt, CCB charter + decision log, signed capital-tier exit review.
 
@@ -126,7 +134,7 @@ Status notes live in `03-todo.md` + docs/todos/ (and historical `../archive/prod
 1. All prior phases met.
 2. 60-day shadow report (published or internally audited).
 3. Funding + tiered MMR exercised for ≥30 days.
-4. DMS position-flattening logic tested (or very strong SOP + automation in place).
+4. DMS first-failure latch, callback-race delivery, exact-once kill-before-close, and failed-kill countdown preservation tested.
 5. `--persist-strict` + encrypted creds demonstrated on ≥10 sessions.
 6. Prometheus / alerting drill executed successfully.
 7. All critical runbooks walked by at least two operators.

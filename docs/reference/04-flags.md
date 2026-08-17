@@ -2,7 +2,7 @@
 
 **All CLI flags live in one place:** `src/bin/main.inc` (function `register_cli_options`, using CLI11). The three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) share the exact same registration via `#include "../main.inc"`. QuestDB and web flags are conditional on `HAS_QUESTDB` / `HAS_WEB` at build time.
 
-**Precedence:** explicit CLI > `--config` JSON file > hard defaults.  
+**Run profiles and precedence:** `--preset` selects a named option bundle. Profile-owned values are applied after JSON configuration; explicit CLI flags take priority.
 (There is **no** `TRUETEST_CONFIG` environment variable — only `--config <path>`.)  
 **Introspection:** `--dry-run` (validate + print summary + exit), `--dump-config` (emit resolved snake_case JSON).
 
@@ -40,7 +40,7 @@
 ### Strategy
 | Flag                  | What it does |
 |-----------------------|--------------|
-| `--strategy <names>`  | Comma-separated list (e.g. `sma,mean-reversion,structure-continuation`). First is primary. Registered set: `mean-reversion`, `sma`, `ma-crossover`, `breakout`, `coiled-spring`, `adaptive-hybrid`, `structure-continuation`, `larry_connor`, `hedge-demo`. Default if empty: `mean-reversion`. |
+| `--strategy <names>`  | Comma-separated list (e.g. `sma,mean-reversion,structure-continuation`). First is primary. Registered set: `mean-reversion`, `sma`, `ma-crossover`, `breakout`, `coiled-spring`, `structure-continuation`, `larry_connor`, `hedge-demo`. Default if empty: `mean-reversion`. `adaptive-hybrid` is retired and explicitly refused. |
 | `--format <tick\|bar>` | Input data format for local provider. |
 | `--sma-period <N>`    | SMA period (default 20). |
 | `--param key=val`     | Strategy parameter (repeatable). |
@@ -72,7 +72,6 @@
 | `--max-notional / --max-leverage / --min-liq-distance-pct` | Pre-trade venue risk caps (`FuturesRiskCheck`). |
 | `--dead-man-countdown-ms / --dead-man-heartbeat-ms` | DMS countdown settings (defaults ~30s / auto). |
 | `--disarm-deadman`                | Explicitly do not arm DMS for this run. |
-| `--dms-attempt-position-close`    | On persistent DMS heartbeat failure, also send a reduceOnly MARKET flatten (pairs with external watchdog). |
 
 ### Credentials / Network / Recording
 | Flag                    | What it does |
@@ -91,7 +90,7 @@
 | `--sl / --tp <float>`       | Platform stop-loss / take-profit as fraction of entry (also used by DefaultExitPolicy; see Platform exits). |
 | `--checkpoint <path>`       | Write periodic binary portfolio snapshots. |
 | `--checkpoint-interval <N>` | Events between checkpoints (default 10000). |
-| `--resume <path>`           | Load portfolio state from checkpoint before start. |
+| `--resume <path>`           | **Unavailable.** Checkpoint v1 lacks enough state for a safe restore; CLI and direct engine configuration refuse before mutation. |
 
 ### Backfill / Order Realism / Debug
 | Flag                        | What it does |
@@ -105,6 +104,7 @@
 | Flag                    | What it does |
 |-------------------------|--------------|
 | `--config <path>`       | Load JSON config file. |
+| `--preset <name>`       | Apply a named run profile: `futures-phase0`, `mc-robustness`, `backtest-local-l2`, or `shadow-tape` (aliases accepted). Use `--dump-config` to inspect resolved values. |
 | `--dump-config`         | Print resolved config as JSON and exit. |
 | `--dry-run`             | Validate everything, print summary, and exit (no engine run). |
 | `--rolling-window / --risk-free-rate / --periods-per-year / --max-equity-points` | Analytics (Sharpe/Sortino, equity curve decimation, etc.). |
@@ -128,7 +128,7 @@
 ### Platform exits (all strategies)
 | Flag | What it does |
 |------|----------------|
-| `--exit-policy <mode>` | **Platform** protective exits applied after each accepted strategy order. Modes: `floor` (default — ensure SL/TP when strategy omitted them), `strategy_only` (legacy research: only strategy `exit_intent`s), `engine_only` (ignore strategy intents), `union` (keep strategy intents; append SL if missing). Position-reducing signal closes do **not** get inverted short/long brackets. |
+| `--exit-policy <mode>` | **Platform** protective exits applied after each accepted strategy order. Modes: `floor` (default — ensure SL/TP when strategy omitted them), `strategy_only` (legacy research: only strategy `exit_intent`s), `engine_only` (ignore strategy intents), `union` (keep strategy intents; append at most one Platform intent containing only globally missing configured SL/TP/trailing legs; an empty Strategy plan receives the full Platform intent). Position-reducing signal closes do **not** get inverted short/long brackets. |
 | `--sl <frac>` | Stop-loss fraction of entry for platform defaults (`0` = off). Default `0.003` (0.3%). |
 | `--tp <frac>` | Take-profit fraction of entry for platform defaults (`0` = off). Default `0.01`. |
 
@@ -154,13 +154,14 @@ Strategies do **not** need to implement SL/TP. Rich strategy intents (ATR/fib/sc
 | `--output-format <json\|csv>` | Results format. |
 | `--status-format <auto\|tui\|plain\|ndjson\|off>` | Live dashboard mode (default `auto` → rich TUI on tty for shadow/live). |
 | `--no-tui`              | Shortcut for `--status-format=plain`. |
+| `--simple-tui`          | On shadow/live, use the ANSI-box console dashboard instead of the rich ncurses TUI; has no effect on backtest or non-TUI status formats. |
 
 ### ImGui strategy desk (only when built with `ENABLE_IMGUI=ON` / `HAS_IMGUI_DESK`)
 | Flag | What it does |
 |------|----------------|
 | `--desk` | Open the personal ImGui desk (Monitor panels + operator pause/flatten/kill). Prefer over rich TUI when set. Batch runs keep the window open on the final snapshot until closed. See `docs/internal/imgui-desk-design.md`. |
 | `--desk-demo-data` | Start the desk with deterministic DEMO DATA research panels already enabled (same as the menu toggle) - headless visual QA / manual smoke without a mouse click. |
-| `--no-footprint` | Disable footprint public-trade collection, which otherwise auto-activates with `--desk`. Never affects trading behavior either way - purely observational (`footprint.md`). |
+| `--no-footprint` | Disable footprint public-trade collection, which otherwise auto-activates with `--desk`. Never affects trading behavior either way; it is purely observational. See `docs/internal/imgui-desk-design.md`. |
 | `--footprint-tick-size` | Exact decimal tick-size override for the footprint panel (e.g. `0.01`), used only when official instrument metadata disagrees or is unavailable; conflicting values make the footprint unavailable rather than guessing. |
 
 ### Web UI (only when built with `ENABLE_WEB=ON` / `HAS_WEB`)
@@ -180,7 +181,7 @@ Strategies do **not** need to implement SL/TP. Rich strategy intents (ATR/fib/sc
 | `--run-notes <string>`      | Free-form note stored in `runs_meta`. |
 | `--questdb-host / --questdb-ilp-port / --questdb-http-port` | Connection details (defaults: 127.0.0.1, 9009, 9000). |
 | `--questdb-flush-ms`        | Time-based ILP flush interval (default 150). |
-| `--persist-strict`          | Hard-fail on QuestDB problems + local ILP fallback. |
+| `--persist-strict`          | Hard-fail on QuestDB startup/runtime problems. Backtest returns non-zero; shadow/live also halt. Rejected with Monte Carlo. A local ILP fallback remains diagnostic, not success. |
 
 **Implicit (CLI11):** `-h/--help`, `--help-all`.
 

@@ -475,7 +475,9 @@ flowchart LR
 ```
 
 **Built-in strategies** (self-registering):  
-`sma` · `ma-crossover` · `mean-reversion` · `breakout` · `coiled-spring` · `larry_connor` · `hedge-demo` · `adaptive-hybrid` · `structure-continuation`
+`sma` · `ma-crossover` · `mean-reversion` · `breakout` · `coiled-spring` · `larry_connor` · `hedge-demo` · `structure-continuation`
+
+The former `adaptive-hybrid` prototype is retired and unavailable pending a safe rebuild.
 
 **Indicators** (`src/indicator/`): SMA, EMA, RSI, Stochastic, Bollinger, ATR, swing detector, rolling extremes, EMA regime.
 

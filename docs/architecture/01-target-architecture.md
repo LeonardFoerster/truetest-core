@@ -2,7 +2,7 @@
 
 **Status**: Thin extraction / planned skeleton (Doc Phase per D-03). 
 
-**Planned / extracted; see reference/ for current** authoritative details and diagrams. Full material lives in `docs/reference/02-user-manual.md` (architecture + data flow), `docs/reference/01-instructions.md`, root governance (`prod.md`, `AGENTS.md`), and source (`src/`).
+**Planned / extracted; see reference/ for current** authoritative details and diagrams. Full material lives in `docs/reference/02-user-manual.md` (architecture + data flow), `docs/reference/01-instructions.md`, `docs/governance/01-prod.md`, `AGENTS.md`, and source (`src/`).
 
 **Last updated**: 2026-07 (new content impl — extracted high-level only; no invention).
 
@@ -22,8 +22,8 @@ Three binaries from one tree via `TT_TARGET` (BACKTEST / SHADOW / LIVE) in `src/
 ## High-Level Components
 
 - **Core engine** (`src/engine/`): event loop, batch/streaming, worker orchestration, StageTimer instrumentation.
-- **Providers** (`src/providers/`): `IProvider` sole extension point. local (CSV/tick), binance + binance-futures (WS+REST), synthetic (GBM for MC).
-- **Strategies** (`src/strategy/`): pluggable via `REGISTER_STRATEGY`; emit `order_event` + `exit_intent`. Self-registering (sma, mean-reversion, breakout, adaptive-hybrid, structure-continuation, ...).
+- **Providers** (`src/providers/`): `IProvider` sole extension point. Always available: local (CSV/tick) and synthetic (GBM for MC); conditional venues: Binance spot/futures, Bitget UTA futures, and Bitunix futures MD/paper/shadow (live routing refused).
+- **Strategies** (`src/strategy/`): pluggable via `REGISTER_STRATEGY`; emit `order_event` + `exit_intent`. Self-registering (sma, mean-reversion, breakout, structure-continuation, ...). The retired Adaptive Hybrid prototype is not shipped.
 - **Execution** (`src/execution/`): `IExecutionAdapter` family (LocalBook, QueueAware, Hybrid, Bridge), `Portfolio` (per-lot), `OrderTracker`, realism models.
 - **Orderbook & matching** (`src/orderbook/`): price-time priority `Orderbook` + `FillModel`.
 - **Risk & Exits** (`src/risk/`, `src/exits/`): `RiskManager`, venue `IRiskCheck` (FuturesRiskCheck first), `ExitManager` (per-lot SL/TP/trailing), `DefaultExitPolicy` (platform SL/TP for every strategy via `--exit-policy` / `--sl` / `--tp`), `IBracketAdapter`.
@@ -53,18 +53,20 @@ Data source → parser (market/tick/l2) → Engine dispatch → Strategy(ies)
 - Hot-path: no nlohmann/json, minimal allocs (pools), lock-free SPSC only.
 - Reconciler refusal default.
 - User-data WS = truth.
-- DMS protects orders only (Phase 3 position flatten pending).
+- DMS owns the venue countdown only. Its first failure signals the centralized
+  exact-once kill session, which owns cancellation and flattening.
 - Provider is sole extension; no `HAS_*` in core.
 - Small capital + evidence gates.
 
 ## Realism, MC, Persistence
 - Realism models (latency/impact/queue/fill/fee) active in backtest/shadow only; bypassed in live.
 - MC: synthetic provider + full reuse of engine/strategy/realism/analytics surfaces; deterministic seeding; `--monte-carlo --mc-trials N` (see instructions + todo MC-*).
-- Persistence: binary zstd event log (mandatory durable), optional QuestDB (soft-fail), checkpoints.
+- Persistence: binary zstd event log (mandatory durable), optional QuestDB
+  (soft-fail by default; terminal/nonzero with `--persist-strict`), and
+  diagnostic-only v1 checkpoints that cannot be resumed.
 
 ## Safety Surface (Phase 1 Freeze)
-10 files (see `scripts/check-live-safety-freeze.sh`, `prod.md`, `prerequisites.md`):
-`tt_target.h`, `engine.cpp`, binance_futures_* (provider/dead_mans/kill/reconciler), risk/*, live_safety.h, worker_watchdog.h.
+The mechanically frozen surface covers the compile-time live gate, engine/session lifecycle, execution admission, Binance and Bitget provider/REST safety paths, risk, and worker halt propagation. See `scripts/check-live-safety-freeze.sh` for the exact list.
 
 All edits: `LIVE_SAFETY_CCB_APPROVED` token + CCB + clean shadow run.
 

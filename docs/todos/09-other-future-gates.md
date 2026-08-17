@@ -10,9 +10,12 @@
 - Richer C API + language bindings. (C API exists for embedding when `BUILD_SHARED_LIB`; produces analytics + results JSON only; not wired through QuestDB capture or rich TUI.)
 - Formal incident post-mortem process + CCB charter (Phase 6).
 
-- Go-Live Gate rows (overarching; no capital tier increase permitted until all nine rows have two signatures + concrete evidence): 1. All prior phases met. 2. 60-day shadow report (published or internally audited). 3. Funding + tiered MMR exercised for ≥30 days. 4. DMS position-flattening logic tested (or very strong SOP + automation in place). 5. `--persist-strict` + encrypted creds demonstrated on ≥10 sessions. 6. Prometheus / alerting drill executed successfully. 7. All critical runbooks walked by at least two operators. 8. CCB size-increase request formally approved. 9. Independent safety review (internal or external) with written sign-off.
+- Go-Live Gate rows (overarching; no capital tier increase permitted until all nine rows have two signatures + concrete evidence): 1. All prior phases met. 2. 60-day shadow report (published or internally audited). 3. Funding + tiered MMR exercised for ≥30 days. 4. DMS first-failure to centralized-kill handoff and process-suspension SOP exercised. 5. `--persist-strict` + encrypted creds demonstrated on ≥10 sessions. 6. Prometheus / alerting drill executed successfully. 7. All critical runbooks walked by at least two operators. 8. CCB size-increase request formally approved. 9. Independent safety review (internal or external) with written sign-off.
 - Risk resume (halt_flag_ stops the engine but there's no resume channel).
-- QuestDB hard-fail (daemon unreachable currently downgrades to a warning; "refuse to start when `--persist` is set but QuestDB is down" is documented as follow-up).
+- QuestDB remains soft-fail by default. `--persist-strict` fails startup or
+  runtime writes with a nonzero result; shadow/live also latch terminal halt.
+  Monte Carlo explicitly rejects strict mode until its summary writer supports
+  the same contract.
 
 **From AGENTS.md / ENGINE "Not yet implemented" + hard invariants (ongoing for all work)**: Respect every one (compile-time live-order gate absolute via `TT_TARGET` + `target_allows_live_orders()`; halt is terminal/write-once atomic; no auto-resume/no cooldown/no "helpful" retry on safety paths; hot-path discipline — zero nlohmann/json (CI-enforced), zero or pooled allocs, lock-free SPSC only (one producer/consumer per ring); reconciler refusal default (except documented spot-testnet carve-out); user-data WS source of truth; provider is the only extension point (IProvider + four safety hooks + transport/parser/executor; core has no `HAS_*` or venue specifics); small capital first + evidence-based gates (full artifacts + 9-row Go-Live with two signatures before any tier increase). "The engine already implements strong compile-time and runtime safety primitives that most retail or early-stage systems lack... This playbook exists so that future operators cannot say 'we forgot why we were careful.'"
 
@@ -22,7 +25,7 @@
 - Initial creation of `reports/phase0/` skeleton and governance root files (`prod.md`, `prerequisites.md`, `todo.md`) – Doc Phase 0 core (this cycle).
 - Phase 1 mechanical freeze markers + enforcement script (already landed).
 - Governance + status synchronization for `monte-carlo` branch Monte Carlo work (README, todo.md, AGENTS.md, prod.md, reports/phase0, instructions.md, user-manual.md).
-- Post-landing doc hygiene for new strategies (structure-continuation, adaptive-hybrid) + indicators (ema_regime, stochastic, swing_detector): updated CLI `--help`, instructions.md, flags.md, user-manual.md, AGENTS.md. Initial MC smoke campaigns executed successfully against the new strategies (MC-05 partial).
+- Historical Adaptive Hybrid smoke work is not current evidence; the prototype is retired and excluded from the CLI and MC matrix pending the A-* rebuild.
 - MC-02 Step A (per-trial win_rate / profit_factor distributions + enhanced reporter; tiny AnalyticsReport addition for exact `winning_trades` count; JSON + QuestDB campaign rows).
 - Multi-agent consolidation of scattered todos/docs (this update): single root `todo.md`; docs/ purged of duplicate action lists (now pointers only); historical hardening guide archived or clearly marked; stale planned refs cleaned with explicit language.
 

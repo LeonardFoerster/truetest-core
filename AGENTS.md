@@ -33,21 +33,24 @@ C++ standard: **C++23**. Build system: CMake + `cmake/Sources.cmake` (no globs) 
 
 # Tests — pick ONE preset tree and stay consistent (prefer presets, not ad-hoc build/):
 cmake --preset linux-tests
-cmake --build --preset linux-tests -j --target engine_backtest truetest_tests
-ctest --test-dir out/build/linux-tests --output-on-failure
+cmake --build --preset linux-tests --target engine_backtest truetest_tests
+ctest --preset linux-tests
 
 # Daily desk/shadow (venues + ImGui) — single warm tree, not build-dev/:
-# cmake --preset linux-dev && cmake --build --preset linux-dev -j --target engine_shadow truetest_tests
+# cmake --preset linux-dev && cmake --build --preset linux-dev --target engine_shadow truetest_tests
 
 # Hot-path focus
 ctest --test-dir out/build/linux-tests -R 'hotpath|Hotpath|ObjectPool|Ring' --output-on-failure
 
 # ASAN when touching pools/rings/lifetime (delete tree after; do not keep warm forever)
-cmake --preset linux-asan && cmake --build --preset linux-asan -j
+cmake --preset linux-asan && cmake --build --preset linux-asan
 # ./scripts/clean-builds.sh --keep linux-tests --apply   # drop asan/extra trees
 
+# Low-memory portable Release + tests (LTO disabled by preset)
+# cmake --preset linux-release-low-memory && cmake --build --preset linux-release-low-memory
+
 # Benchmarks (perf claims only) — reuse preset tree, avoid a second forest:
-cmake --preset linux-benchmarks && cmake --build --preset linux-benchmarks -j --target truetest_benchmarks
+cmake --preset linux-benchmarks && cmake --build --preset linux-benchmarks --target truetest_benchmarks
 ./out/build/linux-benchmarks/truetest_benchmarks --benchmark_filter='Orderbook|Engine_Throughput|HotPath'
 ```
 
@@ -87,21 +90,64 @@ Frozen files (must match `scripts/check-live-safety-freeze.sh`):
 ```
 src/core/tt_target.h
 src/engine/engine.cpp
+src/engine/engine.h
+src/engine/engine_config.h
+src/engine/engine_pending.cpp
+src/engine/live_safety_session.cpp
+src/engine/live_safety_session.h
+src/bin/main.inc
+src/bin/provider_open_policy.h
+src/execution/execution_bridge.h
+src/execution/fill_parser.h
+src/execution/async_support.h
+src/execution/order_transport.h
+src/providers/provider.h
+src/providers/bounded_ws_open.h
+src/providers/bounded_ws_frame_reader.h
+src/providers/data_bridge.h
+src/providers/recovery_payload.h
+src/providers/socket_readiness.h
+src/providers/thread_safe_callback.h
+src/providers/transport.h
+src/providers/binance/binance_transport.h
+src/providers/binance/binance_combined_transport.h
+src/providers/binance/binance_user_data_transport.h
+src/providers/binance/binance_provider.h
+src/providers/binance/binance_kill_switch.h
+src/providers/binance/binance_reconciler.h
+src/providers/binance/binance_rest_client.h
+src/providers/binance/binance_rest_order_transport.h
+src/providers/binance/binance_oco_bracket_adapter.h
 src/providers/binance/binance_futures_provider.h
 src/providers/binance/binance_futures_dead_mans_switch.h
 src/providers/binance/binance_futures_kill_switch.h
 src/providers/binance/binance_futures_reconciler.h
+src/providers/binance/binance_futures_user_data_parser.h
+src/providers/binance/binance_futures_register.cpp
+src/providers/binance/binance_futures_bracket_adapter.h
+src/providers/bitget/bitget_futures_provider.h
+src/providers/bitget/bitget_transport.h
+src/providers/bitget/bitget_combined_transport.h
+src/providers/bitget/bitget_private_ws_transport.h
+src/providers/bitget/bitget_futures_dead_mans_switch.h
+src/providers/bitget/bitget_futures_kill_switch.h
+src/providers/bitget/bitget_futures_reconciler.h
+src/providers/bitget/bitget_futures_user_data_parser.h
+src/providers/bitget/bitget_rest_client.h
+src/providers/bitget/bitget_rest_order_transport.h
+src/providers/bitget/bitget_futures_register.cpp
+src/providers/bitget/bitget_futures_bracket_adapter.h
 src/risk/risk_manager.h
 src/risk/futures_risk_check.h
 src/execution/live_safety.h
+src/threading/worker.h
 src/threading/worker_watchdog.h
 ```
 
 Requirements: `LIVE_SAFETY_CCB_APPROVED` in commit body, `docs/governance/02-prerequisites.md`, clean path exercise, **T3 multi-agent protocol** (root `AGENTS.md` §6), human CCB.
 
-Related hot files (not always in the ten, but treat as high-risk / often T2–T3):
+Related hot files (not always mechanically frozen, but treat as high-risk / often T2–T3):
 
-- `src/engine/engine.h`, `engine_config.h`
 - `src/threading/*` (SPSC, spin, affinity)
 - Any `*kill_switch*`, `*dead_mans*`, `*reconciler*`, `*watchdog*`
 - Hot-path strategy / orderbook / risk on-event code
@@ -196,7 +242,7 @@ pool.set_forbid_runtime_grow(true);  // exhaust → PoolExhausted / halt
 
 ### JSON allow-list (must stay tiny)
 
-Only paths allowed by `scripts/check-hotpath-json.sh` (today: `src/bin/main.inc`, `src/api/truetest_api.cpp`, `tests/`, isolated adaptive hybrid ctor loader). Expanding the allow-list is **Ask first**.
+Only paths allowed by `scripts/check-hotpath-json.sh` (today: `src/bin/main.inc`, `src/api/truetest_api.cpp`, and `tests/`). Expanding the allow-list is **Ask first**.
 
 ---
 
@@ -275,7 +321,7 @@ Register new sources in **`cmake/Sources.cmake`** (no directory globs).
 | `cmake/` / `Sources.cmake` | Configure + build affected targets |
 | `dashboard_snapshot` (new/changed field) | Render it (or explicitly, visibly omit it) in **both** the ncurses TUI (`src/ui/panels/*`, `tabbed_dashboard.cpp`, `console_dashboard.cpp`) and the ImGui desk (`src/ui/desk/panels/*`) before merging — see note below |
 
-**Two UI stacks, one snapshot.** The ncurses rich TUI and the ImGui desk are both first-class, actively maintained surfaces over the same `dashboard_snapshot`/`operator_actions` seam (no plan to freeze or retire either currently) — see `docs/internal/imgui-desk-design.md`. This has already drifted once inside a single week on the desk alone (a dead `portfolio_panels.cpp::draw_positions_panel` duplicating the live `activity_panel.cpp::draw_positions()` with the same columns/badges, just not wired in). With both stacks staying in parity long-term, the same drift can happen *across* the two UIs just as easily — a field added to one renderer and forgotten in the other won't fail a build, only silently miss an operator's screen. Check both renderers whenever `dashboard_snapshot` changes.
+**Two UI stacks, one snapshot.** The ncurses rich TUI and the ImGui desk are both first-class, actively maintained surfaces over the same `dashboard_snapshot`/`operator_actions` seam (no plan to freeze or retire either currently) — see `docs/internal/imgui-desk-design.md`. The desk’s live positions renderer is `src/ui/desk/panels/activity_panel.cpp`; with both stacks staying in parity long-term, a field added to one renderer and forgotten in the other will not fail a build, only silently miss an operator's screen. Check both renderers whenever `dashboard_snapshot` changes.
 
 ---
 
@@ -342,4 +388,4 @@ Then: `/testing` → `TESTING VERDICT: PASS` → `/check-work` → thematic comm
 
 ---
 
-*Last updated: 2026-08-02 — docs tree paths (`internal/`, `platforms/`); pairs with workspace root AGENTS.md.*
+*Last updated: 2026-08-16 — serial preset defaults and low-memory build commands; pairs with workspace root AGENTS.md.*

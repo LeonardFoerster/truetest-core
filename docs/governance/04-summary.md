@@ -43,7 +43,7 @@ Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) are produced 
 - **`bitunix`** / **`bitunix-futures`**: Bitunix futures MD + paper/shadow (Phase 0–1; live order routing refused). Requires `ENABLE_BITUNIX`. See `docs/platforms/bitunix.md`.
 - **`synthetic`** / **`montecarlo`**: On-demand GBM path generation (standalone or Monte Carlo campaigns). Configurable `mu`, `sigma`, steps, initial price.
 - **Binary replay**: `--replay` from zstd-compressed event logs (deterministic, with time slicing).
-- **Generic WebSocket** (opt-in `ENABLE_LIVE_DATA`).
+- Generic `WebSocketDataSource` was removed as unwired; live market data is owned by the concrete venue providers.
 
 All data flows through the pluggable `IProvider` / `IDataTransport` / `IDataParser` / `IExecutionAdapter` architecture. New venues are sibling providers; core engine stays unchanged.
 
@@ -58,7 +58,7 @@ Strategies self-register via `REGISTER_STRATEGY` macro and support multi-strateg
 - `ma-crossover`
 - `mean-reversion`
 - `breakout` / `coiled-spring`
-- `adaptive-hybrid`
+- `adaptive-hybrid` — retired prototype; unavailable pending a safe rebuild
 - `structure-continuation`
 - `larry_connor` (underscore in registry name)
 - `hedge-demo` (paired legs + ExitManager demo)
@@ -92,7 +92,9 @@ Strategies can emit both `order_event`s and `exit_intent` vectors (for per-lot b
 - **ExitManager**: Per-lot SL/TP/trailing brackets attached by strategy.
 - **Bracket adapters**:
   - Spot: Binance OCO (`/api/v3/order/oco`)
-  - Futures: Two `STOP_MARKET` + `TAKE_PROFIT_MARKET` with `closePosition=true` + `reduceOnly=true` (auto-cancel of siblings on fill)
+  - Futures: two independent conditional algo legs (`STOP_MARKET` +
+    `TAKE_PROFIT_MARKET`) with `closePosition=true`; Binance forbids quantity
+    and `reduceOnly` in this shape, and sibling cancellation is not assumed
 - Full order lifecycle: submit → ack → partial → filled / canceled / rejected / amended.
 - `OrderTracker` + rich status machine.
 - Client order ID minting (WAF-safe prefixes).
@@ -118,7 +120,7 @@ Strategies can emit both `order_event`s and `exit_intent` vectors (for per-lot b
   - Shared `runs_meta` with campaign analytics.
   - Soft-fail by default; strict mode available.
   - Batched `IlpWriter` background thread.
-- **Checkpoints**: Periodic binary portfolio snapshots for resume-after-crash.
+- **Checkpoints**: Periodic binary diagnostic snapshots only. Resume v1 is disabled until a complete v2 state/replay contract exists.
 
 ---
 
@@ -160,11 +162,12 @@ Strategies can emit both `order_event`s and `exit_intent` vectors (for per-lot b
 cmake -B build && cmake --build build
 ```
 
-Source registration is centralized in `cmake/Sources.cmake` (core + tests; no globs). Optional venue/backend TUs live in `cmake/Dependencies.cmake`. Common real setups use presets (`cmake --list-presets`); preset binaries land in `out/build/<preset>/`, ad-hoc builds in `build/`.
+Source registration is centralized in `cmake/Sources.cmake` (core + tests; no globs). Optional venue/backend TUs live in `cmake/Dependencies.cmake`. Common real setups use presets (`cmake --list-presets`); preset binaries land in `out/build/<preset>/`, ad-hoc builds in `build/`. Build presets default to one job, and `ctest --preset linux-tests` is the serial test entry point.
 
 **Key CMake options**:
 - Venues: `ENABLE_BINANCE`, `ENABLE_BITGET`, `ENABLE_BITUNIX`
-- Feature: `ENABLE_QUESTDB`, `ENABLE_WEB`, `ENABLE_LIVE_DATA`, `ENABLE_DEBUG`, `ENABLE_NATIVE_OPT` (all three engines when ON)
+- Feature: `ENABLE_QUESTDB`, `ENABLE_WEB`, `ENABLE_IMGUI`, `ENABLE_DEBUG`, `ENABLE_LTO`, `ENABLE_NATIVE_OPT` (all three engines when ON)
+- Compatibility: `ENABLE_LIVE_DATA` is accepted only as a deprecated no-op; select a venue option for live data.
 - `BUILD_TESTS`, `ENABLE_BENCHMARKS`, `BUILD_SHARED_LIB`
 - Sanitizers: `ENABLE_ASAN` / `TSAN` / `UBSAN` (TSAN exclusive with ASAN/UBSAN; ASAN+UBSAN OK)
 
@@ -179,7 +182,7 @@ Source registration is centralized in `cmake/Sources.cmake` (core + tests; no gl
 
 - Strong production primitives already in place (compile-time gating, layered safety, reconciler, DMS + kill, user-data truth, per-lot exits, queue realism, MC engine).
 - **Phase 0** (tiny-size mainnet futures validation): 0/15 qualifying sessions. Phase 0 collection was paused during priority work on the monte-carlo branch (gates/ritual unchanged). Ritual + templates ready in `01-prod.md` + `reports/phase0/`.
-- **Phase 1** Live-Safety Freeze: 10 files under mechanical CCB gate (`scripts/check-live-safety-freeze.sh`). Token + two-person review + clean multi-hour shadow required for all future edits.
+- **Phase 1** Live-Safety Freeze: the engine/execution/provider safety surface is under the mechanical CCB gate (`scripts/check-live-safety-freeze.sh`). Token + two-person review + clean multi-hour shadow are required for all future edits.
 - Monte Carlo simulation capabilities (integrated from the monte-carlo branch) are available for research and strategy robustness (object reuse, reporter, synthetic provider).
 - **Recommendation**: Research, strategy robustness testing, and tiny-size validation only. Not suitable for meaningful capital until Phase 0/1 exit criteria are met.
 

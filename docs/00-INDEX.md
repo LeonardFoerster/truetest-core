@@ -5,7 +5,7 @@
 **Topic navigation** (by task): [`docs/README.md`](README.md).  
 **Authoritative gates/tasks**: root `AGENTS.md`, `docs/governance/`, `docs/todos/`, `reports/phase0/`.
 
-**Last updated**: 2026-08-02 (docs tree refactor: `internal/`, `platforms/`, `skills/`)
+**Last updated**: 2026-08-15 (live-safety decision + backtest-defect backlog navigation)
 
 ## Recommended 01-N order
 
@@ -13,7 +13,7 @@
 02. `AGENTS.md` — AI/agent coding rules, Phase 1 freeze, hot-path + safety red lines, preferred build commands.
 03. `docs/governance/01-prod.md` — Production contract: phases, Go-Live Gate, Phase 0 ritual.
 04. `docs/governance/02-prerequisites.md` — Mandatory pre-PR checklist for frozen-surface edits.
-05. `docs/governance/03-todo.md` (thin) + `docs/todos/` (detailed `00-OVERVIEW` … `09-…`) — Living tasks; cite anchors in safety PRs.
+05. `docs/governance/03-todo.md` (thin) + `docs/todos/` (detailed `00-OVERVIEW` … `10-…`) — Living tasks; cite the file and item ID in PRs.
 06. `docs/governance/04-summary.md` — Condensed status.
 07. `reports/phase0/README.md` + `PROGRESS.md` + `templates/phase0-session-note.md` — Phase 0 evidence.
 08. `docs/reference/01-instructions.md` — Master technical reference (CLI, providers, realism, MC).
@@ -28,9 +28,12 @@
 17. `docs/architecture/04-performance.md` — Capacities, threading, limits.
 18. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md`, `07-strategy-development.md` — Specialized reference (strategy authors → 07).
 19. `docs/archive/` — Historical only (MERGE_PLAN, gaps snapshot, QuestDB logs, Edge1). Not current status.
-20. `docs/internal/engine-decomposition.md` — `engine.{h,cpp}` decomposition plan (+ skill `engine-decomposition`).
+20. `docs/internal/engine-decomposition.md` + `engine-decomposition-design.md` — `engine.{h,cpp}` decomposition plan (+ skill `engine-decomposition`).
 21. `docs/internal/data-pipeline.md` — Market-data path redesign (`MarketSeries`, `DataWrapper`; mostly shipped).
-22. `docs/skills/00-OVERVIEW.md` — Proposed agent skills (planning only; not installed).
+22. `docs/internal/imgui-desk-design.md` — ImGui desk status and remaining research-panel wiring.
+23. `docs/skills/00-OVERVIEW.md` — Proposed agent skills and retained execution records.
+24. `docs/decisions/2026-08-14-live-safety-repair.md` — Approved live-safety repair decision and acceptance criteria.
+25. `docs/todos/10-BF-backtest-engine-bugfixes.md` — Backtest defect backlog and frozen-surface sequencing.
 
 ## Processing notes
 

@@ -46,8 +46,8 @@ A dedicated skill can:
 ## Non-Negotiable Rules the Skill Must Enforce
 
 1. **Reference format**:
-   - Fine-grained references should use `docs/todos/01-P0-phase0.md#P0-01` style.
-   - Backward compat "todo.md #P0-01" is allowed only in thin files.
+   - Fine-grained references should cite a file and item ID, e.g. `docs/todos/01-P0-phase0.md` P0-01.
+   - Avoid fragment-style todo references unless the target defines an explicit anchor.
 2. **Planned language**:
    - Aspirational content must use explicit planned phrasing.
    - No dangling "will be documented in X" without the planned language.

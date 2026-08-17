@@ -18,10 +18,11 @@ A development velocity skill that safely scaffolds a new trading strategy (inclu
 
 Adding a new strategy today requires touching many places with very specific patterns:
 
-- `src/strategy/strategy_registry.h` (the macro registration)
+- Per-translation-unit registration with `REGISTER_STRATEGY` from `src/strategy/strategy_registry.h`
 - New `.h` + `.cpp` following the existing strategy interface
 - Proper use of indicators
-- MC compatibility (`reset_for_next_trial` behavior, no persistent state across trials)
+- MC compatibility (`IStrategy::reset(uint64_t)` and explicit reuse support, with no persistent state across trials)
+- Registration in `cmake/Sources.cmake`
 - Tests in `tests/test_strategies.cpp` or dedicated file
 - Sometimes golden regression data
 - Updates to `--help`, `docs/reference/01-instructions.md`, possibly user-manual or adaptive-hybrid reference
@@ -43,7 +44,7 @@ This is repetitive and error-prone. A good scaffold skill removes boilerplate wh
 
 1. **Registry via macro only** — never manual registration.
 2. **MC safety**:
-   - Strategy must be fully resettable via `reset_for_next_trial`.
+   - Implement `reset(uint64_t)` and return true from `supports_mc_trial_reuse()` only when reuse is fully supported.
    - No heap allocations that grow across trials.
    - Must be safe to run under Monte Carlo with `--monte-carlo`.
 3. **Hot path**:
@@ -71,18 +72,18 @@ This is repetitive and error-prone. A good scaffold skill removes boilerplate wh
 - Create `src/strategy/<name>.h` and `.cpp` with:
   - Correct includes
   - Class inheriting from the strategy base
-  - `register_strategy` macro usage
+  - `REGISTER_STRATEGY` macro usage in the strategy `.cpp`
   - Placeholder `on_*` methods with comments
-  - `reset_for_next_trial` implementation
+  - `reset(uint64_t)` implementation and an explicit reuse-support decision
   - Proper use of `IIndicator` types where relevant
-- Add to the strategy registry file (via precise edit).
+- Add the new source files to `cmake/Sources.cmake`; registration itself remains local to the strategy `.cpp`.
 - Create or extend a test file with a minimal passing test.
 - Generate a short internal design note in the file header.
 
 ### Phase 2 — Documentation & CLI
 - Update places that list strategies (reference docs, possibly instructions).
 - Add a minimal example config snippet if the strategy takes parameters.
-- Ensure `--help` will pick it up after rebuild (no manual string lists).
+- Update the manual strategy list in CLI help and the matching reference docs.
 
 ### Phase 3 — Verification
 - Build succeeds.
@@ -96,7 +97,9 @@ This is repetitive and error-prone. A good scaffold skill removes boilerplate wh
 ### Phase 4 — Optional Polish
 - Offer to set up a golden test (if the strategy is deterministic enough).
 - Suggest a first-pass parameter tuning session using MC.
-- Remind about adding the strategy to adaptive-hybrid demo list if appropriate.
+- Do not add new strategies to the retired Adaptive Hybrid surface. If a future
+  rebuild composes strategies, update its explicit contract only after that
+  feature is restored.
 
 ---
 

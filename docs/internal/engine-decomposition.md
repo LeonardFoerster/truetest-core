@@ -34,7 +34,9 @@
 ## Current Problems (Baseline — 2026-07)
 
 - `engine.cpp` ≈ 4383 LOC, `engine.h` ≈ 492 LOC.
-- Already extracted (good): `IOrderAuditSink` (QuestDB seam), `ExecutionRouter`, `InstrumentSpecCache`, `CheckpointManager`.
+- Already extracted: `IOrderAuditSink` (complete QuestDB seam),
+  `InstrumentSpecCache`, and `CheckpointManager`. `ExecutionRouter` is only a
+  partial seam and retains documented engine bypasses.
 - Remaining major sources of bloat:
   - Four similar large `run*()` methods with duplicated event-loop skeletons.
   - `build_dashboard_view()` + related caches, refresh logic, memory sampling (cold but enormous).
@@ -142,7 +144,7 @@ Use the following reference style in commits/PRs:
 
 **Tasks**:
 - **E-20** Update all comments in `engine.{h,cpp}` and related files to reference this plan + `engine-decomposition` skill.
-- **E-21** Ensure `IOrderAuditSink` and `ExecutionRouter` seams are complete and documented (no remaining dual paths for recording or adapter decisions).
+- **E-21** Complete `IOrderAuditSink`; characterize `ExecutionRouter` as partial until async submit-result and exchange-shadow bypasses move out of engine.
 - **E-22** (If needed) Introduce minimal forwarding methods or accessors that will be used by future extractions.
 - **E-23** Run full gate + test suite. Capture clean baseline.
 - **E-24** Commit with `LIVE_SAFETY_CCB_APPROVED` (even for comments, follow process).
@@ -404,14 +406,16 @@ Full verification (ctest -R 'Hotpath|Engine|Golden', MC campaigns, shadow runs, 
 ### Responsibility Matrix (engine vs. already-extracted / future)
 Already-extracted (good, per plan):
 - `IOrderAuditSink` + `audit_sink_` (Noop + QuestdbOrderAuditSink) — single seam for all recording.
-- `ExecutionRouter` + `router_` — adapter decisions, submit/poll, L2, advance.
+- `ExecutionRouter` + `router_` — partial adapter-routing seam; async submit
+  results, exchange-shadow dual submission, and some provider-fill paths remain
+  in engine.
 - `InstrumentSpecCache` + wrappers.
 - `CheckpointManager`.
 
 | Area                        | Lives in engine today                          | Planned home (per plan)                  | Notes / Risk |
 |-----------------------------|------------------------------------------------|------------------------------------------|--------------|
 | Audit recording             | delegates to audit_sink_                       | already extracted                        | Good |
-| Adapter routing / exec      | delegates to router_                           | already extracted                        | Good |
+| Adapter routing / exec      | partly delegates to router_; direct bypasses remain | complete the extraction              | Characterized, incomplete |
 | Object pools + acquire      | full ownership + template                      | stay (hot sacred)                        | Never touch |
 | Event publish + ring push   | publish_event                                  | stay (hot)                               | Sacred |
 | Core order/fill processing  | process_order, route_order, evaluate_exits     | stay (hot)                               | Canonical sequence must stay identical |
@@ -432,9 +436,8 @@ Critical consumers (must preserve exact behavior):
   - `snapshot_dashboard` used in hotpath pool tests + helpers.
 - **Public API / FFI**: `src/api/truetest_api.cpp` — `std::make_unique<engine>(...)`, `eng->run()`, `get_analytics()`.
 - **Providers / live paths**: config wiring of:
-  - `provider->set_event_publisher( [this](..){ publish_event(ev); } )`
   - `set_halt_callback( [this](r){ trigger_halt(r); } )`
-  - `set_funding_event_factory( ... acquire_pooled ... )`
+  - provider-owned bounded funding ingress, drained only by the engine loop
   - `set_unknown_fill_handler` (captures for bracket meta)
 - **TUI / Observability**:
   - `trigger_halt` updates dashboard state, shutdown reason, pushes error event.
@@ -538,7 +541,10 @@ This is the parseable, incremental, reviewable, mergeable plan. Numbered. Depend
 - **check-work / verifier subagent**: Full trace + code review. **VERDICT: FAIL** (waves missing; no net reduction; plan/docs not updated past Phase 1/2; 0/12 final steps met for decomp). Correctly identified prerequisites not satisfied.
 - **performance + zero-alloc**: **VERDICT: PASS**. Hot paths (acquire_pooled, publish_event, process_order, pools, forbid_runtime_grow, rings) untouched. Only comments. Gates + synthetic hotpath alloc tests PASS. No regressions. Matches invariants.
 - **saftey (frozen surface)**: **VERDICT: PASS**. Commit contains `LIVE_SAFETY_CCB_APPROVED`. `check-live-safety-freeze.sh` passed. No weakening of `halt_flag_`, `trigger_halt`, or other primitives. Comments correctly reference plan/skill. Legacy dual-path removal in seam is strengthening. No new risks.
-- **quality**: **VERDICT: FAIL** (initially, due to incomplete router_ seam initialization left by comment edits — stray initializer list, missing make_unique, latent null deref in hot paths, LOC guard violation). **Fixed** in follow-up commit `1076f2a` (restored proper `router_ = std::make_unique<ExecutionRouter>(...)` wiring; now buildable and seam-complete per E-21). Post-fix, comments are high quality, I-prefix compliant, clear references to plan/skill. Main issues resolved.
+- **quality**: **VERDICT: FAIL** (initially, due to incomplete `router_`
+  initialization left by comment edits). Follow-up `1076f2a` restored wiring,
+  but did not make the routing seam complete: the direct engine bypasses listed
+  above remain.
 - Gates (post-Phase 2 commit): freeze (with token), layer-deps, hotpath-json — all **PASS**.
 - Hot-path/pool tests (prebuilts + synthetic): PASS for alloc matrix, prewarm, etc.
 - Exercise: prebuilt binaries exercised (help + short invocation); behavior identical (comments only).
@@ -589,7 +595,7 @@ This is the parseable, incremental, reviewable, mergeable plan. Numbered. Depend
 
 **Waves status**: 0 executed. No new classes (`DashboardSnapshotBuilder` etc.), no moves, no deduplication. Only prep comments.
 
-**Seams**: IOrderAuditSink and ExecutionRouter confirmed complete (all recording/routing through seams; no dual paths for data capture).
+**Seams correction (2026-08-14)**: `IOrderAuditSink` is the persistence seam. `ExecutionRouter` is only partial: engine still owns async submit-result draining, exchange-shadow dual submission, and several provider-fill paths. Characterization tests pin that boundary; this document must not claim router completeness until those bypasses are extracted.
 
 **Verification**:
 - Freeze check: OK (token present).

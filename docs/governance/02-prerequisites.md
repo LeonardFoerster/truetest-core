@@ -12,20 +12,64 @@ See also:
 
 ---
 
-## Frozen Files (single source of truth)
+## Frozen Files (mechanical mirror)
 
-These 10 files carry the live-safety surface. Any modification requires the `LIVE_SAFETY_CCB_APPROVED` token in the commit message + clean shadow validation.
+These files carry the live-safety surface. Any modification requires the `LIVE_SAFETY_CCB_APPROVED` token in the commit message + clean shadow validation. `scripts/check-live-safety-freeze.sh` is the executable source of truth.
 
 ```
 src/core/tt_target.h
 src/engine/engine.cpp
+src/engine/engine.h
+src/engine/engine_config.h
+src/engine/engine_pending.cpp
+src/engine/live_safety_session.cpp
+src/engine/live_safety_session.h
+src/bin/main.inc
+src/bin/provider_open_policy.h
+src/execution/execution_bridge.h
+src/execution/fill_parser.h
+src/execution/async_support.h
+src/execution/order_transport.h
+src/providers/provider.h
+src/providers/bounded_ws_open.h
+src/providers/bounded_ws_frame_reader.h
+src/providers/data_bridge.h
+src/providers/recovery_payload.h
+src/providers/socket_readiness.h
+src/providers/thread_safe_callback.h
+src/providers/transport.h
+src/providers/binance/binance_transport.h
+src/providers/binance/binance_combined_transport.h
+src/providers/binance/binance_user_data_transport.h
+src/providers/binance/binance_provider.h
+src/providers/binance/binance_kill_switch.h
+src/providers/binance/binance_reconciler.h
+src/providers/binance/binance_rest_client.h
+src/providers/binance/binance_rest_order_transport.h
+src/providers/binance/binance_oco_bracket_adapter.h
 src/providers/binance/binance_futures_provider.h
 src/providers/binance/binance_futures_dead_mans_switch.h
 src/providers/binance/binance_futures_kill_switch.h
 src/providers/binance/binance_futures_reconciler.h
+src/providers/binance/binance_futures_user_data_parser.h
+src/providers/binance/binance_futures_register.cpp
+src/providers/binance/binance_futures_bracket_adapter.h
+src/providers/bitget/bitget_futures_provider.h
+src/providers/bitget/bitget_transport.h
+src/providers/bitget/bitget_combined_transport.h
+src/providers/bitget/bitget_private_ws_transport.h
+src/providers/bitget/bitget_futures_dead_mans_switch.h
+src/providers/bitget/bitget_futures_kill_switch.h
+src/providers/bitget/bitget_futures_reconciler.h
+src/providers/bitget/bitget_futures_user_data_parser.h
+src/providers/bitget/bitget_rest_client.h
+src/providers/bitget/bitget_rest_order_transport.h
+src/providers/bitget/bitget_futures_register.cpp
+src/providers/bitget/bitget_futures_bracket_adapter.h
 src/risk/risk_manager.h
 src/risk/futures_risk_check.h
 src/execution/live_safety.h
+src/threading/worker.h
 src/threading/worker_watchdog.h
 ```
 
@@ -63,7 +107,7 @@ Before opening or merging any PR that edits a frozen file (or significantly desc
 
 5. **Governance hygiene**:
    - Note "prod.md impact" (or "no impact") in PR description
-   - Reference the relevant `todo.md` item(s) (e.g. "Addresses todo.md #P1-02" or "Addresses docs/todos/02-P1-freeze.md#P1-02" for precision; see docs/todos/00-OVERVIEW.md)
+   - Reference the relevant todo item(s) by file and ID (e.g. "Addresses `docs/todos/02-P1-freeze.md` P1-02"; see docs/todos/00-OVERVIEW.md)
    - Phase 0 is still in active collection (or the PR explicitly advances collection / updates status)
 
 6. **No open untagged changes** on the branch that affect reproducibility or safety surface.
@@ -73,9 +117,10 @@ Before opening or merging any PR that edits a frozen file (or significantly desc
    - For phase-exit PRs: also update corresponding `prod.md` section + Go-Live Gate / `reports/phase0/PROGRESS.md`
    - Change must have been exercised in at least one clean `engine_shadow` or backtest run that covers the modified path
    - Two-person CCB review for any frozen surface change
+   - At least four continuous hours of clean `engine_shadow` evidence for kill/DMS/reconciler/halt lifecycle changes; unit tests do not replace this soak
 
 8. **Model discipline**:
-   - Use Opus-class model (per `AGENTS.md` multi-agent protocol) for any edit touching the 10 frozen files or their core invariants.
+   - Use an approved frontier model (per `AGENTS.md` multi-agent protocol) for any edit touching the mechanically frozen safety surface or its core invariants.
 
 Escalate to CCB if borderline or if the change is large.
 
