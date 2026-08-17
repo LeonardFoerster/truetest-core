@@ -32,6 +32,24 @@ set(_TT_DEPENDENCIES_INCLUDED TRUE)
 
 include(FetchContent)
 
+# CMake 4 compatibility for pinned third-party projects whose own
+# cmake_minimum_required() still selects an obsolete policy baseline.  The
+# function scope prevents the override from reaching TrueTest or sibling
+# dependencies, while preserving a stricter user-provided baseline.
+function(_tt_fetchcontent_make_available_with_policy_minimum dependency minimum)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 4.0)
+        if(DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+            if(CMAKE_POLICY_VERSION_MINIMUM VERSION_LESS "${minimum}")
+                set(CMAKE_POLICY_VERSION_MINIMUM "${minimum}")
+            endif()
+        else()
+            set(CMAKE_POLICY_VERSION_MINIMUM "${minimum}")
+        endif()
+    endif()
+
+    FetchContent_MakeAvailable("${dependency}")
+endfunction()
+
 # ── tt_fetch_dependencies() ─────────────────────────────────────────────────
 function(tt_fetch_dependencies)
     # CLI11 — header-only argument parser
@@ -40,7 +58,7 @@ function(tt_fetch_dependencies)
         GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
         GIT_TAG        v2.4.2
     )
-    FetchContent_MakeAvailable(cli11)
+    _tt_fetchcontent_make_available_with_policy_minimum(cli11 3.10)
 
     # zstd — binary event-log compression
     FetchContent_Declare(
@@ -53,7 +71,10 @@ function(tt_fetch_dependencies)
     set(ZSTD_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
     set(ZSTD_BUILD_SHARED   OFF CACHE BOOL "" FORCE)
     set(ZSTD_BUILD_STATIC   ON  CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(zstd)
+    # TrueTest has only ever emitted current-format zstd frames.  Excluding the
+    # pre-1.0 decoders keeps unused legacy code out of every static link.
+    set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+    _tt_fetchcontent_make_available_with_policy_minimum(zstd 3.10)
 
     # nlohmann/json — config-file parsing (NOT hot-path JSON)
     FetchContent_Declare(
@@ -73,6 +94,8 @@ function(tt_fetch_tests_dependencies)
         GIT_TAG        v1.15.2
     )
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    set(BUILD_GMOCK            OFF CACHE BOOL "" FORCE)
+    set(INSTALL_GTEST          OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
 endfunction()
 
@@ -87,6 +110,18 @@ function(tt_fetch_bench_dependencies)
     set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
     set(BENCHMARK_ENABLE_WERROR  OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(benchmark)
+
+    # First-party Debug targets use libstdc++'s checked STL ABI.  Google
+    # Benchmark passes STL-owning types across its library boundary, so its
+    # Debug objects must use the same layout as truetest_benchmarks.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_definitions(benchmark PRIVATE
+            $<$<CONFIG:Debug>:_GLIBCXX_DEBUG>)
+        if(TARGET benchmark_main)
+            target_compile_definitions(benchmark_main PRIVATE
+                $<$<CONFIG:Debug>:_GLIBCXX_DEBUG>)
+        endif()
+    endif()
 endfunction()
 
 # ── tt_wire_optional_backends(target) ───────────────────────────────────────
@@ -98,28 +133,12 @@ function(tt_wire_optional_backends target)
     # Shared Boost find for live/venue backends. Prefer Config-mode (CMP0167 NEW)
     # so modern Boost (header-only System since 1.69; e.g. 1.91 ships boost_headers
     # only, no boost_system package) works without FindBoost deprecation noise.
-    if(ENABLE_LIVE_DATA OR ENABLE_BINANCE OR ENABLE_BITGET OR ENABLE_BITUNIX)
+    if(ENABLE_BINANCE OR ENABLE_BITGET OR ENABLE_BITUNIX)
         if(POLICY CMP0167)
             cmake_policy(SET CMP0167 NEW)
         endif()
         find_package(Boost REQUIRED)
-    endif()
-
-    # HAS_LIVE_DATA remains available for venue live transports under providers/.
-    # Generic WebSocketDataSource was removed (docs/internal/data-pipeline.md#D-07 — unwired dead end).
-    # Do not request COMPONENTS system — link Boost::headers (preferred) or
-    # Boost::system when present on older installs that still export that target.
-    if(ENABLE_LIVE_DATA)
-        if(TARGET Boost::headers)
-            target_link_libraries(${target} PUBLIC Boost::headers)
-        elseif(TARGET Boost::system)
-            target_link_libraries(${target} PUBLIC Boost::system)
-        else()
-            message(FATAL_ERROR
-                "ENABLE_LIVE_DATA requires Boost::headers or Boost::system "
-                "(found Boost but neither target exists)")
-        endif()
-        target_compile_definitions(${target} PUBLIC HAS_LIVE_DATA)
+        target_compile_definitions(${target} PUBLIC TRUETEST_VENUE_DATA_COMPILED=1)
     endif()
 
     # Binance exchange provider
@@ -185,9 +204,8 @@ function(tt_wire_optional_backends target)
             set(CIVETWEB_INSTALL_EXECUTABLE       OFF CACHE BOOL "" FORCE)
             set(CIVETWEB_ENABLE_ASAN              OFF CACHE BOOL "" FORCE)
             # civetweb v1.16 declares cmake_minimum_required < 3.5, which CMake 4
-            # rejects. Scope the compatibility shim to this subproject only.
-            set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
-            FetchContent_MakeAvailable(civetweb)
+            # rejects. Keep the compatibility shim inside the subproject call.
+            _tt_fetchcontent_make_available_with_policy_minimum(civetweb 3.5)
         endif()
         target_sources(${target} PRIVATE
             ${_src}/web/snapshot_json.cpp
@@ -210,8 +228,9 @@ function(tt_wire_optional_backends target)
                 GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
                 GIT_TAG        20240722.0
             )
-            set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
-            set(BUILD_TESTING          OFF CACHE BOOL "" FORCE)
+            set(ABSL_PROPAGATE_CXX_STD   ON CACHE BOOL "" FORCE)
+            set(ABSL_USE_SYSTEM_INCLUDES ON CACHE BOOL "" FORCE)
+            set(BUILD_TESTING             OFF CACHE BOOL "" FORCE)
             FetchContent_MakeAvailable(abseil-cpp)
         endif()
 
@@ -223,7 +242,7 @@ function(tt_wire_optional_backends target)
         target_link_libraries(${target} PUBLIC
             absl::log absl::log_initialize absl::log_severity
             absl::log_sink absl::log_sink_registry
-            absl::flags absl::flags_parse absl::strings absl::str_format)
+            absl::strings absl::str_format)
         target_compile_definitions(${target} PUBLIC HAS_DEBUG)
     endif()
 endfunction()
@@ -286,14 +305,7 @@ function(tt_wire_imgui_desk target)
             GIT_REPOSITORY https://github.com/epezent/implot.git
             GIT_TAG        v0.16
         )
-        FetchContent_GetProperties(imgui)
-        if(NOT imgui_POPULATED)
-            FetchContent_Populate(imgui)
-        endif()
-        FetchContent_GetProperties(implot)
-        if(NOT implot_POPULATED)
-            FetchContent_Populate(implot)
-        endif()
+        FetchContent_MakeAvailable(imgui implot)
 
         add_library(truetest_imgui STATIC
             ${imgui_SOURCE_DIR}/imgui.cpp
@@ -304,7 +316,7 @@ function(tt_wire_imgui_desk target)
             ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
             ${implot_SOURCE_DIR}/implot.cpp
             ${implot_SOURCE_DIR}/implot_items.cpp)
-        target_include_directories(truetest_imgui PUBLIC
+        target_include_directories(truetest_imgui SYSTEM PUBLIC
             ${imgui_SOURCE_DIR}
             ${imgui_SOURCE_DIR}/backends
             ${implot_SOURCE_DIR})

@@ -105,7 +105,7 @@
     },
     {
       "name": "linux-dev",
-      "displayName": "Linux daily dev (venues + ImGui + live data + tests)",
+      "displayName": "Linux daily dev (venues + ImGui + tests)",
       "description": "Single warm tree for desk/shadow work. Prefer over ad-hoc build-dev/ to avoid duplicate multi-GB trees.",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
       "generator": "Unix Makefiles",
@@ -114,7 +114,6 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "BUILD_TESTS": "ON",
         "ENABLE_IMGUI": "ON",
-        "ENABLE_LIVE_DATA": "ON",
         "ENABLE_BINANCE": "ON",
         "ENABLE_BITGET": "ON",
         "ENABLE_BITUNIX": "ON"
@@ -202,23 +201,52 @@
         "CMAKE_BUILD_TYPE": "Release",
         "ENABLE_NATIVE_OPT": "ON"
       }
+    },
+    {
+      "name": "linux-release-low-memory",
+      "displayName": "Linux Release + Tests (portable, no LTO)",
+      "description": "Portable Release validation with tests and LTO disabled to reduce peak memory",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTS": "ON",
+        "ENABLE_LTO": "OFF",
+        "ENABLE_NATIVE_OPT": "OFF"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "windows-ninja", "configurePreset": "windows-ninja" },
-    { "name": "windows-vs-2022", "configurePreset": "windows-vs-2022" },
-    { "name": "linux-default", "configurePreset": "linux-default" },
-    { "name": "linux-tests", "configurePreset": "linux-tests" },
-    { "name": "linux-binance-questdb", "configurePreset": "linux-binance-questdb" },
-    { "name": "linux-bitget", "configurePreset": "linux-bitget" },
-    { "name": "linux-bitunix", "configurePreset": "linux-bitunix" },
-    { "name": "linux-venues", "configurePreset": "linux-venues" },
-    { "name": "linux-dev", "configurePreset": "linux-dev" },
-    { "name": "linux-providers-questdb", "configurePreset": "linux-providers-questdb" },
-    { "name": "linux-web", "configurePreset": "linux-web" },
-    { "name": "linux-asan", "configurePreset": "linux-asan" },
-    { "name": "linux-tsan", "configurePreset": "linux-tsan" },
-    { "name": "linux-benchmarks", "configurePreset": "linux-benchmarks" },
-    { "name": "linux-release-native", "configurePreset": "linux-release-native" }
+    { "name": "windows-ninja", "configurePreset": "windows-ninja", "jobs": 1 },
+    { "name": "windows-vs-2022", "configurePreset": "windows-vs-2022", "jobs": 1 },
+    { "name": "linux-default", "configurePreset": "linux-default", "jobs": 1 },
+    { "name": "linux-tests", "configurePreset": "linux-tests", "jobs": 1 },
+    { "name": "linux-binance-questdb", "configurePreset": "linux-binance-questdb", "jobs": 1 },
+    { "name": "linux-bitget", "configurePreset": "linux-bitget", "jobs": 1 },
+    { "name": "linux-bitunix", "configurePreset": "linux-bitunix", "jobs": 1 },
+    { "name": "linux-venues", "configurePreset": "linux-venues", "jobs": 1 },
+    { "name": "linux-dev", "configurePreset": "linux-dev", "jobs": 1 },
+    { "name": "linux-providers-questdb", "configurePreset": "linux-providers-questdb", "jobs": 1 },
+    { "name": "linux-web", "configurePreset": "linux-web", "jobs": 1 },
+    { "name": "linux-asan", "configurePreset": "linux-asan", "jobs": 1 },
+    { "name": "linux-tsan", "configurePreset": "linux-tsan", "jobs": 1 },
+    { "name": "linux-benchmarks", "configurePreset": "linux-benchmarks", "jobs": 1 },
+    { "name": "linux-release-native", "configurePreset": "linux-release-native", "jobs": 1 },
+    { "name": "linux-release-low-memory", "configurePreset": "linux-release-low-memory", "jobs": 1 }
+  ],
+  "testPresets": [
+    {
+      "name": "linux-tests",
+      "configurePreset": "linux-tests",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1, "noTestsAction": "error" }
+    },
+    {
+      "name": "linux-release-low-memory",
+      "configurePreset": "linux-release-low-memory",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1, "noTestsAction": "error" }
+    }
   ]
 }

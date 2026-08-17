@@ -47,6 +47,7 @@ set(ENGINE_CORE_SOURCES
     src/engine/instrument_spec_cache.cpp
     src/engine/checkpoint.cpp
     src/engine/dashboard_snapshot_builder.cpp
+    src/engine/live_safety_session.cpp
 
     # --- Analytics & reporting ---
     src/analytics/adverse_selection_tracker.cpp
@@ -75,9 +76,6 @@ set(ENGINE_CORE_SOURCES
     src/strategy/breakout_strategy.cpp
     src/strategy/larry_connor_strategy.cpp
     src/strategy/coiled_spring_strategy.cpp
-    src/strategy/sma.cpp
-    src/strategy/adaptive_hybrid_config.cpp
-    src/strategy/adaptive_hybrid_strategy.cpp
     src/strategy/structure_continuation_strategy.cpp
 
     # --- Market maker + risk ---
@@ -118,6 +116,7 @@ set(TEST_SOURCES
     tests/test_price.cpp
     tests/test_order_id.cpp
     tests/test_order_types.cpp
+    tests/test_order_tracker.cpp
     tests/test_object_pool.cpp
     tests/test_control_block_pool.cpp
     tests/test_symbol_table.cpp
@@ -157,6 +156,7 @@ set(TEST_SOURCES
     tests/test_event_log.cpp
     tests/test_engine.cpp
     tests/test_engine_async_support.cpp
+    tests/test_execution_router_characterization.cpp
     tests/test_engine_streaming.cpp
     tests/test_engine_integration.cpp
     tests/test_engine_lookahead.cpp
@@ -165,6 +165,8 @@ set(TEST_SOURCES
     tests/test_engine_l2_ingestion.cpp
     tests/test_engine_venue_risk_check.cpp
     tests/test_engine_brackets.cpp
+    tests/test_checkpoint.cpp
+    tests/test_live_safety_session.cpp
     tests/test_tick_to_trade_safety.cpp
     tests/test_orderbook_registry.cpp
     tests/test_worker_watchdog.cpp
@@ -193,7 +195,6 @@ set(TEST_SOURCES
 
     # --- Strategies ---
     tests/test_strategies.cpp
-    tests/test_adaptive_hybrid.cpp
     tests/test_monte_carlo_generators.cpp
     tests/test_monte_carlo_controller.cpp
 
@@ -217,9 +218,11 @@ set(TEST_SOURCES
     tests/test_execution_adapter.cpp
     tests/test_execution_bridge.cpp
     tests/test_provider_event.cpp
+    tests/test_market_data_feed.cpp
     tests/test_provider_event_stream_contract.cpp
     tests/test_provider_transport.cpp
     tests/test_provider_registry.cpp
+    tests/test_provider_open_policy.cpp
     tests/test_provider_engine_wiring.cpp
     tests/test_trade_tape_shadow_adapter.cpp
     tests/test_trade_tape_shadow_queue.cpp

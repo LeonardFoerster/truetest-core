@@ -15,6 +15,7 @@
 #include "engine/engine_config.h"
 #include "core/event.h"
 #include "data/data_handler.h"
+#include "execution/execution_adapter.h"
 #include "indicator/sma.h"
 #include "market_maker/market_maker.h"
 #include "orderbook/orderbook.h"
@@ -62,7 +63,8 @@ static void BM_Orderbook_InsertCancel(benchmark::State& state)
     {
         // Alternate prices across 100 levels around 100.0 to touch the
         // sorted-array insertion path without triggering a match.
-        double p = 99.0 - (next_id % 100) * 0.01;
+        const double p =
+            99.0 - static_cast<double>(next_id % 100U) * 0.01;
         auto o = make_order(next_id, side::buy, p, 10);
         auto trades = ob.add_order(o);
         benchmark::DoNotOptimize(trades);
@@ -103,6 +105,70 @@ static void BM_Orderbook_Match(benchmark::State& state)
     state.SetItemsProcessed(state.iterations());
 }
 BENCHMARK(BM_Orderbook_Match);
+
+// LocalBookAdapter bar-range scan. No order is traversed, so this isolates
+// the per-resting-order scan cost.
+static void BM_LocalBookAdapter_RangeMiss(benchmark::State& state)
+{
+    auto ob = std::make_shared<orderbook>();
+    LocalBookAdapter adapter(ob, nullptr, nullptr, 42, 1.1, 1.0);
+    const auto ts = std::chrono::system_clock::time_point{};
+    const auto order_count = static_cast<std::size_t>(state.range(0));
+
+    for (std::size_t i = 0; i < order_count; ++i)
+    {
+        order_event o(ts, "X", order_type::limit, order_side::buy, 1.0, 90.0);
+        o.set_order_id(static_cast<std::uint64_t>(i + 1));
+        o.set_earliest_eligible_ts(ts);
+        adapter.submit_order(o);
+    }
+
+    for (auto _ : state)
+    {
+        benchmark::DoNotOptimize(
+            adapter.sweep_resting_range("X", 99.0, 101.0, ts));
+    }
+    state.SetItemsProcessed(
+        state.iterations() * static_cast<std::int64_t>(order_count));
+}
+BENCHMARK(BM_LocalBookAdapter_RangeMiss)->Arg(1)->Arg(16)->Arg(128)->Arg(1000);
+
+// Volume consumes exactly one resting order; setup replenishes it outside
+// timing so every iteration observes the same live-order cardinality.
+static void BM_LocalBookAdapter_VolumeCappedHead(benchmark::State& state)
+{
+    auto ob = std::make_shared<orderbook>();
+    LocalBookAdapter adapter(ob, nullptr, nullptr, 42, 1.1, 1.0);
+    const auto ts = std::chrono::system_clock::time_point{};
+    const auto order_count = static_cast<std::size_t>(state.range(0));
+    std::uint64_t next_id = 1;
+
+    const auto submit_one = [&] {
+        order_event o(ts, "X", order_type::limit,
+                      order_side::buy, 1.0, 99.5);
+        o.set_order_id(next_id++);
+        o.set_earliest_eligible_ts(ts);
+        adapter.submit_order(o);
+    };
+    for (std::size_t i = 0; i < order_count; ++i) submit_one();
+
+    std::vector<fill_event> fills;
+    fills.reserve(1);
+    for (auto _ : state)
+    {
+        benchmark::DoNotOptimize(
+            adapter.sweep_resting_range("X", 99.0, 101.0, ts, 1.0));
+
+        state.PauseTiming();
+        fills.clear();
+        adapter.poll_fills(fills);
+        submit_one();
+        state.ResumeTiming();
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+BENCHMARK(BM_LocalBookAdapter_VolumeCappedHead)
+    ->Arg(1)->Arg(16)->Arg(128)->Arg(1000);
 
 // ─── Ring buffer: single-threaded push + pop round trip ─────────────────────
 static void BM_RingBuffer_PushPop(benchmark::State& state)
@@ -155,7 +221,8 @@ static void BM_Engine_Throughput_100k(benchmark::State& state)
         double p = 100.0;
         for (std::size_t i = 0; i < N_BARS; ++i)
         {
-            const double drift = std::sin(i * 0.01) * 0.5;
+            const double drift =
+                std::sin(static_cast<double>(i) * 0.01) * 0.5;
             const double c = p + drift;
             const double o = p;
             const double h = std::max(o, c) + 0.1;

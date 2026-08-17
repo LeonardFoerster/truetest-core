@@ -5,7 +5,7 @@ project(truetest LANGUAGES CXX VERSION 0.1.0)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 # ── Build options ───────────────────────────────────────────────────────────
-option(ENABLE_LIVE_DATA  "Build with WebSocket live data feed (requires Boost.Beast)" OFF)
+option(ENABLE_LIVE_DATA  "Deprecated no-op; enable a concrete venue provider instead" OFF)
 option(ENABLE_DEBUG      "Build with performance instrumentation (requires Abseil)"   OFF)
 option(ENABLE_BINANCE    "Build with Binance exchange provider"                       OFF)
 option(ENABLE_BITGET     "Build with Bitget UTA futures provider"                     OFF)
@@ -16,10 +16,17 @@ option(ENABLE_QUESTDB    "Build with QuestDB persistence backend"               
 option(ENABLE_TSAN       "Enable ThreadSanitizer"                                     OFF)
 option(ENABLE_ASAN       "Enable AddressSanitizer (mutually exclusive with TSAN)"     OFF)
 option(ENABLE_UBSAN      "Enable UndefinedBehaviorSanitizer (mutually exclusive with TSAN)" OFF)
+option(ENABLE_LTO        "Enable link-time optimization for first-party Release targets"   ON)
 option(ENABLE_NATIVE_OPT "Enable -march=native + unroll/omit-fp on all three engines (Release)" OFF)
 option(BUILD_SHARED_LIB  "Build libtruetest shared library with C API for embedding"  OFF)
 option(BUILD_TESTS       "Build unit tests"                                           OFF)
 option(ENABLE_BENCHMARKS "Build performance benchmarks (Google Benchmark)"            OFF)
+
+if(ENABLE_LIVE_DATA)
+    message(DEPRECATION
+        "ENABLE_LIVE_DATA no longer enables a data source and is ignored; "
+        "use ENABLE_BINANCE, ENABLE_BITGET, or ENABLE_BITUNIX")
+endif()
 
 include(CompilerFlags)   # sets C++23, opt profiles, provides tt_apply_* helpers
 include(Dependencies)    # provides tt_fetch_* and tt_wire_optional_backends
@@ -74,6 +81,10 @@ target_include_directories(engine_core PUBLIC
 target_link_libraries(engine_core PUBLIC
     CLI11::CLI11 nlohmann_json::nlohmann_json libzstd_static)
 tt_apply_common_flags(engine_core)
+# Native tuning must cover the shared engine objects as well as the small
+# per-binary entry points; otherwise ENABLE_NATIVE_OPT leaves almost all engine
+# code at the portable baseline.
+tt_apply_live_flags(engine_core)
 # Call ONCE here — PUBLIC usage-requirements propagate to everything that
 # links engine_core (CMake ≥ 3.12 object-library linking semantics).
 tt_wire_optional_backends(engine_core)
@@ -164,10 +175,21 @@ if(BUILD_TESTS)
     add_executable(truetest_cli_tests tests/test_cli.cpp)
     target_link_libraries(truetest_cli_tests PRIVATE GTest::gtest GTest::gtest_main)
     add_dependencies(truetest_cli_tests engine_backtest engine_live)
+    target_compile_definitions(truetest_cli_tests PRIVATE
+        TRUETEST_ENGINE_DIR="${CMAKE_CURRENT_BINARY_DIR}")
     if(ENABLE_QUESTDB)
         target_compile_definitions(truetest_cli_tests PRIVATE HAS_QUESTDB)
     endif()
+    tt_apply_common_flags(truetest_cli_tests)
     gtest_discover_tests(truetest_cli_tests
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test(NAME launcher_contract
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_launchers.sh")
+    set_tests_properties(launcher_contract PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test(NAME live_safety_freeze_contract
+        COMMAND bash "${CMAKE_SOURCE_DIR}/tests/test_live_safety_freeze.sh")
+    set_tests_properties(live_safety_freeze_contract PROPERTIES
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 

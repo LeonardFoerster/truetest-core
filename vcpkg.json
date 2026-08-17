@@ -12,11 +12,7 @@
             ]
         },
         "live-data": {
-            "description": "Generic WebSocket data source (Boost.Beast)",
-            "dependencies": [
-                "boost-beast",
-                "boost-asio"
-            ]
+            "description": "Deprecated no-op; select a concrete venue feature instead"
         }
     }
 }
