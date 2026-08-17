@@ -121,6 +121,12 @@ public:
     std::chrono::system_clock::time_point read_ts()
     {
         auto us = read_i64();
+        const auto min_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::time_point::min().time_since_epoch()).count();
+        const auto max_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::time_point::max().time_since_epoch()).count();
+        if (us < min_us || us > max_us)
+            throw std::runtime_error("event_log: timestamp out of range");
         return std::chrono::system_clock::time_point(std::chrono::microseconds(us));
     }
 };

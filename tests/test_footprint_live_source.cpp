@@ -70,7 +70,7 @@ TEST(FootprintLiveSource, TapViaProviderEventVariantRoutesTicksOnly)
 {
     FootprintLiveSource src(make_config());
     provider::event tick_ev = make_tick(100.0, 5, 0);
-    provider::status status_ev;
+    provider::status status_ev{};
     status_ev.provider = "test";
     provider::event non_tick_ev = status_ev;
 
