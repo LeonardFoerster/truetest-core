@@ -15,7 +15,9 @@
 
 #include <atomic>
 #include <exception>
+#include <functional>
 #include <iostream>
+#include <string_view>
 #include <thread>
 
 class Worker
@@ -80,6 +82,7 @@ public:
                         if (failure_flag_)
                             failure_flag_->store(true, std::memory_order_release);
                         running_.store(false, std::memory_order_release);
+                        notify_failure();
                         return;
                     }
                 }
@@ -100,6 +103,7 @@ public:
                         if (failure_flag_)
                             failure_flag_->store(true, std::memory_order_release);
                         running_.store(false, std::memory_order_release);
+                        notify_failure();
                         return;
                     }
                 }
@@ -134,6 +138,10 @@ public:
     unsigned error_count() const { return error_count_.load(std::memory_order_relaxed); }
 
     void set_failure_flag(std::atomic<bool>& flag) { failure_flag_ = &flag; }
+    void set_failure_callback(std::function<void(std::string_view)> cb)
+    {
+        failure_cb_ = std::move(cb);
+    }
 
 #ifdef HAS_DEBUG
     debug::thread_utilization utilization_;
@@ -145,9 +153,17 @@ private:
     std::atomic<bool> running_{false};
     std::exception_ptr exception_;
     std::atomic<bool>* failure_flag_ = nullptr;
+    std::function<void(std::string_view)> failure_cb_;
     spin_policy spin_policy_ = spin_policy::adaptive;
     unsigned max_consecutive_errors_ = 5;
     std::atomic<unsigned> error_count_{0};
+
+    void notify_failure() noexcept
+    {
+        if (!failure_cb_) return;
+        try { failure_cb_("worker exceeded consecutive-error budget"); }
+        catch (...) {}
+    }
 
     void backoff(unsigned idle_count)
     {

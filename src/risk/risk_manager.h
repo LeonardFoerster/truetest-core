@@ -4,9 +4,7 @@
 // LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md)
 // Any edit requires explicit two-person CCB review + 4 h
 // mainnet shadow run on engine_shadow before merge.
-// Files in this set: tt_target.h, engine.{h,cpp}, all
-// *kill_switch*, *dead_mans_switch*, *reconciler* under
-// providers/binance/, risk/*, ExecutionBridge, live_safety.h
+// Authoritative path list: scripts/check-live-safety-freeze.sh
 // ============================================================
 
 #include "../core/event.h"
@@ -72,9 +70,12 @@ class RiskManager
 public:
     explicit RiskManager(risk_limits limits = {});
 
+    bool open_order_limit_reached(std::size_t open_order_count) const;
+
     risk_action check_order(const order_event& order,
                             const portfolio& port,
-                            const risk_snapshot& snap);
+                            const risk_snapshot& snap,
+                            std::size_t open_order_count = 0);
 
     risk_action check_post_fill(const fill_event& fill,
                                 const portfolio& port,
@@ -83,7 +84,8 @@ public:
     // Legacy: workers/tests that already hold an AnalyticsReport.
     risk_action check_order(const order_event& order,
                             const portfolio& port,
-                            const AnalyticsReport& snap);
+                            const AnalyticsReport& snap,
+                            std::size_t open_order_count = 0);
 
     risk_action check_post_fill(const fill_event& fill,
                                 const portfolio& port,

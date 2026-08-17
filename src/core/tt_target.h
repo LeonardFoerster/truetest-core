@@ -8,9 +8,7 @@
 // LIVE-SAFETY SURFACE — Phase 1 freeze (see prod.md)
 // Any edit requires explicit two-person CCB review + 4 h
 // mainnet shadow run on engine_shadow before merge.
-// Files in this set: tt_target.h, engine.{h,cpp}, all
-// *kill_switch*, *dead_mans_switch*, *reconciler* under
-// providers/binance/, risk/*, ExecutionBridge, live_safety.h
+// Authoritative path list: scripts/check-live-safety-freeze.sh
 // ============================================================
 
 #define TT_TARGET_BACKTEST 1

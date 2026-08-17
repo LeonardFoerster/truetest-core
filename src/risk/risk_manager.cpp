@@ -39,17 +39,29 @@ double projected_position_notional(const order_event& order,
 
 bool reduces_position_exposure(const order_event& order, const position* pos)
 {
-    if (!pos)
+    if (!pos || std::abs(pos->qty) <= kQtyEps ||
+        order.get_quantity() <= kQtyEps)
         return false;
-    const double current_qty = pos->qty;
-    const double projected_qty = current_qty + signed_order_quantity(order);
-    return std::abs(projected_qty) < std::abs(current_qty) - kQtyEps;
+
+    // A reduction must close existing inventory without crossing zero. A
+    // flip is a new exposure and therefore must face every circuit breaker.
+    const bool order_opposes_position =
+        (pos->qty > 0.0 && order.get_side() == order_side::sell) ||
+        (pos->qty < 0.0 && order.get_side() == order_side::buy);
+    return order_opposes_position &&
+           order.get_quantity() <= std::abs(pos->qty) + kQtyEps;
 }
 
 } // namespace
 
 RiskManager::RiskManager(risk_limits limits)
     : limits_(std::move(limits)) {}
+
+bool RiskManager::open_order_limit_reached(std::size_t open_order_count) const
+{
+    return limits_.max_open_orders > 0 &&
+           open_order_count >= static_cast<std::size_t>(limits_.max_open_orders);
+}
 
 void RiskManager::prune_old_entries(std::deque<timestamped_entry>& entries,
                                     std::chrono::system_clock::time_point cutoff)
@@ -85,7 +97,8 @@ void RiskManager::update_daily_reset(std::chrono::system_clock::time_point now)
 
 risk_action RiskManager::check_order(const order_event& order,
                                      const portfolio& port,
-                                     const risk_snapshot& snap)
+                                     const risk_snapshot& snap,
+                                     std::size_t open_order_count)
 {
     const auto& positions = port.get_positions();
     const auto it = positions.find(order.get_symbol());
@@ -100,7 +113,10 @@ risk_action RiskManager::check_order(const order_event& order,
         snap.max_drawdown / 100.0 >= limits_.max_drawdown)
         return risk_action::halt;
 
-    if (static_cast<int>(snap.total_orders - snap.total_fills) >= limits_.max_open_orders)
+    // The engine-owned OrderTracker supplies the exact lifecycle count before
+    // this candidate becomes active. Analytics counters are reporting only.
+    // This capacity limit deliberately has no reduce-only exemption.
+    if (open_order_limit_reached(open_order_count))
         return risk_action::reject;
 
     if (!reducing_exposure &&
@@ -138,8 +154,11 @@ risk_action RiskManager::check_order(const order_event& order,
             return risk_action::reject;
     }
 
-    // Phase 2.4 - spread circuit breaker (populated in Analytics from L2 snapshots when --depth-stream is active)
-    if (limits_.max_spread_bps > 0.0 && snap.current_spread_bps > limits_.max_spread_bps) {
+    // Phase 2.4 - spread circuit breaker (populated in Analytics from L2 snapshots when --depth-stream is active).
+    // BF-01: reduce-only/exit orders must still pass here, exactly like the drawdown check above —
+    // a blown-out spread is precisely when an open position most needs to be closable, not trapped.
+    if (!reducing_exposure &&
+        limits_.max_spread_bps > 0.0 && snap.current_spread_bps > limits_.max_spread_bps) {
         // Severe breaches (e.g. > 2x limit) escalate to halt to stop trading in obviously broken books
         if (snap.current_spread_bps > limits_.max_spread_bps * 2.0) {
             return risk_action::halt;
@@ -148,8 +167,10 @@ risk_action RiskManager::check_order(const order_event& order,
     }
 
     // Funding rate circuit breaker (rate can be fed via Analytics::set_current_funding_rate_8h
-    // from the provider when ACCOUNT_UPDATE or dedicated funding rate messages are parsed)
-    if (limits_.max_funding_8h_rate > 0.0 && snap.current_funding_8h_rate > limits_.max_funding_8h_rate) {
+    // from the provider when ACCOUNT_UPDATE or dedicated funding rate messages are parsed).
+    // BF-01: same reduce-only exemption as the spread breaker above.
+    if (!reducing_exposure &&
+        limits_.max_funding_8h_rate > 0.0 && snap.current_funding_8h_rate > limits_.max_funding_8h_rate) {
         if (snap.current_funding_8h_rate > limits_.max_funding_8h_rate * 1.5) {
             return risk_action::halt;
         }
@@ -214,7 +235,8 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
 // place.
 risk_action RiskManager::check_order(const order_event& order,
                                      const portfolio& port,
-                                     const AnalyticsReport& snap)
+                                     const AnalyticsReport& snap,
+                                     std::size_t open_order_count)
 {
     risk_snapshot rs;
     rs.max_drawdown = snap.max_drawdown;
@@ -222,7 +244,7 @@ risk_action RiskManager::check_order(const order_event& order,
     rs.total_fills  = snap.total_fills;
     // Phase 2 fields (best effort from full report; modern path uses risk_snapshot directly)
     rs.equity = snap.final_equity;  // approximate
-    return check_order(order, port, rs);
+    return check_order(order, port, rs, open_order_count);
 }
 
 risk_action RiskManager::check_post_fill(const fill_event& fill,
