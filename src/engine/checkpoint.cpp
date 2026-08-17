@@ -31,22 +31,8 @@ void CheckpointManager::restore(portfolio& p)
 {
     if (cfg_.resume_checkpoint_path.empty()) return;
 
-    try {
-        auto cp = checkpoint::read_file(cfg_.resume_checkpoint_path);
-        std::unordered_map<std::string, position> pos_map;
-        pos_map.reserve(cp.positions.size());
-        for (const auto& e : cp.positions)
-        {
-            position pos;
-            pos.qty = e.qty;
-            pos.cost_basis = e.cost_basis;
-            pos_map.emplace(e.symbol, pos);
-        }
-        p.restore_state(cp.cash, static_cast<std::size_t>(cp.total_trades),
-                                 std::move(pos_map));
-        std::cerr << "[checkpoint] resumed from " << cfg_.resume_checkpoint_path
-                  << " at event " << cp.event_count << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "[checkpoint] restore failed: " << e.what() << std::endl;
-    }
+    (void)p;
+    throw std::logic_error(
+        "checkpoint resume is unavailable: version 1 snapshots do not contain "
+        "complete deterministic engine state");
 }

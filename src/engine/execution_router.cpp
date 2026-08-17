@@ -1,7 +1,11 @@
 #include "execution_router.h"
 
+#include "engine_config.h"
+#include "execution/execution_adapter.h"
 #include "execution/hybrid_paper_adapter.h"
 #include "execution/queue_aware_book_adapter.h"
+#include "orderbook/orderbook_registry.h"
+#include "providers/provider.h"
 // NOTE: no concrete bridge / local / shadow includes here.
 // Capability queries go through the IExecutionAdapter base.
 

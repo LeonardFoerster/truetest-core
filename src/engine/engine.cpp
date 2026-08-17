@@ -1,5 +1,6 @@
 #include "engine.h"
 #include "checkpoint.h"
+#include "live_safety_session.h"
 #ifdef HAS_QUESTDB
 #include "data/questdb/run_tag.h"
 #endif
@@ -35,9 +36,7 @@
 // mainnet shadow run on engine_shadow before merge.
 // Commit message MUST contain: LIVE_SAFETY_CCB_APPROVED
 // Run: ./scripts/check-live-safety-freeze.sh after changes.
-// Files in this set: tt_target.h, engine.{h,cpp}, all
-// *kill_switch*, *dead_mans_switch*, *reconciler* under
-// providers/binance/, risk/*, ExecutionBridge, live_safety.h
+// Authoritative path list: scripts/check-live-safety-freeze.sh
 //
 // Engine decomposition (see core/docs/internal/engine-decomposition.md + ~/.grok/skills/engine-decomposition/SKILL.md):
 // Phase 2 prep in progress. Cold-path extractions (dashboard, scheduler, workers, run skeleton)
@@ -48,11 +47,22 @@
 // ENGINE_LOC_WAIVER: (historical; Wave 1 extraction complete, engine.cpp now well under limit)
 // ============================================================
 
+namespace
+{
+engine_config refuse_legacy_resume(engine_config config)
+{
+    if (!config.resume_checkpoint_path.empty())
+        throw std::runtime_error(
+            "checkpoint resume v1 is disabled; no engine state was created");
+    return config;
+}
+}
+
 engine::engine(std::shared_ptr<data_handler> dh,
                std::shared_ptr<orderbook> ob,
                std::shared_ptr<IStrategy> strategy,
                engine_config config)
-    : config_(std::move(config)), data_handler_(std::move(dh)), strategy_(std::move(strategy)),
+    : config_(refuse_legacy_resume(std::move(config))), data_handler_(std::move(dh)), strategy_(std::move(strategy)),
       portfolio_(config_.initial_balance),
       analytics_(config_.initial_balance, config_.rolling_window, config_.risk_free_rate,
                  config_.periods_per_year, config_.max_equity_points),
@@ -60,6 +70,18 @@ engine::engine(std::shared_ptr<data_handler> dh,
       market_maker_(config_.seed != 0 ? MarketMaker(static_cast<unsigned>(config_.seed + 1))
                                       : MarketMaker())
 {
+    if (config_.provider)
+        provider_funding_ingress_ = config_.provider->funding_ingress();
+    if (config_.mode == engine_mode::live && config_.provider
+        && (!config_.live_safety_session
+            || !config_.live_safety_session->owns_provider(config_.provider)
+            || !config_.live_safety_session->is_open()))
+        throw std::runtime_error(
+            "live provider requires its open pre-owned LiveSafetySession");
+    if (config_.mode == engine_mode::live && config_.live_safety_session
+        && config_.kill_switch
+        && !config_.live_safety_session->set_kill_switch(config_.kill_switch))
+        throw std::runtime_error("live safety session already began shutdown");
     market_maker_.set_calibration({config_.mm_levels_per_side,
                                    config_.mm_base_depth,
                                    config_.mm_base_spread_pct,
@@ -108,27 +130,6 @@ engine::engine(std::shared_ptr<data_handler> dh,
     {
         if (auto rc = config_.provider->get_risk_check())
             risk_check_ = std::move(rc);
-
-        // Phase 2: allow providers to publish custom events (funding_event, future liquidation_opportunity, etc.)
-        // back into the engine's ring so they reach QuestDbWorker, analytics, risk workers, TUI, etc.
-        auto armed_for_pub = callbacks_armed_flag_;
-        config_.provider->set_event_publisher(
-            [this, armed_for_pub](std::shared_ptr<event> ev) {
-                if (!armed_for_pub || !armed_for_pub->load(std::memory_order_acquire)) return;
-                publish_event(ev);
-            });
-
-        auto armed_for_funding = callbacks_armed_flag_;
-        config_.provider->set_funding_event_factory(
-            [this, armed_for_funding](std::chrono::system_clock::time_point ts,
-                   const std::string& symbol,
-                   double cash_delta,
-                   const std::string& reason) {
-                if (!armed_for_funding || !armed_for_funding->load(std::memory_order_acquire))
-                    return std::shared_ptr<funding_event>{};
-                return acquire_pooled(funding_pool_, ts, symbol, 0.0,
-                                      cash_delta, reason);
-            });
 
         // Register any liveness sources the provider exposes. Only
         // create the watchdog if there's something to watch — engine
@@ -208,27 +209,12 @@ engine::engine(std::shared_ptr<data_handler> dh,
 
     if (config_.mode == engine_mode::live)
     {
-        // Route a fatal transport disconnect (WS idle timeout, listenKey
-        // failure beyond retry budget) straight into trigger_halt so the
-        // engine begins shutdown within ~2.5s of the loss instead of
-        // burning minutes in the transport-level reconnect loop. Backtest
-        // and shadow paths leave halt_callback unset; their providers
-        // keep the original reconnect-and-continue behaviour.
-        if (config_.provider)
-        {
-            auto armed_for_halt = callbacks_armed_flag_;
-            config_.provider->set_halt_callback(
-                [this, armed_for_halt](std::string_view reason) {
-                    if (!armed_for_halt || !armed_for_halt->load(std::memory_order_acquire)) return;
-                    trigger_halt(reason);
-                });
-        }
-
         auto reconciler = config_.reconciler;
         if (!reconciler && config_.provider)
             reconciler = config_.provider->get_reconciler();
         if (!reconciler)
-            reconciler = std::make_shared<NoopReconciler>();
+            throw std::runtime_error(
+                "reconciliation refused startup: provider has no reconciler");
 
         auto err = reconciler->reconcile(portfolio_, config_.reconcile_tolerance_bps);
         if (!err.empty())
@@ -243,8 +229,61 @@ engine::engine(std::shared_ptr<data_handler> dh,
                                 ? config_.provider->get_bracket_adapter()
                                 : nullptr)
         {
-            for (auto& rb : adapter->list_open())
+            auto recovered = adapter->list_open();
+            struct recovered_scope
             {
+                std::size_t count = 0;
+                std::size_t missing_qty = 0;
+                double total_qty = 0.0;
+            };
+            std::unordered_map<std::string, recovered_scope> per_symbol;
+            for (const auto& rb : recovered)
+            {
+                auto& scope = per_symbol[rb.symbol];
+                ++scope.count;
+                if (!(rb.qty > 0.0) || !std::isfinite(rb.qty))
+                    ++scope.missing_qty;
+                else
+                    scope.total_qty += rb.qty;
+            }
+            for (const auto& [symbol, scope] : per_symbol)
+            {
+                const auto pos = portfolio_.get_positions().find(symbol);
+                if (pos == portfolio_.get_positions().end()
+                    || std::abs(pos->second.qty) <= 1e-12)
+                    throw std::runtime_error(
+                        "reconciliation refused startup: resting bracket has no reconciled position for "
+                        + symbol);
+                const double position_qty = std::abs(pos->second.qty);
+                if (scope.missing_qty != 0
+                    && (scope.count != 1 || scope.missing_qty != 1))
+                    throw std::runtime_error(
+                        "reconciliation refused startup: recovered bracket quantities are ambiguous for "
+                        + symbol);
+                if (scope.missing_qty == 0)
+                {
+                    const double tolerance = std::max(
+                        1e-8, position_qty
+                            * config_.reconcile_tolerance_bps / 10000.0);
+                    if (std::abs(scope.total_qty - position_qty) > tolerance)
+                        throw std::runtime_error(
+                            "reconciliation refused startup: recovered bracket quantity contradicts position for "
+                            + symbol);
+                }
+            }
+            for (auto& rb : recovered)
+            {
+                const auto pos = portfolio_.get_positions().find(rb.symbol);
+                const auto expected_close_side = pos->second.qty > 0.0
+                    ? order_side::sell : order_side::buy;
+                if (rb.close_side != expected_close_side)
+                    throw std::runtime_error(
+                        "reconciliation refused startup: recovered bracket side contradicts position for "
+                        + rb.symbol);
+                if (!(rb.qty > 0.0) || !std::isfinite(rb.qty))
+                {
+                    rb.qty = std::abs(pos->second.qty);
+                }
                 std::cerr << "engine: rehydrating bracket opener="
                           << rb.opener_order_id << " symbol=" << rb.symbol
                           << " sl=" << (rb.stop_loss   ? *rb.stop_loss   : 0.0)
@@ -259,7 +298,8 @@ engine::engine(std::shared_ptr<data_handler> dh,
     // See core/docs/internal/engine-decomposition.md Phase 2 (E-21) + engine-decomposition skill:
     // All recording MUST go exclusively through audit_sink_ (IOrderAuditSink).
     // No raw questdb decision sites for data capture. Activation only here.
-    // Router owns adapter resolution, submit/poll, L2, advance. No ad-hoc bypass.
+    // Router is a partial seam; characterized direct submit-result/fill polling
+    // remains until the documented decomposition follow-up.
     audit_sink_ = std::make_unique<NoopOrderAuditSink>();
 #ifdef HAS_QUESTDB
     if (config_.persist_enabled) {
@@ -325,6 +365,42 @@ engine::engine(std::shared_ptr<data_handler> dh,
     );
 
     prewarm_object_pools();
+
+    // Provider private streams may become ready before engine construction.
+    // Consume any already-admitted funding now, on the constructing/event-loop
+    // thread, before strategy or risk can observe account state.
+    if (!drain_provider_funding_updates())
+        throw std::runtime_error("provider funding ingress failed during construction");
+
+    // Constructor rollback safety: callbacks remain disarmed until every
+    // potentially-throwing initialization/reconciliation step has completed.
+    // A DMS failure before this registration is latched by the provider and
+    // delivered synchronously here.
+    callbacks_armed_flag_->store(true, std::memory_order_release);
+    provider_callbacks_armed_.store(true, std::memory_order_release);
+    try
+    {
+        if (config_.mode == engine_mode::live && config_.provider)
+        {
+            auto armed_for_halt = callbacks_armed_flag_;
+            config_.provider->set_halt_callback(
+                [this, armed_for_halt](std::string_view reason) {
+                    if (!armed_for_halt
+                        || !armed_for_halt->load(std::memory_order_acquire)) return;
+                    trigger_halt(reason);
+                });
+        }
+    }
+    catch (...)
+    {
+        // A provider is allowed to retain the callback before reporting a
+        // registration failure.  Construction then unwinds without running
+        // engine::~engine(), so explicitly disarm every callback that already
+        // captured this engine before rethrowing.
+        provider_callbacks_armed_.store(false, std::memory_order_release);
+        callbacks_armed_flag_->store(false, std::memory_order_release);
+        throw;
+    }
 }
 
 void engine::prewarm_object_pools()
@@ -448,18 +524,35 @@ void engine::publish_event(const event_pointer& ev)
     // Zero-alloc and safe on hot path (cheap atomic + occasional mutex work).
     drain_object_pool_returns();
 
-    if (dashboard_builder_) dashboard_builder_->refresh_if_due();
-
     // Phase 2: funding settlements update the primary portfolio cash immediately
     // (advisory for now; later will also feed risk_snapshot / RiskManager).
     if (ev && ev->get_type() == event_type::funding) {
         if (auto* fe = dynamic_cast<funding_event*>(ev.get())) {
             portfolio_.on_funding(*fe);
-            // Unconditional via sink seam (run_tag supplied by sink; "" when no persistence).
-            // No direct questdb_store_ access. Zero-alloc public seam.
-            audit_sink_->record_funding(*fe, audit_sink_ ? audit_sink_->run_tag() : "");
+#ifdef HAS_QUESTDB
+            // QuestDB formatting, mutexes and network flushes are cold work.
+            // Stage a fixed record here and drain it only at the persistence
+            // cadence/finalization boundary; overflow is terminal and loud.
+            if (questdb_active_)
+            {
+                provider_funding_update record;
+                record.event_time_ms = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(
+                        fe->get_timestamp().time_since_epoch()).count();
+                record.cash_delta = fe->get_cash_delta();
+                const auto symbol = fe->get_symbol();
+                record.symbol_size = static_cast<std::uint8_t>(symbol.size());
+                std::copy(symbol.begin(), symbol.end(), record.symbol.begin());
+                if (!funding_audit_ring_.try_push(record))
+                    trigger_halt("funding persistence staging queue overflow");
+            }
+#endif
         }
     }
+
+    // Refresh after event-specific state mutation so a funding settlement is
+    // visible in the same snapshot rather than one event late.
+    if (dashboard_builder_) dashboard_builder_->refresh_if_due();
 
     if (config_.threading == thread_preset::inline_mode) {
         return;
@@ -566,22 +659,77 @@ void engine::publish_event(const event_pointer& ev)
 #undef TT_PUSH
 }
 
-void engine::trigger_halt(std::string_view reason)
+void engine::trigger_halt(std::string_view reason) noexcept
 {
     if (halt_flag_.exchange(true, std::memory_order_acq_rel))
         return;
 
+    run_failed_.store(true, std::memory_order_release);
+    if (config_.provider)
+    {
+        try
+        {
+            if (auto transport = config_.provider->get_transport())
+                transport->request_stop();
+        }
+        catch (...) {}
+    }
+
     if (auto* dash = config_.dashboard.get())
     {
         dash->stats().halt_flag.store(true, std::memory_order_release);
-        dash->set_state(truetest::ui::connection_state::halted);
-        dash->set_shutdown_reason(reason);
-        dash->push_event(truetest::ui::event_severity::error, reason);
+        // Halt publication is safety state; diagnostics are best-effort and
+        // must never escape a provider/DMS callback thread.
+        try { dash->set_state(truetest::ui::connection_state::halted); }
+        catch (...) {}
+        try { dash->set_shutdown_reason(reason); }
+        catch (...) {}
+        try {
+            dash->push_event(truetest::ui::event_severity::error, reason);
+        }
+        catch (...) {}
     }
     else
     {
-        std::cerr << "  ! engine halt — " << reason << "\n";
+        try { std::cerr << "  ! engine halt — " << reason << "\n"; }
+        catch (...) {}
     }
+}
+
+bool engine::request_operator_kill(std::chrono::milliseconds deadline)
+{
+    trigger_halt("operator kill requested");
+    if (!config_.live_safety_session) return false;
+    const auto report = config_.live_safety_session->shutdown_once(
+        live_shutdown_reason::operator_kill, deadline);
+    return report.quiesce_succeeded
+        && report.kill_succeeded && report.provider_closed;
+}
+
+bool engine::finalize_live_shutdown(live_shutdown_reason reason)
+{
+    if (!config_.live_safety_session) return true;
+
+    const auto report = config_.live_safety_session->shutdown_once(reason);
+    if (config_.mode != engine_mode::live)
+        return true;
+
+    if (report.quiesce_succeeded
+        && report.kill_succeeded && report.provider_closed)
+        return true;
+
+    if (!live_shutdown_failure_reported_.exchange(
+            true, std::memory_order_acq_rel))
+    {
+        trigger_halt(!report.quiesce_succeeded
+            ? "live provider quiesce failed or remained ambiguous"
+            : (report.kill_succeeded
+                ? "live provider shutdown did not finish"
+                : "live kill failed or remained ambiguous"));
+        std::cerr << "  WARNING: live shutdown was incomplete; process remains "
+                     "halted and venue safety must be verified manually.\n";
+    }
+    return false;
 }
 
 bool engine::snapshot_dashboard(truetest::ui::dashboard_snapshot& out) const
@@ -636,13 +784,22 @@ void engine::start_workers()
 {
     // Worker/ring orchestration. See core/docs/internal/engine-decomposition.md Wave 4 (E-60) + engine-decomposition.
     // Will be delegated to WorkerOrchestrator (rings, pinning, start/stop, drops).
-    halt_flag_.store(false, std::memory_order_release);
+    if (halt_flag_.load(std::memory_order_acquire))
+    {
+        provider_callbacks_armed_.store(false, std::memory_order_release);
+        if (callbacks_armed_flag_)
+            callbacks_armed_flag_->store(false, std::memory_order_release);
+        return;
+    }
     provider_callbacks_armed_.store(true, std::memory_order_release);
-    if (callbacks_armed_flag_) callbacks_armed_flag_->store(true, std::memory_order_release);
+    if (callbacks_armed_flag_)
+        callbacks_armed_flag_->store(true, std::memory_order_release);
     worker_failed_.store(false, std::memory_order_release);
 
     auto wire_failure = [this](Worker& w) {
         w.set_failure_flag(worker_failed_);
+        w.set_failure_callback(
+            [this](std::string_view reason) { trigger_halt(reason); });
         w.set_spin_policy(config_.worker_spin_policy);
         w.set_max_consecutive_errors(config_.max_consecutive_worker_errors);
     };
@@ -674,9 +831,11 @@ void engine::start_workers()
     case thread_preset::light:
     {
         observer_ring_ = std::make_shared<EventRing>();
-        observer_worker_ = std::make_unique<ObserverWorker>(risk_manager_, halt_flag_,
+        observer_worker_ = std::make_unique<ObserverWorker>(risk_manager_, halt_flag_, order_tracker_.active_count_atomic(),
             config_.initial_balance, config_.rolling_window, config_.risk_free_rate,
-            config_.periods_per_year, config_.max_equity_points);
+            config_.periods_per_year, config_.max_equity_points,
+            [this](std::string_view reason) { trigger_halt(reason); },
+            config_.mode != engine_mode::backtest);
         wire_failure(*observer_worker_);
 
         worker_threads_.emplace_back([this]() {
@@ -692,9 +851,11 @@ void engine::start_workers()
         risk_stats_ring_ = std::make_shared<EventRing>();
 
         logging_worker_ = make_logging_worker();
-        risk_stats_worker_ = std::make_unique<RiskStatsWorker>(risk_manager_, halt_flag_,
+        risk_stats_worker_ = std::make_unique<RiskStatsWorker>(risk_manager_, halt_flag_, order_tracker_.active_count_atomic(),
             config_.initial_balance, config_.rolling_window, config_.risk_free_rate,
-            config_.periods_per_year, config_.max_equity_points);
+            config_.periods_per_year, config_.max_equity_points,
+            [this](std::string_view reason) { trigger_halt(reason); },
+            config_.mode != engine_mode::backtest);
         wire_failure(*logging_worker_);
         wire_failure(*risk_stats_worker_);
 
@@ -717,9 +878,11 @@ void engine::start_workers()
         stats_ring_ = std::make_shared<EventRing>();
 
         logging_worker_ = make_logging_worker();
-        risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_,
+        risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_, order_tracker_.active_count_atomic(),
             config_.initial_balance, config_.rolling_window, config_.risk_free_rate,
-            config_.periods_per_year, config_.max_equity_points);
+            config_.periods_per_year, config_.max_equity_points,
+            [this](std::string_view reason) { trigger_halt(reason); },
+            config_.mode != engine_mode::backtest);
         stats_worker_ = std::make_unique<StatsWorker>(config_.initial_balance, 1000,
             config_.rolling_window, config_.risk_free_rate,
             config_.periods_per_year, config_.max_equity_points);
@@ -763,9 +926,11 @@ void engine::start_workers()
         }
 
         logging_worker_ = make_logging_worker();
-        risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_,
+        risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_, order_tracker_.active_count_atomic(),
             config_.initial_balance, config_.rolling_window, config_.risk_free_rate,
-            config_.periods_per_year, config_.max_equity_points);
+            config_.periods_per_year, config_.max_equity_points,
+            [this](std::string_view reason) { trigger_halt(reason); },
+            config_.mode != engine_mode::backtest);
         stats_worker_ = std::make_unique<StatsWorker>(config_.initial_balance, 1000,
             config_.rolling_window, config_.risk_free_rate,
             config_.periods_per_year, config_.max_equity_points);
@@ -869,31 +1034,13 @@ void engine::revoke_provider_callbacks()
         if (auto* cap = adapter->get_async_support())
             cap->clear_unknown_fill_handler();
     }
-    if (config_.mode == engine_mode::live)
-    {
-        try { config_.provider->close(); } catch (...) {}
-    }
     config_.provider->set_halt_callback([](std::string_view){});
-    config_.provider->set_event_publisher([](std::shared_ptr<event>){});
-    config_.provider->set_funding_event_factory(
-        [](auto, const auto&, double, const auto&) -> std::shared_ptr<funding_event> {
-            return {};
-        });
 }
 
 void engine::stop_workers()
 {
-    // Shutdown sequence (improved for memory safety per 2026-07-18 check):
-    // 1. Disarm armed flags (so future callback bodies early-return).
-    // 2. Drain deferred.
-    // 3. QuestDB last flush.
-    // 4. Stop watchdog.
-    // 5. revoke_provider_callbacks() (clears + conditional close).
-    // 6. stop workers (join threads).
-    // 7. drain rings.
-    // 8. (live) kill switch flatten.
-    // This order reduces the live window for in-flight [this] bodies vs dtor.
-    // Future: could extract ShutdownCoordinator for the order.
+    // Revoke callbacks, then hand provider quiesce/kill/finish to the shared
+    // exact-once LiveSafetySession before joining engine-owned workers.
     provider_callbacks_armed_.store(false, std::memory_order_release);
     if (callbacks_armed_flag_) callbacks_armed_flag_->store(false, std::memory_order_release);
 
@@ -901,24 +1048,32 @@ void engine::stop_workers()
     // and join. Helps ensure in_use() is low before pools/rings are torn down.
     drain_object_pool_returns();
 
-    // QuestDB: give pending ILP enqueues (from audit sink on any thread)
-    // a last flush opportunity before we tear down workers/rings that may
-    // still produce final records. Best-effort; full wait would require
-    // dedicated flush thread + shutdown latch in IlpWriter (future).
-#ifdef HAS_QUESTDB
-    if (questdb_store_) {
-        try { questdb_store_->flush(); } catch (...) {}
-    }
-#endif
-
     // Stop watchdog early (its poll thread holds a callback into us).
     // Do this right after disarm + before joins and heavy teardown.
     if (worker_watchdog_) worker_watchdog_->stop();
 
-    // Centralized revocation (includes close for live providers, no-op clears
-    // for all installed [this] callbacks). This happens after disarm so that
-    // any already-dispatched in-flight bodies that passed the armed check
-    // see no-op handlers if they re-enter, and transport threads are stopped.
+    const auto reason = halt_flag_.load(std::memory_order_acquire)
+        ? live_shutdown_reason::engine_halt
+        : live_shutdown_reason::normal_end;
+    (void)finalize_live_shutdown(reason);
+
+    // Provider shutdown above joins the private account-stream producer.  The
+    // ring is now stable, so record every admitted settlement before flushing
+    // persistence or stopping worker consumers.
+    (void)drain_provider_funding_updates();
+
+    // QuestDB: give the final funding drain and all earlier audit enqueues a
+    // last flush opportunity before worker/ring teardown. Best-effort; strict
+    // persistence has already latched its own terminal failure.
+#ifdef HAS_QUESTDB
+    if (questdb_store_) {
+        (void)flush_funding_audit();
+        try { questdb_store_->flush(); } catch (...) {}
+    }
+#endif
+
+    // Provider quiesce above stops DMS/transport callback threads before
+    // their std::function targets are replaced, avoiding callback races/UAF.
     revoke_provider_callbacks();
 
     if (observer_worker_) observer_worker_->stop();
@@ -958,31 +1113,6 @@ void engine::stop_workers()
     {
         event_pointer ev; // different ring type, keep original loop
         while (mm_order_ring_->try_pop(ev)) {}
-    }
-
-    if (config_.mode == engine_mode::live)
-    {
-        // Stop the watchdog before kill-switch begins. Otherwise its
-        // poll thread can race against the kill-switch's halt_flag_
-        // observation: heartbeat thread (provider-owned) is about to
-        // be torn down, so its liveness atomic will go stale during
-        // the kill-switch's REST sequence — we don't want that to
-        // re-trigger halt as a "watchdog said the heartbeat hung."
-        if (worker_watchdog_) worker_watchdog_->stop();
-
-        auto kill_switch = config_.kill_switch;
-        if (!kill_switch && config_.provider)
-            kill_switch = config_.provider->get_kill_switch();
-        if (!kill_switch)
-            kill_switch = std::make_shared<NoopKillSwitch>();
-
-        bool ok = kill_switch->cancel_all_and_flatten(config_.kill_switch_deadline);
-        if (!ok)
-        {
-            std::cerr << "  WARNING: kill-switch did NOT complete within "
-                      << config_.kill_switch_deadline.count()
-                      << " ms — inspect exchange state manually.\n";
-        }
     }
 
     Worker* all_workers[] = {
@@ -1039,6 +1169,7 @@ void engine::stop_workers()
 void engine::questdb_begin()
 {
     if (!config_.persist_enabled) return;
+    if (questdb_active_) return;
 
     truetest::questdb::StoreConfig scfg;
     scfg.host = config_.questdb_host;
@@ -1052,6 +1183,8 @@ void engine::questdb_begin()
     {
         std::cerr << "  WARNING: invalid --run-tag (" << e.what()
                   << ") — persistence disabled.\n";
+        if (config_.questdb_strict)
+            throw std::runtime_error("strict persistence rejected invalid run tag");
         return;
     }
 
@@ -1082,6 +1215,14 @@ void engine::questdb_begin()
 
     questdb_store_ = std::make_shared<truetest::questdb::QuestdbStore>(
         std::move(scfg));
+    if (config_.questdb_strict)
+    {
+        questdb_store_->set_strict_failure_callback([this] {
+            run_failed_.store(true, std::memory_order_release);
+            if (config_.mode != engine_mode::backtest)
+                trigger_halt("strict persistence failure");
+        });
+    }
 
     if (questdb_store_->begin())
     {
@@ -1103,8 +1244,7 @@ void engine::questdb_begin()
                       << config_.questdb_host << ":" << config_.questdb_http_port << "\n"
                       << "  --persist-strict requires a working QuestDB instance.\n"
                       << "  Start QuestDB (e.g. `questdb start`) and retry, or remove --persist-strict.\n\n";
-            // Hard exit for strict mode
-            std::exit(1);
+            throw std::runtime_error("strict persistence startup failed");
         }
         else
         {
@@ -1121,6 +1261,7 @@ void engine::questdb_begin()
 void engine::questdb_end()
 {
     if (!questdb_active_ || !questdb_store_) return;
+    (void)flush_funding_audit();
     const auto report = analytics_.snapshot();
     double final_equity;
     {
@@ -1148,6 +1289,7 @@ void engine::questdb_end()
                                   report.total_trades,
                                   report.winning_trades);
     }
+    check_strict_persistence();
     // Note: legacy direct questdb_store_ finalize path removed in Phase 2 prep
     // (core/docs/internal/engine-decomposition.md#E-21) to enforce single IOrderAuditSink seam.
     // Activation in questdb_begin always sets a real sink when store is active.
@@ -1161,11 +1303,48 @@ void engine::maybe_questdb_tick()
     if (!questdb_active_ || !questdb_store_) return;
     auto now = std::chrono::steady_clock::now();
     if (now - last_questdb_flush_ >= config_.questdb_flush_cadence) {
+        (void)flush_funding_audit();
         questdb_store_->tick();
         last_questdb_flush_ = now;
+        check_strict_persistence();
     }
 #endif
 }
+
+#ifdef HAS_QUESTDB
+bool engine::flush_funding_audit() noexcept
+{
+    provider_funding_update record;
+    while (funding_audit_ring_.try_pop(record))
+    {
+        try
+        {
+            const auto ts = std::chrono::system_clock::time_point{
+                std::chrono::milliseconds{record.event_time_ms}};
+            funding_event event(ts, record.symbol_view(), 0.0,
+                                record.cash_delta, "FUNDING_FEE");
+            audit_sink_->record_funding(
+                event, audit_sink_ ? audit_sink_->run_tag() : "");
+        }
+        catch (...)
+        {
+            trigger_halt("funding persistence staging drain failed");
+            return false;
+        }
+    }
+    return true;
+}
+
+void engine::check_strict_persistence()
+{
+    if (!config_.questdb_strict || !questdb_store_
+        || !questdb_store_->strict_failure_latched())
+        return;
+    run_failed_.store(true, std::memory_order_release);
+    if (config_.mode != engine_mode::backtest)
+        trigger_halt("strict persistence failure");
+}
+#endif
 
 void engine::print_summary()
 {
@@ -1417,10 +1596,12 @@ void engine::reset_for_next_trial(uint64_t new_seed)
     // contract violation for the MC controller / test harness).
     drain_object_pool_returns();
 
-    // Re-arm for safety on reused engine objects (callbacks are typically
-    // not live during MC, but keep the flag consistent).
-    provider_callbacks_armed_.store(true, std::memory_order_release);
-    if (callbacks_armed_flag_) callbacks_armed_flag_->store(true, std::memory_order_release);
+    // Terminal halt survives MC reuse; a halted process never re-arms
+    // provider callbacks.
+    const bool may_arm = !halt_flag_.load(std::memory_order_acquire);
+    provider_callbacks_armed_.store(may_arm, std::memory_order_release);
+    if (callbacks_armed_flag_)
+        callbacks_armed_flag_->store(may_arm, std::memory_order_release);
 
     // Re-arm pool alive guards for MC reuse of the engine instance.
     // IMPORTANT: Callers (MC controller, tests) must ensure no shared_ptr<Event>
@@ -1554,7 +1735,17 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         }
 
         auto snap = analytics_.risk_view();
-        auto action = risk_manager_.check_order(*o, portfolio_, snap);
+        // This candidate has not been transitioned into the active lifecycle
+        // yet, so the tracker count is the exact pre-trade capacity.
+        auto existing_active_orders = order_tracker_.active_count();
+        // A pending stop already owns exactly one slot before it fires. Its
+        // conversion to a market/limit order is not a second candidate.
+        if (order_tracker_.is_active(o->get_order_id()) &&
+            existing_active_orders > 0)
+            --existing_active_orders;
+        o->set_pretrade_open_order_count(existing_active_orders);
+        auto action = risk_manager_.check_order(*o, portfolio_, snap,
+                                                existing_active_orders);
         // Backtest research only: portfolio risk breaches reject the trade —
         // never stop the market replay. Live/shadow keep terminal halt even if
         // the soft flag was left true by misconfiguration.
@@ -1735,6 +1926,8 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
     auto adapter = router_->resolve_adapter(symbol);
 
     drain_async_submit_results(adapter.get());
+    if (halt_flag_.load(std::memory_order_acquire))
+        return false;
 
     bool cancelled = adapter->cancel_order(order_id);
 
@@ -2066,7 +2259,6 @@ bool engine::route_order(order_event& order,
     }
 
     order.set_order_id(OrderIdGenerator::next());
-    order_tracker_.set_status(order.get_order_id(), order_status::pending);
     // Canonical step: register_order_meta before any submit or potential fill.
     // This populates opener/strategy so stamp_fill_attribution and rich
     // on_fill paths have the data (critical for per-lot and multi-lot).
@@ -2092,9 +2284,32 @@ bool engine::route_order(order_event& order,
         }
     }
 
+    // Reserve the authoritative lifecycle slot before an order can be queued
+    // by latency/bar-delay or staged as a stop. This is the sole capacity
+    // check at route time; process_order subtracts this candidate when it
+    // performs the remaining venue and portfolio checks.
+    const auto existing_active_orders = order_tracker_.active_count();
+    if (risk_manager_.open_order_limit_reached(existing_active_orders))
+    {
+        const char* reason = "order rejected by risk manager (max open orders)";
+        auto rej = acquire_pooled(rejection_pool_, order.get_timestamp(),
+            order.get_symbol(), order.get_order_id(), reason);
+        log_event(*rej);
+        publish_event(rej);
+        audit_sink_->record_order_submitted(order, "rejected");
+        audit_sink_->record_rejection(order, "risk_reject", reason);
+        order_tracker_.set_status(order.get_order_id(), order_status::rejected);
+        return true;
+    }
+    order.set_pretrade_open_order_count(existing_active_orders);
+    order_tracker_.set_status(order.get_order_id(), order_status::pending);
+
     if (order.get_order_type() == order_type::stop ||
         order.get_order_type() == order_type::stop_limit)
     {
+        // A staged stop occupies capacity while it can still execute. Its
+        // later conversion keeps the same id and therefore the same slot.
+        order_tracker_.set_status(order.get_order_id(), order_status::pending);
         pending_stops_.push_back(acquire_pooled(order_pool_,order));
         return true;
     }
@@ -2485,6 +2700,75 @@ void engine::drain_venue_bracket_meta()
     }
 }
 
+bool engine::drain_provider_funding_updates() noexcept
+{
+    if (!provider_funding_ingress_)
+        return true;
+
+    provider_funding_update update;
+    bool applied_any = false;
+    while (provider_funding_ingress_->try_pop(update))
+    {
+        if (update.event_time_ms <= 0
+            || !std::isfinite(update.cash_delta)
+            || update.cash_delta == 0.0
+            || update.symbol_size == 0
+            || update.symbol_size > provider_funding_update::symbol_capacity
+            || update.why != provider_funding_update::reason::funding_fee)
+        {
+            trigger_halt("provider funding ingress produced an invalid update");
+            return false;
+        }
+
+        try
+        {
+            // The prior loop iteration releases its pooled funding event only
+            // after publish_event returns. Reclaim that deferred return before
+            // acquiring the next retained ingress record.
+            drain_object_pool_returns();
+            const auto ts = std::chrono::system_clock::time_point{
+                std::chrono::milliseconds{update.event_time_ms}};
+            auto funding = acquire_pooled(
+                funding_pool_, ts, update.symbol_view(), 0.0,
+                update.cash_delta, std::string_view{"FUNDING_FEE"});
+            publish_event(funding);
+            applied_any = true;
+        }
+        catch (...)
+        {
+            // acquire_pooled already latches pool exhaustion. Cover every
+            // other construction/audit/ring exception without allowing it to
+            // escape a provider callback or teardown path.
+            trigger_halt("provider funding update could not be applied");
+            return false;
+        }
+    }
+
+    if (applied_any && dashboard_builder_)
+    {
+        try
+        {
+            dashboard_builder_->request_dashboard_refresh();
+            dashboard_builder_->refresh_if_due();
+        }
+        catch (...)
+        {
+            trigger_halt("provider funding dashboard refresh failed");
+            return false;
+        }
+    }
+
+    // Close the producer/consumer race: an enqueue that observed a full ring
+    // while we were draining must still be terminal even if all retained
+    // records were consumed successfully.
+    if (provider_funding_ingress_->failed())
+    {
+        trigger_halt("provider funding ingress overflow or malformed update");
+        return false;
+    }
+    return true;
+}
+
 void engine::drain_async_submit_results(IExecutionAdapter* adapter)
 {
     auto* cap = adapter ? adapter->get_async_support() : nullptr;
@@ -2497,6 +2781,19 @@ void engine::drain_async_submit_results(IExecutionAdapter* adapter)
     {
         if (sr.op == submit_result::operation::submit)
         {
+            if (sr.uncertain)
+            {
+                trigger_halt("venue order outcome is ambiguous after request write");
+                audit_sink_->record_status_transition(
+                    sr.engine_id, order_status::pending, order_status::pending,
+                    "ambiguous post-write submit; terminal halt and reconcile required");
+                continue;
+            }
+            if (sr.fatal)
+            {
+                trigger_halt("order mutation refused because safety prerequisites failed");
+                continue;
+            }
             if (sr.ok)
             {
                 if (order_tracker_.get_order_status(sr.engine_id) == order_status::pending)
@@ -2556,7 +2853,19 @@ void engine::drain_async_submit_results(IExecutionAdapter* adapter)
                 ? meta_it->second.reason
                 : (sr.ok ? "venue cancel acknowledged" : "venue cancel failed");
 
-        if (sr.ok)
+        if (sr.uncertain)
+        {
+            trigger_halt("venue cancel outcome is ambiguous after request write");
+            if (dashboard_builder_)
+                dashboard_builder_->update_open_order_status(sr.engine_id, "cancel_unknown");
+        }
+        else if (sr.fatal)
+        {
+            trigger_halt("cancel refused because safety prerequisites failed");
+            if (dashboard_builder_)
+                dashboard_builder_->update_open_order_status(sr.engine_id, "cancel_refused");
+        }
+        else if (sr.ok)
         {
             if (order_tracker_.is_active(sr.engine_id))
             {
@@ -2760,6 +3069,11 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 {
     drain_object_pool_returns();
 
+    // Apply private-stream cash settlements before any adapter, risk, or
+    // strategy action derived from this market record.
+    if (!drain_provider_funding_updates())
+        return;
+
     // Already terminal (e.g. risk halt on a prior event / DataBridge race):
     // do not strategy-emit or submit on this bar.
     if (halt_flag_.load(std::memory_order_acquire))
@@ -2926,6 +3240,9 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 {
     drain_object_pool_returns();
 
+    if (!drain_provider_funding_updates())
+        return;
+
     if (halt_flag_.load(std::memory_order_acquire))
         return;
 
@@ -3067,7 +3384,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         dispatch_extras_on_tick(te, rec.timestamp, event_count);
 }
 
-void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
+StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
 {
     if (!data_handler_) throw std::runtime_error("missing dependencies");
 
@@ -3088,6 +3405,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
     std::size_t bar_index = 0;
 
     auto* dash = config_.dashboard.get();
+    bool needs_periodic_tick = !dash;
     if (dash)
     {
         dash->set_state(truetest::ui::connection_state::waiting);
@@ -3102,7 +3420,10 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
     auto last_report_time = std::chrono::steady_clock::now();
     std::chrono::system_clock::time_point last_good_bar_ts{};
 
-    bridge->run_streaming(data_handler_, [&](const bar_record& rec) {
+    typename DataBridge<bar_record>::idle_callback funding_idle;
+    if (provider_funding_ingress_)
+        funding_idle = [this] { (void)drain_provider_funding_updates(); };
+    auto stream_result = bridge->run_streaming(data_handler_, [&](const bar_record& rec) {
         auto timestamp = tt::date_parse::resolve_bar_clock(
             rec.open_time_ms, rec.date, last_good_bar_ts);
         last_good_bar_ts = timestamp;
@@ -3176,37 +3497,30 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
             }
         }
 
-        if (!dash)
+        if (needs_periodic_tick)
         {
             auto now_report = std::chrono::steady_clock::now();
             if (now_report - last_report_time >= std::chrono::milliseconds(200))
             {
-                std::cout << "\rStreaming: " << bar_index
-                          << " bars | Fills: " << portfolio_.get_total_fills()
-                          << " | Round-trips: " << portfolio_.get_total_trades()
-                          << std::flush;
-                last_report_time = now_report;
+                if (!dash)
+                    std::cout << "\rStreaming: " << bar_index
+                              << " bars | Fills: " << portfolio_.get_total_fills()
+                              << " | Round-trips: " << portfolio_.get_total_trades()
+                              << std::flush;
                 maybe_questdb_tick();
+                last_report_time = now_report;
             }
         }
-    });
+    }, funding_idle);
 
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-    if (dash)
-    {
-        dash->set_state(truetest::ui::connection_state::closed);
-    }
-    else
-    {
-        std::cout << std::endl;
-        std::cout << "Streaming complete: " << bar_index << " bars, "
-                  << portfolio_.get_total_trades() << " trades in "
-                  << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
-    }
-
-    // Match batch EOS: drain delayed pending + cancel DAY residuals (EL-03).
+    // Force-drain is a research/batch EOS convention. Operator stop and every
+    // failure path must return without creating any new venue mutation; live
+    // session shutdown quiesces and kills through LiveSafetySession instead.
+    if (stream_result.termination == stream_termination::clean_eof
+        && config_.mode == engine_mode::backtest)
     {
         bool halt = halt_flag_.load(std::memory_order_acquire);
         drain_final_pending(event_count, halt);
@@ -3218,9 +3532,24 @@ void engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
 #ifdef HAS_QUESTDB
     questdb_end();
 #endif
+    if (!stream_result.success())
+        run_failed_.store(true, std::memory_order_release);
+    if (stream_result.success() && !run_succeeded())
+        stream_result.termination = stream_termination::runtime_failure;
+    const bool overall_ok = stream_result.success() && run_succeeded();
+    if (dash)
+        dash->set_state(overall_ok ? truetest::ui::connection_state::closed
+                                   : truetest::ui::connection_state::halted);
+    else
+        std::cout << std::endl
+                  << (overall_ok ? "Streaming complete: " : "Streaming failed: ")
+                  << bar_index << " bars, " << portfolio_.get_total_trades()
+                  << " trades in " << (elapsed_ms > 0 ? elapsed_ms : 1)
+                  << " ms" << std::endl;
+    return stream_result;
 }
 
-void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
+StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 {
     if (!data_handler_) throw std::runtime_error("missing dependencies");
 
@@ -3241,6 +3570,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
     std::size_t tick_count = 0;
 
     auto* dash = config_.dashboard.get();
+    bool needs_periodic_tick = !dash;
     if (dash)
     {
         dash->set_state(truetest::ui::connection_state::waiting);
@@ -3254,7 +3584,10 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 
     auto last_report_time = std::chrono::steady_clock::now();
 
-    bridge->run_streaming(data_handler_, [&](const tick_record& rec) {
+    typename DataBridge<tick_record>::idle_callback funding_idle;
+    if (provider_funding_ingress_)
+        funding_idle = [this] { (void)drain_provider_funding_updates(); };
+    auto stream_result = bridge->run_streaming(data_handler_, [&](const tick_record& rec) {
         process_single_tick(rec, event_count);
         tick_count++;
 
@@ -3323,36 +3656,27 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
             }
         }
 
-        if (!dash)
+        if (needs_periodic_tick)
         {
             auto now_report = std::chrono::steady_clock::now();
             if (now_report - last_report_time >= std::chrono::milliseconds(200))
             {
-                std::cout << "\rStreaming: " << tick_count
-                          << " ticks | Fills: " << portfolio_.get_total_fills()
-                          << " | Round-trips: " << portfolio_.get_total_trades()
-                          << std::flush;
-                last_report_time = now_report;
+                if (!dash)
+                    std::cout << "\rStreaming: " << tick_count
+                              << " ticks | Fills: " << portfolio_.get_total_fills()
+                              << " | Round-trips: " << portfolio_.get_total_trades()
+                              << std::flush;
                 maybe_questdb_tick();
+                last_report_time = now_report;
             }
         }
-    });
+    }, funding_idle);
 
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-    if (dash)
-    {
-        dash->set_state(truetest::ui::connection_state::closed);
-    }
-    else
-    {
-        std::cout << std::endl;
-        std::cout << "Streaming complete: " << tick_count << " ticks, "
-                  << portfolio_.get_total_trades() << " trades in "
-                  << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
-    }
-
+    if (stream_result.termination == stream_termination::clean_eof
+        && config_.mode == engine_mode::backtest)
     {
         bool halt = halt_flag_.load(std::memory_order_acquire);
         drain_final_pending(event_count, halt);
@@ -3364,9 +3688,24 @@ void engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 #ifdef HAS_QUESTDB
     questdb_end();
 #endif
+    if (!stream_result.success())
+        run_failed_.store(true, std::memory_order_release);
+    if (stream_result.success() && !run_succeeded())
+        stream_result.termination = stream_termination::runtime_failure;
+    const bool overall_ok = stream_result.success() && run_succeeded();
+    if (dash)
+        dash->set_state(overall_ok ? truetest::ui::connection_state::closed
+                                   : truetest::ui::connection_state::halted);
+    else
+        std::cout << std::endl
+                  << (overall_ok ? "Streaming complete: " : "Streaming failed: ")
+                  << tick_count << " ticks, " << portfolio_.get_total_trades()
+                  << " trades in " << (elapsed_ms > 0 ? elapsed_ms : 1)
+                  << " ms" << std::endl;
+    return stream_result;
 }
 
-void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
+StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
 {
     if (!data_handler_) throw std::runtime_error("missing dependencies");
 
@@ -3387,6 +3726,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
     std::size_t record_count = 0;
 
     auto* dash = config_.dashboard.get();
+    bool needs_periodic_tick = !dash;
     if (dash)
     {
         dash->set_state(truetest::ui::connection_state::waiting);
@@ -3406,7 +3746,10 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
     std::chrono::system_clock::time_point current_event_ts =
         std::chrono::system_clock::now();
 
-    bridge->run_streaming(data_handler_, [&](const provider::event& ev) {
+    typename DataBridge<provider::event>::idle_callback funding_idle;
+    if (provider_funding_ingress_)
+        funding_idle = [this] { (void)drain_provider_funding_updates(); };
+    auto stream_result = bridge->run_streaming(data_handler_, [&](const provider::event& ev) {
         std::visit([&](const auto& e) {
             using E = std::decay_t<decltype(e)>;
 
@@ -3428,6 +3771,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
             }
             else if constexpr (std::is_same_v<E, provider::l2_snapshot>)
             {
+                if (!drain_provider_funding_updates()) return;
                 std::vector<l2_level> bids;
                 bids.reserve(e.bids.size());
                 for (const auto& lvl : e.bids)
@@ -3441,6 +3785,7 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
             }
             else if constexpr (std::is_same_v<E, provider::l2_update>)
             {
+                if (!drain_provider_funding_updates()) return;
                 tick_side ts = (e.side == 0) ? tick_side::bid : tick_side::ask;
                 apply_l2_update(e.symbol, ts, e.price, e.new_quantity);
                 // (forward to queue models now centralized inside apply_l2_update)
@@ -3504,36 +3849,27 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
             write_adapter_diagnostics(st);
         }
 
-        if (!dash)
+        if (needs_periodic_tick)
         {
             auto now_report = std::chrono::steady_clock::now();
             if (now_report - last_report_time >= std::chrono::milliseconds(200))
             {
-                std::cout << "\rStreaming: " << record_count
-                          << " events | Fills: " << portfolio_.get_total_fills()
-                          << " | Round-trips: " << portfolio_.get_total_trades()
-                          << std::flush;
-                last_report_time = now_report;
+                if (!dash)
+                    std::cout << "\rStreaming: " << record_count
+                              << " events | Fills: " << portfolio_.get_total_fills()
+                              << " | Round-trips: " << portfolio_.get_total_trades()
+                              << std::flush;
                 maybe_questdb_tick();
+                last_report_time = now_report;
             }
         }
-    });
+    }, funding_idle);
 
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-    if (dash)
-    {
-        dash->set_state(truetest::ui::connection_state::closed);
-    }
-    else
-    {
-        std::cout << std::endl;
-        std::cout << "Streaming complete: " << record_count << " events, "
-                  << portfolio_.get_total_trades() << " trades in "
-                  << (elapsed_ms > 0 ? elapsed_ms : 1) << " ms" << std::endl;
-    }
-
+    if (stream_result.termination == stream_termination::clean_eof
+        && config_.mode == engine_mode::backtest)
     {
         bool halt = halt_flag_.load(std::memory_order_acquire);
         drain_final_pending(event_count, halt);
@@ -3545,6 +3881,21 @@ void engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
 #ifdef HAS_QUESTDB
     questdb_end();
 #endif
+    if (!stream_result.success())
+        run_failed_.store(true, std::memory_order_release);
+    if (stream_result.success() && !run_succeeded())
+        stream_result.termination = stream_termination::runtime_failure;
+    const bool overall_ok = stream_result.success() && run_succeeded();
+    if (dash)
+        dash->set_state(overall_ok ? truetest::ui::connection_state::closed
+                                   : truetest::ui::connection_state::halted);
+    else
+        std::cout << std::endl
+                  << (overall_ok ? "Streaming complete: " : "Streaming failed: ")
+                  << record_count << " events, " << portfolio_.get_total_trades()
+                  << " trades in " << (elapsed_ms > 0 ? elapsed_ms : 1)
+                  << " ms" << std::endl;
+    return stream_result;
 }
 
 void engine::run()

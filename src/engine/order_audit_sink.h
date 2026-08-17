@@ -75,9 +75,9 @@ public:
     // Safe no-ops on Noop.
     virtual void tick() {}
     virtual void flush() {}
-    virtual void finalize_run(double final_equity, std::size_t total_orders, std::size_t total_fills, std::size_t total_rejections,
-                              double max_drawdown, double sharpe, double sortino, double profit_factor,
-                              double win_rate, double calmar, std::size_t total_trades, std::size_t winning_trades) {}
+    virtual void finalize_run(double, std::size_t, std::size_t, std::size_t,
+                              double, double, double, double,
+                              double, double, std::size_t, std::size_t) {}
 };
 
 // Default sink: counts rejections so soft-risk / unit tests can prove

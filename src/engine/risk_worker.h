@@ -6,21 +6,31 @@
 #include "../analytics/analytics.h"
 
 #include <atomic>
+#include <cstddef>
+#include <functional>
+#include <string_view>
+#include <utility>
 
 class RiskWorker : public Worker
 {
 public:
     RiskWorker(RiskManager rm,
-               std::atomic<bool>& halt_flag,
+                    std::atomic<bool>& halt_flag,
+               const std::atomic<std::size_t>& active_order_count,
                double initial_cash = 100000.0,
                std::size_t rolling_window = 252,
                double risk_free_rate = 0.0,
                std::size_t periods_per_year = 252,
-               std::size_t max_equity_points = 100000)
+               std::size_t max_equity_points = 100000,
+               std::function<void(std::string_view)> halt_cb = {},
+               bool enforce_terminal_halt = true)
         : risk_manager_(std::move(rm))
         , analytics_(initial_cash, rolling_window, risk_free_rate,
                      periods_per_year, max_equity_points)
-        , halt_flag_(halt_flag) {}
+        , halt_flag_(halt_flag)
+        , active_order_count_(active_order_count)
+        , halt_cb_(std::move(halt_cb))
+        , enforce_terminal_halt_(enforce_terminal_halt) {}
 
     const char* worker_name() const override { return "risk"; }
 
@@ -41,15 +51,16 @@ public:
             auto report = analytics_.generate_report();
             auto action = risk_manager_.check_post_fill(fill, portfolio_, report);
             if (action == risk_action::halt)
-                halt_flag_.store(true, std::memory_order_release);
+                request_halt();
         }
         else if (ev->get_type() == event_type::order)
         {
             auto& order = static_cast<const order_event&>(*ev);
             auto snap = analytics_.snapshot();
-            auto action = risk_manager_.check_order(order, portfolio_, snap);
+            auto action = risk_manager_.check_order(order, portfolio_, snap,
+                order.get_pretrade_open_order_count());
             if (action == risk_action::halt)
-                halt_flag_.store(true, std::memory_order_release);
+                request_halt();
         }
     }
 
@@ -63,5 +74,15 @@ private:
     portfolio portfolio_;
     Analytics analytics_;
     std::atomic<bool>& halt_flag_;
+    const std::atomic<std::size_t>& active_order_count_;
+    std::function<void(std::string_view)> halt_cb_;
+    bool enforce_terminal_halt_;
     std::atomic<std::size_t> events_processed_{0};
+
+    void request_halt()
+    {
+        if (!enforce_terminal_halt_) return;
+        if (halt_cb_) halt_cb_("risk worker requested halt");
+        else halt_flag_.store(true, std::memory_order_release);
+    }
 };

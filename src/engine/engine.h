@@ -80,6 +80,8 @@ static constexpr std::size_t DEFAULT_RING_SIZE = 65536;
 
 using EventRing = RingBuffer<event_pointer, DEFAULT_RING_SIZE>;
 
+enum class live_shutdown_reason;
+
 class engine
 {
 private:
@@ -186,12 +188,15 @@ private:
 #ifdef HAS_QUESTDB
     std::shared_ptr<truetest::questdb::QuestdbStore> questdb_store_;
     bool questdb_active_ = false;  // true only after successful begin()
+    RingBuffer<provider_funding_update, 256> funding_audit_ring_;
 
     // Last time we called tick() for time-based ILP flushing (Phase 1 hardening).
     std::chrono::steady_clock::time_point last_questdb_flush_{};
 
     void questdb_begin();
     void questdb_end();
+    bool flush_funding_audit() noexcept;
+    void check_strict_persistence();
 #endif
 
     // Declared unconditionally (guarded impl) to eliminate #ifdef guards from hot paths.
@@ -203,9 +208,12 @@ private:
     // - audit_sink_: single seam for *all* order/fill/reject/cancel/amend/funding/event recording.
     //   Engine calls ONLY record_* methods. No questdb_store_ inspection for decisions.
     // - router_: adapter resolution, submit/poll_fills, L2 forwarding, advance.
-    //   No direct execution_adapters_ bypass for submit/poll in hot paths.
+    // - router_: partial adapter seam. Resolution, basic submit/poll, L2 and
+    //   advance delegate here; async submit-result and exchange-shadow paths
+    //   remain characterized engine-owned bypasses pending extraction.
     std::unique_ptr<IOrderAuditSink> audit_sink_;
     std::unique_ptr<ExecutionRouter> router_;
+    ProviderFundingIngress* provider_funding_ingress_ = nullptr;
 
     // Dashboard logic extracted to cold collaborator (Wave 1).
     // See core/docs/internal/engine-decomposition.md (E-30..) + engine-decomposition skill.
@@ -236,6 +244,9 @@ private:
     // there is no bridge - it just no-ops.
     void drain_venue_bracket_meta();
     void drain_async_submit_results(IExecutionAdapter* adapter);
+    // Sole consumer for provider funding ingress. Only this engine-thread path
+    // may acquire funding_pool_, mutate portfolio/audit, or publish the event.
+    bool drain_provider_funding_updates() noexcept;
 
     // Stamp per-lot attribution (opener_order_id + strategy_name) onto a
     // fill_event if not already present. Uses order_meta_ lookup as fallback.
@@ -391,12 +402,14 @@ private:
     // destroyed members. In-flight bodies that passed the load may still
     // execute; they must only touch things with independent lifetime
     // (shared rings) or guarded pools.
-    std::shared_ptr<std::atomic<bool>> callbacks_armed_flag_ = std::make_shared<std::atomic<bool>>(true);
+    std::shared_ptr<std::atomic<bool>> callbacks_armed_flag_ = std::make_shared<std::atomic<bool>>(false);
 
     // (kept for compatibility with some internal reads; the real authority is the flag above)
-    std::atomic<bool> provider_callbacks_armed_{true};
+    std::atomic<bool> provider_callbacks_armed_{false};
 
     std::atomic<bool> worker_failed_{false};
+    std::atomic<bool> run_failed_{false};
+    std::atomic<bool> live_shutdown_failure_reported_{false};
     std::atomic<bool> pause_all_{false};
     std::atomic<bool> flatten_request_{false};
 
@@ -490,13 +503,18 @@ public:
     void run_replay(const std::string& log_path,
                     int64_t replay_from_us = 0,
                     int64_t replay_to_us = INT64_MAX);
-    void run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge);
-    void run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge);
+    StreamResult run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge);
+    StreamResult run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge);
 
     // Unified-event streaming (bar/tick/l2_snapshot/l2_update). L2 events
     // populate orderbook_registry_ directly - this is how LocalBookAdapter
     // sees real exchange depth in shadow mode.
-    void run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge);
+    StreamResult run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge);
+    bool run_succeeded() const
+    {
+        return !run_failed_.load(std::memory_order_acquire)
+            && !halt_flag_.load(std::memory_order_acquire);
+    }
     void set_strategy(std::shared_ptr<IStrategy> strategy);
 
     void set_primary_strategy_name(const std::string& name) { primary_strategy_name_ = name; }
@@ -599,18 +617,23 @@ public:
         return audit_sink_ ? audit_sink_->total_rejections() : 0;
     }
 
-    // Prefer is_halted() for production reads. Mutable ref is retained for
-    // tests; production code must never clear halt mid-run (S3 terminal).
+    // Halt is observable but never externally mutable. All writes must pass
+    // through trigger_halt so terminal state, wakeup, and diagnostics agree.
     bool is_halted() const
     {
         return halt_flag_.load(std::memory_order_acquire);
     }
-    std::atomic<bool>& get_halt_flag() { return halt_flag_; }
+    const std::atomic<bool>& get_halt_flag() const { return halt_flag_; }
 
     // Single thread-safe halt entry-point. Use this everywhere a halt is
     // raised (ring drop, watchdog hang, network detector, operator action)
     // so the dashboard banner, halt_flag_, and the recent-events ring stay
     // in sync. Idempotent: only the first caller per run wins, the rest
     // are no-ops. `reason` is truncated to streaming_stats::shutdown_reason_cap.
-    void trigger_halt(std::string_view reason);
+    void trigger_halt(std::string_view reason) noexcept;
+
+    // Terminal operator action. The shared live session performs one
+    // kill-before-close sequence and returns the cached result to all callers.
+    bool request_operator_kill(std::chrono::milliseconds deadline);
+    bool finalize_live_shutdown(live_shutdown_reason reason);
 };

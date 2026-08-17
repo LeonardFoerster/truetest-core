@@ -20,6 +20,7 @@ class IFillModel;
 class ILatencyModel;
 class IImpactModel;
 class IProvider;
+class LiveSafetySession;
 class IQueuePositionModel;
 class IQueueModel;
 
@@ -143,6 +144,9 @@ struct engine_config
     bool show_progress = true;
 
     std::shared_ptr<IProvider> provider;
+    // Composition-root-created live lifetime guard. It exists before
+    // provider open and is shared with engine teardown/operator actions.
+    std::shared_ptr<LiveSafetySession> live_safety_session;
 
 #ifdef HAS_QUESTDB
     bool persist_enabled = false;

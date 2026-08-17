@@ -1,24 +1,28 @@
 #pragma once
 
-#include "engine_config.h"
-#include "orderbook/orderbook_registry.h"
-#include "providers/provider.h"
-#include "execution/execution_adapter.h"
 #include "core/event.h"
-#include <unordered_map>
-#include <unordered_set>
+#include "execution/execution_adapter.h"
+#include "providers/provider.h"
+
+#include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string>
-#include <cstdint>
-#include <chrono>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
+
+struct engine_config;
+class OrderbookRegistry;
 
 // Skeleton-local redeclarations of meta types to match the exact design
 // signatures using bare names. These mirror the nested structs currently
 // private in engine (hoisting / dedup happens in later integration PRs).
 //
 // See core/docs/internal/engine-decomposition.md + engine-decomposition skill for router extraction history
-// and Phase 2 seam completeness (E-21): all adapter decisions go through this.
+// and Phase 2 history. This remains a partial seam: async submit-result
+// draining and exchange-shadow dual submission still live in engine.
 struct pending_cancel_meta
 {
     std::string symbol;

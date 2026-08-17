@@ -4,17 +4,18 @@
 #include "../analytics/analytics.h"
 
 #include <atomic>
+#include <cstddef>
 
 class StatsWorker : public Worker
 {
 public:
-    explicit StatsWorker(double initial_cash = 100000.0, std::size_t snapshot_interval = 1000,
+    explicit StatsWorker(double initial_cash = 100000.0,
+                         std::size_t /*legacy_snapshot_interval*/ = 1000,
                          std::size_t rolling_window = 252, double risk_free_rate = 0.0,
                          std::size_t periods_per_year = 252,
                          std::size_t max_equity_points = 100000)
         : analytics_(initial_cash, rolling_window, risk_free_rate,
-                     periods_per_year, max_equity_points),
-          snapshot_interval_(snapshot_interval) {}
+                     periods_per_year, max_equity_points) {}
 
     const char* worker_name() const override { return "stats"; }
 
@@ -22,12 +23,6 @@ public:
     {
         events_processed_.fetch_add(1, std::memory_order_relaxed);
         analytics_.on_event(ev);
-
-        if (snapshot_interval_ > 0 &&
-            events_processed_.load(std::memory_order_relaxed) % snapshot_interval_ == 0)
-        {
-            last_snapshot_ = analytics_.snapshot();
-        }
     }
 
     std::size_t events_processed() const
@@ -35,15 +30,11 @@ public:
         return events_processed_.load(std::memory_order_relaxed);
     }
 
-    AnalyticsReport last_snapshot() const { return last_snapshot_; }
-
     const Analytics& analytics() const { return analytics_; }
     // Mutable only for cold-path fold of engine research counters after stop.
     Analytics& analytics() { return analytics_; }
 
 private:
     Analytics analytics_;
-    std::size_t snapshot_interval_;
     std::atomic<std::size_t> events_processed_{0};
-    AnalyticsReport last_snapshot_;
 };

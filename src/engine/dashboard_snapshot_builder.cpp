@@ -21,7 +21,6 @@ using EventRing = RingBuffer<event_pointer, 65536>;
 #include <iostream>
 #include <sstream>
 #include <chrono>
-#include <iomanip>
 #include <vector>
 
 #ifdef HAS_DEBUG
@@ -96,7 +95,6 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     , risk_stats_ring_(risk_stats_ring)
     , mm_ring_(mm_ring)
     , debug_samplers_(debug_samplers)
-    , dashboard_view_interval_(100)
 {
 }
 
@@ -526,7 +524,6 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
                         else                                b_file   += bytes;
                     }
                 }
-                using snap_t = truetest::ui::dashboard_snapshot;
                 if (b_heap   > 0) m.other_breakdown.push_back({"heap",      b_heap});
                 if (b_stacks > 0) m.other_breakdown.push_back({"stacks",    b_stacks});
                 if (b_so     > 0) m.other_breakdown.push_back({".so libs",  b_so});
@@ -609,10 +606,11 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
         // cached interval. Order matches the add_pool() calls above.
         // Refresh in_use for memory pools (now >4 pools post-extraction; always update known ones)
         for (auto& p : out.memory.pools) {
-            if (p.name == "market_pool") p.in_use = market_pool_.in_use();
-            else if (p.name == "order_pool") p.in_use = order_pool_.in_use();
-            else if (p.name == "fill_pool") p.in_use = fill_pool_.in_use();
-            else if (p.name == "tick_pool") p.in_use = tick_pool_.in_use();
+            const std::string_view name = p.name ? p.name : "";
+            if (name == "market_pool") p.in_use = market_pool_.in_use();
+            else if (name == "order_pool") p.in_use = order_pool_.in_use();
+            else if (name == "fill_pool") p.in_use = fill_pool_.in_use();
+            else if (name == "tick_pool") p.in_use = tick_pool_.in_use();
             // extend for other pools if the memory UI cares
         }
     }
@@ -641,7 +639,7 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
 #ifdef HAS_DEBUG
         d.has_debug = true;
 #endif
-#ifdef HAS_LIVE_DATA
+#ifdef TRUETEST_VENUE_DATA_COMPILED
         d.has_live_data = true;
 #endif
 
@@ -881,4 +879,3 @@ void DashboardSnapshotBuilder::clear_for_mc_reset()
     memory_cache_initialised_ = false;
     // view and memory will be re-populated on next refresh/snapshot
 }
-
