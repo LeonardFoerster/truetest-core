@@ -109,7 +109,7 @@ cat > "$NOTE" <<NOTE_EOF
   --persist --run-tag ${RUN_TAG} \\
   --reconcile-tolerance-bps 3 \\
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \\
-  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \\
+  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 0.07 \\
   --max-daily-loss 80 --risk-unwind
 \`\`\`
 

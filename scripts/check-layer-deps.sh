@@ -38,10 +38,17 @@ ALLOWED[market_maker]="core orderbook threading types"
 ALLOWED[risk]="core execution analytics"
 ALLOWED[strategy]="core types indicator execution exits threading"
 ALLOWED[data]="core types utils debug execution"
+ALLOWED[exits]="core"
+ALLOWED[simulation]="analytics data engine execution exits providers strategy"
+ALLOWED[ui]="analytics core providers"
+ALLOWED[presets]=""
 ALLOWED[providers]="core types utils data orderbook execution engine exits risk simulation threading ui"
 ALLOWED[engine]="core types indicator utils debug threading orderbook execution analytics market_maker risk strategy data providers exits ui"
 ALLOWED[api]="engine core data strategy execution"
 ALLOWED[web]="ui analytics"   # read-only serializers: dashboard_snapshot + AnalyticsReport
+# Executable composition root: it is allowed to wire every application layer,
+# but is still checked so a newly introduced src/ module cannot bypass review.
+ALLOWED[bin]="core data debug engine execution market_maker orderbook presets providers simulation strategy threading ui utils web"
 
 # Current cross-module contracts beyond the original lower-layer graph:
 #   * analytics/footprint (footprint.md §2.2) aggregates the leaf PublicTrade
@@ -49,7 +56,7 @@ ALLOWED[web]="ui analytics"   # read-only serializers: dashboard_snapshot + Anal
 #     or engine dependency, so only the `types` edge was added.
 #   * analytics exposes a risk snapshot used by RiskManager gatekeeping.
 #   * strategies use dense SymbolTable ids via SymbolStateStore (types layer).
-#   * strategies emit exit intents, and adaptive hybrid owns worker/thread knobs.
+#   * strategies emit exit intents; no strategy owns engine worker/thread knobs.
 #   * data/questdb serializes execution order tracker state.
 #   * providers bind venue adapters for exits, futures risk, synthetic generation,
 #     watchdog callbacks, and optional UI status plumbing.
@@ -74,13 +81,23 @@ done
 
 violations=0
 
+# A new src-level module must receive an explicit graph rule. Silently skipping
+# an unknown module would let every include edge from that module bypass this
+# gate until somebody happened to notice the omission.
+for module in "${!REAL_MODULES[@]}"; do
+    if [[ -z "${ALLOWED[$module]+x}" ]]; then
+        echo "UNMAPPED: src/$module/ has no dependency rule in scripts/check-layer-deps.sh" >&2
+        violations=$((violations + 1))
+    fi
+done
+
 while IFS= read -r -d '' file; do
     [[ -n "${EXEMPT_FILES[$file]:-}" ]] && continue
 
     rel="${file#src/}"
     module="${rel%%/*}"
 
-    [[ -z "${ALLOWED[$module]+x}" ]] && continue
+    [[ -z "${ALLOWED[$module]+x}" ]] && continue  # already reported above
 
     while IFS= read -r line; do
         # Match only project-local quoted includes: "foo/bar.h" or "../foo/bar.h".
@@ -121,7 +138,7 @@ while IFS= read -r -d '' file; do
             violations=$((violations + 1))
         fi
     done < "$file"
-done < <(find src -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.cpp' -o -name '*.cc' \) -print0)
+done < <(find src -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.cpp' -o -name '*.cc' -o -name '*.inc' \) -print0)
 
 if (( violations > 0 )); then
     echo "" >&2

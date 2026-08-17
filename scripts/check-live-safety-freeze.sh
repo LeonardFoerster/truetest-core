@@ -5,7 +5,7 @@
 # Enforces the Phase 1 live-safety freeze defined in prod.md.
 #
 # Usage:
-#   ./scripts/check-live-safety-freeze.sh                  # check HEAD~1 (normal pre-commit / CI use)
+#   ./scripts/check-live-safety-freeze.sh                  # check commit + index + worktree
 #   ./scripts/check-live-safety-freeze.sh --base <commit>  # check against arbitrary base
 #   ./scripts/check-live-safety-freeze.sh --help
 #
@@ -29,13 +29,57 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 FROZEN_FILES=(
     "src/core/tt_target.h"
     "src/engine/engine.cpp"
+    "src/engine/engine.h"
+    "src/engine/engine_config.h"
+    "src/engine/engine_pending.cpp"
+    "src/engine/live_safety_session.cpp"
+    "src/engine/live_safety_session.h"
+    "src/bin/main.inc"
+    "src/bin/provider_open_policy.h"
+    "src/execution/execution_bridge.h"
+    "src/execution/fill_parser.h"
+    "src/execution/async_support.h"
+    "src/execution/order_transport.h"
+    "src/providers/provider.h"
+    "src/providers/bounded_ws_open.h"
+    "src/providers/bounded_ws_frame_reader.h"
+    "src/providers/data_bridge.h"
+    "src/providers/recovery_payload.h"
+    "src/providers/socket_readiness.h"
+    "src/providers/thread_safe_callback.h"
+    "src/providers/transport.h"
+    "src/providers/binance/binance_transport.h"
+    "src/providers/binance/binance_combined_transport.h"
+    "src/providers/binance/binance_user_data_transport.h"
+    "src/providers/binance/binance_provider.h"
+    "src/providers/binance/binance_kill_switch.h"
+    "src/providers/binance/binance_reconciler.h"
+    "src/providers/binance/binance_rest_client.h"
+    "src/providers/binance/binance_rest_order_transport.h"
+    "src/providers/binance/binance_oco_bracket_adapter.h"
     "src/providers/binance/binance_futures_provider.h"
     "src/providers/binance/binance_futures_dead_mans_switch.h"
     "src/providers/binance/binance_futures_kill_switch.h"
     "src/providers/binance/binance_futures_reconciler.h"
+    "src/providers/binance/binance_futures_user_data_parser.h"
+    "src/providers/binance/binance_futures_register.cpp"
+    "src/providers/binance/binance_futures_bracket_adapter.h"
+    "src/providers/bitget/bitget_futures_provider.h"
+    "src/providers/bitget/bitget_transport.h"
+    "src/providers/bitget/bitget_combined_transport.h"
+    "src/providers/bitget/bitget_private_ws_transport.h"
+    "src/providers/bitget/bitget_futures_dead_mans_switch.h"
+    "src/providers/bitget/bitget_futures_kill_switch.h"
+    "src/providers/bitget/bitget_futures_reconciler.h"
+    "src/providers/bitget/bitget_futures_user_data_parser.h"
+    "src/providers/bitget/bitget_rest_client.h"
+    "src/providers/bitget/bitget_rest_order_transport.h"
+    "src/providers/bitget/bitget_futures_register.cpp"
+    "src/providers/bitget/bitget_futures_bracket_adapter.h"
     "src/risk/risk_manager.h"
     "src/risk/futures_risk_check.h"
     "src/execution/live_safety.h"
+    "src/threading/worker.h"
     "src/threading/worker_watchdog.h"
 )
 
@@ -49,17 +93,22 @@ Options:
   --base <commit>     Compare against this commit instead of HEAD~1
   --help              Show this help
 
-The script fails (exit 1) if any file in the frozen list was modified in the
-diff and the commit message does not contain the token: ${REQUIRED_TOKEN}
+Committed and dirty changes are authorized independently. Every commit in the
+selected range that touches a frozen file must carry ${REQUIRED_TOKEN} in its
+own message. Dirty staged/unstaged/untracked frozen changes require the explicit
+pre-commit acknowledgement LIVE_SAFETY_APPROVAL_TOKEN. That acknowledgement
+never authorizes already-committed history.
 EOF
 }
 
 BASE="HEAD~1"
+BASE_EXPLICIT=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --base)
             BASE="$2"
+            BASE_EXPLICIT=true
             shift 2
             ;;
         --help|-h)
@@ -74,35 +123,98 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Get the commit message of the current HEAD (the commit being checked)
-COMMIT_MSG=$(git log -1 --pretty=%B 2>/dev/null || echo "")
-
-# Get list of changed files between BASE and HEAD
-# Use --name-only and handle renames/deletes gracefully
-CHANGED_FILES=$(git diff --name-only --diff-filter=ACMR "${BASE}" HEAD 2>/dev/null || true)
-
-if [[ -z "$CHANGED_FILES" ]]; then
-    # No changes (e.g. first commit or identical trees) — pass
-    exit 0
+if ! HEAD_COMMIT=$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null); then
+    echo "check-live-safety-freeze: HEAD is not a commit" >&2
+    exit 1
 fi
 
-# Check whether any frozen file was touched
+ROOT_RANGE=false
+if BASE_COMMIT=$(git rev-parse --verify "${BASE}^{commit}" 2>/dev/null); then
+    COMMIT_RANGE="${BASE_COMMIT}..${HEAD_COMMIT}"
+elif [[ "$BASE_EXPLICIT" == false && "$BASE" == "HEAD~1" ]] \
+    && ! git rev-parse --verify 'HEAD^' >/dev/null 2>&1; then
+    ROOT_RANGE=true
+    COMMIT_RANGE="$HEAD_COMMIT"
+else
+    echo "check-live-safety-freeze: invalid base commit: ${BASE}" >&2
+    exit 1
+fi
+
+touches_frozen() {
+    local changed_files="$1"
+    local frozen
+    for frozen in "${FROZEN_FILES[@]}"; do
+        if grep -Fxq "$frozen" <<<"$changed_files"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+append_touched_frozen() {
+    local changed_files="$1"
+    local frozen
+    for frozen in "${FROZEN_FILES[@]}"; do
+        if grep -Fxq "$frozen" <<<"$changed_files"; then
+            TOUCHED_FROZEN+=("$frozen")
+        fi
+    done
+}
+
+# Validate each touching commit independently. --no-renames intentionally
+# exposes both the deleted source and added destination of a rename.
+if [[ "$ROOT_RANGE" == true ]]; then
+    COMMITS=("$HEAD_COMMIT")
+else
+    mapfile -t COMMITS < <(git rev-list --reverse "$COMMIT_RANGE")
+fi
+
+UNAUTHORIZED_COMMITS=()
 TOUCHED_FROZEN=()
+for commit in "${COMMITS[@]}"; do
+    COMMIT_FILES=$(git diff-tree --root -m --no-commit-id --name-only -r \
+        --no-renames --diff-filter=ACMRD "$commit" | sort -u)
+    if touches_frozen "$COMMIT_FILES"; then
+        append_touched_frozen "$COMMIT_FILES"
+        COMMIT_MSG=$(git show -s --format=%B "$commit")
+        if ! grep -qF "$REQUIRED_TOKEN" <<<"$COMMIT_MSG"; then
+            UNAUTHORIZED_COMMITS+=("$commit")
+        fi
+    fi
+done
+
+# Dirty candidate state is deliberately separate from committed history.
+DIRTY_FILES=$({
+    git diff --cached --no-renames --name-only --diff-filter=ACMRD
+    git diff --no-renames --name-only --diff-filter=ACMRD
+    git ls-files --others --exclude-standard
+} | sort -u)
+DIRTY_FROZEN=()
 for f in "${FROZEN_FILES[@]}"; do
-    if echo "$CHANGED_FILES" | grep -Fxq "$f"; then
+    if grep -Fxq "$f" <<<"$DIRTY_FILES"; then
+        DIRTY_FROZEN+=("$f")
         TOUCHED_FROZEN+=("$f")
     fi
 done
 
 if [[ ${#TOUCHED_FROZEN[@]} -eq 0 ]]; then
-    # No frozen files touched — pass
     exit 0
 fi
 
-# Frozen files were touched — require the magic token
-if echo "$COMMIT_MSG" | grep -qF "$REQUIRED_TOKEN"; then
-    # Token present — allowed
-    echo "[check-live-safety-freeze] Frozen files changed with required token present. OK."
+mapfile -t TOUCHED_FROZEN < <(printf '%s\n' "${TOUCHED_FROZEN[@]}" | sort -u)
+
+COMMITTED_OK=true
+if [[ ${#UNAUTHORIZED_COMMITS[@]} -gt 0 ]]; then
+    COMMITTED_OK=false
+fi
+DIRTY_OK=true
+if [[ ${#DIRTY_FROZEN[@]} -gt 0 \
+    && "${LIVE_SAFETY_APPROVAL_TOKEN:-}" != "$REQUIRED_TOKEN" ]]; then
+    DIRTY_OK=false
+fi
+
+if [[ "$COMMITTED_OK" == true && "$DIRTY_OK" == true ]]; then
+    echo "[check-live-safety-freeze] Frozen changes carry the required independent approvals. OK."
     exit 0
 fi
 
@@ -117,6 +229,18 @@ for f in "${TOUCHED_FROZEN[@]}"; do
     echo "  - $f"
 done
 echo ""
+if [[ ${#UNAUTHORIZED_COMMITS[@]} -gt 0 ]]; then
+    echo "Commits missing the required token:"
+    for commit in "${UNAUTHORIZED_COMMITS[@]}"; do
+        echo "  - $commit"
+    done
+    echo ""
+fi
+if [[ "$DIRTY_OK" == false ]]; then
+    echo "Dirty frozen changes require LIVE_SAFETY_APPROVAL_TOKEN after recorded CCB approval."
+    echo "A token in HEAD never authorizes later dirty changes."
+    echo ""
+fi
 echo "Any change to these files requires explicit two-person CCB review"
 echo "AND the commit message must contain the token:"
 echo ""

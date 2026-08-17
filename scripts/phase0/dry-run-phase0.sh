@@ -26,7 +26,7 @@ QuestDB wiring that the real Phase 0 live sessions will use.
 
 Prerequisites before running:
   1. cmake -B build -DENABLE_BINANCE=ON -DENABLE_QUESTDB=ON
-  2. cmake --build build -j\$(nproc)
+  2. cmake --build build -j1
   3. QuestDB daemon running and reachable on 127.0.0.1:9000 / 9009
   4. You have a Binance futures API key pair (read-only is sufficient for shadow)
 
@@ -45,7 +45,7 @@ export BINANCE_FUTURES_SECRET=...
   --persist --run-tag ${RUN_TAG} \\
   --reconcile-tolerance-bps 3 \\
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \\
-  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 7 \\
+  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 0.07 \\
   --max-daily-loss 80 --risk-unwind 0.4 \\
   --status-format tui
 
