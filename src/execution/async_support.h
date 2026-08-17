@@ -35,6 +35,8 @@ struct submit_result
     std::string error;
     operation   op = operation::submit;
     bool        ok = false;
+    bool        uncertain = false;
+    bool        fatal = false;
 };
 
 struct synth_result

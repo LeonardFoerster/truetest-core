@@ -402,7 +402,8 @@ public:
             sum_frac += frac;
             ++n;
         }
-        return static_cast<std::uint32_t>(std::lround((sum_frac / n) * 10000.0));
+        return static_cast<std::uint32_t>(
+            std::lround((sum_frac / static_cast<double>(n)) * 10000.0));
     }
 
 private:

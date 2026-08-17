@@ -8,6 +8,7 @@
 // `acquire_blocking` (which sleeps on the calling thread).
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <mutex>
@@ -57,6 +58,21 @@ public:
             if (wait == std::chrono::nanoseconds::max()) return; // refill_per_sec_ == 0 -> never
             std::this_thread::sleep_for(wait);
         }
+    }
+
+    bool acquire_interruptibly(const std::atomic<bool>& keep_running,
+                               double tokens = 1.0)
+    {
+        while (keep_running.load(std::memory_order_acquire))
+        {
+            if (try_acquire(tokens)) return true;
+            auto wait = time_until(tokens);
+            if (wait == std::chrono::nanoseconds::max()) return false;
+            std::this_thread::sleep_for(std::min(
+                wait, std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::milliseconds{1})));
+        }
+        return false;
     }
 
     double available_tokens()

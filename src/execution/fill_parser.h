@@ -3,6 +3,7 @@
 #include "../core/event.h"
 
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -82,12 +83,34 @@ struct parsed_exec
     std::string error;
 };
 
+enum class funding_parse_result : std::uint8_t
+{
+    not_funding,
+    valid,
+    invalid,
+};
+
+// Allocation-free handoff from the venue parser to the provider-owned SPSC
+// ingress. Venue parsers must return invalid for funding-like frames whose
+// envelope, timestamp, asset, or delta is not authoritative.
+struct parsed_funding_update
+{
+    std::int64_t event_time_ms = 0;
+    double cash_delta = 0.0;
+};
+
 class IFillParser
 {
 public:
     virtual ~IFillParser() = default;
 
     virtual bool parse(std::string_view raw, parsed_exec& out) = 0;
+
+    virtual funding_parse_result parse_funding_update(
+        std::string_view /*raw*/, parsed_funding_update& /*out*/) noexcept
+    {
+        return funding_parse_result::not_funding;
+    }
 
     // Optional: parse server-pushed position/balance snapshots not tied
     // to a specific order (e.g. futures ACCOUNT_UPDATE). Default returns

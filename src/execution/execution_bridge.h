@@ -60,6 +60,14 @@ public:
         std::function<void(const parsed_position_snapshot&)>
             position_snapshot_handler;
 
+        // Funding/accounting decisions are parsed before the allocating
+        // diagnostic snapshot path. Both callbacks run on the private fill
+        // reader thread. The update callback may only enqueue into a
+        // provider-owned SPSC ingress; false or any exception is terminal.
+        std::function<bool(const parsed_funding_update&)>
+            funding_update_handler;
+        std::function<void()> funding_failure_handler;
+
         bool start_transport_thread = true;
     };
 
@@ -150,6 +158,7 @@ public:
             return false;
         }
 
+        accepting_orders_.store(true, std::memory_order_release);
         // Start background transport thread (only for live order paths).
         // The thread owns all actual calls to order_tx.
         if (d_.start_transport_thread)
@@ -163,13 +172,7 @@ public:
 
     void close()
     {
-        // Revoke the handler immediately so that any in-flight or late
-        // dispatch_unknown_fill on the worker cannot observe a stale
-        // functor after close returns.
-        clear_unknown_fill_handler();
-
-        // Stop transport thread first so it can drain / finish I/O cleanly.
-        transport_running_.store(false, std::memory_order_release);
+        quiesce();
         if (transport_thread_.joinable())
             transport_thread_.join();
 
@@ -177,9 +180,32 @@ public:
         if (d_.order_tx) d_.order_tx->close();
     }
 
+    void quiesce()
+    {
+        accepting_orders_.store(false, std::memory_order_release);
+        transport_running_.store(false, std::memory_order_release);
+        // Serialise the admission check with the actual venue call. Without
+        // this gate, a worker could observe accepting=true, then start a
+        // submit after quiesce() had returned. Shutdown waits only for an
+        // already-admitted mutation; it never permits a new one.
+        std::lock_guard<std::mutex> admission_lock(venue_admission_mu_);
+        if (d_.order_tx) d_.order_tx->quiesce();
+        {
+            std::lock_guard<std::mutex> lk(submit_queue_mu_);
+            submit_queue_.clear();
+        }
+        clear_unknown_fill_handler();
+    }
+
     void submit_order(const order_event& o) override
     {
         clear_error();
+
+        if (!accepting_orders_.load(std::memory_order_acquire))
+        {
+            set_error("ExecutionBridge: live submission is quiesced");
+            return;
+        }
 
         if (!d_.encoder || !d_.order_tx)
         {
@@ -216,6 +242,11 @@ public:
         // Enqueue under short lock (orders are rare vs market ticks).
         {
             std::lock_guard<std::mutex> lk(submit_queue_mu_);
+            if (!accepting_orders_.load(std::memory_order_acquire))
+            {
+                set_error("ExecutionBridge: live submission is quiesced");
+                return;
+            }
             submit_queue_.push_back(std::move(req));
         }
     }
@@ -233,6 +264,7 @@ public:
 
     bool cancel_order(uint64_t engine_order_id) override
     {
+        if (!accepting_orders_.load(std::memory_order_acquire)) return false;
         std::string exchange_id, symbol, client_id;
         {
             std::lock_guard<std::mutex> lk(map_mu_);
@@ -254,6 +286,7 @@ public:
 
         {
             std::lock_guard<std::mutex> lk(submit_queue_mu_);
+            if (!accepting_orders_.load(std::memory_order_acquire)) return false;
             submit_queue_.push_back(std::move(req));
         }
 
@@ -321,6 +354,27 @@ private:
     void handle_message(std::string_view raw)
     {
         if (!d_.parser) return;
+
+        parsed_funding_update funding;
+        const auto funding_result =
+            d_.parser->parse_funding_update(raw, funding);
+        if (funding_result != funding_parse_result::not_funding)
+        {
+            bool accepted = false;
+            if (funding_result == funding_parse_result::valid
+                && d_.funding_update_handler)
+            {
+                try { accepted = d_.funding_update_handler(funding); }
+                catch (...) { accepted = false; }
+            }
+            if (!accepted && d_.funding_failure_handler)
+            {
+                try { d_.funding_failure_handler(); }
+                catch (...) {}
+            }
+            return;
+        }
+
         parsed_exec msg;
         if (!d_.parser->parse(raw, msg))
         {
@@ -515,14 +569,20 @@ private:
     std::mutex                  submit_queue_mu_;
     std::deque<submit_request>  submit_queue_;
 
+    // Guards the final accepting_orders_ check and the corresponding venue
+    // mutation, making the IOrderTransport quiesce admission contract exact.
+    std::mutex venue_admission_mu_;
+
     std::mutex submit_results_mu_;
     std::vector<submit_result> pending_submit_results_;
 
     std::thread transport_thread_;
     std::atomic<bool> transport_running_{false};
+    std::atomic<bool> accepting_orders_{false};
 
     void transport_loop();
     void process_one_submit(const submit_request& req);
+    void close_terminal_admission();
 };
 
 
@@ -546,6 +606,15 @@ inline void ExecutionBridge::transport_loop()
             try {
                 process_one_submit(req);
             } catch (const std::exception& e) {
+                // An exception from a venue mutation cannot prove whether
+                // bytes reached the exchange. Close admission before
+                // publishing the result so no already-queued mutation can
+                // overtake the engine's terminal halt reaction.
+                {
+                    std::lock_guard<std::mutex> admission_lock(
+                        venue_admission_mu_);
+                    close_terminal_admission();
+                }
                 submit_result sr;
                 sr.engine_id = req.engine_id;
                 sr.symbol = req.symbol;
@@ -554,6 +623,28 @@ inline void ExecutionBridge::transport_loop()
                     ? submit_result::operation::cancel
                     : submit_result::operation::submit;
                 sr.ok = false;
+                sr.uncertain = true;
+                sr.fatal = true;
+                {
+                    std::lock_guard<std::mutex> lk(submit_results_mu_);
+                    pending_submit_results_.push_back(std::move(sr));
+                }
+            } catch (...) {
+                {
+                    std::lock_guard<std::mutex> admission_lock(
+                        venue_admission_mu_);
+                    close_terminal_admission();
+                }
+                submit_result sr;
+                sr.engine_id = req.engine_id;
+                sr.symbol = req.symbol;
+                sr.error = "unknown exception from order transport";
+                sr.op = req.is_cancel
+                    ? submit_result::operation::cancel
+                    : submit_result::operation::submit;
+                sr.ok = false;
+                sr.uncertain = true;
+                sr.fatal = true;
                 {
                     std::lock_guard<std::mutex> lk(submit_results_mu_);
                     pending_submit_results_.push_back(std::move(sr));
@@ -569,9 +660,17 @@ inline void ExecutionBridge::transport_loop()
     }
 }
 
+inline void ExecutionBridge::close_terminal_admission()
+{
+    accepting_orders_.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> queue_lock(submit_queue_mu_);
+    submit_queue_.clear();
+}
+
 inline void ExecutionBridge::process_one_submit(const submit_request& req)
 {
-    if (!d_.order_tx || !d_.encoder) return;
+    if (!d_.order_tx || !d_.encoder
+        || !accepting_orders_.load(std::memory_order_acquire)) return;
 
     if (req.is_cancel)
     {
@@ -590,11 +689,19 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
             }
         }
 
-        if (d_.order_rate_limiter)
-            d_.order_rate_limiter->acquire_blocking(1.0);
+        if (d_.order_rate_limiter
+            && !d_.order_rate_limiter->acquire_interruptibly(
+                transport_running_, 1.0))
+            return;
 
         auto enc = d_.encoder->encode_cancel(symbol, exchange_id, client_id);
-        auto res = d_.order_tx->cancel(enc.endpoint, enc.wire_payload);
+        IOrderTransport::result res;
+        {
+            std::lock_guard<std::mutex> admission_lock(venue_admission_mu_);
+            if (!accepting_orders_.load(std::memory_order_acquire)) return;
+            res = d_.order_tx->cancel(enc.endpoint, enc.wire_payload);
+            if (res.uncertain || res.fatal) close_terminal_admission();
+        }
 
         if (!res.ok) {
             set_error("cancel failed: " + res.error);
@@ -614,6 +721,8 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
         sr.error = res.ok ? "" : res.error;
         sr.op = submit_result::operation::cancel;
         sr.ok = res.ok;
+        sr.uncertain = res.uncertain;
+        sr.fatal = res.fatal;
         {
             std::lock_guard<std::mutex> lk(submit_results_mu_);
             pending_submit_results_.push_back(std::move(sr));
@@ -621,12 +730,20 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
         return;
     }
 
-    if (d_.order_rate_limiter)
-        d_.order_rate_limiter->acquire_blocking(1.0);
+    if (d_.order_rate_limiter
+        && !d_.order_rate_limiter->acquire_interruptibly(
+            transport_running_, 1.0))
+        return;
 
-    auto res = d_.order_tx->submit(req.endpoint, req.wire_payload);
+    IOrderTransport::result res;
+    {
+        std::lock_guard<std::mutex> admission_lock(venue_admission_mu_);
+        if (!accepting_orders_.load(std::memory_order_acquire)) return;
+        res = d_.order_tx->submit(req.endpoint, req.wire_payload);
+        if (res.uncertain || res.fatal) close_terminal_admission();
+    }
 
-    if (!res.ok) {
+    if (!res.ok && !res.uncertain && !res.fatal) {
         set_error("submit failed: " + res.error);
         std::lock_guard<std::mutex> lk(map_mu_);
         by_engine_id_.erase(req.engine_id);
@@ -649,6 +766,8 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
     sr.error = res.ok ? "" : res.error;
     sr.op = submit_result::operation::submit;
     sr.ok = res.ok;
+    sr.uncertain = res.uncertain;
+    sr.fatal = res.fatal;
     {
         std::lock_guard<std::mutex> lk(submit_results_mu_);
         pending_submit_results_.push_back(std::move(sr));

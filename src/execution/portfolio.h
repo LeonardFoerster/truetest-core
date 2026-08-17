@@ -52,22 +52,8 @@ public:
     // Does not affect lots (funding does not open or close positions in the bookkeeping sense).
     void on_funding(const funding_event& fe);
 
-    void print_summary() const;
-
     bool position_open() const;
     bool position_open(const std::string& symbol) const;
-
-    // `commission` is the expected fee for this order (default 0 for
-    // legacy callers). Buys require cash >= qty*price + commission.
-    bool can_afford(order_side side, double quantity, double price,
-                    double commission = 0.0) const;
-    bool can_afford(const std::string& symbol, order_side side, double quantity,
-                    double price, double commission = 0.0) const;
-
-    // Notional sizing: deploy risk_fraction of cash as position notional,
-    // optionally shrinking for entry fee rate (fraction of notional).
-    double compute_quantity(double price, double risk_fraction,
-                            double entry_fee_rate = 0.0) const;
 
     std::size_t get_total_trades() const { return total_trades_; }
     std::size_t get_total_fills() const { return total_fills_; }
@@ -86,8 +72,6 @@ public:
     const std::unordered_map<std::uint64_t, lot>& get_lots() const { return lots_; }
 
     std::vector<std::uint64_t> open_lots_by_symbol(const std::string& symbol) const;
-    std::vector<std::uint64_t> open_lots_by_strategy(const std::string& strategy_name) const;
-    std::size_t open_lot_count() const { return lots_.size(); }
 
     void restore_state(double cash, std::size_t total_trades,
                        std::unordered_map<std::string, position> positions)

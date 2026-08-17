@@ -101,8 +101,8 @@ public:
     // Bar-mode traversal: fill resting limits whose price lies inside
     // [low, high]. Returns true if any fill was produced (caller should
     // poll_fills). Default false — paper LocalBookAdapter / Hybrid only.
-    // bar_volume > 0 caps aggregate fill quantity across orders (FIFO by
-    // resting map order / submit order); <=0 leaves full-remaining fills.
+    // bar_volume > 0 caps aggregate fill quantity across orders (submission
+    // FIFO for orders at the same price level); <=0 fills full remainders.
     virtual bool sweep_resting_range(const std::string& /*symbol*/,
                                      double /*low*/, double /*high*/,
                                      std::chrono::system_clock::time_point /*ts*/,
@@ -138,6 +138,11 @@ public:
         , latency_model_(std::move(latency_model))
         , impact_model_(std::move(impact_model))
         , walked_book_impact_(walked_book_impact) {}
+
+    LocalBookAdapter(const LocalBookAdapter&) = delete;
+    LocalBookAdapter& operator=(const LocalBookAdapter&) = delete;
+    LocalBookAdapter(LocalBookAdapter&&) = delete;
+    LocalBookAdapter& operator=(LocalBookAdapter&&) = delete;
 
     void set_mid_price(double price) override { mid_price_ = price; }
     // Symbol carries real L2 depth — enables the walked-book VWAP
@@ -250,8 +255,8 @@ public:
         if (book_order_type == ob_order_type::good_till_cancel &&
             book_order->get_remaining_quantity() > 0)
         {
-            resting_[o.get_order_id()] =
-                resting_info{book_order, o.get_symbol(), o.get_side()};
+            track_resting(o.get_order_id(), book_order,
+                          o.get_symbol(), o.get_side());
         }
 
         for (const auto& trade : resulting_trades)
@@ -343,7 +348,8 @@ public:
         // Only succeed when we actually hold the order (resting or cancel
         // already in flight). Unknown ids must return false so Hybrid does
         // not treat "local always true" as a successful cancel.
-        const bool known = resting_.count(order_id) > 0
+        auto resting_it = resting_.find(order_id);
+        const bool known = resting_it != resting_.end()
                         || pending_cancels_.count(order_id) > 0;
         if (!known)
             return false;
@@ -357,7 +363,8 @@ public:
             return true;
         }
         ob_->cancel_order(order_id);
-        resting_.erase(order_id);
+        if (resting_it != resting_.end())
+            erase_resting(resting_it);
         return true;
     }
 
@@ -378,9 +385,13 @@ public:
         if (pending_cancels_.count(order_id) > 0)
             return false;
 
-        resting_info saved{};
+        std::string saved_symbol;
+        order_side saved_side = order_side::buy;
         if (in_resting)
-            saved = rit->second; // keep entry until success
+        {
+            saved_symbol = rit->second.symbol;
+            saved_side = rit->second.side;
+        }
 
         Price book_price = Price::from_double(new_price);
         quantity book_qty = static_cast<quantity>(std::round(new_qty * qty_scale_));
@@ -393,13 +404,18 @@ public:
             if (auto body = ob_->get_order(order_id))
             {
                 if (body->get_remaining_quantity() > 0)
-                    resting_[order_id] = resting_info{body, saved.symbol, saved.side};
+                {
+                    rit->second.book_order = body;
+                    rit->second.symbol = std::move(saved_symbol);
+                    rit->second.side = saved_side;
+                    move_resting_to_back(&rit->second);
+                }
                 else
-                    resting_.erase(order_id);
+                    erase_resting(rit);
             }
             else
             {
-                resting_.erase(order_id);
+                erase_resting(rit);
             }
         }
         return true;
@@ -413,7 +429,9 @@ public:
             if (it->second <= ts)
             {
                 ob_->cancel_order(it->first);
-                resting_.erase(it->first);
+                auto resting_it = resting_.find(it->first);
+                if (resting_it != resting_.end())
+                    erase_resting(resting_it);
                 it = pending_cancels_.erase(it);
             }
             else
@@ -457,51 +475,71 @@ public:
         double volume_left = (bar_volume > 0.0) ? bar_volume
                                                 : std::numeric_limits<double>::infinity();
         bool any = false;
-        for (auto it = resting_.begin(); it != resting_.end(); )
+        resting_info* current = resting_fifo_head_;
+        while (current != nullptr)
         {
             if (!(volume_left > 0.0)) break;
 
-            auto& ri = it->second;
-            if (ri.symbol != symbol) { ++it; continue; }
+            resting_info* next = current->fifo_next;
+            const uint64_t order_id = current->order_id;
+            if (current->symbol != symbol)
+            {
+                current = next;
+                continue;
+            }
             // Skip orders with a cancel in flight — "too slow to pull"
             // is modeled at the crossing paths, but a traversal fill
             // during the cancel window would be generous, not adverse.
-            if (pending_cancels_.count(it->first)) { ++it; continue; }
-
-            // Always use live book body for remaining qty/price (HIGH-02).
-            if (auto live = ob_->get_order(it->first))
-                ri.book_order = live;
-            else
+            if (pending_cancels_.count(order_id))
             {
-                it = resting_.erase(it);
+                current = next;
                 continue;
             }
 
-            const double px = ri.book_order->get_price().to_double();
-            const bool traversed = (ri.side == order_side::buy)
+            // Always use live book body for remaining qty/price (HIGH-02).
+            if (auto live = ob_->get_order(order_id))
+                current->book_order = live;
+            else
+            {
+                erase_resting(current);
+                current = next;
+                continue;
+            }
+
+            const double px = current->book_order->get_price().to_double();
+            const bool traversed = (current->side == order_side::buy)
                 ? (low <= px) : (high >= px);
-            if (!traversed) { ++it; continue; }
+            if (!traversed)
+            {
+                current = next;
+                continue;
+            }
 
             const double remaining =
-                static_cast<double>(ri.book_order->get_remaining_quantity())
+                static_cast<double>(current->book_order->get_remaining_quantity())
                 / qty_scale_;
             if (remaining <= 0.0)
             {
-                it = resting_.erase(it);
+                erase_resting(current);
+                current = next;
                 continue;
             }
 
             const double fill_qty = std::min(remaining, volume_left);
-            if (!(fill_qty > 0.0)) { ++it; continue; }
+            if (!(fill_qty > 0.0))
+            {
+                current = next;
+                continue;
+            }
 
             double commission = 0.0;
             if (fee_model_)
                 commission = fee_model_->compute_commission(
-                    ri.side, fill_qty, px, /*is_taker=*/false);
+                    current->side, fill_qty, px, /*is_taker=*/false);
 
             const double rem_after = remaining - fill_qty;
             pending_fills_.emplace_back(
-                ts, ri.symbol, it->first, ri.side,
+                ts, current->symbol, order_id, current->side,
                 fill_qty, px, commission,
                 rem_after, next_fill_id_++);
             any = true;
@@ -510,8 +548,8 @@ public:
 
             if (rem_after <= 1e-12)
             {
-                ob_->cancel_order(it->first);
-                it = resting_.erase(it);
+                ob_->cancel_order(order_id);
+                erase_resting(current);
             }
             else
             {
@@ -519,17 +557,16 @@ public:
                 const quantity new_q = static_cast<quantity>(
                     std::round(rem_after * qty_scale_));
                 if (new_q > 0)
-                    ob_->modify_order(it->first,
+                    ob_->modify_order(order_id,
                         Price::from_double(px), new_q);
-                if (auto body = ob_->get_order(it->first))
-                    ri.book_order = body;
+                if (auto body = ob_->get_order(order_id))
+                    current->book_order = body;
                 else
                 {
-                    it = resting_.erase(it);
-                    continue;
+                    erase_resting(current);
                 }
-                ++it;
             }
+            current = next;
         }
         return any;
     }
@@ -580,8 +617,81 @@ private:
     {
         order_pointer book_order;   // live book object; remaining qty stays current
         std::string symbol;
-        order_side side;
+        order_side side = order_side::buy;
+        uint64_t order_id = 0;
+        resting_info* fifo_prev = nullptr;
+        resting_info* fifo_next = nullptr;
     };
+
+    using resting_map = std::unordered_map<uint64_t, resting_info>;
+
+    void link_resting_back(resting_info* info)
+    {
+        info->fifo_prev = resting_fifo_tail_;
+        info->fifo_next = nullptr;
+        if (resting_fifo_tail_ != nullptr)
+            resting_fifo_tail_->fifo_next = info;
+        else
+            resting_fifo_head_ = info;
+        resting_fifo_tail_ = info;
+    }
+
+    void unlink_resting(resting_info* info)
+    {
+        if (info->fifo_prev != nullptr)
+            info->fifo_prev->fifo_next = info->fifo_next;
+        else
+            resting_fifo_head_ = info->fifo_next;
+
+        if (info->fifo_next != nullptr)
+            info->fifo_next->fifo_prev = info->fifo_prev;
+        else
+            resting_fifo_tail_ = info->fifo_prev;
+
+        info->fifo_prev = nullptr;
+        info->fifo_next = nullptr;
+    }
+
+    void move_resting_to_back(resting_info* info)
+    {
+        if (resting_fifo_tail_ == info) return;
+        unlink_resting(info);
+        link_resting_back(info);
+    }
+
+    void track_resting(uint64_t order_id,
+                       order_pointer book_order,
+                       const std::string& symbol,
+                       order_side side)
+    {
+        resting_info replacement{
+            std::move(book_order), symbol, side, order_id, nullptr, nullptr};
+        auto [it, inserted] = resting_.try_emplace(
+            order_id, std::move(replacement));
+        if (inserted)
+        {
+            link_resting_back(&it->second);
+            return;
+        }
+
+        it->second.book_order = std::move(replacement.book_order);
+        it->second.symbol = std::move(replacement.symbol);
+        it->second.side = side;
+        move_resting_to_back(&it->second);
+    }
+
+    void erase_resting(resting_map::iterator it)
+    {
+        unlink_resting(&it->second);
+        resting_.erase(it);
+    }
+
+    void erase_resting(resting_info* info)
+    {
+        auto it = resting_.find(info->order_id);
+        if (it != resting_.end() && &it->second == info)
+            erase_resting(it);
+    }
 
     void record_resting_fill(const trade_info& ti,
                              std::chrono::system_clock::time_point ts)
@@ -613,10 +723,12 @@ private:
             next_fill_id_++);
 
         if (it->second.book_order->is_filled())
-            resting_.erase(it);
+            erase_resting(it);
     }
 
-    std::unordered_map<uint64_t, resting_info> resting_;
+    resting_map resting_;
+    resting_info* resting_fifo_head_ = nullptr;
+    resting_info* resting_fifo_tail_ = nullptr;
 
     std::shared_ptr<ILatencyModel> latency_model_;
     std::shared_ptr<IImpactModel>  impact_model_;

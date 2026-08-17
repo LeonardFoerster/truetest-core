@@ -1,9 +1,8 @@
 #include "portfolio.h"
 #include "../core/event.h"
-#include "position_sizing.h"
 
+#include <algorithm>
 #include <cmath>
-#include <iostream>
 
 portfolio::portfolio() : initial_balance_(10000.0), cash_(10000.0) {}
 
@@ -161,15 +160,6 @@ portfolio::open_lots_by_symbol(const std::string& symbol) const
     return out;
 }
 
-std::vector<std::uint64_t>
-portfolio::open_lots_by_strategy(const std::string& strategy_name) const
-{
-    std::vector<std::uint64_t> out;
-    for (const auto& [id, l] : lots_)
-        if (l.strategy_name == strategy_name) out.push_back(id);
-    return out;
-}
-
 bool portfolio::position_open() const
 {
     for (const auto& [_, pos] : positions_)
@@ -181,33 +171,6 @@ bool portfolio::position_open(const std::string& symbol) const
 {
     auto it = positions_.find(symbol);
     return it != positions_.end() && std::abs(it->second.qty) > 1e-12;
-}
-
-bool portfolio::can_afford(order_side side, double quantity, double price,
-                           double commission) const
-{
-    if (side == order_side::buy)
-        return cash_ >= quantity * price + std::max(0.0, commission);
-    for (const auto& [_, pos] : positions_)
-        if (pos.qty >= quantity) return true;
-    return false;
-}
-
-bool portfolio::can_afford(const std::string& symbol, order_side side,
-                           double quantity, double price, double commission) const
-{
-    if (side == order_side::buy)
-        return cash_ >= quantity * price + std::max(0.0, commission);
-
-    auto it = positions_.find(symbol);
-    return it != positions_.end() && it->second.qty >= quantity;
-}
-
-double portfolio::compute_quantity(double price, double risk_fraction,
-                                   double entry_fee_rate) const
-{
-    return truetest::risk::compute_notional_quantity(
-        cash_, risk_fraction, price, entry_fee_rate);
 }
 
 double portfolio::get_equity(double last_price) const
@@ -235,19 +198,6 @@ double portfolio::get_equity(const std::unordered_map<std::string, double>& mark
         equity += pos.qty * px;
     }
     return equity;
-}
-
-void portfolio::print_summary() const
-{
-    std::cout << "Starting Balance: " << initial_balance_ << std::endl;
-    std::cout << "Ending Cash: " << cash_ << std::endl;
-    for (const auto& [sym, pos] : positions_)
-    {
-        if (std::abs(pos.qty) > 1e-12)
-            std::cout << "Position " << sym << ": " << pos.qty << " units" << std::endl;
-    }
-    std::cout << "Total Trades Executed: " << total_trades_ << std::endl;
-    std::cout << "Open Lots: " << lots_.size() << std::endl;
 }
 
 // Phase A (MC object reuse): reset to initial constructed state.
