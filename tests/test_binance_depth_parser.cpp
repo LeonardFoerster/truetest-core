@@ -7,6 +7,35 @@
 #include <string>
 #include <string_view>
 
+TEST(BinanceDepthParser, OnlyExplicitPartialBookContractsAreLiveSafe)
+{
+    for (const std::string_view stream : {
+             std::string_view{"depth5"},
+             std::string_view{"depth10"},
+             std::string_view{"depth20"},
+             std::string_view{"depth5@100ms"},
+             std::string_view{"depth10@1000ms"},
+             std::string_view{"depth20@100ms"}})
+        EXPECT_TRUE(binance::is_explicit_partial_book_depth_stream(stream))
+            << stream;
+
+    // `depth` and every `depth@...` spelling are raw delta streams.  They
+    // must never be admitted to a live provider until a sequence synchronizer
+    // is introduced and separately reviewed.
+    for (const std::string_view stream : {
+             std::string_view{"depth"},
+             std::string_view{"depth@100ms"},
+             std::string_view{"depth@1000ms"},
+             std::string_view{"depth@anything"},
+             std::string_view{"depth1@100ms"},
+             std::string_view{"depth50@100ms"},
+             std::string_view{"depth20@500ms"},
+             std::string_view{"Depth20@100ms"},
+             std::string_view{"depth20@100ms@extra"}})
+        EXPECT_FALSE(binance::is_explicit_partial_book_depth_stream(stream))
+            << stream;
+}
+
 TEST(BinanceDepthParser, PartialBookBidsAsks)
 {
     const std::string json =
@@ -22,6 +51,63 @@ TEST(BinanceDepthParser, PartialBookBidsAsks)
     EXPECT_DOUBLE_EQ(snap->asks[0].price, 42001.0);
     EXPECT_EQ(snap->asks[0].quantity, static_cast<int64_t>(0.8 * 1e8));
     EXPECT_TRUE(snap->symbol.empty()); // partial book has no "s"
+}
+
+TEST(BinanceDepthParser, StrictPartialBookRequiresAuthoritativeCompleteLevels)
+{
+    const std::string valid =
+        R"({"lastUpdateId":12345,"bids":[["42000.0","1.5"],["41999.5","2.0"]],)"
+        R"("asks":[["42001.0","0.8"],["42002.0","1.2"]]})";
+
+    auto snap = binance::parse_strict_partial_book_snapshot(
+        valid, "BTCUSDT", /*level_limit=*/5);
+    ASSERT_TRUE(snap.has_value());
+    EXPECT_EQ(snap->symbol, "BTCUSDT");
+    ASSERT_EQ(snap->bids.size(), 2u);
+    ASSERT_EQ(snap->asks.size(), 2u);
+    EXPECT_DOUBLE_EQ(snap->bids.front().price, 42000.0);
+    EXPECT_DOUBLE_EQ(snap->asks.front().price, 42001.0);
+
+    // The strict live contract rejects both missing/ambiguous update identity
+    // and every form of level truncation rather than silently retaining a
+    // prefix of the book.
+    EXPECT_FALSE(binance::parse_strict_partial_book_snapshot(
+        R"({"bids":[["42000","1"]],"asks":[["42001","1"]]})",
+        "BTCUSDT", 5).has_value());
+    EXPECT_FALSE(binance::parse_strict_partial_book_snapshot(
+        R"({"lastUpdateId":0,"bids":[["42000","1"]],"asks":[["42001","1"]]})",
+        "BTCUSDT", 5).has_value());
+    EXPECT_FALSE(binance::parse_strict_partial_book_snapshot(
+        R"({"lastUpdateId":"not-a-number","bids":[["42000","1"]],"asks":[["42001","1"]]})",
+        "BTCUSDT", 5).has_value());
+    EXPECT_FALSE(binance::parse_strict_partial_book_snapshot(
+        R"({"lastUpdateId":1,"lastUpdateId":2,"bids":[["42000","1"]],"asks":[["42001","1"]]})",
+        "BTCUSDT", 5).has_value());
+    EXPECT_FALSE(binance::parse_strict_partial_book_snapshot(
+        R"({"lastUpdateId":1,"bids":[["42000","1","ignored"]],"asks":[["42001","1"]]})",
+        "BTCUSDT", 5).has_value());
+    EXPECT_FALSE(binance::parse_strict_partial_book_snapshot(
+        R"({"lastUpdateId":1,"bids":[["42000","1"]],"asks":[["42001","1"])",
+        "BTCUSDT", 5).has_value());
+}
+
+TEST(BinanceDepthParser, StrictPartialBookBoundsLevelsAndRejectsInvalidBookState)
+{
+    // A depth5 subscription can never provide six levels on one side.  This
+    // also proves the strict path does not append without a fixed bound.
+    EXPECT_FALSE(binance::parse_strict_partial_book_snapshot(
+        R"({"lastUpdateId":1,"bids":[["5","1"],["4","1"],["3","1"],["2","1"],["1.5","1"],["1","1"]],"asks":[["6","1"]]})",
+        "BTCUSDT", 5).has_value());
+
+    EXPECT_FALSE(binance::parse_strict_partial_book_snapshot(
+        R"({"lastUpdateId":1,"bids":[["5","1"],["5","1"]],"asks":[["6","1"]]})",
+        "BTCUSDT", 5).has_value());
+    EXPECT_FALSE(binance::parse_strict_partial_book_snapshot(
+        R"({"lastUpdateId":1,"bids":[["5","1"]],"asks":[["4","1"]]})",
+        "BTCUSDT", 5).has_value());
+    EXPECT_FALSE(binance::parse_strict_partial_book_snapshot(
+        R"({"lastUpdateId":1,"bids":[["5","0"]],"asks":[["6","1"]]})",
+        "BTCUSDT", 5).has_value());
 }
 
 TEST(BinanceDepthParser, DepthUpdateShortKeys)

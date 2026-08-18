@@ -108,6 +108,45 @@ private:
 	int reads_ = 0;
 	std::string frame_;
 };
+
+class FiniteStreamingTransport final : public IDataTransport
+{
+public:
+	explicit FiniteStreamingTransport(std::vector<std::string> frames)
+		: frames_(std::move(frames)) {}
+
+	bool open() override
+	{
+		open_ = true;
+		next_ = 0;
+		return true;
+	}
+	void close() override { open_ = false; }
+	bool is_open() const override { return open_; }
+	bool is_streaming() const override { return true; }
+	std::optional<std::string> read_line() override { return std::nullopt; }
+	bool read_frame_blocking(std::string_view& out) override
+	{
+		if (next_ == frames_.size())
+		{
+			open_ = false;
+			return false;
+		}
+		frame_ = frames_[next_++];
+		out = frame_;
+		return true;
+	}
+	transport_terminal_status terminal_status() const override
+	{
+		return transport_terminal_status::clean_eof;
+	}
+
+private:
+	std::vector<std::string> frames_;
+	std::size_t next_ = 0;
+	bool open_ = false;
+	std::string frame_;
+};
 }
 
 // --- Batch mode tests ---
@@ -366,6 +405,33 @@ TEST(DataBridge, StreamingMalformedFirstFrameTerminatesWithoutWaitingForMoreInpu
 	EXPECT_EQ(result.rejected, 1u);
 }
 
+TEST(DataBridge, AfterFrameRunsForHeaderAndIgnoredFramesBeforeFollowingRecord)
+{
+	SilenceBridge quiet;
+	auto transport = std::make_shared<FiniteStreamingTransport>(
+		std::vector<std::string>{"header", "control", "record"});
+	auto bridge = std::make_shared<DataBridge<bar_record>>(
+		transport, std::make_shared<FrameBarParser>(), bar_record_sink);
+	auto handler = std::make_shared<data_handler>();
+	std::vector<std::string> callbacks;
+
+	bridge->set_after_frame_callback([&] {
+		callbacks.emplace_back("after");
+	});
+
+	auto result = bridge->run_streaming(handler, [&](const bar_record&) {
+		callbacks.emplace_back("record");
+	});
+
+	ASSERT_TRUE(result.success());
+	EXPECT_EQ(result.accepted, 1u);
+	ASSERT_EQ(callbacks.size(), 4u);
+	EXPECT_EQ(callbacks[0], "after");   // header: valid no-record frame
+	EXPECT_EQ(callbacks[1], "after");   // ignored control frame
+	EXPECT_EQ(callbacks[2], "record");
+	EXPECT_EQ(callbacks[3], "after");   // record frame, after delivery
+}
+
 TEST(DataBridge, PrelatchedStopIsNotClearedAtStreamingEntry)
 {
 	SilenceBridge quiet;
@@ -432,6 +498,35 @@ TEST(DataBridge, BoundedIdleReadInvokesControlCallbackOnDrivingThread)
 		});
 	EXPECT_TRUE(result.success());
 	EXPECT_EQ(idle_calls, 2);
+}
+
+TEST(DataBridge, AfterFrameDoesNotTreatIdlePollsAsFrames)
+{
+	SilenceBridge quiet;
+	auto transport = std::make_shared<TimedIdleTransport>();
+	auto bridge = std::make_shared<DataBridge<bar_record>>(
+		transport, std::make_shared<FrameBarParser>(), bar_record_sink);
+	int after_frames = 0;
+	int idle_calls = 0;
+	std::vector<std::string> callbacks;
+
+	bridge->set_after_frame_callback([&] {
+		callbacks.emplace_back("after");
+		++after_frames;
+	});
+	auto result = bridge->run_streaming(
+		std::make_shared<data_handler>(), nullptr, [&] {
+			callbacks.emplace_back("idle");
+			++idle_calls;
+		});
+
+	EXPECT_TRUE(result.success());
+	EXPECT_EQ(after_frames, 1); // only the successfully-read header frame
+	EXPECT_EQ(idle_calls, 2);
+	ASSERT_EQ(callbacks.size(), 3u);
+	EXPECT_EQ(callbacks[0], "after");
+	EXPECT_EQ(callbacks[1], "idle");
+	EXPECT_EQ(callbacks[2], "idle");
 }
 
 TEST(DataBridge, IdleCallbackRefusesTransportWithoutBoundedRead)

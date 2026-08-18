@@ -96,7 +96,7 @@ TEST(BitgetFuturesRegister, FundingParserPublishesThroughProviderIngress)
     BitgetFuturesUserDataParser parser;
     ProviderFundingIngress ingress;
     constexpr std::string_view frame =
-        R"({"arg":{"instType":"UTA","topic":"account"},"data":[{"coin":"usdt","balance":"99.75","balanceChange":"-0.25","bizType":"funding_fee"}],"ts":1700000000000})";
+        R"({"action":"snapshot","arg":{"instType":"UTA","topic":"account"},"data":[{"coin":"usdt","balance":"99.75","balanceChange":"-0.25","bizType":"funding_fee"}],"ts":1700000000000})";
     bool exact = true;
     truetest::test::alloc::snapshot allocations;
     {
@@ -257,6 +257,29 @@ TEST(BitgetFuturesRegister, LiveWithKeysMissingPassphraseRefusesOpen)
 
     EXPECT_FALSE(p->open());
     EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
+}
+
+TEST(BitgetFuturesRegister,
+     LiveOpenRefusesUntilUnifiedIngressAndTypedBracketsAreWired)
+{
+    // Complete dummy credentials ensure the expected refusal happens before
+    // provider construction reaches private/public transport or REST setup.
+    provider_config cfg;
+    cfg["symbol"] = "BTCUSDT";
+    cfg["api_key"] = "key";
+    cfg["api_secret"] = "secret";
+    cfg["api_passphrase"] = "passphrase";
+    auto p = create(cfg);
+    ASSERT_NE(p, nullptr);
+
+    engine_config ec;
+    ec.mode = engine_mode::live;
+    p->configure(ec);
+
+    EXPECT_FALSE(p->open());
+    EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
+    EXPECT_EQ(p->get_transport(), nullptr);
+    EXPECT_FALSE(p->private_execution_producer_joined());
 }
 
 // Missing secret alone also refuses offline.

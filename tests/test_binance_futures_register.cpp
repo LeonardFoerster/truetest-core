@@ -191,6 +191,50 @@ TEST(BinanceFuturesRegister, DirectLiveOpenRefusesEveryIncompleteCredentialPair)
     }
 }
 
+TEST(BinanceFuturesRegister,
+     DirectLiveOpenRefusesUntilUnifiedIngressAndTypedBracketsAreWired)
+{
+    // Complete dummy credentials ensure this test proves the structural
+    // admission guard runs before any REST or WebSocket side effect.
+    provider_config cfg;
+    cfg["symbol"] = "btcusdt";
+    cfg["api_key"] = "key";
+    cfg["api_secret"] = "secret";
+    auto p = create(cfg);
+    ASSERT_NE(p, nullptr);
+
+    engine_config ec;
+    ec.mode = engine_mode::live;
+    p->configure(ec);
+
+    EXPECT_FALSE(p->open());
+    EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
+    EXPECT_EQ(p->get_transport(), nullptr);
+    EXPECT_FALSE(p->private_execution_producer_joined());
+}
+
+TEST(BinanceFuturesRegister,
+     DirectLiveOpenRefusesRawDiffDepthBeforeTransportReadiness)
+{
+    // Use complete dummy credentials so the assertion proves depth contract
+    // validation runs before any REST/WS startup work.
+    provider_config cfg;
+    cfg["symbol"] = "btcusdt";
+    cfg["api_key"] = "key";
+    cfg["api_secret"] = "secret";
+    cfg["depth_stream"] = "depth@1000ms";
+    auto p = create(cfg);
+    ASSERT_NE(p, nullptr);
+
+    engine_config ec;
+    ec.mode = engine_mode::live;
+    p->configure(ec);
+
+    EXPECT_FALSE(p->open());
+    EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
+    EXPECT_EQ(p->get_transport(), nullptr);
+}
+
 TEST(BinanceFuturesRegister, RejectsMalformedOrPercentageScaleLiquidationCap)
 {
     for (const char* value : {"oops", "nan", "7"})

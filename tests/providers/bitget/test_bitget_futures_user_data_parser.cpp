@@ -5,9 +5,12 @@
 #include "providers/bitget/bitget_futures_user_data_parser.h"
 #include "providers/bitget/bitget_private_ws_transport.h"
 
+#include <atomic>
+#include <chrono>
 #include <string>
 #include <memory>
 #include <thread>
+#include <string_view>
 
 namespace {
 
@@ -16,7 +19,8 @@ std::string order_push(const std::string& status,
                        const std::string& cum = "0",
                        const std::string& side = "buy",
                        const std::string& client = "tt-1",
-                       const std::string& order_id = "42")
+                       const std::string& order_id = "42",
+                       const std::string& fee = "0")
 {
     std::string j = R"({"action":"snapshot","arg":{"instType":"UTA","topic":"order"},"data":[{)";
     j += R"("category":"usdt-futures",)";
@@ -29,7 +33,7 @@ std::string order_push(const std::string& status,
     j += R"("avgPrice":"60000",)";
     j += R"("orderStatus":")" + status + R"(",)";
     j += R"("cancelReason":"",)";
-    j += R"("feeDetail":[{"feeCoin":"USDT","fee":"0.01"}],)";
+    j += R"("feeDetail":[{"feeCoin":"USDT","fee":")" + fee + R"("}],)";
     j += R"("updatedTime":"1700000000000")";
     j += R"(}],"ts":1700000000001})";
     return j;
@@ -132,6 +136,8 @@ TEST(BitgetPrivateWsTransportHelpers, LoginSuccessCodes)
         R"({"nested":{"event":"login","code":"0"}})"));
     EXPECT_FALSE(bitget::is_login_success(
         R"({"event":"login","op":"login","code":"0"})"));
+    EXPECT_FALSE(bitget::is_login_success(
+        R"({"event":"login","code":"0","data":[{}]})"));
 }
 
 TEST(BitgetPrivateWsTransportHelpers, SubscriptionAckIsAuthoritativeAndTopicBound)
@@ -166,6 +172,10 @@ TEST(BitgetPrivateWsTransportHelpers, SubscriptionAckIsAuthoritativeAndTopicBoun
                   topic),
               bitget::subscription_ack::rejected);
     EXPECT_EQ(bitget::classify_private_subscription_ack(
+                  R"({"event":"subscribe","arg":{"instType":"UTA","topic":"account"},"data":[{}]})",
+                  topic),
+              bitget::subscription_ack::rejected);
+    EXPECT_EQ(bitget::classify_private_subscription_ack(
                   R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"}} trailing)",
                   topic),
               bitget::subscription_ack::unrelated);
@@ -192,11 +202,11 @@ TEST(BitgetPrivateWsTransportHelpers, SubscriptionTrackerRequiresAllFourTopics)
               bitget::subscription_progress::ready);
 }
 
-TEST(BitgetPrivateWsTransportHelpers, SubscriptionTrackerRejectsAndIgnoresSafely)
+TEST(BitgetPrivateWsTransportHelpers, SubscriptionTrackerRejectsUnexpectedPreReadyFrames)
 {
     bitget::private_subscription_tracker tracker;
     EXPECT_EQ(tracker.consume(R"({"event":"info","msg":"connected"})"),
-              bitget::subscription_progress::waiting);
+              bitget::subscription_progress::unexpected);
     EXPECT_EQ(tracker.consume(
                   R"({"event":"subscribe","nested":{"arg":{"instType":"UTA","topic":"order"}}})"),
               bitget::subscription_progress::rejected);
@@ -235,6 +245,8 @@ TEST(BitgetPrivateWsTransport, InitialSocketFailureRefusesAndCleansUp)
     BitgetPrivateWsTransport tx(
         "key", "secret", "pass", "127.0.0.1",
         std::to_string(acceptor.local_endpoint().port()), "/v3/ws/private");
+    tx.set_on_message([](std::string_view) {});
+    tx.set_fatal_disconnect_callback([](std::string_view) {});
     const auto started = std::chrono::steady_clock::now();
     EXPECT_FALSE(tx.open());
     EXPECT_LT(std::chrono::steady_clock::now() - started,
@@ -245,6 +257,224 @@ TEST(BitgetPrivateWsTransport, InitialSocketFailureRefusesAndCleansUp)
     acceptor.close(ignored);
     server_ioc.stop();
     server.join();
+}
+
+TEST(BitgetPrivateWsTransport, OpenRefusesBeforeReaderWhenFatalCallbackMissing)
+{
+    std::atomic<int> reader_starts{0};
+    BitgetPrivateWsTransport tx(
+        "key", "secret", "pass",
+        [&](std::atomic<bool>&) {
+            reader_starts.fetch_add(1, std::memory_order_relaxed);
+            return BitgetPrivateWsTransport::run_result::stopped;
+        },
+        true);
+    tx.set_on_message([](std::string_view) {});
+
+    EXPECT_FALSE(tx.open());
+    EXPECT_EQ(reader_starts.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(tx.state(), IFillTransport::lifecycle::error);
+}
+
+TEST(BitgetPrivateWsTransport, OpenRefusesBeforeReaderWhenMessageCallbackMissing)
+{
+    std::atomic<int> reader_starts{0};
+    BitgetPrivateWsTransport tx(
+        "key", "secret", "pass",
+        [&](std::atomic<bool>&) {
+            reader_starts.fetch_add(1, std::memory_order_relaxed);
+            return BitgetPrivateWsTransport::run_result::stopped;
+        },
+        true);
+    tx.set_fatal_disconnect_callback([](std::string_view) {});
+
+    EXPECT_FALSE(tx.open());
+    EXPECT_EQ(reader_starts.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(tx.state(), IFillTransport::lifecycle::error);
+}
+
+TEST(BitgetPrivateWsTransport, CloseWinsPendingReadyGateAndJoinsReader)
+{
+    std::atomic<bool> reader_entered{false};
+    BitgetPrivateWsTransport tx(
+        "key", "secret", "pass",
+        [&](std::atomic<bool>& stop) {
+            reader_entered.store(true, std::memory_order_release);
+            reader_entered.notify_all();
+            stop.wait(false, std::memory_order_acquire);
+            return BitgetPrivateWsTransport::run_result::stopped;
+        });
+    tx.set_on_message([](std::string_view) {});
+    tx.set_fatal_disconnect_callback([](std::string_view) {});
+
+    bool opened = true;
+    std::thread opening([&] { opened = tx.open(); });
+    reader_entered.wait(false, std::memory_order_acquire);
+
+    const auto started = std::chrono::steady_clock::now();
+    tx.close();
+    EXPECT_LT(std::chrono::steady_clock::now() - started,
+              std::chrono::seconds(2));
+    opening.join();
+
+    EXPECT_FALSE(opened);
+    EXPECT_EQ(tx.state(), IFillTransport::lifecycle::closed);
+    EXPECT_TRUE(tx.private_execution_producer_joined());
+}
+
+TEST(BitgetPrivateWsTransport, ReaderStatusCloseIsJoinedWithoutDeadlock)
+{
+    std::atomic<int> open_status_calls{0};
+    BitgetPrivateWsTransport tx(
+        "key", "secret", "pass",
+        [](std::atomic<bool>& stop) {
+            stop.wait(false, std::memory_order_acquire);
+            return BitgetPrivateWsTransport::run_result::stopped;
+        },
+        true);
+    tx.set_on_message([](std::string_view) {});
+    tx.set_fatal_disconnect_callback([](std::string_view) {});
+    tx.set_on_status([&](IFillTransport::lifecycle state, std::string_view) {
+        if (state == IFillTransport::lifecycle::open)
+        {
+            open_status_calls.fetch_add(1, std::memory_order_relaxed);
+            tx.close();
+        }
+    });
+
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_FALSE(tx.open());
+    EXPECT_LT(std::chrono::steady_clock::now() - started,
+              std::chrono::seconds(2));
+    EXPECT_EQ(open_status_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_TRUE(tx.private_execution_producer_joined());
+}
+
+TEST(BitgetPrivateWsTransport, ConnectingStatusCallbackCanCloseWithoutControlMutexDeadlock)
+{
+    std::atomic<int> connecting_calls{0};
+    BitgetPrivateWsTransport tx(
+        "key", "secret", "pass",
+        [](std::atomic<bool>& stop) {
+            stop.wait(false, std::memory_order_acquire);
+            return BitgetPrivateWsTransport::run_result::stopped;
+        });
+    tx.set_on_message([](std::string_view) {});
+    tx.set_fatal_disconnect_callback([](std::string_view) {});
+    tx.set_on_status([&](IFillTransport::lifecycle state, std::string_view) {
+        if (state == IFillTransport::lifecycle::connecting)
+        {
+            connecting_calls.fetch_add(1, std::memory_order_relaxed);
+            tx.close();
+        }
+    });
+
+    const auto started = std::chrono::steady_clock::now();
+    EXPECT_FALSE(tx.open());
+    EXPECT_LT(std::chrono::steady_clock::now() - started,
+              std::chrono::seconds(2));
+    EXPECT_EQ(connecting_calls.load(std::memory_order_relaxed), 1);
+    EXPECT_TRUE(tx.private_execution_producer_joined());
+}
+
+TEST(BitgetPrivateWsTransport, CallbackClearIsRefusedWhileLiveThenAllowedAfterJoin)
+{
+    BitgetPrivateWsTransport tx(
+        "key", "secret", "pass",
+        [](std::atomic<bool>& stop) {
+            stop.wait(false, std::memory_order_acquire);
+            return BitgetPrivateWsTransport::run_result::stopped;
+        },
+        true);
+    tx.set_on_message([](std::string_view) {});
+    tx.set_on_status([](IFillTransport::lifecycle, std::string_view) {});
+    tx.set_fatal_disconnect_callback([](std::string_view) {});
+
+    ASSERT_TRUE(tx.open());
+
+    // Unsafe live clears are rejected; a clean reopen demonstrates that the
+    // mandatory delivery and terminal-disconnect routes remain in place.
+    tx.set_on_message({});
+    tx.set_on_status({});
+    tx.set_fatal_disconnect_callback({});
+    tx.close();
+    ASSERT_TRUE(tx.open());
+    tx.close();
+    ASSERT_TRUE(tx.private_execution_producer_joined());
+
+    // After join proof, ExecutionBridge can detach all captures before its
+    // own state is destroyed. Reopen then refuses before reader launch.
+    tx.set_on_message({});
+    tx.set_on_status({});
+    tx.set_fatal_disconnect_callback({});
+    EXPECT_FALSE(tx.open());
+}
+
+TEST(BitgetPrivateWsTransport, ConcurrentOpenDuringReadyGateCannotRestartAfterClose)
+{
+    std::atomic<int> reader_starts{0};
+    std::atomic<bool> reader_entered{false};
+    BitgetPrivateWsTransport tx(
+        "key", "secret", "pass",
+        [&](std::atomic<bool>& stop) {
+            reader_starts.fetch_add(1, std::memory_order_relaxed);
+            reader_entered.store(true, std::memory_order_release);
+            reader_entered.notify_all();
+            stop.wait(false, std::memory_order_acquire);
+            return BitgetPrivateWsTransport::run_result::stopped;
+        });
+    tx.set_on_message([](std::string_view) {});
+    tx.set_fatal_disconnect_callback([](std::string_view) {});
+
+    bool first = true;
+    std::thread first_open([&] { first = tx.open(); });
+    reader_entered.wait(false, std::memory_order_acquire);
+
+    // Refuse a competing opener while the first call owns the ready gate;
+    // otherwise it could become an implicit reopen after close() completes.
+    EXPECT_FALSE(tx.open());
+
+    tx.close();
+    first_open.join();
+
+    EXPECT_FALSE(first);
+    EXPECT_EQ(reader_starts.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(tx.state(), IFillTransport::lifecycle::closed);
+    EXPECT_TRUE(tx.private_execution_producer_joined());
+}
+
+TEST(BitgetPrivateWsTransport, ReopenStartsOnlyAfterPriorReaderWasJoined)
+{
+    std::atomic<int> reader_starts{0};
+    BitgetPrivateWsTransport tx(
+        "key", "secret", "pass",
+        [&](std::atomic<bool>& stop) {
+            reader_starts.fetch_add(1, std::memory_order_release);
+            reader_starts.notify_all();
+            stop.wait(false, std::memory_order_acquire);
+            return BitgetPrivateWsTransport::run_result::stopped;
+        },
+        true);
+    tx.set_on_message([](std::string_view) {});
+    tx.set_fatal_disconnect_callback([](std::string_view) {});
+
+    EXPECT_FALSE(tx.private_execution_producer_joined());
+    ASSERT_TRUE(tx.open());
+    int expected = 0;
+    while (reader_starts.load(std::memory_order_acquire) == expected)
+        reader_starts.wait(expected, std::memory_order_acquire);
+    EXPECT_FALSE(tx.private_execution_producer_joined());
+    tx.close();
+    EXPECT_TRUE(tx.private_execution_producer_joined());
+
+    ASSERT_TRUE(tx.open());
+    expected = 1;
+    while (reader_starts.load(std::memory_order_acquire) == expected)
+        reader_starts.wait(expected, std::memory_order_acquire);
+    EXPECT_EQ(reader_starts.load(std::memory_order_acquire), 2);
+    EXPECT_FALSE(tx.private_execution_producer_joined());
+    tx.close();
+    EXPECT_TRUE(tx.private_execution_producer_joined());
 }
 
 // --- orderStatus → kind (plan §9.4) ---
@@ -335,14 +565,13 @@ TEST(BitgetFuturesUserDataParser, OrderSellSide)
     EXPECT_EQ(out.side, order_side::sell);
 }
 
-TEST(BitgetFuturesUserDataParser, OrderFeeDetail)
+TEST(BitgetFuturesUserDataParser, OrderLifecycleRejectsNonzeroFee)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
-    ASSERT_EQ(p.parse(order_push("filled", "1"), out),
-              execution_parse_result::valid);
-    EXPECT_DOUBLE_EQ(out.commission, 0.01);
-    EXPECT_EQ(out.commission_asset, "USDT");
+    EXPECT_EQ(p.parse(order_push("filled", "1", "buy", "tt-1", "42",
+                                 "0.01"), out),
+              execution_parse_result::malformed);
 }
 
 // --- fill channel ---
@@ -476,6 +705,45 @@ TEST(BitgetFuturesUserDataParser, HarmlessControlsLeaveOutputUntouched)
               execution_parse_result::unrelated);
     EXPECT_EQ(out.symbol, "sentinel");
     EXPECT_EQ(out.client_order_id, "keep");
+}
+
+TEST(BitgetFuturesUserDataParser, HarmlessControlsRequireExactSchemas)
+{
+    BitgetFuturesUserDataParser p;
+
+    EXPECT_TRUE(p.is_harmless_private_control("ping"));
+    EXPECT_TRUE(p.is_harmless_private_control("pong"));
+    EXPECT_TRUE(p.is_harmless_private_control(
+        R"({"event":"login","code":"0","msg":""})"));
+    EXPECT_TRUE(p.is_harmless_private_control(
+        R"({"op":"login","code":0})"));
+    EXPECT_TRUE(p.is_harmless_private_control(
+        R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"},"code":"","msg":"","connId":"conn-1"})"));
+    EXPECT_TRUE(p.is_harmless_private_control(
+        R"({"event":"info","msg":"connected"})"));
+    EXPECT_TRUE(p.is_harmless_private_control(
+        R"({"op":"ping","code":"0"})"));
+    EXPECT_TRUE(p.is_harmless_private_control(
+        R"({"event":"pong"})"));
+
+    // A top-level or nested extra turns a seeming control into unmodelled
+    // private state.  It must reach the bridge's fail-closed unrelated gate.
+    EXPECT_FALSE(p.is_harmless_private_control(
+        R"({"event":"login","code":"0","data":[]})"));
+    EXPECT_FALSE(p.is_harmless_private_control(
+        R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order","symbol":"BTCUSDT"}})"));
+    EXPECT_FALSE(p.is_harmless_private_control(
+        R"({"event":"subscribe","arg":{"instType":"UTA","topic":"order"},"requestId":"x"})"));
+    EXPECT_FALSE(p.is_harmless_private_control(
+        R"({"event":"info","action":"snapshot"})"));
+    EXPECT_FALSE(p.is_harmless_private_control(
+        R"({"event":"ping","connId":"x"})"));
+    EXPECT_FALSE(p.is_harmless_private_control(
+        R"({"event":"info","op":"info","msg":"connected"})"));
+
+    parsed_exec out;
+    EXPECT_EQ(p.parse(R"({"event":"info","action":"snapshot"})", out),
+              execution_parse_result::malformed);
 }
 
 TEST(BitgetFuturesUserDataParser,
@@ -653,6 +921,41 @@ TEST(BitgetFuturesUserDataParser, FundingRequiresAuthoritativeUtaAccountRoute)
     parsed_exec execution;
     EXPECT_EQ(p.parse(contradictory_control, execution),
               execution_parse_result::malformed);
+}
+
+TEST(BitgetFuturesUserDataParser,
+     FundingFastPathValidatesActionBalancesAndExecutionDiscriminators)
+{
+    BitgetFuturesUserDataParser p;
+    parsed_funding_update funding;
+
+    constexpr std::string_view valid =
+        R"({"action":"update","arg":{"instType":"UTA","topic":"account"},"data":[{"bizType":"funding_fee","coin":"USDT","balance":"99.75","available":"90.0","equity":"99.75","balanceChange":"-0.5"}],"ts":1700000000000})";
+    ASSERT_EQ(p.parse_funding_update(valid, funding),
+              funding_parse_result::valid);
+    EXPECT_EQ(funding.event_time_ms, 1700000000000LL);
+    EXPECT_DOUBLE_EQ(funding.cash_delta, -0.5);
+
+    EXPECT_EQ(p.parse_funding_update(
+                  R"({"arg":{"instType":"UTA","topic":"account"},"data":[{"bizType":"funding_fee","coin":"USDT","balanceChange":"-0.5"}],"ts":1700000000000})",
+                  funding),
+              funding_parse_result::invalid);
+    EXPECT_EQ(p.parse_funding_update(
+                  R"({"action":"replace","arg":{"instType":"UTA","topic":"account"},"data":[{"bizType":"funding_fee","coin":"USDT","balanceChange":"-0.5"}],"ts":1700000000000})",
+                  funding),
+              funding_parse_result::invalid);
+    EXPECT_EQ(p.parse_funding_update(
+                  R"({"action":"snapshot","arg":{"instType":"UTA","topic":"account"},"data":[{"bizType":"funding_fee","coin":"USDT","balance":"nan","balanceChange":"-0.5"}],"ts":1700000000000})",
+                  funding),
+              funding_parse_result::invalid);
+    EXPECT_EQ(p.parse_funding_update(
+                  R"({"action":"snapshot","arg":{"instType":"UTA","topic":"account"},"data":[{"bizType":"funding_fee","coin":"USDT","balanceChange":"-0.5","orderId":"42"}],"ts":1700000000000})",
+                  funding),
+              funding_parse_result::invalid);
+    EXPECT_EQ(p.parse_funding_update(
+                  R"({"action":"snapshot","arg":{"instType":"UTA","topic":"account"},"data":[{"bizType":"funding_fee","coin":"USDT","balanceChange":"-0.5","execId":"fill-42"}],"ts":1700000000000})",
+                  funding),
+              funding_parse_result::invalid);
 }
 
 TEST(BitgetFuturesUserDataParser, FilledOrderRequiresPositiveCumulativeQuantity)

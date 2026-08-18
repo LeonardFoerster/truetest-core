@@ -15,7 +15,7 @@
 
 namespace {
 
-BinanceCombinedParser make_parser() { return {}; }
+BinanceCombinedParser make_parser() { return BinanceCombinedParser{}; }
 
 }
 
@@ -156,11 +156,12 @@ TEST(BinanceCombinedParser, PartialBookDepth_ProducesL2Snapshot)
     EXPECT_DOUBLE_EQ(snap.asks[0].price, 42001.0);
 }
 
-TEST(BinanceCombinedParser, DepthUpdateFrame_ProducesL2Snapshot)
+TEST(BinanceCombinedParser, DepthUpdateFrameKeepsLegacySnapshotCompatibilityByDefault)
 {
-    // Diff-stream (@depth@100ms) frames have "e":"depthUpdate". Parser
-    // should still route them to an l2_snapshot (the engine's apply_l2
-    // path layers the update into the registry).
+    // Non-live/replay callers retain the historical compatibility behavior:
+    // a default parser still projects a raw diff-depth frame as a snapshot.
+    // Live providers explicitly opt out below until a sequence synchronizer
+    // exists.
     auto p = make_parser();
     const std::string frame =
         R"({"e":"depthUpdate","E":1704067200000,"s":"BTCUSDT",)"
@@ -169,6 +170,69 @@ TEST(BinanceCombinedParser, DepthUpdateFrame_ProducesL2Snapshot)
     auto ev = p.parse_record(frame);
     ASSERT_TRUE(ev.has_value());
     ASSERT_TRUE(std::holds_alternative<provider::l2_snapshot>(*ev));
+}
+
+TEST(BinanceCombinedParser, LiveDepthSafetyRefusesRawDiffDepthFrame)
+{
+    BinanceCombinedParser p(
+        BinanceCombinedParser::depth_update_policy::refuse_raw_diff_depth);
+    const std::string frame =
+        R"({"e":"depthUpdate","E":1704067200000,"s":"BTCUSDT",)"
+        R"("U":1,"u":10,"b":[["42000.0","1.5"]],"a":[["42001.0","0.8"]]})";
+
+    EXPECT_FALSE(p.parse_record(frame).has_value());
+    EXPECT_EQ(p.classify_empty_frame(frame), empty_parse_status::malformed);
+}
+
+TEST(BinanceCombinedParser,
+     LivePartialBookRequiresAuthoritativeIdentityAndCompleteLevels)
+{
+    BinanceCombinedParser p(
+        BinanceCombinedParser::depth_update_policy::refuse_raw_diff_depth);
+
+    const std::string valid =
+        R"({"stream":"btcusdt@depth5@100ms","data":)"
+        R"({"lastUpdateId":7,"bids":[["42000","1"]],)"
+        R"("asks":[["42001","1"]]}})";
+    auto event = p.parse_record(valid);
+    ASSERT_TRUE(event.has_value());
+    ASSERT_TRUE(std::holds_alternative<provider::l2_snapshot>(*event));
+    EXPECT_EQ(std::get<provider::l2_snapshot>(*event).symbol, "BTCUSDT");
+
+    // The combined stream name is the source identity.  A contradictory
+    // payload symbol, a duplicate outer identity, or an omitted update id
+    // must not replace the live book.
+    EXPECT_FALSE(p.parse_record(
+        R"({"stream":"btcusdt@depth5","data":{"lastUpdateId":7,"s":"ETHUSDT","bids":[["42000","1"]],"asks":[["42001","1"]]}})"
+    ).has_value());
+    EXPECT_FALSE(p.parse_record(
+        R"({"stream":"btcusdt@depth5","stream":"ethusdt@depth5","data":{"lastUpdateId":7,"bids":[["42000","1"]],"asks":[["42001","1"]]}})"
+    ).has_value());
+    EXPECT_FALSE(p.parse_record(
+        R"({"stream":"btcusdt@depth5","data":{"bids":[["42000","1"]],"asks":[["42001","1"]]}})"
+    ).has_value());
+
+    // A valid JSON array with an extra third field used to be silently
+    // truncated by the compatibility parser.  The live branch must reject
+    // it, as well as syntactically incomplete levels.
+    EXPECT_FALSE(p.parse_record(
+        R"({"stream":"btcusdt@depth5","data":{"lastUpdateId":7,"bids":[["42000","1","ignored"]],"asks":[["42001","1"]]}})"
+    ).has_value());
+    EXPECT_FALSE(p.parse_record(
+        R"({"stream":"btcusdt@depth5","data":{"lastUpdateId":7,"bids":[["42000","1"]],"asks":[["42001","1"]})"
+    ).has_value());
+}
+
+TEST(BinanceCombinedParser, LivePartialBookRejectsRawPayloadWithoutStreamIdentity)
+{
+    BinanceCombinedParser p(
+        BinanceCombinedParser::depth_update_policy::refuse_raw_diff_depth);
+
+    // A partial-looking body without the authoritative combined-stream
+    // envelope has no symbol/contract identity, so it is not live-admissible.
+    EXPECT_FALSE(p.parse_record(
+        R"({"lastUpdateId":7,"bids":[["42000","1"]],"asks":[["42001","1"]]})"
+    ).has_value());
 }
 
 TEST(BinanceCombinedParser, UnknownFrame_ReturnsNullopt)

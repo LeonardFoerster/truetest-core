@@ -8,6 +8,7 @@
 #endif
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <memory>
 #include <new>
@@ -256,6 +257,116 @@ public:
     }
 };
 
+// Deliberately small fixed test double for the execution-layer ingress port.
+// It assigns source sequence numbers just like the provider-owned SPSC ring,
+// but keeps this bridge unit test independent of provider implementations.
+class TestPrivateExecutionIngress final : public IPrivateExecutionIngress
+{
+public:
+    static constexpr std::size_t capacity = 16;
+
+    bool try_publish(private_execution_record& record) noexcept override
+    {
+        if (failed_ || record.sequence != 0 || size_ == capacity
+            || next_sequence_ == 0)
+        {
+            failed_ = true;
+            return false;
+        }
+
+        record.sequence = next_sequence_;
+        if (!record.valid_shape())
+        {
+            record.sequence = 0;
+            failed_ = true;
+            return false;
+        }
+
+        records_[tail_] = record;
+        tail_ = (tail_ + 1) % capacity;
+        ++size_;
+        ++next_sequence_;
+        return true;
+    }
+
+    bool try_pop(private_execution_record& record) noexcept override
+    {
+        if (size_ == 0) return false;
+        record = records_[head_];
+        head_ = (head_ + 1) % capacity;
+        --size_;
+        return true;
+    }
+
+    bool empty() const noexcept override { return size_ == 0; }
+    bool failed() const noexcept override { return failed_; }
+    void latch_failure() noexcept override { failed_ = true; }
+
+private:
+    std::array<private_execution_record, capacity> records_{};
+    std::size_t head_ = 0;
+    std::size_t tail_ = 0;
+    std::size_t size_ = 0;
+    std::uint64_t next_sequence_ = 1;
+    bool failed_ = false;
+};
+
+class ScriptedPrivateExecutionParser final : public IFillParser
+{
+public:
+    execution_parse_result parse(std::string_view, parsed_exec& out) override
+    {
+        out = next;
+        return result;
+    }
+
+    parsed_exec next{};
+    execution_parse_result result = execution_parse_result::valid;
+};
+
+parsed_exec make_unified_exec(parsed_exec::kind kind,
+                              std::string client_id,
+                              std::string exchange_id,
+                              std::string symbol = "BTCUSDT",
+                              order_side side = order_side::buy)
+{
+    parsed_exec exec;
+    exec.k = kind;
+    exec.client_order_id = std::move(client_id);
+    exec.exchange_order_id = std::move(exchange_id);
+    exec.symbol = std::move(symbol);
+    exec.side = side;
+    exec.ts = std::chrono::system_clock::time_point{
+        std::chrono::milliseconds{1'700'000'000'000LL}};
+    return exec;
+}
+
+private_execution_record make_unified_full_record(
+    std::string_view client_id,
+    std::string_view exchange_id,
+    double quantity = 1.0)
+{
+    private_execution_record record;
+    record.k = private_execution_record::kind::full_fill;
+    record.event_time_ms = 1'700'000'000'000LL;
+    record.side = order_side::buy;
+    record.last_fill_qty = quantity;
+    record.last_fill_price = 100.0;
+    record.cumulative_qty = quantity;
+    record.commission = 0.0;
+    record.remaining_qty = 0.0;
+    record.cumulative_reported = true;
+    (void)private_execution_record::copy_text(
+        record.symbol, record.symbol_size, "BTCUSDT");
+    (void)private_execution_record::copy_text(
+        record.client_order_id, record.client_order_id_size, client_id);
+    (void)private_execution_record::copy_text(
+        record.exchange_order_id, record.exchange_order_id_size, exchange_id);
+    (void)private_execution_record::copy_text(
+        record.execution_id, record.execution_id_size, "private-trade-1");
+    return record;
+}
+
 order_event make_order(uint64_t id,
                        const std::string& sym = "TEST",
                        double qty = 10.0,
@@ -313,6 +424,30 @@ TEST(ExecutionBridge, OpensTransports)
     ASSERT_TRUE(h.bridge->open());
     EXPECT_TRUE(h.tx->opened_);
     EXPECT_EQ(h.ft->state(), IFillTransport::lifecycle::open);
+}
+
+TEST(ExecutionBridge, CloseDetachesPrivateCallbacksOnlyAfterReaderClose)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    ASSERT_TRUE(static_cast<bool>(h.ft->message_cb_));
+    ASSERT_TRUE(static_cast<bool>(h.ft->status_cb_));
+
+    h.bridge->close();
+    EXPECT_FALSE(static_cast<bool>(h.ft->message_cb_));
+    EXPECT_FALSE(static_cast<bool>(h.ft->status_cb_));
+
+    // Explicit reopen reattaches the bridge-owned callbacks before the
+    // private transport is allowed to report readiness again.
+    ASSERT_TRUE(h.bridge->open());
+    EXPECT_TRUE(static_cast<bool>(h.ft->message_cb_));
+    EXPECT_TRUE(static_cast<bool>(h.ft->status_cb_));
+
+    h.bridge.reset();
+    // A provider-held transport may now be destroyed or publish its final
+    // closed status without retaining a stale ExecutionBridge [this].
+    EXPECT_FALSE(static_cast<bool>(h.ft->message_cb_));
+    EXPECT_FALSE(static_cast<bool>(h.ft->status_cb_));
 }
 
 TEST(ExecutionBridge, MissingParserOrFatalSinkCannotOpen)
@@ -1044,6 +1179,295 @@ TEST(ExecutionBridge, AsyncCancelPreservesAmbiguousAndFatalSafetySignals)
     EXPECT_FALSE(results[0].ok);
     EXPECT_TRUE(results[0].uncertain);
     EXPECT_TRUE(results[0].fatal);
+}
+
+TEST(ExecutionBridgeUnifiedIngress,
+     RestCancelAckRetainsMappingUntilPrivateTerminalIsAcknowledged)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    tx->next_exchange_id_ = "EX-CANCEL-UNIFIED";
+    auto fill_tx = std::make_shared<FakeFillTransport>();
+    auto encoder = std::make_shared<FakeEncoder>();
+    auto parser = std::make_shared<ScriptedPrivateExecutionParser>();
+    TestPrivateExecutionIngress ingress;
+    int execution_failures = 0;
+
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = fill_tx;
+    d.encoder = encoder;
+    d.parser = parser;
+    d.execution_ingress = &ingress;
+    d.require_execution_ingress = true;
+    d.execution_failure_handler = [&] { ++execution_failures; };
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    bridge.submit_order(make_order(1900, "BTCUSDT", 1.0, 100.0));
+    std::vector<ExecutionBridge::submit_result> results;
+    ASSERT_TRUE(wait_submit_results(bridge, results));
+    ASSERT_EQ(results.size(), 1u);
+    ASSERT_TRUE(results.front().ok);
+    results.clear();
+
+    ASSERT_TRUE(bridge.cancel_order(1900));
+    ASSERT_TRUE(wait_submit_results(bridge, results));
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_TRUE(results.front().ok);
+    EXPECT_EQ(results.front().op,
+              ExecutionBridge::submit_result::operation::cancel);
+
+    // A REST cancel acknowledgement cannot retire the identity: exactly one
+    // authoritative private terminal must still resolve and be committed by
+    // the engine before the bridge considers this lifecycle clean.
+    EXPECT_TRUE(bridge.has_unresolved_private_lifecycle());
+    EXPECT_FALSE(bridge.cancel_order(1900));
+
+    parser->next = make_unified_exec(parsed_exec::kind::canceled,
+                                     "tt-1900", "EX-CANCEL-UNIFIED");
+    parser->next.has_cumulative_qty = true;
+    parser->next.cumulative_qty = 0.0;
+    fill_tx->deliver("private-cancel-terminal");
+
+    private_execution_record terminal;
+    ASSERT_TRUE(ingress.try_pop(terminal));
+    EXPECT_EQ(terminal.k, private_execution_record::kind::canceled);
+    EXPECT_EQ(terminal.client_order_id_view(), "tt-1900");
+    EXPECT_EQ(terminal.exchange_order_id_view(), "EX-CANCEL-UNIFIED");
+    ASSERT_EQ(bridge.resolve_private_execution(terminal),
+              private_execution_resolution::tracked);
+    EXPECT_EQ(terminal.engine_order_id, 1900u);
+    EXPECT_TRUE(bridge.has_unresolved_private_lifecycle());
+
+    ASSERT_TRUE(bridge.commit_private_execution(
+        {terminal.sequence, terminal.engine_order_id}));
+    ASSERT_TRUE(bridge.acknowledge_private_terminal(terminal.sequence));
+    EXPECT_FALSE(bridge.has_unresolved_private_lifecycle());
+    EXPECT_EQ(execution_failures, 0);
+}
+
+TEST(ExecutionBridgeUnifiedIngress,
+     DelayedRestSubmitConflictingWithAcknowledgedPrivateTerminalHalts)
+{
+    auto tx = std::make_shared<BlockingOrderTransport>();
+    tx->next_exchange_id_ = "EX-REST";
+    auto fill_tx = std::make_shared<FakeFillTransport>();
+    auto encoder = std::make_shared<FakeEncoder>();
+    auto parser = std::make_shared<ScriptedPrivateExecutionParser>();
+    TestPrivateExecutionIngress ingress;
+    int execution_failures = 0;
+
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = fill_tx;
+    d.encoder = encoder;
+    d.parser = parser;
+    d.execution_ingress = &ingress;
+    d.require_execution_ingress = true;
+    d.execution_failure_handler = [&] { ++execution_failures; };
+    d.start_transport_thread = true;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    bridge.submit_order(make_order(1901, "BTCUSDT", 2.0, 100.0));
+    ASSERT_TRUE(tx->wait_until_entered());
+
+    // Model the engine's FIFO consume/resolve/account/ack path while the
+    // REST submit is blocked. The immutable tombstone must retain the private
+    // venue identity until the delayed REST response is compared with it.
+    auto private_full = make_unified_full_record(
+        "tt-1901", "EX-PRIVATE", 2.0);
+    // The private ingress is the sole source of a record sequence; shape
+    // validation intentionally happens inside try_publish after it assigns
+    // that monotonic sequence.
+    ASSERT_TRUE(ingress.try_publish(private_full));
+    private_execution_record terminal;
+    ASSERT_TRUE(ingress.try_pop(terminal));
+    ASSERT_EQ(bridge.resolve_private_execution(terminal),
+              private_execution_resolution::tracked);
+    ASSERT_EQ(terminal.engine_order_id, 1901u);
+    ASSERT_TRUE(bridge.commit_private_execution(
+        {terminal.sequence, terminal.engine_order_id}));
+    ASSERT_TRUE(bridge.acknowledge_private_terminal(terminal.sequence));
+
+    tx->release();
+    std::vector<ExecutionBridge::submit_result> results;
+    for (int i = 0; i < 10000 && results.empty(); ++i)
+    {
+        (void)bridge.poll_submit_results(results);
+        std::this_thread::yield();
+    }
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_FALSE(results.front().ok);
+    EXPECT_TRUE(results.front().uncertain);
+    EXPECT_TRUE(results.front().fatal);
+    EXPECT_EQ(execution_failures, 1);
+    EXPECT_TRUE(ingress.failed());
+    bridge.close();
+}
+
+TEST(ExecutionBridgeUnifiedIngress,
+     RollbackRestoresEconomicReplayReservationBeforeAccountingCommit)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    tx->next_exchange_id_ = "EX-1902";
+    auto fill_tx = std::make_shared<FakeFillTransport>();
+    auto encoder = std::make_shared<FakeEncoder>();
+    auto parser = std::make_shared<ScriptedPrivateExecutionParser>();
+    TestPrivateExecutionIngress ingress;
+
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = fill_tx;
+    d.encoder = encoder;
+    d.parser = parser;
+    d.execution_ingress = &ingress;
+    d.require_execution_ingress = true;
+    d.execution_failure_handler = [] {};
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    bridge.submit_order(make_order(1902, "BTCUSDT", 2.0, 100.0));
+    bridge.drain_outbound_for_test();
+
+    auto partial = make_unified_full_record("tt-1902", "EX-1902", 1.0);
+    partial.k = private_execution_record::kind::partial_fill;
+    partial.remaining_qty = 1.0;
+    ASSERT_TRUE(ingress.try_publish(partial));
+    private_execution_record first_attempt;
+    ASSERT_TRUE(ingress.try_pop(first_attempt));
+    ASSERT_EQ(bridge.resolve_private_execution(first_attempt),
+              private_execution_resolution::tracked);
+    ASSERT_TRUE(bridge.rollback_private_execution(
+        {first_attempt.sequence, first_attempt.engine_order_id}));
+
+    // A retry with the same immutable execution fingerprint must remain
+    // accountable after pre-accounting failure; it cannot be consumed as a
+    // duplicate merely because the first engine attempt rolled back.
+    partial.sequence = 0;
+    ASSERT_TRUE(ingress.try_publish(partial));
+    private_execution_record retried_partial;
+    ASSERT_TRUE(ingress.try_pop(retried_partial));
+    ASSERT_EQ(bridge.resolve_private_execution(retried_partial),
+              private_execution_resolution::tracked);
+    ASSERT_TRUE(bridge.commit_private_execution(
+        {retried_partial.sequence, retried_partial.engine_order_id}));
+
+    partial.sequence = 0;
+    ASSERT_TRUE(ingress.try_publish(partial));
+    private_execution_record duplicate_partial;
+    ASSERT_TRUE(ingress.try_pop(duplicate_partial));
+    EXPECT_EQ(bridge.resolve_private_execution(duplicate_partial),
+              private_execution_resolution::duplicate);
+
+    auto full = make_unified_full_record("tt-1902", "EX-1902", 1.0);
+    full.cumulative_qty = 2.0;
+    full.remaining_qty = 0.0;
+    ASSERT_TRUE(private_execution_record::copy_text(
+        full.execution_id, full.execution_id_size, "private-trade-2"));
+    ASSERT_TRUE(ingress.try_publish(full));
+    private_execution_record terminal;
+    ASSERT_TRUE(ingress.try_pop(terminal));
+    ASSERT_EQ(bridge.resolve_private_execution(terminal),
+              private_execution_resolution::tracked);
+    ASSERT_TRUE(bridge.commit_private_execution(
+        {terminal.sequence, terminal.engine_order_id}));
+    ASSERT_TRUE(bridge.acknowledge_private_terminal(terminal.sequence));
+    EXPECT_FALSE(bridge.has_unresolved_private_lifecycle());
+}
+
+TEST(ExecutionBridgeUnifiedIngress,
+     UnknownPrivateFillPublishesOnlyARecordWithoutReaderSideSynthesis)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto fill_tx = std::make_shared<FakeFillTransport>();
+    auto encoder = std::make_shared<FakeEncoder>();
+    auto parser = std::make_shared<ScriptedPrivateExecutionParser>();
+    TestPrivateExecutionIngress ingress;
+    int execution_failures = 0;
+    int synth_calls = 0;
+
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = fill_tx;
+    d.encoder = encoder;
+    d.parser = parser;
+    d.execution_ingress = &ingress;
+    d.require_execution_ingress = true;
+    d.execution_failure_handler = [&] { ++execution_failures; };
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+    bridge.set_unknown_fill_handler(
+        [&](const parsed_exec&, std::uint64_t)
+            -> std::optional<ExecutionBridge::synth_result>
+        {
+            ++synth_calls;
+            return std::nullopt;
+        });
+
+    parser->next = make_unified_exec(parsed_exec::kind::full_fill,
+                                     "foreign-client", "FOREIGN-1");
+    parser->next.last_fill_qty = 1.0;
+    parser->next.last_fill_price = 100.0;
+    parser->next.cumulative_qty = 1.0;
+    parser->next.has_cumulative_qty = true;
+    parser->next.execution_id = "foreign-trade-1";
+    fill_tx->deliver("foreign-private-fill");
+
+    // The private reader must not call the legacy unknown-fill synthesis
+    // hook, allocate a fill_event, or mutate the bridge's tracking maps. It
+    // only projects fixed data into the authoritative engine FIFO.
+    EXPECT_EQ(synth_calls, 0);
+    EXPECT_EQ(execution_failures, 0);
+    std::vector<fill_event> fills;
+    EXPECT_FALSE(bridge.poll_fills(fills));
+
+    private_execution_record record;
+    ASSERT_TRUE(ingress.try_pop(record));
+    EXPECT_EQ(record.k, private_execution_record::kind::full_fill);
+    EXPECT_EQ(record.client_order_id_view(), "foreign-client");
+    EXPECT_EQ(record.exchange_order_id_view(), "FOREIGN-1");
+    EXPECT_EQ(record.execution_id_view(), "foreign-trade-1");
+    EXPECT_EQ(synth_calls, 0);
+}
+
+TEST(ExecutionBridgeUnifiedIngress,
+     UnrelatedPrivateFrameWithoutExactControlProofClosesAdmission)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto fill_tx = std::make_shared<FakeFillTransport>();
+    auto encoder = std::make_shared<FakeEncoder>();
+    auto parser = std::make_shared<ScriptedPrivateExecutionParser>();
+    TestPrivateExecutionIngress ingress;
+    int execution_failures = 0;
+
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = fill_tx;
+    d.encoder = encoder;
+    d.parser = parser;
+    d.execution_ingress = &ingress;
+    d.require_execution_ingress = true;
+    d.execution_failure_handler = [&] { ++execution_failures; };
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+    ASSERT_TRUE(bridge.open());
+
+    // The default parser contract proves no unrelated frame harmless.  An
+    // account snapshot or unknown authenticated event must therefore enter
+    // the same fail-closed path as malformed execution truth; it must not
+    // be sent to the legacy diagnostic snapshot callback or silently dropped.
+    parser->result = execution_parse_result::unrelated;
+    fill_tx->deliver("unmodelled-private-frame");
+
+    EXPECT_TRUE(ingress.failed());
+    EXPECT_EQ(execution_failures, 1);
+    bridge.submit_order(make_order(1902));
+    bridge.drain_outbound_for_test();
+    EXPECT_TRUE(tx->submissions_.empty());
 }
 
 TEST(ExecutionBridge, PreAckCancelUsesClientId)

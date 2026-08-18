@@ -11,6 +11,9 @@
 #include "core/event.h"
 
 #include <chrono>
+#include <cstdint>
+#include <string>
+#include <string_view>
 
 using namespace truetest::exits;
 using tp = std::chrono::system_clock::time_point;
@@ -521,6 +524,57 @@ struct FakeAdapter : public IBracketAdapter
     }
 };
 
+native_bracket_update native_economic_update(
+    native_bracket_lifecycle lifecycle,
+    std::string_view exchange_id,
+    std::string_view symbol,
+    std::string_view group_id,
+    std::string_view execution_id,
+    double last_qty,
+    double cumulative_qty,
+    double price = 99.0,
+    std::int64_t event_time_ms = 1'700'000'000'000,
+    std::uint64_t source_sequence = 0)
+{
+    native_bracket_update update;
+    update.lifecycle = lifecycle;
+    update.exchange_order_id = exchange_id;
+    update.client_order_id = "venue-client";
+    update.execution_id = execution_id;
+    update.symbol = symbol;
+    update.group_id = group_id;
+    update.side = order_side::sell;
+    update.event_time_ms = event_time_ms;
+    update.source_sequence = source_sequence != 0
+        ? source_sequence : static_cast<std::uint64_t>(event_time_ms);
+    update.last_fill_qty = last_qty;
+    update.last_fill_price = price;
+    update.cumulative_qty = cumulative_qty;
+    update.cumulative_reported = true;
+    return update;
+}
+
+native_bracket_update native_terminal_update(
+    native_bracket_lifecycle lifecycle,
+    std::string_view exchange_id,
+    std::string_view symbol,
+    std::string_view group_id,
+    double cumulative_qty,
+    std::int64_t event_time_ms = 1'700'000'000'100)
+{
+    native_bracket_update update;
+    update.lifecycle = lifecycle;
+    update.exchange_order_id = exchange_id;
+    update.client_order_id = "venue-client";
+    update.symbol = symbol;
+    update.group_id = group_id;
+    update.side = order_side::sell;
+    update.event_time_ms = event_time_ms;
+    update.cumulative_qty = cumulative_qty;
+    update.cumulative_reported = true;
+    return update;
+}
+
 }
 
 TEST(ExitManagerAdapter, OpenerFillTriggersPlaceWithStableHandles)
@@ -578,8 +632,10 @@ TEST(ExitManagerAdapter, PriceTriggerCancelsVenueBracket)
     EXPECT_EQ(fake->cancel_calls, 1);
     EXPECT_EQ(fake->cancelled_openers[0], 9u);
 
-    // Reverse map cleared so a stale fill on the same exchange id is inert.
-    EXPECT_EQ(m.opener_for_exchange_order("sl-9"), 0u);
+    // REST cancel is advisory.  The reverse identity remains until the
+    // private terminal arrives, so a fill racing that cancel can still be
+    // attributed and accounted instead of vanishing as an unknown order.
+    EXPECT_EQ(m.opener_for_exchange_order("sl-9"), 9u);
 }
 
 TEST(ExitManagerAdapter, ManualCancelCancelsVenueBracket)
@@ -616,7 +672,7 @@ TEST(ExitManagerAdapter, FailedVenueCancelRestoresHandlesAndReverseIdentity)
     fake->throw_cancel = false;
     EXPECT_NO_THROW(m.cancel(88u));
     EXPECT_EQ(fake->cancel_calls, 2);
-    EXPECT_EQ(m.opener_for_exchange_order("sl-88"), 0u);
+    EXPECT_EQ(m.opener_for_exchange_order("sl-88"), 88u);
 }
 
 TEST(ExitManagerAdapter, BulkCancelByStrategySymbolCancelsAllVenueBrackets)
@@ -696,6 +752,488 @@ TEST(ExitManagerAdapter, RehydrateRefusesZeroQuantityVenueState)
     rb.handles.sl_exchange_id = "sl";
     EXPECT_THROW(m.rehydrate(rb), std::runtime_error);
     EXPECT_EQ(m.armed_count(), 0u);
+}
+
+TEST(ExitManagerNativeBracket, ExactLegIdentityAndEconomicReplayAreStrict)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-native";
+    fake->next_handles.tp_exchange_id = "tp-native";
+    fake->next_handles.oco_list_id = "oco-native";
+    fake->next_handles.symbol = "BTCUSDT";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 71, 95.0, 110.0));
+    m.on_fill(make_opener_fill(71, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    const auto fill = native_economic_update(
+        native_bracket_lifecycle::full_fill, "sl-native", "BTCUSDT",
+        "oco-native", "trade-71", 1.0, 1.0);
+    const auto accepted = m.resolve_native_bracket_update(fill);
+    EXPECT_EQ(accepted.kind, native_bracket_resolution_kind::economic_fill);
+    EXPECT_EQ(accepted.opener_order_id, 71u);
+    EXPECT_EQ(accepted.role, native_bracket_leg_role::stop_loss);
+    EXPECT_EQ(accepted.close_side, order_side::sell);
+    EXPECT_EQ(accepted.remaining_qty, 0.0);
+    EXPECT_TRUE(accepted.terminal);
+    EXPECT_EQ(accepted.strategy_name, "mr");
+    EXPECT_TRUE(accepted.reservation.valid());
+    EXPECT_TRUE(m.native_bracket_blocks_symbol_admission("btcusdt"));
+
+    const auto replay_while_reserved = m.resolve_native_bracket_update(fill);
+    EXPECT_EQ(replay_while_reserved.kind,
+              native_bracket_resolution_kind::economic_fill);
+    EXPECT_EQ(replay_while_reserved.reservation.source_sequence,
+              accepted.reservation.source_sequence);
+    EXPECT_EQ(replay_while_reserved.reservation.leg_token,
+              accepted.reservation.leg_token);
+    ASSERT_TRUE(m.commit_native_bracket_economic(accepted.reservation));
+
+    EXPECT_EQ(m.resolve_native_bracket_update(fill).kind,
+              native_bracket_resolution_kind::duplicate);
+
+    auto contradictory_replay = fill;
+    contradictory_replay.last_fill_price = 98.0;
+    EXPECT_EQ(m.resolve_native_bracket_update(contradictory_replay).kind,
+              native_bracket_resolution_kind::fatal);
+    EXPECT_TRUE(m.native_bracket_requires_reconciliation());
+}
+
+TEST(ExitManagerNativeBracket,
+     EconomicPreflightRollsBackWithoutConsumingTheVenueFact)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-rollback";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 81, 95.0, 110.0));
+    m.on_fill(make_opener_fill(81, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    const auto fill = native_economic_update(
+        native_bracket_lifecycle::full_fill, "sl-rollback", "BTCUSDT", "",
+        "trade-81", 1.0, 1.0, 99.0, 1'700'000'000'181, 8'101);
+    const auto first = m.resolve_native_bracket_update(fill);
+    ASSERT_EQ(first.kind, native_bracket_resolution_kind::economic_fill);
+    ASSERT_TRUE(first.reservation.valid());
+
+    // This models a throw in pool/accounting/audit after preflight but before
+    // native economic state becomes committed.
+    ASSERT_TRUE(m.rollback_native_bracket_economic(first.reservation));
+    const auto retried = m.resolve_native_bracket_update(fill);
+    ASSERT_EQ(retried.kind, native_bracket_resolution_kind::economic_fill);
+    EXPECT_EQ(retried.reservation.source_sequence,
+              first.reservation.source_sequence);
+    EXPECT_EQ(retried.reservation.leg_token, first.reservation.leg_token);
+    ASSERT_TRUE(m.commit_native_bracket_economic(retried.reservation));
+    EXPECT_EQ(m.resolve_native_bracket_update(fill).kind,
+              native_bracket_resolution_kind::duplicate);
+}
+
+TEST(ExitManagerNativeBracket, ReservationTokenMatchesBothLegAndSequence)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-token-one";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 82, 95.0, 110.0));
+    m.on_fill(make_opener_fill(82, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    fake->next_handles = {};
+    fake->next_handles.sl_exchange_id = "sl-token-two";
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 83, 95.0, 110.0));
+    m.on_fill(make_opener_fill(83, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    const auto one_fill = native_economic_update(
+        native_bracket_lifecycle::full_fill, "sl-token-one", "BTCUSDT", "",
+        "trade-82", 1.0, 1.0, 99.0, 1'700'000'000'182, 8'201);
+    const auto two_fill = native_economic_update(
+        native_bracket_lifecycle::full_fill, "sl-token-two", "BTCUSDT", "",
+        "trade-83", 1.0, 1.0, 99.0, 1'700'000'000'183, 8'301);
+    const auto one = m.resolve_native_bracket_update(one_fill);
+    const auto two = m.resolve_native_bracket_update(two_fill);
+    ASSERT_EQ(one.kind, native_bracket_resolution_kind::economic_fill);
+    ASSERT_EQ(two.kind, native_bracket_resolution_kind::economic_fill);
+    ASSERT_NE(one.reservation.leg_token, two.reservation.leg_token);
+
+    auto mismatched = one.reservation;
+    mismatched.leg_token = two.reservation.leg_token;
+    EXPECT_FALSE(m.rollback_native_bracket_economic(mismatched));
+    // A bad composite token must not consume another leg's reservation.
+    EXPECT_TRUE(m.rollback_native_bracket_economic(two.reservation));
+    EXPECT_TRUE(m.rollback_native_bracket_economic(one.reservation));
+    EXPECT_TRUE(m.native_bracket_requires_reconciliation());
+}
+
+TEST(ExitManagerNativeBracket,
+     DuplicatePendingSourceSequenceAcrossLegsFailsClosed)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-sequence-one";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 87, 95.0, 110.0));
+    m.on_fill(make_opener_fill(87, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    fake->next_handles = {};
+    fake->next_handles.sl_exchange_id = "sl-sequence-two";
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 88, 95.0, 110.0));
+    m.on_fill(make_opener_fill(88, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    constexpr std::uint64_t source_sequence = 8'701;
+    const auto first = m.resolve_native_bracket_update(native_economic_update(
+        native_bracket_lifecycle::full_fill, "sl-sequence-one", "BTCUSDT", "",
+        "trade-87", 1.0, 1.0, 99.0, 1'700'000'000'187, source_sequence));
+    ASSERT_EQ(first.kind, native_bracket_resolution_kind::economic_fill);
+    const auto duplicate_source = m.resolve_native_bracket_update(
+        native_economic_update(native_bracket_lifecycle::full_fill,
+                               "sl-sequence-two", "BTCUSDT", "", "trade-88",
+                               1.0, 1.0, 99.0, 1'700'000'000'188,
+                               source_sequence));
+    EXPECT_EQ(duplicate_source.kind, native_bracket_resolution_kind::fatal);
+    EXPECT_TRUE(m.native_bracket_requires_reconciliation());
+}
+
+TEST(ExitManagerNativeBracket,
+     GroupAllDoneIsMonotonicAndNeedsChildOutcomeProof)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-group-order";
+    fake->next_handles.tp_exchange_id = "tp-group-order";
+    fake->next_handles.oco_list_id = "oco-group-order";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 84, 95.0, 110.0));
+    m.on_fill(make_opener_fill(84, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    native_bracket_group_update all_done;
+    all_done.status = native_bracket_group_status::completed;
+    all_done.group_id = "oco-group-order";
+    all_done.symbol = "BTCUSDT";
+    all_done.event_time_ms = 1'700'000'000'184;
+    EXPECT_EQ(m.resolve_native_bracket_group_update(all_done),
+              native_bracket_group_resolution::lifecycle);
+    EXPECT_TRUE(m.has_unresolved_native_bracket_lifecycle());
+
+    auto stale_active = all_done;
+    stale_active.status = native_bracket_group_status::active;
+    stale_active.event_time_ms = 1'700'000'000'185;
+    EXPECT_EQ(m.resolve_native_bracket_group_update(stale_active),
+              native_bracket_group_resolution::fatal);
+    EXPECT_TRUE(m.native_bracket_requires_reconciliation());
+}
+
+TEST(ExitManagerNativeBracket,
+     IndependentSiblingCancelIsPostCommitAndAmbiguityRetainsProof)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-independent";
+    fake->next_handles.tp_exchange_id = "tp-independent";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 85, 95.0, 110.0));
+    m.on_fill(make_opener_fill(85, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    const auto fill = native_economic_update(
+        native_bracket_lifecycle::full_fill, "sl-independent", "BTCUSDT", "",
+        "trade-85", 1.0, 1.0, 99.0, 1'700'000'000'186, 8'501);
+    const auto winner = m.resolve_native_bracket_update(fill);
+    ASSERT_EQ(winner.kind, native_bracket_resolution_kind::economic_fill);
+    ASSERT_TRUE(m.commit_native_bracket_economic(winner.reservation));
+    EXPECT_EQ(m.request_native_bracket_sibling_cancel(winner.reservation),
+              native_bracket_sibling_cancel_result::requested);
+    EXPECT_EQ(fake->cancel_calls, 1);
+    EXPECT_EQ(m.resolve_native_bracket_update(native_terminal_update(
+                  native_bracket_lifecycle::canceled, "tp-independent", "BTCUSDT",
+                  "", 0.0)).kind,
+              native_bracket_resolution_kind::lifecycle);
+    EXPECT_FALSE(m.has_unresolved_native_bracket_lifecycle());
+    // The active handles can retire, but the reverse identity never rolls
+    // back: a later replay/conflict remains attributable.
+    EXPECT_EQ(m.opener_for_exchange_order("sl-independent"), 85u);
+
+    ExitManager ambiguous;
+    auto ambiguous_fake = std::make_shared<FakeAdapter>();
+    ambiguous_fake->next_handles.sl_exchange_id = "sl-ambiguous";
+    ambiguous_fake->next_handles.tp_exchange_id = "tp-ambiguous";
+    ambiguous_fake->throw_cancel = true;
+    ambiguous.set_bracket_adapter(ambiguous_fake);
+    ambiguous.register_pending(make_long_intent("mr", "BTCUSDT", 86, 95.0, 110.0));
+    ambiguous.on_fill(make_opener_fill(86, "BTCUSDT", order_side::buy, 1.0, 100.0));
+    const auto ambiguous_fill = native_economic_update(
+        native_bracket_lifecycle::full_fill, "sl-ambiguous", "BTCUSDT", "",
+        "trade-86", 1.0, 1.0, 99.0, 1'700'000'000'187, 8'601);
+    const auto ambiguous_winner = ambiguous.resolve_native_bracket_update(
+        ambiguous_fill);
+    ASSERT_EQ(ambiguous_winner.kind, native_bracket_resolution_kind::economic_fill);
+    ASSERT_TRUE(ambiguous.commit_native_bracket_economic(
+        ambiguous_winner.reservation));
+    EXPECT_EQ(ambiguous.request_native_bracket_sibling_cancel(
+                  ambiguous_winner.reservation),
+              native_bracket_sibling_cancel_result::fatal);
+    EXPECT_TRUE(ambiguous.native_bracket_requires_reconciliation());
+    // The expected sibling terminal remains valid proof despite the ambiguous
+    // REST response; it must not be reset to active.
+    EXPECT_EQ(ambiguous.resolve_native_bracket_update(native_terminal_update(
+                  native_bracket_lifecycle::canceled, "tp-ambiguous", "BTCUSDT",
+                  "", 0.0)).kind,
+              native_bracket_resolution_kind::lifecycle);
+}
+
+TEST(ExitManagerNativeBracket,
+     IndependentCancelThenEconomicSiblingFillIsAttributedAndReconciled)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-independent-race";
+    fake->next_handles.tp_exchange_id = "tp-independent-race";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 90, 95.0, 110.0));
+    m.on_fill(make_opener_fill(90, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    m.cancel(90);
+    ASSERT_EQ(m.resolve_native_bracket_update(native_terminal_update(
+                  native_bracket_lifecycle::canceled, "tp-independent-race",
+                  "BTCUSDT", "", 0.0)).kind,
+              native_bracket_resolution_kind::lifecycle);
+    const auto raced = m.resolve_native_bracket_update(native_economic_update(
+        native_bracket_lifecycle::full_fill, "sl-independent-race", "BTCUSDT",
+        "", "trade-90", 1.0, 1.0, 99.0, 1'700'000'000'190, 9'001));
+    EXPECT_EQ(raced.kind,
+              native_bracket_resolution_kind::economic_fill_requires_reconciliation);
+    ASSERT_TRUE(m.commit_native_bracket_economic(raced.reservation));
+    EXPECT_TRUE(m.native_bracket_requires_reconciliation());
+}
+
+TEST(ExitManagerNativeBracket, ExpectedOcoSiblingTerminalCompletesButStaysReplayAddressable)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-oco";
+    fake->next_handles.tp_exchange_id = "tp-oco";
+    fake->next_handles.oco_list_id = "oco-72";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 72, 95.0, 110.0));
+    m.on_fill(make_opener_fill(72, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    const auto winner = m.resolve_native_bracket_update(native_economic_update(
+        native_bracket_lifecycle::full_fill, "sl-oco", "BTCUSDT", "oco-72",
+        "trade-72", 1.0, 1.0));
+    ASSERT_EQ(winner.kind, native_bracket_resolution_kind::economic_fill);
+    ASSERT_TRUE(m.commit_native_bracket_economic(winner.reservation));
+    // A real list/OCO owns sibling cancellation atomically. ExitManager waits
+    // for child confirmation + ALL_DONE rather than issuing a second REST
+    // cancel that would weaken the venue's proof model.
+    EXPECT_EQ(m.request_native_bracket_sibling_cancel(winner.reservation),
+              native_bracket_sibling_cancel_result::not_required);
+    EXPECT_EQ(fake->cancel_calls, 0);
+
+    native_bracket_group_update completed;
+    completed.status = native_bracket_group_status::completed;
+    completed.group_id = "oco-72";
+    completed.symbol = "BTCUSDT";
+    completed.event_time_ms = 1'700'000'000'050;
+    EXPECT_EQ(m.resolve_native_bracket_group_update(completed),
+              native_bracket_group_resolution::lifecycle);
+    EXPECT_TRUE(m.has_unresolved_native_bracket_lifecycle());
+
+    EXPECT_EQ(m.resolve_native_bracket_update(native_terminal_update(
+                  native_bracket_lifecycle::canceled, "tp-oco", "BTCUSDT",
+                  "oco-72", 0.0)).kind,
+              native_bracket_resolution_kind::lifecycle);
+    EXPECT_FALSE(m.native_bracket_requires_reconciliation());
+    EXPECT_FALSE(m.has_unresolved_native_bracket_lifecycle());
+    EXPECT_FALSE(m.native_bracket_blocks_symbol_admission("bTcUsDt"));
+    // Identities are intentionally retained for exact replay/conflict proof.
+    EXPECT_EQ(m.opener_for_exchange_order("tp-oco"), 72u);
+}
+
+TEST(ExitManagerNativeBracket, SiblingEconomicRaceIsAttributedThenRequiresReconciliation)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-race";
+    fake->next_handles.tp_exchange_id = "tp-race";
+    fake->next_handles.oco_list_id = "oco-race";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 73, 95.0, 110.0));
+    m.on_fill(make_opener_fill(73, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    const auto winner = m.resolve_native_bracket_update(native_economic_update(
+        native_bracket_lifecycle::full_fill, "sl-race", "BTCUSDT", "oco-race",
+        "trade-73-sl", 1.0, 1.0));
+    ASSERT_EQ(winner.kind, native_bracket_resolution_kind::economic_fill);
+    ASSERT_TRUE(m.commit_native_bracket_economic(winner.reservation));
+    const auto raced = m.resolve_native_bracket_update(native_economic_update(
+        native_bracket_lifecycle::full_fill, "tp-race", "BTCUSDT", "oco-race",
+        "trade-73-tp", 1.0, 1.0, 111.0, 1'700'000'000'010));
+    EXPECT_EQ(raced.kind,
+              native_bracket_resolution_kind::economic_fill_requires_reconciliation);
+    EXPECT_EQ(raced.opener_order_id, 73u);
+    EXPECT_EQ(raced.strategy_name, "mr");
+    ASSERT_TRUE(m.commit_native_bracket_economic(raced.reservation));
+    EXPECT_TRUE(m.native_bracket_requires_reconciliation());
+}
+
+TEST(ExitManagerNativeBracket, UnrequestedProtectionLossAndMissedSiblingDeadlineFailClosed)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-deadline";
+    fake->next_handles.tp_exchange_id = "tp-deadline";
+    fake->next_handles.oco_list_id = "oco-deadline";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 74, 95.0, 110.0));
+    m.on_fill(make_opener_fill(74, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    // A live protective leg cannot disappear without a local cancel request
+    // or a recorded OCO winner.
+    EXPECT_EQ(m.resolve_native_bracket_update(native_terminal_update(
+                  native_bracket_lifecycle::canceled, "sl-deadline", "BTCUSDT",
+                  "oco-deadline", 0.0)).kind,
+              native_bracket_resolution_kind::fatal);
+    EXPECT_TRUE(m.native_bracket_requires_reconciliation());
+
+    ExitManager deadline_manager;
+    auto deadline_fake = std::make_shared<FakeAdapter>();
+    deadline_fake->next_handles.sl_exchange_id = "sl-await";
+    deadline_fake->next_handles.tp_exchange_id = "tp-await";
+    deadline_fake->next_handles.oco_list_id = "oco-await";
+    deadline_manager.set_bracket_adapter(deadline_fake);
+    deadline_manager.register_pending(
+        make_long_intent("mr", "BTCUSDT", 75, 95.0, 110.0));
+    deadline_manager.on_fill(
+        make_opener_fill(75, "BTCUSDT", order_side::buy, 1.0, 100.0));
+    const auto winner = deadline_manager.resolve_native_bracket_update(
+        native_economic_update(native_bracket_lifecycle::full_fill, "sl-await",
+                               "BTCUSDT", "oco-await", "trade-75", 1.0, 1.0));
+    ASSERT_EQ(winner.kind, native_bracket_resolution_kind::economic_fill);
+    ASSERT_TRUE(deadline_manager.commit_native_bracket_economic(winner.reservation));
+
+    const auto after_winner = std::chrono::steady_clock::now();
+    EXPECT_TRUE(deadline_manager.check_native_bracket_lifecycle_deadline(
+        after_winner + std::chrono::seconds{29}));
+    EXPECT_FALSE(deadline_manager.check_native_bracket_lifecycle_deadline(
+        after_winner + std::chrono::seconds{31}));
+    EXPECT_TRUE(deadline_manager.native_bracket_requires_reconciliation());
+}
+
+TEST(ExitManagerNativeBracket, ManualReleaseAcceptsBothPrivateCancelsThenGroupCompletion)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-manual";
+    fake->next_handles.tp_exchange_id = "tp-manual";
+    fake->next_handles.oco_list_id = "oco-manual";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 76, 95.0, 110.0));
+    m.on_fill(make_opener_fill(76, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    m.cancel(76);
+    ASSERT_EQ(fake->cancel_calls, 1);
+    EXPECT_EQ(m.resolve_native_bracket_update(native_terminal_update(
+                  native_bracket_lifecycle::canceled, "sl-manual", "BTCUSDT",
+                  "oco-manual", 0.0)).kind,
+              native_bracket_resolution_kind::lifecycle);
+    EXPECT_EQ(m.resolve_native_bracket_update(native_terminal_update(
+                  native_bracket_lifecycle::canceled, "tp-manual", "BTCUSDT",
+                  "oco-manual", 0.0, 1'700'000'000'101)).kind,
+              native_bracket_resolution_kind::lifecycle);
+    // Child cancel reports alone do not retire an OCO/list. The retained
+    // group must still observe the venue's ALL_DONE lifecycle.
+    EXPECT_TRUE(m.has_unresolved_native_bracket_lifecycle());
+
+    native_bracket_group_update all_done;
+    all_done.status = native_bracket_group_status::completed;
+    all_done.group_id = "oco-manual";
+    all_done.symbol = "BTCUSDT";
+    all_done.event_time_ms = 1'700'000'000'102;
+    EXPECT_EQ(m.resolve_native_bracket_group_update(all_done),
+              native_bracket_group_resolution::lifecycle);
+    EXPECT_FALSE(m.has_unresolved_native_bracket_lifecycle());
+    EXPECT_FALSE(m.native_bracket_requires_reconciliation());
+
+    // The retained terminal identity still accepts late venue economics for
+    // accounting, but it refuses to call that a clean completed OCO.
+    const auto late_fill = m.resolve_native_bracket_update(native_economic_update(
+        native_bracket_lifecycle::full_fill, "tp-manual", "BTCUSDT",
+        "oco-manual", "trade-76-late", 1.0, 1.0, 111.0,
+        1'700'000'000'103));
+    EXPECT_EQ(late_fill.kind,
+              native_bracket_resolution_kind::economic_fill_requires_reconciliation);
+    EXPECT_EQ(late_fill.opener_order_id, 76u);
+    // Reserve itself closes the former clean-ALL_DONE admission window, even
+    // before engine accounting has had a chance to commit the late venue fact.
+    EXPECT_TRUE(m.native_bracket_blocks_symbol_admission("btcusdt"));
+    EXPECT_FALSE(m.native_bracket_requires_reconciliation());
+    ASSERT_TRUE(m.commit_native_bracket_economic(late_fill.reservation));
+    EXPECT_TRUE(m.native_bracket_requires_reconciliation());
+}
+
+TEST(ExitManagerNativeBracket,
+     ManualTerminalChildrenWithoutAllDoneExpireFailClosed)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-manual-timeout";
+    fake->next_handles.tp_exchange_id = "tp-manual-timeout";
+    fake->next_handles.oco_list_id = "oco-manual-timeout";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent("mr", "BTCUSDT", 89, 95.0, 110.0));
+    m.on_fill(make_opener_fill(89, "BTCUSDT", order_side::buy, 1.0, 100.0));
+
+    m.cancel(89);
+    ASSERT_EQ(m.resolve_native_bracket_update(native_terminal_update(
+                  native_bracket_lifecycle::canceled, "sl-manual-timeout",
+                  "BTCUSDT", "oco-manual-timeout", 0.0)).kind,
+              native_bracket_resolution_kind::lifecycle);
+    ASSERT_EQ(m.resolve_native_bracket_update(native_terminal_update(
+                  native_bracket_lifecycle::canceled, "tp-manual-timeout",
+                  "BTCUSDT", "oco-manual-timeout", 0.0,
+                  1'700'000'000'201)).kind,
+              native_bracket_resolution_kind::lifecycle);
+
+    const auto after_children = std::chrono::steady_clock::now();
+    EXPECT_TRUE(m.check_native_bracket_lifecycle_deadline(
+        after_children + std::chrono::seconds{29}));
+    EXPECT_FALSE(m.check_native_bracket_lifecycle_deadline(
+        after_children + std::chrono::seconds{31}));
+    EXPECT_TRUE(m.native_bracket_requires_reconciliation());
+}
+
+TEST(ExitManagerNativeBracket, BoundedLongAndRecoveredEmptyStrategyAttributionAreExplicit)
+{
+    const std::string long_strategy(80, 's');
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-long-strategy";
+    m.set_bracket_adapter(fake);
+    m.register_pending(make_long_intent(long_strategy, "BTCUSDT", 77, 95.0, 110.0));
+    m.on_fill(make_opener_fill(77, "BTCUSDT", order_side::buy, 1.0, 100.0));
+    const auto long_result = m.resolve_native_bracket_update(native_economic_update(
+        native_bracket_lifecycle::full_fill, "sl-long-strategy", "BTCUSDT", "",
+        "trade-77", 1.0, 1.0));
+    EXPECT_EQ(long_result.kind, native_bracket_resolution_kind::economic_fill);
+    EXPECT_EQ(long_result.strategy_name, long_strategy);
+    ASSERT_TRUE(m.commit_native_bracket_economic(long_result.reservation));
+
+    ExitManager recovered;
+    IBracketAdapter::recovered_bracket rb;
+    rb.opener_order_id = 78;
+    rb.symbol = "BTCUSDT";
+    rb.close_side = order_side::sell;
+    rb.qty = 1.0;
+    rb.entry_price = 100.0;
+    rb.handles.sl_exchange_id = "sl-recovered-empty";
+    ASSERT_NO_THROW(recovered.rehydrate(rb));
+    const auto recovered_result = recovered.resolve_native_bracket_update(
+        native_economic_update(native_bracket_lifecycle::full_fill,
+                                "sl-recovered-empty", "BTCUSDT", "",
+                                "trade-78", 1.0, 1.0));
+    EXPECT_EQ(recovered_result.kind, native_bracket_resolution_kind::economic_fill);
+    EXPECT_EQ(recovered_result.opener_order_id, 78u);
+    EXPECT_TRUE(recovered_result.strategy_name.empty());
+    ASSERT_TRUE(recovered.commit_native_bracket_economic(
+        recovered_result.reservation));
 }
 
 TEST(ExitManagerAdapter, NoAdapterMeansNoCallsAndExchangeMapAlwaysZero)

@@ -3,6 +3,7 @@
 #include "providers/binance/binance_futures_user_data_parser.h"
 
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -32,6 +33,7 @@ std::string update(const std::string& x, const std::string& X,
     j +=     R"("X":")" + X + R"(",)";
     j +=     R"("r":")" + r + R"(",)";
     j +=     R"("i":)" + i + ",";
+    j +=     R"("t":9001,)";
     j +=     R"("l":")" + l + R"(",)";
     j +=     R"("L":")" + L + R"(",)";
     j +=     R"("z":")" + z + R"(",)";
@@ -77,6 +79,11 @@ TEST(BinanceFuturesUserDataParser, HarmlessControlsLeaveOutputUntouched)
     EXPECT_EQ(p.parse("pong", out), execution_parse_result::unrelated);
     EXPECT_EQ(p.parse(R"({"result":null,"id":1})", out),
               execution_parse_result::unrelated);
+    EXPECT_TRUE(p.is_harmless_private_control("ping"));
+    EXPECT_TRUE(p.is_harmless_private_control("pong"));
+    EXPECT_FALSE(p.is_harmless_private_control(
+        R"({"result":null,"id":1})"));
+    EXPECT_FALSE(p.is_harmless_private_control("pong\n"));
     EXPECT_EQ(out.symbol, "sentinel");
     EXPECT_EQ(out.client_order_id, "keep");
 }
@@ -180,6 +187,45 @@ TEST(BinanceFuturesUserDataParser, FundingTimestampMustFitSystemClock)
         R"({"e":"ACCOUNT_UPDATE","E":9223372036854775807,"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","bc":"-0.5"}]}})";
 
     EXPECT_EQ(p.parse_funding_update(overflow, funding),
+              funding_parse_result::invalid);
+}
+
+TEST(BinanceFuturesUserDataParser,
+     FundingFastPathRejectsEmbeddedExecutionAndUnverifiedState)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_funding_update funding;
+
+    constexpr std::string_view valid =
+        R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"T":1700000000001,"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","wb":"99.5","cw":"88.0","bc":"-0.5"}],"P":[]}})";
+    ASSERT_EQ(p.parse_funding_update(valid, funding),
+              funding_parse_result::valid);
+    EXPECT_EQ(funding.event_time_ms, 1700000000000LL);
+    EXPECT_DOUBLE_EQ(funding.cash_delta, -0.5);
+
+    EXPECT_EQ(p.parse_funding_update(
+                  R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"o":{"s":"BTCUSDT","i":42,"x":"TRADE","X":"FILLED"},"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","bc":"-0.5"}]}})",
+                  funding),
+              funding_parse_result::invalid);
+    EXPECT_EQ(p.parse_funding_update(
+                  R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"FUNDING_FEE","o":{"i":42,"x":"TRADE"},"B":[{"a":"USDT","bc":"-0.5"}]}})",
+                  funding),
+              funding_parse_result::invalid);
+    EXPECT_EQ(p.parse_funding_update(
+                  R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","bc":"-0.5","i":42}]}})",
+                  funding),
+              funding_parse_result::invalid);
+    EXPECT_EQ(p.parse_funding_update(
+                  R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"T":"bad-time","a":{"m":"FUNDING_FEE","B":[{"a":"USDT","bc":"-0.5"}]}})",
+                  funding),
+              funding_parse_result::invalid);
+    EXPECT_EQ(p.parse_funding_update(
+                  R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","wb":"nan","bc":"-0.5"}]}})",
+                  funding),
+              funding_parse_result::invalid);
+    EXPECT_EQ(p.parse_funding_update(
+                  R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"FUNDING_FEE","B":[{"a":"USDT","bc":"-0.5"}],"P":[{"s":"BTCUSDT","pa":"1"}]}})",
+                  funding),
               funding_parse_result::invalid);
 }
 
@@ -305,6 +351,8 @@ TEST(BinanceFuturesUserDataParser, NewAck)
     EXPECT_EQ(out.exchange_order_id, "42");
     EXPECT_EQ(out.side, order_side::buy);
     EXPECT_DOUBLE_EQ(out.last_fill_qty, 0.0);
+    EXPECT_TRUE(out.has_cumulative_qty);
+    EXPECT_TRUE(out.execution_id.empty());
 }
 
 TEST(BinanceFuturesUserDataParser, PartialTrade)
@@ -319,6 +367,8 @@ TEST(BinanceFuturesUserDataParser, PartialTrade)
     EXPECT_DOUBLE_EQ(out.last_fill_qty, 0.4);
     EXPECT_DOUBLE_EQ(out.last_fill_price, 60000.0);
     EXPECT_DOUBLE_EQ(out.cumulative_qty, 0.4);
+    EXPECT_TRUE(out.has_cumulative_qty);
+    EXPECT_EQ(out.execution_id, "9001");
 }
 
 TEST(BinanceFuturesUserDataParser, FullTrade)
@@ -340,6 +390,103 @@ TEST(BinanceFuturesUserDataParser, FullTrade)
     EXPECT_DOUBLE_EQ(out.cumulative_qty, 1.0);
     EXPECT_DOUBLE_EQ(out.commission, 0.06);
     EXPECT_EQ(out.commission_asset, "USDT");
+    EXPECT_TRUE(out.has_cumulative_qty);
+    EXPECT_EQ(out.execution_id, "9001");
+}
+
+TEST(BinanceFuturesUserDataParser,
+     LifecycleReportsRejectIncrementalEconomicsButAllowCumulativeProof)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_exec out;
+    const auto expect_incremental_economics_rejected =
+        [&](const std::string& execution_type, const std::string& status) {
+            EXPECT_EQ(p.parse(update(execution_type, status,
+                                     "1", "0", "0"), out),
+                      execution_parse_result::malformed);
+            EXPECT_EQ(p.parse(update(execution_type, status,
+                                     "0", "100", "0"), out),
+                      execution_parse_result::malformed);
+            EXPECT_EQ(p.parse(update(execution_type, status,
+                                     "0", "0", "0", "tt-1", "BUY",
+                                     "42", "0.01"), out),
+                      execution_parse_result::malformed);
+        };
+
+    expect_incremental_economics_rejected("NEW", "NEW");
+    expect_incremental_economics_rejected("CANCELED", "CANCELED");
+    expect_incremental_economics_rejected("REJECTED", "REJECTED");
+    expect_incremental_economics_rejected("EXPIRED", "EXPIRED");
+
+    ASSERT_EQ(p.parse(update("CANCELED", "CANCELED", "0", "0", "0.4"), out),
+              execution_parse_result::valid);
+    EXPECT_EQ(out.k, parsed_exec::kind::canceled);
+    EXPECT_TRUE(out.has_cumulative_qty);
+    EXPECT_DOUBLE_EQ(out.cumulative_qty, 0.4);
+}
+
+TEST(BinanceFuturesUserDataParser, EconomicFillsRequireCanonicalExecutionId)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_exec out;
+
+    auto missing = update("TRADE", "FILLED", "1", "100", "1");
+    const auto missing_field = missing.find(R"(,"t":9001)");
+    ASSERT_NE(missing_field, std::string::npos);
+    missing.erase(missing_field, std::string(R"(,"t":9001)").size());
+    EXPECT_EQ(p.parse(missing, out), execution_parse_result::malformed);
+
+    auto zero = update("TRADE", "FILLED", "1", "100", "1");
+    const auto execution_field = zero.find(R"("t":9001)");
+    ASSERT_NE(execution_field, std::string::npos);
+    zero.replace(execution_field, std::string(R"("t":9001)").size(),
+                 R"("t":0)");
+    EXPECT_EQ(p.parse(zero, out), execution_parse_result::malformed);
+
+    auto negative = update("TRADE", "FILLED", "1", "100", "1");
+    const auto negative_field = negative.find(R"("t":9001)");
+    ASSERT_NE(negative_field, std::string::npos);
+    negative.replace(negative_field, std::string(R"("t":9001)").size(),
+                     R"("t":-1)");
+    EXPECT_EQ(p.parse(negative, out), execution_parse_result::malformed);
+
+    auto nonnumeric = update("TRADE", "FILLED", "1", "100", "1");
+    const auto nonnumeric_field = nonnumeric.find(R"("t":9001)");
+    ASSERT_NE(nonnumeric_field, std::string::npos);
+    nonnumeric.replace(nonnumeric_field, std::string(R"("t":9001)").size(),
+                       R"("t":"not-an-id")");
+    EXPECT_EQ(p.parse(nonnumeric, out), execution_parse_result::malformed);
+
+    auto numeric_string = update("TRADE", "FILLED", "1", "100", "1");
+    const auto string_field = numeric_string.find(R"("t":9001)");
+    ASSERT_NE(string_field, std::string::npos);
+    numeric_string.replace(string_field, std::string(R"("t":9001)").size(),
+                           R"("t":"0009001")");
+    ASSERT_EQ(p.parse(numeric_string, out), execution_parse_result::valid);
+    EXPECT_EQ(out.execution_id, "9001");
+}
+
+TEST(BinanceFuturesUserDataParser, LifecycleReportsDoNotRequireExecutionId)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_exec out;
+
+    auto ack = update("NEW", "NEW");
+    const auto execution_field = ack.find(R"(,"t":9001)");
+    ASSERT_NE(execution_field, std::string::npos);
+    ack.erase(execution_field, std::string(R"(,"t":9001)").size());
+    ASSERT_EQ(p.parse(ack, out), execution_parse_result::valid);
+    EXPECT_EQ(out.k, parsed_exec::kind::ack);
+    EXPECT_TRUE(out.execution_id.empty());
+    EXPECT_TRUE(out.has_cumulative_qty);
+
+    auto no_cumulative = ack;
+    const auto cumulative_field = no_cumulative.find(R"(,"z":"0.0")");
+    ASSERT_NE(cumulative_field, std::string::npos);
+    no_cumulative.erase(cumulative_field,
+                        std::string(R"(,"z":"0.0")").size());
+    ASSERT_EQ(p.parse(no_cumulative, out), execution_parse_result::valid);
+    EXPECT_FALSE(out.has_cumulative_qty);
 }
 
 TEST(BinanceFuturesUserDataParser, Canceled)
@@ -349,6 +496,13 @@ TEST(BinanceFuturesUserDataParser, Canceled)
     ASSERT_EQ(p.parse(update("CANCELED", "CANCELED"), out),
               execution_parse_result::valid);
     EXPECT_EQ(out.k, parsed_exec::kind::canceled);
+
+    auto missing_cumulative = update("CANCELED", "CANCELED");
+    const auto cumulative_field = missing_cumulative.find(R"(,"z":"0.0")");
+    ASSERT_NE(cumulative_field, std::string::npos);
+    missing_cumulative.erase(cumulative_field,
+                             std::string(R"(,"z":"0.0")").size());
+    EXPECT_EQ(p.parse(missing_cumulative, out), execution_parse_result::malformed);
 }
 
 TEST(BinanceFuturesUserDataParser, Rejected)

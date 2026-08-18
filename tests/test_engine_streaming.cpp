@@ -14,7 +14,14 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <future>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 // RAII helper to silence cout during noisy engine runs.
@@ -26,6 +33,40 @@ struct SilenceOutput {
     std::streambuf* orig;
     SilenceOutput() : orig(std::cout.rdbuf(sink.rdbuf())) {}
     ~SilenceOutput() { std::cout.rdbuf(orig); }
+};
+
+class PrivateLiveLedgerFile
+{
+public:
+    explicit PrivateLiveLedgerFile(std::string_view name)
+    {
+        std::string pattern = "/tmp/truetest_engine_live_ledger_XXXXXX";
+        char* created = ::mkdtemp(pattern.data());
+        if (created == nullptr)
+            throw std::runtime_error(
+                "cannot create private engine ledger test directory");
+        directory_ = created;
+        if (::chmod(directory_.c_str(), S_IRWXU) != 0)
+        {
+            (void)::rmdir(directory_.c_str());
+            throw std::runtime_error(
+                "cannot secure engine ledger test directory");
+        }
+        path_ = directory_ + "/" + std::string(name);
+    }
+
+    ~PrivateLiveLedgerFile()
+    {
+        (void)::unlink((path_ + ".partial").c_str());
+        (void)::unlink(path_.c_str());
+        (void)::rmdir(directory_.c_str());
+    }
+
+    const std::string& path() const noexcept { return path_; }
+
+private:
+    std::string directory_;
+    std::string path_;
 };
 
 class FailingStreamingTransport final : public IDataTransport
@@ -94,7 +135,11 @@ public:
     std::shared_ptr<IDataTransport> get_transport() override { return {}; }
     std::shared_ptr<IExecutionAdapter> get_execution_adapter() override
     {
-        return adapter;
+        // This streaming test exercises operator stop before a venue order is
+        // eligible.  It deliberately has no private execution protocol, so
+        // it must not masquerade as a live adapter under the unified-ingress
+        // construction gate.
+        return {};
     }
     std::shared_ptr<IReconciler> get_reconciler() override { return reconciler; }
     std::shared_ptr<IKillSwitch> get_kill_switch() override { return kill_switch; }
@@ -103,6 +148,12 @@ public:
     {
         close();
         last_disposition = disposition;
+    }
+    bool private_execution_producer_joined() const noexcept override
+    {
+        // This fixture owns no private producer; its synchronous finish is
+        // the test-only join proof required for authoritative ledger close.
+        return !opened;
     }
 
     bool opened = false;
@@ -149,6 +200,192 @@ public:
     bool publish_on_close = false;
     bool close_publish_succeeded = false;
     double close_cash_delta = 0.0;
+};
+
+// Minimal engine-thread resolver used to prove the unified private FIFO
+// semantics without a network transport.  It deliberately does not synthesize
+// fills on the producer side: the engine must call resolve/ack in FIFO order.
+class UnifiedIngressSpyAdapter final : public IExecutionAdapter,
+                                       public IAsyncSubmitSupport
+{
+public:
+    void submit_order(const order_event&) override { ++submits; }
+    bool cancel_order(std::uint64_t) override { ++cancels; return true; }
+    bool modify_order(std::uint64_t, double, double) override
+    {
+        ++modifies;
+        return true;
+    }
+    bool poll_fills(std::vector<fill_event>& out) override
+    {
+        ++legacy_poll_calls;
+        if (throw_on_legacy_poll)
+            throw std::runtime_error("legacy poll failure");
+        if (legacy_fills.empty())
+            return false;
+        out.insert(out.end(), legacy_fills.begin(), legacy_fills.end());
+        legacy_fills.clear();
+        return true;
+    }
+    bool supports_async_submit() const override { return true; }
+    IAsyncSubmitSupport* get_async_support() override { return this; }
+
+    void set_unknown_fill_handler(unknown_fill_handler) override {}
+    void clear_unknown_fill_handler() override {}
+    bool poll_synth_meta(std::vector<synth_meta>&) override { return false; }
+    bool poll_submit_results(std::vector<submit_result>&) override { return false; }
+
+    private_execution_resolution resolve_private_execution(
+        private_execution_record& record) override
+    {
+        if (record.client_order_id_view() == "foreign")
+            return private_execution_resolution::untracked;
+        if (record.client_order_id_view() != "tt-1")
+            return private_execution_resolution::fatal;
+        record.engine_order_id = 1;
+        record.remaining_qty = record.k == private_execution_record::kind::partial_fill
+            ? 1.0 : 0.0;
+        return private_execution_resolution::tracked;
+    }
+
+    bool acknowledge_private_terminal(std::uint64_t sequence) override
+    {
+        acknowledged_terminal_sequences.push_back(sequence);
+        return true;
+    }
+
+    bool commit_private_execution(
+        const private_execution_reservation& reservation) override
+    {
+        committed_sequences.push_back(reservation.source_sequence);
+        return reservation.valid();
+    }
+
+    bool rollback_private_execution(
+        const private_execution_reservation& reservation) noexcept override
+    {
+        rolled_back_sequences.push_back(reservation.source_sequence);
+        return reservation.valid();
+    }
+
+    bool has_unresolved_private_lifecycle() const override { return false; }
+
+    void fail_private_execution_admission() noexcept override
+    {
+        admission_failed = true;
+    }
+
+    int submits = 0;
+    int cancels = 0;
+    int modifies = 0;
+    int legacy_poll_calls = 0;
+    bool throw_on_legacy_poll = false;
+    std::vector<fill_event> legacy_fills;
+    bool admission_failed = false;
+    std::vector<std::uint64_t> acknowledged_terminal_sequences;
+    std::vector<std::uint64_t> committed_sequences;
+    std::vector<std::uint64_t> rolled_back_sequences;
+};
+
+class UnifiedIngressProvider final : public IProvider
+{
+public:
+    std::string name() const override { return "unified-ingress-spy"; }
+    bool has_data_feed() const override { return false; }
+    bool has_execution() const override { return true; }
+    bool open() override { opened = true; return true; }
+    void close() override
+    {
+        if (!closed && publish_terminal_on_close)
+        {
+            private_execution_record record;
+            record.k = private_execution_record::kind::full_fill;
+            record.event_time_ms = 1'700'000'000'000LL;
+            record.side = order_side::buy;
+            record.last_fill_qty = 1.0;
+            record.last_fill_price = 100.0;
+            record.cumulative_qty = 1.0;
+            record.remaining_qty = 0.0;
+            record.cumulative_reported = true;
+            (void)private_execution_record::copy_text(
+                record.symbol, record.symbol_size, "BTCUSDT");
+            (void)private_execution_record::copy_text(
+                record.client_order_id, record.client_order_id_size, "tt-1");
+            (void)private_execution_record::copy_text(
+                record.exchange_order_id, record.exchange_order_id_size, "ex-1");
+            (void)private_execution_record::copy_text(
+                record.execution_id, record.execution_id_size, "trade-1");
+            close_publish_succeeded = ingress.try_publish(record);
+        }
+        if (!closed)
+        {
+            for (auto record : close_records)
+                close_records_publish_succeeded =
+                    ingress.try_publish(record) && close_records_publish_succeeded;
+        }
+        closed = true;
+        joined = true;
+        opened = false;
+    }
+    void finish_live_shutdown(live_shutdown_disposition) override { close(); }
+    std::shared_ptr<IDataTransport> get_transport() override { return {}; }
+    std::shared_ptr<IExecutionAdapter> get_execution_adapter() override
+    {
+        return adapter;
+    }
+    ProviderExecutionIngress* execution_ingress() noexcept override
+    {
+        return &ingress;
+    }
+    bool private_execution_producer_joined() const noexcept override
+    {
+        return joined;
+    }
+
+    ProviderExecutionIngress ingress;
+    std::shared_ptr<UnifiedIngressSpyAdapter> adapter =
+        std::make_shared<UnifiedIngressSpyAdapter>();
+    bool opened = false;
+    bool closed = false;
+    bool joined = false;
+    bool publish_terminal_on_close = false;
+    bool close_publish_succeeded = false;
+    std::vector<private_execution_record> close_records;
+    bool close_records_publish_succeeded = true;
+};
+
+class FillCountingStrategy final : public IStrategy
+{
+public:
+    std::optional<order_event> on_market(const market_event&) override
+    {
+        return std::nullopt;
+    }
+    void on_fill(const fill_event&, std::uint64_t) override { ++fills; }
+    void set_position_open(const std::string&, bool) override {}
+    int fills = 0;
+};
+
+class OneShotL2EntryStrategy final : public IStrategy
+{
+public:
+    std::optional<order_event> on_market(const market_event&) override
+    {
+        return std::nullopt;
+    }
+
+    std::optional<order_event> on_l2_update(const l2_update_event& update) override
+    {
+        if (emitted)
+            return std::nullopt;
+        emitted = true;
+        return order_event(update.get_timestamp(), update.get_symbol(),
+                           order_type::market, order_side::buy, 1.0,
+                           update.get_price());
+    }
+
+    void set_position_open(const std::string&, bool) override {}
+    bool emitted = false;
 };
 
 class IdleBeforeHeaderTransport final : public IDataTransport
@@ -376,7 +613,6 @@ TEST(EngineStreaming, FinalDrainAppliesFundingAfterProviderProducerStops)
     cfg.live_safety_session = session;
     engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
                std::make_shared<StreamTestStrategy>(), std::move(cfg));
-
     auto bridge = std::make_shared<DataBridge<bar_record>>(
         std::make_shared<IdleBeforeHeaderTransport>(),
         std::make_shared<CsvBarParser>(), bar_record_sink);
@@ -387,6 +623,248 @@ TEST(EngineStreaming, FinalDrainAppliesFundingAfterProviderProducerStops)
     truetest::ui::dashboard_snapshot snapshot;
     ASSERT_TRUE(eng.snapshot_dashboard(snapshot));
     EXPECT_DOUBLE_EQ(snapshot.cash, 1'003.25);
+}
+
+TEST(EngineStreaming, UnifiedPrivateFundingDrainsBeforeFirstMarketFrame)
+{
+    SilenceOutput quiet;
+    auto provider = std::make_shared<UnifiedIngressProvider>();
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.initial_balance = 1'000.0;
+    cfg.provider = provider;
+    engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
+               std::make_shared<StreamTestStrategy>(), std::move(cfg));
+    // This test injects directly on the engine-side fake; no reader is
+    // running at EOS, so its producer-join proof is already true.
+    provider->joined = true;
+
+    private_execution_record funding;
+    funding.k = private_execution_record::kind::funding;
+    funding.event_time_ms = 1'700'000'000'000LL;
+    funding.cash_delta = 7.5;
+    ASSERT_TRUE(private_execution_record::copy_text(
+        funding.symbol, funding.symbol_size, "BTCUSDT"));
+    ASSERT_TRUE(provider->ingress.try_publish(funding));
+
+    auto bridge = std::make_shared<DataBridge<bar_record>>(
+        std::make_shared<IdleBeforeHeaderTransport>(),
+        std::make_shared<CsvBarParser>(), bar_record_sink);
+    const auto result = eng.run_streaming(bridge);
+    EXPECT_TRUE(result.success());
+    EXPECT_TRUE(provider->ingress.empty());
+
+    truetest::ui::dashboard_snapshot snapshot;
+    ASSERT_TRUE(eng.snapshot_dashboard(snapshot));
+    EXPECT_DOUBLE_EQ(snapshot.cash, 1'007.5);
+}
+
+TEST(EngineStreaming, UnifiedLegacyFillIsRejectedBeforeFreshVenueSubmit)
+{
+    auto provider = std::make_shared<UnifiedIngressProvider>();
+    provider->adapter->legacy_fills.emplace_back(
+        std::chrono::system_clock::time_point{std::chrono::milliseconds{1'700'000'000'000LL}},
+        "BTCUSDT", 1, order_side::buy, 1.0, 100.0);
+    auto strategy = std::make_shared<OneShotL2EntryStrategy>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.provider = provider;
+    engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
+               strategy, std::move(cfg));
+
+    // The normal L2 path drains latency/pending entries before dispatching
+    // the next strategy callback.  The first update parks the strategy
+    // entry; the second reaches the actual process_order mutation boundary.
+    eng.apply_l2_update("BTCUSDT", tick_side::bid, 100.0, 1);
+    eng.apply_l2_update("BTCUSDT", tick_side::bid, 100.0, 1);
+
+    EXPECT_TRUE(strategy->emitted);
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_TRUE(provider->adapter->admission_failed);
+    EXPECT_EQ(provider->adapter->submits, 0);
+}
+
+TEST(EngineStreaming, UnifiedLegacyFillIsRejectedBeforeVenueCancel)
+{
+    auto provider = std::make_shared<UnifiedIngressProvider>();
+    provider->adapter->legacy_fills.emplace_back(
+        std::chrono::system_clock::time_point{std::chrono::milliseconds{1'700'000'000'000LL}},
+        "BTCUSDT", 1, order_side::buy, 1.0, 100.0);
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.provider = provider;
+    engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
+               std::make_shared<StreamTestStrategy>(), std::move(cfg));
+
+    EXPECT_FALSE(eng.cancel_order("BTCUSDT", 1, "test"));
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_TRUE(provider->adapter->admission_failed);
+    EXPECT_EQ(provider->adapter->cancels, 0);
+}
+
+TEST(EngineStreaming, UnifiedLegacyFillIsRejectedBeforeVenueAmend)
+{
+    auto provider = std::make_shared<UnifiedIngressProvider>();
+    provider->adapter->legacy_fills.emplace_back(
+        std::chrono::system_clock::time_point{std::chrono::milliseconds{1'700'000'000'000LL}},
+        "BTCUSDT", 1, order_side::buy, 1.0, 100.0);
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.provider = provider;
+    engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
+               std::make_shared<StreamTestStrategy>(), std::move(cfg));
+
+    EXPECT_FALSE(eng.modify_order("BTCUSDT", 1, 99.0, 1.0));
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_TRUE(provider->adapter->admission_failed);
+    EXPECT_EQ(provider->adapter->modifies, 0);
+}
+
+TEST(EngineStreaming, UnifiedLegacyPollThrowLatchesHaltInsteadOfTerminating)
+{
+    auto provider = std::make_shared<UnifiedIngressProvider>();
+    provider->adapter->throw_on_legacy_poll = true;
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.provider = provider;
+    engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
+               std::make_shared<StreamTestStrategy>(), std::move(cfg));
+
+    EXPECT_FALSE(eng.cancel_order("BTCUSDT", 1, "test"));
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_TRUE(provider->adapter->admission_failed);
+    EXPECT_EQ(provider->adapter->cancels, 0);
+}
+
+TEST(EngineStreaming, FinalPrivateEconomicFillIsAccountedThenRequiresReconciliation)
+{
+    SilenceOutput quiet;
+    auto provider = std::make_shared<UnifiedIngressProvider>();
+    provider->publish_terminal_on_close = true;
+    auto session = std::make_shared<LiveSafetySession>(
+        provider, false, std::chrono::milliseconds{100});
+    ASSERT_TRUE(session->open_provider());
+    auto strategy = std::make_shared<FillCountingStrategy>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.initial_balance = 1'000.0;
+    cfg.provider = provider;
+    cfg.live_safety_session = session;
+    engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
+               strategy, std::move(cfg));
+
+    auto bridge = std::make_shared<DataBridge<bar_record>>(
+        std::make_shared<IdleBeforeHeaderTransport>(),
+        std::make_shared<CsvBarParser>(), bar_record_sink);
+    const auto result = eng.run_streaming(bridge);
+
+    EXPECT_FALSE(result.success());
+    EXPECT_TRUE(provider->close_publish_succeeded);
+    EXPECT_TRUE(provider->ingress.empty());
+    ASSERT_EQ(provider->adapter->acknowledged_terminal_sequences.size(), 1u);
+    EXPECT_EQ(provider->adapter->acknowledged_terminal_sequences.front(), 1u);
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_EQ(strategy->fills, 0);
+    EXPECT_EQ(provider->adapter->submits, 0);
+    EXPECT_EQ(provider->adapter->cancels, 0);
+
+    truetest::ui::dashboard_snapshot snapshot;
+    ASSERT_TRUE(eng.snapshot_dashboard(snapshot));
+    EXPECT_DOUBLE_EQ(snapshot.cash, 900.0);
+}
+
+TEST(EngineStreaming, FinalDrainAccountsTrackedFillAfterUnknownLifecycleFault)
+{
+    SilenceOutput quiet;
+    auto provider = std::make_shared<UnifiedIngressProvider>();
+
+    private_execution_record unknown_cancel;
+    unknown_cancel.k = private_execution_record::kind::canceled;
+    unknown_cancel.event_time_ms = 1'700'000'000'000LL;
+    unknown_cancel.side = order_side::sell;
+    ASSERT_TRUE(private_execution_record::copy_text(
+        unknown_cancel.symbol, unknown_cancel.symbol_size, "BTCUSDT"));
+    ASSERT_TRUE(private_execution_record::copy_text(
+        unknown_cancel.client_order_id,
+        unknown_cancel.client_order_id_size, "foreign"));
+    ASSERT_TRUE(private_execution_record::copy_text(
+        unknown_cancel.exchange_order_id,
+        unknown_cancel.exchange_order_id_size, "foreign-ex"));
+    unknown_cancel.cumulative_reported = true;
+    unknown_cancel.cumulative_qty = 0.0;
+
+    private_execution_record tracked_fill;
+    tracked_fill.k = private_execution_record::kind::full_fill;
+    tracked_fill.event_time_ms = 1'700'000'000'001LL;
+    tracked_fill.side = order_side::buy;
+    tracked_fill.last_fill_qty = 1.0;
+    tracked_fill.last_fill_price = 100.0;
+    tracked_fill.cumulative_qty = 1.0;
+    tracked_fill.cumulative_reported = true;
+    ASSERT_TRUE(private_execution_record::copy_text(
+        tracked_fill.symbol, tracked_fill.symbol_size, "BTCUSDT"));
+    ASSERT_TRUE(private_execution_record::copy_text(
+        tracked_fill.client_order_id,
+        tracked_fill.client_order_id_size, "tt-1"));
+    ASSERT_TRUE(private_execution_record::copy_text(
+        tracked_fill.exchange_order_id,
+        tracked_fill.exchange_order_id_size, "ex-1"));
+    ASSERT_TRUE(private_execution_record::copy_text(
+        tracked_fill.execution_id,
+        tracked_fill.execution_id_size, "trade-1"));
+    provider->close_records = {unknown_cancel, tracked_fill};
+
+    auto session = std::make_shared<LiveSafetySession>(
+        provider, false, std::chrono::milliseconds{100});
+    ASSERT_TRUE(session->open_provider());
+    auto strategy = std::make_shared<FillCountingStrategy>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.initial_balance = 1'000.0;
+    cfg.provider = provider;
+    cfg.live_safety_session = session;
+    engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
+               strategy, std::move(cfg));
+
+    auto bridge = std::make_shared<DataBridge<bar_record>>(
+        std::make_shared<IdleBeforeHeaderTransport>(),
+        std::make_shared<CsvBarParser>(), bar_record_sink);
+    const auto result = eng.run_streaming(bridge);
+
+    EXPECT_FALSE(result.success());
+    EXPECT_TRUE(provider->close_records_publish_succeeded);
+    EXPECT_TRUE(provider->ingress.empty());
+    ASSERT_EQ(provider->adapter->acknowledged_terminal_sequences.size(), 1u);
+    EXPECT_EQ(provider->adapter->acknowledged_terminal_sequences.front(), 2u);
+    EXPECT_TRUE(provider->adapter->admission_failed);
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_EQ(strategy->fills, 0);
+    EXPECT_EQ(provider->adapter->submits, 0);
+    EXPECT_EQ(provider->adapter->cancels, 0);
+
+    truetest::ui::dashboard_snapshot snapshot;
+    ASSERT_TRUE(eng.snapshot_dashboard(snapshot));
+    EXPECT_DOUBLE_EQ(snapshot.cash, 900.0);
 }
 
 // Tick-counting strategy: just counts ticks, never trades
@@ -576,6 +1054,11 @@ TEST(EngineStreaming, BarStreamStopCausesReturn)
 TEST(EngineStreaming, LiveOperatorStopDoesNotForcePendingVenueMutation)
 {
     SilenceOutput silence;
+    PrivateLiveLedgerFile ledger_file("operator_stop.bin");
+    const std::string& ledger_path = ledger_file.path();
+    auto ledger = std::make_shared<AuthoritativeEventLedgerReservation>(
+        ledger_path);
+
     auto transport = std::make_shared<MockStreamingTransport>();
     transport->enqueue("date,symbol,open,high,low,close,volume");
     transport->enqueue("2024-01-01,TEST,100,101,99,100,1000");
@@ -588,6 +1071,8 @@ TEST(EngineStreaming, LiveOperatorStopDoesNotForcePendingVenueMutation)
 
     engine_config cfg;
     cfg.mode = engine_mode::live;
+    cfg.event_log_path = ledger_path;
+    cfg.authoritative_event_ledger = ledger;
     cfg.provider = provider;
     cfg.live_safety_session = session;
     cfg.reconciler = provider->reconciler;
@@ -599,25 +1084,29 @@ TEST(EngineStreaming, LiveOperatorStopDoesNotForcePendingVenueMutation)
     auto fired_future = fired.get_future();
     std::atomic<bool> fired_before_timeout{false};
     auto strategy = std::make_shared<NotifyingOneShotStrategy>(fired);
-    engine eng(std::make_shared<data_handler>(), nullptr, strategy,
-               std::move(cfg));
+    {
+        engine eng(std::make_shared<data_handler>(), nullptr, strategy,
+                   std::move(cfg));
 
-    std::thread stopper([&] {
-        fired_before_timeout.store(
-            fired_future.wait_for(std::chrono::seconds(2))
-                == std::future_status::ready,
-            std::memory_order_release);
-        bridge->stop();
-    });
+        std::thread stopper([&] {
+            fired_before_timeout.store(
+                fired_future.wait_for(std::chrono::seconds(2))
+                    == std::future_status::ready,
+                std::memory_order_release);
+            bridge->stop();
+        });
 
-    const auto result = eng.run_streaming(bridge);
-    stopper.join();
+        const auto result = eng.run_streaming(bridge);
+        stopper.join();
 
-    EXPECT_EQ(result.termination, stream_termination::operator_stop);
-    EXPECT_TRUE(fired_before_timeout.load(std::memory_order_acquire));
-    EXPECT_TRUE(strategy->did_fire());
-    EXPECT_EQ(provider->adapter->submits, 0);
-    EXPECT_EQ(provider->adapter->cancels, 0);
+        EXPECT_EQ(result.termination, stream_termination::operator_stop);
+        EXPECT_TRUE(fired_before_timeout.load(std::memory_order_acquire));
+        EXPECT_TRUE(strategy->did_fire());
+        EXPECT_EQ(provider->adapter->submits, 0);
+        EXPECT_EQ(provider->adapter->cancels, 0);
+    }
+
+    EXPECT_TRUE(ledger->published());
 }
 
 TEST(EngineStreaming, BarStreamBatchTransportFallback)

@@ -5,6 +5,7 @@
 // None of these touch the network - they use in-memory mocks.
 
 #include <gtest/gtest.h>
+#include "core/event_log.h"
 #include "engine/engine.h"
 #include "engine/engine_config.h"
 #include "engine/live_safety_session.h"
@@ -19,10 +20,19 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
+#include <fstream>
 #include <limits>
+#include <memory>
 #include <mutex>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <sys/stat.h>
 #include <unordered_map>
+#include <unistd.h>
 #include <vector>
 
 TEST(ProviderFundingIngress, FifoValueHandoffIsAllocationFree)
@@ -105,6 +115,158 @@ TEST(ProviderFundingIngress, FullLengthFundingEventConstructionIsAllocationFree)
     EXPECT_TRUE(exact);
     EXPECT_EQ(allocations.count, 0u);
     EXPECT_EQ(allocations.bytes, 0u);
+}
+
+namespace {
+
+class LiveLedgerFile
+{
+public:
+    explicit LiveLedgerFile(std::string_view label)
+    {
+        std::string pattern = "/tmp/truetest_live_ledger_XXXXXX";
+        char* created = ::mkdtemp(pattern.data());
+        if (created == nullptr)
+            throw std::runtime_error(
+                "cannot create private live ledger test directory");
+        directory_ = created;
+        if (::chmod(directory_.c_str(), S_IRWXU) != 0)
+        {
+            (void)::rmdir(directory_.c_str());
+            throw std::runtime_error(
+                "cannot secure live ledger test directory");
+        }
+        path_ = directory_ + "/" + std::string(label) + ".bin";
+    }
+
+    ~LiveLedgerFile()
+    {
+        (void)::unlink((path_ + ".partial").c_str());
+        (void)::unlink(path_.c_str());
+        (void)::rmdir(directory_.c_str());
+    }
+
+    void apply(engine_config& cfg)
+    {
+        cfg.event_log_path = path_;
+        cfg.authoritative_event_ledger =
+            std::make_shared<AuthoritativeEventLedgerReservation>(path_);
+    }
+
+    const std::string& path() const noexcept { return path_; }
+
+private:
+    std::string directory_;
+    std::string path_;
+};
+
+private_execution_record make_private_record(
+    private_execution_record::kind k,
+    std::int64_t event_time_ms = 1'700'000'000'000LL)
+{
+    private_execution_record record;
+    record.k = k;
+    record.event_time_ms = event_time_ms;
+    record.engine_order_id = 42;
+    record.side = order_side::buy;
+    EXPECT_TRUE(private_execution_record::copy_text(
+        record.symbol, record.symbol_size, "BTCUSDT"));
+    EXPECT_TRUE(private_execution_record::copy_text(
+        record.client_order_id, record.client_order_id_size, "tt-42"));
+    EXPECT_TRUE(private_execution_record::copy_text(
+        record.exchange_order_id, record.exchange_order_id_size, "venue-42"));
+    record.cumulative_reported = true;
+    if (k == private_execution_record::kind::partial_fill
+        || k == private_execution_record::kind::full_fill)
+    {
+        record.last_fill_qty = 1.0;
+        record.last_fill_price = 100.0;
+        record.cumulative_qty = 1.0;
+        record.remaining_qty = (k == private_execution_record::kind::partial_fill)
+            ? 1.0 : 0.0;
+        EXPECT_TRUE(private_execution_record::copy_text(
+            record.execution_id, record.execution_id_size, "exec-42"));
+    }
+    return record;
+}
+
+} // namespace
+
+TEST(ProviderExecutionIngress, UnifiedPrivateRecordsRemainFifoAndAllocationFree)
+{
+    ProviderExecutionIngress ingress;
+    auto ack = make_private_record(private_execution_record::kind::ack);
+    auto fill = make_private_record(private_execution_record::kind::partial_fill,
+                                    1'700'000'000'001LL);
+
+    bool exact = true;
+    truetest::test::alloc::snapshot allocations;
+    {
+        truetest::test::alloc::measure_window window;
+        exact = ingress.try_publish(ack) && ingress.try_publish(fill);
+        private_execution_record popped;
+        exact = exact && ingress.try_pop(popped)
+            && popped.sequence == 1
+            && popped.k == private_execution_record::kind::ack
+            && popped.symbol_view() == "BTCUSDT";
+        exact = exact && ingress.try_pop(popped)
+            && popped.sequence == 2
+            && popped.k == private_execution_record::kind::partial_fill
+            && popped.execution_id_view() == "exec-42";
+        allocations = window.total();
+    }
+
+    EXPECT_TRUE(exact);
+    EXPECT_EQ(allocations.count, 0u);
+    EXPECT_EQ(allocations.bytes, 0u);
+    EXPECT_FALSE(ingress.failed());
+}
+
+TEST(ProviderExecutionIngress, OverflowLatchesWithoutOverwritingAdmittedRecords)
+{
+    ProviderExecutionIngress ingress;
+    for (std::size_t i = 0; i < ProviderExecutionIngress::capacity; ++i)
+    {
+        auto record = make_private_record(private_execution_record::kind::ack,
+                                          1'700'000'000'000LL
+                                              + static_cast<std::int64_t>(i));
+        ASSERT_TRUE(ingress.try_publish(record));
+    }
+
+    auto overflow = make_private_record(private_execution_record::kind::ack,
+                                        1'700'000'000'999LL);
+    EXPECT_FALSE(ingress.try_publish(overflow));
+    EXPECT_TRUE(ingress.failed());
+
+    private_execution_record popped;
+    for (std::size_t i = 0; i < ProviderExecutionIngress::capacity; ++i)
+    {
+        ASSERT_TRUE(ingress.try_pop(popped));
+        EXPECT_EQ(popped.sequence, i + 1);
+        EXPECT_EQ(popped.event_time_ms,
+                  1'700'000'000'000LL + static_cast<std::int64_t>(i));
+    }
+    EXPECT_FALSE(ingress.try_pop(popped));
+}
+
+TEST(ProviderExecutionIngress, RejectsAContradictoryNonFillEconomicIncrement)
+{
+    ProviderExecutionIngress ingress;
+    auto canceled = make_private_record(private_execution_record::kind::canceled);
+    canceled.last_fill_qty = 1.0;
+    canceled.last_fill_price = 100.0;
+    EXPECT_FALSE(ingress.try_publish(canceled));
+    EXPECT_TRUE(ingress.failed());
+}
+
+TEST(ProviderExecutionIngress, RejectsTerminalLifecycleWithoutCumulativeProof)
+{
+    ProviderExecutionIngress ingress;
+    auto canceled = make_private_record(private_execution_record::kind::canceled);
+    canceled.cumulative_reported = false;
+
+    EXPECT_FALSE(ingress.try_publish(canceled));
+    EXPECT_TRUE(ingress.failed());
 }
 
 namespace {
@@ -238,7 +400,8 @@ truetest::exits::IBracketAdapter::recovered_bracket recovered_bracket(
 
 std::unique_ptr<engine> construct_recovery_engine(
     std::vector<truetest::exits::IBracketAdapter::recovered_bracket> recovered,
-    std::unordered_map<std::string, position> positions)
+    std::unordered_map<std::string, position> positions,
+    LiveLedgerFile& ledger)
 {
     auto adapter = std::make_shared<RecoveryBracketAdapter>(
         std::move(recovered));
@@ -252,6 +415,7 @@ std::unique_ptr<engine> construct_recovery_engine(
     cfg.mode = engine_mode::live;
     cfg.threading = thread_preset::inline_mode;
     cfg.disable_pinning = true;
+    ledger.apply(cfg);
     cfg.provider = provider;
     cfg.live_safety_session = session;
     cfg.reconciler = std::make_shared<PositionSeedingReconciler>(
@@ -328,8 +492,10 @@ TEST(LiveSafety, ReconcilerFailure_BlocksConstruction)
     auto ob = std::make_shared<orderbook>();
     auto strat = std::make_shared<NullStrategy>();
 
+    LiveLedgerFile ledger("reconciler_failure");
     engine_config cfg;
     cfg.mode = engine_mode::live;
+    ledger.apply(cfg);
     cfg.reconciler = std::make_shared<FailingReconciler>();
 
     EXPECT_THROW(engine eng(dh, ob, strat, std::move(cfg)), std::runtime_error);
@@ -341,10 +507,59 @@ TEST(LiveSafety, MissingReconciler_BlocksConstruction)
     auto ob = std::make_shared<orderbook>();
     auto strat = std::make_shared<NullStrategy>();
 
+    LiveLedgerFile ledger("missing_reconciler");
     engine_config cfg;
     cfg.mode = engine_mode::live;
+    ledger.apply(cfg);
     EXPECT_THROW(engine eng(dh, ob, strat, std::move(cfg)),
                  std::runtime_error);
+}
+
+TEST(LiveSafety, LiveEngineRequiresPreReservedAuthoritativeLedger)
+{
+    auto dh = std::make_shared<data_handler>();
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<NullStrategy>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::live;
+    cfg.reconciler = std::make_shared<FailingReconciler>();
+
+    try
+    {
+        engine eng(dh, ob, strat, std::move(cfg));
+        FAIL() << "live construction accepted an unreserved event ledger";
+    }
+    catch (const std::runtime_error& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("pre-reserved authoritative event ledger"),
+                  std::string::npos);
+    }
+}
+
+TEST(LiveSafety, LiveEngineRefusesAuthoritativeLedgerRotation)
+{
+    auto dh = std::make_shared<data_handler>();
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<NullStrategy>();
+    LiveLedgerFile ledger("rotation_refused");
+
+    engine_config cfg;
+    cfg.mode = engine_mode::live;
+    ledger.apply(cfg);
+    cfg.log_max_bytes = 1024;
+    cfg.reconciler = std::make_shared<FailingReconciler>();
+
+    try
+    {
+        engine eng(dh, ob, strat, std::move(cfg));
+        FAIL() << "live construction accepted authoritative ledger rotation";
+    }
+    catch (const std::runtime_error& e)
+    {
+        EXPECT_NE(std::string(e.what()).find("does not permit rotation"),
+                  std::string::npos);
+    }
 }
 
 TEST(LiveSafety, BacktestMode_SkipsReconcileGate)
@@ -363,66 +578,73 @@ TEST(LiveSafety, BacktestMode_SkipsReconcileGate)
 
 TEST(LiveSafety, RecoverySingleMissingQuantityUsesReconciledPosition)
 {
+    LiveLedgerFile ledger("recovery_single_missing_qty");
     EXPECT_NO_THROW({
         auto eng = construct_recovery_engine(
             {recovered_bracket(7, 0.0, order_side::sell)},
-            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}});
+            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}}, ledger);
     });
 }
 
 TEST(LiveSafety, RecoveryWithoutReconciledPositionRefusesStartup)
 {
+    LiveLedgerFile ledger("recovery_no_position");
     EXPECT_THROW(
         construct_recovery_engine(
-            {recovered_bracket(7, 1.0, order_side::sell)}, {}),
+            {recovered_bracket(7, 1.0, order_side::sell)}, {}, ledger),
         std::runtime_error);
 }
 
 TEST(LiveSafety, RecoveryWrongCloseSideRefusesStartup)
 {
+    LiveLedgerFile ledger("recovery_wrong_side");
     EXPECT_THROW(
         construct_recovery_engine(
             {recovered_bracket(7, 2.0, order_side::buy)},
-            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}}),
+            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}}, ledger),
         std::runtime_error);
 }
 
 TEST(LiveSafety, RecoveryMultipleMissingQuantitiesRefuseStartup)
 {
+    LiveLedgerFile ledger("recovery_multiple_missing");
     EXPECT_THROW(
         construct_recovery_engine(
             {recovered_bracket(7, 0.0, order_side::sell),
              recovered_bracket(8, 0.0, order_side::sell)},
-            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}}),
+            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}}, ledger),
         std::runtime_error);
 }
 
 TEST(LiveSafety, RecoverySingleQuantityMismatchRefusesStartup)
 {
+    LiveLedgerFile ledger("recovery_quantity_mismatch");
     EXPECT_THROW(
         construct_recovery_engine(
             {recovered_bracket(7, 1.5, order_side::sell)},
-            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}}),
+            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}}, ledger),
         std::runtime_error);
 }
 
 TEST(LiveSafety, RecoveryAggregateExactQuantityConstructs)
 {
+    LiveLedgerFile ledger("recovery_aggregate_exact");
     EXPECT_NO_THROW({
         auto eng = construct_recovery_engine(
             {recovered_bracket(7, 0.75, order_side::sell),
              recovered_bracket(8, 1.25, order_side::sell)},
-            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}});
+            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}}, ledger);
     });
 }
 
 TEST(LiveSafety, RecoveryAggregateOverPositionRefusesStartup)
 {
+    LiveLedgerFile ledger("recovery_aggregate_over");
     EXPECT_THROW(
         construct_recovery_engine(
             {recovered_bracket(7, 1.0, order_side::sell),
              recovered_bracket(8, 1.25, order_side::sell)},
-            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}}),
+            {{"BTCUSDT", position{.qty = 2.0, .cost_basis = 100.0}}}, ledger),
         std::runtime_error);
 }
 
@@ -616,6 +838,12 @@ public:
             throw std::runtime_error("finish failure");
         state = lifecycle::closed;
     }
+    bool private_execution_producer_joined() const noexcept override
+    {
+        // This fixture has no private reader; finish_live_shutdown is its
+        // synchronous producer barrier.
+        return state == lifecycle::closed;
+    }
 
     std::shared_ptr<ShutdownOrderKillSwitch> kill;
     live_shutdown_disposition disposition =
@@ -690,12 +918,14 @@ TEST(LiveSafety, LiveEngineDestructorUsesSessionShutdownExactlyOnce)
     auto session = std::make_shared<LiveSafetySession>(
         provider, true, std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
+    LiveLedgerFile ledger("destructor_shutdown");
 
     {
         engine_config cfg;
         cfg.mode = engine_mode::live;
         cfg.threading = thread_preset::inline_mode;
         cfg.disable_pinning = true;
+        ledger.apply(cfg);
         cfg.provider = provider;
         cfg.live_safety_session = session;
         cfg.reconciler = std::make_shared<NoopReconciler>();
@@ -709,6 +939,10 @@ TEST(LiveSafety, LiveEngineDestructorUsesSessionShutdownExactlyOnce)
     EXPECT_EQ(provider->events[0], "quiesce");
     EXPECT_EQ(provider->events[1], "kill");
     EXPECT_EQ(provider->events[2], "finish");
+
+    EXPECT_TRUE(std::ifstream(ledger.path(), std::ios::binary).good());
+    EXPECT_FALSE(std::ifstream(ledger.path() + ".partial",
+                               std::ios::binary).good());
 
     const auto report = session->shutdown_once(live_shutdown_reason::normal_end);
     EXPECT_TRUE(report.kill_succeeded);
@@ -725,12 +959,14 @@ TEST(LiveSafety, ProviderFatalCallbackHaltsThenUsesSharedShutdownSession)
     auto session = std::make_shared<LiveSafetySession>(
         provider, true, std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
+    LiveLedgerFile ledger("fatal_callback");
 
     {
         engine_config cfg;
         cfg.mode = engine_mode::live;
         cfg.threading = thread_preset::inline_mode;
         cfg.disable_pinning = true;
+        ledger.apply(cfg);
         cfg.provider = provider;
         cfg.live_safety_session = session;
         cfg.reconciler = std::make_shared<NoopReconciler>();
@@ -757,12 +993,14 @@ TEST(LiveSafety, FinishFailureCannotReportSuccessfulLiveRun)
     auto session = std::make_shared<LiveSafetySession>(
         provider, true, std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
+    LiveLedgerFile ledger("finish_failure");
 
     {
         engine_config cfg;
         cfg.mode = engine_mode::live;
         cfg.threading = thread_preset::inline_mode;
         cfg.disable_pinning = true;
+        ledger.apply(cfg);
         cfg.provider = provider;
         cfg.live_safety_session = session;
         cfg.reconciler = std::make_shared<NoopReconciler>();
@@ -779,6 +1017,9 @@ TEST(LiveSafety, FinishFailureCannotReportSuccessfulLiveRun)
     EXPECT_EQ(provider->events[0], "quiesce");
     EXPECT_EQ(provider->events[1], "kill");
     EXPECT_EQ(provider->events[2], "finish");
+    EXPECT_FALSE(std::ifstream(ledger.path(), std::ios::binary).good());
+    EXPECT_TRUE(std::ifstream(ledger.path() + ".partial",
+                               std::ios::binary).good());
 }
 
 TEST(LiveSafety, OperatorKillReportsFailureWhenProviderCannotFinishClosing)
@@ -790,12 +1031,14 @@ TEST(LiveSafety, OperatorKillReportsFailureWhenProviderCannotFinishClosing)
     auto session = std::make_shared<LiveSafetySession>(
         provider, true, std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
+    LiveLedgerFile ledger("operator_kill_failure");
 
     {
         engine_config cfg;
         cfg.mode = engine_mode::live;
         cfg.threading = thread_preset::inline_mode;
         cfg.disable_pinning = true;
+        ledger.apply(cfg);
         cfg.provider = provider;
         cfg.live_safety_session = session;
         cfg.reconciler = std::make_shared<NoopReconciler>();
@@ -823,9 +1066,11 @@ TEST(LiveSafety, ThrowingConstructorLeavesCapturedCallbacksDisarmed)
     auto session = std::make_shared<LiveSafetySession>(
         spy, true, std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
+    LiveLedgerFile ledger("constructor_callback_disarm");
 
     engine_config cfg;
     cfg.mode = engine_mode::live;
+    ledger.apply(cfg);
     cfg.provider = spy;
     cfg.live_safety_session = session;
     cfg.reconciler = std::make_shared<FailingReconciler>();
@@ -845,9 +1090,11 @@ TEST(LiveSafety, ThrowingHaltRegistrationDisarmsEveryCapturedCallback)
         spy, true, std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
     spy->throw_after_storing_halt = true;
+    LiveLedgerFile ledger("halt_registration_disarm");
 
     engine_config cfg;
     cfg.mode = engine_mode::live;
+    ledger.apply(cfg);
     cfg.provider = spy;
     cfg.live_safety_session = session;
     cfg.reconciler = std::make_shared<NoopReconciler>();

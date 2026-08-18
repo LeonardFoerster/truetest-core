@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -17,7 +18,9 @@
 #include <limits>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -40,6 +43,40 @@ struct TempFile {
     }
     ~TempFile() { std::remove(path.c_str()); }
 };
+
+#if defined(__linux__)
+// Authoritative ledgers deliberately reject shared directories such as /tmp.
+// Keep those tests in one private state directory per fixture so they exercise
+// the same owner-only parent invariant required in live mode.
+struct PrivateLedgerFile {
+    std::string directory;
+    std::string path;
+
+    explicit PrivateLedgerFile(const std::string& name)
+    {
+        std::string pattern = "/tmp/truetest_authoritative_XXXXXX";
+        char* created = ::mkdtemp(pattern.data());
+        if (created == nullptr)
+            throw std::runtime_error(
+                "cannot create private authoritative ledger test directory");
+        directory = created;
+        if (::chmod(directory.c_str(), S_IRWXU) != 0)
+        {
+            (void)::rmdir(directory.c_str());
+            throw std::runtime_error(
+                "cannot secure authoritative ledger test directory");
+        }
+        path = directory + "/" + name;
+    }
+
+    ~PrivateLedgerFile()
+    {
+        (void)::unlink((path + ".partial").c_str());
+        (void)::unlink(path.c_str());
+        (void)::rmdir(directory.c_str());
+    }
+};
+#endif
 
 // RAII helper to silence cout.
 // Anonymous namespace prevents ODR clashes with identically-named helpers in
@@ -65,7 +102,8 @@ void write_raw_event_record(std::ostream& out,
 
 void write_event_log_preamble(std::ostream& out,
                               bool compressed,
-                              bool finalized = false)
+                              bool finalized = false,
+                              uint8_t extra_flags = 0)
 {
     out.write(reinterpret_cast<const char*>(EVENT_LOG_FILE_MAGIC.data()),
               static_cast<std::streamsize>(EVENT_LOG_FILE_MAGIC.size()));
@@ -73,6 +111,7 @@ void write_event_log_preamble(std::ostream& out,
     uint8_t flags = compressed ? EVENT_LOG_FILE_FLAG_ZSTD : uint8_t{0};
     if (finalized)
         flags |= EVENT_LOG_FILE_FLAG_FINALIZED;
+    flags |= extra_flags;
     event_serial::write_u8(out, flags);
 }
 }
@@ -328,6 +367,150 @@ TEST(EventLog, BadPath_Throws)
     EXPECT_THROW(EventReplayer("/nonexistent/dir/file.bin"), std::runtime_error);
 }
 
+#if defined(__linux__)
+TEST(EventLog, AuthoritativeLedgerReservesNoFollowPartialThenPublishesFinal)
+{
+    PrivateLedgerFile tf("authoritative.bin");
+    const std::string partial = tf.path + ".partial";
+    std::remove(partial.c_str());
+
+    auto reservation = std::make_shared<AuthoritativeEventLedgerReservation>(
+        tf.path);
+    ASSERT_TRUE(reservation->reserved());
+    EXPECT_EQ(reservation->partial_path(), partial);
+    EXPECT_FALSE(std::ifstream(tf.path, std::ios::binary).good());
+
+    struct stat before{};
+    ASSERT_EQ(::stat(partial.c_str(), &before), 0);
+    EXPECT_TRUE(S_ISREG(before.st_mode));
+    EXPECT_EQ(before.st_mode & 0777, 0600);
+
+    {
+        EventLogger logger(reservation, false);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+        logger.finalize();
+    }
+
+    EXPECT_TRUE(reservation->published());
+    EXPECT_FALSE(std::ifstream(partial, std::ios::binary).good());
+    struct stat after{};
+    ASSERT_EQ(::stat(tf.path.c_str(), &after), 0);
+    EXPECT_TRUE(S_ISREG(after.st_mode));
+    EXPECT_EQ(after.st_mode & 0777, 0600);
+
+    EventReplayer replayer(tf.path);
+    ASSERT_TRUE(replayer.has_next());
+    EXPECT_EQ(replayer.next()->get_type(), event_type::market);
+    EXPECT_FALSE(replayer.has_next());
+}
+
+TEST(EventLog, AuthoritativeLedgerRefusesExistingPartialAndPartialReplay)
+{
+    PrivateLedgerFile tf("authoritative_collision.bin");
+    const std::string partial = tf.path + ".partial";
+    {
+        std::ofstream stale(partial, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(stale.good());
+        stale << "forensic";
+    }
+
+    EXPECT_THROW(AuthoritativeEventLedgerReservation(tf.path), std::runtime_error);
+    EXPECT_THROW(EventReplayer{partial}, std::runtime_error);
+    std::remove(partial.c_str());
+}
+
+TEST(EventLog, AuthoritativeLedgerRefusesExistingFinalBeforeReservation)
+{
+    PrivateLedgerFile tf("authoritative_final_collision.bin");
+    {
+        auto reservation = std::make_shared<AuthoritativeEventLedgerReservation>(
+            tf.path);
+        EventLogger logger(reservation, false);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+        logger.finalize();
+    }
+
+    EXPECT_THROW(AuthoritativeEventLedgerReservation(tf.path), std::runtime_error);
+    EXPECT_FALSE(std::ifstream(tf.path + ".partial", std::ios::binary).good());
+}
+
+TEST(EventLog, AuthoritativeLedgerRequiresExplicitFinalize)
+{
+    PrivateLedgerFile tf("authoritative_explicit_finalize.bin");
+    const std::string partial = tf.path + ".partial";
+    std::remove(partial.c_str());
+
+    auto reservation = std::make_shared<AuthoritativeEventLedgerReservation>(
+        tf.path);
+    {
+        EventLogger logger(reservation, false);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+        // Deliberately omit finalize: an incomplete live session must leave
+        // forensic evidence rather than publish an authoritative ledger.
+    }
+
+    EXPECT_FALSE(reservation->published());
+    EXPECT_FALSE(std::ifstream(tf.path, std::ios::binary).good());
+    EXPECT_TRUE(std::ifstream(partial, std::ios::binary).good());
+    EXPECT_THROW(EventReplayer{partial}, std::runtime_error);
+    std::remove(partial.c_str());
+}
+
+TEST(EventLog, AuthoritativeLedgerRefusesFinalWithForensicPartialSibling)
+{
+    PrivateLedgerFile tf("authoritative_sibling_partial.bin");
+    const std::string partial = tf.path + ".partial";
+    std::remove(partial.c_str());
+
+    auto reservation = std::make_shared<AuthoritativeEventLedgerReservation>(
+        tf.path);
+    {
+        EventLogger logger(reservation, false);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+        logger.finalize();
+    }
+    ASSERT_TRUE(reservation->published());
+
+    {
+        std::ofstream forensic(partial, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(forensic.good());
+        forensic << "interrupted publication";
+    }
+    EXPECT_THROW(EventReplayer{tf.path}, std::runtime_error);
+    std::remove(partial.c_str());
+}
+
+TEST(EventLog, AuthoritativeLedgerRefusesSharedParentDirectory)
+{
+    TempFile tf("authoritative_shared_parent.bin");
+    std::remove(tf.path.c_str());
+    std::remove((tf.path + ".partial").c_str());
+
+    // /tmp is deliberately world-writable.  A live ledger must never rely
+    // on a pathname in a directory another local account can replace.
+    EXPECT_THROW(AuthoritativeEventLedgerReservation(tf.path), std::runtime_error);
+}
+
+TEST(EventLog, AuthoritativeReplayRefusesPublishedLedgerMovedToSharedParent)
+{
+    PrivateLedgerFile private_ledger("published.bin");
+    auto reservation = std::make_shared<AuthoritativeEventLedgerReservation>(
+        private_ledger.path);
+    {
+        EventLogger logger(reservation, false);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+        logger.finalize();
+    }
+    ASSERT_TRUE(reservation->published());
+
+    TempFile shared_parent("authoritative_replay_shared_parent.bin");
+    std::remove(shared_parent.path.c_str());
+    ASSERT_EQ(::rename(private_ledger.path.c_str(), shared_parent.path.c_str()), 0);
+
+    EXPECT_THROW(EventReplayer{shared_parent.path}, std::runtime_error);
+}
+#endif
+
 TEST(EventLog, LoggerRejectsWritesAfterFinalize)
 {
     TempFile tf("logger_finalized.bin");
@@ -505,6 +688,19 @@ TEST(EventLog, InvalidHeaderPreambleIsRejectedBeforeReplay)
         event_serial::write_u32(out, EVENT_LOG_INDEX_MAGIC);
     }
     EXPECT_THROW(EventReplayer(index_tf.path), std::runtime_error);
+}
+
+TEST(EventLog, ImpossibleAuthoritativePublicationFlagsAreRejected)
+{
+    TempFile tf("impossible_authoritative_flags.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        write_event_log_preamble(
+            out, false, false,
+            EVENT_LOG_FILE_FLAG_AUTHORITATIVE_PUBLISHED);
+    }
+
+    EXPECT_THROW(EventReplayer(tf.path), std::runtime_error);
 }
 
 TEST(EventLog, UnfinalizedHeaderNeverTreatsRecordTailAsIndexTrailer)

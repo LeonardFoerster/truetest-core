@@ -60,3 +60,17 @@ TEST(OrderIdGenerator, Reset)
     EXPECT_EQ(OrderIdGenerator::next(), 100u);
     EXPECT_EQ(OrderIdGenerator::next(), 101u);
 }
+
+TEST(OrderIdGenerator, AdvanceToAtLeastNeverMovesBackward)
+{
+    OrderIdGenerator::reset(1);
+    EXPECT_TRUE(OrderIdGenerator::advance_to_at_least(500));
+    EXPECT_EQ(OrderIdGenerator::next(), 500u);
+
+    // A stale recovery scan cannot reuse an identity allocated after its
+    // snapshot was taken.
+    EXPECT_EQ(OrderIdGenerator::next(), 501u);
+    EXPECT_TRUE(OrderIdGenerator::advance_to_at_least(100));
+    EXPECT_EQ(OrderIdGenerator::next(), 502u);
+    EXPECT_FALSE(OrderIdGenerator::advance_to_at_least(0));
+}
