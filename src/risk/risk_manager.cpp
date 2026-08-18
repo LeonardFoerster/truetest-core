@@ -123,9 +123,17 @@ risk_action RiskManager::check_order(const order_event& order,
         projected_notional > limits_.max_position_value)
         return risk_action::reject;
 
+    // Percentage-of-equity caps are meaningful only with a finite positive
+    // account valuation. A missing mark must not turn a configured cap off.
+    // True reductions remain exempt so a broken mark cannot trap inventory.
+    if (!reducing_exposure &&
+        limits_.max_position_pct_of_equity > 0.0 &&
+        (!std::isfinite(snap.equity) || snap.equity <= 0.0))
+        return risk_action::reject;
+
     // Phase 2.3 - max position as % of equity
     if (!reducing_exposure &&
-        limits_.max_position_pct_of_equity > 0.0 && snap.equity > 0.0) {
+        limits_.max_position_pct_of_equity > 0.0) {
         double max_notional = snap.equity * limits_.max_position_pct_of_equity;
         if (projected_notional > max_notional)
             return risk_action::reject;
@@ -148,7 +156,7 @@ risk_action RiskManager::check_order(const order_event& order,
 
     // Phase 2.3 - portfolio-wide % of equity
     if (!reducing_exposure &&
-        limits_.max_position_pct_of_equity > 0.0 && snap.equity > 0.0) {
+        limits_.max_position_pct_of_equity > 0.0) {
         double max_portfolio_notional = snap.equity * limits_.max_position_pct_of_equity;
         if (projected_total_exposure > max_portfolio_notional)
             return risk_action::reject;
