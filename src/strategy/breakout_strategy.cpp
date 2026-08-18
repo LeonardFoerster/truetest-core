@@ -1,4 +1,5 @@
 #include "breakout_strategy.h"
+#include "types/quantity_scale.h"
 #include "../execution/position_sizing.h"
 #include "strategy_registry.h"
 #include "../core/event.h"
@@ -104,9 +105,11 @@ bool breakout_strategy::detect_consolidation(const SymbolState& st, double& out_
 bool breakout_strategy::check_breakout_gates(const SymbolState& st,
                                              double open, double close, double high, double low,
                                              double atr, double vol,
+                                             double prior_atr_low,
+                                             double prior_vol_avg,
                                              double& out_break_level) const
 {
-    if (!st.atr.ready() || st.vol_sma.ready() == false || atr <= 0.0)
+    if (!st.atr.ready() || !st.vol_sma.ready() || atr <= 0.0)
         return false;
 
     // Must have consolidation range recorded
@@ -114,7 +117,6 @@ bool breakout_strategy::check_breakout_gates(const SymbolState& st,
         return false;
 
     double upper = st.consolidation_high;
-    double vol_avg = st.vol_sma.value();
 
     // 1. Close >= 0.75% above upper boundary
     double break_price = upper * (1.0 + breakout_threshold_);
@@ -128,12 +130,12 @@ bool breakout_strategy::check_breakout_gates(const SymbolState& st,
     if ((body / bar_range) < MIN_BODY_STRENGTH) return false;
 
     // 3. ATR expansion >15% above its 10-bar low
-    double atr_low = get_recent_atr_min(st, 10);
-    if (atr <= atr_low * (1.0 + atr_expansion_))
+    if (prior_atr_low <= 0.0
+        || atr <= prior_atr_low * (1.0 + atr_expansion_))
         return false;
 
     // 4. Volume surge
-    if (vol_avg > 0.0 && vol < vol_avg * vol_mult_)
+    if (prior_vol_avg > 0.0 && vol < prior_vol_avg * vol_mult_)
         return false;
 
     out_break_level = break_price;
@@ -165,32 +167,22 @@ std::optional<order_event> breakout_strategy::on_market(const market_event& mkt)
     double h = mkt.get_high();
     double l = mkt.get_low();
     double c = mkt.get_close();
-    int64_t v = mkt.get_volume();
+    const double v = tt::quantity_scale::to_base(
+        mkt.get_volume(), mkt.get_quantity_scale());
 
     auto slot = states_.get(mkt.get_symbol());
     auto& st = slot.state;
     const std::string& sym = slot.symbol;
 
-    // Update indicators
-    auto atr_opt = st.atr.update(h, l, c);
-    (void)st.vol_sma.update(static_cast<double>(v));
-
-    // Maintain history
-    st.highs.push_back(h);
-    st.lows.push_back(l);
-    if (atr_opt) st.atr_history.push_back(*atr_opt);
-    st.vol_history.push_back(static_cast<double>(v));
-    trim_deques(st);
-
-    if (!st.atr.ready() || !st.vol_sma.ready())
-        return std::nullopt;
-
-    double atrv = st.atr.value();
-
-    // Update consolidation detection
+    // Candidate baselines are strictly prior-bar state. Including the current
+    // breakout high in the range would move the boundary above the candidate
+    // close; including its volume/ATR would contaminate the surge baselines.
+    const bool indicators_ready_before = st.atr.ready() && st.vol_sma.ready();
+    const double prior_vol_avg = st.vol_sma.ready() ? st.vol_sma.value() : 0.0;
+    const double prior_atr_low = st.atr.ready()
+        ? get_recent_atr_min(st, 10) : 0.0;
     double cons_h = 0.0, cons_l = 0.0;
-    bool in_consol = detect_consolidation(st, cons_h, cons_l);
-
+    const bool in_consol = detect_consolidation(st, cons_h, cons_l);
     if (in_consol)
     {
         if (st.phase == SymbolState::Phase::SCANNING)
@@ -198,6 +190,23 @@ std::optional<order_event> breakout_strategy::on_market(const market_event& mkt)
         st.consolidation_high = cons_h;
         st.consolidation_low = cons_l;
     }
+
+    // Current bar now advances indicators and becomes history only for future
+    // decisions. Its ATR is still the candidate expansion being tested.
+    auto atr_opt = st.atr.update(h, l, c);
+    (void)st.vol_sma.update(v);
+
+    // Maintain history
+    st.highs.push_back(h);
+    st.lows.push_back(l);
+    if (atr_opt) st.atr_history.push_back(*atr_opt);
+    st.vol_history.push_back(v);
+    trim_deques(st);
+
+    if (!indicators_ready_before || !st.atr.ready() || !st.vol_sma.ready())
+        return std::nullopt;
+
+    double atrv = st.atr.value();
 
     bool is_open = st.position_open || (st.open_lots > 0);
     if (is_open)
@@ -209,7 +218,9 @@ std::optional<order_event> breakout_strategy::on_market(const market_event& mkt)
 
     // Check for breakout gates
     double break_lvl = 0.0;
-    bool gates_ok = check_breakout_gates(st, o, c, h, l, atrv, static_cast<double>(v), break_lvl);
+    bool gates_ok = check_breakout_gates(
+        st, o, c, h, l, atrv, v, prior_atr_low,
+        prior_vol_avg, break_lvl);
 
     if (gates_ok && (st.phase == SymbolState::Phase::CONSOLIDATING || st.phase == SymbolState::Phase::BROKEN))
     {

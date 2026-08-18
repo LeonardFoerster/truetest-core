@@ -29,6 +29,7 @@ public:
     std::optional<order_event> on_market(const market_event& mkt) override;
 
     void set_position_open(const std::string& symbol, bool open) override;
+    void set_account_equity(double equity) override { equity_ = equity; }
 
     std::vector<truetest::exits::exit_intent> take_pending_exit_intents() override;
 
@@ -90,7 +91,9 @@ private:
     double compute_quantity(double price, double sl_distance) const;
     bool detect_consolidation(const SymbolState& st, double& out_high, double& out_low) const;
     bool check_breakout_gates(const SymbolState& st, double open, double close, double high, double low,
-                              double atr, double vol, double& out_break_level) const;
+                              double atr, double vol, double prior_atr_low,
+                              double prior_vol_avg,
+                              double& out_break_level) const;
     void trim_deques(SymbolState& st);
     double get_recent_atr_min(const SymbolState& st, std::size_t n = 10) const;
 };

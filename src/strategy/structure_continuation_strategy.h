@@ -48,6 +48,7 @@ public:
     std::optional<order_event> on_market(const market_event& mkt) override;
 
     void set_position_open(const std::string& symbol, bool open) override;
+    void set_account_equity(double equity) override { equity_ = equity; }
 
     std::vector<truetest::exits::exit_intent> take_pending_exit_intents() override;
 
@@ -63,7 +64,8 @@ public:
     bool supports_mc_trial_reuse() const override { return true; }
 
 private:
-    // Config (temporary sizing parameters)
+    // Config
+    double      equity_ = 10000.0;
     double      risk_fraction_;
     double      entry_fee_rate_ = 0.0;
     double      exit_fee_rate_  = 0.0;
@@ -130,9 +132,8 @@ private:
 
     void advance_continuation_fsm(SymbolState& st, bool long_signal, bool short_signal);
 
-    // Fee/slip-aware fixed-risk sizing. equity <= 0 falls back to 10k.
-    double compute_quantity(double price, double sl_distance, double equity,
-                            bool is_long) const;
+    // Fee/slip-aware fixed-risk sizing.
+    double compute_quantity(double price, double sl_distance, bool is_long) const;
 
     // Exit intent creation (uses ExitManager) — implements user's SL/TP rules
     void create_exit_intents(const std::string& symbol, SymbolState& st,

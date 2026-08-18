@@ -96,6 +96,10 @@ public:
 
     // Helper for the user's sideways rule: "Range der letzten N Swings < ATR"
     bool is_sideways_by_swing_range(std::size_t n, double atr) const;
+    double recent_swing_range(std::size_t n) const
+    {
+        return last_n_swings_range(n);
+    }
 
     // Monte Carlo object reuse (landed with monte-carlo merge)
     void reset();

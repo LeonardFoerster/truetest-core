@@ -33,6 +33,11 @@ public:
     virtual void set_position_open(const std::string& /*symbol*/, bool /*open*/) {}
     virtual void set_position_open(bool open) { set_position_open("", open); }
 
+    // Push the latest account equity into strategies that use equity-based
+    // position sizing. Strategies without equity-based sizing keep the
+    // default no-op.
+    virtual void set_account_equity(double /*equity*/) {}
+
     // Fires after the engine updates its own books for a fill that this
     // strategy emitted. `opener_order_id` identifies the lot (equals
     // fill.order_id on an opener, points at the original entry on a

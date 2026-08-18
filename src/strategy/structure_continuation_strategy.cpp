@@ -192,16 +192,15 @@ void structure_continuation_strategy::advance_continuation_fsm(
 }
 
 double structure_continuation_strategy::compute_quantity(
-    double price, double sl_distance, double equity, bool is_long) const
+    double price, double sl_distance, bool is_long) const
 {
-    // Sizing uses provided equity (or 10k fallback for backtests/demos).
     // Structure SL levels are absolute (no reference_entry rebase); expected
     // entry/exit slip and fees are folded into the per-unit risk budget.
-    if (!(price > 0.0) || sl_distance <= 0.0) return 0.0;
-    if (equity <= 0.0) equity = 10000.0;
+    if (!(price > 0.0) || !(sl_distance > 0.0) || !(equity_ > 0.0))
+        return 0.0;
 
     truetest::risk::risk_size_inputs in;
-    in.equity            = equity;
+    in.equity            = equity_;
     in.risk_fraction     = risk_fraction_;
     in.entry_price       = price;
     in.stop_price        = is_long ? (price - sl_distance) : (price + sl_distance);
@@ -331,8 +330,9 @@ std::optional<order_event> structure_continuation_strategy::on_market(const mark
                 ? (c - std::min(st.ema100.value(), c * 0.98))
                 : (std::max(st.ema100.value(), c * 1.02) - c);
 
-            double qty = compute_quantity(c, std::max(sl_dist, c * 0.005), 10000.0, go_long);
-            if (qty <= 0.0) qty = 1.0; // fallback for backtests / tiny equity
+            double qty = compute_quantity(c, std::max(sl_dist, c * 0.005), go_long);
+            if (!(qty > 0.0))
+                return std::nullopt;
 
             order_side side = go_long ? order_side::buy : order_side::sell;
 
@@ -407,6 +407,7 @@ void structure_continuation_strategy::on_fill(const fill_event& fill, std::uint6
 std::vector<param_def> structure_continuation_strategy::get_param_schema() const
 {
     return {
+        {"equity", equity_, 0, 1e18, "Account equity for position sizing"},
         {"risk_fraction", risk_fraction_, 0.001, 0.05, "Stop-risk budget as fraction of equity"},
         {"entry_fee_rate", entry_fee_rate_, 0, 0.05, "Entry fee as fraction of notional"},
         {"exit_fee_rate", exit_fee_rate_, 0, 0.05, "Exit fee as fraction of notional"},
@@ -420,7 +421,8 @@ std::vector<param_def> structure_continuation_strategy::get_param_schema() const
 
 void structure_continuation_strategy::set_param(const std::string& key, double value)
 {
-    if (key == "risk_fraction") risk_fraction_ = value;
+    if (key == "equity") equity_ = value;
+    else if (key == "risk_fraction") risk_fraction_ = value;
     else if (key == "entry_fee_rate") entry_fee_rate_ = value;
     else if (key == "exit_fee_rate") exit_fee_rate_ = value;
     else if (key == "entry_slip_bps") entry_slip_bps_ = value;

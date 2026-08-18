@@ -27,7 +27,8 @@ public:
 
     std::vector<truetest::exits::exit_intent> take_pending_exit_intents() override;
 
-    void update_equity(double equity) { equity_ = equity; }
+    void set_account_equity(double equity) override { equity_ = equity; }
+    void update_equity(double equity) { set_account_equity(equity); }
 
     std::vector<param_def> get_param_schema() const override;
     void set_param(const std::string& key, double value) override;

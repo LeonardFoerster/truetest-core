@@ -197,17 +197,12 @@ inline void ema_regime_detector::update(double ema_fast,
                                         const swing_detector& sd,
                                         const average_true_range& atr)
 {
-    double swing_range = 0.0;
+    std::optional<double> swing_range;
     double atr_val     = atr.ready() ? atr.value() : 0.0;
 
     // Use the user's rule: range of last swing_n_ swings
     if (sd.ready())
-    {
-        // We call the public helper on the detector we already have
-        swing_range = sd.is_sideways_by_swing_range(swing_n_, atr_val) ? 0.0 : 999.0; // placeholder; better to expose range directly later
-        // For now we use the sideways helper as a proxy — in real use the strategy can pass the real range.
-        // To keep the helper small we accept the limitation in v1.
-    }
+        swing_range = sd.recent_swing_range(swing_n_);
 
     update(ema_fast, ema_slow, swing_range, atr_val);
 }
