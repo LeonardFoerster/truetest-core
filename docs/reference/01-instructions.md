@@ -204,7 +204,7 @@ cmake --preset linux-release-low-memory # portable Release + tests, LTO off
 - Profiles: `--preset futures-phase0|mc-robustness|backtest-local-l2|shadow-tape` (aliases are accepted; inspect the resolved configuration with `--dump-config`).
 - Persistence: `--persist --run-tag myrun_YYYYMMDD_HHMM` (QuestDB), `--checkpoint path`.
 - Replay/Record: `--replay events.bin --replay-from/--to`, `--record`, `--replay-data`.
-- Output: `--output results.json`, `--status-format auto|tui|plain|ndjson|off`, `--no-tui`, `--simple-tui`, `--log-events`, `--log-file`, `--log-max-size`, `--log-keep`.
+- Output: `--output results.json`, `--status-format auto|tui|plain|ndjson|off`, `--no-tui`, `--simple-tui`, `--log-events`, `--log-file`, `--log-max-size`, `--log-keep`. In live mode, `--log-events` is an authoritative ledger: its direct parent must be private to the service/effective UID (normally `0700`), its final and `.partial` paths must be absent before start, and rotation is refused.
 - Web UI (`-DENABLE_WEB=ON` only): `--web` (serve read-only web UI), `--web-port 8080`, `--web-bind 127.0.0.1`, `--web-token <tok>` (**required** for shadow/live; optional for backtest; also `?token=` in the browser), `--web-assets <dir>` (built SPA to serve at `/`). Streaming runs serve a live cockpit; backtest runs keep serving the final report until Ctrl-C. Read-only on every target — no order/flatten/kill routes. Full guide: [05-web-ui.md](05-web-ui.md).
 
 **TUI**: Rich ncurses tabbed dashboard on shadow/live (positions, orders, L2, risk, brackets, debug StageTimer/ring, health/DMS counter). Hotkeys, setup menu on backtest. `--no-tui` for headless/CI.

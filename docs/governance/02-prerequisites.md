@@ -119,7 +119,15 @@ Before opening or merging any PR that edits a frozen file (or significantly desc
    - Two-person CCB review for any frozen surface change
    - At least four continuous hours of clean `engine_shadow` evidence for kill/DMS/reconciler/halt lifecycle changes; unit tests do not replace this soak
 
-8. **Model discipline**:
+8. **Authoritative live ledger**:
+   - A live `--log-events <path>` ledger must be reserved before any provider
+     configuration or open. Its direct parent must be owned by the service
+     effective UID and have no group or other permissions (normally `0700`).
+   - Both `<path>` and `<path>.partial` must be absent before startup. A
+     leftover `.partial` is forensic evidence, not a file to delete or replay
+     automatically. Live ledger rotation is refused.
+
+9. **Model discipline**:
    - Use an approved frontier model (per `AGENTS.md` multi-agent protocol) for any edit touching the mechanically frozen safety surface or its core invariants.
 
 Escalate to CCB if borderline or if the change is large.

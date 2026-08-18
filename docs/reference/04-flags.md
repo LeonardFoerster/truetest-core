@@ -11,9 +11,9 @@
 |-------------------------------|--------------|
 | `--replay <path>`             | Replay from a binary event log (zstd-compressed). |
 | `--replay-from / --replay-to` | Time window (µs since epoch) inside the replay file. |
-| `--log-events <path>`         | Write binary event log (market + order + fill events) for this run. |
+| `--log-events <path>`         | Write binary event log (market + order + fill events) for this run. In live mode it must be in a service/euid-owned private parent (normally `0700`), and neither `<path>` nor `<path>.partial` may already exist. |
 | `--log-file <path>`           | Write operational text log (L1) instead of stderr. |
-| `--log-max-size <MB>`         | Rotate logs after this size (L3). 0 = no rotation. |
+| `--log-max-size <MB>`         | Rotate logs after this size (L3). 0 = no rotation; rotation is refused for the live authoritative ledger. |
 | `--log-keep <N>`              | How many rotated log files to keep. |
 | `--compress-log / --no-compress-log` | Toggle zstd compression of binary event logs (default on). |
 | `--seed <uint64>`             | Master RNG seed (0 = non-deterministic). |
