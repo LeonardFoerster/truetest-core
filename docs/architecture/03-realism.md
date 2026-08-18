@@ -102,6 +102,9 @@ Fill events carry rich metadata (opener, strategy, queue_position, futures flags
 - Flags: `--fee tiered --maker-rate 0.0002 --taker-rate 0.0004` (example).
 - Applied on fills for realistic net P&L in backtest/shadow reports.
 - Tiered uses venue-like maker/taker distinction.
+- Open/unrealized PnL is fee-complete: `Analytics` tracks each open lot's entry
+  commission and deducts a pro-rated share from the mark-to-market unrealized
+  figure, not just from realized PnL at close.
 - See: `test_fee_model.cpp`.
 
 Funding is partially wired (events exist; full risk/P&L impact in progress — see todo R-03).

@@ -23,9 +23,11 @@ OPERATIONS):
   coarser grouping the operator actually navigates (`desk_layout_model.h`).
 - **OPERATIONS** — the former Operations page, unchanged in content, plus two
   strips drawn above its dockspace: the trimmed Account strip (7 metrics —
-  see below) and the previously-unwired `draw_safety_strip` (Safety Status:
-  halt/pause/kill-hook/provider/stream, deliberately separate from the
-  dockable Risk panel's measured limits).
+  see below; REALIZED PNL is a fixed "N/A — accounting source pending"
+  placeholder, not a live 7th number, since no trustworthy realized-PnL
+  source is exposed to the desk yet) and the previously-unwired
+  `draw_safety_strip` (Safety Status: halt/pause/kill-hook/provider/stream,
+  deliberately separate from the dockable Risk panel's measured limits).
 - **DIAGNOSTICS** — new page hosting the existing (previously unwired) Debug
   panel (`panels/debug_panel.cpp`) as its own top-level home instead of
   engineering telemetry having no page at all.
@@ -100,17 +102,21 @@ workspace (Market has four; the other three have exactly one each).
 | RESEARCH | `research` | Setup/Report/Monte Carlo/Replay tabs, capability-gated NOT WIRED content | — |
 
 The default Market/Footprint layout is optimized for a 2560×1440 single
-monitor: 14% watchlist, 68% primary canvas, 18% DOM/context rail, and a
-20%-high collapsible activity blotter under the watchlist/canvas. Diagnostics
-and Research use a single dominant pane (no left/right/bottom splits).
-Versioned persistence uses `truetest_desk_v4.ini`; temporary focus mode
-snapshots and restores the normal ImGui layout while using separate
-transient dockspaces.
+monitor: ~12% watchlist, ~60–65% primary canvas, ~17% DOM/context rail, and a
+~12%-high collapsible activity blotter under the watchlist/canvas (see
+`desk_layout_geometry()`'s literal split ratios and the enforcing test
+`ImGuiDeskLayout.OrderflowGeometryMatchesFootprintSpec`). Diagnostics and
+Research use a single dominant pane (no left/right/bottom splits). Versioned
+persistence uses `truetest_desk_v4.ini`; temporary focus mode snapshots and
+restores the normal ImGui layout while using separate transient dockspaces.
 
 A compact **Market metric band** (mid/last, spread bps, microprice,
 imbalance, update rate, queue position) renders above the dockspace whenever
 a MARKET subview is active and a snapshot exists — deliberately excluding
-account/build metrics, which stay in Operations/Diagnostics.
+account/build metrics, which stay in Operations/Diagnostics. Queue position
+only appears once the queue model has actually observed something
+(`avg_bps`/`submitted_with_queue`/`filled_after_drain` all zero hides it
+rather than showing a misleading 0%).
 
 ### MIXED SOURCES
 

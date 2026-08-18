@@ -25,6 +25,15 @@ segments and remain inspection-only until a manifest-based stitching format is
 implemented. Use the default `--log-max-size 0` when authoritative replay is
 required.
 
+When `--log-events` is set, a dropped or failed logging-worker write is
+**terminal** (triggers halt) regardless of `--drop-policy`/mode — a silently
+incomplete durable ledger is never treated as authoritative. The logging
+worker's error budget is also tightened to 1 consecutive error instead of the
+usual default in this mode. Known limitation: the durable-log path does not
+yet require the target to be a regular, recoverable file, so non-file sinks
+are not rejected — treat `--log-events` output review as part of your own
+Phase 0 checklist until that gap closes.
+
 ### Threading / CPU
 | Flag                    | What it does |
 |-------------------------|--------------|
@@ -64,7 +73,7 @@ required.
 | Flag                    | What it does |
 |-------------------------|--------------|
 | `--symbol <SYM>`        | Trading symbol (e.g. `BTCUSDT`). |
-| `--stream <type>`       | `trade`, `kline`, `kline_1m` / venue kline ids, etc. |
+| `--stream <type>`       | `trade`, `kline`, `kline_1m` / venue kline ids, etc. On Binance, kline streams only emit closed candles (`"x": true`); forming/in-progress candles are discarded, not forwarded early. |
 | `--depth-stream <spec>` | L2 depth on same WS (Binance e.g. `depth20@100ms`; Bitget e.g. `books5`). Enables queue/impact realism and real-book seeding. |
 | `--live`                | Required safety flag for real-money orders (mainnet triggers math captcha; sandbox skips it). Only works on `engine_live` binary. |
 | `--testnet`             | Sandbox routing: Binance → spot/futures testnet hosts; Bitget → demo/paptrading (same as `--demo`). |

@@ -86,6 +86,10 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 
 **Backtesting**:
 - Local CSV (OHLCV and tick-level) and binary cache replay via `local` provider
+- Source-aware quantity scale: CSV volumes are read as-is (integer columns keep
+  their native units; fractional columns are converted to fixed-point atoms).
+  There is no blanket unit conversion — the scale travels with the bar/tick so
+  execution/analytics always consume correctly-scaled base-unit quantities.
 - Deterministic authoritative-ledger replay from current-v2 event logs (`--replay`; bounded ledger replay is currently refused)
 - Configurable realism models (latency, impact, queue position, fees, fill simulation)
 - Golden regression tests + full event logging for audit

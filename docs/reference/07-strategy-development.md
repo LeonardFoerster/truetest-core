@@ -113,6 +113,7 @@ Canonical: `src/strategy/strategy_interface.h`.
 | `set_param(key, double)` | optional | wirft `Unknown parameter` | nur `double` |
 | `get_indicator_values(symbol)` | optional | `{}` | Observability `(name, value)` |
 | `reset(uint64_t seed=0)` | optional | no-op | MC object-reuse |
+| `set_account_equity(double)` | optional | no-op | Engine pusht mark-to-market Account-Equity (nicht nur Cash) bei praktisch jedem Market/Tick/L2-Dispatch; nur relevant für Strategien mit Equity-basiertem Sizing (überschrieben u. a. von `breakout_strategy`, `structure_continuation_strategy`) |
 
 **Explizit nicht im Contract:**
 
@@ -344,6 +345,17 @@ auto& sma = get_sma(mkt.get_symbol());
 auto sma_value = sma.update(mkt.get_close());
 if (!sma_value) return std::nullopt;
 ```
+
+### Breakout: Baseline-Freeze und Regime-Input
+
+`breakout_strategy` friert seine Kandidaten-Baselines (Vol-Average, ATR-Minimum,
+Konsolidierungs-Boundary) strikt auf Prior-Bar-State ein, **bevor** die
+aktuelle Bar in Indikatoren/Historie einfließt — die Kandidaten-Bar wird also
+immer gegen eingefrorene Vorbedingungen geprüft, nie gegen sich selbst
+mitverschobene Baselines (`breakout_strategy.cpp`). `ema_regime_detector`
+erhält über den `swing_detector`-Parameter eine echte gemessene Swing-Range
+(`recent_swing_range()`), kein Boolean-Sentinel — die Sideways-Regel greift
+nur, wenn diese Range kleiner als der aktuelle ATR ist.
 
 ### SMA-Namenszuordnung
 
