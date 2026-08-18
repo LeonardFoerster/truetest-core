@@ -80,11 +80,11 @@ inline bool parse_one_level(std::string_view json, std::size_t& pos,
 }
 
 // Append levels from `"key":[ ... ]` into out. Uses from_chars (no stod/substr allocs).
-inline void append_levels(std::string_view json, std::string_view key,
+inline bool append_levels(std::string_view json, std::string_view key,
                           std::vector<provider::l2_snapshot::level>& out)
 {
     auto pos = find_level_array(json, key);
-    if (pos == std::string_view::npos) return;
+    if (pos == std::string_view::npos) return true;
 
     // Typical partial book is depth5/10/20 — reserve once.
     if (out.capacity() < out.size() + 20)
@@ -94,31 +94,35 @@ inline void append_levels(std::string_view json, std::string_view key,
     while (pos < n)
     {
         double price = 0.0, qty = 0.0;
-        std::size_t save = pos;
         if (!parse_one_level(json, pos, price, qty))
         {
-            // End of array or malformed — stop cleanly on ']'.
+            // End of array is valid; anything else rejects the whole frame.
             while (pos < n && (json[pos] == ' ' || json[pos] == ',')) ++pos;
-            break;
+            return pos < n && json[pos] == ']';
         }
-        (void)save;
-        out.push_back({price, static_cast<int64_t>(qty * 1e8)});
+        std::int64_t qty_atoms = 0;
+        if (!(price > 0.0)
+            || !tt::quantity_scale::from_base_nonnegative(
+                qty, tt::quantity_scale::canonical_atoms, qty_atoms))
+            return false;
+        out.push_back({price, qty_atoms});
 
         while (pos < n && (json[pos] == ' ' || json[pos] == ',')) ++pos;
         if (pos >= n || json[pos] == ']')
             break;
     }
+    return true;
 }
 
 // Prefer long keys ("bids"/"asks"), fall back to short ("b"/"a").
-inline void parse_side_levels(std::string_view json,
+inline bool parse_side_levels(std::string_view json,
                               std::string_view long_key, std::string_view short_key,
                               std::vector<provider::l2_snapshot::level>& out)
 {
     out.clear();
-    append_levels(json, long_key, out);
-    if (out.empty())
-        append_levels(json, short_key, out);
+    if (find_level_array(json, long_key) != std::string_view::npos)
+        return append_levels(json, long_key, out);
+    return append_levels(json, short_key, out);
 }
 
 inline std::chrono::system_clock::time_point parse_event_time(std::string_view json)
@@ -140,6 +144,7 @@ inline std::chrono::system_clock::time_point parse_event_time(std::string_view j
 inline std::optional<provider::l2_snapshot> parse_depth_snapshot(std::string_view json)
 {
     provider::l2_snapshot snap;
+    snap.quantity_scale = 100'000'000ULL;
 
     auto sym_sv = extract_sv_string(json, "s");
     if (!sym_sv.empty())
@@ -147,8 +152,9 @@ inline std::optional<provider::l2_snapshot> parse_depth_snapshot(std::string_vie
 
     snap.timestamp = depth_detail::parse_event_time(json);
 
-    depth_detail::parse_side_levels(json, "bids", "b", snap.bids);
-    depth_detail::parse_side_levels(json, "asks", "a", snap.asks);
+    if (!depth_detail::parse_side_levels(json, "bids", "b", snap.bids)
+        || !depth_detail::parse_side_levels(json, "asks", "a", snap.asks))
+        return std::nullopt;
 
     if (snap.bids.empty() && snap.asks.empty())
         return std::nullopt;
@@ -175,8 +181,9 @@ inline std::vector<provider::l2_update> parse_depth_updates(std::string_view jso
     // Cheaper than building a full l2_snapshot with the same data twice.
     std::vector<provider::l2_snapshot::level> bids;
     std::vector<provider::l2_snapshot::level> asks;
-    depth_detail::parse_side_levels(json, "bids", "b", bids);
-    depth_detail::parse_side_levels(json, "asks", "a", asks);
+    if (!depth_detail::parse_side_levels(json, "bids", "b", bids)
+        || !depth_detail::parse_side_levels(json, "asks", "a", asks))
+        return {};
 
     updates.reserve(bids.size() + asks.size());
 
@@ -190,6 +197,7 @@ inline std::vector<provider::l2_update> parse_depth_updates(std::string_view jso
             upd.side = side;
             upd.price = lvl.price;
             upd.new_quantity = lvl.quantity;
+            upd.quantity_scale = 100'000'000ULL;
             updates.push_back(std::move(upd));
         }
     };

@@ -9,13 +9,16 @@
 #include "providers/provider_event.h"
 #include "providers/local/csv_parser.h"
 #include "providers/recovery_payload.h"
+#include "data/quantity_scale.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -80,7 +83,7 @@ inline std::optional<double> parse_double_token(std::string_view tok)
     std::string tmp(tok);
     char* end = nullptr;
     const double v = std::strtod(tmp.c_str(), &end);
-    if (end == tmp.c_str())
+    if (end == tmp.c_str() || *end != '\0' || !std::isfinite(v))
         return std::nullopt;
     return v;
 }
@@ -120,7 +123,8 @@ inline std::optional<std::int64_t> extract_int(std::string_view json,
                                                std::string_view key)
 {
     auto n = extract_number(json, key);
-    if (!n)
+    if (!n || *n < static_cast<double>(std::numeric_limits<std::int64_t>::min())
+        || *n > static_cast<double>(std::numeric_limits<std::int64_t>::max()))
         return std::nullopt;
     return static_cast<std::int64_t>(*n);
 }
@@ -301,10 +305,16 @@ inline std::vector<tick_record> parse_all_trades(std::string_view json)
 
         if (!p || !v || *p <= 0.0 || *v <= 0.0)
             return;
+        std::int64_t qty_atoms = 0;
+        if (!tt::quantity_scale::from_base_nonnegative(
+                *v, tt::quantity_scale::canonical_atoms, qty_atoms)
+            || qty_atoms <= 0)
+            return;
         tick_record rec;
         rec.price = *p;
         // Domain Tick uses fixed-scale int64 qty (1e8), same as Binance/Bitget.
-        rec.quantity = static_cast<std::int64_t>(*v * 1e8);
+        rec.quantity = qty_atoms;
+        rec.quantity_scale = tt::quantity_scale::canonical_atoms;
         rec.symbol = symbol;
         if (auto side = detail::extract_string(obj, "s"))
         {
@@ -346,6 +356,7 @@ inline provider::tick to_provider_tick(const tick_record& rec)
     t.symbol = rec.symbol;
     t.price = rec.price;
     t.quantity = rec.quantity;
+    t.quantity_scale = rec.quantity_scale;
     t.side = (rec.side == data_tick_side::bid) ? 0
            : (rec.side == data_tick_side::ask) ? 1 : 2;
     return t;

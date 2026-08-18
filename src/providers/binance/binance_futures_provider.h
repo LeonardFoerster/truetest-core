@@ -193,6 +193,18 @@ public:
             state_ = lifecycle::error;
             return false;
         }
+        if (!std::isfinite(rc_cfg_.max_notional_usdt)
+            || !std::isfinite(rc_cfg_.max_leverage)
+            || !std::isfinite(rc_cfg_.maintenance_margin_pct)
+            || rc_cfg_.max_notional_usdt < 0.0
+            || rc_cfg_.max_leverage < 0.0
+            || rc_cfg_.maintenance_margin_pct < 0.0)
+        {
+            std::cerr << "BinanceFuturesProvider: refusing open — risk "
+                         "limits must be finite and non-negative.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
         if (dead_man_countdown_ms_ < 0 || dead_man_heartbeat_ms_ < 0
             || (dead_man_countdown_ms_ == 0 && dead_man_heartbeat_ms_ > 0)
             || (dead_man_countdown_ms_ > 0 && dead_man_heartbeat_ms_ > 0

@@ -31,6 +31,7 @@ inline bool emit_record(const bar_record& rec, IMarketSink& sink)
 	bar.low = rec.low;
 	bar.close = rec.close;
 	bar.volume = rec.volume;
+	bar.quantity_scale = rec.quantity_scale;
 	// Prefer open_time (epoch ms) when present — Binance kline CSVs.
 	if (rec.open_time_ms > 0)
 	{

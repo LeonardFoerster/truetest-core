@@ -66,8 +66,8 @@ inline bool tap_context_ready(const FootprintTapContext& ctx) noexcept
 // (has_exact_decimal - populated by a venue parser that decoded the raw
 // decimal string directly, §2.1), those are used verbatim - no floating
 // point touches the price/quantity. Otherwise price_ticks/base_qty_atoms
-// are derived from the double price/quantity via ctx.tick_size /
-// ctx.qty_atom_scale; this fallback exists for venues/tests that have not
+// are derived from the double price and fixed-point quantity via ctx.tick_size,
+// t.quantity_scale, and ctx.qty_atom_scale; this fallback exists for venues/tests that have not
 // yet been wired for exact-decimal parsing and must not be relied on for
 // production tick-grouping precision (see footprint.md §2.1 tick-size note).
 inline PublicTrade tick_to_public_trade(const FootprintTapContext& ctx,
@@ -89,12 +89,15 @@ inline PublicTrade tick_to_public_trade(const FootprintTapContext& ctx,
         out.price_ticks = t.price_ticks;
         out.base_qty_atoms = t.base_qty_atoms;
     }
-    else if (ctx.tick_size > 0.0)
+    else if (ctx.tick_size > 0.0 && t.quantity_scale != 0)
     {
         out.price_ticks = static_cast<std::int64_t>(
             std::llround(t.price / ctx.tick_size));
         out.base_qty_atoms = static_cast<std::int64_t>(
-            std::llround(static_cast<double>(t.quantity) * ctx.qty_atom_scale));
+            std::llround(
+                (static_cast<long double>(t.quantity)
+                 / static_cast<long double>(t.quantity_scale))
+                * static_cast<long double>(ctx.qty_atom_scale)));
     }
     // else: tick_size unresolved and no exact decimal on the tick - leave
     // price_ticks/base_qty_atoms at 0. try_tap_push() below refuses to push
@@ -130,7 +133,8 @@ inline bool try_tap_push(FootprintTapContext& ctx,
                           const provider::tick& t,
                           FootprintResearchRing<N>& ring) noexcept
 {
-    if (!t.has_exact_decimal && !tap_context_ready(ctx))
+    if (!t.has_exact_decimal
+        && (!tap_context_ready(ctx) || t.quantity_scale == 0))
         return false;
 
     PublicTrade trade = tick_to_public_trade(ctx, t);

@@ -2,6 +2,7 @@
 #ifdef HAS_BITGET
 
 #include "data/data_handler.h"
+#include "data/quantity_scale.h"
 #include "providers/local/csv_parser.h"
 #include "providers/parser.h"
 #include "providers/provider_event.h"
@@ -267,11 +268,12 @@ inline std::string_view first_data_object(std::string_view json)
 }
 
 // Locate `"key":[` and append levels into out. Qty scaled *1e8 like Binance.
-inline void append_levels(std::string_view json, std::string_view key,
+inline bool append_levels(std::string_view json, std::string_view key,
                           std::vector<provider::l2_snapshot::level>& out)
 {
     auto arr = extract_array(json, key);
-    if (arr.size() < 2) return;
+    if (arr.empty()) return true;
+    if (arr.size() < 2) return false;
 
     if (out.capacity() < out.size() + 8)
         out.reserve(out.size() + 8);
@@ -284,24 +286,24 @@ inline void append_levels(std::string_view json, std::string_view key,
                            arr[pos] == '\r' || arr[pos] == '\t'))
             ++pos;
         if (pos >= n || arr[pos] == ']') break;
-        if (arr[pos] != '[') break;
+        if (arr[pos] != '[') return false;
         ++pos;
 
         skip_ws(arr, pos);
-        if (pos >= n || arr[pos] != '"') break;
+        if (pos >= n || arr[pos] != '"') return false;
         ++pos;
         auto price_end = arr.find('"', pos);
-        if (price_end == std::string_view::npos) break;
+        if (price_end == std::string_view::npos) return false;
         std::string_view price_sv = arr.substr(pos, price_end - pos);
         pos = price_end + 1;
 
         while (pos < n && (arr[pos] == ',' || arr[pos] == ' ' || arr[pos] == '\t'))
             ++pos;
 
-        if (pos >= n || arr[pos] != '"') break;
+        if (pos >= n || arr[pos] != '"') return false;
         ++pos;
         auto qty_end = arr.find('"', pos);
-        if (qty_end == std::string_view::npos) break;
+        if (qty_end == std::string_view::npos) return false;
         std::string_view qty_sv = arr.substr(pos, qty_end - pos);
         pos = qty_end + 1;
 
@@ -309,10 +311,16 @@ inline void append_levels(std::string_view json, std::string_view key,
         if (pos < n) ++pos;
 
         double price = 0.0, qty = 0.0;
-        if (!parse_double_sv(price_sv, price) || !parse_double_sv(qty_sv, qty))
-            break;
-        out.push_back({price, static_cast<int64_t>(qty * 1e8)});
+        if (!parse_double_sv(price_sv, price) || !(price > 0.0)
+            || !parse_double_sv(qty_sv, qty))
+            return false;
+        std::int64_t qty_atoms = 0;
+        if (!tt::quantity_scale::from_base_nonnegative(
+                qty, tt::quantity_scale::canonical_atoms, qty_atoms))
+            return false;
+        out.push_back({price, qty_atoms});
     }
+    return true;
 }
 
 inline std::chrono::system_clock::time_point tp_from_ms(int64_t ts_ms)
@@ -447,8 +455,15 @@ inline std::optional<provider::tick> parse_trade_object(std::string_view obj,
         return std::nullopt;
 
     double price = 0.0, qty = 0.0;
-    if (!detail::parse_double_sv(price_sv, price)) return std::nullopt;
+    if (!detail::parse_double_sv(price_sv, price) || !(price > 0.0))
+        return std::nullopt;
     if (!detail::parse_double_sv(qty_sv, qty)) return std::nullopt;
+
+    std::int64_t qty_atoms = 0;
+    if (!tt::quantity_scale::from_base_nonnegative(
+            qty, tt::quantity_scale::canonical_atoms, qty_atoms)
+        || qty_atoms <= 0)
+        return std::nullopt;
 
     auto side = detail::map_side(side_sv);
     if (!side) return std::nullopt;
@@ -456,7 +471,8 @@ inline std::optional<provider::tick> parse_trade_object(std::string_view obj,
     provider::tick t;
     t.symbol.assign(symbol.data(), symbol.size());
     t.price = price;
-    t.quantity = static_cast<int64_t>(qty * 1e8);
+    t.quantity = qty_atoms;
+    t.quantity_scale = tt::quantity_scale::canonical_atoms;
     t.side = detail::side_to_u8(*side);
 
     if (auto tp = detail::parse_ts_ms(time_sv))
@@ -530,6 +546,7 @@ inline tick_record tick_to_record(const provider::tick& t)
     rec.price     = t.price;
     rec.quantity  = t.quantity;
     rec.side      = static_cast<data_tick_side>(t.side);
+    rec.quantity_scale = t.quantity_scale;
     return rec;
 }
 
@@ -605,6 +622,7 @@ inline std::optional<provider::l2_snapshot> parse_books5(std::string_view json)
 
     provider::l2_snapshot snap;
     snap.symbol.assign(symbol.data(), symbol.size());
+    snap.quantity_scale = 100'000'000ULL;
 
     auto ts_sv = extract_sv_number(body, "ts");
     if (ts_sv.empty())
@@ -614,12 +632,15 @@ inline std::optional<provider::l2_snapshot> parse_books5(std::string_view json)
     else
         snap.timestamp = std::chrono::system_clock::now();
 
-    detail::append_levels(body, "b", snap.bids);
-    if (snap.bids.empty())
-        detail::append_levels(body, "bids", snap.bids);
-    detail::append_levels(body, "a", snap.asks);
-    if (snap.asks.empty())
-        detail::append_levels(body, "asks", snap.asks);
+    bool levels_valid = detail::append_levels(body, "b", snap.bids);
+    if (levels_valid && snap.bids.empty())
+        levels_valid = detail::append_levels(body, "bids", snap.bids);
+    if (levels_valid)
+        levels_valid = detail::append_levels(body, "a", snap.asks);
+    if (levels_valid && snap.asks.empty())
+        levels_valid = detail::append_levels(body, "asks", snap.asks);
+    if (!levels_valid)
+        return std::nullopt;
 
     if (snap.bids.empty() && snap.asks.empty())
         return std::nullopt;
@@ -686,21 +707,24 @@ inline std::optional<provider::bar> parse_kline(std::string_view json)
 
     provider::bar b;
     b.symbol.assign(symbol.data(), symbol.size());
+    b.quantity_scale = 100'000'000ULL;
 
     double v = 0.0;
-    if (!detail::parse_double_sv(open_sv, v))  return std::nullopt;
+    if (!detail::parse_double_sv(open_sv, v) || !(v > 0.0)) return std::nullopt;
     b.open = v;
-    if (!detail::parse_double_sv(high_sv, v))  return std::nullopt;
+    if (!detail::parse_double_sv(high_sv, v) || !(v > 0.0)) return std::nullopt;
     b.high = v;
-    if (!detail::parse_double_sv(low_sv, v))   return std::nullopt;
+    if (!detail::parse_double_sv(low_sv, v) || !(v > 0.0)) return std::nullopt;
     b.low = v;
-    if (!detail::parse_double_sv(close_sv, v)) return std::nullopt;
+    if (!detail::parse_double_sv(close_sv, v) || !(v > 0.0)) return std::nullopt;
     b.close = v;
 
-    if (!vol_sv.empty() && detail::parse_double_sv(vol_sv, v))
-        b.volume = static_cast<int64_t>(v * 1e8);
-    else
+    if (vol_sv.empty())
         b.volume = 0;
+    else if (!detail::parse_double_sv(vol_sv, v)
+             || !tt::quantity_scale::from_base_nonnegative(
+                 v, tt::quantity_scale::canonical_atoms, b.volume))
+        return std::nullopt;
 
     if (!start_sv.empty())
         b.date.assign(start_sv.data(), start_sv.size());
@@ -776,6 +800,7 @@ inline std::optional<bar_record> to_bar_record(const provider::bar& b)
     rec.low    = b.low;
     rec.close  = b.close;
     rec.volume = b.volume;
+    rec.quantity_scale = b.quantity_scale;
     return rec;
 }
 

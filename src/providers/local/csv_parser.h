@@ -2,6 +2,7 @@
 
 #include "providers/parser.h"
 #include "data/data_handler.h"
+#include "data/quantity_scale.h"
 
 #include <sstream>
 #include <unordered_map>
@@ -29,6 +30,9 @@ namespace tt::csv {
 // Integer-only volume fields (legacy equity CSVs) are stored as-is without scaling.
 inline constexpr double kVolumeScale = 1e8;
 
+inline constexpr std::uint64_t kIntegerQuantityScale = 1;
+inline constexpr std::uint64_t kFractionalQuantityScale = 100'000'000ULL;
+
 inline std::int64_t fast_stoll(std::string_view sv)
 {
     std::int64_t v = 0;
@@ -38,21 +42,43 @@ inline std::int64_t fast_stoll(std::string_view sv)
     return v;
 }
 
-// Integer volumes pass through; fractional (e.g. "246.092") → llround(v * 1e8).
-inline std::int64_t parse_bar_volume(std::string_view sv)
+inline bool parse_nonnegative_quantity(std::string_view sv,
+                                       std::int64_t& out,
+                                       std::uint64_t& quantity_scale)
 {
-    if (sv.empty()) return 0;
+    out = 0;
+    quantity_scale = kIntegerQuantityScale;
+    if (sv.empty()) return true;
+
     try {
-        return fast_stoll(sv);
+        out = fast_stoll(sv);
+        return out >= 0;
     } catch (...) {
         try {
-            const double d = std::stod(std::string(sv));
-            if (!std::isfinite(d) || d < 0.0) return 0;
-            return static_cast<std::int64_t>(std::llround(d * kVolumeScale));
+            const std::string token(sv);
+            std::size_t parsed = 0;
+            const double value = std::stod(token, &parsed);
+            if (parsed != token.size()
+                || !tt::quantity_scale::from_base_nonnegative(
+                    value, kFractionalQuantityScale, out))
+                return false;
+            quantity_scale = kFractionalQuantityScale;
+            return true;
         } catch (...) {
-            return 0;
+            return false;
         }
     }
+}
+
+// Integer volumes pass through; fractional (e.g. "246.092") use 1e8 atoms.
+inline std::int64_t parse_bar_volume(std::string_view sv,
+                                     std::uint64_t* quantity_scale = nullptr)
+{
+    std::int64_t out = 0;
+    std::uint64_t scale = kIntegerQuantityScale;
+    (void)parse_nonnegative_quantity(sv, out, scale);
+    if (quantity_scale) *quantity_scale = scale;
+    return out;
 }
 
 } // namespace tt::csv
@@ -72,6 +98,7 @@ struct bar_record
 	int64_t volume = 0;
 	// Epoch milliseconds from open_time (Binance kline CSV). 0 = unset → use date.
 	int64_t open_time_ms = 0;
+	uint64_t quantity_scale = 1;
 };
 
 class CsvBarParser : public IDataParser<bar_record>
@@ -155,7 +182,9 @@ public:
 			rec.high   = high_sv.empty()  ? 0.0 : std::stod(std::string(high_sv));
 			rec.low    = low_sv.empty()   ? 0.0 : std::stod(std::string(low_sv));
 			rec.close  = close_sv.empty() ? 0.0 : std::stod(std::string(close_sv));
-			rec.volume = tt::csv::parse_bar_volume(vol_sv);
+			if (!tt::csv::parse_nonnegative_quantity(
+			        vol_sv, rec.volume, rec.quantity_scale))
+				return std::nullopt;
 
 			if (!ot_sv.empty())
 			{
@@ -216,8 +245,10 @@ public:
 			catch (...) { return std::nullopt; }
 
 			int64_t qty = 0;
-			try { qty = tt::csv::fast_stoll(fields[3]); }
-			catch (...) { return std::nullopt; }
+			std::uint64_t quantity_scale = 1;
+			if (!tt::csv::parse_nonnegative_quantity(
+			        fields[3], qty, quantity_scale))
+				return std::nullopt;
 
 			data_tick_side side = data_tick_side::unknown;
 			if (fields.size() >= 5 && !fields[4].empty())
@@ -235,6 +266,7 @@ public:
 			rec.symbol = std::move(symbol);
 			rec.price = price;
 			rec.quantity = qty;
+			rec.quantity_scale = quantity_scale;
 			rec.side = side;
 			return rec;
 		}
@@ -249,7 +281,8 @@ public:
 
 inline void bar_record_sink(const bar_record& rec, std::shared_ptr<data_handler> handler)
 {
-	handler->load_into_queue(rec.date, rec.symbol, rec.open, rec.high, rec.low, rec.close, rec.volume);
+	handler->load_into_queue(rec.date, rec.symbol, rec.open, rec.high, rec.low,
+	                         rec.close, rec.volume, rec.quantity_scale);
 }
 
 inline void tick_record_sink(const tick_record& rec, std::shared_ptr<data_handler> handler)

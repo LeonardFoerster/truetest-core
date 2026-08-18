@@ -18,6 +18,7 @@ inline bar_record to_bar_record(const bar& b)
 	rec.low    = b.low;
 	rec.close  = b.close;
 	rec.volume = b.volume;
+	rec.quantity_scale = b.quantity_scale;
 	return rec;
 }
 
@@ -29,18 +30,23 @@ inline tick_record to_tick_record(const tick& t)
 	rec.price     = t.price;
 	rec.quantity  = t.quantity;
 	rec.side      = static_cast<data_tick_side>(t.side);
+	rec.quantity_scale = t.quantity_scale;
 	return rec;
 }
 
 inline bar from_bar_record(const bar_record& r)
 {
-	return bar{r.date, r.symbol, r.open, r.high, r.low, r.close, r.volume};
+	bar out{r.date, r.symbol, r.open, r.high, r.low, r.close, r.volume};
+	out.quantity_scale = r.quantity_scale;
+	return out;
 }
 
 inline tick from_tick_record(const tick_record& r)
 {
-	return tick{r.timestamp, r.symbol, r.price, r.quantity,
-	            static_cast<uint8_t>(r.side)};
+	tick out{r.timestamp, r.symbol, r.price, r.quantity,
+	         static_cast<uint8_t>(r.side)};
+	out.quantity_scale = r.quantity_scale;
+	return out;
 }
 
 // Domain Bar helpers (docs/internal/data-pipeline.md D-01)
@@ -54,6 +60,7 @@ inline Bar to_domain_bar(const bar& b)
 	out.low = b.low;
 	out.close = b.close;
 	out.volume = b.volume;
+	out.quantity_scale = b.quantity_scale;
 	return out;
 }
 
@@ -67,6 +74,7 @@ inline Bar to_domain_bar(const bar_record& r)
 	out.low = r.low;
 	out.close = r.close;
 	out.volume = r.volume;
+	out.quantity_scale = r.quantity_scale;
 	if (r.open_time_ms > 0)
 	{
 		out.ts = std::chrono::system_clock::time_point{

@@ -25,6 +25,43 @@
 #include <utility>
 #include <vector>
 
+class BitgetHybridLatencyRelay final : public ILatencyModel
+{
+public:
+    explicit BitgetHybridLatencyRelay(
+        std::shared_ptr<ILatencyModel> upstream)
+        : upstream_(std::move(upstream)) {}
+
+    latency_duration get_order_latency() override
+    {
+        return upstream_->get_order_latency();
+    }
+
+    latency_duration get_market_data_latency() override
+    {
+        return upstream_->get_market_data_latency();
+    }
+
+    latency_duration get_cancel_latency() override
+    {
+        last_cancel_latency_ = upstream_->get_cancel_latency();
+        cancel_sampled_ = true;
+        return last_cancel_latency_;
+    }
+
+    void clear_cancel_sample() noexcept { cancel_sampled_ = false; }
+    bool cancel_sampled() const noexcept { return cancel_sampled_; }
+    latency_duration last_cancel_latency() const noexcept
+    {
+        return last_cancel_latency_;
+    }
+
+private:
+    std::shared_ptr<ILatencyModel> upstream_;
+    latency_duration last_cancel_latency_{};
+    bool cancel_sampled_{false};
+};
+
 // Mid-price market paper fills (taker). Limits go through the hybrid's book.
 class BitgetPaperExecutor : public IExecutionAdapter
 {
@@ -116,8 +153,9 @@ private:
     std::shared_ptr<IFeeModel> fee_model_;
 };
 
-// Market → paper mid fill; limit → local/queue-aware book. Seeds synthetic
-// depth from mid when no venue L2 is available (paper/backtest without books).
+// Market → paper mid fill; passive limit → queue-aware when configured;
+// BBO-crossing limit → deterministic local taker. Seeds synthetic depth from
+// mid when no venue L2 is available (paper/backtest without books).
 class BitgetHybridExecutor : public IExecutionAdapter
 {
 public:
@@ -135,63 +173,92 @@ public:
         , spread_step_factor_(spread_step_factor)
         , latency_model_(std::move(latency_model))
     {
+        // Cold-path prewarm: on_mid_price owns exactly ten bid and ten ask
+        // quote ids. Reuse the buffer across every re-seed.
+        quote_ids_.reserve(20);
+        inner_fills_.reserve(64);
+        delayed_fills_.reserve(64);
+        order_latencies_.reserve(64);
+        if (latency_model_)
+            inner_latency_model_ =
+                std::make_shared<BitgetHybridLatencyRelay>(latency_model_);
+        auto effective_fee = fee_model
+            ? std::move(fee_model)
+            : std::make_shared<ZeroFeeModel>();
+
         if (maker_queue_model)
         {
             book_adapter_ = std::make_unique<QueueAwareBookAdapter>(
                 std::move(maker_queue_model),
-                fee_model ? std::move(fee_model) : std::make_shared<ZeroFeeModel>(),
-                latency_model_);
+                effective_fee,
+                inner_latency_model_);
+            aggressive_limit_adapter_ = std::make_unique<LocalBookAdapter>(
+                book_, effective_fee, std::make_shared<PerfectFillModel>(),
+                42u, 1.1, qty_scale_);
         }
         else
         {
+            auto effective_fill = fill_model
+                ? std::move(fill_model)
+                : std::make_shared<RealisticFillModel>(0.05, 0.8, 5.0);
             book_adapter_ = std::make_unique<LocalBookAdapter>(
-                book_,
-                fee_model ? std::move(fee_model) : std::make_shared<ZeroFeeModel>(),
-                fill_model ? std::move(fill_model)
-                           : std::make_shared<RealisticFillModel>(0.05, 0.8, 5.0));
+                book_, effective_fee, effective_fill,
+                42u, 1.1, qty_scale_, inner_latency_model_);
         }
     }
 
     void submit_order(const order_event& o) override
     {
         if (o.get_earliest_eligible_ts() > now_proxy_)
-            now_proxy_ = o.get_earliest_eligible_ts();
+            advance_time(o.get_earliest_eligible_ts());
 
         if (latency_model_)
-            order_latencies_[o.get_order_id()] = latency_model_->get_order_latency();
+            order_latencies_[o.get_order_id()] = {
+                latency_model_->get_order_latency(), o.get_tif()};
 
         if (o.get_order_type() == order_type::market)
             paper_->submit_order(o);
+        else if (aggressive_limit_adapter_)
+        {
+            const double bbo_mid = marketable_limit_bbo_mid(o);
+            const bool immediate = o.get_tif() == time_in_force::ioc
+                || o.get_tif() == time_in_force::fok;
+            if (!(bbo_mid > 0.0) && !immediate)
+            {
+                book_adapter_->submit_order(o);
+                return;
+            }
+            if (bbo_mid > 0.0)
+                aggressive_limit_adapter_->set_mid_price(bbo_mid);
+            aggressive_limit_adapter_->submit_order_against_external(o);
+            migrate_aggressive_residual(o);
+        }
         else
             book_adapter_->submit_order(o);
     }
 
     bool poll_fills(std::vector<fill_event>& out) override
     {
-        std::vector<fill_event> inner;
-        paper_->poll_fills(inner);
-        book_adapter_->poll_fills(inner);
+        poll_inner_fills();
 
         if (!latency_model_)
         {
-            if (inner.empty()) return false;
-            for (auto& f : inner) out.push_back(std::move(f));
+            if (inner_fills_.empty()) return false;
+            for (auto& f : inner_fills_) out.push_back(std::move(f));
+            inner_fills_.clear();
             return true;
         }
 
-        for (auto& f : inner)
-        {
-            auto it = order_latencies_.find(f.get_order_id());
-            auto latency = (it != order_latencies_.end())
-                ? it->second : latency_duration(0);
-            delayed_fills_.push_back({std::move(f), f.get_timestamp() + latency});
-        }
+        append_inner_to_delayed();
 
         bool released = false;
         auto new_end = std::remove_if(delayed_fills_.begin(), delayed_fills_.end(),
             [&](delayed_fill& df) {
                 if (df.release_ts <= now_proxy_)
                 {
+                    const auto order_id = df.fill.get_order_id();
+                    if (df.final_for_order)
+                        order_latencies_.erase(order_id);
                     out.push_back(std::move(df.fill));
                     released = true;
                     return true;
@@ -204,26 +271,78 @@ public:
 
     bool cancel_order(uint64_t order_id) override
     {
-        bool cancelled = book_adapter_->cancel_order(order_id);
-        if (!cancelled)
-            cancelled = paper_->cancel_order(order_id);
+        if (latency_model_)
+            buffer_inner_fills();
+        if (inner_latency_model_)
+            inner_latency_model_->clear_cancel_sample();
 
-        order_latencies_.erase(order_id);
-        auto new_end = std::remove_if(delayed_fills_.begin(), delayed_fills_.end(),
-            [order_id](const delayed_fill& df) {
-                return df.fill.get_order_id() == order_id;
-            });
-        if (new_end != delayed_fills_.end())
+        bool cancelled = book_adapter_->cancel_order(order_id);
+        if (!cancelled && aggressive_limit_adapter_)
+            cancelled = aggressive_limit_adapter_->cancel_order(order_id);
+
+        // A paper/local fill matched synchronously before it entered the
+        // simulated wire-latency buffer. It is no longer cancellable; only
+        // genuinely resting queue/book state may report cancellation.
+        if (latency_model_)
         {
-            delayed_fills_.erase(new_end, delayed_fills_.end());
-            cancelled = true;
+            const auto it = order_latencies_.find(order_id);
+            if (cancelled && it != order_latencies_.end()
+                && inner_latency_model_
+                && inner_latency_model_->cancel_sampled())
+            {
+                it->second.cancel_pending = true;
+                it->second.cancel_release_ts = now_proxy_
+                    + inner_latency_model_->last_cancel_latency();
+                if (it->second.cancel_release_ts < next_cancel_cleanup_)
+                    next_cancel_cleanup_ = it->second.cancel_release_ts;
+            }
+            else
+            {
+                order_latencies_.erase(order_id);
+            }
         }
         return cancelled;
     }
 
     bool modify_order(uint64_t order_id, double new_price, double new_qty) override
     {
-        return book_adapter_->modify_order(order_id, new_price, new_qty);
+        if (book_adapter_->modify_order(order_id, new_price, new_qty))
+            return true;
+        return aggressive_limit_adapter_
+            && aggressive_limit_adapter_->modify_order(
+                order_id, new_price, new_qty);
+    }
+
+    void advance_time(std::chrono::system_clock::time_point ts) override
+    {
+        if (ts > now_proxy_)
+            now_proxy_ = ts;
+        paper_->advance_time(ts);
+        book_adapter_->advance_time(ts);
+        if (aggressive_limit_adapter_)
+            aggressive_limit_adapter_->advance_time(ts);
+        if (latency_model_ && next_cancel_cleanup_ <= ts)
+        {
+            buffer_inner_fills();
+            next_cancel_cleanup_ =
+                std::chrono::system_clock::time_point::max();
+            for (auto it = order_latencies_.begin();
+                 it != order_latencies_.end(); )
+            {
+                if (it->second.cancel_pending
+                    && it->second.cancel_release_ts <= ts)
+                    it = order_latencies_.erase(it);
+                else
+                {
+                    if (it->second.cancel_pending
+                        && it->second.cancel_release_ts
+                            < next_cancel_cleanup_)
+                        next_cancel_cleanup_ =
+                            it->second.cancel_release_ts;
+                    ++it;
+                }
+            }
+        }
     }
 
     void on_l2_snapshot(
@@ -231,7 +350,10 @@ public:
         const std::vector<std::pair<double, double>>& bids,
         const std::vector<std::pair<double, double>>& asks) override
     {
+        mark_l2_seeded();
         book_adapter_->on_l2_snapshot(symbol, bids, asks);
+        if (aggressive_limit_adapter_)
+            aggressive_limit_adapter_->on_l2_snapshot(symbol, bids, asks);
     }
 
     void on_l2_update(
@@ -240,54 +362,253 @@ public:
         double price,
         double new_size) override
     {
+        mark_l2_seeded();
         book_adapter_->on_l2_update(symbol, side, price, new_size);
+        if (aggressive_limit_adapter_)
+            aggressive_limit_adapter_->on_l2_update(
+                symbol, side, price, new_size);
+    }
+
+    void on_trade(const std::string& symbol,
+                  double trade_price,
+                  double trade_qty,
+                  std::chrono::system_clock::time_point trade_ts) override
+    {
+        book_adapter_->on_trade(
+            symbol, trade_price, trade_qty, trade_ts);
+        if (aggressive_limit_adapter_)
+            aggressive_limit_adapter_->on_trade(
+                symbol, trade_price, trade_qty, trade_ts);
     }
 
     void on_mid_price(double mid)
     {
         if (!(mid > 0.0) || !book_) return;
 
-        book_->clear();
+        // The book is shared with locally resting strategy orders and may also
+        // contain venue L2. Re-seeding must remove only quotes owned by this
+        // executor; clearing the whole book leaves those orders tracked as
+        // open while making them impossible to fill.
+        for (auto id : quote_ids_)
+            book_->cancel_order(id);
+        quote_ids_.clear();
+
+        book_adapter_->set_mid_price(mid);
+        if (aggressive_limit_adapter_)
+            aggressive_limit_adapter_->set_mid_price(mid);
+        paper_->set_last_price(mid);
+        if (l2_seeded_)
+            return;
+
         double spread_step = mid * spread_step_factor_;
         for (int i = 1; i <= 10; ++i)
         {
             double bid_px = mid - i * spread_step;
             double ask_px = mid + i * spread_step;
             quantity qty = static_cast<quantity>(qty_scale_);
-            book_->add_order(std::make_shared<order>(
-                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
+            const auto bid_id = OrderIdGenerator::next();
+            auto bid_trades = book_->add_external_order(std::make_shared<order>(
+                ob_order_type::good_till_cancel, bid_id,
                 side::buy, Price::from_double(bid_px), qty));
-            book_->add_order(std::make_shared<order>(
-                ob_order_type::good_till_cancel, OrderIdGenerator::next(),
+            quote_ids_.push_back(bid_id);
+            if (book_adapter_ && !bid_trades.empty())
+                book_adapter_->on_book_trades(bid_trades, now_proxy_);
+            if (aggressive_limit_adapter_ && !bid_trades.empty())
+                aggressive_limit_adapter_->on_book_trades(
+                    bid_trades, now_proxy_);
+
+            const auto ask_id = OrderIdGenerator::next();
+            auto ask_trades = book_->add_external_order(std::make_shared<order>(
+                ob_order_type::good_till_cancel, ask_id,
                 side::sell, Price::from_double(ask_px), qty));
+            quote_ids_.push_back(ask_id);
+            if (book_adapter_ && !ask_trades.empty())
+                book_adapter_->on_book_trades(ask_trades, now_proxy_);
+            if (aggressive_limit_adapter_ && !ask_trades.empty())
+                aggressive_limit_adapter_->on_book_trades(
+                    ask_trades, now_proxy_);
         }
 
-        book_adapter_->set_mid_price(mid);
-        paper_->set_last_price(mid);
     }
 
     void set_l2_seeded(bool seeded) override
     {
+        if (seeded) mark_l2_seeded();
+        else l2_seeded_ = false;
         if (book_adapter_) book_adapter_->set_l2_seeded(seeded);
+        if (aggressive_limit_adapter_)
+            aggressive_limit_adapter_->set_l2_seeded(seeded);
+    }
+
+    void on_book_trades(const trades& trs,
+                        std::chrono::system_clock::time_point ts) override
+    {
+        if (book_adapter_) book_adapter_->on_book_trades(trs, ts);
+        if (aggressive_limit_adapter_)
+            aggressive_limit_adapter_->on_book_trades(trs, ts);
+    }
+
+    bool sweep_resting_range(const std::string& symbol,
+                             double low, double high,
+                             std::chrono::system_clock::time_point ts,
+                             double bar_volume = 0.0) override
+    {
+        if (!aggressive_limit_adapter_)
+            return book_adapter_
+                ? book_adapter_->sweep_resting_range(
+                      symbol, low, high, ts, bar_volume)
+                : false;
+
+        bool any = aggressive_limit_adapter_->sweep_resting_range(
+            symbol, low, high, ts, bar_volume);
+        double remaining_volume = bar_volume;
+        if (bar_volume > 0.0)
+        {
+            remaining_volume -=
+                aggressive_limit_adapter_->last_sweep_fill_qty();
+            if (!(remaining_volume > 0.0))
+                return any;
+        }
+        if (book_adapter_->sweep_resting_range(
+                symbol, low, high, ts,
+                bar_volume > 0.0 ? remaining_volume : 0.0))
+            any = true;
+        return any;
+    }
+
+    double last_sweep_fill_qty() const override
+    {
+        const double passive = book_adapter_
+            ? book_adapter_->last_sweep_fill_qty() : 0.0;
+        const double aggressive = aggressive_limit_adapter_
+            ? aggressive_limit_adapter_->last_sweep_fill_qty() : 0.0;
+        return passive + aggressive;
+    }
+
+    std::size_t pending_latency_order_count() const noexcept
+    {
+        return order_latencies_.size();
     }
 
 private:
+    void mark_l2_seeded()
+    {
+        l2_seeded_ = true;
+        if (!book_)
+            return;
+        for (auto id : quote_ids_)
+            book_->cancel_order(id);
+        quote_ids_.clear();
+    }
+
+    void migrate_aggressive_residual(const order_event& original)
+    {
+        if (!aggressive_limit_adapter_ || !book_
+            || original.get_tif() == time_in_force::ioc
+            || original.get_tif() == time_in_force::fok)
+            return;
+
+        const double remaining =
+            aggressive_limit_adapter_->remaining_quantity_base(
+                original.get_order_id());
+        if (!(remaining > 0.0))
+            return;
+
+        if (!aggressive_limit_adapter_->cancel_order(
+                original.get_order_id()))
+            return;
+        order_event residual = original;
+        residual.set_quantity(remaining);
+        book_adapter_->submit_order(residual);
+    }
+
+    void poll_inner_fills()
+    {
+        inner_fills_.clear();
+        paper_->poll_fills(inner_fills_);
+        book_adapter_->poll_fills(inner_fills_);
+        if (aggressive_limit_adapter_)
+            aggressive_limit_adapter_->poll_fills(inner_fills_);
+    }
+
+    void buffer_inner_fills()
+    {
+        poll_inner_fills();
+        append_inner_to_delayed();
+    }
+
+    void append_inner_to_delayed()
+    {
+        for (auto& f : inner_fills_)
+        {
+            const auto it = order_latencies_.find(f.get_order_id());
+            const auto latency = it != order_latencies_.end()
+                ? it->second.latency : latency_duration(0);
+            const bool final_for_order = f.get_remaining_qty() <= 1e-12
+                || (it != order_latencies_.end()
+                    && (it->second.tif == time_in_force::ioc
+                        || it->second.tif == time_in_force::fok));
+            const auto release_ts = f.get_timestamp() + latency;
+            delayed_fills_.push_back(
+                {std::move(f), release_ts, final_for_order});
+        }
+        inner_fills_.clear();
+    }
+
+    double marketable_limit_bbo_mid(const order_event& o) const noexcept
+    {
+        if (o.get_order_type() != order_type::limit || !book_
+            || !(o.get_price() > 0.0))
+            return 0.0;
+
+        const double bid = book_->best_external_bid_price();
+        const double ask = book_->best_external_ask_price();
+        if (bid > 0.0 && ask > 0.0 && bid > ask)
+            return 0.0;
+        const double contra = o.get_side() == order_side::buy ? ask : bid;
+        if (!(contra > 0.0))
+            return 0.0;
+        const bool marketable = o.get_side() == order_side::buy
+            ? o.get_price() >= contra
+            : o.get_price() <= contra;
+        if (!marketable)
+            return 0.0;
+        return bid > 0.0 && ask > 0.0 ? (bid + ask) * 0.5 : contra;
+    }
+
     struct delayed_fill
     {
         fill_event fill;
         std::chrono::system_clock::time_point release_ts;
+        bool final_for_order{false};
+    };
+
+    struct order_latency_state
+    {
+        latency_duration latency{};
+        time_in_force tif{time_in_force::gtc};
+        bool cancel_pending{false};
+        std::chrono::system_clock::time_point cancel_release_ts{};
     };
 
     std::shared_ptr<BitgetPaperExecutor> paper_;
     std::shared_ptr<orderbook> book_;
     std::unique_ptr<IExecutionAdapter> book_adapter_;
+    std::unique_ptr<LocalBookAdapter> aggressive_limit_adapter_;
+    // Synthetic quotes owned by this executor; never clear the shared book.
+    std::vector<uint64_t> quote_ids_;
     double qty_scale_ = 1e8;
     double spread_step_factor_ = 0.0001;
+    bool l2_seeded_ = false;
 
     std::shared_ptr<ILatencyModel> latency_model_;
-    std::unordered_map<uint64_t, latency_duration> order_latencies_;
+    std::shared_ptr<BitgetHybridLatencyRelay> inner_latency_model_;
+    std::unordered_map<uint64_t, order_latency_state> order_latencies_;
+    std::vector<fill_event> inner_fills_;
     std::vector<delayed_fill> delayed_fills_;
     std::chrono::system_clock::time_point now_proxy_{};
+    std::chrono::system_clock::time_point next_cancel_cleanup_{
+        std::chrono::system_clock::time_point::max()};
 };
 
 #endif // HAS_BITGET

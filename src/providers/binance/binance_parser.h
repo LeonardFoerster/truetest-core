@@ -3,6 +3,7 @@
 #include "providers/parser.h"
 #include "providers/local/csv_parser.h"
 #include "providers/provider_event.h"
+#include "data/quantity_scale.h"
 
 #include <charconv>
 #include <chrono>
@@ -291,11 +292,19 @@ inline std::optional<tick_record> parse_trade(std::string_view json)
 
     tick_record rec;
     double price = 0.0, qty = 0.0;
-    if (!parse_double_sv(price_sv, price)) return std::nullopt;
+    if (!parse_double_sv(price_sv, price) || !(price > 0.0))
+        return std::nullopt;
     if (!parse_double_sv(qty_sv, qty)) return std::nullopt;
 
+    std::int64_t qty_atoms = 0;
+    if (!tt::quantity_scale::from_base_nonnegative(
+            qty, tt::quantity_scale::canonical_atoms, qty_atoms)
+        || qty_atoms <= 0)
+        return std::nullopt;
+
     rec.price = price;
-    rec.quantity = static_cast<int64_t>(qty * 1e8);
+    rec.quantity = qty_atoms;
+    rec.quantity_scale = tt::quantity_scale::canonical_atoms;
     rec.symbol.assign(symbol_sv.data(), symbol_sv.size());
     rec.side = buyer_is_maker ? data_tick_side::ask : data_tick_side::bid;
 
@@ -377,7 +386,8 @@ inline std::optional<bar_record> parse_kline(std::string_view json)
         }
     }
 
-    std::string_view open_sv, close_sv, high_sv, low_sv, vol_sv, sym_sv, time_sv;
+    std::string_view open_sv, close_sv, high_sv, low_sv, vol_sv, sym_sv,
+        time_sv, closed_sv;
 
     detail::for_each_flat_field(json, brace + 1, k_end,
         [&](std::string_view key, std::string_view value) {
@@ -390,29 +400,36 @@ inline std::optional<bar_record> parse_kline(std::string_view json)
             case detail::key_tag("v"): vol_sv   = value; break;
             case detail::key_tag("s"): sym_sv   = value; break;
             case detail::key_tag("t"): time_sv  = value; break;
+            case detail::key_tag("x"): closed_sv = value; break;
             default: break;
             }
         });
 
-    if (open_sv.empty() || close_sv.empty() || high_sv.empty() || low_sv.empty())
+    // Binance emits many updates for the currently forming candle. Only x=true
+    // is a completed observation suitable for strategy/indicator advancement.
+    if (closed_sv != "true"
+        || open_sv.empty() || close_sv.empty() || high_sv.empty() || low_sv.empty())
         return std::nullopt;
 
     bar_record rec;
     rec.symbol.assign(sym_sv.data(), sym_sv.size());
+    rec.quantity_scale = 100'000'000ULL;
 
     double v = 0.0;
-    if (!parse_double_sv(open_sv, v))  return std::nullopt;
+    if (!parse_double_sv(open_sv, v) || !(v > 0.0)) return std::nullopt;
     rec.open = v;
-    if (!parse_double_sv(high_sv, v))  return std::nullopt;
+    if (!parse_double_sv(high_sv, v) || !(v > 0.0)) return std::nullopt;
     rec.high = v;
-    if (!parse_double_sv(low_sv, v))   return std::nullopt;
+    if (!parse_double_sv(low_sv, v) || !(v > 0.0)) return std::nullopt;
     rec.low = v;
-    if (!parse_double_sv(close_sv, v)) return std::nullopt;
+    if (!parse_double_sv(close_sv, v) || !(v > 0.0)) return std::nullopt;
     rec.close = v;
-    if (!vol_sv.empty() && parse_double_sv(vol_sv, v))
-        rec.volume = static_cast<int64_t>(v * 1e8);
-    else
+    if (vol_sv.empty())
         rec.volume = 0;
+    else if (!parse_double_sv(vol_sv, v)
+             || !tt::quantity_scale::from_base_nonnegative(
+                 v, tt::quantity_scale::canonical_atoms, rec.volume))
+        return std::nullopt;
 
     rec.date.assign(time_sv.data(), time_sv.size());
     return rec;

@@ -58,6 +58,7 @@ public:
             t.quantity = rec->quantity;
             t.side = (rec->side == data_tick_side::bid) ? 0 :
                      (rec->side == data_tick_side::ask) ? 1 : 2;
+            t.quantity_scale = rec->quantity_scale;
 
             // Native trade id ("t") - unconditional, cheap, always exact
             // (it's an integer already). footprint.md §2.1.
@@ -108,6 +109,7 @@ public:
             b.low = rec->low;
             b.close = rec->close;
             b.volume = rec->volume;
+            b.quantity_scale = rec->quantity_scale;
             return provider::event{b};
         }
         else if (event_type == "depthUpdate")
@@ -133,12 +135,21 @@ public:
 
     empty_parse_status classify_empty_frame(std::string_view line) const override
     {
-        // Binance subscription acknowledgements have a null result and an id.
-        // Everything else that produced no market event is malformed/unknown.
+        // Binance subscription acknowledgements and well-formed x=false
+        // kline updates are valid no-data frames. Everything else that
+        // produced no market event is malformed/unknown.
         if (!provider_recovery::is_authoritative_object(line)
             || !provider_recovery::decision_members_are_unique(
                 line, {"result", "id", "data"}))
             return empty_parse_status::malformed;
+
+        const std::string frame(line);
+        std::string data_json = extract_data(frame);
+        if (data_json.empty())
+            data_json = frame;
+        if (is_well_formed_forming_kline(data_json))
+            return empty_parse_status::ignored;
+
         std::string_view result;
         std::string_view id;
         std::string_view data;
@@ -156,6 +167,24 @@ public:
     }
 
 private:
+    static bool is_well_formed_forming_kline(const std::string& json)
+    {
+        if (binance::extract_string(json, "e") != "kline")
+            return false;
+        const auto closed = binance::extract_sv_optional_bool(json, "x");
+        if (!closed.has_value() || *closed)
+            return false;
+
+        double value = 0.0;
+        for (const std::string_view key : {"o", "h", "l", "c"})
+        {
+            if (!binance::parse_double_sv(
+                    binance::extract_sv_number(json, key), value))
+                return false;
+        }
+        return true;
+    }
+
     static std::string extract_data(const std::string& json)
     {
         std::string search = "\"data\":";

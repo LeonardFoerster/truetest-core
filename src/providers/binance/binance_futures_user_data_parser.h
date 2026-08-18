@@ -111,21 +111,27 @@ public:
         out.r = classify_reason(m_str);
 
         auto ts_ms = binance::extract_number(json, "E");
-        if (!ts_ms.empty())
-        {
-            auto ms = std::strtoll(ts_ms.c_str(), nullptr, 10);
-            out.ts = std::chrono::system_clock::time_point(
-                std::chrono::milliseconds(ms));
-        }
+        std::int64_t snapshot_time_ms = 0;
+        if (ts_ms.empty() || !parse_int64(ts_ms, snapshot_time_ms)
+            || snapshot_time_ms <= 0)
+            return false;
+        out.ts = std::chrono::system_clock::time_point(
+            std::chrono::milliseconds(snapshot_time_ms));
 
         // Walk B[] (balances) - array starts at "B":[ inside the inner.
+        bool rows_valid = true;
         for_each_object_in_array(inner, "B", [&](std::string_view obj) {
             parsed_position_snapshot::balance_row row;
             row.asset = std::string(binance::extract_sv_string(obj, "a"));
-            row.wallet_balance =
-                to_double(binance::extract_sv_string(obj, "wb"));
-            row.balance_change =
-                to_double(binance::extract_sv_string(obj, "bc"));
+            if (row.asset.empty()
+                || !parse_double(binance::extract_sv_string(obj, "wb"),
+                                 row.wallet_balance)
+                || !parse_double(binance::extract_sv_string(obj, "bc"),
+                                 row.balance_change))
+            {
+                rows_valid = false;
+                return;
+            }
             if (!row.asset.empty())
                 out.balances.push_back(std::move(row));
         });
@@ -134,7 +140,13 @@ public:
         for_each_object_in_array(inner, "P", [&](std::string_view obj) {
             parsed_position_snapshot::position_row row;
             row.symbol = std::string(binance::extract_sv_string(obj, "s"));
-            row.qty    = to_double(binance::extract_sv_string(obj, "pa"));
+            if (row.symbol.empty()
+                || !parse_double(binance::extract_sv_string(obj, "pa"),
+                                 row.qty))
+            {
+                rows_valid = false;
+                return;
+            }
             auto mt    = binance::extract_sv_string(obj, "mt");
             row.margin_type = canonical_margin_type(mt);
             row.position_side =
@@ -143,6 +155,11 @@ public:
                 out.positions.push_back(std::move(row));
         });
 
+        if (!rows_valid)
+        {
+            out = parsed_position_snapshot{};
+            return false;
+        }
         return true;
     }
 
@@ -165,27 +182,55 @@ public:
         out.exchange_order_id = take_id(inner, "i");
 
         auto side = binance::extract_sv_string(inner, "S");
+        const bool side_valid = side == "BUY" || side == "SELL";
         out.side = (side == "SELL") ? order_side::sell : order_side::buy;
 
-        out.last_fill_qty    = to_double(binance::extract_sv_string(inner, "l"));
-        out.last_fill_price  = to_double(binance::extract_sv_string(inner, "L"));
-        out.cumulative_qty   = to_double(binance::extract_sv_string(inner, "z"));
-        out.commission       = to_double(binance::extract_sv_string(inner, "n"));
+        auto read_nonnegative = [&](std::string_view key, double& value) {
+            const auto raw_value = binance::extract_sv_string(inner, key);
+            if (raw_value.empty()) {
+                value = 0.0;
+                return true;
+            }
+            return parse_double(raw_value, value) && value >= 0.0;
+        };
+        const bool numeric_valid =
+            read_nonnegative("l", out.last_fill_qty)
+            && read_nonnegative("L", out.last_fill_price)
+            && read_nonnegative("z", out.cumulative_qty)
+            && read_finite_optional(inner, "n", out.commission);
         out.commission_asset = std::string(binance::extract_sv_string(inner, "N"));
 
         // Wrapper-level event time (matches spot, which uses `E`).
         auto ts_ms = binance::extract_number(json, "E");
-        if (!ts_ms.empty())
+        std::int64_t event_time_ms = 0;
+        const bool timestamp_valid = !ts_ms.empty()
+            && parse_int64(ts_ms, event_time_ms) && event_time_ms > 0;
+        if (timestamp_valid)
         {
-            auto ms = std::strtoll(ts_ms.c_str(), nullptr, 10);
             out.ts = std::chrono::system_clock::time_point(
-                std::chrono::milliseconds(ms));
+                std::chrono::milliseconds(event_time_ms));
         }
 
         auto x_str = std::string(binance::extract_sv_string(inner, "x"));
         auto X_str = std::string(binance::extract_sv_string(inner, "X"));
 
         out.k = classify(x_str, X_str);
+
+        const bool is_fill = out.k == parsed_exec::kind::partial_fill
+            || out.k == parsed_exec::kind::full_fill;
+        if (!numeric_valid || !side_valid || !timestamp_valid
+            || out.symbol.empty() || out.client_order_id.empty()
+            || (is_fill && (!(out.last_fill_qty > 0.0)
+                            || !(out.last_fill_price > 0.0)
+                            || out.cumulative_qty < out.last_fill_qty)))
+        {
+            // Return true so ExecutionBridge can distinguish a malformed
+            // lifecycle frame from an unrelated user-data event and latch a
+            // terminal admission failure.
+            out.k = parsed_exec::kind::invalid;
+            out.error = "malformed ORDER_TRADE_UPDATE";
+            return true;
+        }
 
         if (out.k == parsed_exec::kind::rejected)
             out.error = std::string(binance::extract_sv_string(inner, "r"));
@@ -210,11 +255,16 @@ private:
             && std::isfinite(out);
     }
 
-    static double to_double(std::string_view sv)
+    static bool read_finite_optional(std::string_view inner,
+                                     std::string_view key,
+                                     double& out) noexcept
     {
-        if (sv.empty()) return 0.0;
-        std::string s(sv);
-        return std::strtod(s.c_str(), nullptr);
+        const auto value = binance::extract_sv_string(inner, key);
+        if (value.empty()) {
+            out = 0.0;
+            return true;
+        }
+        return parse_double(value, out);
     }
 
     static std::string take_id(std::string_view inner, std::string_view key)
