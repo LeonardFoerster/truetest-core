@@ -8,8 +8,8 @@
 #include "providers/bitget/bitget_parser.h"
 #include "providers/bitget/bitget_transport.h"
 #include "providers/bounded_ws_open.h"
+#include "providers/private_ws_lifecycle.h"
 #include "providers/recovery_payload.h"
-#include "providers/thread_safe_callback.h"
 #include "utils/retry.h"
 
 #include <boost/asio.hpp>
@@ -226,9 +226,14 @@ private:
 // the execution bridge, and disconnect → halt with no reconnect.  A
 // callback-less private stream would otherwise become fill-blind.
 
-class BitgetPrivateWsTransport : public IFillTransport
+class BitgetPrivateWsTransport : public IFillTransport,
+                                 private provider_ws::private_ws_lifecycle
 {
 public:
+    using IFillTransport::lifecycle;
+    using IFillTransport::message_cb;
+    using IFillTransport::status_cb;
+
     enum class run_result
     {
         stopped,
@@ -248,7 +253,8 @@ public:
                              std::string host = "ws.bitget.com",
                              std::string port = "443",
                              std::string path = "/v3/ws/private")
-        : api_key_(std::move(api_key))
+        : private_ws_lifecycle(this)
+        , api_key_(std::move(api_key))
         , api_secret_(std::move(api_secret))
         , passphrase_(std::move(passphrase))
         , host_(std::move(host))
@@ -292,7 +298,7 @@ public:
     {
         // A close-status callback must not reopen while member teardown is
         // about to destroy the socket/context it would otherwise reuse.
-        destroying_.store(true, std::memory_order_release);
+        mark_destroying();
         close();
     }
 
@@ -313,40 +319,31 @@ public:
         // A concurrent open must not queue behind a pending ready gate and
         // later become an implicit reopen after close().  It either observes
         // an already-ready session below or fails closed.
-        if (open_in_progress_.load(std::memory_order_acquire))
-            return false;
-        if (destroying_.load(std::memory_order_acquire))
+        if (!try_claim_open())
             return false;
 
         // Serialize session ownership (threads and io_context reset), while
         // allowing close() to request stop before it waits for this mutex.
-        std::unique_lock<std::mutex> control(control_mu_);
+        std::unique_lock<std::mutex> control(control_mutex());
         status_notifications deferred_status;
         bool owns_open_call = false;
         const auto finish_open = [&](bool result) {
             if (control.owns_lock()) control.unlock();
             publish_statuses(deferred_status);
             if (owns_open_call)
-                open_in_progress_.store(false, std::memory_order_release);
+                release_open_claim();
             return result;
         };
+        owns_open_call = true;
 
-        if (open_in_progress_.load(std::memory_order_acquire))
-            return finish_open(false);
-        if (destroying_.load(std::memory_order_acquire))
+        if (destroying())
             return finish_open(false);
 
         // A close that has begun owns the terminal transition.  A queued
         // open must not clear stop_flag_ before close has joined the reader.
-        if (close_requests_.load(std::memory_order_acquire) != 0)
+        if (close_requested())
             return finish_open(false);
         if (session_is_ready_locked()) return finish_open(true);
-
-        // Remain exclusive through deferred status delivery. A status
-        // callback must not recursively turn an error/close into a new
-        // private stream while this invocation is still unwinding.
-        open_in_progress_.store(true, std::memory_order_release);
-        owns_open_call = true;
 
         if (api_key_.empty() || api_secret_.empty() || passphrase_.empty())
         {
@@ -374,23 +371,19 @@ public:
         // Error/fatal paths can leave a joinable reader.  It is unsafe to
         // overwrite it or reuse ioc_ until the join establishes that the old
         // reader cannot publish another ready/error transition.
-        if ((reader_started_.load(std::memory_order_acquire)
-             && !reader_joined_.load(std::memory_order_acquire))
-            || reader_.joinable()
-            || active_session_.load(std::memory_order_acquire) != 0)
+        if (needs_teardown(reader_.joinable()))
             teardown_locked(&deferred_status);
 
-        if (close_requests_.load(std::memory_order_acquire) != 0)
+        if (close_requested())
             return finish_open(false);
 
-        ever_open_.store(false, std::memory_order_release);
-        const auto session = next_session_++;
-        begin_session_locked(session, "connecting private WS", &deferred_status);
-        reader_joined_.store(false, std::memory_order_release);
+        clear_ever_open();
+        const auto session = begin_session_locked(
+            "connecting private WS", &deferred_status);
         try
         {
             reader_ = std::thread([this, session] { run(session); });
-            reader_started_.store(true, std::memory_order_release);
+            mark_workers_started();
         }
         catch (...)
         {
@@ -411,31 +404,13 @@ public:
         // join rather than blocking behind an open() that is waiting for it.
         control.unlock();
         publish_statuses(deferred_status);
-        bool ready = false;
-        {
-            std::unique_lock<std::mutex> lk(state_mu_);
-            const bool signaled = open_cv_.wait_for(
-                lk, kOpenReadyTimeout, [this] {
-                    return (state_ == lifecycle::open
-                            && !ready_status_callback_pending_)
-                        || state_ == lifecycle::error
-                        || stop_flag_.load(std::memory_order_acquire);
-                });
-            ready = state_ == lifecycle::open
-                && !ready_status_callback_pending_
-                && session_running_locked(session);
-
-            if (!ready)
-            {
-                std::cerr << "BitgetPrivateWsTransport: open ready-gate failed"
-                          << (signaled ? " (error state)" : " (timeout)")
-                          << "\n";
-            }
-        }
+        const bool ready = wait_until_ready(session, kOpenReadyTimeout);
+        if (!ready)
+            std::cerr << "BitgetPrivateWsTransport: open ready-gate failed\n";
 
         control.lock();
         if (ready
-            && close_requests_.load(std::memory_order_acquire) == 0
+            && !close_requested()
             && session_is_ready_locked())
         {
             return finish_open(true);
@@ -453,7 +428,7 @@ public:
         // Re-entering close() there must only assert stop; taking control_mu_
         // would form reader -> control_mu_ -> join(reader).  The outer
         // open/close owner observes stop_flag_ and completes teardown.
-        if (status_callback_context() == this)
+        if (in_status_callback())
         {
             request_stop();
             return;
@@ -462,9 +437,9 @@ public:
         // Linearize close against reader ready publication before waiting for
         // the session owner.  An open() in its ready gate therefore returns
         // false rather than reporting a stream that is concurrently closing.
-        close_requests_.fetch_add(1, std::memory_order_acq_rel);
+        begin_close_request();
         request_stop();
-        std::unique_lock<std::mutex> control(control_mu_);
+        std::unique_lock<std::mutex> control(control_mutex());
         status_notifications deferred_status;
         const bool caller_is_reader = called_from_reader_locked();
         teardown_locked(&deferred_status);
@@ -488,56 +463,34 @@ public:
 
     lifecycle state() const override
     {
-        std::lock_guard<std::mutex> lk(state_mu_);
-        return state_;
+        return private_ws_lifecycle::state();
     }
 
     void set_on_message(message_cb cb) override
     {
-        std::lock_guard<std::mutex> control(control_mu_);
-        std::lock_guard<std::mutex> lock(callback_mu_);
-        // A running private stream may not lose its only delivery sink. The
-        // bridge may detach it after close() has joined the reader, but a
-        // clear while any generation remains live or unjoined is refused.
-        if (!cb && !callbacks_detachable_locked())
-            return;
-        const bool armed = static_cast<bool>(cb);
-        message_callback_armed_.store(false, std::memory_order_release);
-        message_cb_.store(std::move(cb));
-        message_callback_armed_.store(armed, std::memory_order_release);
+        std::lock_guard<std::mutex> control(control_mutex());
+        private_ws_lifecycle::set_on_message(
+            std::move(cb), callbacks_detachable_locked());
     }
     void set_on_status(status_cb cb) override
     {
-        std::lock_guard<std::mutex> control(control_mu_);
-        if (!cb && !callbacks_detachable_locked())
-            return;
-        status_cb_.store(std::move(cb));
+        std::lock_guard<std::mutex> control(control_mutex());
+        private_ws_lifecycle::set_on_status(
+            std::move(cb), callbacks_detachable_locked());
     }
 
     void set_fatal_disconnect_callback(
         std::function<void(std::string_view reason)> cb) override
     {
-        // Installing/replacing a non-empty callback can synchronously replay
-        // a previously latched failure. Keep control_mu_ out of that call so
-        // a replayed callback may safely enter close().
         if (cb)
         {
-            std::lock_guard<std::mutex> lock(callback_mu_);
-            fatal_callback_armed_.store(false, std::memory_order_release);
-            fatal_cb_.store(std::move(cb));
-            fatal_callback_armed_.store(true, std::memory_order_release);
+            private_ws_lifecycle::set_fatal_disconnect_callback(
+                std::move(cb), false);
             return;
         }
-
-        std::lock_guard<std::mutex> control(control_mu_);
-        std::lock_guard<std::mutex> lock(callback_mu_);
-        // Clearing a running private stream's only halt path is refused.
-        // Keeping the last registered callback is safer than permitting an
-        // asynchronous loss to continue fill-blind.
-        if (!callbacks_detachable_locked())
-            return;
-        fatal_callback_armed_.store(false, std::memory_order_release);
-        fatal_cb_.store({});
+        std::lock_guard<std::mutex> control(control_mutex());
+        private_ws_lifecycle::set_fatal_disconnect_callback(
+            {}, callbacks_detachable_locked());
     }
 
     // Providers can forward this as private_execution_producer_joined().
@@ -545,206 +498,30 @@ public:
     // after the launch's reader thread has been joined by teardown.
     bool private_execution_producer_joined() const noexcept
     {
-        return reader_started_.load(std::memory_order_acquire)
-            && reader_joined_.load(std::memory_order_acquire)
-            && active_session_.load(std::memory_order_acquire) == 0;
+        return producer_joined();
     }
 
 private:
-    struct status_notification
-    {
-        lifecycle state;
-        std::string note;
-    };
-    struct status_notifications
-    {
-        // A lifecycle path has a bounded transition count. Avoid a vector
-        // allocation in close()/destruction merely to defer status callbacks
-        // until after control_mu_ is released.
-        std::array<status_notification, 8> entries{};
-        std::size_t size = 0;
-
-        void push(lifecycle state, std::string note) noexcept
-        {
-            if (size == entries.size()) return;
-            entries[size++] = {state, std::move(note)};
-        }
-
-        void clear() noexcept
-        {
-            for (std::size_t i = 0; i < size; ++i)
-                entries[i].note.clear();
-            size = 0;
-        }
-    };
-
-    bool message_callback_ready()
-    {
-        std::lock_guard<std::mutex> lock(callback_mu_);
-        return message_callback_armed_.load(std::memory_order_acquire)
-            && static_cast<bool>(message_cb_.load());
-    }
-
-    bool fatal_callback_ready()
-    {
-        std::lock_guard<std::mutex> lock(callback_mu_);
-        return fatal_callback_armed_.load(std::memory_order_acquire);
-    }
-
-    // `control_mu_` is held by callers. `active_session_` becomes zero before
-    // join, so both the joined proof and std::thread ownership check are
-    // necessary before a bridge callback may be detached.
     bool callbacks_detachable_locked() const noexcept
     {
-        return active_session_.load(std::memory_order_acquire) == 0
-            && (!reader_started_.load(std::memory_order_acquire)
-                || reader_joined_.load(std::memory_order_acquire))
-            && !reader_.joinable();
-    }
-
-    void publish_statuses(status_notifications& notifications) noexcept
-    {
-        for (std::size_t i = 0; i < notifications.size; ++i)
-            publish_status(notifications.entries[i].state,
-                           notifications.entries[i].note);
-        notifications.clear();
-    }
-
-    void record_status(status_notifications* deferred, lifecycle s,
-                       std::string note) noexcept
-    {
-        if (deferred)
-        {
-            deferred->push(s, std::move(note));
-            return;
-        }
-        publish_status(s, note);
-    }
-
-    void publish_status(lifecycle s, std::string_view note) noexcept
-    {
-        auto& callback_context = status_callback_context();
-        struct restore_context
-        {
-            BitgetPrivateWsTransport*& slot;
-            BitgetPrivateWsTransport* previous;
-            ~restore_context() { slot = previous; }
-        } restore{callback_context, callback_context};
-        callback_context = this;
-        if (auto callback = status_cb_.load())
-        {
-            try { (*callback)(s, note); }
-            catch (...) {}
-        }
-    }
-
-    static BitgetPrivateWsTransport*& status_callback_context() noexcept
-    {
-        static thread_local BitgetPrivateWsTransport* current = nullptr;
-        return current;
-    }
-
-    void set_state(lifecycle s, std::string note,
-                   status_notifications* deferred = nullptr)
-    {
-        {
-            std::lock_guard<std::mutex> lk(state_mu_);
-            state_ = s;
-            if (s == lifecycle::open || s == lifecycle::error)
-                open_cv_.notify_all();
-        }
-        record_status(deferred, s, std::move(note));
-    }
-
-    bool set_state_for_session(std::uint64_t session, lifecycle s,
-                               std::string note,
-                               status_notifications* deferred = nullptr)
-    {
-        // A reader status callback can call close().  The readiness wait must
-        // not succeed until that callback returns, otherwise open() can
-        // admit a stream which the callback has already stopped.
-        const bool gate_ready_on_callback = s == lifecycle::open
-            && deferred == nullptr;
-        {
-            std::lock_guard<std::mutex> lk(state_mu_);
-            if (active_session_.load(std::memory_order_acquire) != session
-                || closing_)
-                return false;
-            if (s == lifecycle::open
-                && stop_flag_.load(std::memory_order_acquire))
-                return false;
-            state_ = s;
-            if (gate_ready_on_callback)
-                ready_status_callback_pending_ = true;
-            else if (s != lifecycle::open)
-                ready_status_callback_pending_ = false;
-            if (s == lifecycle::error || !gate_ready_on_callback)
-                open_cv_.notify_all();
-        }
-        record_status(deferred, s, std::move(note));
-        if (gate_ready_on_callback)
-        {
-            std::lock_guard<std::mutex> lk(state_mu_);
-            ready_status_callback_pending_ = false;
-            open_cv_.notify_all();
-        }
-        return true;
-    }
-
-    bool session_running(std::uint64_t session) const noexcept
-    {
-        return active_session_.load(std::memory_order_acquire) == session
-            && !stop_flag_.load(std::memory_order_acquire);
-    }
-
-    bool session_running_locked(std::uint64_t session) const noexcept
-    {
-        return !closing_
-            && active_session_.load(std::memory_order_acquire) == session
-            && !stop_flag_.load(std::memory_order_acquire);
-    }
-
-    bool session_is_ready_locked() const noexcept
-    {
-        std::lock_guard<std::mutex> lk(state_mu_);
-        return state_ == lifecycle::open && !ready_status_callback_pending_
-            && !closing_
-            && active_session_.load(std::memory_order_acquire) != 0
-            && !stop_flag_.load(std::memory_order_acquire);
-    }
-
-    void begin_session_locked(std::uint64_t session, std::string note,
-                              status_notifications* deferred = nullptr)
-    {
-        stop_flag_.store(false, std::memory_order_release);
-        active_session_.store(session, std::memory_order_release);
-        {
-            std::lock_guard<std::mutex> lk(state_mu_);
-            closing_ = false;
-            ready_status_callback_pending_ = false;
-            state_ = lifecycle::connecting;
-            open_cv_.notify_all();
-        }
-        record_status(deferred, lifecycle::connecting, std::move(note));
+        return private_ws_lifecycle::callbacks_detachable_locked(
+            reader_.joinable());
     }
 
     void request_stop() noexcept
     {
-        stop_flag_.store(true, std::memory_order_release);
-        stop_flag_.notify_all();
-        {
-            std::lock_guard<std::mutex> lk(state_mu_);
-            closing_ = true;
-            open_cv_.notify_all();
-        }
-        cv_.notify_all();
-        interrupt_websocket();
+        private_ws_lifecycle::request_stop([this] {
+            cv_.notify_all();
+            interrupt_websocket();
+        });
     }
 
     void stop_session(std::uint64_t session) noexcept
     {
-        if (active_session_.load(std::memory_order_acquire) == session)
-            request_stop();
+        private_ws_lifecycle::stop_session(session, [this] {
+            cv_.notify_all();
+            interrupt_websocket();
+        });
     }
 
     void interrupt_websocket() noexcept
@@ -780,12 +557,11 @@ private:
         if (called_from_reader_locked()) return;
 
         const bool had_active_session =
-            active_session_.load(std::memory_order_acquire) != 0;
+            has_active_session();
         const bool had_worker = reader_.joinable();
-        active_session_.store(0, std::memory_order_release);
+        clear_active_session();
         if (reader_.joinable()) reader_.join();
-        if (reader_started_.load(std::memory_order_acquire))
-            reader_joined_.store(true, std::memory_order_release);
+        mark_workers_joined();
 
         {
             std::lock_guard<std::mutex> lk(ws_mu_);
@@ -804,33 +580,16 @@ private:
             ioc_.restart();
         }
 
-        bool notify_closed = had_active_session || had_worker;
-        {
-            std::lock_guard<std::mutex> lk(state_mu_);
-            notify_closed = notify_closed || state_ != lifecycle::closed;
-            state_ = lifecycle::closed;
-            ready_status_callback_pending_ = false;
-            closing_ = close_requests_.load(std::memory_order_acquire) != 0;
-            open_cv_.notify_all();
-        }
-        if (notify_closed)
-            record_status(deferred, lifecycle::closed, "closed");
+        mark_closed(had_active_session, had_worker, deferred);
     }
 
     // `control_mu_` is held.  Keep close asserted until the final concurrent
     // close caller has completed; this closes the reopen-between-closes race.
     void finish_close_request_locked() noexcept
     {
-        const auto prior = close_requests_.fetch_sub(
-            1, std::memory_order_acq_rel);
-        if (prior != 1) return;
-        if ((reader_started_.load(std::memory_order_acquire)
-             && !reader_joined_.load(std::memory_order_acquire))
-            || active_session_.load(std::memory_order_acquire) != 0)
-            return;
-        std::lock_guard<std::mutex> lk(state_mu_);
-        closing_ = false;
-        open_cv_.notify_all();
+        finish_close_request(
+            workers_unjoined()
+            || reader_.joinable());
     }
 
     int64_t login_timestamp_ms() const
@@ -871,7 +630,7 @@ private:
 
     void maybe_send_ping(bool force = false)
     {
-        if (!ws_ || stop_flag_.load())
+        if (!ws_ || stop_token().load())
             return;
         const auto now = std::chrono::steady_clock::now();
         if (!force && (now - last_ping_) < kPingInterval)
@@ -890,7 +649,7 @@ private:
 
     bool wait_ready_for_read()
     {
-        if (!ws_ || stop_flag_.load())
+        if (!ws_ || stop_token().load())
             return false;
 
         if (ssl_has_pending_app_data(ws_->next_layer().native_handle()))
@@ -908,13 +667,13 @@ private:
     // `out` views frame_buffer_ — valid only until the next read.
     bool read_app_frame(std::string_view& out)
     {
-        while (!stop_flag_.load())
+        while (!stop_token().load())
         {
             maybe_send_ping();
 
             if (!wait_ready_for_read())
             {
-                if (stop_flag_.load())
+                if (stop_token().load())
                     return false;
                 maybe_send_ping(/*force=*/true);
                 continue;
@@ -939,7 +698,7 @@ private:
                 });
             if (!read) return false;
 
-            if (stop_flag_.load())
+            if (stop_token().load())
                 return false;
 
             if (frame_buffer_.size() > kMaxInboundFrameBytes)
@@ -966,7 +725,7 @@ private:
         const auto deadline =
             std::chrono::steady_clock::now() + kLoginTimeout;
 
-        while (!stop_flag_.load())
+        while (!stop_token().load())
         {
             if (std::chrono::steady_clock::now() >= deadline)
             {
@@ -1015,7 +774,7 @@ private:
                     lowest.close(ignored);
                 });
             if (!read) return false;
-            if (stop_flag_.load())
+            if (stop_token().load())
                 return false;
 
             if (frame_buffer_.size() > kMaxInboundFrameBytes)
@@ -1057,7 +816,7 @@ private:
             std::chrono::steady_clock::now() + kLoginTimeout;
         private_subscription_tracker tracker;
 
-        while (!stop_flag_.load(std::memory_order_acquire))
+        while (!stop_token().load(std::memory_order_acquire))
         {
             const auto now = std::chrono::steady_clock::now();
             if (now >= deadline)
@@ -1101,7 +860,7 @@ private:
                     lowest.cancel(ignored);
                     lowest.close(ignored);
                 });
-            if (!read || stop_flag_.load(std::memory_order_acquire))
+            if (!read || stop_token().load(std::memory_order_acquire))
                 return false;
 
             if (frame_buffer_.size() > kMaxInboundFrameBytes)
@@ -1228,7 +987,7 @@ private:
             last_ping_ = std::chrono::steady_clock::now();
 
             reached_open = true;
-            ever_open_.store(true, std::memory_order_release);
+            mark_ever_open();
             if (!set_state_for_session(
                     session, lifecycle::open,
                     "private WS open (order/fill/position)"))
@@ -1240,8 +999,7 @@ private:
                 if (!read_app_frame(view))
                     break;
                 if (!session_running(session)) break;
-                if (auto callback = message_cb_.load())
-                    (*callback)(view);
+                publish_message(view);
             }
             return run_result::stopped;
         }
@@ -1273,7 +1031,7 @@ private:
         if (!session_running(session)) return;
         if (run_once_override_ && override_reports_ready_)
         {
-            ever_open_.store(true, std::memory_order_release);
+            mark_ever_open();
             if (!set_state_for_session(
                     session, lifecycle::open, "test private WS open"))
                 return;
@@ -1297,7 +1055,7 @@ private:
                 delay = std::min(delay * 2, max_delay);
             }
 
-            auto r = run_once_override_ ? run_once_override_(stop_flag_)
+            auto r = run_once_override_ ? run_once_override_(stop_token())
                                         : run_once(session);
             if (!session_running(session)) return;
             if (r == run_result::stopped)
@@ -1306,7 +1064,7 @@ private:
                 // so fatal_cb / reconnect policy can run (unless close() set stop).
                 if (!session_running(session))
                     return;
-                if (!ever_open_.load(std::memory_order_acquire))
+                if (!ever_open())
                 {
                     set_state_for_session(session, lifecycle::error,
                                           "private WS stopped before ready");
@@ -1324,7 +1082,7 @@ private:
 
             // Initial connect failed before ever open: fail open() wait
             // immediately — do not burn reconnect budget during ready-gate.
-            if (!ever_open_.load(std::memory_order_acquire))
+            if (!ever_open())
             {
                 char buf[192];
                 std::snprintf(buf, sizeof(buf),
@@ -1343,7 +1101,7 @@ private:
                           "bitget private WS lost: %s", what);
             set_state_for_session(session, lifecycle::error, buf);
             stop_session(session);
-            fatal_cb_.publish(buf);
+            publish_failure(buf);
             return;
         }
     }
@@ -1364,45 +1122,12 @@ private:
     std::unique_ptr<websocket::stream<beast::ssl_stream<tcp::socket>>> ws_;
     beast::flat_buffer frame_buffer_;
 
-    ThreadSafeCallback<void(std::string_view)> message_cb_;
-    ThreadSafeCallback<void(lifecycle, std::string_view)> status_cb_;
-    LatchedFailureCallback fatal_cb_;
-    // Couple the armed bit to the callback replacement, so a racing setter
-    // cannot leave open() with an armed bit for an empty delivery/halt route.
-    std::mutex callback_mu_;
-    std::atomic<bool> message_callback_armed_{false};
-    std::atomic<bool> fatal_callback_armed_{false};
-
-    // `control_mu_` serializes reader ownership and ioc_ reset.  It is not
-    // used for stop publication, so close() can wake a concurrent open().
-    std::mutex control_mu_;
     std::thread reader_;
-    std::atomic<bool> stop_flag_{false};
-    // Set once login+subscribe succeed; open() ready-gate and reconnect policy.
-    std::atomic<bool> ever_open_{false};
-    std::atomic<bool> reader_started_{false};
-    std::atomic<bool> reader_joined_{false};
-    std::atomic<bool> open_in_progress_{false};
-    std::atomic<bool> destroying_{false};
-    std::atomic<std::uint64_t> active_session_{0};
-    std::atomic<unsigned> close_requests_{0};
-    std::uint64_t next_session_ = 1;
     run_once_fn run_once_override_;
     bool override_reports_ready_ = false;
 
     std::mutex cv_mu_;
     std::condition_variable cv_;
-
-    mutable std::mutex state_mu_;
-    std::condition_variable open_cv_;
-    lifecycle state_ = lifecycle::closed;
-    // Protected by state_mu_.  This is the internal `closing` state missing
-    // from IFillTransport::lifecycle and prevents late ready publication.
-    bool closing_ = false;
-    // Protected by state_mu_. A status callback is part of the ready
-    // handshake: it can close the transport, so open() waits for it to return
-    // before acknowledging readiness.
-    bool ready_status_callback_pending_ = false;
 
     std::chrono::steady_clock::time_point last_ping_{};
 

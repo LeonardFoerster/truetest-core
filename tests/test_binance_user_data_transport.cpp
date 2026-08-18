@@ -7,11 +7,78 @@
 #ifdef HAS_BINANCE
 
 #include "providers/binance/binance_user_data_transport.h"
+#include "providers/private_ws_lifecycle.h"
 
 #include <memory>
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 #include <thread>
+
+TEST(PrivateWsLifecycle, CallbacksDetachOnlyAfterWorkerJoin)
+{
+    int owner_token = 0;
+    provider_ws::private_ws_lifecycle lifecycle(&owner_token);
+    lifecycle.set_on_message([](std::string_view) {}, true);
+    lifecycle.set_fatal_disconnect_callback(
+        [](std::string_view) {}, true);
+
+    const auto session = lifecycle.begin_session_locked("test");
+    lifecycle.mark_workers_started();
+    EXPECT_TRUE(lifecycle.session_running(session));
+    EXPECT_FALSE(lifecycle.callbacks_detachable_locked(false));
+
+    lifecycle.begin_close_request();
+    lifecycle.request_stop([] {});
+    lifecycle.clear_active_session();
+    lifecycle.mark_workers_joined();
+    lifecycle.mark_closed(true, true);
+    lifecycle.finish_close_request(false);
+
+    EXPECT_TRUE(lifecycle.producer_joined());
+    EXPECT_TRUE(lifecycle.callbacks_detachable_locked(false));
+    lifecycle.set_on_message({}, true);
+    lifecycle.set_fatal_disconnect_callback({}, true);
+    EXPECT_FALSE(lifecycle.message_callback_ready());
+    EXPECT_FALSE(lifecycle.fatal_callback_ready());
+}
+
+TEST(PrivateWsLifecycle, ReadyStatusCallbackCanStopBeforeReadyIsObserved)
+{
+    int owner_token = 0;
+    provider_ws::private_ws_lifecycle lifecycle(&owner_token);
+    lifecycle.set_on_status(
+        [&](IFillTransport::lifecycle state, std::string_view) {
+            if (state == IFillTransport::lifecycle::open)
+                lifecycle.request_stop([] {});
+        },
+        true);
+
+    const auto session = lifecycle.begin_session_locked("test");
+    lifecycle.mark_workers_started();
+    ASSERT_TRUE(lifecycle.set_state_for_session(
+        session, IFillTransport::lifecycle::open, "ready"));
+    EXPECT_FALSE(lifecycle.wait_until_ready(
+        session, std::chrono::milliseconds(1)));
+
+    lifecycle.clear_active_session();
+    lifecycle.mark_workers_joined();
+}
+
+TEST(PrivateWsLifecycle, MessageCallbackFailureIsNotSilentlyDropped)
+{
+    int owner_token = 0;
+    provider_ws::private_ws_lifecycle lifecycle(&owner_token);
+    lifecycle.set_on_message(
+        [](std::string_view) {
+            throw std::runtime_error("consumer rejected private frame");
+        },
+        true);
+
+    // Reader loops own the terminal transition. The shared lifecycle must
+    // preserve their exception boundary rather than lose authenticated truth.
+    EXPECT_THROW(lifecycle.publish_message("private frame"), std::runtime_error);
+}
 
 TEST(BinanceUserDataTransport, ConstructDoesNotOpenConnections)
 {
