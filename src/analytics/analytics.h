@@ -177,14 +177,7 @@ public:
     {
         open_positions_[symbol].last_price = price;
         last_close_ = price;
-        const double equity = cash_ + position_value();
-        last_equity_ = equity;
-        if (equity > peak_equity_) peak_equity_ = equity;
-        if (peak_equity_ > 0.0)
-        {
-            const double dd = (peak_equity_ - equity) / peak_equity_;
-            if (dd > max_drawdown_) max_drawdown_ = dd;
-        }
+        update_risk_equity(cash_ + position_value());
     }
 
     // Phase 2.4 — allow external update of the current 8h funding rate    // (called from provider when better funding rate data is available)
@@ -357,6 +350,7 @@ private:
                              std::size_t& stride,
                              std::size_t& counter,
                              const equity_point& pt);
+    void update_risk_equity(double equity) noexcept;
 
     double last_close_ = 0.0;
     std::vector<equity_point> equity_curve_;

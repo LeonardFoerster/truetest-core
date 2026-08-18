@@ -2,6 +2,7 @@
 #include "date_parse.h"
 
 #include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <numeric>
 #include <type_traits>
@@ -30,11 +31,13 @@ std::chrono::system_clock::time_point parse_or_epoch(const std::string& date)
 
 bool MarketSeries::validate_and_append_bar(std::string date, std::string symbol,
                                            std::chrono::system_clock::time_point ts,
-                                           double o, double h, double l, double c, int64_t v)
+                                           double o, double h, double l, double c, int64_t v,
+                                           uint64_t quantity_scale)
 {
 	size_t row = bar_date_.size() + 1;
 
-	if (o <= 0 || h <= 0 || l <= 0 || c <= 0)
+	if (!std::isfinite(o) || !std::isfinite(h) || !std::isfinite(l)
+	    || !std::isfinite(c) || o <= 0 || h <= 0 || l <= 0 || c <= 0)
 	{
 		std::cerr << "  ! Row " << row << ": non-positive price (o=" << o
 		          << " h=" << h << " l=" << l << " c=" << c << "), skipping\n";
@@ -53,6 +56,12 @@ bool MarketSeries::validate_and_append_bar(std::string date, std::string symbol,
 		++validation_error_count_;
 		return false;
 	}
+	if (quantity_scale == 0)
+	{
+		std::cerr << "  ! Row " << row << ": zero quantity scale, skipping\n";
+		++validation_error_count_;
+		return false;
+	}
 
 	if (ts == std::chrono::system_clock::time_point{} && !date.empty())
 		ts = parse_or_epoch(date);
@@ -65,13 +74,15 @@ bool MarketSeries::validate_and_append_bar(std::string date, std::string symbol,
 	bar_low_.emplace_back(l);
 	bar_close_.emplace_back(c);
 	bar_volume_.emplace_back(v);
+	bar_quantity_scale_.emplace_back(quantity_scale);
 	return true;
 }
 
 bool MarketSeries::on_bar(const Bar& bar)
 {
 	return validate_and_append_bar(bar.date, bar.symbol, bar.ts,
-	                               bar.open, bar.high, bar.low, bar.close, bar.volume);
+	                               bar.open, bar.high, bar.low, bar.close, bar.volume,
+	                               bar.quantity_scale);
 }
 
 bool MarketSeries::on_tick(const Tick& tick)
@@ -80,15 +91,17 @@ bool MarketSeries::on_tick(const Tick& tick)
 }
 
 bool MarketSeries::load_into_queue(std::string date, std::string symbol,
-                                   double o, double h, double l, double c, int64_t v)
+                                   double o, double h, double l, double c, int64_t v,
+                                   uint64_t quantity_scale)
 {
 	auto ts = parse_or_epoch(date);
-	return validate_and_append_bar(std::move(date), std::move(symbol), ts, o, h, l, c, v);
+	return validate_and_append_bar(std::move(date), std::move(symbol), ts,
+	                               o, h, l, c, v, quantity_scale);
 }
 
 bool MarketSeries::add_tick(tick_record rec)
 {
-	if (rec.price <= 0)
+	if (!std::isfinite(rec.price) || rec.price <= 0)
 	{
 		std::cerr << "  ! Tick: non-positive price (" << rec.price << "), skipping\n";
 		++validation_error_count_;
@@ -97,6 +110,12 @@ bool MarketSeries::add_tick(tick_record rec)
 	if (rec.quantity <= 0)
 	{
 		std::cerr << "  ! Tick: non-positive quantity (" << rec.quantity << "), skipping\n";
+		++validation_error_count_;
+		return false;
+	}
+	if (rec.quantity_scale == 0)
+	{
+		std::cerr << "  ! Tick: zero quantity scale, skipping\n";
 		++validation_error_count_;
 		return false;
 	}
@@ -183,6 +202,7 @@ void MarketSeries::apply_bar_permutation(std::vector<std::size_t>& source_for_de
 		const double low = bar_low_[dest];
 		const double close = bar_close_[dest];
 		const int64_t volume = bar_volume_[dest];
+		const uint64_t quantity_scale = bar_quantity_scale_[dest];
 
 		std::size_t current = dest;
 		while (source_for_dest[current] != dest)
@@ -196,6 +216,7 @@ void MarketSeries::apply_bar_permutation(std::vector<std::size_t>& source_for_de
 			bar_low_[current] = bar_low_[source];
 			bar_close_[current] = bar_close_[source];
 			bar_volume_[current] = bar_volume_[source];
+			bar_quantity_scale_[current] = bar_quantity_scale_[source];
 			source_for_dest[current] = current;
 			current = source;
 		}
@@ -208,6 +229,7 @@ void MarketSeries::apply_bar_permutation(std::vector<std::size_t>& source_for_de
 		bar_low_[current] = low;
 		bar_close_[current] = close;
 		bar_volume_[current] = volume;
+		bar_quantity_scale_[current] = quantity_scale;
 		source_for_dest[current] = current;
 	}
 }
@@ -289,6 +311,7 @@ void MarketSeries::filter_appended_window(
 				bar_low_[write] = bar_low_[read];
 				bar_close_[write] = bar_close_[read];
 				bar_volume_[write] = bar_volume_[read];
+				bar_quantity_scale_[write] = bar_quantity_scale_[read];
 			}
 			++write;
 		}
@@ -301,6 +324,7 @@ void MarketSeries::filter_appended_window(
 		bar_low_.resize(write);
 		bar_close_.resize(write);
 		bar_volume_.resize(write);
+		bar_quantity_scale_.resize(write);
 	}
 
 	const std::size_t original_tick_count = tick_count();
@@ -330,6 +354,7 @@ MarketSeries::BarView MarketSeries::bar_at(std::size_t i) const
 	v.low = bar_low_[i];
 	v.close = bar_close_[i];
 	v.volume = bar_volume_[i];
+	v.quantity_scale = bar_quantity_scale_[i];
 	return v;
 }
 
@@ -364,6 +389,7 @@ void MarketSeries::clear()
 	bar_low_.clear();
 	bar_close_.clear();
 	bar_volume_.clear();
+	bar_quantity_scale_.clear();
 	ticks_.clear();
 }
 
@@ -383,6 +409,7 @@ void MarketSeries::reserve_bars(std::size_t n)
 	bar_low_.reserve(n);
 	bar_close_.reserve(n);
 	bar_volume_.reserve(n);
+	bar_quantity_scale_.reserve(n);
 }
 
 void MarketSeries::reserve_ticks(std::size_t n)
@@ -414,6 +441,7 @@ void MarketSeries::rollback_appends(AppendCheckpoint checkpoint) noexcept
 	bar_low_.resize(checkpoint.bar_count);
 	bar_close_.resize(checkpoint.bar_count);
 	bar_volume_.resize(checkpoint.bar_count);
+	bar_quantity_scale_.resize(checkpoint.bar_count);
 	ticks_.resize(checkpoint.tick_count);
 	validation_error_count_ = checkpoint.validation_errors;
 }

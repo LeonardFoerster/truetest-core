@@ -27,7 +27,8 @@ public:
 	// ── Legacy write helpers (MC / tests / migration) ──────────────────────
 	// date string is parsed once into bar_ts_ (not re-parsed on every engine bar).
 	bool load_into_queue(std::string date, std::string symbol,
-	                     double o, double h, double l, double c, int64_t v);
+	                     double o, double h, double l, double c, int64_t v,
+	                     uint64_t quantity_scale = 1);
 	bool add_tick(tick_record rec);
 
 	// ── Capacity / lifecycle ───────────────────────────────────────────────
@@ -88,6 +89,7 @@ public:
 		double low = 0;
 		double close = 0;
 		int64_t volume = 0;
+		uint64_t quantity_scale = 1;
 	};
 
 	std::size_t bar_count() const noexcept { return bar_symbol_.size(); }
@@ -113,7 +115,8 @@ public:
 private:
 	bool validate_and_append_bar(std::string date, std::string symbol,
 	                             std::chrono::system_clock::time_point ts,
-	                             double o, double h, double l, double c, int64_t v);
+	                             double o, double h, double l, double c, int64_t v,
+	                             uint64_t quantity_scale);
 	std::vector<std::size_t> sorted_bar_indices() const;
 	std::vector<std::size_t> sorted_tick_indices() const;
 	void apply_bar_permutation(std::vector<std::size_t>& source_for_dest);
@@ -130,6 +133,7 @@ private:
 	std::vector<double> bar_low_;
 	std::vector<double> bar_close_;
 	std::vector<int64_t> bar_volume_;
+	std::vector<uint64_t> bar_quantity_scale_;
 
 	// Tick AoS
 	std::vector<Tick> ticks_;

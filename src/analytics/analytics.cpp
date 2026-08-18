@@ -175,7 +175,7 @@ void Analytics::on_funding(const funding_event& fe)
     // Mirror the equity calculation from on_market
     double equity = cash_ + position_value();
 
-    last_equity_ = equity;
+    update_risk_equity(equity);
 
     // Record a point so the equity curve (and any downstream reports) shows the funding step
     record_equity_point(equity_curve_, equity_stride_, equity_counter_,
@@ -250,22 +250,14 @@ void Analytics::on_market(const market_event& m)
         prev_bh_equity_ = bh_equity_now;
     }
 
-    if (equity > peak_equity_)
-        peak_equity_ = equity;
-
-    if (peak_equity_ > 0.0)
-    {
-        double dd = (peak_equity_ - equity) / peak_equity_;
-        if (dd > max_drawdown_)
-            max_drawdown_ = dd;
-    }
+    update_risk_equity(equity);
 }
 
 void Analytics::on_tick(const tick_event& t)
 {
     last_close_ = t.get_price();
     open_positions_[t.get_symbol()].last_price = t.get_price();
-    last_equity_ = cash_ + position_value();
+    update_risk_equity(cash_ + position_value());
 
     // Phase 2.3 - update vol from tick mid (price)
     double mid = t.get_price();
@@ -324,10 +316,10 @@ void Analytics::on_fill(const fill_event& f)
         slippage_count_++;
     }
 
-    std::string strat_name;
+    const std::string* strat_name = &f.get_strategy_name();
     auto strat_it = order_strategies_.find(f.get_order_id());
     if (strat_it != order_strategies_.end())
-        strat_name = strat_it->second;
+        strat_name = &strat_it->second;
 
     trade_record rec;
     rec.order_id = f.get_order_id();
@@ -339,7 +331,7 @@ void Analytics::on_fill(const fill_event& f)
     rec.timestamp = f.get_timestamp();
     rec.pnl = 0.0;
     rec.symbol = f.get_symbol();
-    rec.strategy_name = strat_name;
+    rec.strategy_name = *strat_name;
 
     const double fill_price = f.get_fill_price();
     const double commission = f.get_commission();
@@ -408,9 +400,9 @@ void Analytics::on_fill(const fill_event& f)
             if (pnl > 0.0) { sa.win_count++; sa.total_win += pnl; }
             else { sa.total_loss += std::abs(pnl); }
         }
-        if (!strat_name.empty())
+        if (!strat_name->empty())
         {
-            auto& sa = per_strategy_[strat_name];
+            auto& sa = per_strategy_[*strat_name];
             sa.total_pnl += pnl;
             sa.trade_count++;
             if (pnl > 0.0) { sa.win_count++; sa.total_win += pnl; }
@@ -449,6 +441,25 @@ void Analytics::on_fill(const fill_event& f)
     }
 
     trades_.push_back(rec);
+
+    // Fill cash/position mutation is immediately visible to post-fill risk.
+    // Do not append an equity-curve point here (curve cadence is market-time),
+    // but never leave risk_view() at the pre-fill mark.
+    const double equity = cash_ + position_value();
+    update_risk_equity(equity);
+}
+
+void Analytics::update_risk_equity(double equity) noexcept
+{
+    last_equity_ = equity;
+    if (equity > peak_equity_)
+        peak_equity_ = equity;
+    if (peak_equity_ > 0.0)
+    {
+        const double dd = (peak_equity_ - equity) / peak_equity_;
+        if (dd > max_drawdown_)
+            max_drawdown_ = dd;
+    }
 }
 
 void Analytics::on_l2_snapshot(const l2_snapshot_event& ev)
@@ -459,6 +470,7 @@ void Analytics::on_l2_snapshot(const l2_snapshot_event& ev)
         if (best_ask > best_bid && best_bid > 0) {
             double mid = (best_ask + best_bid) / 2.0;
             current_spread_bps_ = ((best_ask - best_bid) / mid) * 10000.0;
+            on_mark(ev.get_symbol(), mid);
         }
     }
 }
@@ -580,7 +592,10 @@ AnalyticsReport Analytics::snapshot() const
         op.avg_entry = pos.avg_entry;
         op.mark = pos.last_price > 0.0 ? pos.last_price : pos.avg_entry;
         // Long: (mark - entry) * qty; short qty negative → same formula.
-        op.unrealized_pnl = (op.mark - op.avg_entry) * op.quantity;
+        // Entry commission is already deducted from cash, so the remaining
+        // open share belongs in unrealized PnL until the position closes.
+        op.unrealized_pnl =
+            (op.mark - op.avg_entry) * op.quantity - pos.open_commission;
         r.unrealized_pnl += op.unrealized_pnl;
         r.open_positions.push_back(std::move(op));
     }

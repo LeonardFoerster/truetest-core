@@ -132,7 +132,10 @@ bool load_csv_bars(const std::filesystem::path& path, IMarketSink& sink, LoadSta
 					std::size_t idx = 0;
 					const long long iv = std::stoll(v_s, &idx);
 					if (idx == v_s.size())
+					{
 						bar.volume = iv;
+						bar.quantity_scale = 1;
+					}
 					else
 						throw std::invalid_argument("fractional");
 				}
@@ -142,7 +145,10 @@ bool load_csv_bars(const std::filesystem::path& path, IMarketSink& sink, LoadSta
 					{
 						const double d = std::stod(v_s);
 						if (std::isfinite(d) && d >= 0.0)
+						{
 							bar.volume = static_cast<int64_t>(std::llround(d * 1e8));
+							bar.quantity_scale = 100'000'000ULL;
+						}
 					}
 					catch (...) {}
 				}

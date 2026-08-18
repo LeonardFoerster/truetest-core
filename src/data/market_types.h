@@ -30,6 +30,9 @@ struct Bar
 	double low = 0;
 	double close = 0;
 	int64_t volume = 0;
+	// Units represented by one whole quantity. Legacy integer CSV volumes use
+	// 1; exchange decimal quantities encoded as fixed-point atoms use 1e8.
+	uint64_t quantity_scale = 1;
 };
 
 struct Tick
@@ -42,6 +45,8 @@ struct Tick
 	double price = 0;
 	int64_t quantity = 0;
 	data_tick_side side = data_tick_side::unknown;
+	// Units represented by one whole quantity (see Bar::quantity_scale).
+	uint64_t quantity_scale = 1;
 };
 
 // Legacy name kept for one migration cycle (parsers, DataBridge, engine ticks).
