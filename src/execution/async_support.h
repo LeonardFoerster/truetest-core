@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/event.h"
+#include "private_execution_record.h"
 
 #include <cstdint>
 #include <functional>
@@ -57,6 +58,34 @@ using unknown_fill_handler =
     std::function<std::optional<synth_result>(const parsed_exec&,
                                               std::uint64_t fill_id)>;
 
+// Result of engine-thread resolution of one record taken from the provider's
+// private FIFO.  The private reader only parses and publishes; all bridge map
+// mutation, terminal retirement, and venue-bracket attribution happen on the
+// engine thread after source order has been fixed by the ingress.
+enum class private_execution_resolution : std::uint8_t
+{
+    tracked,
+    untracked,
+    duplicate,
+    fatal,
+};
+
+// Opaque engine-thread proof returned implicitly by a successful private
+// record resolution.  The source sequence is globally monotonic for one
+// provider ingress and the engine id binds that sequence to exactly one
+// tracked order.  A caller may commit or roll back only this exact pair;
+// guessing a later sequence must fail closed.
+struct private_execution_reservation
+{
+    std::uint64_t source_sequence = 0;
+    std::uint64_t engine_order_id = 0;
+
+    [[nodiscard]] constexpr bool valid() const noexcept
+    {
+        return source_sequence != 0 && engine_order_id != 0;
+    }
+};
+
 // Narrow capability interface for adapters that support async submit
 // acknowledgement + venue-managed bracket leg synthesis (currently only
 // ExecutionBridge for live Binance providers).
@@ -87,4 +116,65 @@ public:
     // Engine should call this after submit_order (and periodically).
     // Mirrors the poll_fills pattern used for incoming fills.
     virtual bool poll_submit_results(std::vector<submit_result>& out) = 0;
+
+    // Resolve a provider-private record after the engine has popped it from
+    // the SPSC ingress.  On `tracked`, `record.engine_order_id` and
+    // `record.remaining_qty` are populated.  `duplicate` is an exact no-op;
+    // `untracked` is reserved for a typed venue-managed leg that ExitManager
+    // must resolve; `fatal` means identity/cumulative proof failed and order
+    // admission has already been closed.
+    virtual private_execution_resolution
+    resolve_private_execution(private_execution_record&)
+    {
+        return private_execution_resolution::fatal;
+    }
+
+    // Resolution is deliberately a prepare step.  A concrete bridge must
+    // not advance cumulative quantities, replay history, or terminal map
+    // retirement until the engine has completed canonical accounting.  Test
+    // doubles must explicitly override these methods when used with a unified
+    // ingress.  The fail-closed defaults prevent a future adapter from
+    // accidentally claiming source-of-truth lifecycle proof by inheritance.
+    virtual bool commit_private_execution(
+        const private_execution_reservation& /*reservation*/)
+    {
+        return false;
+    }
+
+    virtual bool rollback_private_execution(
+        const private_execution_reservation& /*reservation*/)
+    {
+        return false;
+    }
+
+    // Commits retirement of a terminal record only after the engine has
+    // accounted/audited it.  This is the bridge half of the proof that a
+    // terminal mapping cannot disappear before accounting succeeds.
+    virtual bool acknowledge_private_terminal(std::uint64_t /*sequence*/)
+    {
+        return false;
+    }
+
+    // Returns false once a REST-cancel acknowledgement has outlived its
+    // bounded private-terminal confirmation window.  Engine polls it from
+    // normal and final drain maintenance; failure is terminal/reconcile.
+    virtual bool check_private_lifecycle_deadline()
+    {
+        return true;
+    }
+
+    // Used only after the private producer has joined at shutdown.  A clean
+    // final drain is impossible while a REST cancel acknowledgement or a
+    // terminal record still awaits its engine-side commit.
+    virtual bool has_unresolved_private_lifecycle() const
+    {
+        return true;
+    }
+
+    // Engine-side validation can discover a broken sequence or an
+    // unresolvable record after the reader successfully published it.  Close
+    // the bridge's venue-admission gate synchronously before the engine
+    // begins its accounting-only drain; this is distinct from merely setting
+    // the provider ring failure flag.
+    virtual void fail_private_execution_admission() {}
 };

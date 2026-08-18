@@ -5,14 +5,19 @@
 #include "fill_transport.h"
 #include "order_encoder.h"
 #include "fill_parser.h"
+#include "private_execution_ingress.h"
 #include "rate_limiter.h"
 #include "async_support.h"
 #include "../core/event.h"
 
 #include <chrono>
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -76,6 +81,13 @@ public:
         // that queue has a different producer and ordering contract.
         std::function<void()> execution_failure_handler;
 
+        // When supplied, this is the sole private-account handoff.  The
+        // private reader parses and publishes a POD record only; all identity
+        // resolution and lifecycle mutation run later on the engine thread.
+        IPrivateExecutionIngress* execution_ingress = nullptr;
+        std::string private_account_symbol;
+        bool require_execution_ingress = false;
+
         bool start_transport_thread = true;
     };
 
@@ -114,6 +126,26 @@ public:
         unknown_fill_handler_ = {};
     }
 
+    private_execution_resolution
+    resolve_private_execution(private_execution_record& record) override;
+
+    bool commit_private_execution(
+        const private_execution_reservation& reservation) override;
+
+    bool rollback_private_execution(
+        const private_execution_reservation& reservation) noexcept override;
+
+    bool acknowledge_private_terminal(std::uint64_t sequence) override;
+
+    bool check_private_lifecycle_deadline() override;
+
+    bool has_unresolved_private_lifecycle() const override;
+
+    void fail_private_execution_admission() noexcept override
+    {
+        fail_malformed_execution();
+    }
+
     // Engine drains this BEFORE poll_fills so order_meta_ has the
     // mapping ready when lookup_opener fires inside the fill loop.
     bool poll_synth_meta(std::vector<synth_meta>& out) override
@@ -129,22 +161,19 @@ public:
 
     ~ExecutionBridge()
     {
-        close();  // ensure transport thread joined before destroying rings/mutexes/d_
+        // `d_` is deliberately the first member and is therefore destroyed
+        // last.  A fill transport may outlive the bridge through a provider
+        // reference, or it may be released while `d_` is torn down.  In both
+        // cases its close/destructor is allowed to publish a final status.
+        // Detach our [this] callbacks only after close() has joined its
+        // reader, while all bridge callback targets still exist.
+        close();
     }
 
     explicit ExecutionBridge(deps d)
         : d_(std::move(d))
     {
-        if (d_.fill_tx)
-        {
-            d_.fill_tx->set_on_message([this](std::string_view raw) {
-                handle_message(raw);
-            });
-            d_.fill_tx->set_on_status([this](IFillTransport::lifecycle st,
-                                             std::string_view note) {
-                handle_status(st, note);
-            });
-        }
+        attach_fill_callbacks();
     }
 
     bool open()
@@ -163,12 +192,18 @@ public:
         // before opening either transport.
         if (!d_.order_tx || !d_.fill_tx || !d_.parser
             || !d_.execution_failure_handler
-            || (static_cast<bool>(d_.funding_update_handler)
-                != static_cast<bool>(d_.funding_failure_handler)))
+            || (d_.require_execution_ingress && !d_.execution_ingress)
+            || (!d_.execution_ingress
+                && (static_cast<bool>(d_.funding_update_handler)
+                    != static_cast<bool>(d_.funding_failure_handler))))
         {
             set_error("ExecutionBridge: missing execution safety dependency");
             return false;
         }
+        // close() detaches callbacks only after the reader has joined.  A
+        // later explicit reopen must install the bridge-owned sinks before it
+        // creates another private session.
+        attach_fill_callbacks();
         if (!d_.order_tx->open())
         {
             set_error("ExecutionBridge: order transport open failed");
@@ -220,6 +255,11 @@ public:
 
         if (d_.fill_tx)  d_.fill_tx->close();
         if (d_.order_tx) d_.order_tx->close();
+        // Concrete transports accept callback clearing only after close has
+        // proved the private reader joined.  This prevents their later
+        // destructor/reopen status publication from calling into a destroyed
+        // bridge while retaining the no-clear-while-live invariant.
+        detach_fill_callbacks_after_join();
     }
 
     void quiesce()
@@ -296,15 +336,30 @@ public:
         req.wire_payload  = std::string(enc.wire_payload);
         req.is_cancel     = false;
 
-        // Enqueue under short lock (orders are rare vs market ticks).
+        // Enqueue under short lock (orders are rare vs market ticks).  If
+        // shutdown wins after identity registration but before enqueue, remove
+        // only the still-active unsent mapping; never erase a private record
+        // that has already advanced it meanwhile.
+        bool queued = false;
         {
             std::lock_guard<std::mutex> lk(submit_queue_mu_);
-            if (!accepting_orders_.load(std::memory_order_acquire))
+            if (accepting_orders_.load(std::memory_order_acquire))
             {
-                set_error("ExecutionBridge: live submission is quiesced");
-                return;
+                submit_queue_.push_back(std::move(req));
+                queued = true;
             }
-            submit_queue_.push_back(std::move(req));
+        }
+        if (!queued)
+        {
+            std::lock_guard<std::mutex> lk(map_mu_);
+            auto it = by_engine_id_.find(t.engine_id);
+            if (it != by_engine_id_.end()
+                && it->second.state == tracked_order::lifecycle::active)
+            {
+                by_client_id_.erase(it->second.client_id);
+                by_engine_id_.erase(it);
+            }
+            set_error("ExecutionBridge: live submission is quiesced");
         }
     }
 
@@ -322,17 +377,23 @@ public:
     bool cancel_order(uint64_t engine_order_id) override
     {
         if (!accepting_orders_.load(std::memory_order_acquire)) return false;
+        if (!d_.encoder || !d_.order_tx) return false;
         std::string exchange_id, symbol, client_id;
         {
             std::lock_guard<std::mutex> lk(map_mu_);
             auto it = by_engine_id_.find(engine_order_id);
             if (it == by_engine_id_.end()) return false;
+            // A REST cancellation acknowledgement is not venue lifecycle
+            // truth.  Mark the request before it leaves the engine so a
+            // second local cancel cannot race the one authoritative private
+            // terminal we still require afterwards.
+            if (it->second.state != tracked_order::lifecycle::active)
+                return false;
             exchange_id = it->second.exchange_id;
             symbol      = it->second.symbol;
             client_id   = it->second.client_id;
+            it->second.state = tracked_order::lifecycle::cancel_requested;
         }
-
-        if (!d_.encoder || !d_.order_tx) return false;
 
         submit_request req;
         req.engine_id           = engine_order_id;
@@ -343,7 +404,16 @@ public:
 
         {
             std::lock_guard<std::mutex> lk(submit_queue_mu_);
-            if (!accepting_orders_.load(std::memory_order_acquire)) return false;
+            if (!accepting_orders_.load(std::memory_order_acquire))
+            {
+                std::lock_guard<std::mutex> map_lock(map_mu_);
+                auto it = by_engine_id_.find(engine_order_id);
+                if (it != by_engine_id_.end()
+                    && it->second.state
+                        == tracked_order::lifecycle::cancel_requested)
+                    it->second.state = tracked_order::lifecycle::active;
+                return false;
+            }
             submit_queue_.push_back(std::move(req));
         }
 
@@ -399,6 +469,20 @@ public:
 private:
     struct tracked_order
     {
+        enum class lifecycle : std::uint8_t
+        {
+            active,
+            // A definitive REST submit response is still not authoritative
+            // enough to erase a live private identity. Keep it resolvable
+            // until private truth or reconciliation proves the venue state.
+            rest_submit_failed,
+            cancel_requested,
+            rest_cancel_acked,
+            private_terminal_enqueued,
+        };
+
+        static constexpr std::size_t execution_history_capacity = 32;
+
         uint64_t    engine_id     = 0;
         std::string client_id;
         std::string exchange_id;
@@ -406,7 +490,135 @@ private:
         order_side  side           = order_side::buy;
         double      total_qty      = 0.0;
         double      cumulative_qty = 0.0;
+        lifecycle   state          = lifecycle::active;
+        std::chrono::steady_clock::time_point cancel_confirmation_deadline{};
+        std::uint64_t terminal_sequence = 0;
+        std::uint16_t terminal_slot = std::numeric_limits<std::uint16_t>::max();
+        private_execution_record terminal_record{};
+        std::array<private_execution_record, execution_history_capacity>
+            execution_history{};
+        std::uint8_t execution_history_size = 0;
+
+        // The engine owns accounting.  Resolution may reserve capacity and
+        // prove the next transition, but it must not make that transition
+        // durable until the engine explicitly commits this exact source
+        // record.  One pending transition per tracked order is sufficient:
+        // the provider ingress is FIFO and the engine consumes it serially.
+        struct pending_private_commit
+        {
+            bool active = false;
+            bool append_execution_history = false;
+            bool terminal = false;
+            bool bind_exchange_id = false;
+            std::uint64_t sequence = 0;
+            double next_cumulative_qty = 0.0;
+            std::uint16_t terminal_slot =
+                std::numeric_limits<std::uint16_t>::max();
+            private_execution_record record{};
+        } pending{};
     };
+
+    // Retain fixed, immutable proof for every retired terminal for the life of
+    // the bridge process.  This is intentionally not a cyclic cache: once the
+    // proof budget is exhausted the bridge closes admission rather than allow
+    // an old duplicate/conflict to lose its identity evidence.  Operators must
+    // restart/reconcile before the session can continue beyond this budget.
+    static constexpr std::size_t terminal_tombstone_capacity = 4096;
+    static constexpr auto private_cancel_confirmation_deadline =
+        std::chrono::seconds{30};
+
+    struct terminal_tombstone
+    {
+        enum class state : std::uint8_t { empty, reserved, committed };
+        state status = state::empty;
+        std::uint64_t engine_id = 0;
+        std::uint64_t sequence = 0;
+        private_execution_record record{};
+    };
+
+    static bool same_text(std::string_view left,
+                          std::string_view right) noexcept
+    {
+        return left == right;
+    }
+
+    static bool same_number(double left, double right) noexcept
+    {
+        // Parser output is already canonical decimal-to-double conversion.
+        // Replays must be exact, not epsilon-close: an altered economic field
+        // is contradictory source truth rather than numeric noise.
+        return left == right;
+    }
+
+    static bool same_order_identity(const private_execution_record& left,
+                                    const private_execution_record& right) noexcept;
+    static bool same_execution_fingerprint(const private_execution_record& left,
+                                           const private_execution_record& right) noexcept;
+    static bool same_terminal_replay(const private_execution_record& left,
+                                     const private_execution_record& right) noexcept;
+
+    bool reserve_terminal_tombstone_locked(
+        tracked_order& tracked,
+        const private_execution_record& record,
+        std::uint16_t& slot) noexcept;
+    void rollback_terminal_tombstone_locked(std::uint16_t slot,
+                                            std::uint64_t sequence) noexcept;
+    terminal_tombstone* find_tombstone_by_sequence_locked(
+        std::uint64_t sequence) noexcept;
+    const terminal_tombstone* find_related_tombstone_locked(
+        const private_execution_record& record) const noexcept;
+    bool exchange_id_available_locked(std::string_view exchange_id,
+                                      std::uint64_t engine_id) const noexcept;
+
+    static bool make_private_ingress_record(
+        const parsed_exec& msg, private_execution_record& record) noexcept
+    {
+        using record_kind = private_execution_record::kind;
+        switch (msg.k)
+        {
+        case parsed_exec::kind::ack:          record.k = record_kind::ack; break;
+        case parsed_exec::kind::partial_fill: record.k = record_kind::partial_fill; break;
+        case parsed_exec::kind::full_fill:    record.k = record_kind::full_fill; break;
+        case parsed_exec::kind::canceled:     record.k = record_kind::canceled; break;
+        case parsed_exec::kind::rejected:     record.k = record_kind::rejected; break;
+        case parsed_exec::kind::expired:      record.k = record_kind::expired; break;
+        case parsed_exec::kind::other:        return false;
+        }
+
+        // Private lifecycle ordering must rest on source-provided time.  A
+        // locally fabricated timestamp can turn an absent/invalid venue field
+        // into apparently authoritative order, so reject it at admission.
+        if (msg.ts.time_since_epoch().count() == 0) return false;
+        const auto ts = msg.ts;
+        record.event_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            ts.time_since_epoch()).count();
+        record.last_fill_qty = msg.last_fill_qty;
+        record.last_fill_price = msg.last_fill_price;
+        record.cumulative_qty = msg.cumulative_qty;
+        record.commission = msg.commission;
+        record.side = msg.side;
+        record.cumulative_reported = msg.has_cumulative_qty;
+        record.lifecycle_only = msg.lifecycle_only;
+
+        return private_execution_record::copy_text(
+                   record.symbol, record.symbol_size, msg.symbol)
+            && private_execution_record::copy_optional_text(
+                   record.client_order_id, record.client_order_id_size,
+                   msg.client_order_id)
+            && private_execution_record::copy_optional_text(
+                   record.exchange_order_id, record.exchange_order_id_size,
+                   msg.exchange_order_id)
+            && private_execution_record::copy_optional_text(
+                   record.execution_id, record.execution_id_size,
+                   msg.execution_id)
+            && private_execution_record::copy_optional_text(
+                   record.commission_asset, record.commission_asset_size,
+                   msg.commission_asset)
+            && private_execution_record::copy_optional_text(
+                   record.error, record.error_size, msg.error)
+            && (record.client_order_id_size != 0
+                || record.exchange_order_id_size != 0);
+    }
 
     void handle_message(std::string_view raw)
     {
@@ -424,6 +636,29 @@ private:
             d_.parser->parse_funding_update(raw, funding);
         if (funding_result != funding_parse_result::not_funding)
         {
+            if (d_.execution_ingress)
+            {
+                bool accepted = false;
+                if (funding_result == funding_parse_result::valid
+                    && !d_.private_account_symbol.empty())
+                {
+                    private_execution_record record;
+                    record.k = private_execution_record::kind::funding;
+                    record.event_time_ms = funding.event_time_ms;
+                    record.cash_delta = funding.cash_delta;
+                    accepted = private_execution_record::copy_text(
+                        record.symbol, record.symbol_size,
+                        d_.private_account_symbol)
+                        && d_.execution_ingress->try_publish(record);
+                }
+                if (!accepted)
+                {
+                    d_.execution_ingress->latch_failure();
+                    fail_malformed_execution();
+                }
+                return;
+            }
+
             bool accepted = false;
             if (funding_result == funding_parse_result::valid
                 && d_.funding_update_handler)
@@ -468,6 +703,23 @@ private:
 
         if (execution_result == execution_parse_result::unrelated)
         {
+            if (d_.execution_ingress)
+            {
+                // The unified FIFO is the sole source-order boundary for
+                // private account truth.  Do not preserve the legacy
+                // diagnostic snapshot escape hatch here: only a parser-
+                // proven exact control can be ignored.  Everything else is
+                // an unmodelled authenticated state transition and must
+                // synchronously close order admission before it can outrun
+                // the engine's reconciliation halt.
+                if (!d_.parser->is_harmless_private_control(raw))
+                {
+                    d_.execution_ingress->latch_failure();
+                    fail_malformed_execution();
+                }
+                return;
+            }
+
             // Not an order-lifecycle event; might be a server-pushed
             // position/balance snapshot. Spot's parser short-circuits
             // here (default returns false); futures recognizes
@@ -487,6 +739,18 @@ private:
                     // terminal admission latch used for malformed execution.
                     fail_malformed_execution();
                 }
+            }
+            return;
+        }
+
+        if (d_.execution_ingress)
+        {
+            private_execution_record record;
+            if (!make_private_ingress_record(msg, record)
+                || !d_.execution_ingress->try_publish(record))
+            {
+                d_.execution_ingress->latch_failure();
+                fail_malformed_execution();
             }
             return;
         }
@@ -723,6 +987,8 @@ private:
             std::lock_guard<std::mutex> admission_lock(venue_admission_mu_);
             close_terminal_admission();
         }
+        if (d_.execution_ingress)
+            d_.execution_ingress->latch_failure();
         if (d_.execution_failure_handler)
         {
             try { d_.execution_failure_handler(); }
@@ -733,6 +999,51 @@ private:
         // an allocation failure from a parser, so it must not terminate the
         // process before the safety callback has run.
         try { set_error("ExecutionBridge: malformed private execution envelope"); }
+        catch (...) {}
+    }
+
+    void attach_fill_callbacks()
+    {
+        std::lock_guard<std::mutex> lock(fill_callback_attachment_mu_);
+        if (!d_.fill_tx || fill_callbacks_attached_)
+            return;
+
+        d_.fill_tx->set_on_message([this](std::string_view raw) {
+            handle_message(raw);
+        });
+        d_.fill_tx->set_on_status([this](IFillTransport::lifecycle st,
+                                         std::string_view note) {
+            handle_status(st, note);
+        });
+        fill_callbacks_attached_ = true;
+    }
+
+    void detach_fill_callbacks_after_join() noexcept
+    {
+        std::shared_ptr<IFillTransport> fill_tx;
+        {
+            std::lock_guard<std::mutex> lock(fill_callback_attachment_mu_);
+            if (!fill_callbacks_attached_)
+                return;
+            fill_callbacks_attached_ = false;
+            fill_tx = d_.fill_tx;
+        }
+        if (!fill_tx)
+            return;
+
+        // A concrete private transport must not invoke a callback after its
+        // close() returned (the reader is joined).  Clearing the callbacks at
+        // that point is consequently safe and makes a later transport
+        // destructor harmless even when the provider owns another reference.
+        try { fill_tx->set_on_message({}); }
+        catch (...) {}
+        try { fill_tx->set_on_status({}); }
+        catch (...) {}
+        // Providers install the fatal route before bridge open.  It may close
+        // over provider/bridge lifetime state just like the delivery sinks,
+        // so retire it after the reader join as well.  Any explicit reopen
+        // must re-arm its provider-local terminal route first.
+        try { fill_tx->set_fatal_disconnect_callback({}); }
         catch (...) {}
     }
 
@@ -753,6 +1064,8 @@ private:
     mutable std::mutex map_mu_;
     std::unordered_map<uint64_t, tracked_order> by_engine_id_;
     std::unordered_map<std::string, uint64_t>   by_client_id_;
+    std::array<terminal_tombstone, terminal_tombstone_capacity>
+        terminal_tombstones_{};
 
     std::mutex fills_mu_;
     std::vector<fill_event> pending_fills_;
@@ -766,6 +1079,11 @@ private:
 
     mutable std::mutex handler_mu_;
     unknown_fill_handler unknown_fill_handler_;
+
+    // Guards only attachment/detachment.  Private callbacks themselves never
+    // take this lock; transport close joins the reader before detachment.
+    std::mutex fill_callback_attachment_mu_;
+    bool fill_callbacks_attached_ = false;
 
     std::mutex synth_mu_;
     std::vector<synth_meta> pending_synth_meta_;
@@ -803,6 +1121,549 @@ private:
     void process_one_submit(const submit_request& req);
     void close_terminal_admission();
 };
+
+
+inline bool ExecutionBridge::same_order_identity(
+    const private_execution_record& left,
+    const private_execution_record& right) noexcept
+{
+    if (!same_text(left.symbol_view(), right.symbol_view())
+        || left.side != right.side)
+        return false;
+
+    const bool same_client = left.client_order_id_size != 0
+        && right.client_order_id_size != 0
+        && same_text(left.client_order_id_view(), right.client_order_id_view());
+    const bool same_exchange = left.exchange_order_id_size != 0
+        && right.exchange_order_id_size != 0
+        && same_text(left.exchange_order_id_view(), right.exchange_order_id_view());
+    if (!same_client && !same_exchange) return false;
+
+    if (left.client_order_id_size != 0 && right.client_order_id_size != 0
+        && !same_client)
+        return false;
+    if (left.exchange_order_id_size != 0 && right.exchange_order_id_size != 0
+        && !same_exchange)
+        return false;
+    return true;
+}
+
+inline bool ExecutionBridge::same_execution_fingerprint(
+    const private_execution_record& left,
+    const private_execution_record& right) noexcept
+{
+    return same_order_identity(left, right)
+        && left.k == right.k
+        && left.lifecycle_only == right.lifecycle_only
+        && left.cumulative_reported == right.cumulative_reported
+        && same_number(left.cumulative_qty, right.cumulative_qty)
+        && same_number(left.last_fill_qty, right.last_fill_qty)
+        && same_number(left.last_fill_price, right.last_fill_price)
+        && same_number(left.commission, right.commission)
+        && same_text(left.execution_id_view(), right.execution_id_view())
+        && same_text(left.commission_asset_view(), right.commission_asset_view());
+}
+
+inline bool ExecutionBridge::same_terminal_replay(
+    const private_execution_record& left,
+    const private_execution_record& right) noexcept
+{
+    if (!same_order_identity(left, right)) return false;
+
+    // UTA-style order-channel full status is a non-economic confirmation of
+    // a previously booked economic full.  It has no execution fingerprint but
+    // must exactly corroborate terminal kind + cumulative truth.
+    if (left.k == private_execution_record::kind::full_fill
+        && right.k == private_execution_record::kind::full_fill
+        && right.lifecycle_only)
+    {
+        return left.cumulative_reported == right.cumulative_reported
+            && same_number(left.cumulative_qty, right.cumulative_qty);
+    }
+    if (left.k == private_execution_record::kind::full_fill
+        && left.lifecycle_only
+        && right.k == private_execution_record::kind::full_fill)
+        return false;
+
+    if (left.k != right.k
+        || left.cumulative_reported != right.cumulative_reported
+        || !same_number(left.cumulative_qty, right.cumulative_qty))
+        return false;
+    if (left.is_economic_fill() || right.is_economic_fill())
+        return same_execution_fingerprint(left, right);
+    return true;
+}
+
+inline bool ExecutionBridge::reserve_terminal_tombstone_locked(
+    tracked_order& tracked, const private_execution_record& record,
+    std::uint16_t& slot) noexcept
+{
+    if (tracked.terminal_slot != std::numeric_limits<std::uint16_t>::max()
+        || record.sequence == 0)
+        return false;
+
+    for (std::size_t i = 0; i < terminal_tombstones_.size(); ++i)
+    {
+        auto& tombstone = terminal_tombstones_[i];
+        if (tombstone.status != terminal_tombstone::state::empty) continue;
+        tombstone.status = terminal_tombstone::state::reserved;
+        tombstone.engine_id = tracked.engine_id;
+        tombstone.sequence = record.sequence;
+        tombstone.record = record;
+        slot = static_cast<std::uint16_t>(i);
+        return true;
+    }
+    return false;
+}
+
+inline void ExecutionBridge::rollback_terminal_tombstone_locked(
+    std::uint16_t slot, std::uint64_t sequence) noexcept
+{
+    if (slot == std::numeric_limits<std::uint16_t>::max()
+        || slot >= terminal_tombstones_.size())
+        return;
+    auto& tombstone = terminal_tombstones_[slot];
+    if (tombstone.status != terminal_tombstone::state::reserved
+        || tombstone.sequence != sequence)
+        return;
+    tombstone = terminal_tombstone{};
+}
+
+inline ExecutionBridge::terminal_tombstone*
+ExecutionBridge::find_tombstone_by_sequence_locked(
+    std::uint64_t sequence) noexcept
+{
+    for (auto& tombstone : terminal_tombstones_)
+    {
+        if (tombstone.status != terminal_tombstone::state::empty
+            && tombstone.sequence == sequence)
+            return &tombstone;
+    }
+    return nullptr;
+}
+
+inline const ExecutionBridge::terminal_tombstone*
+ExecutionBridge::find_related_tombstone_locked(
+    const private_execution_record& record) const noexcept
+{
+    for (const auto& tombstone : terminal_tombstones_)
+    {
+        if (tombstone.status == terminal_tombstone::state::empty) continue;
+        const auto& prior = tombstone.record;
+        const bool client_match = record.client_order_id_size != 0
+            && prior.client_order_id_size != 0
+            && same_text(record.client_order_id_view(),
+                         prior.client_order_id_view());
+        const bool exchange_match = record.exchange_order_id_size != 0
+            && prior.exchange_order_id_size != 0
+            && same_text(record.exchange_order_id_view(),
+                         prior.exchange_order_id_view());
+        if (client_match || exchange_match)
+            return &tombstone;
+    }
+    return nullptr;
+}
+
+inline bool ExecutionBridge::exchange_id_available_locked(
+    std::string_view exchange_id, std::uint64_t engine_id) const noexcept
+{
+    if (exchange_id.empty()) return true;
+    for (const auto& [other_engine_id, tracked] : by_engine_id_)
+    {
+        if (other_engine_id == engine_id) continue;
+        if (!tracked.exchange_id.empty()
+            && same_text(tracked.exchange_id, exchange_id))
+            return false;
+        if (tracked.pending.active && tracked.pending.bind_exchange_id
+            && tracked.pending.record.exchange_order_id_size != 0
+            && same_text(tracked.pending.record.exchange_order_id_view(),
+                         exchange_id))
+            return false;
+    }
+    for (const auto& tombstone : terminal_tombstones_)
+    {
+        if (tombstone.status == terminal_tombstone::state::empty
+            || tombstone.engine_id == engine_id
+            || tombstone.record.exchange_order_id_size == 0)
+            continue;
+        if (same_text(tombstone.record.exchange_order_id_view(), exchange_id))
+            return false;
+    }
+    return true;
+}
+
+inline private_execution_resolution
+ExecutionBridge::resolve_private_execution(private_execution_record& record)
+{
+    using resolution = private_execution_resolution;
+    bool fatal = false;
+    resolution result = resolution::fatal;
+
+    {
+        std::lock_guard<std::mutex> lock(map_mu_);
+        if (!record.valid_shape()
+            || record.k == private_execution_record::kind::fatal
+            || record.k == private_execution_record::kind::unknown_lifecycle
+            || record.k == private_execution_record::kind::funding
+            || record.k == private_execution_record::kind::bracket_group_active
+            || record.k == private_execution_record::kind::bracket_group_completed)
+        {
+            fatal = true;
+        }
+        else if (const auto* tombstone = find_related_tombstone_locked(record))
+        {
+            result = same_terminal_replay(tombstone->record, record)
+                ? resolution::duplicate : resolution::fatal;
+            fatal = result == resolution::fatal;
+        }
+        else
+        {
+            auto tracked_it = by_engine_id_.end();
+            if (record.client_order_id_size != 0)
+            {
+                // std::unordered_map<std::string,...>::find would require a
+                // transient allocating string on this engine-thread hot
+                // boundary unless the map is rebuilt with transparent
+                // lookup.  The tracked-order set is bounded by order limits;
+                // retain an allocation-free exact scan here.
+                for (auto it = by_engine_id_.begin();
+                     it != by_engine_id_.end(); ++it)
+                {
+                    if (same_text(it->second.client_id,
+                                  record.client_order_id_view()))
+                    {
+                        tracked_it = it;
+                        break;
+                    }
+                }
+            }
+            if (record.exchange_order_id_size != 0)
+            {
+                for (auto it = by_engine_id_.begin();
+                     it != by_engine_id_.end(); ++it)
+                {
+                    const auto& candidate = it->second;
+                    const bool matches_committed = !candidate.exchange_id.empty()
+                        && same_text(candidate.exchange_id,
+                                     record.exchange_order_id_view());
+                    const bool matches_pending = candidate.pending.active
+                        && candidate.pending.bind_exchange_id
+                        && candidate.pending.record.exchange_order_id_size != 0
+                        && same_text(candidate.pending.record.exchange_order_id_view(),
+                                     record.exchange_order_id_view());
+                    if (!matches_committed && !matches_pending) continue;
+                    if (tracked_it != by_engine_id_.end()
+                        && tracked_it != it)
+                    {
+                        fatal = true;
+                        break;
+                    }
+                    tracked_it = it;
+                }
+            }
+
+            // Unrecognised authenticated execution truth cannot be treated
+            // as a generic "foreign" fill.  A future typed native-bracket
+            // registry may explicitly claim such records; until then the
+            // bridge closes admission rather than lose their attribution.
+            if (!fatal && tracked_it == by_engine_id_.end())
+            {
+                fatal = true;
+            }
+            else if (!fatal)
+            {
+                auto& tracked = tracked_it->second;
+                if (!same_text(tracked.symbol, record.symbol_view())
+                    || tracked.side != record.side
+                    || (record.exchange_order_id_size != 0
+                        && !tracked.exchange_id.empty()
+                        && !same_text(tracked.exchange_id,
+                                      record.exchange_order_id_view())))
+                {
+                    fatal = true;
+                }
+                else if (tracked.pending.active)
+                {
+                    // The engine has not yet committed or rolled back the
+                    // preceding FIFO transition.  It may be replayed by the
+                    // venue, but a distinct transition cannot overtake it.
+                    result = same_execution_fingerprint(tracked.pending.record,
+                                                        record)
+                        ? resolution::duplicate : resolution::fatal;
+                    fatal = result == resolution::fatal;
+                }
+                else if (tracked.state
+                    == tracked_order::lifecycle::private_terminal_enqueued)
+                {
+                    result = same_terminal_replay(tracked.terminal_record,
+                                                  record)
+                        ? resolution::duplicate : resolution::fatal;
+                    fatal = result == resolution::fatal;
+                }
+                else
+                {
+                    const bool bind_exchange_id = tracked.exchange_id.empty()
+                        && record.exchange_order_id_size != 0;
+                    if (bind_exchange_id
+                        && !exchange_id_available_locked(
+                            record.exchange_order_id_view(), tracked.engine_id))
+                    {
+                        fatal = true;
+                    }
+
+                    const auto prepare = [&](double next_cumulative,
+                                             bool append_history,
+                                             bool terminal) noexcept {
+                        record.engine_order_id = tracked.engine_id;
+                        record.remaining_qty = std::max(
+                            0.0, tracked.total_qty - next_cumulative);
+                        auto& pending = tracked.pending;
+                        pending.active = true;
+                        pending.append_execution_history = append_history;
+                        pending.terminal = terminal;
+                        pending.bind_exchange_id = bind_exchange_id;
+                        pending.sequence = record.sequence;
+                        pending.next_cumulative_qty = next_cumulative;
+                        pending.record = record;
+                        pending.terminal_slot =
+                            std::numeric_limits<std::uint16_t>::max();
+                        if (terminal
+                            && !reserve_terminal_tombstone_locked(
+                                tracked, record, pending.terminal_slot))
+                        {
+                            pending = {};
+                            fatal = true;
+                            return;
+                        }
+                        result = resolution::tracked;
+                    };
+
+                    if (!fatal && record.is_economic_fill())
+                    {
+                        if (record.lifecycle_only)
+                        {
+                            const bool matches_cumulative =
+                                record.cumulative_reported
+                                && same_number(record.cumulative_qty,
+                                               tracked.cumulative_qty);
+                            const bool terminal_truth =
+                                record.k != private_execution_record::kind::full_fill
+                                || same_number(record.cumulative_qty,
+                                               tracked.total_qty);
+                            if (!matches_cumulative || !terminal_truth)
+                            {
+                                fatal = true;
+                            }
+                            else if (record.k
+                                     == private_execution_record::kind::full_fill)
+                            {
+                                // Zero-delta full confirmation is terminal
+                                // lifecycle truth. It reserves retirement but
+                                // does not advance economic cumulative state.
+                                prepare(tracked.cumulative_qty,
+                                        /*append_history=*/false,
+                                        /*terminal=*/true);
+                            }
+                            else
+                            {
+                                result = resolution::duplicate;
+                            }
+                        }
+                        else
+                        {
+                            bool duplicate_execution = false;
+                            for (std::size_t i = 0;
+                                 i < tracked.execution_history_size; ++i)
+                            {
+                                const auto& prior = tracked.execution_history[i];
+                                if (!same_text(prior.execution_id_view(),
+                                               record.execution_id_view()))
+                                    continue;
+                                result = same_execution_fingerprint(prior, record)
+                                    ? resolution::duplicate : resolution::fatal;
+                                duplicate_execution = true;
+                                fatal = result == resolution::fatal;
+                                break;
+                            }
+
+                            if (!duplicate_execution && !fatal)
+                            {
+                                const double next_cumulative =
+                                    tracked.cumulative_qty + record.last_fill_qty;
+                                if (!record.cumulative_reported
+                                    || !same_number(record.cumulative_qty,
+                                                    next_cumulative)
+                                    || record.cumulative_qty > tracked.total_qty
+                                    || tracked.execution_history_size
+                                        == tracked.execution_history.size()
+                                    || (record.k
+                                            == private_execution_record::kind::full_fill
+                                        && !same_number(record.cumulative_qty,
+                                                        tracked.total_qty)))
+                                {
+                                    fatal = true;
+                                }
+                                else
+                                {
+                                    prepare(next_cumulative,
+                                            /*append_history=*/true,
+                                            /*terminal=*/record.is_terminal());
+                                }
+                            }
+                        }
+                    }
+                    else if (!fatal)
+                    {
+                        const bool terminal = record.is_terminal();
+                        if ((terminal && !record.cumulative_reported)
+                            || (record.cumulative_reported
+                                && !same_number(record.cumulative_qty,
+                                                tracked.cumulative_qty)))
+                        {
+                            fatal = true;
+                        }
+                        else
+                        {
+                            prepare(tracked.cumulative_qty,
+                                    /*append_history=*/false, terminal);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (fatal)
+    {
+        fail_malformed_execution();
+        return resolution::fatal;
+    }
+    return result;
+}
+
+inline bool ExecutionBridge::commit_private_execution(
+    const private_execution_reservation& reservation)
+{
+    if (!reservation.valid()) return false;
+    std::lock_guard<std::mutex> lock(map_mu_);
+    const auto tracked_it = by_engine_id_.find(reservation.engine_order_id);
+    if (tracked_it == by_engine_id_.end()) return false;
+    auto& tracked = tracked_it->second;
+    auto& pending = tracked.pending;
+    if (!pending.active || pending.sequence != reservation.source_sequence)
+        return false;
+
+    if (pending.bind_exchange_id)
+    {
+        if (pending.record.exchange_order_id_size == 0
+            || !tracked.exchange_id.empty()
+            || !exchange_id_available_locked(
+                pending.record.exchange_order_id_view(), tracked.engine_id))
+            return false;
+        tracked.exchange_id.assign(pending.record.exchange_order_id_view());
+    }
+    if (pending.append_execution_history)
+    {
+        if (tracked.execution_history_size == tracked.execution_history.size())
+            return false;
+        tracked.cumulative_qty = pending.next_cumulative_qty;
+        tracked.execution_history[tracked.execution_history_size++] = pending.record;
+    }
+    if (pending.terminal)
+    {
+        if (pending.terminal_slot == std::numeric_limits<std::uint16_t>::max()
+            || pending.terminal_slot >= terminal_tombstones_.size())
+            return false;
+        const auto& tombstone = terminal_tombstones_[pending.terminal_slot];
+        if (tombstone.status != terminal_tombstone::state::reserved
+            || tombstone.engine_id != tracked.engine_id
+            || tombstone.sequence != pending.sequence)
+            return false;
+        tracked.terminal_slot = pending.terminal_slot;
+        tracked.terminal_sequence = pending.sequence;
+        tracked.terminal_record = pending.record;
+        tracked.state = tracked_order::lifecycle::private_terminal_enqueued;
+    }
+    pending = {};
+    return true;
+}
+
+inline bool ExecutionBridge::rollback_private_execution(
+    const private_execution_reservation& reservation) noexcept
+{
+    if (!reservation.valid()) return false;
+    std::lock_guard<std::mutex> lock(map_mu_);
+    const auto tracked_it = by_engine_id_.find(reservation.engine_order_id);
+    if (tracked_it == by_engine_id_.end()) return false;
+    auto& pending = tracked_it->second.pending;
+    if (!pending.active || pending.sequence != reservation.source_sequence)
+        return false;
+    if (pending.terminal)
+        rollback_terminal_tombstone_locked(pending.terminal_slot,
+                                          pending.sequence);
+    pending = {};
+    return true;
+}
+
+inline bool ExecutionBridge::acknowledge_private_terminal(
+    std::uint64_t sequence)
+{
+    std::lock_guard<std::mutex> lock(map_mu_);
+    auto* tombstone = find_tombstone_by_sequence_locked(sequence);
+    if (!tombstone) return false;
+    if (tombstone->status == terminal_tombstone::state::committed)
+        return true;
+    if (tombstone->status != terminal_tombstone::state::reserved)
+        return false;
+
+    auto tracked_it = by_engine_id_.find(tombstone->engine_id);
+    if (tracked_it == by_engine_id_.end()
+        || tracked_it->second.state
+            != tracked_order::lifecycle::private_terminal_enqueued
+        || tracked_it->second.pending.active
+        || tracked_it->second.terminal_sequence != sequence)
+        return false;
+
+    const auto client_id = tracked_it->second.client_id;
+    by_engine_id_.erase(tracked_it);
+    if (!client_id.empty()) by_client_id_.erase(client_id);
+    tombstone->status = terminal_tombstone::state::committed;
+    return true;
+}
+
+inline bool ExecutionBridge::check_private_lifecycle_deadline()
+{
+    bool expired = false;
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(map_mu_);
+        for (const auto& [_, tracked] : by_engine_id_)
+        {
+            if (tracked.state == tracked_order::lifecycle::rest_cancel_acked
+                && tracked.cancel_confirmation_deadline !=
+                    std::chrono::steady_clock::time_point{}
+                && now >= tracked.cancel_confirmation_deadline)
+            {
+                expired = true;
+                break;
+            }
+        }
+    }
+    if (expired) fail_malformed_execution();
+    return !expired;
+}
+
+inline bool ExecutionBridge::has_unresolved_private_lifecycle() const
+{
+    std::lock_guard<std::mutex> lock(map_mu_);
+    // A successful REST kill/cancel is advisory.  At shutdown every active
+    // mapping still needs source-of-truth private terminal evidence (or an
+    // explicit reconciled replacement) before the authoritative ledger may
+    // be published.  Pending prepares are likewise unresolved until commit
+    // or rollback; a compact state subset here would reopen the old
+    // REST-acknowledged-but-private-silent escape hatch.
+    return !by_engine_id_.empty();
+}
 
 
 // ================== Async transport implementations (clean) ==================
@@ -896,17 +1757,21 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
         std::string symbol = req.symbol;
         std::string exchange_id = req.cancel_exchange_id;
         std::string client_id = req.client_id;
+        bool cancellation_still_authorized = false;
 
         {
             std::lock_guard<std::mutex> lk(map_mu_);
             auto it = by_engine_id_.find(req.engine_id);
-            if (it != by_engine_id_.end())
-            {
-                if (!it->second.symbol.empty()) symbol = it->second.symbol;
-                if (!it->second.exchange_id.empty()) exchange_id = it->second.exchange_id;
-                if (!it->second.client_id.empty()) client_id = it->second.client_id;
-            }
+            if (it == by_engine_id_.end()
+                || it->second.state != tracked_order::lifecycle::cancel_requested)
+                return;
+
+            if (!it->second.symbol.empty()) symbol = it->second.symbol;
+            if (!it->second.exchange_id.empty()) exchange_id = it->second.exchange_id;
+            if (!it->second.client_id.empty()) client_id = it->second.client_id;
+            cancellation_still_authorized = true;
         }
+        if (!cancellation_still_authorized) return;
 
         if (d_.order_rate_limiter
             && !d_.order_rate_limiter->acquire_interruptibly(
@@ -922,16 +1787,110 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
             if (res.uncertain || res.fatal) close_terminal_admission();
         }
 
+        bool cancel_response_identity_conflict = false;
         if (!res.ok) {
             set_error("cancel failed: " + res.error);
+            // A definitive REST failure means the requested cancellation did
+            // not transition venue state.  Keep the private identity and
+            // return to active so an explicit later operator action can make
+            // a new request.  Ambiguous/fatal outcomes intentionally retain
+            // cancel_requested: their truth is no longer locally knowable.
+            if (!res.uncertain && !res.fatal)
+            {
+                std::lock_guard<std::mutex> lk(map_mu_);
+                const auto it = by_engine_id_.find(req.engine_id);
+                if (it != by_engine_id_.end()
+                    && it->second.state
+                        == tracked_order::lifecycle::cancel_requested)
+                {
+                    it->second.state = tracked_order::lifecycle::active;
+                    it->second.cancel_confirmation_deadline = {};
+                }
+            }
         }
         else
         {
             std::lock_guard<std::mutex> lk(map_mu_);
-            by_engine_id_.erase(req.engine_id);
-            if (!client_id.empty())
-                by_client_id_.erase(client_id);
+            auto it = by_engine_id_.find(req.engine_id);
+            if (it == by_engine_id_.end())
+            {
+                // A private terminal may have won the race and been
+                // acknowledged already.  Its immutable tombstone still
+                // proves whether this delayed REST response names the same
+                // venue order; anything else is an identity contradiction.
+                const auto tombstone = std::find_if(
+                    terminal_tombstones_.begin(), terminal_tombstones_.end(),
+                    [&req](const terminal_tombstone& candidate) {
+                        return candidate.status
+                                != terminal_tombstone::state::empty
+                            && candidate.engine_id == req.engine_id;
+                    });
+                if (tombstone == terminal_tombstones_.end()
+                    || (!res.exchange_order_id.empty()
+                        && tombstone->record.exchange_order_id_size != 0
+                        && !same_text(res.exchange_order_id,
+                                      tombstone->record.exchange_order_id_view())))
+                {
+                    res.ok = false;
+                    res.uncertain = true;
+                    res.fatal = true;
+                    res.error = "cancel response lost private lifecycle identity";
+                    cancel_response_identity_conflict = true;
+                }
+            }
+            else if (it->second.state == tracked_order::lifecycle::cancel_requested)
+            {
+                if (!res.exchange_order_id.empty()
+                    && !it->second.exchange_id.empty()
+                    && it->second.exchange_id != res.exchange_order_id)
+                {
+                    res.ok = false;
+                    res.uncertain = true;
+                    res.fatal = true;
+                    res.error = "conflicting exchange order id from cancel response";
+                    cancel_response_identity_conflict = true;
+                }
+                else
+                {
+                    if (it->second.exchange_id.empty()
+                        && !res.exchange_order_id.empty())
+                    {
+                        if (!exchange_id_available_locked(
+                                res.exchange_order_id, req.engine_id))
+                        {
+                            res.ok = false;
+                            res.uncertain = true;
+                            res.fatal = true;
+                            res.error = "duplicate exchange order id from cancel response";
+                            cancel_response_identity_conflict = true;
+                        }
+                        else
+                        {
+                            it->second.exchange_id = res.exchange_order_id;
+                        }
+                    }
+                    if (!cancel_response_identity_conflict)
+                    {
+                        it->second.state = tracked_order::lifecycle::rest_cancel_acked;
+                        it->second.cancel_confirmation_deadline =
+                            std::chrono::steady_clock::now()
+                            + private_cancel_confirmation_deadline;
+                    }
+                }
+            }
+            else if (it->second.state != tracked_order::lifecycle::private_terminal_enqueued)
+            {
+                // A REST response cannot advance an order lifecycle we did
+                // not request.  Keep the mapping intact for reconciliation.
+                res.ok = false;
+                res.uncertain = true;
+                res.fatal = true;
+                res.error = "unexpected cancel response lifecycle state";
+                cancel_response_identity_conflict = true;
+            }
         }
+        if (cancel_response_identity_conflict)
+            fail_malformed_execution();
 
         submit_result sr;
         sr.engine_id = req.engine_id;
@@ -965,9 +1924,22 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
     if (!res.ok && !res.uncertain && !res.fatal) {
         set_error("submit failed: " + res.error);
         std::lock_guard<std::mutex> lk(map_mu_);
-        by_engine_id_.erase(req.engine_id);
-        if (!req.client_id.empty())
-            by_client_id_.erase(req.client_id);
+        const auto it = by_engine_id_.find(req.engine_id);
+        if (d_.execution_ingress)
+        {
+            // A private fill/status can have been admitted while the REST
+            // call was blocked.  Preserve the identity instead of turning
+            // that future source-of-truth record into an untracked drop.
+            if (it != by_engine_id_.end()
+                && it->second.state == tracked_order::lifecycle::active)
+                it->second.state = tracked_order::lifecycle::rest_submit_failed;
+        }
+        else
+        {
+            by_engine_id_.erase(req.engine_id);
+            if (!req.client_id.empty())
+                by_client_id_.erase(req.client_id);
+        }
     }
 
     bool response_identity_conflict = false;
@@ -984,18 +1956,31 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
             }
             else
             {
-                for (const auto& [other_engine_id, other] : by_engine_id_)
-                {
-                    if (other_engine_id != req.engine_id
-                        && other.exchange_id == res.exchange_order_id)
-                    {
-                        response_identity_conflict = true;
-                        break;
-                    }
-                }
-                if (!response_identity_conflict)
+                if (!exchange_id_available_locked(res.exchange_order_id,
+                                                  req.engine_id))
+                    response_identity_conflict = true;
+                else
                     it->second.exchange_id = res.exchange_order_id;
             }
+        }
+        else
+        {
+            // The private reader can publish and the engine can acknowledge
+            // a terminal fill while the synchronous REST submit is still
+            // blocked.  Do not let that map retirement erase the one chance
+            // to compare the REST and private venue identities.
+            const auto tombstone = std::find_if(
+                terminal_tombstones_.begin(), terminal_tombstones_.end(),
+                [&req](const terminal_tombstone& candidate) {
+                    return candidate.status
+                            != terminal_tombstone::state::empty
+                        && candidate.engine_id == req.engine_id;
+                });
+            response_identity_conflict =
+                tombstone == terminal_tombstones_.end()
+                || (tombstone->record.exchange_order_id_size != 0
+                    && !same_text(res.exchange_order_id,
+                                  tombstone->record.exchange_order_id_view()));
         }
     }
 

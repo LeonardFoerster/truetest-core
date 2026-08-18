@@ -71,6 +71,10 @@ struct parsed_exec
 
     std::string client_order_id;
     std::string exchange_order_id;
+    // Venue-native immutable execution/trade identifier.  Required for
+    // economic replay proof whenever the venue supplies it; a duplicate ID
+    // with changed economics is a contradiction, never a benign duplicate.
+    std::string execution_id;
     std::string symbol;
     order_side  side = order_side::buy;
 
@@ -81,6 +85,14 @@ struct parsed_exec
     std::string commission_asset;
 
     std::chrono::system_clock::time_point ts{};
+
+    // A present cumulative value of zero is materially different from an
+    // omitted field: the former can contradict an already-booked partial fill.
+    bool has_cumulative_qty = false;
+
+    // Some venue order channels mirror a fill/terminal state without carrying
+    // an economic delta.  They are typed confirmations, not a second fill.
+    bool lifecycle_only = false;
 
     std::string error;
 };
@@ -146,6 +158,18 @@ public:
         std::string_view /*raw*/, parsed_funding_update& /*out*/) noexcept
     {
         return funding_parse_result::not_funding;
+    }
+
+    // `unrelated` is only safe to ignore on the ordered private-account path
+    // when the parser can prove that the entire raw frame is an exact,
+    // documented transport/control envelope.  The conservative default is
+    // false: account snapshots, unknown authenticated events, and a future
+    // parser's accidental catch-all must close admission rather than vanish
+    // between the private reader and engine FIFO.
+    virtual bool is_harmless_private_control(
+        std::string_view /*raw*/) const noexcept
+    {
+        return false;
     }
 
     // Optional: parse server-pushed position/balance snapshots not tied
