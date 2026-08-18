@@ -6,7 +6,7 @@
 
 **Completed (Phase 8)**: Monte Carlo to master merge — all phases completed successfully. Master is the new baseline. Private retail character clearly stated. All technical safety docs remain intact. See `docs/archive/MERGE_PLAN.md` for the full historical execution record.
 
-**Last update**: 2026-07-06 (removed stale duplicated todo tail after todos/ split; this file is now a thin high-level stub only. Full details live in docs/todos/).
+**Last update**: 2026-08-18 (H-07 added in docs/todos/08-H-persistence-observability.md — mainnet durable-log gate does not yet reject non-regular-file `--log-events` sinks; frozen-surface `main.inc` track, open).
 **How to reference**: use the item ID in prose, e.g. "Addresses P0-03 (Phase 0 evidence scaffolding)"; for precision cite both file and ID: "Closes `docs/todos/01-P0-phase0.md` P0-01" or "Addresses `docs/todos/02-P1-freeze.md` P1-02".
 
 Items are grouped by theme (details in numbered docs/todos/ files). Completed items moved/stuck per-file or summarized here after phase declared done in `prod.md`.
