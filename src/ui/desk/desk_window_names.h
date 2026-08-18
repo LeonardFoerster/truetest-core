@@ -30,6 +30,7 @@ enum class DeskPanel : std::uint8_t
     risk,
     health,
     debug,
+    research_setup,
     count,
 };
 
@@ -57,6 +58,7 @@ inline constexpr std::array<const char*, desk_panel_count> desk_window_names = {
     "Risk##desk_v2",
     "Health##desk_v2",
     "Debug##desk_v2",
+    "Research##desk_v2",
 };
 
 constexpr const char* desk_window_name(DeskPanel panel) noexcept

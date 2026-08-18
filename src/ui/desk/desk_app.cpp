@@ -1,13 +1,16 @@
 #ifdef HAS_IMGUI_DESK
 
 #include "ui/desk/desk_app.h"
+#include "ui/desk/desk_capabilities.h"
 #include "ui/desk/desk_layout.h"
 #include "ui/desk/desk_theme.h"
 #include "ui/desk/desk_command_model.h"
 #include "ui/desk/panels/about_dialog.h"
 #include "ui/desk/panels/activity_panel.h"
+#include "ui/desk/panels/debug_panel.h"
 #include "ui/desk/panels/market_panels.h"
 #include "ui/desk/panels/research_panels.h"
+#include "ui/desk/panels/research_workspace_panel.h"
 #include "ui/desk/panels/status_panels.h"
 #include "ui/desk/footprint_presentation_bridge.h"
 #include "ui/console_dashboard.h"
@@ -834,16 +837,22 @@ void DeskApp::draw_menu_bar(const dashboard_snapshot* snap, bool has_snap)
     ImGui::EndMenuBar();
 }
 
-void DeskApp::draw_page_switcher()
+void DeskApp::draw_workspace_switcher()
 {
-    // Single-page desk for now: no point showing a one-item tab strip.
-    // Re-adding pages to desk_pages makes this switcher reappear for free.
-    if (desk_pages.size() <= 1)
-        return;
+    const DeskPage active_page = page_controller_.active_page();
+    const DeskWorkspace active_workspace = desk_workspace_of(active_page);
+    if (active_workspace == DeskWorkspace::market)
+        last_market_view_ = active_page;
 
-    const bool narrow = ImGui::GetContentRegionAvail().x < theme::dp(900.0f);
+    const bool narrow = ImGui::GetContentRegionAvail().x < theme::dp(700.0f);
+
+    static constexpr std::array<DeskWorkspace, 4> kWorkspaceOrder = {
+        DeskWorkspace::market, DeskWorkspace::research,
+        DeskWorkspace::operations, DeskWorkspace::diagnostics,
+    };
+
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::bg1());
-    ImGui::BeginChild("page_switcher", ImVec2(0, theme::dp(theme::kStripHeight)), true,
+    ImGui::BeginChild("workspace_switcher", ImVec2(0, theme::dp(theme::kStripHeight)), true,
                       ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     if (!narrow)
     {
@@ -851,28 +860,59 @@ void DeskApp::draw_page_switcher()
         ImGui::TextColored(theme::tx_faint(), "WORKSPACE");
         ImGui::SameLine(0, 16);
     }
-
-    for (const auto page : desk_pages)
+    for (std::size_t i = 0; i < kWorkspaceOrder.size(); ++i)
     {
-        const bool active = page_controller_.active_page() == page;
-        ImGui::PushStyleColor(ImGuiCol_Button,
-                              active ? theme::accent_dim() : theme::bg2());
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                              active ? theme::accent_dim() : theme::bg3());
-        ImGui::PushStyleColor(ImGuiCol_Text,
-                              active ? theme::accent() : theme::tx_mid());
-        if (ImGui::Button(desk_page_label(page), ImVec2(theme::dp(112.0f), 0)))
-            page_controller_.select(page);
+        const DeskWorkspace workspace = kWorkspaceOrder[i];
+        const bool active = active_workspace == workspace;
+        ImGui::PushStyleColor(ImGuiCol_Button, active ? theme::accent_dim() : theme::bg2());
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? theme::accent_dim() : theme::bg3());
+        ImGui::PushStyleColor(ImGuiCol_Text, active ? theme::accent() : theme::tx_mid());
+        if (ImGui::Button(desk_workspace_label(workspace), ImVec2(theme::dp(128.0f), 0)))
+        {
+            const DeskPage target = workspace == DeskWorkspace::market
+                ? last_market_view_ : desk_workspace_default_page(workspace);
+            page_controller_.select(target);
+        }
         ImGui::PopStyleColor(3);
-        if (page != desk_pages.back())
+        if (i + 1 < kWorkspaceOrder.size())
             ImGui::SameLine(0, 6);
     }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 
+    // Market subview strip: only meaningful while MARKET is the active
+    // workspace. Switching workspaces never changes which Market subview
+    // last_market_view_ remembers.
+    if (active_workspace != DeskWorkspace::market)
+        return;
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::bg1());
+    ImGui::BeginChild("market_view_switcher", ImVec2(0, theme::dp(theme::kStripHeight)), true,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    if (!narrow)
+    {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(theme::tx_faint(), "MARKET VIEW");
+        ImGui::SameLine(0, 16);
+    }
+    for (std::size_t i = 0; i < desk_market_views.size(); ++i)
+    {
+        const DeskPage page = desk_market_views[i];
+        const bool active = active_page == page;
+        ImGui::PushStyleColor(ImGuiCol_Button, active ? theme::accent_dim() : theme::bg2());
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? theme::accent_dim() : theme::bg3());
+        ImGui::PushStyleColor(ImGuiCol_Text, active ? theme::accent() : theme::tx_mid());
+        if (ImGui::Button(desk_market_view_label(page), ImVec2(theme::dp(120.0f), 0)))
+            page_controller_.select(page);
+        ImGui::PopStyleColor(3);
+        if (i + 1 < desk_market_views.size())
+            ImGui::SameLine(0, 6);
+    }
     ImGui::EndChild();
     ImGui::PopStyleColor();
 }
 
-void DeskApp::draw_top_chrome(const dashboard_snapshot* snap, bool has_snap)
+void DeskApp::draw_top_chrome(const dashboard_snapshot* snap, bool has_snap, bool mixed_sources)
 {
     const char* target = (has_snap && snap && !snap->debug.target.empty())
                              ? snap->debug.target.c_str()
@@ -914,6 +954,15 @@ void DeskApp::draw_top_chrome(const dashboard_snapshot* snap, bool has_snap)
         {
             ImGui::SameLine();
             theme::status_badge("DEMO DATA", theme::StatusTone::warning);
+        }
+        // §8.1: a live footprint alongside still-demo siblings (or any other
+        // simultaneous demo/real mix) must never let one live surface make
+        // the others look live — surfaced globally, on top of each panel's
+        // own per-surface provenance header.
+        if (mixed_sources)
+        {
+            ImGui::SameLine();
+            theme::status_badge("MIXED SOURCES", theme::StatusTone::warning);
         }
         draw_toast();
     };
@@ -1023,7 +1072,8 @@ void DeskApp::draw_help_overlay()
         ImGui::BulletText("F1 — this help");
         ImGui::BulletText("Ctrl+K — command palette");
         ImGui::BulletText("F11 — focus/restore primary surface");
-        ImGui::BulletText("Use the top switch to move between workspaces");
+        ImGui::BulletText("MARKET / RESEARCH / OPERATIONS / DIAGNOSTICS — top workspace switch");
+        ImGui::BulletText("MARKET shows a second row: Footprint / Liquidity / Structure / Cross-market");
         ImGui::BulletText("Unlock Layout > Lock layout, then drag titles to re-dock");
         ImGui::BulletText("Layout saved to %s", desk_layout_ini_filename);
         ImGui::Separator();
@@ -1109,26 +1159,42 @@ void DeskApp::draw_frame(const dashboard_snapshot* snap, bool has_snap)
         | ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_MenuBar
         | ImGuiWindowFlags_NoDocking;
 
+    const ResearchPresentation* research = active_research_view();
+    const bool mixed_sources = research != nullptr
+        && research_presentation_has_mixed_sources(*research);
+
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                         ImVec2(theme::dp(8.0f), theme::dp(6.0f)));
     ImGui::Begin("##TrueTestDeskRoot", nullptr, root);
     draw_menu_bar(snap, has_snap);
-    draw_page_switcher();
-    draw_top_chrome(snap, has_snap);
+    draw_workspace_switcher();
+    draw_top_chrome(snap, has_snap, mixed_sources);
 
     if (has_snap && snap)
         draw_halt_banner(*snap);
 
-    // Always-visible P&L/risk header — deliberately rendered outside the
-    // dockspace (not a dockable ImGui::Begin window) so it can never be
-    // dragged away, closed, or buried under another tab.
-    if (page_controller_.active_page() == DeskPage::monitor)
-    {
-        static const dashboard_snapshot empty_monitor_snapshot{};
-        panels::draw_account_strip(snap ? *snap : empty_monitor_snapshot, monitor_telemetry_);
-    }
-
     const DeskPage active_page = page_controller_.active_page();
+    const DeskWorkspace active_workspace = desk_workspace_of(active_page);
+    static const dashboard_snapshot empty_snapshot{};
+    const dashboard_snapshot& current = snap ? *snap : empty_snapshot;
+
+    // Always-visible workspace-level strips — deliberately rendered outside
+    // the dockspace (not a dockable ImGui::Begin window) so they can never
+    // be dragged away, closed, or buried under another tab. Only drawn once
+    // a coherent snapshot exists (§22: never render account/market metrics
+    // from a default-constructed placeholder while genuinely waiting).
+    if (snap)
+    {
+        if (active_workspace == DeskWorkspace::operations)
+        {
+            panels::draw_account_strip(current, monitor_telemetry_);
+            panels::draw_safety_strip(current, actions_, monitor_telemetry_);
+        }
+        else if (active_workspace == DeskWorkspace::market)
+        {
+            panels::draw_market_metric_band(current, monitor_telemetry_, context_);
+        }
+    }
     const ImGuiID normal_dock_id = ImGui::GetID(desk_page_dockspace_name(active_page));
     const ImGuiID focus_dock_id = ImGui::GetID(desk_focus_dockspace_name(active_page));
     const ImGuiID dock_id = focus_mode_ ? focus_dock_id : normal_dock_id;
@@ -1195,10 +1261,6 @@ void DeskApp::draw_frame(const dashboard_snapshot* snap, bool has_snap)
         ImGui::DockSpace(normal_dock_id, ImVec2(0, 0), ImGuiDockNodeFlags_KeepAliveOnly);
     ImGui::DockSpace(dock_id, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
     set_desk_layout_locked(dock_id, layout_locked_);
-
-    const ResearchPresentation* research = active_research_view();
-    static const dashboard_snapshot empty_snapshot{};
-    const dashboard_snapshot& current = snap ? *snap : empty_snapshot;
 
     switch (active_page)
     {
@@ -1270,26 +1332,26 @@ void DeskApp::draw_frame(const dashboard_snapshot* snap, bool has_snap)
             }
         }
         break;
-    case DeskPage::monitor:
+    case DeskPage::diagnostics:
         if (!snap)
-        {
-            draw_waiting_window(DeskPanel::activity_blotter, "POSITIONS & ACTIVITY");
-            if (!focus_mode_)
-            {
-                draw_waiting_window(DeskPanel::health, "SYSTEM HEALTH");
-                draw_waiting_window(DeskPanel::risk, "RISK");
-            }
-        }
+            draw_waiting_window(DeskPanel::debug, "DIAGNOSTICS");
         else
-        {
-            panels::draw_activity_panel(DeskPanel::activity_blotter, snap, density_);
-            if (!focus_mode_)
-            {
-                panels::draw_health_panel(current, monitor_telemetry_);
-                panels::draw_risk_panel(current);
-            }
-        }
+            draw_debug_panel(current);
         break;
+    case DeskPage::research:
+    {
+        // No snapshot dependency: Research's content is CLI/config
+        // reference material and honest capability state, not engine
+        // telemetry, so it renders unconditionally rather than waiting.
+        const auto caps = derive_desk_capabilities(
+            has_snap, snap,
+            static_cast<bool>(actions_.pause_toggle),
+            static_cast<bool>(actions_.flatten),
+            static_cast<bool>(actions_.kill),
+            research != nullptr);
+        panels::draw_research_workspace_panel(caps);
+        break;
+    }
     case DeskPage::count:
         break;
     }

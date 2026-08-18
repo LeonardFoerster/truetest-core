@@ -25,12 +25,19 @@ struct DeskCommand
     DeskPage page;
 };
 
-// Single-page desk for now (orderflow/liquidity/structure/markets/operations
-// stay fully defined in desk_layout_model.h, just benched from desk_pages —
-// trim their WORKSPACE commands here too so the palette can't "escape" to a
-// dormant page and steal activity_blotter/health/risk from Monitor).
-inline constexpr std::array<DeskCommand, 6> desk_commands = {{
-    {"WORKSPACE MONITOR", "Positions, orders, activity, health and risk", DeskCommandKind::select_page, DeskPage::monitor},
+// Four top-level workspace entries (jumping to MARKET always lands on its
+// Footprint view, matching DeskPageController's default) plus one entry per
+// Market subview so the palette can reach any of them directly, then the
+// layout/view utility commands.
+inline constexpr std::array<DeskCommand, 13> desk_commands = {{
+    {"WORKSPACE MARKET", "Footprint, liquidity, structure and cross-market views", DeskCommandKind::select_page, DeskPage::orderflow},
+    {"MARKET · FOOTPRINT", "Orderflow canvas, watchlist, DOM, selected context", DeskCommandKind::select_page, DeskPage::orderflow},
+    {"MARKET · LIQUIDITY", "Historical L2 heatmap, DOM, liquidations, tape", DeskCommandKind::select_page, DeskPage::liquidity},
+    {"MARKET · STRUCTURE", "TPO / market profile, volume profile, session", DeskCommandKind::select_page, DeskPage::structure},
+    {"MARKET · CROSS-MARKET", "Correlation and funding intelligence", DeskCommandKind::select_page, DeskPage::markets},
+    {"WORKSPACE OPERATIONS", "Account, execution activity, strategies, risk, safety, health", DeskCommandKind::select_page, DeskPage::operations},
+    {"WORKSPACE DIAGNOSTICS", "Engineering telemetry: rings, pools, stage timings, memory", DeskCommandKind::select_page, DeskPage::diagnostics},
+    {"WORKSPACE RESEARCH", "Backtest/replay/Monte Carlo setup and review", DeskCommandKind::select_page, DeskPage::research},
     {"RESET LAYOUT", "Restore this workspace default", DeskCommandKind::reset_layout, DeskPage::count},
     {"TOGGLE DEMO DATA", "Enable or disable deterministic UI fixtures", DeskCommandKind::toggle_demo, DeskPage::count},
     {"FOCUS PRIMARY", "Maximize or restore the primary surface", DeskCommandKind::toggle_focus, DeskPage::count},

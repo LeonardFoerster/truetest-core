@@ -9,6 +9,7 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -194,6 +195,49 @@ inline const ResearchSurfaceStatus& research_surface_status(
     ResearchSurface surface) noexcept
 {
     return presentation.surfaces[static_cast<std::size_t>(surface)];
+}
+
+// MARKET workspace §8.1: the desk can simultaneously show a real/live
+// footprint (via set_live_footprint_source) alongside sibling surfaces still
+// published from the demo fixture. Classify each surface's DeskDataState
+// into a coarse provenance bucket so a mix of "demo" and "real" surfaces can
+// be flagged as MIXED SOURCES without ever inferring an aggregate LIVE from
+// one live sibling. `unavailable`/`error` are not a competing source class —
+// they carry no data to conflict with anything.
+enum class ResearchProvenanceClass : std::uint8_t { none, demo, real };
+
+constexpr ResearchProvenanceClass research_provenance_class(DeskDataState state) noexcept
+{
+    switch (state)
+    {
+    case DeskDataState::demo:        return ResearchProvenanceClass::demo;
+    case DeskDataState::live:
+    case DeskDataState::snapshot:
+    case DeskDataState::stale:       return ResearchProvenanceClass::real;
+    case DeskDataState::unavailable:
+    case DeskDataState::error:       return ResearchProvenanceClass::none;
+    }
+    return ResearchProvenanceClass::none;
+}
+
+constexpr bool research_surfaces_have_mixed_sources(
+    std::span<const ResearchSurfaceStatus> surfaces) noexcept
+{
+    bool has_demo = false;
+    bool has_real = false;
+    for (const auto& surface : surfaces)
+    {
+        const auto cls = research_provenance_class(surface.state);
+        has_demo = has_demo || cls == ResearchProvenanceClass::demo;
+        has_real = has_real || cls == ResearchProvenanceClass::real;
+    }
+    return has_demo && has_real;
+}
+
+inline bool research_presentation_has_mixed_sources(
+    const ResearchPresentation& presentation) noexcept
+{
+    return research_surfaces_have_mixed_sources(presentation.surfaces);
 }
 
 using research_view_handle = std::shared_ptr<const ResearchPresentation>;

@@ -71,8 +71,11 @@ private:
 
     void draw_frame(const dashboard_snapshot* snap, bool has_snap);
     void draw_menu_bar(const dashboard_snapshot* snap, bool has_snap);
-    void draw_page_switcher();
-    void draw_top_chrome(const dashboard_snapshot* snap, bool has_snap);
+    // Two-tier: top-level workspace tabs (MARKET/RESEARCH/OPERATIONS/
+    // DIAGNOSTICS) plus, only while MARKET is active, a Footprint/Liquidity/
+    // Structure/Cross-market subview strip.
+    void draw_workspace_switcher();
+    void draw_top_chrome(const dashboard_snapshot* snap, bool has_snap, bool mixed_sources);
     void draw_halt_banner(const dashboard_snapshot& snap);
     void draw_help_overlay();
     void draw_command_palette();
@@ -143,6 +146,10 @@ private:
     std::array<char, 96> command_query_{};
     int command_selection_ = 0;
     DeskPageController page_controller_;
+    // Sticky "which Market subview to return to" — selecting the MARKET
+    // workspace tab from a non-Market workspace jumps back here instead of
+    // always resetting to Footprint, without persisting anything to disk.
+    DeskPage last_market_view_ = DeskPage::orderflow;
     std::array<bool, static_cast<std::size_t>(DeskPage::count)> page_layout_resolved_{};
     std::array<bool, static_cast<std::size_t>(DeskPage::count)> focus_layout_resolved_{};
     int  fill_filter_ = 0; // 0=all 1=buy 2=sell

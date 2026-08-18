@@ -10,9 +10,17 @@
 
 namespace truetest::ui::desk {
 
-inline constexpr std::uint32_t desk_layout_version = 3;
-inline constexpr const char* desk_layout_ini_filename = "truetest_desk_v3.ini";
+inline constexpr std::uint32_t desk_layout_version = 4;
+inline constexpr const char* desk_layout_ini_filename = "truetest_desk_v4.ini";
 
+// v4 replaces the v3 single-active-page ("Monitor") shell with four
+// top-level operator workspaces (see DeskWorkspace below): MARKET groups
+// orderflow/liquidity/structure/markets as an internal view switcher,
+// OPERATIONS/DIAGNOSTICS/RESEARCH are each their own page. DeskPage stays
+// the fine-grained dockspace/layout unit (one dockspace + geometry +
+// panel-assignment table per page) since Market's four views genuinely
+// need independent geometry and independent docking state, exactly like
+// the dormant v3 pages did.
 enum class DeskPage : std::uint8_t
 {
     orderflow,
@@ -20,12 +28,90 @@ enum class DeskPage : std::uint8_t
     structure,
     markets,
     operations,
-    // Single operator-monitoring page (positions/orders, health, risk).
-    // orderflow/liquidity/structure/markets/operations stay fully defined
-    // above (dormant, not in desk_pages) so they're trivial to re-enable.
-    monitor,
+    diagnostics,
+    research,
     count,
 };
+
+enum class DeskWorkspace : std::uint8_t
+{
+    market,
+    research,
+    operations,
+    diagnostics,
+    count,
+};
+
+constexpr const char* desk_workspace_label(DeskWorkspace workspace) noexcept
+{
+    switch (workspace)
+    {
+    case DeskWorkspace::market:      return "MARKET";
+    case DeskWorkspace::research:    return "RESEARCH";
+    case DeskWorkspace::operations:  return "OPERATIONS";
+    case DeskWorkspace::diagnostics: return "DIAGNOSTICS";
+    case DeskWorkspace::count:       break;
+    }
+    return "UNKNOWN";
+}
+
+constexpr DeskWorkspace desk_workspace_of(DeskPage page) noexcept
+{
+    switch (page)
+    {
+    case DeskPage::orderflow:
+    case DeskPage::liquidity:
+    case DeskPage::structure:
+    case DeskPage::markets:    return DeskWorkspace::market;
+    case DeskPage::operations: return DeskWorkspace::operations;
+    case DeskPage::diagnostics: return DeskWorkspace::diagnostics;
+    case DeskPage::research:   return DeskWorkspace::research;
+    case DeskPage::count:      break;
+    }
+    return DeskWorkspace::market;
+}
+
+// Market's internal view-switcher label — distinct from desk_page_label()
+// (which stays the stable/internal name used in a handful of toasts) so the
+// operator-facing strip can read "Footprint | Liquidity | Structure |
+// Cross-market" per the MARKET workspace spec.
+constexpr const char* desk_market_view_label(DeskPage page) noexcept
+{
+    switch (page)
+    {
+    case DeskPage::orderflow: return "Footprint";
+    case DeskPage::liquidity: return "Liquidity";
+    case DeskPage::structure: return "Structure";
+    case DeskPage::markets:   return "Cross-market";
+    default:                 return "Market";
+    }
+}
+
+inline constexpr std::array<DeskPage, 4> desk_market_views = {
+    DeskPage::orderflow, DeskPage::liquidity, DeskPage::structure, DeskPage::markets,
+};
+inline constexpr std::array<DeskPage, 1> desk_operations_views = {DeskPage::operations};
+inline constexpr std::array<DeskPage, 1> desk_diagnostics_views = {DeskPage::diagnostics};
+inline constexpr std::array<DeskPage, 1> desk_research_views = {DeskPage::research};
+
+constexpr std::span<const DeskPage> desk_workspace_pages(DeskWorkspace workspace) noexcept
+{
+    switch (workspace)
+    {
+    case DeskWorkspace::market:      return desk_market_views;
+    case DeskWorkspace::operations:  return desk_operations_views;
+    case DeskWorkspace::diagnostics: return desk_diagnostics_views;
+    case DeskWorkspace::research:    return desk_research_views;
+    case DeskWorkspace::count:       break;
+    }
+    return {};
+}
+
+constexpr DeskPage desk_workspace_default_page(DeskWorkspace workspace) noexcept
+{
+    const auto pages = desk_workspace_pages(workspace);
+    return pages.empty() ? DeskPage::orderflow : pages.front();
+}
 
 enum class DeskDockSlot : std::uint8_t
 {
@@ -51,21 +137,31 @@ struct DeskPanelAssignment
     DeskDockSlot slot;
 };
 
-inline constexpr std::array<DeskPage, 1> desk_pages = {
-    DeskPage::monitor,
+// All seven pages are now active (v3 kept only Monitor active and benched
+// the rest). MARKET's four subviews plus Operations/Diagnostics/Research
+// are reachable from the workspace switcher; see DeskWorkspace above.
+inline constexpr std::array<DeskPage, 7> desk_pages = {
+    DeskPage::orderflow,
+    DeskPage::liquidity,
+    DeskPage::structure,
+    DeskPage::markets,
+    DeskPage::operations,
+    DeskPage::diagnostics,
+    DeskPage::research,
 };
 
 constexpr const char* desk_page_label(DeskPage page) noexcept
 {
     switch (page)
     {
-    case DeskPage::orderflow:  return "Orderflow";
-    case DeskPage::liquidity:  return "Liquidity";
-    case DeskPage::structure:  return "Structure";
-    case DeskPage::markets:    return "Markets";
-    case DeskPage::operations: return "Operations";
-    case DeskPage::monitor:    return "Monitor";
-    case DeskPage::count:      break;
+    case DeskPage::orderflow:   return "Orderflow";
+    case DeskPage::liquidity:   return "Liquidity";
+    case DeskPage::structure:   return "Structure";
+    case DeskPage::markets:     return "Markets";
+    case DeskPage::operations:  return "Operations";
+    case DeskPage::diagnostics: return "Diagnostics";
+    case DeskPage::research:    return "Research";
+    case DeskPage::count:       break;
     }
     return "Unknown";
 }
@@ -74,13 +170,14 @@ constexpr const char* desk_page_dockspace_name(DeskPage page) noexcept
 {
     switch (page)
     {
-    case DeskPage::orderflow:  return "OrderflowDockSpaceV2";
-    case DeskPage::liquidity:  return "LiquidityDockSpaceV2";
-    case DeskPage::structure:  return "StructureDockSpaceV2";
-    case DeskPage::markets:    return "MarketsDockSpaceV2";
-    case DeskPage::operations: return "OperationsDockSpaceV2";
-    case DeskPage::monitor:    return "MonitorDockSpaceV2";
-    case DeskPage::count:      break;
+    case DeskPage::orderflow:   return "OrderflowDockSpaceV2";
+    case DeskPage::liquidity:   return "LiquidityDockSpaceV2";
+    case DeskPage::structure:   return "StructureDockSpaceV2";
+    case DeskPage::markets:     return "MarketsDockSpaceV2";
+    case DeskPage::operations:  return "OperationsDockSpaceV2";
+    case DeskPage::diagnostics: return "DiagnosticsDockSpaceV2";
+    case DeskPage::research:    return "ResearchDockSpaceV2";
+    case DeskPage::count:       break;
     }
     return "UnknownDockSpaceV2";
 }
@@ -89,13 +186,14 @@ constexpr const char* desk_focus_dockspace_name(DeskPage page) noexcept
 {
     switch (page)
     {
-    case DeskPage::orderflow:  return "OrderflowFocusDockSpaceV2";
-    case DeskPage::liquidity:  return "LiquidityFocusDockSpaceV2";
-    case DeskPage::structure:  return "StructureFocusDockSpaceV2";
-    case DeskPage::markets:    return "MarketsFocusDockSpaceV2";
-    case DeskPage::operations: return "OperationsFocusDockSpaceV2";
-    case DeskPage::monitor:    return "MonitorFocusDockSpaceV2";
-    case DeskPage::count:      break;
+    case DeskPage::orderflow:   return "OrderflowFocusDockSpaceV2";
+    case DeskPage::liquidity:   return "LiquidityFocusDockSpaceV2";
+    case DeskPage::structure:   return "StructureFocusDockSpaceV2";
+    case DeskPage::markets:     return "MarketsFocusDockSpaceV2";
+    case DeskPage::operations:  return "OperationsFocusDockSpaceV2";
+    case DeskPage::diagnostics: return "DiagnosticsFocusDockSpaceV2";
+    case DeskPage::research:    return "ResearchFocusDockSpaceV2";
+    case DeskPage::count:       break;
     }
     return "UnknownFocusDockSpaceV2";
 }
@@ -142,9 +240,12 @@ constexpr DeskLayoutGeometry desk_layout_geometry(DeskPage page) noexcept
     case DeskPage::structure:  return {0.28f, 0.00f, 0.00f, 0.48f};
     case DeskPage::markets:    return {0.32f, 0.00f, 0.00f, 0.48f};
     case DeskPage::operations: return {0.28f, 0.25f, 0.32f, 0.48f};
-    // Monitor: primary (activity/positions/orders) + a right column split
-    // 55/45 into health (top) / risk (bottom). No left/bottom splits needed.
-    case DeskPage::monitor:    return {0.30f, 0.00f, 0.00f, 0.45f};
+    // Diagnostics/Research: single dominant primary pane, no left/right/
+    // bottom splits (right_bottom_ratio stays a valid (0,1) fraction per
+    // desk_layout_geometry's own invariant even though it is inert here,
+    // since apply_desk_page_layout() only consumes it when right != 0).
+    case DeskPage::diagnostics: return {0.00f, 0.00f, 0.00f, 0.48f};
+    case DeskPage::research:    return {0.00f, 0.00f, 0.00f, 0.48f};
     case DeskPage::count:      break;
     }
     return {0.17f, 0.12f, 0.145f, 0.30f};
@@ -216,12 +317,18 @@ inline constexpr std::array<DeskPanelAssignment, 5> operations_assignments = {{
     {DeskPanel::operations_activity, DeskDockSlot::bottom},
 }};
 
-// Monitor: reuses activity_blotter/health/risk verbatim from the (dormant)
-// orderflow/operations pages — no new panel UI, just a new home for them.
-inline constexpr std::array<DeskPanelAssignment, 3> monitor_assignments = {{
-    {DeskPanel::activity_blotter, DeskDockSlot::primary},
-    {DeskPanel::health, DeskDockSlot::right_top},
-    {DeskPanel::risk, DeskDockSlot::right_bottom},
+// Diagnostics: the existing Debug panel gets its own top-level home instead
+// of staying unwired (it drew nowhere in v3 — no page hosted DeskPanel::debug).
+inline constexpr std::array<DeskPanelAssignment, 1> diagnostics_assignments = {{
+    {DeskPanel::debug, DeskDockSlot::primary},
+}};
+
+// Research: single dockable panel that internally tabs Setup/Report/Monte
+// Carlo/Replay. No isolated backtest-launcher or report seam exists yet
+// (see docs/internal/imgui-desk-design.md) so its content is capability-
+// gated NOT WIRED/UNAVAILABLE text rather than invented data.
+inline constexpr std::array<DeskPanelAssignment, 1> research_assignments = {{
+    {DeskPanel::research_setup, DeskDockSlot::primary},
 }};
 
 constexpr std::span<const DeskPanelAssignment>
@@ -229,13 +336,14 @@ desk_page_assignments(DeskPage page) noexcept
 {
     switch (page)
     {
-    case DeskPage::orderflow:  return orderflow_assignments;
-    case DeskPage::liquidity:  return liquidity_assignments;
-    case DeskPage::structure:  return structure_assignments;
-    case DeskPage::markets:    return markets_assignments;
-    case DeskPage::operations: return operations_assignments;
-    case DeskPage::monitor:    return monitor_assignments;
-    case DeskPage::count:      break;
+    case DeskPage::orderflow:   return orderflow_assignments;
+    case DeskPage::liquidity:   return liquidity_assignments;
+    case DeskPage::structure:   return structure_assignments;
+    case DeskPage::markets:     return markets_assignments;
+    case DeskPage::operations:  return operations_assignments;
+    case DeskPage::diagnostics: return diagnostics_assignments;
+    case DeskPage::research:    return research_assignments;
+    case DeskPage::count:       break;
     }
     return {};
 }
@@ -278,7 +386,11 @@ public:
     }
 
 private:
-    DeskPage active_ = DeskPage::monitor;
+    // Default entry point is MARKET/Footprint: Research has no wired data
+    // source yet (see docs/internal/imgui-desk-design.md), so it is never a
+    // safe first-launch default even in a backtest-only build; Market is
+    // the correct default in every mode until that changes.
+    DeskPage active_ = DeskPage::orderflow;
     std::optional<DeskPage> pending_reset_;
 };
 

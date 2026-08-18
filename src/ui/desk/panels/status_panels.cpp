@@ -18,9 +18,12 @@
 namespace truetest::ui::desk::panels {
 
 void draw_account_strip(const dashboard_snapshot& snap,
-                        const MonitorTelemetry& telemetry)
+                        const MonitorTelemetry&)
 {
-    constexpr std::size_t metric_count = 9;
+    // Trimmed to the 7 account/risk metrics that don't already live in
+    // global chrome (target/mode/symbol/provider) or the Health panel
+    // (rate, provider, stream) — §6/§9.1: compact bands, not a KPI card grid.
+    constexpr std::size_t metric_count = 7;
     constexpr float gap = theme::kMetricCardGap;
     constexpr float card_height = theme::kMetricCardHeight;
     const float available = ImGui::GetContentRegionAvail().x;
@@ -35,17 +38,13 @@ void draw_account_strip(const dashboard_snapshot& snap,
     char equity_context[96];
     char pnl_value[64];
     char pnl_context[96];
-    char realized_value[64];
     char unrealized_value[64];
     char unrealized_context[96];
     char drawdown_value[64];
     char drawdown_context[96];
-    char sharpe_value[64];
-    char sharpe_context[96];
-    char rate_value[64];
-    char rate_context[96];
-    char market_context[128];
-    char target_context[128];
+    char exposure_value[64];
+    char exposure_context[96];
+    char orders_value[64];
 
     const double equity_delta = snap.equity - snap.initial_balance;
     std::snprintf(equity_value, sizeof(equity_value), "$%.2f", snap.equity);
@@ -53,7 +52,6 @@ void draw_account_strip(const dashboard_snapshot& snap,
     std::snprintf(pnl_value, sizeof(pnl_value), "%+.2f", equity_delta);
     std::snprintf(pnl_context, sizeof(pnl_context), "%+.2f%% vs initial",
                   snap.trend.equity_change_pct);
-    std::snprintf(realized_value, sizeof(realized_value), "N/A");
     std::snprintf(unrealized_value, sizeof(unrealized_value), "%+.2f",
                   snap.unrealized_pnl);
     std::snprintf(unrealized_context, sizeof(unrealized_context), "%zu open positions",
@@ -65,29 +63,23 @@ void draw_account_strip(const dashboard_snapshot& snap,
                       snap.risk.max_drawdown_limit);
     else
         std::snprintf(drawdown_context, sizeof(drawdown_context), "peak to current");
-    std::snprintf(sharpe_value, sizeof(sharpe_value), "%.2f", snap.perf.sharpe);
-    std::snprintf(sharpe_context, sizeof(sharpe_context), "WR %.1f%%  %zu trades",
-                  snap.perf.win_rate, snap.perf.total_trades);
-    if (telemetry.available() && telemetry.rate_available())
-        std::snprintf(rate_value, sizeof(rate_value), "%.1f/s", snap.health.rate_ev_per_sec);
+    std::snprintf(exposure_value, sizeof(exposure_value), "%s", fmt_usd(snap.risk.exposure).c_str());
+    if (snap.risk.exposure_limit > 0.0)
+        std::snprintf(exposure_context, sizeof(exposure_context), "limit %s",
+                      fmt_usd(snap.risk.exposure_limit).c_str());
     else
-        std::snprintf(rate_value, sizeof(rate_value), "N/A");
-    std::snprintf(rate_context, sizeof(rate_context), "%zu events", snap.health.events_total);
+        std::snprintf(exposure_context, sizeof(exposure_context), "no limit configured");
+    if (snap.risk.open_orders_limit > 0)
+        std::snprintf(orders_value, sizeof(orders_value), "%zu / %zu",
+                      snap.risk.open_orders, snap.risk.open_orders_limit);
+    else
+        std::snprintf(orders_value, sizeof(orders_value), "%zu", snap.risk.open_orders);
 
-    const char* symbol = !snap.l2.symbol.empty() ? snap.l2.symbol.c_str()
-        : (!snap.positions.empty() ? snap.positions.front().symbol.c_str() : "NO SYMBOL");
-    const char* source = snap.l2.source == dashboard_snapshot::l2_source::venue
-        ? "VENUE" : (snap.l2.source == dashboard_snapshot::l2_source::synthetic
-                          ? "SYNTH" : "NO L2");
-    std::snprintf(market_context, sizeof(market_context), "%s  ·  %s",
-                  snap.health.provider_name.empty() ? "provider N/A"
-                                                    : snap.health.provider_name.c_str(),
-                  source);
-    const char* target = snap.debug.target.empty() ? "TARGET N/A" : snap.debug.target.c_str();
-    const char* mode = snap.debug.mode.empty() ? "mode N/A" : snap.debug.mode.c_str();
-    const char* stream = telemetry.available()
-        ? stream_state_text(telemetry.stream_state()) : "stream N/A";
-    std::snprintf(target_context, sizeof(target_context), "%s  ·  %s", mode, stream);
+    const bool exposure_warning = snap.risk.exposure_limit > 0.0
+        && snap.risk.exposure / snap.risk.exposure_limit > theme::kWarnFraction;
+    const bool orders_warning = snap.risk.open_orders_limit > 0
+        && static_cast<double>(snap.risk.open_orders)
+               / static_cast<double>(snap.risk.open_orders_limit) > theme::kWarnFraction;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::BeginChild("kpi_strip", ImVec2(0, strip_height), false,
@@ -105,21 +97,84 @@ void draw_account_strip(const dashboard_snapshot& snap,
          theme::pnl_color(equity_delta));
     card("kpi_session", "SESSION PNL", pnl_value, pnl_context,
          theme::pnl_color(equity_delta));
-    card("kpi_realized", "REALIZED PNL", realized_value, "accounting source pending",
+    card("kpi_realized", "REALIZED PNL", "N/A", "accounting source pending",
          theme::tx_mid());
     card("kpi_unrealized", "UNREALIZED PNL", unrealized_value, unrealized_context,
          theme::pnl_color(snap.unrealized_pnl));
     card("kpi_drawdown", "DRAWDOWN", drawdown_value, drawdown_context,
          snap.trend.drawdown_now_pct > 0.0 ? theme::down() : theme::tx_mid());
-    card("kpi_sharpe", "SHARPE", sharpe_value, sharpe_context,
-         snap.perf.sharpe < 0.0 ? theme::down() : theme::secondary());
-    card("kpi_rate", "UPDATE RATE", rate_value, rate_context,
-         telemetry.rate_available() ? theme::info() : theme::tx_mid());
-    card("kpi_market", "PROVIDER / SYMBOL", symbol, market_context, theme::accent());
-    card("kpi_target", "EXECUTION STATE", snap.risk.halted ? "HALTED" : target,
-         target_context, snap.risk.halted ? theme::danger() : theme::mode_color(target));
+    card("kpi_exposure", "EXPOSURE", exposure_value, exposure_context,
+         exposure_warning ? theme::warn() : theme::tx_mid());
+    card("kpi_orders", "OPEN ORDERS", orders_value,
+         snap.risk.open_orders_limit > 0 ? "vs limit" : "no limit configured",
+         orders_warning ? theme::warn() : theme::tx_mid());
     ImGui::EndChild();
     ImGui::PopStyleVar();
+}
+
+void draw_market_metric_band(const dashboard_snapshot& snap,
+                             const MonitorTelemetry& telemetry,
+                             const DeskLinkContext& context)
+{
+    // §7.6: only immediately-useful MARKET values — never account/build
+    // metrics, which belong to Operations/Diagnostics chrome instead.
+    const bool has_l2 = snap.l2.source != dashboard_snapshot::l2_source::none;
+    const char* l2_source = snap.l2.source == dashboard_snapshot::l2_source::venue
+        ? "VENUE" : (snap.l2.source == dashboard_snapshot::l2_source::synthetic
+                          ? "SYNTH" : "NO L2");
+    const bool queue_observed = snap.queue.avg_bps != 0
+        || snap.queue.submitted_with_queue != 0 || snap.queue.filled_after_drain != 0;
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::bg1());
+    ImGui::BeginChild("market_metric_band", ImVec2(0, theme::kStripHeight), true,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+    ImGui::TextColored(theme::tx_faint(), "%s", context.symbol.c_str());
+    ImGui::SameLine(0, 16);
+    if (has_l2)
+    {
+        const bool mono = theme::push_mono_font();
+        ImGui::TextColored(theme::tx_hi(), "MID %s", fmt_px(snap.l2.mid).c_str());
+        theme::pop_mono_font(mono);
+        ImGui::SameLine(0, 14);
+        ImGui::TextColored(theme::tx_lo(), "SPREAD");
+        ImGui::SameLine();
+        ImGui::TextColored(theme::tx_mid(), "%s", fmt_bps(snap.l2.spread_bps).c_str());
+        ImGui::SameLine(0, 14);
+        ImGui::TextColored(theme::tx_lo(), "MICRO");
+        ImGui::SameLine();
+        ImGui::TextColored(theme::tx_mid(), "%s", fmt_px(snap.l2.microprice).c_str());
+        ImGui::SameLine(0, 14);
+        ImGui::TextColored(theme::tx_lo(), "IMB");
+        ImGui::SameLine();
+        ImGui::TextColored(snap.l2.imbalance > 0.0 ? theme::up()
+                               : (snap.l2.imbalance < 0.0 ? theme::down() : theme::tx_mid()),
+                           "%+.2f", snap.l2.imbalance);
+        ImGui::SameLine(0, 14);
+        theme::status_badge(l2_source, snap.l2.source == dashboard_snapshot::l2_source::venue
+                                ? theme::StatusTone::info : theme::StatusTone::neutral);
+    }
+    else
+    {
+        ImGui::TextColored(theme::tx_faint(), "MID/SPREAD/MICRO/IMB — N/A (no L2 for this symbol)");
+    }
+
+    ImGui::SameLine(0, 18);
+    if (telemetry.available() && telemetry.rate_available())
+        ImGui::TextColored(theme::tx_mid(), "%.1f ev/s", snap.health.rate_ev_per_sec);
+    else
+        ImGui::TextColored(theme::tx_faint(), "rate N/A");
+
+    if (queue_observed)
+    {
+        ImGui::SameLine(0, 14);
+        ImGui::TextColored(theme::tx_lo(), "QUEUE");
+        ImGui::SameLine();
+        ImGui::TextColored(theme::tx_mid(), "%.1f%%", static_cast<double>(snap.queue.avg_bps) / 100.0);
+    }
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 }
 
 void draw_safety_strip(const dashboard_snapshot& snap,
