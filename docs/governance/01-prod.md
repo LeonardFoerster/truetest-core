@@ -47,13 +47,15 @@ See also:
 **Exact recommended command template** (conservative caps; must meet or exceed these for a qualifying session):
 
 ```bash
+RUN_TAG="p0_$(date -u +%Y%m%d_%H%M)"
 ./build/engine_live \
   --provider binance-futures \
   --symbol BTCUSDT \
   --stream trade --depth-stream depth20@100ms \
   --live \
   --api-key "${BINANCE_FUTURES_KEY}" --api-secret "${BINANCE_FUTURES_SECRET}" \
-  --persist --run-tag p0_$(date +%Y%m%d_%H%M) \
+  --log-events "./event_log_${RUN_TAG}.bin" \
+  --persist --run-tag "${RUN_TAG}" \
   --reconcile-tolerance-bps 3 \
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
   --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 0.07 \
@@ -62,7 +64,8 @@ See also:
 
 **Why each element is mandatory**:
 - `--depth-stream depth20@100ms`: enables realistic queue/impact/L2 models in shadow.
-- `--persist`: **binary zstd event log is the mandatory durable truth**; QuestDB is a secondary, queryable observability store (see questdb-multi-week-hardening-guide.md).
+- `--log-events`: writes the binary zstd event log, the mandatory durable truth. Keep `--log-max-size 0` (the default) for a single authoritative ledger; rotated segments are inspection-only until manifest stitching exists.
+- `--persist`: writes the secondary, queryable QuestDB observability stream (see questdb-multi-week-hardening-guide.md).
 - DMS + reconciler + three futures risk caps + daily-loss/unwind: layered safety nets.
 - Tiny notional + low leverage + conservative liq distance: "prove the system, not the P&L".
 

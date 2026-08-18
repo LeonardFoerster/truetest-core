@@ -15,6 +15,7 @@
 ```bash
 export BINANCE_FUTURES_KEY=...
 export BINANCE_FUTURES_SECRET=...
+RUN_TAG="p0_$(date -u +%Y%m%d_%H%M)"
 
 ./build/engine_live \
   --provider binance-futures \
@@ -22,7 +23,8 @@ export BINANCE_FUTURES_SECRET=...
   --stream trade --depth-stream depth20@100ms \
   --live \
   --api-key "${BINANCE_FUTURES_KEY}" --api-secret "${BINANCE_FUTURES_SECRET}" \
-  --persist --run-tag p0_$(date +%Y%m%d_%H%M) \
+  --log-events "./event_log_${RUN_TAG}.bin" \
+  --persist --run-tag "${RUN_TAG}" \
   --reconcile-tolerance-bps 3 \
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
   --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 0.07 \
@@ -31,7 +33,8 @@ export BINANCE_FUTURES_SECRET=...
 
 **Why each element (from prod.md)**:
 - `--depth-stream depth20@100ms`: enables realistic queue/impact/L2 models in shadow.
-- `--persist`: binary zstd event log is the **mandatory durable truth** (QuestDB secondary).
+- `--log-events`: binary zstd event log is the **mandatory durable truth**; leave event-log rotation disabled for authoritative replay.
+- `--persist`: secondary QuestDB observability keyed by `--run-tag`.
 - DMS (`--dead-man-*`): venue auto-cancel on heartbeat loss (protects orders only).
 - Reconciler (`--reconcile-tolerance-bps 3`): blocks on drift > tol.
 - Futures risk caps + daily-loss + unwind: layered pre-trade + post-fill safety.
@@ -48,7 +51,7 @@ export BINANCE_FUTURES_SECRET=...
 - [ ] DMS heartbeat visible + advancing in TUI
 - [ ] Math-captcha window open and will stay visible/attended entire session (mainnet)
 - [ ] Conservative caps applied (notional/leverage/liq/daily-loss/unwind as template)
-- [ ] Reconcile tol ≤3 bps; DMS timers set; persist + run-tag active
+- [ ] Reconcile tol ≤3 bps; DMS timers set; `--log-events`, persist + run-tag active
 - [ ] All referenced docs read (`prod.md` Phase 0 + this SOP + prerequisites)
 - [ ] `new-session.sh` run; target reports/phase0/ dir ready
 - [ ] Prior clean ≥4h `engine_shadow` mainnet run completed (no unexplained drift)

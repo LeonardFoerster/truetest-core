@@ -86,7 +86,7 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 
 **Backtesting**:
 - Local CSV (OHLCV and tick-level) and binary cache replay via `local` provider
-- Deterministic replay from recorded event logs (`--replay`, `--replay-from/--to`)
+- Deterministic authoritative-ledger replay from current-v2 event logs (`--replay`; bounded ledger replay is currently refused)
 - Configurable realism models (latency, impact, queue position, fees, fill simulation)
 - Golden regression tests + full event logging for audit
 - Walked-book impact using real L2 depth when available
@@ -214,7 +214,7 @@ ctest --test-dir build --output-on-failure
 - Threading: `--thread-preset`, `--no-pin`, `--spin-policy`
 - Risk: `--max-daily-loss`, `--max-trades-per-hour`, `--risk-unwind`, futures-specific caps (`--max-notional`, `--max-leverage`, …)
 - Persistence: `--persist`, `--questdb-host`, `--log-events`, `--record`
-- Replay: `--replay`, `--replay-from`, `--replay-to`
+- Replay: `--replay`; `--replay-from` and non-default `--replay-to` are refused until prefix/append-sequence state can be reconstructed
 - Live safety: `--dead-man-countdown-ms`, `--kill-switch-deadline-ms`, credentials via `TRUETEST_*` env or flags
 
 **External services**:
@@ -241,7 +241,7 @@ lines, fallback lines, and age since the last successful flush.
 
 Per-run tables (e.g. `{run_tag}_orders`, `{run_tag}_fills`, `{run_tag}_events`, `{run_tag}_rejections`) are created automatically with `PARTITION BY DAY` and a designated timestamp column. A shared `runs_meta` table (now using WEEK partitioning) records campaign summaries, including rich analytics fields such as max drawdown, Sharpe, Sortino, profit factor, and win rate written on shutdown. A generic `_events` table (Phase 3) enables capture of strategy decisions, risk actions, and other logic beyond pure order lifecycle.
 
-QuestDB is explicitly a secondary, queryable analytics and observability store. The binary zstd-compressed event log (`--record`) is the authoritative, durable audit trail. In non-strict mode, QuestDB unavailability at startup causes graceful degradation (persistence is disabled for the session with a warning). In strict mode, startup or persistent write failures cause a hard exit.
+QuestDB is explicitly a secondary, queryable analytics and observability store. The binary zstd-compressed event log (`--log-events`) is the authoritative, durable audit trail; `--record` captures raw transport frames instead. In non-strict mode, QuestDB unavailability at startup causes graceful degradation (persistence is disabled for the session with a warning). In strict mode, startup or persistent write failures cause a hard exit.
 
 For operational details, golden queries, retention/TTL recommendations, soak testing with failure injection, and post-run reconciliation, see [03-db.md](03-db.md) and `docs/archive/questdb-multi-week-hardening-guide.md` (historical).
 

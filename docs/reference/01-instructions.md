@@ -68,13 +68,15 @@ Full authoritative details, Phase 0/1 gates, exact ritual, Go-Live table (9 rows
 
 **Key Phase 0 command template** (see 01-prod.md for full "why" + exit criteria + ritual):
 ```bash
+RUN_TAG="p0_$(date -u +%Y%m%d_%H%M)"
 ./build/engine_live \
   --provider binance-futures \
   --symbol BTCUSDT \
   --stream trade --depth-stream depth20@100ms \
   --live \
   --api-key "${BINANCE_FUTURES_KEY}" --api-secret "${BINANCE_FUTURES_SECRET}" \
-  --persist --run-tag p0_$(date +%Y%m%d_%H%M) \
+  --log-events "./event_log_${RUN_TAG}.bin" \
+  --persist --run-tag "${RUN_TAG}" \
   --reconcile-tolerance-bps 3 \
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \
   --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 0.07 \
@@ -344,7 +346,7 @@ Full `provider::event` variant + market/tick/l2/order/fill/funding. OrderTracker
 
 **Checkpoints**: Portfolio snapshots are diagnostic-only. `--resume` and direct `resume_checkpoint_path` are refused because v1 does not contain enough state for safe recovery. A future v2 must cover orders, lots, strategy, risk, and execution state. `--seed` remains the RNG/fixed-epoch determinism control.
 
-**Replay**: `--replay events.bin` (or `--replay-data`), time-seeking `--replay-from/--to`, paced vs fast-forward. Golden regression tests for bit-identical fills/PnL.
+**Replay**: `--replay events.bin` applies a current-v2 recorded economic ledger exactly once; it does not rerun a strategy or regenerate fills. Supply the same `--balance` as the recorded run. `--replay-from` and non-default `--replay-to` are refused: checkpoint prefix state is unavailable and record append order need not be monotonic in exchange-event time. Legacy/headerless logs remain available to `EventReplayer` for inspection but are not accepted as authoritative engine ledgers. `--replay-data` is the separate market-data path. Regression tests compare orders, fills, trades and PnL against the source run.
 
 **Analytics**: Cumulative + rolling, per-symbol/strategy, alpha/beta vs benchmark, adverse selection, report export JSON/CSV.
 

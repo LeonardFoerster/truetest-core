@@ -202,7 +202,7 @@ if (!is_open && mkt.get_close() > *sma_value) {
 
 | Wert | Order-Typ | Engine-Delay / Fill-Ort |
 |------|-----------|-------------------------|
-| `0` (Default) | `order_type::market` | Mit Default `execution_bar_delay > 0` → Order geparkt (`sim_time + 1ns`); typ. Fill am nächsten späteren Timestamp (meist Bar-N+1). Fill ist **MM-Book-Walk nach Re-Center**, kein garantierter exakter Open. Mit `delay=0` → same-bar Close-Book. |
+| `0` (Default) | `order_type::market` | Mit Default `execution_bar_delay=1` → Order bis zum nächsten preisführenden Event **desselben Symbols** geparkt (meist Bar-N+1). Fill ist **MM-Book-Walk nach Re-Center**, kein garantierter exakter Open. Mit `delay=0` → same-bar Close-Book. |
 | `1` | `order_type::limit` at close (`limit_at_close`) | Limit am Close; Sweep-Semantik separat |
 
 ### Signal-Closes vs. Platform-Brackets
@@ -458,8 +458,8 @@ src/strategy/my_strategy.cpp
 
 | Fakt | Detail |
 |------|--------|
-| Semantik im Code | Jeder Wert `> 0` → `earliest_eligible_ts = sim_time + 1ns` (**boolean Gate**, kein N-Bar-Delay). CLI-Wording „Bars of simulated execution delay“ / „N bars“ ist **irreführend** vs. Code. |
-| Typischer Effekt | Signal Bar-N Close → Fill am nächsten späteren Timestamp (meist Bar-N+1 Open-Region; Book re-centered). Fill = MM Book-Walk, **kein** garantierter exakter Open. |
+| Semantik im Code | `N` zählt zukünftige preisführende Events **desselben Symbols**. Events anderer Symbole geben die Order nicht frei. |
+| Typischer Effekt | Signal Bar-N Close mit `N=1` → Fill bei der nächsten Beobachtung desselben Symbols (meist Bar-N+1 Open-Region; Book re-centered). Am Stream-Ende ohne Folgebeobachtung verfällt die Order statt synthetisch zu fillen. Fill = MM Book-Walk, **kein** garantierter exakter Open. |
 | `delay = 0` | same-bar Close-Book (sofort eligible) |
 | `latency_model` | hat **Vorrang** vor `execution_bar_delay` |
 | Live | CLI forciert `execution_bar_delay = 0` |
