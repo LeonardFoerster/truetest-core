@@ -7,7 +7,9 @@
 #include <fstream>
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <utility>
 
 class LoggingWorker : public Worker
 {
@@ -33,29 +35,85 @@ public:
             text_file_.open(text_log_path, std::ios::out | std::ios::trunc);
     }
 
+    // Used only for the pre-reserved live ledger.  The engine creates this
+    // worker before its initial private drain, so that drain is recorded by
+    // the same logger that later consumes the logging ring—without a pathname
+    // reopen or a second writer.
+    explicit LoggingWorker(std::unique_ptr<EventLogger> authoritative_event_logger,
+                           log_sink text_sink = log_sink::none,
+                           const std::string& text_log_path = "",
+                           std::uint64_t text_max_bytes = 0,
+                           int text_max_files = 5)
+        : event_logger_(std::move(authoritative_event_logger))
+        , authoritative_event_log_(true)
+        , text_sink_(text_sink)
+        , text_log_path_(text_log_path)
+        , text_max_bytes_(text_max_bytes)
+        , text_max_files_(text_max_files)
+    {
+        if (!event_logger_)
+            throw std::invalid_argument(
+                "LoggingWorker requires an authoritative EventLogger");
+        if (text_sink_ == log_sink::file_sink && !text_log_path.empty())
+            text_file_.open(text_log_path, std::ios::out | std::ios::trunc);
+    }
+
     ~LoggingWorker()
     {
-        flush_batch();
-        if (event_logger_)
-            event_logger_->flush();
+        // Preserve the ordinary logger's existing destructor semantics.  A
+        // secure ledger can deliberately be abandoned after a terminal
+        // failure, where flush() correctly throws; suppress only that
+        // teardown rethrow because engine::stop_workers already latched it.
+        if (!authoritative_event_log_)
+        {
+            flush_batch();
+            if (event_logger_)
+                event_logger_->flush();
+            return;
+        }
+
+        try
+        {
+            flush_batch();
+            if (event_logger_)
+                event_logger_->flush();
+        }
+        catch (...)
+        {
+            // Explicit live finalization is performed by engine::stop_workers
+            // where failure can latch the terminal halt.  Destruction is only
+            // a last-resort cleanup path and must not terminate the process.
+        }
     }
 
     const char* worker_name() const override { return "logging"; }
 
     void on_event(const event_pointer& ev) override
     {
-        events_processed_.fetch_add(1, std::memory_order_relaxed);
+        write_event(*ev);
+    }
 
-        if (event_logger_)
-            event_logger_->log(*ev);
+    // Before the worker thread exists, a live engine can still need to drain
+    // provider-private facts during construction.  Write those facts through
+    // this exact secure logger, never through a second path-opened logger.
+    // Once startup marks the worker active, all events must go through its
+    // SPSC ring to preserve asynchronous hot-path behavior.
+    void log_event_before_worker_start(const event& ev)
+    {
+        if (worker_started_.load(std::memory_order_acquire))
+            throw std::logic_error(
+                "LoggingWorker direct logging after worker startup");
+        write_event(ev);
+    }
 
-        if (text_sink_ != log_sink::none)
-        {
-            batch_buffer_ << format_event(*ev) << '\n';
-            ++batch_count_;
-            if (batch_count_ >= BATCH_SIZE)
-                flush_batch();
-        }
+    void mark_worker_started() noexcept
+    {
+        worker_started_.store(true, std::memory_order_release);
+    }
+
+    bool worker_started() const noexcept
+    {
+        return worker_started_.load(std::memory_order_acquire);
     }
 
     std::size_t events_processed() const
@@ -63,8 +121,44 @@ public:
         return events_processed_.load(std::memory_order_relaxed);
     }
 
+    // Call only after the worker has been stopped and joined.  This preserves
+    // the live ledger's ordering: final private accounting is enqueued before
+    // worker shutdown, the worker drains its ring, then the one descriptor
+    // owner writes the terminal index and atomically publishes the ledger.
+    void finalize_event_log()
+    {
+        flush_batch();
+        if (event_logger_)
+            event_logger_->finalize();
+    }
+
+    // A dropped or failed authoritative logging record invalidates the
+    // ledger's completeness proof.  It must remain a forensic `.partial`,
+    // never be promoted merely because shutdown reached the normal boundary.
+    void abandon_event_log() noexcept
+    {
+        if (event_logger_)
+            event_logger_->abandon_unpublished();
+    }
+
 private:
+    void write_event(const event& ev)
+    {
+        events_processed_.fetch_add(1, std::memory_order_relaxed);
+
+        if (event_logger_)
+            event_logger_->log(ev);
+
+        if (text_sink_ != log_sink::none)
+        {
+            batch_buffer_ << format_event(ev) << '\n';
+            ++batch_count_;
+            if (batch_count_ >= BATCH_SIZE)
+                flush_batch();
+        }
+    }
     std::unique_ptr<EventLogger> event_logger_;
+    bool authoritative_event_log_ = false;
 
     log_sink text_sink_ = log_sink::none;
     std::string text_log_path_;
@@ -76,6 +170,7 @@ private:
     static constexpr std::size_t BATCH_SIZE = 100;
 
     std::atomic<std::size_t> events_processed_{0};
+    std::atomic<bool> worker_started_{false};
 
     void rotate_text_if_needed()
     {
