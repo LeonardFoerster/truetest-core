@@ -79,3 +79,20 @@ TEST(Price, LargeValues)
     Price p = Price::from_double(999999999.9999);
     EXPECT_DOUBLE_EQ(p.to_double(), 999999999.9999);
 }
+
+TEST(Price, CheckedConversionRejectsRoundedIntegerOverflow)
+{
+    Price out;
+    EXPECT_TRUE(Price::try_from_double(100.25, out));
+    EXPECT_DOUBLE_EQ(out.to_double(), 100.25);
+
+    const double positive_edge =
+        static_cast<double>(std::numeric_limits<int64_t>::max())
+        / static_cast<double>(Price::SCALE);
+    EXPECT_FALSE(Price::try_from_double(
+        std::nextafter(positive_edge,
+                       std::numeric_limits<double>::infinity()), out));
+    EXPECT_FALSE(Price::try_from_double(1e100, out));
+    EXPECT_FALSE(Price::try_from_double(
+        std::numeric_limits<double>::quiet_NaN(), out));
+}

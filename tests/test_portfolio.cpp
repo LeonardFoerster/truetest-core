@@ -248,6 +248,156 @@ TEST(Portfolio, FlipLongToShort_CommissionChargedOnce)
     EXPECT_NEAR(pos.cost_basis, -495.0, 1e-9);
 }
 
+TEST(Portfolio, BF13_LongToShortFlipSplitsCloseAndNewOpenerLot)
+{
+    portfolio p;
+    const double initial_cash = p.get_cash();
+    const auto ts = now();
+
+    fill_event open(ts, "AAPL", 101, order_side::buy,
+                    10.0, 100.0, 10.0,
+                    /*remaining_qty=*/0.0, /*fill_id=*/1,
+                    "alpha", /*opener_order_id=*/101);
+    p.on_fill(open, 101, "alpha");
+
+    // One physical fill closes the old 10-unit long and opens a new
+    // 5-unit short.  Its 15 commission is prorated 10/5 by net accounting.
+    fill_event flip(ts, "AAPL", 202, order_side::sell,
+                    15.0, 120.0, 15.0,
+                    /*remaining_qty=*/0.0, /*fill_id=*/2,
+                    "alpha", /*opener_order_id=*/101);
+    p.on_fill(flip, 101, "alpha");
+
+    const auto& pos = p.get_positions().at("AAPL");
+    EXPECT_DOUBLE_EQ(pos.qty, -5.0);
+    EXPECT_DOUBLE_EQ(pos.cost_basis, -595.0);
+    EXPECT_EQ(p.get_total_fills(), 2u);
+    EXPECT_EQ(p.get_total_trades(), 1u);
+
+    // Realized old-leg PnL is 200 gross - 10 entry fee - 10 close fee;
+    // the residual opener's 5 fee remains reflected in marked equity.
+    EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash - 1010.0 + 1190.0 + 595.0);
+    EXPECT_DOUBLE_EQ(p.get_equity(120.0), initial_cash + 175.0);
+
+    const auto& lots = p.get_lots();
+    EXPECT_EQ(lots.count(101), 0u);
+    ASSERT_EQ(lots.size(), 1u);
+    auto residual = lots.find(202);
+    ASSERT_NE(residual, lots.end());
+    EXPECT_EQ(residual->second.side, order_side::sell);
+    EXPECT_DOUBLE_EQ(residual->second.qty_open, 5.0);
+    EXPECT_DOUBLE_EQ(residual->second.entry_filled_qty, 5.0);
+    EXPECT_DOUBLE_EQ(residual->second.entry_price, 120.0);
+    EXPECT_EQ(residual->second.strategy_name, "alpha");
+}
+
+TEST(Portfolio, BF13_ShortToLongFlipSplitsCloseAndNewOpenerLot)
+{
+    portfolio p;
+    const double initial_cash = p.get_cash();
+    const auto ts = now();
+
+    fill_event open(ts, "AAPL", 301, order_side::sell,
+                    10.0, 100.0, 10.0,
+                    /*remaining_qty=*/0.0, /*fill_id=*/1,
+                    "alpha", /*opener_order_id=*/301);
+    p.on_fill(open, 301, "alpha");
+
+    fill_event flip(ts, "AAPL", 402, order_side::buy,
+                    15.0, 80.0, 15.0,
+                    /*remaining_qty=*/0.0, /*fill_id=*/2,
+                    "alpha", /*opener_order_id=*/301);
+    p.on_fill(flip, 301, "alpha");
+
+    const auto& pos = p.get_positions().at("AAPL");
+    EXPECT_DOUBLE_EQ(pos.qty, 5.0);
+    EXPECT_DOUBLE_EQ(pos.cost_basis, 405.0);
+    EXPECT_EQ(p.get_total_fills(), 2u);
+    EXPECT_EQ(p.get_total_trades(), 1u);
+    EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash + 990.0 - 810.0 - 405.0);
+    EXPECT_DOUBLE_EQ(p.get_equity(80.0), initial_cash + 175.0);
+
+    const auto& lots = p.get_lots();
+    EXPECT_EQ(lots.count(301), 0u);
+    ASSERT_EQ(lots.size(), 1u);
+    auto residual = lots.find(402);
+    ASSERT_NE(residual, lots.end());
+    EXPECT_EQ(residual->second.side, order_side::buy);
+    EXPECT_DOUBLE_EQ(residual->second.qty_open, 5.0);
+    EXPECT_DOUBLE_EQ(residual->second.entry_filled_qty, 5.0);
+    EXPECT_DOUBLE_EQ(residual->second.entry_price, 80.0);
+    EXPECT_EQ(residual->second.strategy_name, "alpha");
+}
+
+TEST(Portfolio, BF17_FlipOnlyConsumesReferencedLotAndOpensResidual)
+{
+    portfolio p;
+    const auto ts = now();
+
+    fill_event first(ts, "AAPL", 11, order_side::buy, 10.0, 100.0, 0.0);
+    fill_event second(ts, "AAPL", 12, order_side::buy, 7.0, 105.0, 0.0);
+    p.on_fill(first, 11, "alpha");
+    p.on_fill(second, 12, "beta");
+
+    // The fill is explicitly attributed to lot 11. It closes only that lot;
+    // the five-unit overshoot becomes a new short lot even though lot 12
+    // keeps the venue's aggregate net position long.
+    fill_event flip(ts, "AAPL", 22, order_side::sell, 15.0, 110.0, 0.0);
+    p.on_fill(flip, 11, "alpha");
+
+    const auto& lots = p.get_lots();
+    EXPECT_EQ(lots.count(11), 0u);
+    ASSERT_NE(lots.find(12), lots.end());
+    EXPECT_DOUBLE_EQ(lots.at(12).qty_open, 7.0);
+    const auto residual = lots.find(22);
+    ASSERT_NE(residual, lots.end());
+    EXPECT_EQ(residual->second.side, order_side::sell);
+    EXPECT_DOUBLE_EQ(residual->second.qty_open, 5.0);
+    EXPECT_DOUBLE_EQ(residual->second.entry_filled_qty, 5.0);
+
+    const auto& pos = p.get_positions().at("AAPL");
+    EXPECT_DOUBLE_EQ(pos.qty, 2.0);
+}
+
+TEST(Portfolio, FlipAcrossPartialFillsContinuesNewOpenerLot)
+{
+    portfolio p;
+    const auto ts = now();
+
+    fill_event open(ts, "AAPL", 51, order_side::buy, 10.0, 100.0, 0.0);
+    p.on_fill(open, 51, "alpha");
+
+    // The first physical partial fill consumes the old lot exactly, while
+    // the order still has five units left to fill.
+    fill_event first_flip(ts, "AAPL", 52, order_side::sell,
+                          10.0, 110.0, 0.0,
+                          /*remaining_qty=*/5.0);
+    p.on_fill(first_flip, 51, "alpha");
+
+    // The old opener no longer exists. Subsequent fills are entirely opener
+    // fills of the same order and roll into one weighted residual lot.
+    fill_event second_flip(ts, "AAPL", 52, order_side::sell,
+                           2.0, 115.0, 0.0,
+                           /*remaining_qty=*/3.0);
+    p.on_fill(second_flip, 51, "alpha");
+    fill_event third_flip(ts, "AAPL", 52, order_side::sell,
+                           3.0, 120.0, 0.0,
+                           /*remaining_qty=*/0.0);
+    p.on_fill(third_flip, 51, "alpha");
+
+    const auto& lots = p.get_lots();
+    EXPECT_EQ(lots.count(51), 0u);
+    ASSERT_EQ(lots.size(), 1u);
+    const auto residual = lots.find(52);
+    ASSERT_NE(residual, lots.end());
+    EXPECT_DOUBLE_EQ(residual->second.qty_open, 5.0);
+    EXPECT_DOUBLE_EQ(residual->second.entry_filled_qty, 5.0);
+    EXPECT_DOUBLE_EQ(residual->second.entry_price, 118.0);
+
+    const auto& pos = p.get_positions().at("AAPL");
+    EXPECT_DOUBLE_EQ(pos.qty, -5.0);
+}
+
 TEST(Portfolio, MultiSymbol_CashTracking)
 {
     portfolio p;

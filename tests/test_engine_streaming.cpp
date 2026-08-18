@@ -14,6 +14,7 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <cstdio>
 #include <future>
 
 namespace {
@@ -247,7 +248,7 @@ TEST(EngineStreaming, QuietStreamDrainsFundingBeforeFirstMarketFrame)
     EXPECT_DOUBLE_EQ(snapshot.cash, 1'007.5);
 }
 
-TEST(EngineStreaming, ConstructorDrainsPrequeuedFunding)
+TEST(EngineStreaming, StartDrainsPrequeuedFundingBeforeMarketDispatch)
 {
     auto provider = std::make_shared<IdleFundingProvider>();
     const auto ts = std::chrono::system_clock::time_point{
@@ -263,10 +264,111 @@ TEST(EngineStreaming, ConstructorDrainsPrequeuedFunding)
     engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
                std::make_shared<StreamTestStrategy>(), std::move(cfg));
 
+    EXPECT_FALSE(provider->ingress.empty());
+
+    auto bridge = std::make_shared<DataBridge<bar_record>>(
+        std::make_shared<IdleBeforeHeaderTransport>(),
+        std::make_shared<CsvBarParser>(), bar_record_sink);
+    const auto result = eng.run_streaming(bridge);
+    EXPECT_TRUE(result.success());
     EXPECT_TRUE(provider->ingress.empty());
     truetest::ui::dashboard_snapshot snapshot;
     ASSERT_TRUE(eng.snapshot_dashboard(snapshot));
     EXPECT_DOUBLE_EQ(snapshot.cash, 1'002.25);
+}
+
+TEST(EngineStreaming, PrequeuedFundingIsPersistedInInlineEventLog)
+{
+    const std::string path = "/tmp/truetest_prequeued_funding_event_log.bin";
+    std::remove(path.c_str());
+    auto provider = std::make_shared<IdleFundingProvider>();
+    const auto ts = std::chrono::system_clock::time_point{
+        std::chrono::milliseconds{1'700'000'000'000LL}};
+    ASSERT_TRUE(provider->ingress.try_publish(ts, "BTCUSDT", -2.25));
+
+    {
+        engine_config cfg;
+        cfg.mode = engine_mode::backtest;
+        cfg.threading = thread_preset::inline_mode;
+        cfg.disable_pinning = true;
+        cfg.initial_balance = 1'000.0;
+        cfg.provider = provider;
+        cfg.event_log_path = path;
+        cfg.compress_log = false;
+        engine eng(std::make_shared<data_handler>(),
+                   std::make_shared<orderbook>(),
+                   std::make_shared<StreamTestStrategy>(), std::move(cfg));
+        auto bridge = std::make_shared<DataBridge<bar_record>>(
+            std::make_shared<IdleBeforeHeaderTransport>(),
+            std::make_shared<CsvBarParser>(), bar_record_sink);
+        EXPECT_TRUE(eng.run_streaming(bridge).success());
+    }
+
+    EventReplayer replayer(path);
+    auto ev = replayer.next();
+    ASSERT_NE(ev, nullptr);
+    ASSERT_EQ(ev->get_type(), event_type::funding);
+    EXPECT_DOUBLE_EQ(static_cast<const funding_event&>(*ev).get_cash_delta(),
+                     -2.25);
+    EXPECT_FALSE(replayer.has_next());
+    std::remove(path.c_str());
+}
+
+TEST(EngineStreaming, PrequeuedFundingReachesEveryThreadedAnalyticsAndDurableLog)
+{
+    SilenceOutput quiet;
+    const auto ts = std::chrono::system_clock::time_point{
+        std::chrono::milliseconds{1'700'000'000'000LL}};
+
+    for (const auto preset : {thread_preset::light, thread_preset::standard,
+                              thread_preset::full, thread_preset::extended})
+    {
+        SCOPED_TRACE(static_cast<int>(preset));
+        const bool supports_log = preset != thread_preset::light;
+        const std::string path =
+            "/tmp/truetest_prequeued_funding_threaded_"
+            + std::to_string(static_cast<int>(preset)) + ".bin";
+        std::remove(path.c_str());
+
+        auto provider = std::make_shared<IdleFundingProvider>();
+        ASSERT_TRUE(provider->ingress.try_publish(ts, "BTCUSDT", -2.25));
+
+        double reported_funding = 0.0;
+        {
+            engine_config cfg;
+            cfg.mode = engine_mode::backtest;
+            cfg.threading = preset;
+            cfg.disable_pinning = true;
+            cfg.initial_balance = 1'000.0;
+            cfg.provider = provider;
+            if (supports_log)
+                cfg.event_log_path = path;
+            cfg.compress_log = false;
+            engine eng(std::make_shared<data_handler>(),
+                       std::make_shared<orderbook>(),
+                       std::make_shared<StreamTestStrategy>(), std::move(cfg));
+
+            auto bridge = std::make_shared<DataBridge<bar_record>>(
+                std::make_shared<IdleBeforeHeaderTransport>(),
+                std::make_shared<CsvBarParser>(), bar_record_sink);
+            ASSERT_TRUE(eng.run_streaming(bridge).success());
+            reported_funding = eng.get_analytics().total_funding_pnl();
+        }
+
+        EXPECT_DOUBLE_EQ(reported_funding, -2.25);
+        if (supports_log)
+        {
+            EventReplayer replayer(path);
+            auto ev = replayer.next();
+            ASSERT_NE(ev, nullptr);
+            ASSERT_EQ(ev->get_type(), event_type::funding);
+            EXPECT_DOUBLE_EQ(
+                static_cast<const funding_event&>(*ev).get_cash_delta(),
+                -2.25);
+            EXPECT_FALSE(replayer.has_next());
+        }
+        std::remove(path.c_str());
+    }
 }
 
 TEST(EngineStreaming, QuietTickStreamUsesFundingIdleDrain)
@@ -360,6 +462,9 @@ TEST(EngineStreaming, RuntimeFundingOverflowHaltsBeforeMarketDispatch)
 TEST(EngineStreaming, FinalDrainAppliesFundingAfterProviderProducerStops)
 {
     SilenceOutput quiet;
+    const std::string path =
+        "/tmp/truetest_final_provider_funding_event_log.bin";
+    std::remove(path.c_str());
     auto provider = std::make_shared<IdleFundingProvider>();
     provider->publish_on_close = true;
     provider->close_cash_delta = 3.25;
@@ -374,6 +479,8 @@ TEST(EngineStreaming, FinalDrainAppliesFundingAfterProviderProducerStops)
     cfg.initial_balance = 1'000.0;
     cfg.provider = provider;
     cfg.live_safety_session = session;
+    cfg.event_log_path = path;
+    cfg.compress_log = false;
     engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
                std::make_shared<StreamTestStrategy>(), std::move(cfg));
 
@@ -387,6 +494,15 @@ TEST(EngineStreaming, FinalDrainAppliesFundingAfterProviderProducerStops)
     truetest::ui::dashboard_snapshot snapshot;
     ASSERT_TRUE(eng.snapshot_dashboard(snapshot));
     EXPECT_DOUBLE_EQ(snapshot.cash, 1'003.25);
+
+    EventReplayer replayer(path);
+    auto ev = replayer.next();
+    ASSERT_NE(ev, nullptr);
+    ASSERT_EQ(ev->get_type(), event_type::funding);
+    EXPECT_DOUBLE_EQ(static_cast<const funding_event&>(*ev).get_cash_delta(),
+                     3.25);
+    EXPECT_FALSE(replayer.has_next());
+    std::remove(path.c_str());
 }
 
 // Tick-counting strategy: just counts ticks, never trades

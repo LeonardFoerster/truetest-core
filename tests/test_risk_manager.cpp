@@ -89,6 +89,41 @@ TEST(RiskManager, MaxPositionValue_RejectsShortIncrease)
     EXPECT_EQ(rm.check_order(short_open, port, snap), risk_action::reject);
 }
 
+TEST(RiskManager, EquityPercentageCapRejectsUnusableEquityFailClosed)
+{
+    risk_limits lim;
+    lim.max_position_pct_of_equity = 0.10;
+    RiskManager rm(lim);
+    portfolio port;
+    order_event open(epoch_ms(1), "AAPL", order_type::limit,
+                     order_side::buy, 1.0, 100.0);
+
+    for (const double equity : {
+             0.0, -1.0, std::numeric_limits<double>::quiet_NaN()})
+    {
+        risk_snapshot snap;
+        snap.equity = equity;
+        EXPECT_EQ(rm.check_order(open, port, snap), risk_action::reject)
+            << "equity=" << equity;
+    }
+}
+
+TEST(RiskManager, EquityPercentageCapStillAllowsReductionWithUnusableEquity)
+{
+    risk_limits lim;
+    lim.max_position_pct_of_equity = 0.10;
+    RiskManager rm(lim);
+    portfolio port;
+    port.on_fill(fill_event(epoch_ms(0), "AAPL", 1, order_side::buy,
+                            10.0, 100.0, 0.0));
+    order_event reduce(epoch_ms(1), "AAPL", order_type::limit,
+                       order_side::sell, 5.0, 100.0);
+    risk_snapshot snap;
+    snap.equity = std::numeric_limits<double>::quiet_NaN();
+
+    EXPECT_EQ(rm.check_order(reduce, port, snap), risk_action::pass);
+}
+
 TEST(RiskManager, MaxPositionValue_AllowsShortReductionNearLimit)
 {
     risk_limits lim;

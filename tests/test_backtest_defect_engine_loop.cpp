@@ -31,7 +31,7 @@ TEST(BacktestDefects, EL01_TickPath_NoDualMarketDispatch)
 
 // ── FR-02: MC trials apply fee model ───────────────────────────────────────
 
-TEST(BacktestDefects, EL03_BatchWithBarDelay_FinalPendingDrains)
+TEST(BacktestDefects, EL03_BatchWithBarDelayFillsOnFutureBar)
 {
     SilenceOutput silence;
     auto dh = std::make_shared<data_handler>();
@@ -45,7 +45,7 @@ TEST(BacktestDefects, EL03_BatchWithBarDelay_FinalPendingDrains)
     cfg.initial_balance = 10000;
     auto eng = std::make_unique<engine>(dh, nullptr, strat, std::move(cfg));
     eng->run();
-    // One-shot buy with delay=1 must still fill before EOS drain completes.
+    // The first bar emits and the second same-symbol bar causally releases it.
     EXPECT_GE(eng->get_analytics().snapshot().total_fills, 1u);
 }
 
@@ -71,9 +71,9 @@ TEST(BacktestDefects, EL02_EngineBatch_LatencyModelAdvancesWithoutCrash)
     EXPECT_NO_THROW(eng->run());
 }
 
-// ── EL-03 streaming EOS drains delayed market order ────────────────────────
+// ── EL-03 streaming delay uses a future market observation ─────────────────
 
-TEST(BacktestDefects, EL03_StreamingEosDrainsDelayedOrder)
+TEST(BacktestDefects, EL03_StreamingFutureBarDrainsDelayedOrder)
 {
     SilenceOutput silence;
     auto transport = std::make_shared<MockStreamingTransport>();
@@ -112,7 +112,7 @@ TEST(BacktestDefects, EL03_StreamingEosDrainsDelayedOrder)
     eng.run_streaming(bridge);
     feeder.join();
 
-    // Without EOS drain_final_pending, delay=1 last/parked order is abandoned.
+    // The later same-symbol input bar, not EOF cleanup, releases the order.
     EXPECT_GE(eng.get_analytics().snapshot().total_fills, 1u);
 }
 

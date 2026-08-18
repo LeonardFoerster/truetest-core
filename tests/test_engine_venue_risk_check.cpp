@@ -56,6 +56,36 @@ private:
     mutable std::atomic<int> calls_{0};
 };
 
+class CapturingRiskCheck final : public IRiskCheck
+{
+public:
+    decision evaluate(const order_event&, const portfolio&,
+                      double mark) const override
+    {
+        mark_.store(mark, std::memory_order_relaxed);
+        return {};
+    }
+
+    decision evaluate_with_account_equity(
+        const order_event&, const portfolio&, double mark,
+        double equity) const override
+    {
+        mark_.store(mark, std::memory_order_relaxed);
+        equity_.store(equity, std::memory_order_relaxed);
+        calls_.fetch_add(1, std::memory_order_relaxed);
+        return {};
+    }
+
+    int calls() const { return calls_.load(std::memory_order_relaxed); }
+    double mark() const { return mark_.load(std::memory_order_relaxed); }
+    double equity() const { return equity_.load(std::memory_order_relaxed); }
+
+private:
+    mutable std::atomic<int> calls_{0};
+    mutable std::atomic<double> mark_{0.0};
+    mutable std::atomic<double> equity_{0.0};
+};
+
 // Minimal IProvider stub. Returns nullptr from every hook except
 // get_risk_check(); the engine wires that one through. We deliberately
 // report has_data_feed=false so engine.run() falls back to the
@@ -185,4 +215,45 @@ TEST(EngineVenueRiskCheck, AllowsOrderWhenCheckPasses)
         << "engine must invoke the check even when it allows";
     EXPECT_GT(eng.get_analytics().snapshot().total_fills, 0u)
         << "allow=true must not block the existing fill path";
+}
+
+TEST(EngineVenueRiskCheck, CrossSymbolOrderUsesItsOwnRecordedMark)
+{
+    SilenceCout quiet;
+    auto dh = std::make_shared<data_handler>();
+    dh->load_into_queue("1704067200000", "BTCUSDT",
+                        100.0, 101.0, 99.0, 100.0, 1000);
+    dh->load_into_queue("1704067260000", "ETHUSDT",
+                        3000.0, 3010.0, 2990.0, 3000.0, 1000);
+
+    class EmitBtcFromEth final : public IStrategy
+    {
+    public:
+        std::optional<order_event> on_market(const market_event& m) override
+        {
+            if (done_ || m.get_symbol() != "ETHUSDT") return std::nullopt;
+            done_ = true;
+            return order_event(m.get_timestamp(), "BTCUSDT",
+                               order_type::market, order_side::buy,
+                               1.0, 100.0);
+        }
+        void set_position_open(const std::string&, bool) override {}
+    private:
+        bool done_ = false;
+    };
+
+    auto rc = std::make_shared<CapturingRiskCheck>();
+    engine_config cfg;
+    cfg.show_progress = false;
+    cfg.execution_bar_delay = 0;
+    cfg.initial_balance = 10'000.0;
+    cfg.provider = std::make_shared<MockProvider>(rc);
+    engine eng(dh, std::make_shared<orderbook>(),
+               std::make_shared<EmitBtcFromEth>(), std::move(cfg));
+    eng.run();
+
+    ASSERT_EQ(rc->calls(), 1);
+    EXPECT_DOUBLE_EQ(rc->mark(), 100.0);
+    EXPECT_TRUE(std::isfinite(rc->equity()));
+    EXPECT_NE(rc->mark(), 3000.0);
 }

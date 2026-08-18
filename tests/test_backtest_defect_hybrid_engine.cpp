@@ -46,6 +46,58 @@ TEST(BacktestDefects, HybridPaper_LimitFillsFromBarTradeTape)
     EXPECT_GE(eng->get_analytics().snapshot().total_fills, 1u);
 }
 
+TEST(BacktestDefects, FixedPointBarVolumeIsBaseUnitsAndUsedOnlyOnce)
+{
+    SilenceOutput silence;
+    auto dh = std::make_shared<data_handler>();
+    const auto base = std::chrono::system_clock::time_point{
+        std::chrono::seconds{1'700'000'000}};
+    for (int i = 0; i < 2; ++i)
+    {
+        Bar bar;
+        bar.ts = base + std::chrono::seconds{i};
+        bar.symbol = "BTCUSDT";
+        bar.open = 100.0;
+        bar.high = 100.5;
+        bar.low = 99.5;
+        bar.close = 100.0;
+        bar.volume = 300'000'000; // 3.0 base units
+        bar.quantity_scale = 100'000'000ULL;
+        ASSERT_TRUE(dh->on_bar(bar));
+    }
+
+    class TenUnitLimit final : public IStrategy
+    {
+        bool fired_ = false;
+    public:
+        std::optional<order_event> on_market(const market_event& m) override
+        {
+            if (fired_) return std::nullopt;
+            fired_ = true;
+            return order_event(m.get_timestamp(), m.get_symbol(),
+                               order_type::limit, order_side::buy,
+                               10.0, m.get_close());
+        }
+    };
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.show_progress = false;
+    cfg.execution_bar_delay = 0;
+    cfg.initial_balance = 10000;
+    cfg.maker_queue_model = std::make_shared<UniformCancelModel>();
+    cfg.exit_defaults.mode = truetest::exits::exit_policy_mode::strategy_only;
+
+    engine eng(dh, nullptr, std::make_shared<TenUnitLimit>(), std::move(cfg));
+    eng.run();
+
+    const auto report = eng.get_analytics().generate_report();
+    ASSERT_EQ(report.trades.size(), 1u);
+    EXPECT_NEAR(report.trades.front().quantity, 3.0, 1e-9)
+        << "raw fixed-point volume must be normalized and not reused by "
+           "both range sweep and close tape";
+}
+
 // ── EL-HYBRID-SWEEP / FR-hybrid-bar-range-miss ─────────────────────────────
 // Buy limit between open and close: bar low touches it but close misses.
 // Hybrid + maker_queue must fill via QueueAware sweep_resting_range (not
@@ -189,7 +241,7 @@ TEST(BacktestDefects, EL_ReplayPaperTape_HybridLimitFillParity)
     }
     ASSERT_GE(batch_fills, 1) << "batch paper tape must fill hybrid limit";
 
-    int replay_fills = 0;
+    std::size_t replay_fills = 0;
     {
         auto strat = std::make_shared<OneShotLimitAtCloseFillCount>();
         engine_config cfg;
@@ -202,13 +254,14 @@ TEST(BacktestDefects, EL_ReplayPaperTape_HybridLimitFillParity)
         cfg.exit_defaults.mode = truetest::exits::exit_policy_mode::strategy_only;
         engine eng(std::make_shared<data_handler>(), nullptr, strat, std::move(cfg));
         eng.run_replay(log_path);
-        replay_fills = strat->fill_callbacks;
+        EXPECT_EQ(strat->fill_callbacks, 0)
+            << "ledger replay must not invoke strategy callbacks";
+        replay_fills = eng.get_analytics().snapshot().total_fills;
     }
     std::remove(log_path.c_str());
 
-    EXPECT_EQ(replay_fills, batch_fills)
-        << "replay must feed paper trade tape for hybrid maker-queue fills";
+    EXPECT_EQ(replay_fills, static_cast<std::size_t>(batch_fills))
+        << "recorded fills must be applied once without paper-tape regeneration";
 }
 
 // ── Deferred residual locks (2026-08-12 reliability repair) ────────────────
-

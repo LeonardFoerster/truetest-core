@@ -1,8 +1,12 @@
 #include <gtest/gtest.h>
+
+#include <algorithm>
 #include "strategy/sma_strategy.h"
 #include "strategy/mean_reversion_strategy.h"
 #include "strategy/ma_crossover_strategy.h"
 #include "strategy/breakout_strategy.h"
+#include "strategy/larry_connor_strategy.h"
+#include "strategy/structure_continuation_strategy.h"
 #include "strategy/strategy_interface.h"
 #include "strategy/strategy_registry.h"
 #include "strategy/strategy_factory.h"
@@ -363,6 +367,33 @@ TEST(Strategy, OnL2UpdateDefault)
     EXPECT_EQ(s.on_l2_update(e), std::nullopt);
 }
 
+TEST(Strategy, AccountEquityHookUpdatesEveryEquitySizedBuiltin)
+{
+    auto expect_equity = [](IStrategy& strategy, double expected) {
+        strategy.set_account_equity(expected);
+        const auto schema = strategy.get_param_schema();
+        const auto it = std::find_if(schema.begin(), schema.end(), [](const param_def& p) {
+            return p.name == "equity";
+        });
+        ASSERT_NE(it, schema.end());
+        EXPECT_DOUBLE_EQ(it->default_value, expected);
+    };
+
+    sma_strategy sma;
+    ma_crossover_strategy ma;
+    mean_reversion_strategy mean_reversion;
+    breakout_strategy breakout;
+    larry_connor_strategy larry;
+    structure_continuation_strategy structure;
+
+    expect_equity(sma, 11000.0);
+    expect_equity(ma, 12000.0);
+    expect_equity(mean_reversion, 13000.0);
+    expect_equity(breakout, 14000.0);
+    expect_equity(larry, 15000.0);
+    expect_equity(structure, 16000.0);
+}
+
 // --- Breakout Strategy (Coiled Spring) ---
 
 TEST(BreakoutStrategy, WarmupNoSignal)
@@ -385,4 +416,63 @@ TEST(BreakoutStrategy, ParamsSchemaHasBreakoutKeys)
     for (const auto& p : schema) if (p.name == "equity") has_equity = true;
     EXPECT_TRUE(has_equity);
     EXPECT_TRUE(s.get_indicator_values("FOO").empty());
+}
+
+TEST(BreakoutStrategy, BreakoutUsesOnlyPriorBarsForConsolidationBoundary)
+{
+    breakout_strategy s(/*equity=*/10000.0, /*risk_fraction=*/0.005,
+                        /*atr_period=*/3, /*vol_period=*/3,
+                        /*lookback=*/3, /*breakout_threshold=*/0.01,
+                        /*atr_expansion=*/0.10, /*vol_mult=*/1.5,
+                        /*min_rr=*/2.0);
+
+    for (int i = 0; i < 5; ++i)
+    {
+        market_event flat(epoch_ms(i * 1000), "TEST",
+                          100.0, 100.5, 99.5, 100.0, 100);
+        EXPECT_EQ(s.on_market(flat), std::nullopt);
+    }
+
+    market_event breakout(epoch_ms(6000), "TEST",
+                          100.0, 103.0, 99.8, 102.5, 1000);
+    const auto order = s.on_market(breakout);
+    ASSERT_TRUE(order.has_value())
+        << "candidate high/volume/ATR must not redefine its own baseline";
+    EXPECT_EQ(order->get_side(), order_side::buy);
+    EXPECT_GT(order->get_quantity(), 0.0);
+}
+
+TEST(BreakoutStrategy, VolumeGateUsesBaseUnitsAcrossMixedScales)
+{
+    breakout_strategy integer_series(
+        10000.0, 0.005, 3, 3, 3, 0.01, 0.10, 1.5, 2.0);
+    breakout_strategy mixed_scale_series(
+        10000.0, 0.005, 3, 3, 3, 0.01, 0.10, 1.5, 2.0);
+
+    for (int i = 0; i < 5; ++i)
+    {
+        const auto ts = epoch_ms(i * 1000);
+        ASSERT_FALSE(integer_series.on_market(market_event(
+            ts, "TEST", 100.0, 100.5, 99.5, 100.0, 100, 1)));
+        const bool fractional_encoding = (i % 2) != 0;
+        const int64_t raw_volume = fractional_encoding
+            ? 10'000'000'000LL : 100;
+        const std::uint64_t scale = fractional_encoding
+            ? 100'000'000ULL : 1ULL;
+        ASSERT_FALSE(mixed_scale_series.on_market(market_event(
+            ts, "TEST", 100.0, 100.5, 99.5, 100.0,
+            raw_volume, scale)));
+    }
+
+    const auto ts = epoch_ms(6000);
+    const auto integer_order = integer_series.on_market(market_event(
+        ts, "TEST", 100.0, 103.0, 99.8, 102.5, 1000, 1));
+    const auto scaled_order = mixed_scale_series.on_market(market_event(
+        ts, "TEST", 100.0, 103.0, 99.8, 102.5,
+        100'000'000'000LL, 100'000'000ULL));
+
+    ASSERT_TRUE(integer_order);
+    ASSERT_TRUE(scaled_order);
+    EXPECT_DOUBLE_EQ(integer_order->get_quantity(),
+                     scaled_order->get_quantity());
 }

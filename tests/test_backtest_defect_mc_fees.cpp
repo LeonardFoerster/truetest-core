@@ -112,6 +112,31 @@ TEST(BacktestDefects, FR02_McInjectsStrategyFeeRates)
     }
 }
 
+TEST(BacktestDefects, McPlatformRiskFractionReachesStrategyAndParamOverrides)
+{
+    const char* probe_name = "risk-probe-mc-audit";
+    auto state = std::make_shared<FeeProbeState>();
+    StrategyRegistry::instance().register_strategy(
+        probe_name, [state] { return std::make_shared<FeeProbeStrategy>(state.get()); });
+
+    SilenceOutput silence;
+    McRunConfig cfg;
+    cfg.n_trials = 1;
+    cfg.generator_config.n_steps = 20;
+    cfg.strategy_name = probe_name;
+    cfg.base_seed = 17;
+    cfg.risk_fraction = 0.037;
+    MonteCarloController platform_default(cfg);
+    (void)platform_default.run();
+    EXPECT_DOUBLE_EQ(state->last_risk_fraction, 0.037);
+
+    *state = FeeProbeState{};
+    cfg.strategy_params = {{"risk_fraction", 0.011}};
+    MonteCarloController explicit_override(cfg);
+    (void)explicit_override.run();
+    EXPECT_DOUBLE_EQ(state->last_risk_fraction, 0.011);
+}
+
 TEST(BacktestDefects, FR02_McImpactWithoutAdvThrows)
 {
     McRunConfig cfg;
@@ -402,4 +427,3 @@ TEST(BacktestDefects, FR_ZeroFee_ReportEchoesFeeModelLabel)
     eng.run();
     EXPECT_EQ(eng.get_analytics().snapshot().fee_model, "zero");
 }
-

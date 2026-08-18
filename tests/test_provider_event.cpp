@@ -195,5 +195,27 @@ TEST(ProviderEvent, SinkL2SnapshotNoCrash)
 	provider::event_sink(ev, dh);
 
 	EXPECT_FALSE(dh->has_bar_data());
-	EXPECT_FALSE(dh->has_tick_data());
+    EXPECT_FALSE(dh->has_tick_data());
+}
+
+TEST(ProviderEvent, L2SinkRejectsWholeInvalidSnapshotWithoutBookMutation)
+{
+	auto ob = std::make_shared<orderbook>();
+	provider::l2_snapshot valid;
+	valid.symbol = "TEST";
+	valid.quantity_scale = 100'000'000ULL;
+	valid.bids.push_back({100.0, 100'000'000});
+	valid.asks.push_back({101.0, 100'000'000});
+	provider::event_sink_l2(provider::event{valid}, ob);
+
+	provider::l2_snapshot invalid = valid;
+	invalid.bids = {{99.0, -1}};
+	invalid.asks = {{102.0, 100'000'000}};
+	provider::event_sink_l2(provider::event{invalid}, ob);
+
+	const auto infos = ob->get_order_infos();
+	ASSERT_FALSE(infos.get_bids().empty());
+	ASSERT_FALSE(infos.get_asks().empty());
+	EXPECT_DOUBLE_EQ(infos.get_bids().front().price_.to_double(), 100.0);
+	EXPECT_DOUBLE_EQ(infos.get_asks().front().price_.to_double(), 101.0);
 }

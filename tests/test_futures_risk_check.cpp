@@ -3,6 +3,7 @@
 #include "risk/futures_risk_check.h"
 
 #include <chrono>
+#include <limits>
 #include <unordered_map>
 
 namespace {
@@ -35,6 +36,17 @@ portfolio with_state(double cash, double existing_qty,
     return p;
 }
 
+portfolio with_equity_and_position(double equity, double existing_qty,
+                                   double mark_price,
+                                   const std::string& symbol = "BTCUSDT")
+{
+    // Portfolio uses spot-style cash settlement internally.  Choose cash so
+    // cash + signed position value equals the requested account equity for
+    // both long and short fixtures.
+    return with_state(equity - existing_qty * mark_price,
+                      existing_qty, symbol);
+}
+
 FuturesRiskCheck::config disabled()
 {
     return FuturesRiskCheck::config{};
@@ -53,7 +65,7 @@ TEST(FuturesRiskCheck, AllCapsDisabledAllows)
     EXPECT_TRUE(d.reason.empty());
 }
 
-TEST(FuturesRiskCheck, MarkZeroSkipsAllChecks)
+TEST(FuturesRiskCheck, InvalidMarkRejectsNewExposureFailClosed)
 {
     FuturesRiskCheck::config c;
     c.max_notional_usdt = 100.0;
@@ -62,8 +74,88 @@ TEST(FuturesRiskCheck, MarkZeroSkipsAllChecks)
     auto p = with_state(100.0, 0.0);
     auto o = make_order("BTCUSDT", order_side::buy, 100.0);
 
-    auto d = check.evaluate(o, p, /*mark=*/0.0);
-    EXPECT_TRUE(d.allow) << "mark==0 must skip cleanly, not refuse";
+    for (const double mark : {
+             0.0, -1.0, std::numeric_limits<double>::quiet_NaN()})
+    {
+        auto d = check.evaluate(o, p, mark);
+        EXPECT_FALSE(d.allow) << "mark=" << mark;
+        EXPECT_NE(d.reason.find("invalid mark"), std::string::npos)
+            << d.reason;
+    }
+}
+
+TEST(FuturesRiskCheck, InvalidMarkStillAllowsStrictReduction)
+{
+    FuturesRiskCheck::config c;
+    c.max_notional_usdt = 100.0;
+    FuturesRiskCheck check(c);
+
+    auto long_port = with_state(100.0, 10.0);
+    auto short_port = with_state(100.0, -10.0);
+    for (const double mark : {
+             0.0, -1.0, std::numeric_limits<double>::quiet_NaN()})
+    {
+        EXPECT_TRUE(check.evaluate(
+            make_order("BTCUSDT", order_side::sell, 5.0),
+            long_port, mark).allow) << "long mark=" << mark;
+        EXPECT_TRUE(check.evaluate(
+            make_order("BTCUSDT", order_side::buy, 5.0),
+            short_port, mark).allow) << "short mark=" << mark;
+    }
+}
+
+TEST(FuturesRiskCheck, InvalidOrderQuantityRejectsFailClosed)
+{
+    FuturesRiskCheck::config c;
+    c.max_leverage = 5.0;
+    FuturesRiskCheck check(c);
+    auto p = with_state(100.0, 0.0);
+
+    for (const double qty : {
+             0.0, -1.0, std::numeric_limits<double>::quiet_NaN()})
+    {
+        auto d = check.evaluate(
+            make_order("BTCUSDT", order_side::buy, qty), p, 100.0);
+        EXPECT_FALSE(d.allow) << "qty=" << qty;
+        EXPECT_NE(d.reason.find("quantity"), std::string::npos);
+    }
+}
+
+TEST(FuturesRiskCheck, NonFiniteExistingOrPostTradePositionRejectsFailClosed)
+{
+    FuturesRiskCheck::config c;
+    c.max_leverage = 5.0;
+    FuturesRiskCheck check(c);
+
+    auto poisoned = with_state(
+        100.0, std::numeric_limits<double>::quiet_NaN());
+    auto poisoned_decision = check.evaluate(
+        make_order("BTCUSDT", order_side::sell, 1.0), poisoned, 100.0);
+    EXPECT_FALSE(poisoned_decision.allow);
+    EXPECT_NE(poisoned_decision.reason.find("existing position"),
+              std::string::npos);
+
+    auto extreme = with_state(100.0, std::numeric_limits<double>::max());
+    auto overflow_decision = check.evaluate(
+        make_order("BTCUSDT", order_side::buy,
+                   std::numeric_limits<double>::max()),
+        extreme, 100.0);
+    EXPECT_FALSE(overflow_decision.allow);
+    EXPECT_NE(overflow_decision.reason.find("post-trade position"),
+              std::string::npos);
+}
+
+TEST(FuturesRiskCheck, NonFiniteConfiguredCapFailsClosedForNewRisk)
+{
+    FuturesRiskCheck::config cfg;
+    cfg.max_leverage = std::numeric_limits<double>::infinity();
+    FuturesRiskCheck check(cfg);
+    portfolio p(1000.0);
+
+    const auto d = check.evaluate(
+        make_order("BTCUSDT", order_side::buy, 1.0), p, 100.0);
+    EXPECT_FALSE(d.allow);
+    EXPECT_NE(d.reason.find("risk configuration"), std::string::npos);
 }
 
 TEST(FuturesRiskCheck, NotionalCapAllowsUnder)
@@ -161,7 +253,7 @@ TEST(FuturesRiskCheck, LeverageCapRejects)
     c.max_leverage = 5.0;
     FuturesRiskCheck check(c);
 
-    // cash=100, post_notional = 0.05 BTC * 30000 = 1500 -> leverage 15x
+    // equity=100, post_notional = 0.05 BTC * 30000 = 1500 -> leverage 15x
     // > 5x cap.
     auto p = with_state(100.0, 0.0);
     auto o = make_order("BTCUSDT", order_side::buy, 0.05);
@@ -177,7 +269,7 @@ TEST(FuturesRiskCheck, LeverageCapAllowsUnder)
     c.max_leverage = 5.0;
     FuturesRiskCheck check(c);
 
-    // cash=100, post_notional = 0.01 BTC * 30000 = 300 -> leverage 3x.
+    // equity=100, post_notional = 0.01 BTC * 30000 = 300 -> leverage 3x.
     auto p = with_state(100.0, 0.0);
     auto o = make_order("BTCUSDT", order_side::buy, 0.01);
 
@@ -185,19 +277,48 @@ TEST(FuturesRiskCheck, LeverageCapAllowsUnder)
     EXPECT_TRUE(d.allow);
 }
 
-TEST(FuturesRiskCheck, LeverageCapZeroCashSkipsCheck)
+TEST(FuturesRiskCheck, LeverageCapUsesEquitySymmetricallyForLongAndShort)
+{
+    FuturesRiskCheck::config c;
+    c.max_leverage = 1.5;
+    FuturesRiskCheck check(c);
+
+    constexpr double mark = 30000.0;
+    // Both portfolios have 1000 equity and 0.03 BTC existing exposure.
+    // Adding another 0.03 makes post-notional 1800, hence 1.8x leverage.
+    // Their spot-style cash balances differ (long=100, short=1900), so a
+    // cash denominator would incorrectly reject only the long.
+    auto long_port = with_equity_and_position(1000.0, 0.03, mark);
+    auto short_port = with_equity_and_position(1000.0, -0.03, mark);
+    auto add_long = make_order("BTCUSDT", order_side::buy, 0.03);
+    auto add_short = make_order("BTCUSDT", order_side::sell, 0.03);
+
+    auto long_d = check.evaluate(add_long, long_port, mark);
+    auto short_d = check.evaluate(add_short, short_port, mark);
+
+    EXPECT_FALSE(long_d.allow);
+    EXPECT_FALSE(short_d.allow);
+    EXPECT_NE(long_d.reason.find("leverage"), std::string::npos);
+    EXPECT_NE(short_d.reason.find("leverage"), std::string::npos);
+}
+
+TEST(FuturesRiskCheck, RiskIncreaseWithNonPositiveEquityRejectsFailClosed)
 {
     FuturesRiskCheck::config c;
     c.max_leverage = 5.0;
     FuturesRiskCheck check(c);
 
-    auto p = with_state(/*cash=*/0.0, 0.0);
-    auto o = make_order("BTCUSDT", order_side::buy, 0.01);
+    for (double equity : {0.0, -100.0})
+    {
+        auto p = with_equity_and_position(
+            equity, /*existing_qty=*/0.0, /*mark=*/30000.0);
+        auto o = make_order("BTCUSDT", order_side::buy, 0.01);
 
-    // No margin base -> can't compute leverage; skip cleanly rather
-    // than divide by zero or refuse on a moot calculation.
-    auto d = check.evaluate(o, p, 30000.0);
-    EXPECT_TRUE(d.allow);
+        auto d = check.evaluate(o, p, 30000.0);
+        EXPECT_FALSE(d.allow) << "equity=" << equity;
+        EXPECT_NE(d.reason.find("non-positive equity"), std::string::npos)
+            << "equity=" << equity << " reason=" << d.reason;
+    }
 }
 
 TEST(FuturesRiskCheck, LiquidationDistanceRejectsHighLeverage)
@@ -207,7 +328,7 @@ TEST(FuturesRiskCheck, LiquidationDistanceRejectsHighLeverage)
     c.maintenance_margin_pct       = 0.005; // 0.5%
     FuturesRiskCheck check(c);
 
-    // cash=100, post_notional=3000 -> margin_ratio = 100/3000 = 0.033
+    // equity=100, post_notional=3000 -> margin_ratio = 100/3000 = 0.033
     // distance = 0.033 - 0.005 = 0.028 = 2.8% < 5% -> refuse.
     auto p = with_state(100.0, 0.0);
     auto o = make_order("BTCUSDT", order_side::buy, 0.1);
@@ -224,13 +345,130 @@ TEST(FuturesRiskCheck, LiquidationDistanceAllowsLowLeverage)
     c.maintenance_margin_pct       = 0.005;
     FuturesRiskCheck check(c);
 
-    // cash=100, post_notional=300 -> margin_ratio = 100/300 = 0.333
+    // equity=100, post_notional=300 -> margin_ratio = 100/300 = 0.333
     // distance = 0.328 = 32.8% >> 5% -> allow.
     auto p = with_state(100.0, 0.0);
     auto o = make_order("BTCUSDT", order_side::buy, 0.01);
 
     auto d = check.evaluate(o, p, 30000.0);
     EXPECT_TRUE(d.allow);
+}
+
+TEST(FuturesRiskCheck, LiquidationDistanceUsesEquitySymmetricallyForLongAndShort)
+{
+    FuturesRiskCheck::config c;
+    c.min_liquidation_distance_pct = 0.60;
+    c.maintenance_margin_pct = 0.005;
+    FuturesRiskCheck check(c);
+
+    constexpr double mark = 30000.0;
+    // Equal 1000 equity and equal post-notional 1800 produce the same
+    // projected distance: 1000/1800 - 0.005 ~= 55.06%, below 60%.
+    // A cash denominator would see long cash=100 and short cash=1900.
+    auto long_port = with_equity_and_position(1000.0, 0.03, mark);
+    auto short_port = with_equity_and_position(1000.0, -0.03, mark);
+    auto add_long = make_order("BTCUSDT", order_side::buy, 0.03);
+    auto add_short = make_order("BTCUSDT", order_side::sell, 0.03);
+
+    auto long_d = check.evaluate(add_long, long_port, mark);
+    auto short_d = check.evaluate(add_short, short_port, mark);
+
+    EXPECT_FALSE(long_d.allow);
+    EXPECT_FALSE(short_d.allow);
+    EXPECT_NE(long_d.reason.find("liquidation"), std::string::npos);
+    EXPECT_NE(short_d.reason.find("liquidation"), std::string::npos);
+}
+
+TEST(FuturesRiskCheck, EngineSuppliedMultiSymbolEquityAvoidsSingleMarkDistortion)
+{
+    FuturesRiskCheck::config c;
+    c.max_leverage = 1.0;
+    FuturesRiskCheck check(c);
+
+    portfolio p(1'000.0);
+    const auto ts = now();
+    fill_event btc(ts, "BTCUSDT", 10, order_side::buy,
+                   1.0, 100.0, 0.0);
+    fill_event eth(ts, "ETHUSDT", 20, order_side::buy,
+                   100.0, 10.0, 0.0);
+    p.on_fill(btc, 10, "alpha");
+    p.on_fill(eth, 20, "alpha");
+
+    auto add_btc = make_order("BTCUSDT", order_side::buy, 10.0);
+
+    // The legacy compatibility overload marks both positions at BTC=100,
+    // inventing 10,000 of ETH value and therefore allowing 0.11x leverage.
+    EXPECT_TRUE(check.evaluate(add_btc, p, 100.0).allow);
+
+    // Engine context marks BTC at 100 and ETH at 10: true account equity is
+    // 1,000 and post-BTC notional is 1,100, so the 1x cap must reject.
+    auto exact = check.evaluate_with_account_equity(
+        add_btc, p, 100.0, /*account_equity=*/1'000.0);
+    EXPECT_FALSE(exact.allow);
+    EXPECT_NE(exact.reason.find("leverage"), std::string::npos);
+
+    // Missing marks for any other open symbol are represented as non-finite
+    // equity and must fail closed for risk-increasing orders.
+    auto missing = check.evaluate_with_account_equity(
+        add_btc, p, 100.0,
+        std::numeric_limits<double>::quiet_NaN());
+    EXPECT_FALSE(missing.allow);
+    EXPECT_NE(missing.reason.find("non-positive equity"), std::string::npos);
+}
+
+TEST(FuturesRiskCheck, BadEquityAndCapsStillAllowStrictLongAndShortReduction)
+{
+    FuturesRiskCheck::config c;
+    c.max_notional_usdt = 10.0;
+    c.max_leverage = 0.1;
+    c.min_liquidation_distance_pct = 0.90;
+    FuturesRiskCheck check(c);
+
+    constexpr double mark = 100.0;
+    auto long_port = with_equity_and_position(-50.0, 10.0, mark);
+    auto short_port = with_equity_and_position(-50.0, -10.0, mark);
+    auto reduce_long = make_order("BTCUSDT", order_side::sell, 1.0);
+    auto reduce_short = make_order("BTCUSDT", order_side::buy, 1.0);
+
+    // Each order leaves 900 notional, still far above every configured cap,
+    // but neither can increase or reverse exposure.
+    EXPECT_TRUE(check.evaluate(reduce_long, long_port, mark).allow);
+    EXPECT_TRUE(check.evaluate(reduce_short, short_port, mark).allow);
+}
+
+TEST(FuturesRiskCheck, BadEquityAndCapsStillAllowLongAndShortFlatten)
+{
+    FuturesRiskCheck::config c;
+    c.max_notional_usdt = 10.0;
+    c.max_leverage = 0.1;
+    c.min_liquidation_distance_pct = 0.90;
+    FuturesRiskCheck check(c);
+
+    constexpr double mark = 100.0;
+    auto long_port = with_equity_and_position(-50.0, 10.0, mark);
+    auto short_port = with_equity_and_position(-50.0, -10.0, mark);
+    auto flatten_long = make_order("BTCUSDT", order_side::sell, 10.0);
+    auto flatten_short = make_order("BTCUSDT", order_side::buy, 10.0);
+
+    EXPECT_TRUE(check.evaluate(flatten_long, long_port, mark).allow);
+    EXPECT_TRUE(check.evaluate(flatten_short, short_port, mark).allow);
+}
+
+TEST(FuturesRiskCheck, CrossingFlatIsNotClassifiedAsExposureReduction)
+{
+    FuturesRiskCheck::config c;
+    c.max_leverage = 5.0;
+    FuturesRiskCheck check(c);
+
+    constexpr double mark = 100.0;
+    auto p = with_equity_and_position(-50.0, 10.0, mark);
+    // SELL 15 closes the long and opens a short 5.  Although the final
+    // absolute exposure is smaller, the order creates opposite-side risk.
+    auto flip = make_order("BTCUSDT", order_side::sell, 15.0);
+
+    auto d = check.evaluate(flip, p, mark);
+    EXPECT_FALSE(d.allow);
+    EXPECT_NE(d.reason.find("non-positive equity"), std::string::npos);
 }
 
 TEST(FuturesRiskCheck, FlatPostQtySkipsLiquidationCheck)

@@ -133,6 +133,31 @@ TEST(BinanceCombinedParser, CombinedEnvelope_KlineFrame_ProducesBar)
     EXPECT_DOUBLE_EQ(b.close, 42100.0);
 }
 
+TEST(BinanceCombinedParser, FormingKlineIsClassifiedAsIgnoredNoData)
+{
+    auto p = make_parser();
+    const std::string frame =
+        R"({"stream":"btcusdt@kline_1m","data":)"
+        R"({"e":"kline","E":1704067200000,"s":"BTCUSDT","k":)"
+        R"({"t":1704067200000,"s":"BTCUSDT","o":"42000","c":"42050",)"
+        R"("h":"42100","l":"41900","v":"2.0","x":false}}})";
+
+    EXPECT_FALSE(p.parse_record(frame).has_value());
+    EXPECT_EQ(p.classify_empty_frame(frame), empty_parse_status::ignored);
+}
+
+TEST(BinanceCombinedParser, MalformedFormingKlineStillFailsClosed)
+{
+    auto p = make_parser();
+    const std::string missing_low =
+        R"({"e":"kline","s":"BTCUSDT","k":)"
+        R"({"t":1,"o":"1","c":"1","h":"1","x":false}})";
+
+    EXPECT_FALSE(p.parse_record(missing_low).has_value());
+    EXPECT_EQ(p.classify_empty_frame(missing_low),
+              empty_parse_status::malformed);
+}
+
 TEST(BinanceCombinedParser, PartialBookDepth_ProducesL2Snapshot)
 {
     // @depth20@100ms format has no "e" event-type and no "s" symbol -

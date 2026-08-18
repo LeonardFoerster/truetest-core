@@ -6,6 +6,9 @@
 #include "ui/desk/desk_layout_model.h"
 #include "ui/desk/research_views.h"
 
+#include "ui/desk/desk_capabilities.h"
+
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <set>
@@ -25,23 +28,50 @@ TEST(ImGuiDeskPages, LabelsAndDockspaceIdsAreUnique)
         EXPECT_TRUE(focus_dockspaces.insert(
             truetest::ui::desk::desk_focus_dockspace_name(page)).second);
     }
-    EXPECT_EQ(labels.size(), 1u);
-    EXPECT_EQ(dockspaces.size(), 1u);
-    EXPECT_EQ(focus_dockspaces.size(), 1u);
+    // v4: all 7 pages active (orderflow/liquidity/structure/markets under
+    // MARKET, plus operations/diagnostics/research).
+    EXPECT_EQ(labels.size(), 7u);
+    EXPECT_EQ(dockspaces.size(), 7u);
+    EXPECT_EQ(focus_dockspaces.size(), 7u);
 }
 
-TEST(ImGuiDeskPages, DefaultsToMonitorAndSwitchesDeterministically)
+TEST(ImGuiDeskPages, DefaultsToMarketFootprintAndSwitchesDeterministically)
 {
     using truetest::ui::desk::DeskPage;
     truetest::ui::desk::DeskPageController controller;
-    EXPECT_EQ(controller.active_page(), DeskPage::monitor);
-    EXPECT_FALSE(controller.select(DeskPage::monitor));
+    EXPECT_EQ(controller.active_page(), DeskPage::orderflow);
+    EXPECT_FALSE(controller.select(DeskPage::orderflow));
     EXPECT_TRUE(controller.select(DeskPage::operations));
     EXPECT_EQ(controller.active_page(), DeskPage::operations);
     controller.request_layout_reset();
     ASSERT_TRUE(controller.has_layout_request());
     EXPECT_EQ(*controller.consume_layout_request(), DeskPage::operations);
     EXPECT_FALSE(controller.consume_layout_request().has_value());
+}
+
+TEST(ImGuiDeskWorkspaces, EveryPageMapsToExactlyOneWorkspace)
+{
+    using namespace truetest::ui::desk;
+    EXPECT_EQ(desk_workspace_of(DeskPage::orderflow), DeskWorkspace::market);
+    EXPECT_EQ(desk_workspace_of(DeskPage::liquidity), DeskWorkspace::market);
+    EXPECT_EQ(desk_workspace_of(DeskPage::structure), DeskWorkspace::market);
+    EXPECT_EQ(desk_workspace_of(DeskPage::markets), DeskWorkspace::market);
+    EXPECT_EQ(desk_workspace_of(DeskPage::operations), DeskWorkspace::operations);
+    EXPECT_EQ(desk_workspace_of(DeskPage::diagnostics), DeskWorkspace::diagnostics);
+    EXPECT_EQ(desk_workspace_of(DeskPage::research), DeskWorkspace::research);
+
+    // Every page in desk_pages must be reachable from exactly one workspace's
+    // page list, and every workspace's default page must round-trip.
+    for (const auto page : desk_pages)
+    {
+        const auto workspace = desk_workspace_of(page);
+        const auto pages = desk_workspace_pages(workspace);
+        EXPECT_NE(std::find(pages.begin(), pages.end(), page), pages.end());
+    }
+    EXPECT_EQ(desk_workspace_default_page(DeskWorkspace::market), DeskPage::orderflow);
+    EXPECT_EQ(desk_workspace_default_page(DeskWorkspace::operations), DeskPage::operations);
+    EXPECT_EQ(desk_workspace_default_page(DeskWorkspace::diagnostics), DeskPage::diagnostics);
+    EXPECT_EQ(desk_workspace_default_page(DeskWorkspace::research), DeskPage::research);
 }
 
 TEST(ImGuiDeskPages, V2PanelInstancesAreUniqueAcrossWorkspaces)
@@ -64,23 +94,10 @@ TEST(ImGuiDeskPages, V2PanelInstancesAreUniqueAcrossWorkspaces)
             EXPECT_LE(count, 1);
     }
 
-    // Only Monitor is in desk_pages now; it launches activity_blotter,
-    // health, and risk exactly once. Everything else below is dormant
-    // (still fully defined in desk_layout_model.h, just benched from
-    // desk_pages) and launches zero times until re-added.
-    for (const auto panel : {
-             DeskPanel::activity_blotter, DeskPanel::health, DeskPanel::risk})
-        EXPECT_EQ(launched[static_cast<std::size_t>(panel)], 1) << static_cast<int>(panel);
-    for (const auto panel : {
-             DeskPanel::watchlist, DeskPanel::orderflow_canvas, DeskPanel::orderflow_dom,
-             DeskPanel::selected_context,
-             DeskPanel::liquidity_heatmap, DeskPanel::liquidity_dom,
-             DeskPanel::liquidations, DeskPanel::liquidity_tape,
-             DeskPanel::tpo_profile, DeskPanel::volume_profile, DeskPanel::session_context,
-             DeskPanel::funding, DeskPanel::correlation,
-             DeskPanel::equity, DeskPanel::operations_activity, DeskPanel::strategies,
-             DeskPanel::debug})
-        EXPECT_EQ(launched[static_cast<std::size_t>(panel)], 0) << static_cast<int>(panel);
+    // v4: every page is active, so every declared DeskPanel launches exactly
+    // once across the whole desk_pages set (no dormant panels left).
+    for (std::size_t i = 0; i < desk_panel_count; ++i)
+        EXPECT_EQ(launched[i], 1) << i;
 }
 
 TEST(ImGuiDeskPages, FeatureMapMatchesCyrexWorkflows)
@@ -96,6 +113,11 @@ TEST(ImGuiDeskPages, FeatureMapMatchesCyrexWorkflows)
     EXPECT_TRUE(desk_page_contains(DeskPage::markets, DeskPanel::correlation));
     EXPECT_TRUE(desk_page_contains(DeskPage::operations, DeskPanel::risk));
     EXPECT_TRUE(desk_page_contains(DeskPage::operations, DeskPanel::health));
+    EXPECT_TRUE(desk_page_contains(DeskPage::diagnostics, DeskPanel::debug));
+    EXPECT_TRUE(desk_page_contains(DeskPage::research, DeskPanel::research_setup));
+    // Safety Status (draw_safety_strip) and the Market metric band are
+    // always-visible strips, not dockable DeskPanel windows — they have no
+    // desk_page_assignments entry by design (see desk_app.cpp draw_frame()).
 }
 
 // Supersedes the docs/internal/imgui-desk-design.md §4 width-only
@@ -153,8 +175,8 @@ TEST(ImGuiDeskLayout, KpiColumnsAdaptWithoutDroppingMetrics)
 TEST(ImGuiDeskLayout, VersionedPersistenceCannotRestoreLegacyPages)
 {
     using namespace truetest::ui::desk;
-    EXPECT_EQ(desk_layout_version, 3u);
-    EXPECT_STREQ(desk_layout_ini_filename, "truetest_desk_v3.ini");
+    EXPECT_EQ(desk_layout_version, 4u);
+    EXPECT_STREQ(desk_layout_ini_filename, "truetest_desk_v4.ini");
     EXPECT_TRUE(should_seed_default_layout(false, false));
     EXPECT_FALSE(should_seed_default_layout(true, false));
     EXPECT_FALSE(should_keep_inactive_dockspace(false));
@@ -164,14 +186,28 @@ TEST(ImGuiDeskLayout, VersionedPersistenceCannotRestoreLegacyPages)
 TEST(ImGuiDeskCommands, SearchIsCaseInsensitiveAndOperatorShortcutsRequireBareKeys)
 {
     using namespace truetest::ui::desk;
-    // desk_commands (6 entries): 0=WORKSPACE MONITOR, 1=RESET LAYOUT,
-    // 2=TOGGLE DEMO DATA, 3=FOCUS PRIMARY, 4=TOGGLE LAYOUT LOCK,
-    // 5=TOGGLE DENSITY.
-    EXPECT_TRUE(desk_command_matches(desk_commands[0], "monitor"));
-    EXPECT_TRUE(desk_command_matches(desk_commands[0], "RISK"));
+    // desk_commands (13 entries): 0=WORKSPACE MARKET, 1=MARKET·FOOTPRINT,
+    // 2=MARKET·LIQUIDITY, 3=MARKET·STRUCTURE, 4=MARKET·CROSS-MARKET,
+    // 5=WORKSPACE OPERATIONS, 6=WORKSPACE DIAGNOSTICS, 7=WORKSPACE RESEARCH,
+    // 8=RESET LAYOUT, 9=TOGGLE DEMO DATA, 10=FOCUS PRIMARY,
+    // 11=TOGGLE LAYOUT LOCK, 12=TOGGLE DENSITY.
+    ASSERT_EQ(desk_commands.size(), 13u);
+    EXPECT_TRUE(desk_command_matches(desk_commands[0], "market"));
+    EXPECT_EQ(desk_commands[0].page, DeskPage::orderflow);
+    EXPECT_TRUE(desk_command_matches(desk_commands[1], "footprint"));
+    EXPECT_EQ(desk_commands[1].page, DeskPage::orderflow);
+    EXPECT_EQ(desk_commands[2].page, DeskPage::liquidity);
+    EXPECT_EQ(desk_commands[3].page, DeskPage::structure);
+    EXPECT_EQ(desk_commands[4].page, DeskPage::markets);
+    EXPECT_TRUE(desk_command_matches(desk_commands[5], "risk"));
+    EXPECT_EQ(desk_commands[5].page, DeskPage::operations);
+    EXPECT_TRUE(desk_command_matches(desk_commands[6], "rings"));
+    EXPECT_EQ(desk_commands[6].page, DeskPage::diagnostics);
+    EXPECT_TRUE(desk_command_matches(desk_commands[7], "monte carlo"));
+    EXPECT_EQ(desk_commands[7].page, DeskPage::research);
     EXPECT_FALSE(desk_command_matches(desk_commands[0], "funding"));
-    EXPECT_TRUE(desk_command_matches(desk_commands[4], "lock"));
-    EXPECT_TRUE(desk_command_matches(desk_commands[5], "comfortable"));
+    EXPECT_TRUE(desk_command_matches(desk_commands[11], "lock"));
+    EXPECT_TRUE(desk_command_matches(desk_commands[12], "comfortable"));
     EXPECT_TRUE(operator_shortcut_allowed(false, false, false, false,
                                           false, false, false));
     EXPECT_FALSE(operator_shortcut_allowed(true, false, false, false,
@@ -215,6 +251,78 @@ TEST(ImGuiDeskDemo, SurfaceStatusDefaultsUnavailableForHonestPartialWiring)
         = DeskDataState::live;
     EXPECT_EQ(research_surface_status(partial, ResearchSurface::footprint).state,
               DeskDataState::live);
+}
+
+TEST(ImGuiDeskProvenance, MixedSourcesRequiresBothADemoAndARealSurface)
+{
+    using namespace truetest::ui::desk;
+    ResearchPresentation presentation;
+    // All-demo: never mixed.
+    for (auto& surface : presentation.surfaces)
+        surface.state = DeskDataState::demo;
+    EXPECT_FALSE(research_presentation_has_mixed_sources(presentation));
+
+    // All-live: never mixed.
+    for (auto& surface : presentation.surfaces)
+        surface.state = DeskDataState::live;
+    EXPECT_FALSE(research_presentation_has_mixed_sources(presentation));
+
+    // unavailable/error siblings never count as a competing source class.
+    presentation.surfaces[0].state = DeskDataState::live;
+    presentation.surfaces[1].state = DeskDataState::unavailable;
+    presentation.surfaces[2].state = DeskDataState::error;
+    for (std::size_t i = 3; i < presentation.surfaces.size(); ++i)
+        presentation.surfaces[i].state = DeskDataState::unavailable;
+    EXPECT_FALSE(research_presentation_has_mixed_sources(presentation));
+
+    // §8.1's concrete example: one live footprint alongside demo siblings.
+    presentation.surfaces[static_cast<std::size_t>(ResearchSurface::footprint)].state
+        = DeskDataState::live;
+    presentation.surfaces[static_cast<std::size_t>(ResearchSurface::dom)].state
+        = DeskDataState::demo;
+    EXPECT_TRUE(research_presentation_has_mixed_sources(presentation));
+
+    // stale still counts as "real" provenance for mixing purposes (it was a
+    // real surface that went stale, not a demo one).
+    ResearchPresentation stale_vs_demo;
+    stale_vs_demo.surfaces[0].state = DeskDataState::stale;
+    stale_vs_demo.surfaces[1].state = DeskDataState::demo;
+    EXPECT_TRUE(research_presentation_has_mixed_sources(stale_vs_demo));
+}
+
+TEST(ImGuiDeskCapabilities, NeverInfersAvailabilityFromAbsentData)
+{
+    using namespace truetest::ui::desk;
+    const auto no_snapshot = derive_desk_capabilities(
+        /*has_snapshot=*/false, /*snap=*/nullptr,
+        /*pause=*/false, /*flatten=*/false, /*kill=*/false,
+        /*research_present=*/false);
+    EXPECT_FALSE(no_snapshot.snapshot_available);
+    EXPECT_FALSE(no_snapshot.pause_available);
+    EXPECT_FALSE(no_snapshot.flatten_available);
+    EXPECT_FALSE(no_snapshot.kill_available);
+    EXPECT_FALSE(no_snapshot.debug_telemetry_available);
+    EXPECT_FALSE(no_snapshot.questdb_active);
+    EXPECT_FALSE(no_snapshot.research_surface_available);
+    // Roadmap seams: always false until an actual seam exists — never
+    // inferred from any other field.
+    EXPECT_FALSE(no_snapshot.research_report_available);
+    EXPECT_FALSE(no_snapshot.research_launcher_available);
+    EXPECT_FALSE(no_snapshot.research_resolved_config_available);
+
+    truetest::ui::dashboard_snapshot snap;
+    snap.debug.has_debug = true;
+    snap.health.questdb.active = true;
+    const auto with_snapshot = derive_desk_capabilities(
+        true, &snap, /*pause=*/true, /*flatten=*/true, /*kill=*/false,
+        /*research_present=*/true);
+    EXPECT_TRUE(with_snapshot.snapshot_available);
+    EXPECT_TRUE(with_snapshot.pause_available);
+    EXPECT_TRUE(with_snapshot.flatten_available);
+    EXPECT_FALSE(with_snapshot.kill_available);
+    EXPECT_TRUE(with_snapshot.debug_telemetry_available);
+    EXPECT_TRUE(with_snapshot.questdb_active);
+    EXPECT_TRUE(with_snapshot.research_surface_available);
 }
 
 TEST(ImGuiDeskDemo, DenseResearchRenderBudgetIsHardBounded)

@@ -103,6 +103,7 @@ struct FeeProbeState {
     double last_entry_fee = -1.0;
     double last_exit_fee = -1.0;
     double last_fixed_fee = -1.0;
+    double last_risk_fraction = -1.0;
 };
 
 struct FeeProbeStrategy : IStrategy {
@@ -118,6 +119,7 @@ struct FeeProbeStrategy : IStrategy {
             {"entry_fee_rate", 0.0, 0.0, 0.05, ""},
             {"exit_fee_rate", 0.0, 0.0, 0.05, ""},
             {"fixed_fee_per_leg", 0.0, 0.0, 1e6, ""},
+            {"risk_fraction", 0.02, 0.0, 1.0, ""},
         };
     }
     void set_param(const std::string& key, double value) override
@@ -126,6 +128,7 @@ struct FeeProbeStrategy : IStrategy {
         if (key == "entry_fee_rate") state->last_entry_fee = value;
         else if (key == "exit_fee_rate") state->last_exit_fee = value;
         else if (key == "fixed_fee_per_leg") state->last_fixed_fee = value;
+        else if (key == "risk_fraction") state->last_risk_fraction = value;
         else throw std::runtime_error("Unknown parameter: " + key);
     }
 };

@@ -100,6 +100,8 @@ TEST(BarAggregator, Flush_EmitsPartialBar)
     EXPECT_EQ(count, 0); // nothing emitted while the bar is still open
     agg.flush();
     EXPECT_EQ(count, 1); // flush emits the final partial bar
+    agg.flush();
+    EXPECT_EQ(count, 1); // an already-flushed partial is not duplicated
 }
 
 TEST(BarAggregator, Flush_NothingOpen)
@@ -144,4 +146,78 @@ TEST(BarAggregator, Symbol_Propagation)
     agg.on_tick("BTC", 1.0, 1, epoch_ms(0));
     agg.flush();
     EXPECT_EQ(sym, "BTC");
+}
+
+TEST(BarAggregator, InterleavedSymbolsKeepIndependentBars)
+{
+    std::vector<market_event> bars;
+    BarAggregator agg(std::chrono::milliseconds(1000),
+                      [&](const market_event& bar) { bars.push_back(bar); });
+
+    EXPECT_TRUE(agg.on_tick("BTC", 100.0, 100, epoch_ms(0), 1));
+    EXPECT_TRUE(agg.on_tick("ETH", 1000.0, 200'000'000,
+                            epoch_ms(10), 100'000'000ULL));
+    EXPECT_TRUE(agg.on_tick("BTC", 110.0, 50, epoch_ms(20), 1));
+    EXPECT_TRUE(agg.on_tick("ETH", 900.0, 100'000'000,
+                            epoch_ms(30), 100'000'000ULL));
+    agg.flush();
+
+    ASSERT_EQ(bars.size(), 2u);
+    EXPECT_EQ(bars[0].get_symbol(), "BTC");
+    EXPECT_DOUBLE_EQ(bars[0].get_open(), 100.0);
+    EXPECT_DOUBLE_EQ(bars[0].get_close(), 110.0);
+    EXPECT_EQ(bars[0].get_volume(), 150);
+    EXPECT_EQ(bars[0].get_quantity_scale(), 1u);
+    EXPECT_EQ(bars[1].get_symbol(), "ETH");
+    EXPECT_DOUBLE_EQ(bars[1].get_open(), 1000.0);
+    EXPECT_DOUBLE_EQ(bars[1].get_close(), 900.0);
+    EXPECT_EQ(bars[1].get_volume(), 300'000'000);
+    EXPECT_EQ(bars[1].get_quantity_scale(), 100'000'000ULL);
+}
+
+TEST(BarAggregator, FlushEmitsOpenSymbolsInEventTimeOrder)
+{
+    std::vector<market_event> bars;
+    BarAggregator agg(std::chrono::milliseconds(1000),
+                      [&](const market_event& bar) { bars.push_back(bar); });
+
+    ASSERT_TRUE(agg.on_tick("A", 100.0, 1, epoch_ms(0)));
+    ASSERT_TRUE(agg.on_tick("B", 200.0, 1, epoch_ms(10)));
+    // Rolls A and emits its old bar; A's new partial is newer than B's.
+    ASSERT_TRUE(agg.on_tick("A", 101.0, 1, epoch_ms(2000)));
+    agg.flush();
+
+    ASSERT_EQ(bars.size(), 3u);
+    EXPECT_EQ(bars[0].get_symbol(), "A");
+    EXPECT_EQ(bars[0].get_timestamp(), epoch_ms(0));
+    EXPECT_EQ(bars[1].get_symbol(), "B");
+    EXPECT_EQ(bars[1].get_timestamp(), epoch_ms(10));
+    EXPECT_EQ(bars[2].get_symbol(), "A");
+    EXPECT_EQ(bars[2].get_timestamp(), epoch_ms(2000));
+}
+
+TEST(BarAggregator, SymbolCapacityFailsClosedWithoutMixing)
+{
+    int emitted = 0;
+    BarAggregator agg(std::chrono::milliseconds(1000),
+                      [&](const market_event&) { ++emitted; }, 1);
+    EXPECT_TRUE(agg.on_tick("A", 1.0, 1, epoch_ms(0)));
+    EXPECT_FALSE(agg.on_tick("B", 2.0, 1, epoch_ms(1)));
+    agg.flush();
+    EXPECT_EQ(emitted, 1);
+}
+
+TEST(BarAggregator, InvalidTickFailsWithoutMutatingOpenBar)
+{
+    std::vector<market_event> bars;
+    BarAggregator agg(std::chrono::milliseconds(1000),
+                      [&](const market_event& bar) { bars.push_back(bar); });
+    ASSERT_TRUE(agg.on_tick("A", 100.0, 5, epoch_ms(0)));
+    EXPECT_FALSE(agg.on_tick("A", 200.0, -1, epoch_ms(1)));
+    EXPECT_FALSE(agg.on_tick("A", std::numeric_limits<double>::infinity(),
+                             1, epoch_ms(2)));
+    agg.flush();
+    ASSERT_EQ(bars.size(), 1u);
+    EXPECT_DOUBLE_EQ(bars[0].get_close(), 100.0);
+    EXPECT_EQ(bars[0].get_volume(), 5);
 }

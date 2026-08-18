@@ -367,6 +367,84 @@ TEST(ExecutionBridge, PartialThenFull)
     EXPECT_DOUBLE_EQ(fills[1].get_remaining_qty(), 0.0);
 }
 
+TEST(ExecutionBridge, ShortTerminalFillFailsClosed)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(3, "TEST", 10.0, 100.0));
+
+    h.ft->deliver("full|tt-3|EX-1|TEST|buy|4|100");
+
+    std::vector<fill_event> fills;
+    EXPECT_FALSE(h.bridge->poll_fills(fills));
+    std::vector<ExecutionBridge::submit_result> results;
+    ASSERT_TRUE(h.bridge->poll_submit_results(results));
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_TRUE(results[0].fatal);
+    EXPECT_NE(results[0].error.find("does not complete"), std::string::npos);
+}
+
+TEST(ExecutionBridge, PartialSliceAtTotalPromotesToTerminalFill)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(3, "TEST", 2.0, 100.0));
+
+    h.ft->deliver("partial|tt-3|EX-1|TEST|buy|1|100");
+    h.ft->deliver("partial|tt-3|EX-1|TEST|buy|1|100");
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(h.bridge->poll_fills(fills));
+    ASSERT_EQ(fills.size(), 2u);
+    EXPECT_TRUE(fills[0].is_partial());
+    EXPECT_FALSE(fills[1].is_partial());
+    EXPECT_FALSE(h.bridge->cancel_order(3))
+        << "quantity-complete partial slices must retire bridge tracking";
+}
+
+TEST(ExecutionBridge, MalformedFillClosesAdmissionAndPublishesFatalResult)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(3, "TEST", 10.0, 100.0));
+
+    h.ft->deliver("full|tt-3|EX-1|TEST|buy|nan|100");
+
+    std::vector<fill_event> fills;
+    EXPECT_FALSE(h.bridge->poll_fills(fills));
+    std::vector<ExecutionBridge::submit_result> results;
+    ASSERT_TRUE(h.bridge->poll_submit_results(results));
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_TRUE(results[0].fatal);
+    EXPECT_FALSE(results[0].ok);
+    EXPECT_NE(results[0].error.find("malformed"), std::string::npos);
+
+    h.bridge->submit_order(make_order(4, "TEST", 1.0, 100.0));
+    EXPECT_NE(h.bridge->last_error().find("quiesced"), std::string::npos);
+    EXPECT_FALSE(h.bridge->cancel_order(3));
+}
+
+TEST(ExecutionBridge, OverfillOrIdentityMismatchClosesAdmission)
+{
+    for (const std::string payload : {
+             "full|tt-3|EX-1|TEST|buy|11|100",
+             "full|tt-3|EX-1|OTHER|buy|10|100",
+             "full|tt-3|EX-1|TEST|sell|10|100"})
+    {
+        bridge_harness h;
+        ASSERT_TRUE(h.bridge->open());
+        h.bridge->submit_order(make_order(3, "TEST", 10.0, 100.0));
+        h.ft->deliver(payload);
+
+        std::vector<fill_event> fills;
+        EXPECT_FALSE(h.bridge->poll_fills(fills));
+        std::vector<ExecutionBridge::submit_result> results;
+        ASSERT_TRUE(h.bridge->poll_submit_results(results));
+        ASSERT_EQ(results.size(), 1u);
+        EXPECT_TRUE(results[0].fatal);
+    }
+}
+
 TEST(ExecutionBridge, CancelFlowsThrough)
 {
     bridge_harness h;

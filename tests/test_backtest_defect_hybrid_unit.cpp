@@ -1,11 +1,25 @@
 // Hybrid/queue/local adapter unit locks (backtest defect closure).
 #include "helpers/backtest_defect_helpers.h"
 
+#include <utility>
+
+namespace
+{
+std::shared_ptr<LocalBookAdapter> make_hybrid_taker(
+    const std::shared_ptr<orderbook>& ob,
+    std::shared_ptr<IFeeModel> fees = nullptr)
+{
+    return std::make_shared<LocalBookAdapter>(
+        ob, std::move(fees), std::make_shared<PerfectFillModel>(),
+        42, 1.1, /*qty_scale=*/1.0);
+}
+}
+
 TEST(BacktestDefects, FR01_HybridPaper_MarketOrderFills)
 {
     auto ob = std::make_shared<orderbook>();
     // Seed a sell so market buy can match.
-    ob->add_order(std::make_shared<order>(
+    ob->add_external_order(std::make_shared<order>(
         ob_order_type::good_till_cancel, 9001,
         side::sell, Price::from_double(100.0), /*qty=*/10));
 
@@ -14,7 +28,7 @@ TEST(BacktestDefects, FR01_HybridPaper_MarketOrderFills)
     local->set_mid_price(100.0);
     auto qa = std::make_shared<QueueAwareBookAdapter>(
         std::make_shared<UniformCancelModel>());
-    HybridPaperAdapter hybrid(local, qa);
+    HybridPaperAdapter hybrid(local, qa, ob, make_hybrid_taker(ob));
 
     order_event mkt(t0(), "X", order_type::market, order_side::buy, 5.0, 100.0);
     mkt.set_order_id(1);
@@ -32,10 +46,16 @@ TEST(BacktestDefects, FR01_HybridPaper_MarketOrderFills)
 TEST(BacktestDefects, FR01_HybridPaper_LimitGoesToQueueAware)
 {
     auto ob = std::make_shared<orderbook>();
+    ob->add_external_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 9001,
+        side::buy, Price::from_double(98.0), 10));
+    ob->add_external_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 9002,
+        side::sell, Price::from_double(100.0), 10));
     auto local = std::make_shared<LocalBookAdapter>(ob, nullptr, nullptr, 42, 1.1, 1.0);
     auto qa = std::make_shared<QueueAwareBookAdapter>(
         std::make_shared<BackCancelModel>());
-    HybridPaperAdapter hybrid(local, qa);
+    HybridPaperAdapter hybrid(local, qa, ob, make_hybrid_taker(ob));
 
     order_event lim(t0(), "X", order_type::limit, order_side::buy, 5.0, 99.0);
     lim.set_order_id(7);
@@ -44,6 +64,154 @@ TEST(BacktestDefects, FR01_HybridPaper_LimitGoesToQueueAware)
 
     EXPECT_EQ(qa->live_order_count(), 1u);
     EXPECT_EQ(local->live_quote_count(), 0u);
+}
+
+TEST(BacktestDefects, HybridPaper_MarketableConvertedLimitUsesLocalTaker)
+{
+    auto ob = std::make_shared<orderbook>();
+    ob->add_external_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 9001,
+        side::buy, Price::from_double(99.0), 10));
+    ob->add_external_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 9002,
+        side::sell, Price::from_double(100.0), 10));
+
+    auto fees = std::make_shared<TieredFeeModel>(
+        /*maker_rate=*/0.001, /*taker_rate=*/0.002);
+    auto local = std::make_shared<LocalBookAdapter>(
+        ob, fees,
+        std::make_shared<RealisticFillModel>(
+            /*fade_rate=*/0.0, /*base_fill_prob=*/0.0,
+            /*distance_decay=*/0.0),
+        42, 1.1, /*qty_scale=*/1.0);
+    auto aggressive = std::make_shared<LocalBookAdapter>(
+        ob, fees, std::make_shared<PerfectFillModel>(),
+        42, 1.1, /*qty_scale=*/1.0);
+    auto qa = std::make_shared<QueueAwareBookAdapter>(
+        std::make_shared<BackCancelModel>(), fees);
+    HybridPaperAdapter hybrid(local, qa, ob, aggressive);
+
+    // Stop-limit triggers are converted by the engine to ordinary limits
+    // before reaching the adapter. Crossing the shared-book ask must select
+    // LocalBook immediately, not wait for QueueAware tape activity.
+    order_event converted(t0(), "X", order_type::limit,
+                          order_side::buy, 2.0, 100.0);
+    converted.set_order_id(7);
+    converted.set_earliest_eligible_ts(t0());
+    hybrid.submit_order(converted);
+
+    EXPECT_EQ(qa->live_order_count(), 0u)
+        << "marketable limit must not enter the passive queue";
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(hybrid.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].get_order_id(), 7u);
+    EXPECT_DOUBLE_EQ(fills[0].get_fill_price(), 100.0);
+    EXPECT_NEAR(fills[0].get_commission(), 0.4, 1e-12)
+        << "marketable limit must pay taker, not maker, fees";
+}
+
+TEST(BacktestDefects, HybridPaper_MarketablePartialMigratesResidualToQueue)
+{
+    auto ob = std::make_shared<orderbook>();
+    ob->add_external_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 9101,
+        side::buy, Price::from_double(99.0), 10));
+    ob->add_external_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 9102,
+        side::sell, Price::from_double(100.0), 1));
+
+    auto local = std::make_shared<LocalBookAdapter>(
+        ob, nullptr, nullptr, 42, 1.1, /*qty_scale=*/1.0);
+    auto qa = std::make_shared<QueueAwareBookAdapter>(
+        std::make_shared<BackCancelModel>());
+    HybridPaperAdapter hybrid(
+        local, qa, ob, make_hybrid_taker(ob));
+    hybrid.on_l2_snapshot("X", {{100.0, 0.0}}, {});
+
+    order_event crossing(t0(), "X", order_type::limit,
+                         order_side::buy, 2.0, 100.0);
+    crossing.set_order_id(8);
+    crossing.set_earliest_eligible_ts(t0());
+    hybrid.submit_order(crossing);
+
+    EXPECT_EQ(qa->live_order_count(), 1u)
+        << "unfilled taker remainder must become a passive queue order";
+    EXPECT_EQ(ob->get_order(8), nullptr)
+        << "residual must not remain owned by the temporary taker adapter";
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(hybrid.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_NEAR(fills[0].get_filled_quantity(), 1.0, 1e-12);
+    EXPECT_NEAR(fills[0].get_remaining_qty(), 1.0, 1e-12);
+
+    fills.clear();
+    hybrid.on_trade("X", 100.0, 2.0, t_at(1));
+    ASSERT_TRUE(hybrid.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].get_order_id(), 8u);
+    EXPECT_NEAR(fills[0].get_filled_quantity(), 1.0, 1e-12);
+    EXPECT_NEAR(fills[0].get_remaining_qty(), 0.0, 1e-12);
+}
+
+TEST(BacktestDefects, HybridPaper_LocalOrderNeverDefinesVenueMarketability)
+{
+    auto ob = std::make_shared<orderbook>();
+    const std::pair<Price, quantity> bids[] = {
+        {Price::from_double(99.0), 10}};
+    const std::pair<Price, quantity> asks[] = {
+        {Price::from_double(101.0), 10}};
+    ob->apply_l2_snapshot(bids, 1, asks, 1);
+    ob->add_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 7001, side::sell,
+        Price::from_double(100.0), 2));
+
+    auto local = std::make_shared<LocalBookAdapter>(
+        ob, nullptr, nullptr, 42, 1.1, 1.0);
+    auto queue = std::make_shared<QueueAwareBookAdapter>(
+        std::make_shared<BackCancelModel>());
+    HybridPaperAdapter hybrid(local, queue, ob, make_hybrid_taker(ob));
+
+    order_event passive(t0(), "X", order_type::limit,
+                        order_side::buy, 1.0, 100.0);
+    passive.set_order_id(7002);
+    passive.set_earliest_eligible_ts(t0());
+    hybrid.submit_order(passive);
+
+    EXPECT_EQ(queue->live_order_count(), 1u);
+    EXPECT_NE(ob->get_order(7001), nullptr);
+}
+
+TEST(BacktestDefects, HybridPaper_ExternalTakerSkipsBetterLocalContra)
+{
+    auto ob = std::make_shared<orderbook>();
+    const std::pair<Price, quantity> bids[] = {
+        {Price::from_double(99.0), 10}};
+    const std::pair<Price, quantity> asks[] = {
+        {Price::from_double(101.0), 10}};
+    ob->apply_l2_snapshot(bids, 1, asks, 1);
+    ob->add_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 7101, side::sell,
+        Price::from_double(100.0), 2));
+
+    auto local = std::make_shared<LocalBookAdapter>(
+        ob, nullptr, nullptr, 42, 1.1, 1.0);
+    auto queue = std::make_shared<QueueAwareBookAdapter>(
+        std::make_shared<BackCancelModel>());
+    HybridPaperAdapter hybrid(local, queue, ob, make_hybrid_taker(ob));
+
+    order_event crossing(t0(), "X", order_type::limit,
+                         order_side::buy, 1.0, 101.0);
+    crossing.set_order_id(7102);
+    crossing.set_earliest_eligible_ts(t0());
+    hybrid.submit_order(crossing);
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(hybrid.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_DOUBLE_EQ(fills[0].get_fill_price(), 101.0);
+    EXPECT_NE(ob->get_order(7101), nullptr);
 }
 
 // ── FR-03: fill-fade matches book qty ──────────────────────────────────────
@@ -119,7 +287,7 @@ TEST(BacktestDefects, HybridModify_QueueOnlyLimitFailsClosed)
     auto local = std::make_shared<LocalBookAdapter>(ob, nullptr, nullptr, 42, 1.1, 1.0);
     auto qa = std::make_shared<QueueAwareBookAdapter>(
         std::make_shared<UniformCancelModel>());
-    HybridPaperAdapter hybrid(local, qa);
+    HybridPaperAdapter hybrid(local, qa, ob, make_hybrid_taker(ob));
 
     order_event lim(t0(), "X", order_type::limit, order_side::buy, 5.0, 99.0);
     lim.set_order_id(7);
@@ -138,7 +306,7 @@ TEST(BacktestDefects, HybridCancel_UnknownIdReturnsFalse)
     auto local = std::make_shared<LocalBookAdapter>(ob, nullptr, nullptr, 42, 1.1, 1.0);
     auto qa = std::make_shared<QueueAwareBookAdapter>(
         std::make_shared<UniformCancelModel>());
-    HybridPaperAdapter hybrid(local, qa);
+    HybridPaperAdapter hybrid(local, qa, ob, make_hybrid_taker(ob));
     EXPECT_FALSE(hybrid.cancel_order(99999));
 }
 
@@ -148,7 +316,7 @@ TEST(BacktestDefects, HybridPaper_SweepForwardsToQueueAware)
     auto local = std::make_shared<LocalBookAdapter>(ob, nullptr, nullptr, 42, 1.1, 1.0);
     auto qa = std::make_shared<QueueAwareBookAdapter>(
         std::make_shared<UniformCancelModel>());
-    HybridPaperAdapter hybrid(local, qa);
+    HybridPaperAdapter hybrid(local, qa, ob, make_hybrid_taker(ob));
 
     order_event lim(t0(), "X", order_type::limit, order_side::buy, 5.0, 99.5);
     lim.set_order_id(1);
@@ -235,7 +403,7 @@ TEST(BacktestDefects, HybridSweep_VolumeBudgetNotDoubleApplied)
     auto local = std::make_shared<LocalBookAdapter>(ob, nullptr, nullptr, 42, 1.1, 1.0);
     auto qa = std::make_shared<QueueAwareBookAdapter>(
         std::make_shared<UniformCancelModel>());
-    HybridPaperAdapter hybrid(local, qa);
+    HybridPaperAdapter hybrid(local, qa, ob, make_hybrid_taker(ob));
 
     // Local-only resting limit qty 10 @ 99.0
     order_event local_lim(t0(), "X", order_type::limit, order_side::buy, 10.0, 99.0);

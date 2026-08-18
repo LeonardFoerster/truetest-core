@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -86,7 +87,8 @@ TEST(EventLog, RoundTrip_MarketEvent)
 
     {
         EventLogger logger(tf.path);
-        market_event mkt(ts, "AAPL", 150.25, 152.00, 149.50, 151.75, 1000000);
+        market_event mkt(ts, "AAPL", 150.25, 152.00, 149.50, 151.75,
+                         1000000, 100'000'000ULL);
         logger.log(mkt);
         logger.flush();
     }
@@ -105,6 +107,7 @@ TEST(EventLog, RoundTrip_MarketEvent)
     EXPECT_DOUBLE_EQ(mkt.get_low(), 149.50);
     EXPECT_DOUBLE_EQ(mkt.get_close(), 151.75);
     EXPECT_EQ(mkt.get_volume(), 1000000);
+    EXPECT_EQ(mkt.get_quantity_scale(), 100'000'000ULL);
 
     EXPECT_FALSE(replayer.has_next());
 }
@@ -144,6 +147,8 @@ TEST(EventLog, RoundTrip_OrderEvent)
                         time_in_force::gtc, 0.0);
         ord.set_order_id(12345);
         ord.set_earliest_eligible_ts(elig_ts);
+        ord.set_opener_order_id(77);
+        ord.set_strategy_name("breakout");
         logger.log(ord);
         logger.flush();
     }
@@ -162,6 +167,8 @@ TEST(EventLog, RoundTrip_OrderEvent)
     EXPECT_EQ(ord.get_tif(), time_in_force::gtc);
     EXPECT_EQ(ord.get_order_id(), 12345u);
     EXPECT_EQ(ord.get_earliest_eligible_ts(), elig_ts);
+    EXPECT_EQ(ord.get_opener_order_id(), 77u);
+    EXPECT_EQ(ord.get_strategy_name(), "breakout");
 }
 
 TEST(EventLog, RoundTrip_FillEvent)
@@ -171,7 +178,11 @@ TEST(EventLog, RoundTrip_FillEvent)
 
     {
         EventLogger logger(tf.path);
-        fill_event fill(ts, "MSFT", 99, order_side::buy, 100, 310.50, 1.25);
+        fill_event fill(ts, "MSFT", 99, order_side::buy, 100, 310.50, 1.25,
+                        /*remaining_qty=*/0.0, /*fill_id=*/7,
+                        /*strategy_name=*/"mean_reversion",
+                        /*opener_order_id=*/42);
+        fill.set_source(fill_source::exchange);
         logger.log(fill);
         logger.flush();
     }
@@ -188,6 +199,10 @@ TEST(EventLog, RoundTrip_FillEvent)
     EXPECT_EQ(fill.get_filled_quantity(), 100);
     EXPECT_DOUBLE_EQ(fill.get_fill_price(), 310.50);
     EXPECT_DOUBLE_EQ(fill.get_commission(), 1.25);
+    EXPECT_EQ(fill.get_fill_id(), 7u);
+    EXPECT_EQ(fill.get_source(), fill_source::exchange);
+    EXPECT_EQ(fill.get_opener_order_id(), 42u);
+    EXPECT_EQ(fill.get_strategy_name(), "mean_reversion");
 }
 
 TEST(EventLog, RoundTrip_TickEvent)
@@ -197,7 +212,8 @@ TEST(EventLog, RoundTrip_TickEvent)
 
     {
         EventLogger logger(tf.path);
-        tick_event tick(ts, "SPY", 450.25, 500, tick_side::bid);
+        tick_event tick(ts, "SPY", 450.25, 500, tick_side::bid,
+                        100'000'000ULL);
         logger.log(tick);
         logger.flush();
     }
@@ -212,6 +228,7 @@ TEST(EventLog, RoundTrip_TickEvent)
     EXPECT_DOUBLE_EQ(tick.get_price(), 450.25);
     EXPECT_EQ(tick.get_quantity(), 500);
     EXPECT_EQ(tick.get_side(), tick_side::bid);
+    EXPECT_EQ(tick.get_quantity_scale(), 100'000'000ULL);
 }
 
 TEST(EventLog, RoundTrip_L2SnapshotEvent)
@@ -225,7 +242,7 @@ TEST(EventLog, RoundTrip_L2SnapshotEvent)
         std::vector<l2_level> asks = {{101.0, 150}, {101.5, 250}};
         l2_snapshot_event snap(ts, "DOGE",
                                bids.data(), bids.size(),
-                               asks.data(), asks.size());
+                               asks.data(), asks.size(), 100'000'000ULL);
         logger.log(snap);
         logger.flush();
     }
@@ -244,6 +261,7 @@ TEST(EventLog, RoundTrip_L2SnapshotEvent)
     ASSERT_EQ(snap.ask_count(), 2u);
     EXPECT_DOUBLE_EQ(snap.ask(0).price, 101.0);
     EXPECT_EQ(snap.ask(0).quantity, 150);
+    EXPECT_EQ(snap.get_quantity_scale(), 100'000'000ULL);
 }
 
 TEST(EventLog, RoundTrip_L2UpdateEvent)
@@ -253,7 +271,8 @@ TEST(EventLog, RoundTrip_L2UpdateEvent)
 
     {
         EventLogger logger(tf.path);
-        l2_update_event upd(ts, "SOL", tick_side::ask, 25.50, 1000);
+        l2_update_event upd(ts, "SOL", tick_side::ask, 25.50, 1000,
+                            100'000'000ULL);
         logger.log(upd);
         logger.flush();
     }
@@ -268,6 +287,28 @@ TEST(EventLog, RoundTrip_L2UpdateEvent)
     EXPECT_EQ(upd.get_side(), tick_side::ask);
     EXPECT_DOUBLE_EQ(upd.get_price(), 25.50);
     EXPECT_EQ(upd.get_new_quantity(), 1000);
+    EXPECT_EQ(upd.get_quantity_scale(), 100'000'000ULL);
+}
+
+TEST(EventLog, RoundTrip_FundingEvent)
+{
+    TempFile tf("funding.bin");
+    const auto ts = epoch_ms(7'500'000);
+    {
+        EventLogger logger(tf.path);
+        logger.log(funding_event(ts, "BTCUSDT", 0.0, -1.25,
+                                 "FUNDING_FEE"));
+    }
+
+    EventReplayer replayer(tf.path);
+    auto ev = replayer.next();
+    ASSERT_NE(ev, nullptr);
+    ASSERT_EQ(ev->get_type(), event_type::funding);
+    const auto& funding = static_cast<const funding_event&>(*ev);
+    EXPECT_EQ(funding.get_timestamp(), ts);
+    EXPECT_EQ(funding.get_symbol(), "BTCUSDT");
+    EXPECT_DOUBLE_EQ(funding.get_cash_delta(), -1.25);
+    EXPECT_EQ(funding.get_reason(), "FUNDING_FEE");
 }
 
 // ─── Multiple events in sequence ────────────────────────────────────────────
@@ -405,7 +446,159 @@ TEST(EventLog, FinalizeFailurePoisonsLoggerWithoutTerminatingDestructor)
         },
         ::testing::ExitedWithCode(0), "");
 }
+
+TEST(EventLog, ThreadedDurableFinalizeFailureHaltsEngine)
+{
+    SilenceCout quiet;
+    auto dh = std::make_shared<data_handler>();
+    dh->load_into_queue("1704067200000", "TEST",
+                        100.0, 101.0, 99.0, 100.0, 1000);
+
+    engine_config cfg;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.event_log_path = "/dev/full";
+    cfg.compress_log = false;
+    engine eng(dh, std::make_shared<orderbook>(), nullptr, std::move(cfg));
+
+    eng.run();
+
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+}
+
+TEST(EventLog, InlineDurableWriteOrFinalizeFailureHaltsEngine)
+{
+    SilenceCout quiet;
+    auto dh = std::make_shared<data_handler>();
+    dh->load_into_queue("1704067200000", "TEST",
+                        100.0, 101.0, 99.0, 100.0, 1000);
+
+    engine_config cfg;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.show_progress = false;
+    cfg.event_log_path = "/dev/full";
+    cfg.compress_log = false;
+    engine eng(dh, std::make_shared<orderbook>(), nullptr, std::move(cfg));
+
+    EXPECT_NO_THROW(eng.run());
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+}
 #endif
+
+TEST(EventLog, InlineEngineHonorsConfiguredRotation)
+{
+    SilenceCout quiet;
+    TempFile tf("inline_rotation.bin");
+    const std::string rotated = tf.path + ".1";
+    auto dh = std::make_shared<data_handler>();
+    for (int i = 0; i < 3; ++i)
+        dh->load_into_queue(std::to_string(1704067200000LL + i * 60'000LL),
+                            "TEST", 100.0, 101.0, 99.0, 100.0, 1000);
+
+    {
+        engine_config cfg;
+        cfg.threading = thread_preset::inline_mode;
+        cfg.show_progress = false;
+        cfg.event_log_path = tf.path;
+        cfg.compress_log = false;
+        cfg.log_max_bytes = 1;
+        cfg.log_max_files = 1;
+        engine eng(dh, std::make_shared<orderbook>(), nullptr, std::move(cfg));
+        eng.run();
+    }
+
+    std::ifstream rotated_log(rotated, std::ios::binary);
+    EXPECT_TRUE(rotated_log.good());
+    rotated_log.close();
+    std::remove(rotated.c_str());
+}
+
+TEST(EventLog, AuthoritativeReplayRefusesUnfinalizedPrefix)
+{
+    SilenceCout quiet;
+    TempFile tf("unfinalized-prefix.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        write_event_log_preamble(out, /*compressed=*/false,
+                                 /*finalized=*/false);
+        const auto payload = event_serial::serialise(
+            market_event(epoch_ms(1), "TEST", 1, 1, 1, 1, 1));
+        write_raw_event_record(out, event_type::market, payload);
+    }
+
+    EventReplayer inspection(tf.path);
+    EXPECT_FALSE(inspection.file_finalized());
+    EXPECT_NE(inspection.next(), nullptr);
+
+    engine_config cfg;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr,
+               std::move(cfg));
+    EXPECT_THROW(eng.run_replay(tf.path), std::runtime_error);
+}
+
+TEST(EventLog, AuthoritativeReplayRefusesEveryRotatedSegment)
+{
+    SilenceCout quiet;
+    TempFile tf("segmented-ledger.bin");
+    const std::string rotated = tf.path + ".1";
+    {
+        EventLogger logger(tf.path, /*compress=*/false,
+                           /*max_bytes=*/1, /*max_files=*/1);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 1, 1, 1, 1));
+    }
+
+    EventReplayer current(tf.path);
+    EventReplayer previous(rotated);
+    EXPECT_TRUE(current.file_finalized());
+    EXPECT_TRUE(previous.file_finalized());
+    EXPECT_TRUE(current.file_segmented());
+    EXPECT_TRUE(previous.file_segmented());
+
+    engine_config cfg1;
+    cfg1.threading = thread_preset::inline_mode;
+    engine current_engine(std::make_shared<data_handler>(), nullptr, nullptr,
+                          std::move(cfg1));
+    EXPECT_THROW(current_engine.run_replay(tf.path), std::runtime_error);
+
+    engine_config cfg2;
+    cfg2.threading = thread_preset::inline_mode;
+    engine previous_engine(std::make_shared<data_handler>(), nullptr, nullptr,
+                           std::move(cfg2));
+    EXPECT_THROW(previous_engine.run_replay(rotated), std::runtime_error);
+    std::remove(rotated.c_str());
+}
+
+TEST(EventLog, RotationFailurePreservesFinalizedBaseAndPoisonsLogger)
+{
+    TempFile tf("rotation-failure.bin");
+    const std::string blocked_target = tf.path + ".1";
+    const std::string child = blocked_target + "/keep";
+    ASSERT_TRUE(std::filesystem::create_directory(blocked_target));
+    {
+        std::ofstream marker(child);
+        marker << "occupied";
+    }
+
+    {
+        EventLogger logger(tf.path, /*compress=*/false,
+                           /*max_bytes=*/1, /*max_files=*/1);
+        EXPECT_THROW(logger.log(market_event(
+            epoch_ms(1), "TEST", 1, 1, 1, 1, 1)), std::runtime_error);
+        EXPECT_THROW(logger.flush(), std::runtime_error);
+    }
+
+    EventReplayer preserved(tf.path);
+    EXPECT_TRUE(preserved.file_finalized());
+    EXPECT_TRUE(preserved.file_segmented());
+    EXPECT_NE(preserved.next(), nullptr);
+
+    std::filesystem::remove(child);
+    std::filesystem::remove(blocked_target);
+}
 
 TEST(EventLog, HeaderedRawPayloadStartingWithZstdMagicReplaysRaw)
 {
@@ -694,11 +887,14 @@ TEST(EventLog, DeserialiseRejectsTrailingPayloadBytes)
 TEST(EventLog, FillExtensionAcceptsOnlyCompleteHistoricShapes)
 {
     fill_event fill(epoch_ms(1), "TEST", 42, order_side::buy,
-                    2.0, 100.0, 0.5, 3.0, 99);
+                    2.0, 100.0, 0.5, 3.0, 99, "alpha", 7);
     fill.set_source(fill_source::exchange);
     const auto current = event_serial::serialise(fill);
-    ASSERT_GE(current.size(), 17u);
-    const auto base_size = current.size() - 17U;
+    const std::size_t attribution_size = sizeof(uint64_t) + sizeof(uint16_t)
+                                       + fill.get_strategy_name().size();
+    ASSERT_GE(current.size(), 17u + attribution_size);
+    const auto v1_complete_size = current.size() - attribution_size;
+    const auto base_size = v1_complete_size - 17U;
 
     auto legacy = current;
     legacy.resize(base_size);
@@ -720,6 +916,18 @@ TEST(EventLog, FillExtensionAcceptsOnlyCompleteHistoricShapes)
     EXPECT_EQ(prior_fill.get_fill_id(), 99U);
     EXPECT_EQ(prior_fill.get_source(), fill_source::unknown);
 
+    auto v1_complete = current;
+    v1_complete.resize(v1_complete_size);
+    const auto v1_event = event_serial::deserialise(
+        event_type::fill, v1_complete.data(), v1_complete.size());
+    ASSERT_NE(v1_event, nullptr);
+    const auto& v1_fill = static_cast<const fill_event&>(*v1_event);
+    EXPECT_DOUBLE_EQ(v1_fill.get_remaining_qty(), 3.0);
+    EXPECT_EQ(v1_fill.get_fill_id(), 99U);
+    EXPECT_EQ(v1_fill.get_source(), fill_source::exchange);
+    EXPECT_EQ(v1_fill.get_opener_order_id(), 0U);
+    EXPECT_TRUE(v1_fill.get_strategy_name().empty());
+
     const auto current_event = event_serial::deserialise(
         event_type::fill, current.data(), current.size());
     ASSERT_NE(current_event, nullptr);
@@ -727,8 +935,19 @@ TEST(EventLog, FillExtensionAcceptsOnlyCompleteHistoricShapes)
     EXPECT_DOUBLE_EQ(current_fill.get_remaining_qty(), 3.0);
     EXPECT_EQ(current_fill.get_fill_id(), 99U);
     EXPECT_EQ(current_fill.get_source(), fill_source::exchange);
+    EXPECT_EQ(current_fill.get_opener_order_id(), 7U);
+    EXPECT_EQ(current_fill.get_strategy_name(), "alpha");
 
     for (std::size_t tail_size = 1; tail_size < 16; ++tail_size) {
+        auto partial = current;
+        partial.resize(base_size + tail_size);
+        EXPECT_THROW(
+            (void)event_serial::deserialise(event_type::fill,
+                                            partial.data(), partial.size()),
+            std::runtime_error);
+    }
+
+    for (std::size_t tail_size = 18; tail_size < 27; ++tail_size) {
         auto partial = current;
         partial.resize(base_size + tail_size);
         EXPECT_THROW(
@@ -743,6 +962,37 @@ TEST(EventLog, FillExtensionAcceptsOnlyCompleteHistoricShapes)
         (void)event_serial::deserialise(event_type::fill,
                                         extra_extension.data(), extra_extension.size()),
         std::runtime_error);
+}
+
+TEST(EventLog, OrderAttributionExtensionRemainsBackwardCompatible)
+{
+    order_event order(epoch_ms(1), "TEST", order_type::limit,
+                      order_side::sell, 2.0, 100.0);
+    order.set_order_id(12);
+    order.set_opener_order_id(7);
+    order.set_strategy_name("alpha");
+    auto current = event_serial::serialise(order);
+    const std::size_t attribution_size = sizeof(uint64_t) + sizeof(uint16_t)
+                                       + order.get_strategy_name().size();
+    ASSERT_GT(current.size(), attribution_size);
+
+    auto legacy = current;
+    legacy.resize(legacy.size() - attribution_size);
+    const auto legacy_event = event_serial::deserialise(
+        event_type::order, legacy.data(), legacy.size());
+    ASSERT_NE(legacy_event, nullptr);
+    const auto& legacy_order = static_cast<const order_event&>(*legacy_event);
+    EXPECT_EQ(legacy_order.get_opener_order_id(), 0U);
+    EXPECT_TRUE(legacy_order.get_strategy_name().empty());
+
+    for (std::size_t partial_size = 1; partial_size < 10; ++partial_size) {
+        auto partial = legacy;
+        partial.insert(partial.end(), partial_size, 0);
+        EXPECT_THROW(
+            (void)event_serial::deserialise(event_type::order,
+                                            partial.data(), partial.size()),
+            std::runtime_error);
+    }
 }
 
 TEST(EventLog, DeserialiseRejectsOutOfRangeEnumBytes)
@@ -773,16 +1023,17 @@ TEST(EventLog, DeserialiseRejectsOutOfRangeEnumBytes)
     const auto fill = fill_event(epoch_ms(1), "X", 1, order_side::buy,
                                  1.0, 10.0, 0.0, 0.0, 1);
     expect_rejected(event_type::fill, event_serial::serialise(fill), prefix_size + 8U);
-    auto fill_with_source = event_serial::serialise(fill);
-    fill_with_source.back() = 0xFF;
-    EXPECT_THROW(
-        (void)event_serial::deserialise(event_type::fill,
-                                        fill_with_source.data(), fill_with_source.size()),
-        std::runtime_error);
+    constexpr std::size_t fill_source_offset =
+        prefix_size + sizeof(uint64_t) + sizeof(uint8_t)
+                    + 4U * sizeof(double) + sizeof(uint64_t);
+    expect_rejected(event_type::fill, event_serial::serialise(fill),
+                    fill_source_offset);
 
     const auto tick = tick_event(epoch_ms(1), "X", 10.0, 1, tick_side::bid);
-    const auto tick_payload = event_serial::serialise(tick);
-    expect_rejected(event_type::tick, tick_payload, tick_payload.size() - 1U);
+    constexpr std::size_t tick_side_offset =
+        prefix_size + sizeof(double) + sizeof(int64_t);
+    expect_rejected(event_type::tick, event_serial::serialise(tick),
+                    tick_side_offset);
 
     const auto update = l2_update_event(epoch_ms(1), "X", tick_side::bid, 10.0, 1);
     expect_rejected(event_type::l2_update, event_serial::serialise(update), prefix_size);
@@ -983,6 +1234,8 @@ class DetTestStrategy : public IStrategy
     bool position_open_ = false;
     int call_count_ = 0;
 public:
+    int call_count() const { return call_count_; }
+
     std::optional<order_event> on_market(const market_event& mkt) override
     {
         call_count_++;
@@ -1036,6 +1289,7 @@ TEST(EventLog, Deterministic_SameSeedSameLog)
         cfg.event_log_path = log_path;
 
         engine eng(dh, nullptr, strat, std::move(cfg));
+        eng.set_primary_strategy_name("deterministic");
         eng.run();
     };
 
@@ -1093,9 +1347,10 @@ TEST(EventLog, Replay_ProducesIdenticalAnalytics)
     SilenceCout quiet;
     TempFile tf("replay.bin");
 
-    // Run original backtest with event logging
-    double original_pnl = 0.0;
+    AnalyticsReport original;
+    double original_funding = 0.0;
     {
+        OrderIdGenerator::reset(1);
         auto dh = make_det_data(20);
         auto strat = std::make_shared<DetTestStrategy>();
 
@@ -1104,27 +1359,204 @@ TEST(EventLog, Replay_ProducesIdenticalAnalytics)
         cfg.event_log_path = tf.path;
 
         engine eng(dh, nullptr, strat, std::move(cfg));
+        eng.set_primary_strategy_name("deterministic");
         eng.run();
-
-        // The engine ran - get some basic output to compare
-        // We can't easily extract PnL from the engine, so we just verify
-        // the replay completes without error and processes events
-        original_pnl = 1.0; // sentinel to verify we got here
+        original = eng.get_analytics().generate_report();
+        original_funding = eng.get_analytics().total_funding_pnl();
     }
 
-    EXPECT_NE(original_pnl, 0.0);
-
-    // Replay the event log
+    AnalyticsReport replayed;
+    double replayed_funding = 0.0;
+    auto replay_strategy = std::make_shared<DetTestStrategy>();
     {
         auto dh = std::make_shared<data_handler>();
-        auto strat = std::make_shared<DetTestStrategy>();
 
         engine_config cfg;
-        cfg.seed = 42;
+        cfg.seed = 9999; // ledger replay must not depend on simulation RNG.
+        cfg.initial_balance = original.initial_equity;
+        cfg.threading = thread_preset::inline_mode;
 
-        engine eng(dh, nullptr, strat, std::move(cfg));
-        EXPECT_NO_THROW(eng.run_replay(tf.path));
+        engine eng(dh, nullptr, replay_strategy, std::move(cfg));
+        eng.run_replay(tf.path);
+        replayed = eng.get_analytics().generate_report();
+        replayed_funding = eng.get_analytics().total_funding_pnl();
     }
+
+    EXPECT_EQ(replay_strategy->call_count(), 0)
+        << "ledger replay must never regenerate strategy decisions";
+    EXPECT_EQ(replayed.total_orders, original.total_orders);
+    EXPECT_EQ(replayed.total_fills, original.total_fills);
+    EXPECT_EQ(replayed.total_trades, original.total_trades);
+    EXPECT_EQ(replayed.trades.size(), original.trades.size());
+    EXPECT_NEAR(replayed.final_equity, original.final_equity, 1e-9);
+    EXPECT_NEAR(replayed.realized_pnl, original.realized_pnl, 1e-9);
+    EXPECT_NEAR(replayed.unrealized_pnl, original.unrealized_pnl, 1e-9);
+    EXPECT_NEAR(replayed.max_drawdown, original.max_drawdown, 1e-12);
+    EXPECT_NEAR(replayed_funding, original_funding, 1e-12);
+    ASSERT_FALSE(replayed.trades.empty());
+    EXPECT_EQ(replayed.trades.front().strategy_name, "deterministic");
+
+    for (std::size_t i = 0; i < original.trades.size(); ++i)
+    {
+        const auto& a = original.trades[i];
+        const auto& b = replayed.trades[i];
+        EXPECT_EQ(b.order_id, a.order_id);
+        EXPECT_EQ(b.side, a.side);
+        EXPECT_EQ(b.symbol, a.symbol);
+        EXPECT_EQ(b.strategy_name, a.strategy_name);
+        EXPECT_EQ(b.timestamp, a.timestamp);
+        EXPECT_NEAR(b.quantity, a.quantity, 1e-12);
+        EXPECT_NEAR(b.fill_price, a.fill_price, 1e-12);
+        EXPECT_NEAR(b.commission, a.commission, 1e-12);
+        EXPECT_NEAR(b.pnl, a.pnl, 1e-9);
+    }
+}
+
+TEST(EventLog, LedgerReplayRefusesMissingPrefixState)
+{
+    SilenceCout quiet;
+    TempFile tf("partial_replay_refused.bin");
+    {
+        EventLogger logger(tf.path);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 1, 1, 1, 1));
+    }
+
+    engine_config cfg;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr,
+               std::move(cfg));
+    EXPECT_THROW(eng.run_replay(tf.path, /*replay_from_us=*/1),
+                 std::runtime_error);
+    EXPECT_THROW(eng.run_replay(tf.path, /*replay_from_us=*/0,
+                                /*replay_to_us=*/1),
+                 std::runtime_error);
+}
+
+TEST(EventLog, LedgerReplayRefusesOutputLoggingWithoutTruncatingSource)
+{
+    SilenceCout quiet;
+    TempFile tf("replay-no-overwrite.bin");
+    {
+        EventLogger logger(tf.path, false);
+        market_event market(epoch_ms(1), "TEST", 100, 101, 99, 100, 10);
+        logger.log(market);
+    }
+
+    engine_config cfg;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.event_log_path = tf.path;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr, std::move(cfg));
+    EXPECT_THROW(eng.run_replay(tf.path), std::runtime_error);
+
+    EventReplayer intact(tf.path);
+    auto ev = intact.next();
+    ASSERT_NE(ev, nullptr);
+    EXPECT_EQ(ev->get_type(), event_type::market);
+}
+
+TEST(EventLog, LedgerReplayAppliesNonzeroFundingExactlyOnce)
+{
+    SilenceCout quiet;
+    TempFile tf("replay-funding.bin");
+    {
+        EventLogger logger(tf.path, false);
+        market_event market(epoch_ms(1), "TEST", 100, 100, 100, 100, 10);
+        funding_event funding(epoch_ms(2), "TEST", 0.0, 7.25,
+                              "FUNDING_FEE");
+        logger.log(market);
+        logger.log(funding);
+    }
+
+    engine_config cfg;
+    cfg.initial_balance = 1'000.0;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr, std::move(cfg));
+    eng.run_replay(tf.path);
+
+    const auto report = eng.get_analytics().generate_report();
+    EXPECT_DOUBLE_EQ(eng.get_analytics().total_funding_pnl(), 7.25);
+    EXPECT_DOUBLE_EQ(report.initial_equity, 1'000.0);
+    EXPECT_DOUBLE_EQ(report.final_equity, 1'007.25);
+    EXPECT_DOUBLE_EQ(report.final_equity - report.initial_equity,
+                     report.realized_pnl + report.unrealized_pnl + 7.25);
+}
+
+TEST(EventLog, LedgerReplayReconstructsIncrementalL2Marks)
+{
+    SilenceCout quiet;
+    TempFile tf("replay-l2-marks.bin");
+    {
+        EventLogger logger(tf.path, false);
+        const l2_level bids[] = {{99.0, 10}};
+        const l2_level asks[] = {{101.0, 10}};
+        logger.log(l2_snapshot_event(
+            epoch_ms(1), "TEST", bids, 1, asks, 1, 1));
+
+        order_event order(epoch_ms(2), "TEST", order_type::market,
+                          order_side::buy, 1.0, 100.0);
+        order.set_order_id(1);
+        order.set_strategy_name("ledger");
+        logger.log(order);
+        logger.log(fill_event(epoch_ms(3), "TEST", 1,
+                              order_side::buy, 1.0, 100.0, 0.0,
+                              0.0, 1, "ledger", 1));
+        logger.log(l2_update_event(
+            epoch_ms(4), "TEST", tick_side::bid, 99.0, 0, 1));
+        logger.log(l2_update_event(
+            epoch_ms(5), "TEST", tick_side::bid, 79.0, 10, 1));
+        logger.log(l2_update_event(
+            epoch_ms(6), "TEST", tick_side::ask, 101.0, 0, 1));
+        logger.log(l2_update_event(
+            epoch_ms(7), "TEST", tick_side::ask, 81.0, 10, 1));
+    }
+
+    engine_config cfg;
+    cfg.initial_balance = 1'000.0;
+    cfg.qty_scale = 1.0;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr,
+               std::move(cfg));
+    eng.run_replay(tf.path);
+
+    const auto report = eng.get_analytics().generate_report();
+    EXPECT_DOUBLE_EQ(report.final_equity, 980.0);
+    EXPECT_DOUBLE_EQ(report.unrealized_pnl, -20.0);
+    // Replay mirrors the live incremental sequence, including the temporary
+    // one-sided marks while the old best levels are removed/replaced.
+    EXPECT_NEAR(report.max_drawdown, 22.0 / 1001.0 * 100.0, 1e-12);
+}
+
+TEST(EventLog, LegacyV1IsReadableForInspectionButRefusedAsLedger)
+{
+    SilenceCout quiet;
+    TempFile tf("legacy-v1.bin");
+    auto payload = event_serial::serialise(
+        market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+    ASSERT_GE(payload.size(), sizeof(uint64_t));
+    payload.resize(payload.size() - sizeof(uint64_t));
+
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(EVENT_LOG_FILE_MAGIC.data()),
+                  static_cast<std::streamsize>(EVENT_LOG_FILE_MAGIC.size()));
+        const uint8_t version = EVENT_LOG_LEGACY_FILE_VERSION;
+        const uint8_t flags = 0;
+        out.write(reinterpret_cast<const char*>(&version), 1);
+        out.write(reinterpret_cast<const char*>(&flags), 1);
+        write_raw_event_record(out, event_type::market, payload);
+    }
+
+    EventReplayer inspection(tf.path);
+    EXPECT_EQ(inspection.file_version(), EVENT_LOG_LEGACY_FILE_VERSION);
+    auto inspected = inspection.next();
+    ASSERT_NE(inspected, nullptr);
+    EXPECT_EQ(static_cast<const market_event&>(*inspected).get_quantity_scale(),
+              1U);
+
+    engine_config cfg;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr, std::move(cfg));
+    EXPECT_THROW(eng.run_replay(tf.path), std::runtime_error);
 }
 
 // ─── Replay: verify events are consumed ─────────────────────────────────────

@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -37,15 +38,32 @@ std::string fixture_path(const std::string& name)
 
 TEST(BinanceKlineCsv, ParseVolumeIntegerPassthrough)
 {
-	EXPECT_EQ(tt::csv::parse_bar_volume("1000000"), 1000000);
+	std::uint64_t scale = 0;
+	EXPECT_EQ(tt::csv::parse_bar_volume("1000000", &scale), 1000000);
+	EXPECT_EQ(scale, 1u);
 	EXPECT_EQ(tt::csv::parse_bar_volume(""), 0);
 }
 
 TEST(BinanceKlineCsv, ParseVolumeFractionalScaled)
 {
 	// 246.092 * 1e8 → 24609200000
-	EXPECT_EQ(tt::csv::parse_bar_volume("246.092"), 24609200000LL);
+	std::uint64_t scale = 0;
+	EXPECT_EQ(tt::csv::parse_bar_volume("246.092", &scale), 24609200000LL);
+	EXPECT_EQ(scale, 100'000'000ULL);
 	EXPECT_EQ(tt::csv::parse_bar_volume("100.5"), 10050000000LL);
+}
+
+TEST(BinanceKlineCsv, CsvBarRejectsInvalidOrOverflowVolume)
+{
+	CsvBarParser parser;
+	ASSERT_TRUE(parser.parse_header(
+		"date,symbol,open,high,low,close,volume"));
+	EXPECT_FALSE(parser.parse_record(
+		"2024-01-01,BTC,1,1,1,1,-0.1"));
+	EXPECT_FALSE(parser.parse_record(
+		"2024-01-01,BTC,1,1,1,1,1e100"));
+	EXPECT_FALSE(parser.parse_record(
+		"2024-01-01,BTC,1,1,1,1,nan"));
 }
 
 TEST(BinanceKlineCsv, CsvBarParserOpenTimeAndVolume)
@@ -63,6 +81,7 @@ TEST(BinanceKlineCsv, CsvBarParserOpenTimeAndVolume)
 	ASSERT_TRUE(rec.has_value());
 	EXPECT_EQ(rec->open_time_ms, 1577836800000LL);
 	EXPECT_EQ(rec->volume, 24609200000LL);
+	EXPECT_EQ(rec->quantity_scale, 100'000'000ULL);
 	EXPECT_DOUBLE_EQ(rec->open, 7189.43);
 	EXPECT_DOUBLE_EQ(rec->close, 7182.44);
 }
@@ -84,6 +103,7 @@ TEST(BinanceKlineCsv, FixtureLoadViaDataBridge)
 	const auto b1 = dh->bar_at(1);
 	EXPECT_GT(b0.volume, 0);
 	EXPECT_EQ(b0.volume, 24609200000LL);
+	EXPECT_EQ(b0.quantity_scale, 100'000'000ULL);
 
 	using ms = std::chrono::milliseconds;
 	const auto t0 = std::chrono::duration_cast<ms>(b0.ts.time_since_epoch()).count();
@@ -101,6 +121,7 @@ TEST(BinanceKlineCsv, FixtureLoadViaCsvDataSource)
 	ASSERT_TRUE(src.load_into(dh, nullptr));
 	EXPECT_EQ(dh.bar_count(), 20u);
 	EXPECT_EQ(dh.bar_at(0).volume, 24609200000LL);
+	EXPECT_EQ(dh.bar_at(0).quantity_scale, 100'000'000ULL);
 	using ms = std::chrono::milliseconds;
 	const auto t0 = std::chrono::duration_cast<ms>(dh.bar_at(0).ts.time_since_epoch()).count();
 	EXPECT_EQ(t0, 1577836800000LL);

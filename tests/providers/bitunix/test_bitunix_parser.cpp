@@ -28,6 +28,7 @@ TEST(BitunixParser, ParseAllTradesBatch)
     EXPECT_DOUBLE_EQ(ticks[0].price, 68621.4);
     // Quantity is fixed-scale int64 (×1e8), matching Binance/Bitget domain Tick.
     EXPECT_EQ(ticks[0].quantity, static_cast<std::int64_t>(0.7142 * 1e8));
+    EXPECT_EQ(ticks[0].quantity_scale, 100'000'000ULL);
     EXPECT_EQ(ticks[0].side, data_tick_side::bid);
     EXPECT_DOUBLE_EQ(ticks[1].price, 68621.5);
     EXPECT_EQ(ticks[1].quantity, static_cast<std::int64_t>(0.0018 * 1e8));
@@ -42,6 +43,7 @@ TEST(BitunixParser, CombinedParserEmitsEveryTrade)
     ASSERT_TRUE(std::holds_alternative<provider::tick>(events[0]));
     ASSERT_TRUE(std::holds_alternative<provider::tick>(events[1]));
     EXPECT_DOUBLE_EQ(std::get<provider::tick>(events[0]).price, 68621.4);
+    EXPECT_EQ(std::get<provider::tick>(events[0]).quantity_scale, 100'000'000ULL);
     EXPECT_DOUBLE_EQ(std::get<provider::tick>(events[1]).price, 68621.5);
 }
 
@@ -58,6 +60,18 @@ TEST(BitunixParser, EmptyDataYieldsNothing)
     BitunixCombinedParser parser;
     EXPECT_TRUE(parser.parse_records(
         R"({"ch":"trade","symbol":"BTCUSDT","ts":1,"data":[]})").empty());
+}
+
+TEST(BitunixParser, RejectsUnsafeTradeQuantityBeforeIntegerConversion)
+{
+    for (const char* qty : {"-1", "1e100", "nan", "inf"})
+    {
+        const std::string frame =
+            std::string(R"({"ch":"trade","symbol":"BTCUSDT","ts":1,)"
+                        R"("data":[{"p":"100","v":")")
+            + qty + R"(","s":"buy"}]})";
+        EXPECT_TRUE(bitunix::parse_all_trades(frame).empty()) << qty;
+    }
 }
 
 TEST(BitunixParser, ControlAckRequiresAuthoritativeUniqueEnvelope)

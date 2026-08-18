@@ -222,6 +222,38 @@ TEST(BinanceFuturesUserDataParser, FullTrade)
     EXPECT_EQ(out.commission_asset, "USDT");
 }
 
+TEST(BinanceFuturesUserDataParser, MalformedExecutionNumbersOrSideAreExplicit)
+{
+    BinanceFuturesUserDataParser p;
+    for (const auto& payload : {
+             update("TRADE", "FILLED", "nan", "60000", "1"),
+             update("TRADE", "FILLED", "1", "inf", "1"),
+             update("TRADE", "FILLED", "1", "60000", "nan"),
+             update("TRADE", "FILLED", "1", "60000", "1",
+                    "tt-1", "BUY", "42", "nan"),
+             update("TRADE", "FILLED", "1", "60000", "1",
+                    "tt-1", "SIDEWAYS")})
+    {
+        parsed_exec out;
+        ASSERT_TRUE(p.parse(payload, out));
+        EXPECT_EQ(out.k, parsed_exec::kind::invalid);
+        EXPECT_NE(out.error.find("malformed"), std::string::npos);
+    }
+}
+
+TEST(BinanceFuturesUserDataParser, PositionSnapshotRejectsNonFiniteRows)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_position_snapshot out;
+    const std::string payload =
+        R"({"e":"ACCOUNT_UPDATE","E":1700000000000,"a":{"m":"ORDER",)"
+        R"("B":[{"a":"USDT","wb":"nan","bc":"0"}],)"
+        R"("P":[]}})";
+    EXPECT_FALSE(p.parse_position_snapshot(payload, out));
+    EXPECT_TRUE(out.balances.empty());
+    EXPECT_TRUE(out.positions.empty());
+}
+
 TEST(BinanceFuturesUserDataParser, Canceled)
 {
     BinanceFuturesUserDataParser p;

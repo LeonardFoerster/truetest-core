@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "helpers/mock_transport.h"
 #include "providers/data_bridge.h"
+#include "providers/binance/binance_combined_parser.h"
 #include "providers/local/csv_parser.h"
 #include "data/data_handler.h"
 
@@ -197,6 +198,38 @@ TEST(DataBridge, BatchLoadsTickRecords)
 	EXPECT_EQ(dh->tick_at(1).side, data_tick_side::ask);
 }
 
+TEST(DataBridge, CsvTicksPreserveFractionalQuantityScale)
+{
+	SilenceBridge quiet;
+	auto transport = std::make_shared<MockBatchTransport>(std::vector<std::string>{
+		"timestamp_ms,symbol,price,quantity,side",
+		"1704067200000,BTCUSDT,42000.0,0.25,B",
+		"1704067200010,BTCUSDT,42001.0,2,A",
+	});
+	auto parser = std::make_shared<CsvTickParser>();
+	auto bridge = std::make_shared<DataBridge<tick_record>>(
+		transport, parser, tick_record_sink);
+
+	auto dh = std::make_shared<data_handler>();
+	ASSERT_TRUE(bridge->load_data(dh));
+	ASSERT_EQ(dh->tick_count(), 2u);
+	EXPECT_EQ(dh->tick_at(0).quantity, 25'000'000);
+	EXPECT_EQ(dh->tick_at(0).quantity_scale, 100'000'000ULL);
+	EXPECT_EQ(dh->tick_at(1).quantity, 2);
+	EXPECT_EQ(dh->tick_at(1).quantity_scale, 1u);
+}
+
+TEST(DataBridge, CsvTickRejectsInvalidOrOverflowQuantity)
+{
+	CsvTickParser parser;
+	EXPECT_FALSE(parser.parse_record(
+		"1704067200000,BTCUSDT,42000.0,-0.1,B"));
+	EXPECT_FALSE(parser.parse_record(
+		"1704067200000,BTCUSDT,42000.0,1e100,B"));
+	EXPECT_FALSE(parser.parse_record(
+		"1704067200000,BTCUSDT,42000.0,nan,B"));
+}
+
 // --- Streaming mode tests ---
 
 TEST(DataBridge, StreamingDeliversAllRecords)
@@ -233,6 +266,41 @@ TEST(DataBridge, StreamingDeliversAllRecords)
 	EXPECT_EQ(dh->bar_count(), 10u);
 	EXPECT_TRUE(result.success());
 	EXPECT_EQ(result.termination, stream_termination::operator_stop);
+}
+
+TEST(DataBridge, BinanceFormingKlineDoesNotTerminateBeforeClosedKline)
+{
+	SilenceBridge quiet;
+	auto transport = std::make_shared<MockStreamingTransport>();
+	auto parser = std::make_shared<BinanceCombinedParser>();
+	auto bridge = std::make_shared<DataBridge<provider::event>>(transport, parser);
+	auto dh = std::make_shared<data_handler>();
+
+	const std::string forming =
+		R"({"stream":"btcusdt@kline_1m","data":)"
+		R"({"e":"kline","E":1,"s":"BTCUSDT","k":)"
+		R"({"t":1000,"s":"BTCUSDT","o":"100","h":"102",)"
+		R"("l":"99","c":"101","v":"2","x":false}}})";
+	const std::string closed =
+		R"({"stream":"btcusdt@kline_1m","data":)"
+		R"({"e":"kline","E":2,"s":"BTCUSDT","k":)"
+		R"({"t":1000,"s":"BTCUSDT","o":"100","h":"103",)"
+		R"("l":"99","c":"102","v":"3","x":true}}})";
+
+	transport->enqueue(forming); // first streaming frame is also parsed
+	transport->enqueue(closed);
+	std::thread stopper([&] {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		transport->request_stop();
+	});
+	bridge->set_retain_streamed(true);
+	const auto result = bridge->run_streaming(dh);
+	stopper.join();
+
+	ASSERT_TRUE(result.success());
+	EXPECT_EQ(result.rejected, 0u);
+	ASSERT_EQ(dh->bar_count(), 1u);
+	EXPECT_DOUBLE_EQ(dh->bar_at(0).close, 102.0);
 }
 
 TEST(DataBridge, StreamingDoesNotRetainByDefault)

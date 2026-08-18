@@ -97,6 +97,7 @@ TEST(BitgetParser, ParseTradeFixture_FieldsExact)
     EXPECT_EQ(result->symbol, "BTCUSDT");
     EXPECT_DOUBLE_EQ(result->price, 97000.5);
     EXPECT_EQ(result->quantity, static_cast<int64_t>(0.01 * 1e8));
+    EXPECT_EQ(result->quantity_scale, 100'000'000ULL);
     EXPECT_EQ(result->side, 0); // buy → bid aggressor
 
     auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -214,6 +215,18 @@ TEST(BitgetParser, ParseTrade_MalformedNoCrash)
     EXPECT_FALSE(bitget::parse_trade(R"({"data":"not-array"})").has_value());
 }
 
+TEST(BitgetParser, RejectsUnsafeTradeQuantityBeforeIntegerConversion)
+{
+    for (const char* qty : {"-1", "1e100", "nan", "inf"})
+    {
+        const std::string json =
+            std::string(R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},)"
+                        R"("data":[{"p":"100","v":")")
+            + qty + R"(","S":"buy","T":"1"}]})";
+        EXPECT_FALSE(bitget::parse_trade(json).has_value()) << qty;
+    }
+}
+
 // --- books5 fixtures (plan §9.2) ---
 
 namespace {
@@ -238,6 +251,7 @@ TEST(BitgetParser, ParseBooks5_BidAskLevels)
     ASSERT_TRUE(snap.has_value());
 
     EXPECT_EQ(snap->symbol, "BTCUSDT");
+    EXPECT_EQ(snap->quantity_scale, 100'000'000ULL);
     ASSERT_EQ(snap->bids.size(), 2u);
     ASSERT_EQ(snap->asks.size(), 2u);
 
@@ -372,6 +386,7 @@ TEST(BitgetParser, ParseKline_OHLCV)
     EXPECT_DOUBLE_EQ(bar->low, 96900.0);
     EXPECT_DOUBLE_EQ(bar->close, 97050.0);
     EXPECT_EQ(bar->volume, static_cast<int64_t>(100.5 * 1e8));
+    EXPECT_EQ(bar->quantity_scale, 100'000'000ULL);
     EXPECT_EQ(bar->date, "1710000000000");
 }
 
@@ -392,6 +407,19 @@ TEST(BitgetParser, ParseKline_ConfirmFalseStillParsesRaw)
     auto conf = bitget::extract_kline_confirm(open_candle);
     ASSERT_TRUE(conf.has_value());
     EXPECT_FALSE(*conf);
+}
+
+TEST(BitgetParser, RejectsUnsafeKlineVolume)
+{
+    for (const char* volume : {"-1", "1e100", "nan", "inf"})
+    {
+        const std::string json =
+            std::string(R"({"arg":{"topic":"kline","symbol":"BTCUSDT"},)"
+                        R"("data":[{"start":"1","open":"1","high":"2",)"
+                        R"("low":"0.5","close":"1.5","volume":")")
+            + volume + R"("}]})";
+        EXPECT_FALSE(bitget::parse_kline(json).has_value()) << volume;
+    }
 }
 
 TEST(BitgetParser, ParseKline_ConfirmTrueStillParsesRaw)

@@ -6,6 +6,7 @@
 #include "data/tick_csv_data_source.h"
 #include "data/data_wrapper.h"
 #include <filesystem>
+#include <limits>
 #include <sstream>
 
 namespace {
@@ -88,20 +89,24 @@ TEST(MarketSeries, OnBarOnTick)
     b.date = "2024-01-01";
     b.symbol = "AAPL";
     b.open = 150; b.high = 155; b.low = 149; b.close = 153; b.volume = 1000;
+    b.quantity_scale = 100'000'000ULL;
     ASSERT_TRUE(series.on_bar(b));
     EXPECT_EQ(series.bar_count(), 1u);
     EXPECT_EQ(series.bar_at(0).symbol, "AAPL");
     EXPECT_DOUBLE_EQ(series.bar_at(0).close, 153.0);
+    EXPECT_EQ(series.bar_at(0).quantity_scale, 100'000'000ULL);
 
     Tick t;
     t.symbol = "AAPL";
     t.price = 150.25;
     t.quantity = 10;
+    t.quantity_scale = 100'000'000ULL;
     t.side = data_tick_side::bid;
     t.timestamp = std::chrono::system_clock::time_point(std::chrono::milliseconds(1704067200000));
     ASSERT_TRUE(series.on_tick(t));
     EXPECT_EQ(series.tick_count(), 1u);
     EXPECT_DOUBLE_EQ(series.tick_at(0).price, 150.25);
+    EXPECT_EQ(series.tick_at(0).quantity_scale, 100'000'000ULL);
 }
 
 TEST(MarketSeries, ValidationRejectsNonPositive)
@@ -114,6 +119,33 @@ TEST(MarketSeries, ValidationRejectsNonPositive)
     EXPECT_FALSE(series.on_bar(b));
     EXPECT_EQ(series.bar_count(), 0u);
     EXPECT_EQ(series.validation_errors(), 1u);
+}
+
+TEST(MarketSeries, ValidationRejectsNonFinitePricesWithoutMutation)
+{
+    SilenceOutput quiet;
+    MarketSeries series;
+
+    Bar bar;
+    bar.symbol = "X";
+    bar.open = std::numeric_limits<double>::quiet_NaN();
+    bar.high = 2.0;
+    bar.low = 0.5;
+    bar.close = 1.0;
+    bar.volume = 1;
+    EXPECT_FALSE(series.on_bar(bar));
+
+    Tick tick;
+    tick.symbol = "X";
+    tick.price = std::numeric_limits<double>::infinity();
+    tick.quantity = 1;
+    tick.timestamp = std::chrono::system_clock::time_point{
+        std::chrono::milliseconds{1}};
+    EXPECT_FALSE(series.on_tick(tick));
+
+    EXPECT_EQ(series.bar_count(), 0u);
+    EXPECT_EQ(series.tick_count(), 0u);
+    EXPECT_EQ(series.validation_errors(), 2u);
 }
 
 TEST(MarketSeries, ClearKeepsCapacityForMcReuse)
@@ -134,13 +166,16 @@ TEST(MarketSeries, ClearKeepsCapacityForMcReuse)
 TEST(MarketSeries, SortBarsByTimeMultiSymbol)
 {
     MarketSeries series;
-    series.load_into_queue("2024-01-02", "BBB", 1, 1, 1, 1, 1);
-    series.load_into_queue("2024-01-01", "AAA", 1, 1, 1, 1, 1);
-    series.load_into_queue("2024-01-01", "BBB", 1, 1, 1, 1, 1);
+    series.load_into_queue("2024-01-02", "BBB", 1, 1, 1, 1, 1, 2);
+    series.load_into_queue("2024-01-01", "AAA", 1, 1, 1, 1, 1, 3);
+    series.load_into_queue("2024-01-01", "BBB", 1, 1, 1, 1, 1, 4);
     series.sort_bars_by_time();
     EXPECT_EQ(series.bar_at(0).symbol, "AAA");
+    EXPECT_EQ(series.bar_at(0).quantity_scale, 3u);
     EXPECT_EQ(series.bar_at(1).symbol, "BBB");
+    EXPECT_EQ(series.bar_at(1).quantity_scale, 4u);
     EXPECT_EQ(std::string(series.bar_at(2).date), "2024-01-02");
+    EXPECT_EQ(series.bar_at(2).quantity_scale, 2u);
 }
 
 TEST(CsvDataSource, LoadsCorrectly)

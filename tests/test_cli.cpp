@@ -462,10 +462,55 @@ TEST(DryRun, LiveBinaryMainnetFuturesAcceptsCapsAndDailyLoss)
     std::string out;
     int rc = run_engine_live(
         "--dry-run --provider binance-futures --symbol BTCUSDT "
-        "--mode live --live --max-notional 25 --max-daily-loss 5",
+        "--mode live --live --max-notional 25 --max-daily-loss 5 "
+        "--log-events /tmp/truetest-live-dry-run.bin",
         out);
     EXPECT_EQ(rc, 0);
     EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetFuturesRequiresDurableEventLog)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live --max-notional 25 --max-daily-loss 5",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("without a durable binary event log"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryFuturesRejectsNonFiniteRiskCaps)
+{
+    for (const char* bad_flag : {
+             "--max-notional inf --max-daily-loss 5",
+             "--max-leverage inf --max-daily-loss 5",
+             "--max-notional 25 --max-daily-loss inf"})
+    {
+        std::string out;
+        const std::string args =
+            std::string("--dry-run --provider binance-futures ")
+            + "--symbol BTCUSDT --mode live --live " + bad_flag
+            + " --log-events /tmp/truetest-live-dry-run.bin";
+        const int rc = run_engine_live(args, out);
+        EXPECT_EQ(rc, 1) << bad_flag;
+        EXPECT_NE(out.find("must be finite values"), std::string::npos)
+            << bad_flag;
+    }
+}
+
+TEST(DryRun, LiveBinaryFuturesRejectsRotatedAuthoritativeLog)
+{
+    std::string out;
+    const int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live --max-notional 25 --max-daily-loss 5 "
+        "--log-events /tmp/truetest-live-dry-run.bin "
+        "--log-max-size 1 --log-keep 0",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("rotation enabled"), std::string::npos);
 }
 
 TEST(DryRun, LiveBinaryTestnetFuturesAllowsWarningOnlyCaps)

@@ -204,6 +204,36 @@ TEST(StopFillPricing, StopLimitAnchoredAtTrigger)
         << "stop-limit fills against the trigger-anchored book";
 }
 
+TEST(StopFillPricing, DifferentSymbolCannotTriggerPendingStop)
+{
+    SilenceCout quiet;
+    auto dh = std::make_shared<data_handler>();
+    constexpr long long t0 = 1704067200000LL;
+    dh->load_into_queue(std::to_string(t0), "BTCUSDT",
+                        100.0, 110.0, 90.0, 100.0, 1000);
+    // Numerically crosses BTC's stop, but belongs to ETH.
+    dh->load_into_queue(std::to_string(t0 + 60'000), "ETHUSDT",
+                        200.0, 220.0, 180.0, 200.0, 1000);
+    dh->load_into_queue(std::to_string(t0 + 120'000), "BTCUSDT",
+                        100.0, 140.0, 90.0, 100.0, 1000);
+    dh->load_into_queue(std::to_string(t0 + 180'000), "BTCUSDT",
+                        145.0, 160.0, 140.0, 155.0, 1000);
+
+    auto strat = std::make_shared<StopPlacer>(
+        order_type::stop, order_side::buy, 150.0);
+    auto cfg = make_cfg();
+    cfg.show_progress = false;
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.run();
+
+    const auto report = eng.get_analytics().generate_report();
+    ASSERT_EQ(report.trades.size(), 1u);
+    EXPECT_EQ(report.trades.front().symbol, "BTCUSDT");
+    EXPECT_EQ(report.trades.front().timestamp,
+              std::chrono::system_clock::time_point{
+                  std::chrono::milliseconds{t0 + 180'000}});
+}
+
 // A resting buy limit must fill when the bar's range trades through its
 // level (intrabar traversal), at its own limit price — previously it only
 // filled when an MM re-quote anchor (open/close/stop ref) crossed it, so
@@ -238,9 +268,8 @@ TEST(EngineOpenOrderCapacity, QueuedOrderReservesSlotBeforeVenueSubmission)
                          {100, 101, 99, 100}});
     auto cfg = make_cfg();
     cfg.risk.max_open_orders = 1;
-    // Keep the first candidate queued across every input bar.  The legacy
-    // execution_bar_delay flag only means "next timestamp" regardless of its
-    // numeric value, so it cannot establish this capacity precondition.
+    // Keep the first candidate queued across every input bar via wall-clock
+    // latency so later candidates observe its reserved lifecycle slot.
     cfg.latency_model = std::make_shared<FixedLatencyModel>(
         std::chrono::hours(1));
     cfg.show_progress = false;
@@ -250,10 +279,11 @@ TEST(EngineOpenOrderCapacity, QueuedOrderReservesSlotBeforeVenueSubmission)
     eng.run();
 
     ASSERT_EQ(strat->call_count(), 5);
-    // Batch EOF force-drains the one accepted candidate, so it is filled by
-    // the time run() returns.  The four later candidates must nevertheless
-    // have observed its reserved pending slot and been rejected.
+    // EOF expires the accepted-but-unobserved candidate without filling it.
+    // The four later candidates must nevertheless have observed its reserved
+    // pending slot and been rejected while the run was active.
     EXPECT_EQ(eng.get_order_tracker().active_count(), 0u);
+    EXPECT_EQ(eng.get_analytics().snapshot().total_fills, 0u);
     EXPECT_EQ(eng.total_audit_rejections(), 4u)
         << "later candidates must be rejected while the first order is queued";
 }

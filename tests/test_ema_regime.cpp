@@ -58,6 +58,29 @@ TEST(EMARegime, SidewaysViaSwingRange_UserRule)
     EXPECT_EQ(regime.current_regime(), ema_regime::sideways);
 }
 
+TEST(EMARegime, SwingDetectorOverloadPassesActualRange)
+{
+    swing_detector swings(/*strength=*/1, /*max_history=*/32);
+    average_true_range atr(/*period=*/3);
+    for (int i = 0; i < 36; ++i)
+    {
+        const double base = 100.0 + (i % 3) * 0.5;
+        swings.update(base + 0.8, base, base + 0.4);
+        (void)atr.update(base + 3.0, base - 3.0, base);
+    }
+    ASSERT_TRUE(swings.ready());
+    ASSERT_TRUE(atr.ready());
+    ASSERT_GT(swings.recent_swing_range(14), 0.0);
+    ASSERT_LT(swings.recent_swing_range(14), atr.value());
+
+    ema_regime_detector regime;
+    regime.update(/*ema_fast=*/102.0, /*ema_slow=*/100.0, swings, atr);
+
+    EXPECT_TRUE(regime.is_sideways())
+        << "the convenience overload must not replace a true range with zero";
+    EXPECT_EQ(regime.current_regime(), ema_regime::sideways);
+}
+
 TEST(EMARegime, WideCautionFilter)
 {
     ema_regime_detector regime;

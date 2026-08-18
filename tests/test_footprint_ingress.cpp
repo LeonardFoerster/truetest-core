@@ -87,19 +87,24 @@ TEST(FootprintIngress, TickEnrichmentDefaultsToAbsent)
     EXPECT_FALSE(t.has_exact_decimal);
 }
 
-TEST(FootprintIngress, TickEnrichmentIgnoredByExistingConversion)
+TEST(FootprintIngress, TickEnrichmentIgnoredAndQuantityScalePreservedByConversion)
 {
     provider::tick t = make_tick(100.25, 7, 1);
     t.native_trade_id = 123456;
     t.price_ticks = 1002500;
     t.base_qty_atoms = 700000000;
     t.has_exact_decimal = true;
+    t.quantity_scale = 100'000'000ULL;
 
     // Existing engine conversion path must be untouched by the enrichment.
     auto rec = provider::to_tick_record(t);
     EXPECT_DOUBLE_EQ(rec.price, 100.25);
     EXPECT_EQ(rec.quantity, 7);
     EXPECT_EQ(rec.side, data_tick_side::ask);
+    EXPECT_EQ(rec.quantity_scale, 100'000'000ULL);
+
+    auto round_trip = provider::from_tick_record(rec);
+    EXPECT_EQ(round_trip.quantity_scale, 100'000'000ULL);
 }
 
 // --- Tick size resolution: metadata wins, override only when metadata
@@ -198,6 +203,19 @@ TEST(FootprintTap, FallbackDerivesFromTickSizeWhenNoExactDecimal)
     EXPECT_EQ(pt.side, aggressor_side::sell);
     EXPECT_EQ(pt.native_trade_id, 0u);
     EXPECT_TRUE(pt.flags & provenance_session_only);
+}
+
+TEST(FootprintTap, FallbackNormalizesFixedPointProviderQuantity)
+{
+    FootprintTapContext ctx;
+    ctx.tick_size = 0.5;
+    ctx.qty_atom_scale = 100'000'000.0;
+
+    provider::tick t = make_tick(100.0, 25'000'000, 0);
+    t.quantity_scale = 100'000'000ULL; // 0.25 base units
+    PublicTrade pt = tick_to_public_trade(ctx, t);
+
+    EXPECT_EQ(pt.base_qty_atoms, 25'000'000);
 }
 
 TEST(FootprintTap, UnknownSideMapsToUnknown)

@@ -318,6 +318,7 @@ class CountingSubmitAdapter : public IExecutionAdapter
 {
 public:
     int submit_count = 0;
+    void set_mid_price(double mid) override { last_mid = mid; }
     void submit_order(const order_event& o) override
     {
         ++submit_count;
@@ -328,6 +329,7 @@ public:
     bool cancel_order(uint64_t) override { return false; }
     int64_t last_recv_ns = 0;
     uint64_t last_order_id = 0;
+    double last_mid = 0.0;
 };
 
 class CountingSubmitProvider : public IProvider
@@ -361,24 +363,68 @@ TEST(TickToTradeSafety, L2Dispatch_StampsRecvNsAndRoutesOrder)
     cfg.initial_balance = 100000.0;
     cfg.threading = thread_preset::inline_mode;
     cfg.disable_pinning = true;
+    cfg.execution_bar_delay = 1;
 
     engine eng(dh, ob, strat, std::move(cfg));
     eng.set_primary_strategy_name("l2");
 
-    // First update: strategy emits; default execution_bar_delay parks the order.
-    eng.apply_l2_update("TEST", tick_side::bid, 100.0, 50);
+    const auto base_ts = std::chrono::system_clock::time_point{
+        std::chrono::seconds{1'700'000'000}};
+
+    // First TEST observation: strategy emits; default delay=1 parks the order.
+    eng.apply_l2_update("TEST", tick_side::bid, 100.0, 50, base_ts);
     EXPECT_EQ(strat->l2_calls, 1);
     EXPECT_GT(strat->last_event_recv_ns, 0)
         << "apply_l2_update must stamp steady_clock recv_ns on the event";
+    EXPECT_EQ(provider->adapter->submit_count, 0);
 
-    // Second update: pending drain submits the parked order (pure L2 stream).
-    eng.apply_l2_update("TEST", tick_side::bid, 100.5, 40);
+    // An unrelated symbol is not a future TEST observation and must not
+    // release the parked order.
+    eng.apply_l2_update("OTHER", tick_side::ask, 200.0, 25,
+                        base_ts + std::chrono::seconds{1});
+    EXPECT_EQ(provider->adapter->submit_count, 0);
+
+    // The next same-symbol observation releases the order (pure L2 stream).
+    eng.apply_l2_update("TEST", tick_side::bid, 100.5, 40,
+                        base_ts + std::chrono::seconds{2});
 
     EXPECT_EQ(provider->adapter->submit_count, 1)
-        << "L2 strategy order must drain via pending + process_order → submit";
+        << "L2 strategy order must drain on the next same-symbol observation";
     EXPECT_GT(provider->adapter->last_order_id, 0u);
     EXPECT_GT(provider->adapter->last_recv_ns, 0)
         << "order must carry recv_ns for tick-to-trade stamping";
+    EXPECT_DOUBLE_EQ(provider->adapter->last_mid, 100.5)
+        << "pure L2 execution/risk must use the releasing symbol's current mark";
+}
+
+TEST(TickToTradeSafety, L2SnapshotIsSameSymbolObservationForDelayedOrder)
+{
+    silence_cout quiet;
+    auto strat = std::make_shared<L2OneShotStrategy>();
+    auto provider = std::make_shared<CountingSubmitProvider>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.provider = provider;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.execution_bar_delay = 1;
+    engine eng(make_bars(1), std::make_shared<orderbook>(), strat,
+               std::move(cfg));
+
+    const auto base_ts = std::chrono::system_clock::time_point{
+        std::chrono::seconds{1'700'000'000}};
+    eng.apply_l2_update("TEST", tick_side::bid, 100.0, 50, base_ts);
+    ASSERT_EQ(provider->adapter->submit_count, 0);
+
+    eng.apply_l2_snapshot("OTHER", {{200.0, 10}}, {{201.0, 10}},
+                          base_ts + std::chrono::seconds{1});
+    EXPECT_EQ(provider->adapter->submit_count, 0);
+
+    eng.apply_l2_snapshot("TEST", {{100.0, 10}}, {{101.0, 10}},
+                          base_ts + std::chrono::seconds{2});
+    EXPECT_EQ(provider->adapter->submit_count, 1);
+    EXPECT_DOUBLE_EQ(provider->adapter->last_mid, 100.5);
 }
 
 // ---------------------------------------------------------------------------

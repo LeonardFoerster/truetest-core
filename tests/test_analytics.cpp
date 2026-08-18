@@ -224,6 +224,29 @@ TEST(Analytics, OpenPosition_ReportsUnrealizedPnl)
     EXPECT_DOUBLE_EQ(r.realized_pnl, 0.0);
 }
 
+TEST(Analytics, OpenPosition_UnrealizedIncludesRemainingEntryCommission)
+{
+    Analytics a(10000.0);
+
+    auto buy = std::make_shared<fill_event>(
+        epoch_ms(1), "X", 1, order_side::buy, 10.0, 100.0, 10.0);
+    a.on_event(buy);
+
+    auto partial_close = std::make_shared<fill_event>(
+        epoch_ms(2), "X", 2, order_side::sell, 4.0, 100.0, 4.0);
+    a.on_event(partial_close);
+
+    const auto r = a.generate_report();
+    ASSERT_EQ(r.open_positions.size(), 1u);
+    EXPECT_DOUBLE_EQ(r.open_positions[0].quantity, 6.0);
+    EXPECT_DOUBLE_EQ(r.open_positions[0].unrealized_pnl, -6.0);
+    EXPECT_DOUBLE_EQ(r.realized_pnl, -8.0);
+    EXPECT_DOUBLE_EQ(r.unrealized_pnl, -6.0);
+    EXPECT_DOUBLE_EQ(r.final_equity, 9986.0);
+    EXPECT_DOUBLE_EQ(r.final_equity - r.initial_equity,
+                     r.realized_pnl + r.unrealized_pnl);
+}
+
 TEST(Analytics, RoundTrip_PnL)
 {
     Analytics a;
@@ -324,6 +347,33 @@ TEST(Analytics, BF06_SignalTagDoesNotFallThroughToL2Handler)
         epoch_ms(0), "X", bids, std::size(bids), asks, std::size(asks));
     l2_dispatch.on_event(snapshot);
     EXPECT_GT(l2_dispatch.risk_view().current_spread_bps, 0.0);
+}
+
+TEST(Analytics, L2SnapshotUpdatesSpreadMarkedEquityAndDrawdownTogether)
+{
+    Analytics a(1000.0);
+    auto fill = std::make_shared<fill_event>(
+        epoch_ms(0), "X", 1, order_side::buy,
+        1.0, 100.0, 0.0, 0.0, 1);
+    a.on_event(fill);
+
+    const l2_level first_bids[] = {{99.0, 10}};
+    const l2_level first_asks[] = {{101.0, 10}};
+    a.on_event(std::make_shared<l2_snapshot_event>(
+        epoch_ms(1), "X", first_bids, std::size(first_bids),
+        first_asks, std::size(first_asks)));
+    EXPECT_DOUBLE_EQ(a.risk_view().equity, 1000.0);
+
+    const l2_level down_bids[] = {{79.0, 10}};
+    const l2_level down_asks[] = {{81.0, 10}};
+    a.on_event(std::make_shared<l2_snapshot_event>(
+        epoch_ms(2), "X", down_bids, std::size(down_bids),
+        down_asks, std::size(down_asks)));
+
+    const auto risk = a.risk_view();
+    EXPECT_DOUBLE_EQ(risk.equity, 980.0);
+    EXPECT_NEAR(risk.max_drawdown, 2.0, 1e-12);
+    EXPECT_NEAR(risk.current_spread_bps, 250.0, 1e-12);
 }
 
 // --- Step 7: Streaming / Incremental Analytics tests ---
@@ -665,6 +715,47 @@ TEST(Analytics, RiskView_EquityPopulatedFromMarketEvents)
     EXPECT_NEAR(a.risk_view().equity, 100100.0, 1e-6);
 }
 
+TEST(Analytics, RiskViewUpdatesEquityAndDrawdownImmediatelyAfterFill)
+{
+    Analytics a(1000.0);
+    a.on_event(std::make_shared<market_event>(
+        epoch_ms(0), "X", 100.0, 100.0, 100.0, 100.0));
+    a.on_event(std::make_shared<fill_event>(
+        epoch_ms(1), "X", 1, order_side::buy, 10.0, 100.0, 0.0));
+
+    // No later market event: the close itself must make the loss visible to
+    // the post-fill RiskManager in the same engine event.
+    a.on_event(std::make_shared<fill_event>(
+        epoch_ms(2), "X", 2, order_side::sell, 10.0, 80.0, 0.0));
+
+    const auto rv = a.risk_view();
+    EXPECT_DOUBLE_EQ(rv.equity, 800.0);
+    EXPECT_DOUBLE_EQ(rv.max_drawdown, 20.0);
+}
+
+TEST(Analytics, TickAndFundingUpdateDrawdownImmediately)
+{
+    Analytics a(1000.0);
+    a.on_event(std::make_shared<market_event>(
+        epoch_ms(0), "X", 100.0, 100.0, 100.0, 100.0));
+    a.on_event(std::make_shared<fill_event>(
+        epoch_ms(1), "X", 1, order_side::buy, 10.0, 100.0, 0.0));
+    a.on_event(std::make_shared<tick_event>(
+        epoch_ms(2), "X", 150.0, 1, tick_side::bid));
+    a.on_event(std::make_shared<tick_event>(
+        epoch_ms(3), "X", 80.0, 1, tick_side::bid));
+
+    auto rv = a.risk_view();
+    EXPECT_NEAR(rv.equity, 800.0, 1e-9);
+    EXPECT_NEAR(rv.max_drawdown, 700.0 / 1500.0 * 100.0, 1e-9);
+
+    a.on_event(std::make_shared<funding_event>(
+        epoch_ms(4), "X", 0.0, -100.0, "FUNDING_FEE"));
+    rv = a.risk_view();
+    EXPECT_NEAR(rv.equity, 700.0, 1e-9);
+    EXPECT_NEAR(rv.max_drawdown, 800.0 / 1500.0 * 100.0, 1e-9);
+}
+
 TEST(Analytics, Sortino_DownsideDeviationOverAllPeriods)
 {
     const std::size_t ppy = 252;
@@ -724,4 +815,17 @@ TEST(Analytics, FundingEvent_UpdatesCashAndEquityAndRiskView)
     auto report = a.generate_report();
     // Equity curve should have recorded the funding adjustment point
     EXPECT_GE(report.equity_curve.size(), 1u);
+}
+
+TEST(Analytics, FillCarriesStrategyWhenRecordedOrderIsUnavailable)
+{
+    Analytics a(10'000.0);
+    auto fill = std::make_shared<fill_event>(
+        epoch_ms(1), "BTCUSDT", 77, order_side::buy, 1.0, 100.0,
+        0.0, 0.0, 1, "ledger_strategy", 77);
+
+    a.on_event(fill);
+    const auto report = a.generate_report();
+    ASSERT_EQ(report.trades.size(), 1u);
+    EXPECT_EQ(report.trades.front().strategy_name, "ledger_strategy");
 }

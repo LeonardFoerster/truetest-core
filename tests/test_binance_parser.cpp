@@ -81,6 +81,7 @@ TEST(BinanceParser, ParseTradeMessage)
     EXPECT_EQ(result->symbol, "BTCUSDT");
     EXPECT_DOUBLE_EQ(result->price, 16800.50);
     EXPECT_EQ(result->quantity, 50000000);  // 0.5 * 1e8 (satoshi-scaled)
+    EXPECT_EQ(result->quantity_scale, 100'000'000ULL);
     EXPECT_EQ(result->side, data_tick_side::ask);  // m=true -> seller aggressor -> ask
 
     auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -117,6 +118,17 @@ TEST(BinanceParser, ParseTradeMissingFields)
     EXPECT_FALSE(result.has_value());
 }
 
+TEST(BinanceParser, RejectsUnsafeTradeQuantitiesBeforeIntegerConversion)
+{
+    for (const char* qty : {"-1", "1e100", "nan", "inf"})
+    {
+        const std::string json =
+            std::string(R"({"e":"trade","s":"BTCUSDT","p":"100","q":")")
+            + qty + R"(","T":1,"m":false})";
+        EXPECT_FALSE(binance::parse_trade(json).has_value()) << qty;
+    }
+}
+
 // --- Kline parsing tests ---
 
 TEST(BinanceParser, ParseKlineMessage)
@@ -126,7 +138,7 @@ TEST(BinanceParser, ParseKlineMessage)
         "k":{
             "t":1672531200000,"T":1672531259999,"s":"BTCUSDT","i":"1m",
             "o":"16800.00","c":"16850.50","h":"16860.00","l":"16790.00",
-            "v":"100.5","n":500,"x":false
+            "v":"100.5","n":500,"x":true
         }
     })";
 
@@ -139,6 +151,20 @@ TEST(BinanceParser, ParseKlineMessage)
     EXPECT_DOUBLE_EQ(result->high, 16860.00);
     EXPECT_DOUBLE_EQ(result->low, 16790.00);
     EXPECT_EQ(result->volume, 10050000000);  // 100.5 * 1e8 (satoshi-scaled)
+    EXPECT_EQ(result->quantity_scale, 100'000'000ULL);
+}
+
+TEST(BinanceParser, IgnoresUnfinishedKlineUpdate)
+{
+    const std::string json = R"({
+        "e":"kline","s":"BTCUSDT","k":{
+            "t":1672531200000,"s":"BTCUSDT",
+            "o":"16800","c":"16850","h":"16860","l":"16790",
+            "v":"100.5","x":false
+        }
+    })";
+
+    EXPECT_FALSE(binance::parse_kline(json).has_value());
 }
 
 TEST(BinanceParser, ParseKlineWrongEventType)
@@ -153,6 +179,19 @@ TEST(BinanceParser, ParseKlineMissingKObject)
     std::string json = R"({"e":"kline","s":"BTCUSDT"})";
     auto result = binance::parse_kline(json);
     EXPECT_FALSE(result.has_value());
+}
+
+TEST(BinanceParser, RejectsUnsafeClosedKlineVolume)
+{
+    for (const char* volume : {"-1", "1e100", "nan", "inf"})
+    {
+        const std::string json =
+            std::string(R"({"e":"kline","s":"BTCUSDT","k":{)"
+                        R"("t":1,"s":"BTCUSDT","o":"1","h":"2",)"
+                        R"("l":"0.5","c":"1.5","v":")")
+            + volume + R"(","x":true}})";
+        EXPECT_FALSE(binance::parse_kline(json).has_value()) << volume;
+    }
 }
 
 // --- IDataParser adapter tests ---
@@ -173,7 +212,7 @@ TEST(BinanceParser, KlineParserAdapter)
     BinanceKlineParser parser;
     EXPECT_TRUE(parser.parse_header(""));
 
-    std::string json = R"({"e":"kline","s":"ETHUSDT","k":{"t":1000,"s":"ETHUSDT","o":"100","c":"101","h":"102","l":"99","v":"50"}})";
+    std::string json = R"({"e":"kline","s":"ETHUSDT","k":{"t":1000,"s":"ETHUSDT","o":"100","c":"101","h":"102","l":"99","v":"50","x":true}})";
     auto result = parser.parse_record(json);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->symbol, "ETHUSDT");

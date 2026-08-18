@@ -167,6 +167,9 @@ TEST(ExecutionBridgeUnknownFill, HandlerReturningNulloptDropsMessage)
     parser->next.client_order_id    = "unknown";
     parser->next.exchange_order_id  = "999";
     parser->next.symbol             = "X";
+    parser->next.side               = order_side::buy;
+    parser->next.last_fill_qty      = 1.0;
+    parser->next.last_fill_price    = 100.0;
 
     fill_tx->inject("{}");
 

@@ -19,6 +19,7 @@ TEST(BinanceDepthParser, PartialBookBidsAsks)
     ASSERT_EQ(snap->asks.size(), 2u);
     EXPECT_DOUBLE_EQ(snap->bids[0].price, 42000.0);
     EXPECT_EQ(snap->bids[0].quantity, static_cast<int64_t>(1.5 * 1e8));
+    EXPECT_EQ(snap->quantity_scale, 100'000'000ULL);
     EXPECT_DOUBLE_EQ(snap->asks[0].price, 42001.0);
     EXPECT_EQ(snap->asks[0].quantity, static_cast<int64_t>(0.8 * 1e8));
     EXPECT_TRUE(snap->symbol.empty()); // partial book has no "s"
@@ -53,6 +54,9 @@ TEST(BinanceDepthParser, DepthUpdatesExpandSides)
 
     auto ups = binance::parse_depth_updates(json);
     ASSERT_EQ(ups.size(), 3u);
+    EXPECT_EQ(ups[0].quantity_scale, 100'000'000ULL);
+    EXPECT_EQ(ups[1].quantity_scale, 100'000'000ULL);
+    EXPECT_EQ(ups[2].quantity_scale, 100'000'000ULL);
 
     EXPECT_EQ(ups[0].side, 0); // bid
     EXPECT_EQ(ups[0].symbol, "ETHUSDT");
@@ -70,6 +74,18 @@ TEST(BinanceDepthParser, EmptyPayloadReturnsNullopt)
 {
     EXPECT_FALSE(binance::parse_depth_snapshot(R"({"lastUpdateId":1})").has_value());
     EXPECT_TRUE(binance::parse_depth_updates(R"({"e":"depthUpdate","s":"X"})").empty());
+}
+
+TEST(BinanceDepthParser, RejectsWholeFrameOnUnsafeLevel)
+{
+    for (const char* qty : {"-1", "1e100", "nan", "inf"})
+    {
+        const std::string json =
+            std::string(R"({"s":"BTCUSDT","b":[["100","1"],["99",")")
+            + qty + R"("]],"a":[["101","1"]]})";
+        EXPECT_FALSE(binance::parse_depth_snapshot(json).has_value()) << qty;
+        EXPECT_TRUE(binance::parse_depth_updates(json).empty()) << qty;
+    }
 }
 
 TEST(BinanceDepthParser, Depth20TwentyLevels)

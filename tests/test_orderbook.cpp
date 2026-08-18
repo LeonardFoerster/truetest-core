@@ -12,6 +12,48 @@ TEST(Orderbook, AddOrder_SingleBid)
     EXPECT_EQ(ob.size(), 1u);
 }
 
+TEST(Orderbook, L2SnapshotReplacementPreservesLocallyRestingOrder)
+{
+    orderbook ob;
+    ob.apply_l2_snapshot({{P(100.0), 100}}, {{P(101.0), 100}});
+    constexpr order_id local_id = 9'000'001;
+    auto local = ob.create_order(ob_order_type::good_till_cancel, local_id,
+                                 side::buy, P(99.0), 5);
+    EXPECT_TRUE(ob.add_order(local).empty());
+    ASSERT_NE(ob.get_order(local_id), nullptr);
+
+    ob.apply_l2_snapshot({{P(98.0), 200}}, {{P(102.0), 300}});
+
+    auto preserved = ob.get_order(local_id);
+    ASSERT_NE(preserved, nullptr);
+    EXPECT_EQ(preserved, local);
+    EXPECT_EQ(preserved->get_remaining_quantity(), 5u);
+    ob.cancel_order(local_id);
+    EXPECT_EQ(ob.get_order(local_id), nullptr);
+}
+
+TEST(Orderbook, L2UpdateAtSharedPriceReplacesOnlyExternalLiquidity)
+{
+    orderbook ob;
+    ob.apply_l2_snapshot({{P(100.0), 100}}, {{P(101.0), 100}});
+    constexpr order_id local_id = 9'000'002;
+    auto local = ob.create_order(ob_order_type::good_till_cancel, local_id,
+                                 side::buy, P(100.0), 5);
+    EXPECT_TRUE(ob.add_order(local).empty());
+
+    ob.apply_l2_update(side::buy, P(100.0), 200);
+    ASSERT_EQ(ob.get_order(local_id), local);
+    auto levels = ob.get_order_infos();
+    ASSERT_FALSE(levels.get_bids().empty());
+    EXPECT_EQ(levels.get_bids().front().quantity_, 205u);
+
+    ob.apply_l2_update(side::buy, P(100.0), 0);
+    ASSERT_EQ(ob.get_order(local_id), local);
+    levels = ob.get_order_infos();
+    ASSERT_FALSE(levels.get_bids().empty());
+    EXPECT_EQ(levels.get_bids().front().quantity_, 5u);
+}
+
 TEST(Orderbook, AddOrder_SingleAsk)
 {
     orderbook ob;
@@ -189,7 +231,8 @@ TEST(Orderbook, L2Snapshot_Apply)
 TEST(Orderbook, L2Snapshot_ClearsPrevious)
 {
     orderbook ob;
-    ob.add_order(std::make_shared<order>(ob_order_type::good_till_cancel, 1, side::buy, P(50.0), 10));
+    ob.add_external_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 1, side::buy, P(50.0), 10));
     EXPECT_EQ(ob.size(), 1u);
     std::vector<std::pair<Price, quantity>> bids = {{P(100.0), 100}};
     std::vector<std::pair<Price, quantity>> asks = {};
