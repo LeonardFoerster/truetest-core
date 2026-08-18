@@ -19,6 +19,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
@@ -1584,4 +1585,79 @@ TEST(EventLog, Replay_ConsumesAllEvents)
         if (ev) count++;
     }
     EXPECT_EQ(count, 10);
+}
+
+// H-07 (docs/todos/08-H-persistence-observability.md): the operator-facing
+// path-validation predicate used by the mainnet CLI gate (src/bin/main.inc),
+// not enforced inside EventLogger itself — see the predicate's own comment
+// for why (the existing /dev/full fault-injection tests below need to keep
+// constructing EventLogger directly against a non-regular-file target).
+TEST(EventLog, DurableLogTargetPredicateRejectsDevNull)
+{
+    EXPECT_FALSE(is_acceptable_durable_log_target("/dev/null"));
+}
+
+TEST(EventLog, DurableLogTargetPredicateRejectsFifo)
+{
+    TempFile tf("fifo_target");
+    ASSERT_EQ(::mkfifo(tf.path.c_str(), 0600), 0);
+    EXPECT_FALSE(is_acceptable_durable_log_target(tf.path));
+    ::unlink(tf.path.c_str());
+}
+
+TEST(EventLog, DurableLogTargetPredicateAcceptsFreshRegularFilePath)
+{
+    TempFile tf("fresh_regular_target");
+    // TempFile only reserves a path; the file itself does not exist yet.
+    ASSERT_FALSE(std::filesystem::exists(tf.path));
+    EXPECT_TRUE(is_acceptable_durable_log_target(tf.path));
+}
+
+TEST(EventLog, DurableLogTargetPredicateAcceptsExistingRegularFile)
+{
+    SilenceCout quiet;
+    TempFile tf("existing_regular_target");
+    { EventLogger logger(tf.path); }
+    EXPECT_TRUE(is_acceptable_durable_log_target(tf.path));
+}
+
+TEST(EventLog, DurableLogTargetPredicateRejectsEmptyPath)
+{
+    EXPECT_FALSE(is_acceptable_durable_log_target(""));
+}
+
+TEST(EventLog, DurableLogTargetPredicateRejectsMissingParentDirectory)
+{
+    TempFile tf("missing_parent");
+    const std::string path = tf.path + "/no_such_subdir/log.bin";
+    EXPECT_FALSE(is_acceptable_durable_log_target(path));
+}
+
+TEST(EventLog, DurableLogTargetPredicateRejectsSymlinkToDevNull)
+{
+    TempFile tf("symlink_to_dev_null");
+    ASSERT_EQ(::symlink("/dev/null", tf.path.c_str()), 0);
+    EXPECT_FALSE(is_acceptable_durable_log_target(tf.path));
+    ::unlink(tf.path.c_str());
+}
+
+TEST(EventLog, DurableLogTargetPredicateFailsClosedOnSymlinkLoop)
+{
+    TempFile tf("symlink_loop");
+    ASSERT_EQ(::symlink(tf.path.c_str(), tf.path.c_str()), 0);
+    // exists()/is_regular_file() cannot resolve a self-referential symlink
+    // (ELOOP); the predicate must reject rather than fall through to the
+    // "not yet created" branch and accept based only on the parent dir.
+    EXPECT_FALSE(is_acceptable_durable_log_target(tf.path));
+    ::unlink(tf.path.c_str());
+}
+
+TEST(EventLog, EventLoggerItselfStillAcceptsDevFullForFaultInjection)
+{
+    // Documents the deliberate scope boundary above: EventLogger's own
+    // constructor does not call is_acceptable_durable_log_target(), so the
+    // existing *DurableFinalizeFailureHaltsEngine fault-injection tests
+    // keep working.
+    SilenceCout quiet;
+    EXPECT_NO_THROW(EventLogger logger("/dev/full", false));
 }

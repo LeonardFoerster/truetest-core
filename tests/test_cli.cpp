@@ -2,10 +2,12 @@
 #include <cstdlib>
 #include <cstdio>
 #include <array>
+#include <filesystem>
 #include <string>
 #include <fstream>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 static bool is_executable_file(const std::string& path)
 {
@@ -479,6 +481,34 @@ TEST(DryRun, LiveBinaryMainnetFuturesRequiresDurableEventLog)
     EXPECT_EQ(rc, 1);
     EXPECT_NE(out.find("without a durable binary event log"),
               std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetFuturesRejectsNonRegularFileEventLog)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live --max-notional 25 --max-daily-loss 5 "
+        "--log-events /dev/null",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("target is not a regular file"), std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetFuturesAcceptsFreshRegularFileEventLogPath)
+{
+    const std::string path = "/tmp/truetest-h07-dry-run-"
+        + std::to_string(::getpid()) + ".bin";
+    std::filesystem::remove(path);
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live --max-notional 25 --max-daily-loss 5 "
+        "--log-events " + path,
+        out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+    std::filesystem::remove(path);
 }
 
 TEST(DryRun, LiveBinaryFuturesRejectsNonFiniteRiskCaps)
