@@ -23,6 +23,15 @@
 class BinanceFuturesUserDataParser : public IFillParser
 {
 public:
+    bool is_harmless_private_control(
+        std::string_view raw) const noexcept override
+    {
+        // USD-M private keepalives are raw text only.  Any JSON frame that
+        // this parser classifies as unrelated must remain fail-closed at the
+        // unified private ingress rather than being inferred as a control.
+        return raw == "ping" || raw == "pong";
+    }
+
     funding_parse_result parse_funding_update(
         std::string_view raw, parsed_funding_update& out) noexcept override
     {
@@ -34,10 +43,22 @@ public:
             return funding_parse_result::not_funding;
         if (event != "ACCOUNT_UPDATE")
             return funding_parse_result::not_funding;
+        // The funding fast path runs before normal execution classification.
+        // An ACCOUNT_UPDATE-shaped frame must not use that precedence to hide
+        // an embedded order/fill envelope.
+        if (has_execution_discriminator(raw)
+            || !optional_positive_timestamp(raw, "T"))
+            return funding_parse_result::invalid;
 
         std::string_view account;
         if (!provider_recovery::top_level_member(raw, "a", account)
             || !provider_recovery::is_authoritative_object(account))
+            return funding_parse_result::invalid;
+        // `P` is an independent position state update.  This narrow funding
+        // route has no typed position handoff, so it may accept an explicitly
+        // empty array only; silently dropping non-empty state is unsafe.
+        if (has_execution_discriminator(account)
+            || !funding_positions_are_empty(account))
             return funding_parse_result::invalid;
 
         std::string_view reason;
@@ -65,10 +86,14 @@ public:
             balances, [&](std::string_view row) noexcept {
                 std::string_view asset;
                 std::string_view raw_delta;
-                if (!provider_recovery::top_level_plain_string(
+                double ignored = 0.0;
+                if (has_execution_discriminator(row)
+                    || !provider_recovery::top_level_plain_string(
                         row, "a", asset)
                     || !provider_recovery::top_level_scalar_text(
-                        row, "bc", raw_delta))
+                        row, "bc", raw_delta)
+                    || !parse_optional_finite(row, "wb", ignored)
+                    || !parse_optional_finite(row, "cw", ignored))
                     return false;
                 double parsed = 0.0;
                 if (!parse_double(raw_delta, parsed)) return false;
@@ -233,25 +258,46 @@ public:
                                       has_commission)
             || candidate.cumulative_qty < 0.0)
             return execution_parse_result::malformed;
+        candidate.has_cumulative_qty = has_cumulative;
 
-        if (candidate.k == parsed_exec::kind::partial_fill
-            || candidate.k == parsed_exec::kind::full_fill)
+        const bool is_economic_fill =
+            candidate.k == parsed_exec::kind::partial_fill
+            || candidate.k == parsed_exec::kind::full_fill;
+        if (is_economic_fill)
         {
+            // USD-M futures uses inner `t` as the immutable trade identity.
+            // An ORDER_TRADE_UPDATE without it is not admissible economic
+            // evidence, even if its aggregate cumulative quantity is valid.
+            std::uint64_t execution_id = 0;
             if (!has_last_qty || !has_last_price || !has_cumulative
                 || !has_commission
                 || candidate.last_fill_qty <= 0.0
                 || candidate.last_fill_price <= 0.0
-                || candidate.cumulative_qty < candidate.last_fill_qty)
+                || candidate.cumulative_qty < candidate.last_fill_qty
+                || !provider_recovery::top_level_positive_u64(
+                    inner, "t", execution_id))
                 return execution_parse_result::malformed;
+            candidate.execution_id = std::to_string(execution_id);
         }
+        // A terminal/ack lifecycle can prove the previously observed
+        // cumulative quantity, but never introduce a fresh fill quantity,
+        // price, or commission.  Route such contradictions to fail-closed
+        // handling instead of treating them as harmless status text.
+        else if (((candidate.k == parsed_exec::kind::canceled
+                   || candidate.k == parsed_exec::kind::rejected
+                   || candidate.k == parsed_exec::kind::expired)
+                  && !has_cumulative)
+                 || (has_last_qty && candidate.last_fill_qty != 0.0)
+                 || (has_last_price && candidate.last_fill_price != 0.0)
+                 || (has_commission && candidate.commission != 0.0))
+            return execution_parse_result::malformed;
 
         std::string_view commission_asset;
         if (!optional_nullable_plain_string(inner, "N", commission_asset))
             return execution_parse_result::malformed;
         candidate.commission_asset.assign(
             commission_asset.data(), commission_asset.size());
-        if ((candidate.k == parsed_exec::kind::partial_fill
-             || candidate.k == parsed_exec::kind::full_fill)
+        if (is_economic_fill
             && candidate.commission != 0.0
             && candidate.commission_asset.empty())
             return execution_parse_result::malformed;
@@ -268,6 +314,67 @@ public:
     }
 
 private:
+    // These keys identify an order or fill in Binance's private schema.  A
+    // presence check is deliberately enough: no account funding row has a
+    // valid reason to carry one, and attempting to reinterpret it would let
+    // lifecycle evidence bypass the normal execution parser.
+    static bool has_execution_discriminator(std::string_view object) noexcept
+    {
+        for (const auto key : {std::string_view{"o"}, std::string_view{"i"},
+                               std::string_view{"c"}, std::string_view{"s"},
+                               std::string_view{"S"}, std::string_view{"x"},
+                               std::string_view{"X"}, std::string_view{"l"},
+                               std::string_view{"L"}, std::string_view{"z"},
+                               std::string_view{"n"}, std::string_view{"t"},
+                               std::string_view{"I"},
+                               std::string_view{"orderId"},
+                               std::string_view{"clientOrderId"},
+                               std::string_view{"clientOid"},
+                               std::string_view{"execId"},
+                               std::string_view{"execQty"},
+                               std::string_view{"execPrice"},
+                               std::string_view{"orderStatus"}})
+        {
+            std::string_view ignored;
+            if (provider_recovery::payload_parser(object)
+                    .inspect_top_level_member(key, ignored)
+                != provider_recovery::payload_parser::member_result::missing)
+                return true;
+        }
+        return false;
+    }
+
+    static bool optional_positive_timestamp(std::string_view object,
+                                            std::string_view key) noexcept
+    {
+        std::string_view text;
+        const auto state = provider_recovery::payload_parser(object)
+            .inspect_top_level_member(key, text);
+        if (state == provider_recovery::payload_parser::member_result::missing)
+            return true;
+        std::int64_t timestamp = 0;
+        return state == provider_recovery::payload_parser::member_result::unique
+            && provider_recovery::top_level_scalar_text(object, key, text)
+            && parse_int64(text, timestamp)
+            && timestamp > 0
+            && system_clock_millis_is_representable(timestamp);
+    }
+
+    static bool funding_positions_are_empty(
+        std::string_view account) noexcept
+    {
+        std::string_view positions;
+        const auto state = provider_recovery::payload_parser(account)
+            .inspect_top_level_member("P", positions);
+        if (state == provider_recovery::payload_parser::member_result::missing)
+            return true;
+        if (state != provider_recovery::payload_parser::member_result::unique
+            || !provider_recovery::is_authoritative_object_array(positions))
+            return false;
+        return provider_recovery::every_top_level_object(
+            positions, [](std::string_view) noexcept { return false; });
+    }
+
     static bool looks_like_execution_envelope(std::string_view wrapper) noexcept
     {
         std::string_view inner;

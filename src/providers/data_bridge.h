@@ -90,6 +90,12 @@ public:
 	using sink_fn = std::function<void(const T&, std::shared_ptr<data_handler>)>;
 	using record_callback = std::function<void(const T&)>;
 	using idle_callback = std::function<void()>;
+	// Called on the consumer/event-loop thread after every successfully read
+	// public frame, including frames that parse to no record.  Live engines use
+	// this to service the authoritative private FIFO before a following market
+	// frame can route strategy or venue work.  It is deliberately a callback
+	// rather than a provider dependency: DataBridge remains venue-neutral.
+	using after_frame_callback = std::function<void()>;
 
 	DataBridge(
 		std::shared_ptr<IDataTransport> transport,
@@ -115,6 +121,10 @@ public:
 	// consumer.
 	using research_tap_fn = std::function<void(const T&)>;
 	void set_research_tap(research_tap_fn tap) { research_tap_ = std::move(tap); }
+	void set_after_frame_callback(after_frame_callback callback)
+	{
+		after_frame_ = std::move(callback);
+	}
 
 	bool load_data(std::shared_ptr<data_handler> handler) override
 	{
@@ -332,6 +342,8 @@ private:
 				for (auto& record : records)
 					if (!handle(record))
 						break;
+				if (after_frame_)
+					after_frame_();
 			}
 			else
 			{
@@ -368,6 +380,8 @@ private:
 					if (!handle(record))
 						break;
 			}
+			if (after_frame_)
+				after_frame_();
 		}
 
 		auto finish_result = [&] {
@@ -397,12 +411,19 @@ private:
 			       == empty_parse_status::malformed)
 			{
 				++result.rejected;
+				// The frame was read successfully even though public parsing
+				// rejected it.  Service private truth before terminating so an
+				// admitted fill cannot be stranded behind this public failure.
+				if (after_frame_)
+					after_frame_();
 				record_failed = true;
 				break;
 			}
 			for (auto& record : records)
 				if (!handle(record))
 					break;
+			if (after_frame_)
+				after_frame_();
 		}
 
 		finish_result();
@@ -460,6 +481,7 @@ private:
 	std::shared_ptr<IDataParser<T>> parser_;
 	sink_fn sink_;
 	research_tap_fn research_tap_;
+	after_frame_callback after_frame_;
 	std::atomic<bool>* halt_flag_ = nullptr;
 	std::atomic<bool> stop_requested_{false};
 	bool retain_streamed_ = false; // D-06 default: do not grow series on stream

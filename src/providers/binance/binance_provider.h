@@ -56,8 +56,29 @@ public:
         if (!port.empty()) endpoints_.ws_port = port;
     }
 
-    // Combined WS: primary stream + depth (e.g. "depth20@100ms"). Empty =
-    // single-stream, paper-seeded book in shadow.
+    ~BinanceProvider() override
+    {
+        // bridge_ owns a private-reader callback that references this
+        // provider.  Close it while the failure latch and mutation guard are
+        // still alive; member destruction order alone would release the guard
+        // before bridge_'s final reader join.
+        try { quiesce_for_live_shutdown(); }
+        catch (...) {
+            std::cerr << "BinanceProvider: destructor quiesce failed; forcing "
+                         "resource finish.\n";
+        }
+        try {
+            finish_live_shutdown(
+                live_shutdown_disposition::preserve_dead_man_switch);
+        }
+        catch (...) {
+            std::cerr << "BinanceProvider: destructor resource finish failed.\n";
+        }
+    }
+
+    // Combined WS: primary stream + explicit partial-book depth (for example
+    // "depth20@100ms").  In live mode `open()` rejects raw diff-depth and
+    // every other unrecognised contract before it creates a transport.
     void set_depth_stream(const std::string& depth_stream_suffix)
     {
         depth_stream_ = depth_stream_suffix;
@@ -107,11 +128,40 @@ public:
     {
         state_ = lifecycle::opening;
 
+        // Raw `depthUpdate` carries only a delta range.  It cannot safely
+        // replace a book until a separately reviewed sequence synchronizer
+        // exists, so refuse before any WebSocket/REST readiness work.
+        if (mode_ == engine_mode::live && !depth_stream_.empty()
+            && !binance::is_explicit_partial_book_depth_stream(depth_stream_))
+        {
+            std::cerr << "BinanceProvider: refusing live open — depth stream '"
+                      << depth_stream_
+                      << "' is not an explicit partial-book contract. "
+                         "Use depth5, depth10, or depth20 (optionally "
+                         "@100ms/@1000ms); raw diff-depth is unsupported.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
+
         if (mode_ == engine_mode::live &&
             (api_key_.empty() || api_secret_.empty()))
         {
             std::cerr << "BinanceProvider: refusing live open — complete API "
                          "credentials are required.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
+
+        // The old split private-feed bridge cannot prove native OCO leg
+        // identity or preserve source order with funding.  Keep the entire
+        // live path closed until the one private execution ingress and typed
+        // native-bracket lifecycle are enabled together.
+        if (mode_ == engine_mode::live
+            && !live_private_execution_protocol_complete())
+        {
+            std::cerr << "BinanceProvider: refusing live open — unified private "
+                         "execution ingress and typed native bracket lifecycle "
+                         "are not wired.\n";
             state_ = lifecycle::error;
             return false;
         }
@@ -368,6 +418,12 @@ public:
         apply_halt_cb_to_transports();
     }
 
+    bool private_execution_producer_joined() const noexcept override
+    {
+        return binance_user_data_
+            && binance_user_data_->private_execution_producer_joined();
+    }
+
     // Only with depth - otherwise the single-stream parser is cheaper.
     bool supports_event_stream() const override
     {
@@ -377,7 +433,10 @@ public:
     std::shared_ptr<IDataParser<provider::event>> get_event_parser() override
     {
         if (depth_stream_.empty()) return nullptr;
-        return std::make_shared<BinanceCombinedParser>();
+        return std::make_shared<BinanceCombinedParser>(
+            mode_ == engine_mode::live
+                ? BinanceCombinedParser::depth_update_policy::refuse_raw_diff_depth
+                : BinanceCombinedParser::depth_update_policy::legacy_snapshot_compatibility);
     }
 
     const std::string& symbol() const { return symbol_; }
@@ -422,31 +481,53 @@ private:
     LatchedFailureCallback execution_failure_cb_;
     std::atomic<bool> private_execution_failure_latched_{false};
 
-    void fail_private_execution_ingress() noexcept
+    // This is intentionally a compile-time deny, never an operator switch.
+    // It may become true only in the same reviewed change that supplies
+    // d.execution_ingress, d.require_execution_ingress, and typed native OCO
+    // lifecycle records consumed by ExitManager.
+    static constexpr bool live_private_execution_protocol_complete() noexcept
+    {
+        return false;
+    }
+
+    void fail_private_execution_ingress(
+        std::string_view reason =
+            "binance private execution parser rejected a known envelope") noexcept
     {
         if (private_execution_failure_latched_.exchange(
                 true, std::memory_order_acq_rel))
             return;
         live_mutations_cancelled_->store(true, std::memory_order_release);
-        execution_failure_cb_.publish(
-            "binance private execution parser rejected a known envelope");
+        // Make the local REST gate terminal before notifying Engine.  The
+        // engine halt owner wakes the public loop, but it cannot by itself
+        // prevent an already-queued bridge mutation from reaching the venue.
+        if (bridge_)
+        {
+            try { bridge_->quiesce(); }
+            catch (...) {}
+        }
         if (transport_)
         {
             try { transport_->request_stop(); }
             catch (...) {}
         }
+        execution_failure_cb_.publish(reason);
     }
 
     void apply_halt_cb_to_transports()
     {
-        auto halt = halt_cb_.load();
-        if (!halt) return;
+        // Do not replace the local quiesce wrapper once Engine has installed
+        // its callback.  A raw engine halt alone leaves bridge REST work
+        // admissible until shutdown reaches provider cleanup.
+        const auto terminal = [this](std::string_view reason) noexcept {
+            fail_private_execution_ingress(reason);
+        };
         if (binance_transport_)
-            binance_transport_->set_fatal_disconnect_callback(*halt);
+            binance_transport_->set_fatal_disconnect_callback(terminal);
         if (binance_combined_transport_)
-            binance_combined_transport_->set_fatal_disconnect_callback(*halt);
+            binance_combined_transport_->set_fatal_disconnect_callback(terminal);
         if (binance_user_data_)
-            binance_user_data_->set_fatal_disconnect_callback(*halt);
+            binance_user_data_->set_fatal_disconnect_callback(terminal);
     }
 
     std::shared_ptr<BinanceExecutor> binance_exec_;

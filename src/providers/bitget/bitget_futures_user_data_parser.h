@@ -5,6 +5,7 @@
 #include "providers/bitget/bitget_parser.h"
 #include "providers/recovery_payload.h"
 
+#include <array>
 #include <charconv>
 #include <cctype>
 #include <chrono>
@@ -22,6 +23,44 @@
 class BitgetFuturesUserDataParser : public IFillParser
 {
 public:
+    bool is_harmless_private_control(
+        std::string_view raw) const noexcept override
+    {
+        // Bitget documents raw text heartbeats.  JSON controls are accepted
+        // only through the exact, typed schemas below; an unrelated JSON
+        // frame is not harmless merely because it contains a familiar field.
+        if (raw == "ping" || raw == "pong") return true;
+        if (!provider_recovery::is_authoritative_object(raw)) return false;
+
+        std::string_view event;
+        std::string_view op;
+        const auto event_state = provider_recovery::payload_parser(raw)
+            .inspect_top_level_member("event", event);
+        const auto op_state = provider_recovery::payload_parser(raw)
+            .inspect_top_level_member("op", op);
+        if (event_state
+                == provider_recovery::payload_parser::member_result::invalid_or_duplicate
+            || op_state
+                == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+            return false;
+
+        const bool has_event =
+            event_state == provider_recovery::payload_parser::member_result::unique;
+        const bool has_op =
+            op_state == provider_recovery::payload_parser::member_result::unique;
+        // A control response has exactly one discriminator.  Treating an
+        // event/op hybrid as harmless would let a contradictory envelope
+        // select whichever spelling happens to be inspected first.
+        if (has_event == has_op) return false;
+
+        const std::string_view discriminator = has_event ? "event" : "op";
+        std::string_view control;
+        if (!provider_recovery::top_level_plain_string(
+                raw, discriminator, control))
+            return false;
+        return is_exact_harmless_control(raw, discriminator, control);
+    }
+
     funding_parse_result parse_funding_update(
         std::string_view raw, parsed_funding_update& out) noexcept override
     {
@@ -62,6 +101,17 @@ public:
         if (!provider_recovery::top_level_exact_string(arg, "instType", "UTA"))
             return funding_parse_result::invalid;
 
+        // Bitget documents account push actions as snapshot/update.  Requiring
+        // a unique, typed action prevents a malformed private frame from
+        // slipping through the funding fast path on routing fields alone.
+        std::string_view action;
+        const auto action_state = provider_recovery::payload_parser(raw)
+            .inspect_top_level_member("action", action);
+        if (action_state != provider_recovery::payload_parser::member_result::unique
+            || !provider_recovery::top_level_plain_string(raw, "action", action)
+            || (action != "snapshot" && action != "update"))
+            return funding_parse_result::invalid;
+
         // Only an authoritative account-channel envelope may be considered
         // funding-like.  A client id, symbol, or error text containing
         // "fund" on the order/fill channels must never preempt execution
@@ -78,6 +128,7 @@ public:
         double delta = 0.0;
         const bool valid_rows = provider_recovery::every_top_level_object(
             data, [&](std::string_view row) noexcept {
+                if (has_execution_discriminator(row)) return false;
                 std::string_view reason;
                 std::size_t reason_fields = 0;
                 for (const auto key : {std::string_view{"bizType"},
@@ -153,6 +204,7 @@ public:
                 double parsed = 0.0;
                 if (asset_fields != 1 || delta_fields != 1
                     || !is_usdt(asset)
+                    || !validate_optional_balance_fields(row)
                     || !parse_finite_double(raw_delta, parsed)
                     || parsed == 0.0)
                     return false;
@@ -201,7 +253,7 @@ public:
             if (!provider_recovery::top_level_plain_string(
                     raw, "event", control_event))
                 return execution_parse_result::malformed;
-            if (is_harmless_control(raw, control_event))
+            if (is_harmless_private_control(raw))
                 return execution_parse_result::unrelated;
             // Post-ready server errors and unrecognised controls are not a
             // harmless payload.  The transport only classifies login/
@@ -220,7 +272,7 @@ public:
         {
             if (!provider_recovery::top_level_plain_string(raw, "op", control_op))
                 return execution_parse_result::malformed;
-            if (is_harmless_control(raw, control_op))
+            if (is_harmless_private_control(raw))
                 return execution_parse_result::unrelated;
             return execution_parse_result::malformed;
         }
@@ -537,6 +589,85 @@ public:
     }
 
 private:
+    // Account funding rows must never carry order/fill evidence.  The bridge
+    // consults funding before execution classification, so treating one of
+    // these fields as an irrelevant account attribute would drop lifecycle
+    // truth on the floor instead of failing closed.
+    // Keep this set specific to order/fill schemas: generic routing also
+    // uses it for position/account pushes, where a symbol or average price is
+    // legitimate state rather than evidence of an execution.
+    static bool has_order_fill_discriminator(
+        std::string_view object) noexcept
+    {
+        for (const auto key : {std::string_view{"orderId"},
+                               std::string_view{"clientOid"},
+                               std::string_view{"execId"},
+                               std::string_view{"execLinkId"},
+                               std::string_view{"execQty"},
+                               std::string_view{"execPrice"},
+                               std::string_view{"execValue"},
+                               std::string_view{"execPnl"},
+                               std::string_view{"execTime"},
+                               std::string_view{"cumExecQty"},
+                               std::string_view{"cumExecValue"},
+                               std::string_view{"orderStatus"},
+                               std::string_view{"orderType"},
+                               std::string_view{"tradeSide"},
+                               std::string_view{"feeDetail"}})
+        {
+            std::string_view ignored;
+            if (provider_recovery::payload_parser(object)
+                    .inspect_top_level_member(key, ignored)
+                != provider_recovery::payload_parser::member_result::missing)
+                return true;
+        }
+        return false;
+    }
+
+    // Funding accepts a narrower account-row shape than generic state
+    // routing, so symbol/side/average-price evidence is also contradictory
+    // there even though it can be legitimate on a position update.
+    static bool has_execution_discriminator(std::string_view object) noexcept
+    {
+        if (has_order_fill_discriminator(object)) return true;
+        for (const auto key : {std::string_view{"symbol"},
+                               std::string_view{"side"},
+                               std::string_view{"avgPrice"}})
+        {
+            std::string_view ignored;
+            if (provider_recovery::payload_parser(object)
+                    .inspect_top_level_member(key, ignored)
+                != provider_recovery::payload_parser::member_result::missing)
+                return true;
+        }
+        return false;
+    }
+
+    // The funding delta is the only balance value consumed, but an accepted
+    // accompanying balance must still be a finite scalar.  Otherwise a bad
+    // account row could be accepted and hide an invalid state snapshot.
+    static bool validate_optional_balance_fields(
+        std::string_view row) noexcept
+    {
+        for (const auto key : {std::string_view{"balance"},
+                               std::string_view{"available"},
+                               std::string_view{"equity"},
+                               std::string_view{"walletBalance"}})
+        {
+            std::string_view text;
+            const auto state = provider_recovery::payload_parser(row)
+                .inspect_top_level_member(key, text);
+            if (state == provider_recovery::payload_parser::member_result::missing)
+                continue;
+            double value = 0.0;
+            if (state != provider_recovery::payload_parser::member_result::unique
+                || !provider_recovery::top_level_scalar_text(row, key, text)
+                || !parse_finite_double(text, value))
+                return false;
+        }
+        return true;
+    }
+
     // A data-bearing push with no usable routing envelope cannot be safely
     // reclassified as a position/control update.  Keep the test deliberately
     // narrow so a pure control frame remains unrelated.
@@ -573,39 +704,25 @@ private:
             return true;
 
         bool found_execution_field = false;
-        const auto row_has_execution_field = [&](std::string_view row) noexcept {
-            for (const auto key : {std::string_view{"orderId"},
-                                   std::string_view{"clientOid"},
-                                   std::string_view{"execQty"},
-                                   std::string_view{"execPrice"},
-                                   std::string_view{"orderStatus"}})
-            {
-                std::string_view ignored;
-                if (provider_recovery::payload_parser(row)
-                        .inspect_top_level_member(key, ignored)
-                    != provider_recovery::payload_parser::member_result::missing)
-                    return true;
-            }
-            return false;
-        };
 
         if (provider_recovery::is_authoritative_object_array(data))
         {
             (void)provider_recovery::every_top_level_object(
                 data, [&](std::string_view row) noexcept {
-                    found_execution_field = row_has_execution_field(row);
+                    found_execution_field = has_order_fill_discriminator(row);
                     return !found_execution_field;
                 });
         }
         else if (provider_recovery::is_authoritative_object(data))
         {
-            found_execution_field = row_has_execution_field(data);
+            found_execution_field = has_order_fill_discriminator(data);
         }
         return found_execution_field;
     }
 
     static bool control_code_is_success(std::string_view raw,
-                                        bool required) noexcept
+                                        bool required,
+                                        bool allow_empty = false) noexcept
     {
         std::string_view raw_code;
         const auto state = provider_recovery::payload_parser(raw)
@@ -617,48 +734,251 @@ private:
             return !required;
         std::string_view code;
         return provider_recovery::top_level_scalar_text(raw, "code", code)
-            && (code == "0" || code == "00000");
+            && (code == "0" || code == "00000"
+                || (allow_empty && code.empty()));
     }
 
-    static bool is_harmless_control(std::string_view raw,
-                                    std::string_view control) noexcept
+    static void skip_json_ws(std::string_view object,
+                             std::size_t& pos) noexcept
     {
-        // A control discriminator must never mask a data-bearing execution
-        // frame.  This is intentionally strict: an embedded order/fill is a
-        // contradictory private envelope, not an ignorable notification.
-        // `action` is equally execution-specific on Bitget's private push
-        // schema.  In particular, an `info` control carrying
-        // `action:"snapshot"` plus an order/fill routing arg but missing
-        // `data` is a malformed execution envelope, not an informational
-        // control frame.
-        std::string_view action;
-        if (provider_recovery::payload_parser(raw).inspect_top_level_member(
-                "action", action)
-            != provider_recovery::payload_parser::member_result::missing)
+        while (pos < object.size())
+        {
+            const char c = object[pos];
+            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') break;
+            ++pos;
+        }
+    }
+
+    static bool read_plain_json_key(std::string_view object,
+                                    std::size_t& pos,
+                                    std::string_view& key) noexcept
+    {
+        if (pos >= object.size() || object[pos++] != '"') return false;
+        const std::size_t begin = pos;
+        while (pos < object.size())
+        {
+            const unsigned char c =
+                static_cast<unsigned char>(object[pos++]);
+            if (c == '"')
+            {
+                key = object.substr(begin, pos - begin - 1);
+                return true;
+            }
+            // Exact control schemas deliberately reject escaped key names:
+            // a decision key must have one unambiguous ASCII spelling.
+            if (c < 0x20 || c == '\\') return false;
+        }
+        return false;
+    }
+
+    static bool skip_json_string(std::string_view object,
+                                 std::size_t& pos) noexcept
+    {
+        if (pos >= object.size() || object[pos++] != '"') return false;
+        while (pos < object.size())
+        {
+            const char c = object[pos++];
+            if (c == '"') return true;
+            if (c != '\\') continue;
+            if (pos >= object.size()) return false;
+            const char escaped = object[pos++];
+            if (escaped != 'u') continue;
+            if (object.size() - pos < 4) return false;
+            pos += 4;
+        }
+        return false;
+    }
+
+    static bool skip_json_value(std::string_view object,
+                                std::size_t& pos) noexcept
+    {
+        if (pos >= object.size()) return false;
+        if (object[pos] == '"') return skip_json_string(object, pos);
+
+        if (object[pos] == '{' || object[pos] == '[')
+        {
+            // `is_authoritative_object` has already established valid JSON.
+            // Keep this local scanner quote-aware so the strict top-level
+            // allowlist cannot be confused by braces/comma in a value.
+            std::array<char, 65> closing{};
+            std::size_t depth = 0;
+            while (pos < object.size())
+            {
+                const char c = object[pos];
+                if (c == '"')
+                {
+                    if (!skip_json_string(object, pos)) return false;
+                    continue;
+                }
+                if (c == '{' || c == '[')
+                {
+                    if (depth == closing.size()) return false;
+                    closing[depth++] = c == '{' ? '}' : ']';
+                    ++pos;
+                    continue;
+                }
+                if (c == '}' || c == ']')
+                {
+                    if (depth == 0 || c != closing[depth - 1]) return false;
+                    ++pos;
+                    if (--depth == 0) return true;
+                    continue;
+                }
+                ++pos;
+            }
             return false;
-        std::string_view data;
-        if (provider_recovery::payload_parser(raw).inspect_top_level_member(
-                "data", data)
-            != provider_recovery::payload_parser::member_result::missing)
-            return false;
+        }
+
+        const std::size_t begin = pos;
+        while (pos < object.size())
+        {
+            const char c = object[pos];
+            if (c == ',' || c == '}' || c == ' ' || c == '\t'
+                || c == '\n' || c == '\r')
+                break;
+            ++pos;
+        }
+        return pos != begin;
+    }
+
+    template <std::size_t AllowedCount, std::size_t RequiredCount>
+    static bool has_exact_top_level_schema(
+        std::string_view object,
+        const std::array<std::string_view, AllowedCount>& allowed,
+        const std::array<std::string_view, RequiredCount>& required) noexcept
+    {
+        if (!provider_recovery::is_authoritative_object(object)) return false;
+
+        std::array<bool, AllowedCount> seen{};
+        std::size_t pos = 0;
+        skip_json_ws(object, pos);
+        if (pos >= object.size() || object[pos++] != '{') return false;
+        skip_json_ws(object, pos);
+        if (pos < object.size() && object[pos] == '}')
+            ++pos;
+        else
+        {
+            for (;;)
+            {
+                std::string_view key;
+                if (!read_plain_json_key(object, pos, key)) return false;
+
+                std::size_t index = AllowedCount;
+                for (std::size_t i = 0; i < AllowedCount; ++i)
+                {
+                    if (allowed[i] == key)
+                    {
+                        index = i;
+                        break;
+                    }
+                }
+                if (index == AllowedCount || seen[index]) return false;
+                seen[index] = true;
+
+                skip_json_ws(object, pos);
+                if (pos >= object.size() || object[pos++] != ':') return false;
+                skip_json_ws(object, pos);
+                if (!skip_json_value(object, pos)) return false;
+                skip_json_ws(object, pos);
+                if (pos >= object.size()) return false;
+                if (object[pos] == '}')
+                {
+                    ++pos;
+                    break;
+                }
+                if (object[pos++] != ',') return false;
+                skip_json_ws(object, pos);
+            }
+        }
+
+        skip_json_ws(object, pos);
+        if (pos != object.size()) return false;
+        for (const auto required_key : required)
+        {
+            bool present = false;
+            for (std::size_t i = 0; i < AllowedCount; ++i)
+            {
+                if (allowed[i] == required_key)
+                {
+                    present = seen[i];
+                    break;
+                }
+            }
+            if (!present) return false;
+        }
+        return true;
+    }
+
+    static bool optional_control_plain_string(std::string_view object,
+                                              std::string_view key,
+                                              bool require_nonempty = false) noexcept
+    {
+        std::string_view value;
+        const auto state = provider_recovery::payload_parser(object)
+            .inspect_top_level_member(key, value);
+        if (state == provider_recovery::payload_parser::member_result::missing)
+            return true;
+        return state == provider_recovery::payload_parser::member_result::unique
+            && provider_recovery::top_level_plain_string(object, key, value)
+            && (!require_nonempty || !value.empty());
+    }
+
+    static bool is_private_subscription_arg(std::string_view arg) noexcept
+    {
+        constexpr std::array<std::string_view, 2> allowed{
+            "instType", "topic"};
+        if (!has_exact_top_level_schema(arg, allowed, allowed)) return false;
+
+        std::string_view topic;
+        return provider_recovery::top_level_exact_string(arg, "instType", "UTA")
+            && provider_recovery::top_level_plain_string(arg, "topic", topic)
+            && (topic == "order" || topic == "fill"
+                || topic == "position" || topic == "account");
+    }
+
+    static bool is_exact_harmless_control(
+        std::string_view raw,
+        std::string_view discriminator,
+        std::string_view control) noexcept
+    {
+        if (control == "login")
+        {
+            const std::array<std::string_view, 3> allowed{
+                discriminator, "code", "msg"};
+            const std::array<std::string_view, 2> required{
+                discriminator, "code"};
+            return has_exact_top_level_schema(raw, allowed, required)
+                && control_code_is_success(raw, true)
+                && optional_control_plain_string(raw, "msg");
+        }
 
         if (control == "subscribe")
         {
-            if (!control_code_is_success(raw, false)) return false;
+            const std::array<std::string_view, 5> allowed{
+                discriminator, "arg", "code", "msg", "connId"};
+            const std::array<std::string_view, 2> required{
+                discriminator, "arg"};
             std::string_view arg;
-            std::string_view topic;
-            return provider_recovery::top_level_member(raw, "arg", arg)
-                && provider_recovery::is_authoritative_object(arg)
-                && provider_recovery::top_level_exact_string(
-                    arg, "instType", "UTA")
-                && provider_recovery::top_level_plain_string(arg, "topic", topic)
-                && (topic == "order" || topic == "fill"
-                    || topic == "position" || topic == "account");
+            return has_exact_top_level_schema(raw, allowed, required)
+                // Bitget's documented subscription ACKs use no code, a
+                // success code, or an empty code string depending on channel
+                // version; all other scalar values are failures.
+                && control_code_is_success(raw, false, true)
+                && optional_control_plain_string(raw, "msg")
+                && optional_control_plain_string(raw, "connId", true)
+                && provider_recovery::top_level_member(raw, "arg", arg)
+                && is_private_subscription_arg(arg);
         }
-        if (control == "login")
-            return control_code_is_success(raw, true);
+
         if (control == "info" || control == "ping" || control == "pong")
-            return control_code_is_success(raw, false);
+        {
+            const std::array<std::string_view, 3> allowed{
+                discriminator, "code", "msg"};
+            const std::array<std::string_view, 1> required{discriminator};
+            return has_exact_top_level_schema(raw, allowed, required)
+                && control_code_is_success(raw, false)
+                && optional_control_plain_string(raw, "msg");
+        }
         return false;
     }
 
@@ -949,7 +1269,12 @@ private:
         }
 
         if (!parse_fee(object, candidate)
-            || !parse_timestamp(object, wrapper, candidate.ts))
+            || !parse_timestamp(object, wrapper, candidate.ts)
+            // The order channel is lifecycle-only.  Fill-channel records are
+            // the exclusive source of fee economics, so a non-zero order
+            // fee is contradictory even if the order also has a cumulative
+            // terminal proof.
+            || (topic == "order" && candidate.commission != 0.0))
             return false;
         out = std::move(candidate);
         return true;

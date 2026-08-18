@@ -257,6 +257,26 @@ public:
         if (!port.empty()) endpoints_.ws_port = port;
     }
 
+    ~BitgetFuturesProvider() override
+    {
+        // The bridge/private reader and DMS can invoke callbacks that use the
+        // provider's latch and mutation guard. Join them before those members
+        // are destroyed, even if an earlier open/close path failed.
+        try { quiesce_for_live_shutdown(); }
+        catch (...) {
+            std::cerr << "BitgetFuturesProvider: destructor quiesce failed; "
+                         "forcing resource finish.\n";
+        }
+        try {
+            finish_live_shutdown(
+                live_shutdown_disposition::preserve_dead_man_switch);
+        }
+        catch (...) {
+            std::cerr << "BitgetFuturesProvider: destructor resource finish "
+                         "failed; preserving DMS where available.\n";
+        }
+    }
+
     void set_depth_stream(const std::string& depth_stream)
     {
         depth_stream_ = depth_stream;
@@ -345,6 +365,20 @@ public:
         {
             std::cerr << "BitgetFuturesProvider: refusing live open — API key, "
                          "secret, and passphrase are all required.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
+
+        // The pre-unified private bridge cannot represent typed native
+        // protective-order groups.  Refuse before allocating transports or
+        // issuing REST calls; do not silently fall back to legacy live order
+        // admission while that source-of-truth gap exists.
+        if (mode_ == engine_mode::live
+            && !live_private_execution_protocol_complete())
+        {
+            std::cerr << "BitgetFuturesProvider: refusing live open — unified "
+                         "private execution ingress and typed native bracket "
+                         "lifecycle are not wired.\n";
             state_ = lifecycle::error;
             return false;
         }
@@ -518,15 +552,23 @@ public:
 
     void quiesce_for_live_shutdown() override
     {
+        // ExecutionBridge owns the private fill transport and closes it in
+        // finish_live_shutdown.  Only hand it to the generic helper if bridge
+        // construction did not complete, so one reader has exactly one join
+        // owner.
+        const auto private_transport = private_transport_not_owned_by_bridge();
         quiesce_futures_live_resources(
-            live_mutations_cancelled_, dms_, bridge_, bitget_private_ws_,
+            live_mutations_cancelled_, dms_, bridge_, private_transport,
             transport_);
     }
 
     void finish_live_shutdown(live_shutdown_disposition disposition) override
     {
+        // See quiesce_for_live_shutdown: passing bitget_private_ws_ alongside
+        // bridge_ would close/join the same reader twice.
+        const auto private_transport = private_transport_not_owned_by_bridge();
         const bool disarm_succeeded = finish_futures_live_resources(
-            dms_, bridge_, bitget_private_ws_, transport_, disposition);
+            dms_, bridge_, private_transport, transport_, disposition);
         state_ = lifecycle::closed;
         if (!disarm_succeeded)
         {
@@ -613,6 +655,12 @@ public:
     ProviderFundingIngress* funding_ingress() noexcept override
     {
         return mode_ == engine_mode::live ? &funding_ingress_ : nullptr;
+    }
+
+    bool private_execution_producer_joined() const noexcept override
+    {
+        return bitget_private_ws_
+            && bitget_private_ws_->private_execution_producer_joined();
     }
 
     bool supports_event_stream() const override
@@ -702,6 +750,23 @@ private:
     LatchedFailureCallback execution_failure_cb_;
     std::atomic<bool> private_execution_failure_latched_{false};
     ProviderFundingIngress funding_ingress_;
+
+    // This is a compile-time fail-closed guard, not an operator override.
+    // It may change only when d.execution_ingress,
+    // d.require_execution_ingress, and typed native bracket lifecycle
+    // consumption are enabled in one reviewed change.
+    static constexpr bool live_private_execution_protocol_complete() noexcept
+    {
+        return false;
+    }
+
+    std::shared_ptr<IFillTransport>
+    private_transport_not_owned_by_bridge() const noexcept
+    {
+        if (bridge_ || !bitget_private_ws_)
+            return {};
+        return std::static_pointer_cast<IFillTransport>(bitget_private_ws_);
+    }
 
     // Live refuse checklist (plan Phase 2 / Task 9).
     // Returns false → caller sets state=error.
@@ -955,55 +1020,50 @@ private:
         return true;
     }
 
-    // Wire engine halt into transports when present. Matches Binance:
-    // leave fatal_cb unset until set_halt_callback so public/private WS may
-    // reconnect during the open→engine-wire window. A log-only provisional
-    // would disable reconnect without actually halting (fill-blind live).
-    // Paper/shadow: same — no fatal until engine wires halt.
+    // Every fatal source retains the provider-local quiesce wrapper for the
+    // full session.  Replacing it with raw Engine halt after wiring leaves a
+    // queued bridge REST request admissible during the shutdown handoff.
     void apply_halt_cb_to_transports()
     {
-        auto halt = halt_cb_.load();
-        if (!halt)
-            return;
+        const auto terminal = [this](std::string_view reason) noexcept {
+            fail_private_execution_ingress(reason);
+        };
         if (bitget_transport_)
-            bitget_transport_->set_fatal_disconnect_callback(*halt);
+            bitget_transport_->set_fatal_disconnect_callback(terminal);
         if (bitget_combined_transport_)
-            bitget_combined_transport_->set_fatal_disconnect_callback(*halt);
+            bitget_combined_transport_->set_fatal_disconnect_callback(terminal);
         if (bitget_private_ws_)
-            bitget_private_ws_->set_fatal_disconnect_callback(*halt);
+            bitget_private_ws_->set_fatal_disconnect_callback(
+                terminal);
         if (dms_)
-        {
-            wire_dms_failure_to_engine(dms_, *halt, transport_);
-        }
+            wire_dms_failure_to_engine(dms_, terminal, transport_);
     }
 
     void fail_funding_ingress() noexcept
     {
-        if (auto halt = halt_cb_.load())
-        {
-            try { (*halt)("bitget funding ingress overflow or malformed update"); }
-            catch (...) {}
-        }
-        if (transport_)
-        {
-            try { transport_->request_stop(); }
-            catch (...) {}
-        }
+        fail_private_execution_ingress(
+            "bitget funding ingress overflow or malformed update");
     }
 
-    void fail_private_execution_ingress() noexcept
+    void fail_private_execution_ingress(
+        std::string_view reason =
+            "bitget private execution parser rejected a known envelope") noexcept
     {
         if (private_execution_failure_latched_.exchange(
                 true, std::memory_order_acq_rel))
             return;
         live_mutations_cancelled_->store(true, std::memory_order_release);
-        execution_failure_cb_.publish(
-            "bitget private execution parser rejected a known envelope");
+        if (bridge_)
+        {
+            try { bridge_->quiesce(); }
+            catch (...) {}
+        }
         if (transport_)
         {
             try { transport_->request_stop(); }
             catch (...) {}
         }
+        execution_failure_cb_.publish(reason);
     }
 
     // Empty or "uta" (any case) → allowed. Everything else → refuse.

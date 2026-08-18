@@ -7,13 +7,32 @@
 #include "providers/footprint/decimal_ticks.h"
 #include "providers/recovery_payload.h"
 
+#include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 
 class BinanceCombinedParser : public IDataParser<provider::event>
 {
 public:
+    // Legacy/replay callers retain the old projection for compatibility.
+    // Live providers choose refuse_raw_diff_depth: raw `depthUpdate` needs a
+    // separate sequence synchronizer and must never replace the local book.
+    enum class depth_update_policy : std::uint8_t
+    {
+        legacy_snapshot_compatibility,
+        refuse_raw_diff_depth,
+    };
+
+    explicit BinanceCombinedParser(
+        depth_update_policy depth_policy =
+            depth_update_policy::legacy_snapshot_compatibility) noexcept
+        : depth_policy_(depth_policy)
+    {}
+
     bool parse_header(const std::string&) override
     {
         return true;
@@ -35,9 +54,24 @@ public:
 
     std::optional<provider::event> parse_record(const std::string& line) override
     {
-        // Accept both combined-stream envelopes ({"stream":...,"data":{...}})
-        // and raw single-stream data objects.
+        // A live partial-book record must carry its combined-stream identity.
+        // Handle that branch before generic event dispatch: a frame labelled
+        // `@depth20` must never be reinterpreted as an unrelated trade/kline
+        // merely because its body was malformed or injected.
         const std::string stream_name = extract_stream_name(line);
+        const bool depth_like_frame =
+            std::string_view(line.data(), line.size()).find("@depth")
+                != std::string_view::npos;
+        if (depth_policy_ == depth_update_policy::refuse_raw_diff_depth
+            && (is_partial_book_stream(stream_name) || depth_like_frame))
+        {
+            auto snap = parse_live_partial_book_frame(line);
+            if (!snap) return std::nullopt;
+            return provider::event{std::move(*snap)};
+        }
+
+        // Accept both combined-stream envelopes ({"stream":...,"data":{...}})
+        // and raw single-stream data objects for legacy/replay callers.
         std::string data_json = extract_data(line);
         if (data_json.empty())
         {
@@ -112,6 +146,8 @@ public:
         }
         else if (event_type == "depthUpdate")
         {
+            if (depth_policy_ == depth_update_policy::refuse_raw_diff_depth)
+                return std::nullopt;
             auto snap = binance::parse_depth_snapshot(data_json);
             if (!snap) return std::nullopt;
             return provider::event{*snap};
@@ -121,6 +157,13 @@ public:
         // just {lastUpdateId, bids, asks} - detect by stream-name suffix.
         if (is_partial_book_stream(stream_name))
         {
+            if (depth_policy_ == depth_update_policy::refuse_raw_diff_depth)
+            {
+                // The live branch above is intentionally the only admission
+                // path.  In particular, never fall back to the permissive
+                // parser when strict envelope or level validation failed.
+                return std::nullopt;
+            }
             auto snap = binance::parse_depth_snapshot(data_json);
             if (!snap) return std::nullopt;
             if (snap->symbol.empty())
@@ -185,15 +228,14 @@ private:
         return binance::extract_string(json, "stream");
     }
 
-    // Match "@depth" + digit so partial-book ("@depth5@…") isn't confused
-    // with the diff stream ("@depth@100ms", no level count).
+    // The stream name contains the symbol before its first '@'; classify only
+    // the suffix so a raw diff stream can never masquerade as a partial book.
     static bool is_partial_book_stream(const std::string& stream_name)
     {
-        auto pos = stream_name.find("@depth");
-        if (pos == std::string::npos) return false;
-        const auto after = pos + 6;
-        return after < stream_name.size() &&
-               stream_name[after] >= '0' && stream_name[after] <= '9';
+        const auto at = stream_name.find('@');
+        return at != std::string::npos
+            && binance::is_explicit_partial_book_depth_stream(
+                std::string_view(stream_name).substr(at + 1));
     }
 
     static std::string symbol_from_stream(const std::string& stream_name)
@@ -207,6 +249,62 @@ private:
         return sym;
     }
 
+    static std::optional<std::string> strict_partial_stream_symbol(
+        std::string_view stream_name)
+    {
+        const auto at = stream_name.find('@');
+        if (at == std::string_view::npos || at == 0
+            || at > binance::depth_detail::max_live_partial_book_symbol_bytes)
+            return std::nullopt;
+
+        const std::string_view symbol = stream_name.substr(0, at);
+        const std::string_view suffix = stream_name.substr(at + 1);
+        if (binance::explicit_partial_book_depth_level_limit(suffix) == 0
+            || !binance::depth_detail::is_ascii_binance_symbol(symbol))
+            return std::nullopt;
+
+        std::string canonical_symbol;
+        canonical_symbol.reserve(symbol.size());
+        for (const unsigned char c : symbol)
+        {
+            canonical_symbol.push_back(static_cast<char>(
+                (c >= 'a' && c <= 'z') ? c - 'a' + 'A' : c));
+        }
+        return canonical_symbol;
+    }
+
+    static std::optional<provider::l2_snapshot> parse_live_partial_book_frame(
+        std::string_view frame)
+    {
+        // The strict payload parser imposes its own body bound.  The small
+        // envelope allowance rejects oversized wrappers before repeated full
+        // document scans while leaving ample room for Binance's stream name.
+        constexpr std::size_t max_frame_bytes =
+            binance::depth_detail::max_live_partial_book_payload_bytes + 512;
+        if (frame.empty() || frame.size() > max_frame_bytes
+            || !provider_recovery::is_authoritative_object(frame)
+            || !provider_recovery::decision_members_are_unique(
+                frame, {"stream", "data"}))
+            return std::nullopt;
+
+        std::string_view stream_name;
+        std::string_view data;
+        if (!provider_recovery::top_level_plain_string(
+                frame, "stream", stream_name)
+            || !provider_recovery::top_level_member(frame, "data", data))
+            return std::nullopt;
+
+        auto canonical_symbol = strict_partial_stream_symbol(stream_name);
+        if (!canonical_symbol) return std::nullopt;
+
+        const auto at = stream_name.find('@');
+        const auto level_limit = binance::explicit_partial_book_depth_level_limit(
+            stream_name.substr(at + 1));
+        return binance::parse_strict_partial_book_snapshot(
+            data, *canonical_symbol, level_limit);
+    }
+
     std::optional<truetest::footprint::DecimalValue> exact_tick_size_;
     int atom_decimals_ = 8;
+    depth_update_policy depth_policy_;
 };

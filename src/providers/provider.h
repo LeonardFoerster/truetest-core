@@ -8,6 +8,7 @@
 #include "execution/execution_adapter.h"
 #include "execution/instrument.h"
 #include "execution/live_safety.h"
+#include "execution/private_execution_ingress.h"
 #include "risk/futures_risk_check.h"
 #include "exits/bracket_adapter.h"
 #include "threading/ring_buffer.h"
@@ -92,22 +93,24 @@ inline bool finish_futures_live_resources(
     return finished;
 }
 
-// DMS callbacks run on the heartbeat thread. They must latch the engine halt
-// before waking the blocking data stream; teardown and the one kill path then
-// remain owned by the engine thread. Keeping this wiring shared prevents
-// futures providers from drifting into a join/flatten callback on the DMS
-// thread.
+// DMS callbacks run on the heartbeat thread. `terminal_failure` is a
+// provider-local wrapper that first closes its mutation gate/bridge and then
+// notifies the engine halt owner; waking the blocking data stream remains a
+// secondary prompt for engine-thread teardown. Keeping this wiring shared
+// prevents futures providers from drifting into a join/flatten callback on
+// the DMS thread.
 template <typename DeadMansSwitch>
 inline void wire_dms_failure_to_engine(
     const std::shared_ptr<DeadMansSwitch>& dms,
-    std::function<void(std::string_view)> halt,
+    std::function<void(std::string_view)> terminal_failure,
     std::shared_ptr<IDataTransport> transport)
 {
     if (!dms) return;
     dms->set_failure_callback(
-        [halt = std::move(halt), transport = std::move(transport)](
+        [terminal_failure = std::move(terminal_failure),
+         transport = std::move(transport)](
             std::string_view reason) {
-            if (halt) halt(reason);
+            if (terminal_failure) terminal_failure(reason);
             if (transport) transport->request_stop();
         });
 }
@@ -194,6 +197,66 @@ public:
 private:
     RingBuffer<provider_funding_update, capacity> ring_;
     std::atomic<bool> failed_{false};
+};
+
+// Provider-owned implementation of the unified private-account ingress.
+// The provider's private reader is its sole publisher and the engine is its
+// sole consumer.  This concrete ring deliberately stays in providers/ so the
+// execution layer depends only on IPrivateExecutionIngress rather than the
+// threading implementation.
+class ProviderExecutionIngress final : public IPrivateExecutionIngress
+{
+public:
+    static constexpr std::size_t capacity = 256;
+
+    bool try_publish(private_execution_record& record) noexcept override
+    {
+        if (failed_.load(std::memory_order_acquire) || record.sequence != 0)
+        {
+            failed_.store(true, std::memory_order_release);
+            return false;
+        }
+
+        const auto next = next_sequence_;
+        if (next == 0)
+        {
+            failed_.store(true, std::memory_order_release);
+            return false;
+        }
+        record.sequence = next;
+        if (!record.valid_shape() || !ring_.try_push(record))
+        {
+            record.sequence = 0;
+            failed_.store(true, std::memory_order_release);
+            return false;
+        }
+        ++next_sequence_;
+        return true;
+    }
+
+    bool try_pop(private_execution_record& record) noexcept override
+    {
+        return ring_.try_pop(record);
+    }
+
+    bool empty() const noexcept override { return ring_.empty(); }
+
+    bool failed() const noexcept override
+    {
+        return failed_.load(std::memory_order_acquire);
+    }
+
+    void latch_failure() noexcept override
+    {
+        failed_.store(true, std::memory_order_release);
+    }
+
+private:
+    RingBuffer<private_execution_record, capacity> ring_;
+    std::atomic<bool> failed_{false};
+    // Solely private-reader-owned; a second producer violates the provider
+    // contract rather than gaining accidental MPSC semantics.
+    std::uint64_t next_sequence_ = 1;
 };
 
 class IProvider
@@ -303,4 +366,21 @@ public:
 	// virtual poll calls on every market event. Provider/session ownership keeps
 	// the ingress alive until the final post-close drain.
 	virtual ProviderFundingIngress* funding_ingress() noexcept { return nullptr; }
+
+    // Authoritative private execution/funding ingress.  New live providers
+    // must expose this instead of split funding and fill queues so the engine
+    // can apply source order before every strategy/risk boundary.
+    virtual ProviderExecutionIngress* execution_ingress() noexcept
+    {
+        return nullptr;
+    }
+
+    // `true` only after finish_live_shutdown has joined the sole private
+    // ingress producer.  Engine uses this proof before final accounting; a
+    // default-false provider is never assumed safe merely because close()
+    // returned.
+    virtual bool private_execution_producer_joined() const noexcept
+    {
+        return false;
+    }
 };

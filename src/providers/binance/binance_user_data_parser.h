@@ -15,6 +15,16 @@
 class BinanceUserDataParser : public IFillParser
 {
 public:
+    bool is_harmless_private_control(
+        std::string_view raw) const noexcept override
+    {
+        // Binance documents the private-stream heartbeat as a raw text
+        // ping/pong.  Do not bless a JSON result/control envelope here: an
+        // unrelated authenticated JSON frame may carry account truth that
+        // this parser does not model.
+        return raw == "ping" || raw == "pong";
+    }
+
     execution_parse_result parse(std::string_view raw,
                                  parsed_exec& out) override
     {
@@ -101,25 +111,46 @@ public:
                                       has_commission)
             || candidate.cumulative_qty < 0.0)
             return execution_parse_result::malformed;
+        candidate.has_cumulative_qty = has_cumulative;
 
-        if (candidate.k == parsed_exec::kind::partial_fill
-            || candidate.k == parsed_exec::kind::full_fill)
+        const bool is_economic_fill =
+            candidate.k == parsed_exec::kind::partial_fill
+            || candidate.k == parsed_exec::kind::full_fill;
+        if (is_economic_fill)
         {
+            // Spot's `I` is the venue execution identity.  Do not substitute
+            // the order-level `i` or the optional trade id `t`: replay proof
+            // needs the immutable identity of this economic execution.
+            std::uint64_t execution_id = 0;
             if (!has_last_qty || !has_last_price || !has_cumulative
                 || !has_commission
                 || candidate.last_fill_qty <= 0.0
                 || candidate.last_fill_price <= 0.0
-                || candidate.cumulative_qty < candidate.last_fill_qty)
+                || candidate.cumulative_qty < candidate.last_fill_qty
+                || !provider_recovery::top_level_positive_u64(
+                    raw, "I", execution_id))
                 return execution_parse_result::malformed;
+            candidate.execution_id = std::to_string(execution_id);
         }
+        // A non-fill report may carry the cumulative quantity already booked
+        // by a prior fill, but it cannot carry a fresh price/quantity/fee
+        // delta.  Otherwise a lifecycle update would become an untracked
+        // economic mutation on the private fast path.
+        else if (((candidate.k == parsed_exec::kind::canceled
+                   || candidate.k == parsed_exec::kind::rejected
+                   || candidate.k == parsed_exec::kind::expired)
+                  && !has_cumulative)
+                 || (has_last_qty && candidate.last_fill_qty != 0.0)
+                 || (has_last_price && candidate.last_fill_price != 0.0)
+                 || (has_commission && candidate.commission != 0.0))
+            return execution_parse_result::malformed;
 
         std::string_view commission_asset;
         if (!optional_nullable_plain_string(raw, "N", commission_asset))
             return execution_parse_result::malformed;
         candidate.commission_asset.assign(
             commission_asset.data(), commission_asset.size());
-        if ((candidate.k == parsed_exec::kind::partial_fill
-             || candidate.k == parsed_exec::kind::full_fill)
+        if (is_economic_fill
             && candidate.commission != 0.0
             && candidate.commission_asset.empty())
             return execution_parse_result::malformed;
