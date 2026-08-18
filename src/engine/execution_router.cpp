@@ -57,12 +57,25 @@ std::shared_ptr<IExecutionAdapter> ExecutionRouter::resolve_adapter(const std::s
 
         if (cfg_.maker_queue_model)
         {
-            // Hybrid: limits → queue-aware; market/stop → local (never silent drop).
+            // Hybrid: passive limits → queue-aware; BBO-crossing limits →
+            // deterministic local taker; market/stop → configured local.
             auto qa = std::make_shared<QueueAwareBookAdapter>(
                 cfg_.maker_queue_model,
                 cfg_.fee_model,
                 cfg_.latency_model);
-            adapter = std::make_shared<HybridPaperAdapter>(std::move(local), std::move(qa));
+            // Crossing limits are takers. A deterministic LocalBook path over
+            // the same book prevents stochastic passive-fill models from
+            // dropping or downsizing an already marketable order.
+            auto aggressive_limits = std::make_shared<LocalBookAdapter>(
+                ob, cfg_.fee_model, std::make_shared<PerfectFillModel>(),
+                cfg_.seed != 0 ? static_cast<unsigned>(cfg_.seed + 2)
+                               : cfg_.fill_rng_seed,
+                cfg_.market_aggression, cfg_.qty_scale,
+                /*latency_model=*/nullptr, cfg_.impact_model,
+                cfg_.walked_book_impact);
+            adapter = std::make_shared<HybridPaperAdapter>(
+                std::move(local), std::move(qa), std::move(ob),
+                std::move(aggressive_limits));
         }
         else
         {

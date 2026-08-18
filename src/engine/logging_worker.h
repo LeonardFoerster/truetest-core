@@ -35,9 +35,8 @@ public:
 
     ~LoggingWorker()
     {
-        flush_batch();
-        if (event_logger_)
-            event_logger_->flush();
+        try { finalize(); }
+        catch (...) {}
     }
 
     const char* worker_name() const override { return "logging"; }
@@ -61,6 +60,16 @@ public:
     std::size_t events_processed() const
     {
         return events_processed_.load(std::memory_order_relaxed);
+    }
+
+    // Call after the worker thread has joined. Unlike destructor-only
+    // finalization, this gives the engine a synchronous failure boundary for
+    // the durable trailer/flush and lets it latch a terminal halt.
+    void finalize()
+    {
+        flush_batch();
+        if (event_logger_)
+            event_logger_->finalize();
     }
 
 private:

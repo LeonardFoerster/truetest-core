@@ -314,16 +314,17 @@ private:
     // level lies inside the bar's [low, high] traded through intrabar even
     // if the MM re-quote anchors (open/close/stop refs) never crossed it.
     // bar_volume caps aggregate fill qty (FR-bar-sweep-ignores-volume); 0 = uncapped.
-    void sweep_resting_limits(const std::string& symbol,
-                              double low, double high,
-                              const std::chrono::system_clock::time_point& ts,
-                              std::size_t& event_count, bool& halt_requested,
-                              double bar_volume = 0.0);
+    double sweep_resting_limits(const std::string& symbol,
+                                double low, double high,
+                                const std::chrono::system_clock::time_point& ts,
+                                std::size_t& event_count, bool& halt_requested,
+                                double bar_volume = 0.0);
 
     // Stops trigger on the bar's high/low and fill anchored at the stop
     // price (or the open when the bar gaps through). Tick callers pass
     // open == high == low == tick price.
-    void check_pending_stops(double open, double high, double low,
+    void check_pending_stops(std::string_view event_symbol,
+                             double open, double high, double low,
                              const std::chrono::system_clock::time_point& sim_time,
                              std::size_t& event_count, bool& halt_requested);
 
@@ -347,6 +348,9 @@ private:
     void dispatch_extras_on_tick(const tick_event& te,
                                  const std::chrono::system_clock::time_point& ts,
                                  std::size_t& event_count);
+    double marked_account_equity(std::string_view current_symbol,
+                                 double current_mark) const;
+    void sync_strategy_account_equity(IStrategy& strategy) const;
     void notify_position_change_all(const std::string& symbol, bool open);
 
     void process_single_bar(const bar_record& rec, std::size_t& event_count,
@@ -372,6 +376,23 @@ private:
     }
     std::priority_queue<pending_entry, std::vector<pending_entry>,
                         decltype(&engine::pending_cmp)> pending_orders_{&engine::pending_cmp};
+    struct bar_delayed_entry
+    {
+        std::shared_ptr<order_event> order;
+        uint64_t seq;
+        std::size_t remaining_symbol_events;
+    };
+    // execution_bar_delay is event-count based, not wall-clock based. Keep it
+    // separate from latency orders so an unrelated symbol can never release it.
+    // Both buffers are reserved before the run. The ready buffer lets the
+    // drain compact in one stable pass before submitting, without per-order
+    // vector::erase shifts or hot-path growth.
+    std::vector<bar_delayed_entry> bar_delayed_orders_;
+    std::vector<bar_delayed_entry> bar_delayed_ready_;
+    // Reused L2 adapter payloads. Reserved during cold initialization so a
+    // snapshot does not allocate on the provider→engine hot path.
+    std::vector<std::pair<double, double>> l2_bid_scratch_;
+    std::vector<std::pair<double, double>> l2_ask_scratch_;
     uint64_t order_seq_ = 0;
 
     std::vector<std::pair<std::string, uint64_t>> day_order_ids_;
@@ -465,6 +486,8 @@ private:
     // Extracted as private methods first (minimal surface on frozen file).
     // Later waves will delegate pending (W3), workers (W4).
     void clear_pending_state();
+    void prepare_event_logging();
+    void finalize_inline_event_log() noexcept;
     void setup_event_loop_infra();
     void teardown_event_loop_infra();
     void drain_final_pending(std::size_t& event_count, bool& halt_requested);
@@ -472,12 +495,12 @@ private:
     // Per-symbol mark for multi-symbol pending fills (EL-MULTISYM-MID).
     // last_mark_prices_[sym] if positive, else last_mid_price_.
     double mid_for_symbol(const std::string& symbol) const;
-    // Drain time-eligible pending orders; re-center each order's book at that
-    // symbol's mark and temporarily set last_mid so process_order / adapter
-    // mid / risk see the order symbol (not the current event symbol).
+    // Drain time-eligible latency orders plus bar-delayed orders whose next
+    // counted observation belongs to event_symbol. Re-center each order's
+    // book at that symbol's mark before submission.
     void drain_pending_orders(const std::chrono::system_clock::time_point& sim_time,
                               std::size_t& event_count, bool& halt_requested,
-                              bool force_all = false);
+                              std::string_view event_symbol);
     // Paper maker-queue: feed a trade print into resolved adapters then drain fills.
     // No-op unless config_.maker_queue_model is set (QueueAware needs a tape).
     void feed_paper_trade_and_drain(const std::string& symbol,
@@ -552,9 +575,13 @@ public:
 
     void apply_l2_snapshot(const std::string& symbol,
                            const std::vector<l2_level>& bids,
-                           const std::vector<l2_level>& asks);
+                           const std::vector<l2_level>& asks,
+                           std::chrono::system_clock::time_point timestamp = {},
+                           std::uint64_t quantity_scale = 1);
     void apply_l2_update(const std::string& symbol,
-                         tick_side side, double price, int64_t new_qty);
+                         tick_side side, double price, int64_t new_qty,
+                         std::chrono::system_clock::time_point timestamp = {},
+                         std::uint64_t quantity_scale = 1);
     void print_summary();
     const Analytics& get_analytics() const;
     // Research honesty: invalid CSV/tick rows counted at load (before workers start).

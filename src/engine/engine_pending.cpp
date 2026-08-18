@@ -2,15 +2,68 @@
 // (engine-decomposition: keep freeze surface lean; behavior unchanged).
 #include "engine.h"
 
+#include <cmath>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 #include <utility>
 
 void engine::clear_pending_state()
 {
     pending_stops_.clear();
     while (!pending_orders_.empty()) pending_orders_.pop();
+    bar_delayed_orders_.clear();
+    bar_delayed_ready_.clear();
+    if (bar_delayed_orders_.capacity() == 0)
+    {
+        const auto configured = config_.risk.max_open_orders > 0
+            ? static_cast<std::size_t>(config_.risk.max_open_orders)
+            : DEFAULT_RING_SIZE;
+        bar_delayed_orders_.reserve(configured);
+    }
+    if (bar_delayed_ready_.capacity() < bar_delayed_orders_.capacity())
+        bar_delayed_ready_.reserve(bar_delayed_orders_.capacity());
+    l2_bid_scratch_.clear();
+    l2_ask_scratch_.clear();
+    if (l2_bid_scratch_.capacity() < kL2SnapshotMaxLevels)
+        l2_bid_scratch_.reserve(kL2SnapshotMaxLevels);
+    if (l2_ask_scratch_.capacity() < kL2SnapshotMaxLevels)
+        l2_ask_scratch_.reserve(kL2SnapshotMaxLevels);
     order_seq_ = 0;
     day_order_ids_.clear();
+}
+
+void engine::prepare_event_logging()
+{
+    if (config_.event_log_path.empty())
+        return;
+    if (config_.threading == thread_preset::light)
+        throw std::runtime_error(
+            "event logging requires inline, standard, full, or extended threading");
+    if (config_.threading == thread_preset::inline_mode && !event_logger_)
+        event_logger_ = std::make_unique<EventLogger>(
+            config_.event_log_path, config_.compress_log,
+            config_.log_max_bytes, config_.log_max_files);
+}
+
+void engine::finalize_inline_event_log() noexcept
+{
+    if (!event_logger_ || config_.is_threaded())
+        return;
+    try
+    {
+        event_logger_->finalize();
+    }
+    catch (const std::exception& e)
+    {
+        run_failed_.store(true, std::memory_order_release);
+        trigger_halt(e.what());
+    }
+    catch (...)
+    {
+        run_failed_.store(true, std::memory_order_release);
+        trigger_halt("durable inline event-log finalization failed");
+    }
 }
 
 double engine::mid_for_symbol(const std::string& symbol) const
@@ -18,10 +71,11 @@ double engine::mid_for_symbol(const std::string& symbol) const
     {
         std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
         if (auto it = last_mark_prices_.find(symbol);
-            it != last_mark_prices_.end() && it->second > 0.0)
+            it != last_mark_prices_.end()
+            && std::isfinite(it->second) && it->second > 0.0)
             return it->second;
     }
-    return last_mid_price_.load(std::memory_order_relaxed);
+    return std::numeric_limits<double>::quiet_NaN();
 }
 
 void engine::prepare_mark_prices_for_run(std::size_t symbol_hint)
@@ -36,23 +90,23 @@ void engine::prepare_mark_prices_for_run(std::size_t symbol_hint)
 void engine::drain_pending_orders(
     const std::chrono::system_clock::time_point& sim_time,
     std::size_t& event_count, bool& halt_requested,
-    bool force_all)
+    std::string_view event_symbol)
 {
     // Preserve the event-loop mid (open/tick of the current symbol). Each
     // pending order may belong to a different symbol; fill mid and MM
     // re-center must track the order's marks, not the event's (EL-MULTISYM-MID).
-    // force_all (EOS): ignore eligibility cutoff; MM trades use order ts.
     const double event_mid = last_mid_price_.load(std::memory_order_relaxed);
-    while (!pending_orders_.empty() &&
-           (force_all ||
-            pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time) &&
-           !halt_requested &&
-           !halt_flag_.load(std::memory_order_acquire))
-    {
-        auto entry = pending_orders_.top();
-        pending_orders_.pop();
-        const auto& sym = entry.order->get_symbol();
+    auto submit = [&](const std::shared_ptr<order_event>& order) {
+        if (!order)
+            return true;
+        const auto& sym = order->get_symbol();
         const double mid = mid_for_symbol(sym);
+        if (!std::isfinite(mid) || mid <= 0.0)
+        {
+            trigger_halt("pending order has no valid same-symbol mark");
+            halt_requested = true;
+            return false;
+        }
         last_mid_price_.store(mid, std::memory_order_release);
 
         if (!mm_worker_ && !l2_seeded_symbols_.count(sym))
@@ -60,35 +114,191 @@ void engine::drain_pending_orders(
             auto ob = orderbook_registry_.get_or_create(sym);
             auto mm_trades = market_maker_.replenish(
                 ob, mid, /*update_history=*/false);
-            const auto mm_ts = force_all
-                ? entry.order->get_earliest_eligible_ts()
-                : sim_time;
-            deliver_mm_book_trades(sym, mm_trades, mm_ts,
+            deliver_mm_book_trades(sym, mm_trades, sim_time,
                                    event_count, halt_requested);
             if (halt_requested || halt_flag_.load(std::memory_order_acquire))
-            {
-                last_mid_price_.store(event_mid, std::memory_order_release);
-                return;
-            }
+                return false;
         }
 
-        if (entry.order->get_tif() == time_in_force::day)
-            day_order_ids_.push_back({sym, entry.order->get_order_id()});
-        if (!process_order(entry.order, event_count, halt_requested))
+        if (order->get_tif() == time_in_force::day)
+            day_order_ids_.push_back({sym, order->get_order_id()});
+        return process_order(order, event_count, halt_requested);
+    };
+
+    while (!pending_orders_.empty() &&
+           pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time &&
+           !halt_requested &&
+           !halt_flag_.load(std::memory_order_acquire))
+    {
+        auto entry = pending_orders_.top();
+        pending_orders_.pop();
+        if (!submit(entry.order))
         {
             last_mid_price_.store(event_mid, std::memory_order_release);
             return;
         }
     }
+    if (halt_requested || halt_flag_.load(std::memory_order_acquire))
+    {
+        last_mid_price_.store(event_mid, std::memory_order_release);
+        return;
+    }
+
+    // A non-empty ready buffer means a prior submission stopped on a terminal
+    // halt before its remaining due orders could be restored. Never resume or
+    // silently discard that retained state.
+    if (!bar_delayed_ready_.empty())
+    {
+        trigger_halt("delayed-order scheduler retained ready orders after halt");
+        halt_requested = true;
+        last_mid_price_.store(event_mid, std::memory_order_release);
+        return;
+    }
+
+    const std::size_t delayed_count = bar_delayed_orders_.size();
+    if (delayed_count > bar_delayed_ready_.capacity())
+    {
+        trigger_halt("delayed-order scheduler ready capacity exhausted");
+        halt_requested = true;
+        last_mid_price_.store(event_mid, std::memory_order_release);
+        return;
+    }
+
+    // Stable, allocation-free single pass. Survivors retain insertion order in
+    // bar_delayed_orders_; due entries retain insertion order in the prewarmed
+    // ready buffer. Submission happens only after compaction so an order routed
+    // by a submission can use the slot just released and cannot be counted by
+    // the same observation.
+    std::size_t survivor_count = 0;
+    for (std::size_t read = 0; read < delayed_count; ++read)
+    {
+        auto& entry = bar_delayed_orders_[read];
+        const bool same_symbol = entry.order
+            && entry.order->get_symbol() == event_symbol;
+        if (same_symbol && entry.remaining_symbol_events <= 1)
+        {
+            bar_delayed_ready_.push_back(std::move(entry));
+            continue;
+        }
+
+        if (same_symbol)
+            --entry.remaining_symbol_events;
+        if (survivor_count != read)
+            bar_delayed_orders_[survivor_count] = std::move(entry);
+        ++survivor_count;
+    }
+    bar_delayed_orders_.resize(survivor_count);
+
+    auto restore_ready_suffix = [&](std::size_t first_unsubmitted) {
+        const std::size_t remaining =
+            bar_delayed_ready_.size() - first_unsubmitted;
+        if (remaining == 0)
+        {
+            bar_delayed_ready_.clear();
+            return;
+        }
+        if (remaining > bar_delayed_orders_.capacity()
+                            - bar_delayed_orders_.size())
+            return;
+
+        const std::size_t old_size = bar_delayed_orders_.size();
+        bar_delayed_orders_.resize(old_size + remaining);
+        std::size_t left = old_size;
+        std::size_t right = bar_delayed_ready_.size();
+        std::size_t out = old_size + remaining;
+        while (left > 0 && right > first_unsubmitted)
+        {
+            if (bar_delayed_orders_[left - 1].seq
+                > bar_delayed_ready_[right - 1].seq)
+            {
+                bar_delayed_orders_[--out] =
+                    std::move(bar_delayed_orders_[--left]);
+            }
+            else
+            {
+                bar_delayed_orders_[--out] =
+                    std::move(bar_delayed_ready_[--right]);
+            }
+        }
+        while (right > first_unsubmitted)
+        {
+            bar_delayed_orders_[--out] =
+                std::move(bar_delayed_ready_[--right]);
+        }
+        bar_delayed_ready_.clear();
+    };
+
+    for (std::size_t i = 0; i < bar_delayed_ready_.size(); ++i)
+    {
+        if (halt_requested || halt_flag_.load(std::memory_order_acquire))
+        {
+            restore_ready_suffix(i);
+            last_mid_price_.store(event_mid, std::memory_order_release);
+            return;
+        }
+        auto order = std::move(bar_delayed_ready_[i].order);
+        // Bar-delay fills belong to the observation that released them, not
+        // to the signal timestamp plus an artificial nanosecond.
+        order->set_earliest_eligible_ts(sim_time);
+        if (!submit(order))
+        {
+            // The failed order matches the old erase-before-submit behavior.
+            // Restore every not-yet-submitted due order in global insertion
+            // order when bounded capacity permits. This is a linear in-place
+            // merge; it allocates nothing. If a pathological re-entrant route
+            // consumed those slots, retain the suffix in ready_ for the final
+            // fail-closed expiry path instead of growing or dropping it.
+            const std::size_t first_unsubmitted = i + 1;
+            restore_ready_suffix(first_unsubmitted);
+            last_mid_price_.store(event_mid, std::memory_order_release);
+            return;
+        }
+    }
+    bar_delayed_ready_.clear();
     last_mid_price_.store(event_mid, std::memory_order_release);
 }
 
 void engine::drain_final_pending(std::size_t& event_count, bool& halt_requested)
 {
-    // Honor both the local out-param and the process-wide halt_flag_ so a
-    // risk halt mid-drain does not keep submitting remaining pendings.
-    drain_pending_orders(/*sim_time=*/{}, event_count, halt_requested,
-                         /*force_all=*/true);
+    // No future market observation exists at EOF. Submitting here fabricates
+    // both liquidity and a causal timestamp. Expire every never-submitted
+    // candidate and release its authoritative lifecycle slot instead.
+    (void)halt_requested;
+    auto expire = [&](const std::shared_ptr<order_event>& order) {
+        if (!order)
+            return;
+        const auto& sym = order->get_symbol();
+        const auto order_id = order->get_order_id();
+        order_tracker_.set_status(order_id, order_status::cancelled);
+        if (dashboard_builder_) dashboard_builder_->erase_open_order(order_id);
+        const auto ts = last_sim_time_.time_since_epoch().count() != 0
+            ? last_sim_time_ : order->get_timestamp();
+        constexpr const char* reason =
+            "backtest_eos_without_future_market_event";
+        auto cancel_ev = acquire_pooled(cancel_pool_, ts, sym, order_id, reason);
+        log_event(*cancel_ev);
+        publish_event(cancel_ev);
+        if (!config_.is_threaded())
+            analytics_.on_event(cancel_ev);
+        audit_sink_->record_cancellation(order_id, sym.c_str(),
+            lookup_strategy_name(order_id).c_str(), reason);
+        audit_sink_->record_status_transition(order_id,
+            order_status::pending, order_status::cancelled, reason);
+        ++event_count;
+    };
+
+    while (!pending_orders_.empty())
+    {
+        auto entry = pending_orders_.top();
+        pending_orders_.pop();
+        expire(entry.order);
+    }
+    for (const auto& entry : bar_delayed_orders_)
+        expire(entry.order);
+    bar_delayed_orders_.clear();
+    for (const auto& entry : bar_delayed_ready_)
+        expire(entry.order);
+    bar_delayed_ready_.clear();
 }
 
 void engine::cancel_day_orders()
@@ -164,8 +374,11 @@ void engine::teardown_event_loop_infra()
     // and pools become unreachable.
     drain_object_pool_returns();
 
-    if (event_logger_) event_logger_->flush();
     stop_workers();
+    // Provider shutdown can enqueue one final settlement.  Finalize the
+    // synchronous ledger only after stop_workers() has quiesced the producer
+    // and drained that settlement.
+    finalize_inline_event_log();
 #ifdef HAS_QUESTDB
     questdb_end();
 #endif
