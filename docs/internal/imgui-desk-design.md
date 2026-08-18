@@ -1,9 +1,43 @@
 # ImGui Strategy Desk — Design Note
 
-**Status**: Active (workspace shell v2; research data wiring pending)  
-**Date**: 2026-08-03  
+**Status**: Active (v4 workspace shell: MARKET/RESEARCH/OPERATIONS/DIAGNOSTICS; Research data wiring pending)  
+**Date**: 2026-08-03 (v4 workspace redesign: 2026-08-18)  
 **Scope**: Personal attended client for Develop → Research → Monitor → Execute  
 **Non-scope**: Multi-tenant SaaS inside the engine; in-desk C++ strategy IDE
+
+## v4 redesign summary (2026-08-18)
+
+v3 shipped five fully-defined workspaces (Orderflow/Liquidity/Structure/
+Markets/Operations) but kept only `Monitor` (a sixth, minimal page) active in
+`desk_pages` — a deliberate interim state (see the v3 delivery checklist
+below). v4 replaces that shape with four top-level operator workspaces and
+retires `Monitor` (its content is redistributed: symbol-filtered positions/
+activity moved to MARKET, all-symbol activity/health/risk stayed in
+OPERATIONS):
+
+- **MARKET** — the former Orderflow/Liquidity/Structure/Markets pages, now
+  reachable as an internal view switcher (Footprint · Liquidity · Structure ·
+  Cross-market) under one workspace tab instead of four separate top-level
+  entries. Each subview keeps its own dockspace/geometry/panel set —
+  `DeskPage` stays the fine-grained layout unit; `DeskWorkspace` is the new,
+  coarser grouping the operator actually navigates (`desk_layout_model.h`).
+- **OPERATIONS** — the former Operations page, unchanged in content, plus two
+  strips drawn above its dockspace: the trimmed Account strip (7 metrics —
+  see below) and the previously-unwired `draw_safety_strip` (Safety Status:
+  halt/pause/kill-hook/provider/stream, deliberately separate from the
+  dockable Risk panel's measured limits).
+- **DIAGNOSTICS** — new page hosting the existing (previously unwired) Debug
+  panel (`panels/debug_panel.cpp`) as its own top-level home instead of
+  engineering telemetry having no page at all.
+- **RESEARCH** — new page (`panels/research_workspace_panel.cpp`), Setup /
+  Report / Monte Carlo / Replay tabs. No isolated backtest-launcher,
+  resolved-config preview, or AnalyticsReport/MC-report seam exists in the
+  desk yet, so every tab renders an honest NOT WIRED / UNAVAILABLE state
+  rather than reimplementing config precedence or inventing report data —
+  see "Research: current vs future wiring" below.
+
+Layout bumped to **v4** (`truetest_desk_v4.ini`) — v3's Monitor-only layout
+cannot be silently reinterpreted as the new shape.
 
 ---
 
@@ -48,19 +82,47 @@ local fixture can be enabled manually and is persistently labeled `DEMO DATA`.
 
 ## 4. Workspaces
 
-| Workspace | Primary surface | Secondary surfaces |
-|-----------|-----------------|--------------------|
-| Orderflow | Footprint/orderflow canvas | Linked watchlist, DOM, selected context, compact tabbed activity blotter |
-| Liquidity | Historical L2 heatmap | DOM, liquidation clusters and tape |
-| Structure | TPO / market profile | Volume profile and session context |
-| Markets | Rolling correlation | Funding intelligence; detail opens later from an explicit selection |
-| Operations | Equity/drawdown | Strategies, risk, system health and all-symbol activity |
+Top-level navigation (`DeskWorkspace` in `desk_layout_model.h`), left to
+right in the chrome: **MARKET · RESEARCH · OPERATIONS · DIAGNOSTICS**.
+`DeskPage` remains the actual dockspace/geometry/panel-assignment unit —
+`desk_workspace_of(DeskPage)` maps each page to its workspace, and
+`desk_workspace_pages(DeskWorkspace)` returns the page(s) reachable from a
+workspace (Market has four; the other three have exactly one each).
 
-The default Orderflow layout is optimized for a 2560×1440 single monitor:
-14% watchlist, 68% primary canvas, 18% DOM/context rail, and a 20%-high
-collapsible activity blotter under the watchlist/canvas. Versioned persistence
-uses `truetest_desk_v2.ini`; temporary focus mode snapshots and restores the
-normal ImGui layout while using separate transient dockspaces.
+| Workspace | Subview / page | Primary surface | Secondary surfaces |
+|-----------|-----------------|-----------------|--------------------|
+| MARKET | Footprint (`orderflow`) | Footprint/orderflow canvas | Linked watchlist, DOM, selected context, symbol-filtered activity blotter |
+| MARKET | Liquidity | Historical L2 heatmap | DOM, liquidation clusters and tape |
+| MARKET | Structure | TPO / market profile | Volume profile and session context |
+| MARKET | Cross-market (`markets`) | Rolling correlation | Funding intelligence |
+| OPERATIONS | `operations` | Equity/drawdown | Strategies, risk, system health, all-symbol activity; Account + Safety Status strips above the dockspace |
+| DIAGNOSTICS | `diagnostics` | Debug (build/threading/rings/pools/engine-state/stage-timings/memory/subsystem errors) | — (single dominant pane) |
+| RESEARCH | `research` | Setup/Report/Monte Carlo/Replay tabs, capability-gated NOT WIRED content | — |
+
+The default Market/Footprint layout is optimized for a 2560×1440 single
+monitor: 14% watchlist, 68% primary canvas, 18% DOM/context rail, and a
+20%-high collapsible activity blotter under the watchlist/canvas. Diagnostics
+and Research use a single dominant pane (no left/right/bottom splits).
+Versioned persistence uses `truetest_desk_v4.ini`; temporary focus mode
+snapshots and restores the normal ImGui layout while using separate
+transient dockspaces.
+
+A compact **Market metric band** (mid/last, spread bps, microprice,
+imbalance, update rate, queue position) renders above the dockspace whenever
+a MARKET subview is active and a snapshot exists — deliberately excluding
+account/build metrics, which stay in Operations/Diagnostics.
+
+### MIXED SOURCES
+
+The desk can simultaneously show a real/live footprint (via
+`set_live_footprint_source`) alongside sibling research surfaces still
+published from the demo fixture. `research_presentation_has_mixed_sources()`
+(`research_views.h`) classifies each surface's `DeskDataState` into `demo` /
+`real` / `none` and flags the aggregate as mixed only when both a demo and a
+real surface are simultaneously present — a `MIXED SOURCES` badge then
+appears in global chrome. This is in addition to, never a replacement for,
+each panel's own per-surface provenance header; one live surface can never
+make its demo siblings read as live.
 
 ## 5. Presentation contract
 
@@ -80,6 +142,36 @@ normal ImGui layout while using separate transient dockspaces.
   Operations state is shown as unavailable, never as zero or safe.
 
 Honest series only — no unlabeled synthetic sparklines.
+
+### Safety vs Risk (OPERATIONS)
+
+The Risk panel (`panels/status_panels.cpp::draw_risk_panel`) and the Safety
+Status strip (`draw_safety_strip`) are deliberately separate surfaces, not
+one merged "risk & safety" panel:
+
+- **Risk** owns *measured limits*: drawdown/limit, exposure/limit, open
+  orders/limit gauges. An absent limit renders "no limit configured", never
+  0%/"safe".
+- **Safety Status** owns the terminal-halt / pause / kill-hook / provider /
+  stream distinction: `HALT SET — RESTART` vs `HALT not set` (never "clear
+  halt"), strategies blocked-by-halt vs paused vs enabled, whether the kill
+  hook exists at all, and provider/stream lifecycle. Roadmap safety states
+  (DMS countdown, external watchdog, reconciler detail, ambiguous kill
+  result) are not inferred from these fields — they simply have no row until
+  a trustworthy seam exists.
+
+### Capability model
+
+`desk_capabilities.h` provides a small, pure, cold `DeskCapabilities` struct
+(`derive_desk_capabilities(...)`) answering "is X actually available right
+now" (snapshot, pause/flatten/kill hooks, debug telemetry, QuestDB active,
+a research surface present) from data the desk already holds — never
+inferred, never defaulted to available. Fields for roadmap seams that do not
+exist yet (`research_report_available`, `research_launcher_available`,
+`research_resolved_config_available`) stay explicitly `false`. This is not
+an engine state machine; it exists to stop re-deriving the same presence
+checks ad hoc across panels (currently consumed by the RESEARCH workspace
+panel; not yet threaded through every panel that could use it).
 
 ## 6. Control policy
 
@@ -115,7 +207,63 @@ src/engine/      no ImGui includes
 - SaaS orchestrator spawns processes; remote viewers are read-only snapshot consumers.
 - Personal desk stays attended single-operator.
 
-## 10. Delivery checklist
+## 9a. DIAGNOSTICS role
+
+DIAGNOSTICS hosts the existing Debug panel content (build/target flags,
+threading, rings, pools, engine-state counters, stage timings — build-
+dependent on `ENABLE_DEBUG`, "N/A — build with ENABLE_DEBUG" when absent —
+process memory, pool/ring memory estimates, subsystem error strings) as its
+own top-level workspace rather than leaving it unreachable from any page.
+It is intentionally less polished than MARKET/OPERATIONS for a non-developer
+operator, but never implies health from the absence of error text.
+
+## 9b. RESEARCH: current vs future wiring
+
+RESEARCH (`panels/research_workspace_panel.cpp`) is deliberately built as a
+capability-gated shell, not a partial implementation dressed up as
+complete:
+
+| Tab | State today | What's missing |
+|-----|-------------|-----------------|
+| Setup | Reference-only description of the CLI/JSON config surface (`--config`/`--preset`/`--dry-run`/`--dump-config`) | No resolved-configuration preview and no in-desk backtest launch — see seams below |
+| Report | UNAVAILABLE | No `AnalyticsReport` source is ever wired to `research_fn_`; the desk's research callback only ever publishes market-structure `ResearchPresentation` data |
+| Monte Carlo | NOT WIRED | No campaign setup/trial/seed/aggregate/distribution/drill-down surface exists |
+| Replay | NOT WIRED | `--replay` remains CLI-only; no in-desk control to trigger or browse a replay run |
+
+**Seams a future session would need** (do not build ad hoc without design
+review, per the redesign brief's launch-boundary guidance):
+
+1. A cold-path call into the existing dry-run/resolved-config resolver,
+   invokable without starting an engine run, to power the Setup tab's
+   resolved-configuration preview.
+2. An isolated `engine_backtest` child-process launch API — a heavy backtest
+   must never run on the attached shadow/live engine event loop. If this
+   already exists elsewhere in the tree, integrate it; if not, this redesign
+   deliberately does **not** invent a new process-orchestration subsystem to
+   fill the gap.
+3. An `AnalyticsReport`/MC-report publication path into `research_fn_` (or a
+   sibling callback), following the same immutable-snapshot pattern as
+   `ResearchPresentation`.
+
+## 10. Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+K` | Command palette (includes all four workspaces, Market subviews, reset layout, focus primary, layout lock, density, demo toggle) |
+| `F1` | Help overlay |
+| `F11` | Focus/restore primary surface |
+| `P` | Pause / resume (bare key; suppressed while typing, palette open, or a confirm modal is open) |
+| `F` | Flatten (confirm modal) |
+| `K` | Kill switch (confirm modal) |
+| `Esc` | Cancel confirm / close help |
+
+Top chrome carries two rows: **WORKSPACE** (MARKET · RESEARCH · OPERATIONS ·
+DIAGNOSTICS) and, only while MARKET is active, **MARKET VIEW** (Footprint ·
+Liquidity · Structure · Cross-market). Selecting MARKET from another
+workspace returns to whichever Market subview was last active
+(`last_market_view_`), not always Footprint.
+
+## 11. Delivery checklist
 
 | Phase | Deliverable |
 |-------|-------------|
@@ -124,7 +272,8 @@ src/engine/      no ImGui includes
 | 3 | DOM/footprint/volume profile wiring |
 | 4 | Book-history heatmaps, TPO and liquidation wiring |
 | 5 | Funding/correlation sources and interactive detail |
-| 6 | Research report/backtest launcher and MC review |
+| 6 (**this redesign, 2026-08-18**) | v4: four-workspace shell (MARKET/RESEARCH/OPERATIONS/DIAGNOSTICS) replacing the v3 Monitor-only shape; Safety Status and Debug panels wired to real pages; capability model + mixed-source provenance badge; RESEARCH shell honestly NOT WIRED pending the seams in §9b |
+| 7 | Research report/backtest launcher and MC review (needs §9b seams) |
 
 ---
 

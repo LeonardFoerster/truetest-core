@@ -9,14 +9,21 @@
 ### Core / Replay / Logging
 | Flag                          | What it does |
 |-------------------------------|--------------|
-| `--replay <path>`             | Replay from a binary event log (zstd-compressed). |
-| `--replay-from / --replay-to` | Time window (µs since epoch) inside the replay file. |
+| `--replay <path>`             | Authoritative ledger replay from a finalized, current-v2, non-rotated binary event log; recorded orders, fills and funding are applied once and strategies are not rerun. Use the same initial balance as the recorded run. |
+| `--replay-from / --replay-to` | Both bounds are currently refused for ledger replay: prefix state is unavailable and append order need not be monotonic in exchange-event time. |
 | `--log-events <path>`         | Write binary event log (market + order + fill events) for this run. |
 | `--log-file <path>`           | Write operational text log (L1) instead of stderr. |
 | `--log-max-size <MB>`         | Rotate logs after this size (L3). 0 = no rotation. |
 | `--log-keep <N>`              | How many rotated log files to keep. |
 | `--compress-log / --no-compress-log` | Toggle zstd compression of binary event logs (default on). |
 | `--seed <uint64>`             | Master RNG seed (0 = non-deterministic). |
+
+`--log-events` is intentionally refused together with `--replay`; replay reads
+an authoritative ledger and does not generate a second event log.
+Logs created with `--log-max-size > 0` are marked as independent rotation
+segments and remain inspection-only until a manifest-based stitching format is
+implemented. Use the default `--log-max-size 0` when authoritative replay is
+required.
 
 ### Threading / CPU
 | Flag                    | What it does |
@@ -112,7 +119,7 @@
 ### Realism Models (backtest/shadow only)
 | Flag                        | What it does |
 |-----------------------------|--------------|
-| `--exec-bar-delay <N>`      | Bars of execution delay (1 = parks until next bar open; kills same-bar lookahead). |
+| `--exec-bar-delay <N>`      | Future same-symbol price events before submission (1 = next observation; prevents same-bar execution; no EOS force-fill). |
 | `--wire-latency-us`         | Extra wire + ingest latency on top of any engine latency model. |
 | `--order-latency-us / --order-latency-stddev-us` | Strategy→eligible delay (fixed or stochastic). |
 | `--impact-k-bps / --impact-adv` | Square-root market impact model. |
@@ -159,7 +166,7 @@ Strategies do **not** need to implement SL/TP. Rich strategy intents (ATR/fib/sc
 ### ImGui strategy desk (only when built with `ENABLE_IMGUI=ON` / `HAS_IMGUI_DESK`)
 | Flag | What it does |
 |------|----------------|
-| `--desk` | Open the personal ImGui desk (Monitor panels + operator pause/flatten/kill). Prefer over rich TUI when set. Batch runs keep the window open on the final snapshot until closed. See `docs/internal/imgui-desk-design.md`. |
+| `--desk` | Open the personal ImGui desk (MARKET/RESEARCH/OPERATIONS/DIAGNOSTICS workspaces + operator pause/flatten/kill). Prefer over rich TUI when set. Batch runs keep the window open on the final snapshot until closed. See `docs/internal/imgui-desk-design.md`. |
 | `--desk-demo-data` | Start the desk with deterministic DEMO DATA research panels already enabled (same as the menu toggle) - headless visual QA / manual smoke without a mouse click. |
 | `--no-footprint` | Disable footprint public-trade collection, which otherwise auto-activates with `--desk`. Never affects trading behavior either way; it is purely observational. See `docs/internal/imgui-desk-design.md`. |
 | `--footprint-tick-size` | Exact decimal tick-size override for the footprint panel (e.g. `0.01`), used only when official instrument metadata disagrees or is unavailable; conflicting values make the footprint unavailable rather than guessing. |
