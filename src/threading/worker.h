@@ -125,8 +125,32 @@ public:
 
         while (inbound.try_pop(ev))
         {
-            try { on_event(ev); }
-            catch (...) {}
+            try
+            {
+                on_event(ev);
+            }
+            catch (const std::exception& e)
+            {
+                error_count_.fetch_add(1, std::memory_order_relaxed);
+                LOG_ERROR(worker_name(),
+                          "on_event exception while draining: %s", e.what());
+                exception_ = std::current_exception();
+                if (failure_flag_)
+                    failure_flag_->store(true, std::memory_order_release);
+                notify_failure();
+                return;
+            }
+            catch (...)
+            {
+                error_count_.fetch_add(1, std::memory_order_relaxed);
+                LOG_ERROR(worker_name(),
+                          "unknown on_event exception while draining");
+                exception_ = std::current_exception();
+                if (failure_flag_)
+                    failure_flag_->store(true, std::memory_order_release);
+                notify_failure();
+                return;
+            }
         }
     }
 

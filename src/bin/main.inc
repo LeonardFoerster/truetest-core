@@ -468,6 +468,14 @@ static bool validate_binance_futures_live_phase0(const cli_options& o,
                   "[0,1] (use 0.07 for 7%).\n";
         return false;
     }
+    if (!std::isfinite(o.max_notional_usdt)
+        || !std::isfinite(o.max_leverage)
+        || !std::isfinite(o.risk_max_daily_loss))
+    {
+        errors << "  ! --max-notional, --max-leverage, and "
+                  "--max-daily-loss must be finite values.\n";
+        return false;
+    }
     if (o.dead_man_countdown_ms < 0 || o.dead_man_heartbeat_ms < 0
         || (o.dead_man_countdown_ms == 0 && o.dead_man_heartbeat_ms > 0)
         || (o.dead_man_countdown_ms > 0 && o.dead_man_heartbeat_ms > 0
@@ -514,6 +522,22 @@ static bool validate_binance_futures_live_phase0(const cli_options& o,
         }
         warnings << "  [Phase 0] WARNING: --max-daily-loss is 0 (disabled). "
                     "Set a conservative daily loss limit before mainnet.\n";
+    }
+
+    if (!sandbox && o.event_log_path.empty())
+    {
+        errors << "  ! Refusing mainnet futures live mode without a durable "
+                  "binary event log.\n"
+                  "    Set --log-events to an operator-controlled path.\n";
+        return false;
+    }
+    if (!sandbox && o.log_max_size_mb > 0)
+    {
+        errors << "  ! Refusing mainnet futures live mode with binary event "
+                  "log rotation enabled.\n"
+                  "    Use --log-max-size 0 until rotated segments have an "
+                  "authoritative stitching manifest.\n";
+        return false;
     }
 
     return true;
@@ -876,8 +900,12 @@ static void dump_config(const cli_options& o)
 static void register_cli_options(CLI::App& app, cli_options& o)
 {
     app.add_option("--replay", o.replay_path, "Path to event log for replay mode");
-    app.add_option("--replay-from", o.replay_from_us, "Replay from timestamp (microseconds since epoch)");
-    app.add_option("--replay-to", o.replay_to_us, "Replay to timestamp (microseconds since epoch)");
+    app.add_option("--replay-from", o.replay_from_us,
+                   "Replay lower bound (microseconds since epoch; nonzero is "
+                   "currently refused because ledger prefix state is unavailable)");
+    app.add_option("--replay-to", o.replay_to_us,
+                   "Replay upper bound (microseconds since epoch; non-default "
+                   "is currently refused because append order need not follow event time)");
     app.add_option("--log-events", o.event_log_path, "Path to write binary event log");
     app.add_option("--log-file", o.log_file_path, "Path to write operational log (L1, default: stderr)");
     app.add_option("--log-max-size", o.log_max_size_mb, "Max size (MB) per event/text log before rotation (L3, 0 = no rotation)");
@@ -933,7 +961,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
         "|post_qty| * mark_price <= cap. 0 disables. Default: 0.");
     app.add_option("--max-leverage", o.max_leverage,
         "(futures providers) Pre-trade implied-leverage cap: "
-        "post_notional / cash <= cap. 0 disables. Default: 0.");
+        "post_notional / marked account equity <= cap. 0 disables. Default: 0.");
     app.add_option("--min-liq-distance-pct", o.min_liquidation_distance_pct,
         "(futures providers) Minimum projected post-trade buffer "
         "to liquidation, as a fraction (0.05 = 5%). 0 disables. "
@@ -1024,8 +1052,9 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Max points retained in equity/benchmark curves before decimation")
         ->default_val(100000);
     app.add_option("--exec-bar-delay", o.exec_bar_delay,
-                   "Bars of simulated execution delay for backtest/shadow. "
-                   "1 (default) parks orders until next bar's open - kills same-bar look-ahead. "
+                   "Same-symbol price events of simulated execution delay for "
+                   "backtest/shadow. 1 (default) parks orders until the next "
+                   "observation for that symbol and prevents same-bar execution. "
                    "0 disables. Ignored when --mode live or a latency model is configured.")
         ->default_val(1);
     app.add_option("--wire-latency-us", o.wire_latency_us,
@@ -1517,16 +1546,19 @@ static int run_dry_run(const cli_options& o)
 
 static int run_replay_mode(const cli_options& o)
 {
-    std::cout << "\n  Replaying events from: " << o.replay_path << "\n";
-    std::cout << "  Using Mean Reversion strategy (default) for replay.\n";
+    if (!o.event_log_path.empty())
+        throw std::invalid_argument(
+            "--log-events cannot be combined with authoritative --replay");
 
-    auto strategy = std::make_shared<mean_reversion_strategy>(20);
-    apply_execution_cost_params(*strategy, o);
-    apply_strategy_params(*strategy, o.params);
+    std::cout << "\n  Replaying events from: " << o.replay_path << "\n";
+    std::cout << "  Applying recorded orders, fills and funding as an authoritative ledger.\n";
+
+    std::shared_ptr<IStrategy> strategy;
 
     engine_config cfg;
     cfg.seed = o.seed;
-    cfg.event_log_path = o.event_log_path;
+    cfg.initial_balance = o.balance;
+    cfg.threading = thread_preset::inline_mode;
     cfg.compress_log = o.compress_log;
     cfg.log_max_bytes = o.log_max_size_mb * 1024ull * 1024ull;
     cfg.log_max_files = o.log_keep;
@@ -1578,6 +1610,7 @@ static int run_monte_carlo_mode(const cli_options& o)
     }
     mc_cfg.base_seed = o.seed;
     mc_cfg.initial_balance = o.balance;
+    mc_cfg.risk_fraction = o.risk_fraction;
 
     // Strategy --param key=value (same contract as single-run backtests)
     for (const auto& p : o.params) {
