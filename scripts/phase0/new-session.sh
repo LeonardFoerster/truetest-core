@@ -27,6 +27,7 @@ REGIME="medium"
 NOTES=""
 DATE_UTC=$(date -u +%Y%m%d_%H%M)
 RUN_TAG="p0_${DATE_UTC}"
+EVENT_LOG="./event_log_${RUN_TAG}.bin"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -55,7 +56,12 @@ export BINANCE_FUTURES_SECRET=...
   --depth-stream depth20@100ms \\
   --live \\
   --api-key "\${BINANCE_FUTURES_KEY}" --api-secret "\${BINANCE_FUTURES_SECRET}" \\
-  --persist --run-tag ${RUN_TAG}
+  --log-events "${EVENT_LOG}" \\
+  --persist --run-tag ${RUN_TAG} \\
+  --reconcile-tolerance-bps 3 \\
+  --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \\
+  --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 0.07 \\
+  --max-daily-loss 80 --risk-unwind
 EOF
 )
 
@@ -66,6 +72,7 @@ echo "PHASE 0 — NEW SESSION GENERATOR"
 echo "=================================================================="
 echo ""
 echo "Run tag     : ${RUN_TAG}"
+echo "Event log   : ${EVENT_LOG}"
 echo "Symbol(s)   : ${SYMBOL}"
 echo "Regime      : ${REGIME}"
 echo "Target dir  : ${DIR_NAME}"

@@ -42,6 +42,7 @@ export BINANCE_FUTURES_SECRET=...
   --stream trade \\
   --depth-stream depth20@100ms \\
   --api-key "\${BINANCE_FUTURES_KEY}" --api-secret "\${BINANCE_FUTURES_SECRET}" \\
+  --log-events "./event_log_${RUN_TAG}.bin" \\
   --persist --run-tag ${RUN_TAG} \\
   --reconcile-tolerance-bps 3 \\
   --dead-man-countdown-ms 30000 --dead-man-heartbeat-ms 8000 \\
