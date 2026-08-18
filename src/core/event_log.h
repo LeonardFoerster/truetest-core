@@ -16,7 +16,18 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
+
+#if defined(__linux__)
+#include <cerrno>
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <linux/openat2.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 #include <zstd.h>
 
@@ -649,9 +660,534 @@ static constexpr std::array<uint8_t, 4> EVENT_LOG_FILE_MAGIC{
 static constexpr uint8_t EVENT_LOG_FILE_VERSION = 1;
 static constexpr uint8_t EVENT_LOG_FILE_FLAG_ZSTD = 1U << 0;
 static constexpr uint8_t EVENT_LOG_FILE_FLAG_FINALIZED = 1U << 1;
+// Set from the first descriptor-backed write.  A live ledger carrying this
+// bit is deliberately unreplayable until publication adds the companion
+// PUBLISHED bit after every durable filesystem step has succeeded.
+static constexpr uint8_t EVENT_LOG_FILE_FLAG_AUTHORITATIVE = 1U << 2;
+static constexpr uint8_t EVENT_LOG_FILE_FLAG_AUTHORITATIVE_PUBLISHED = 1U << 3;
 static constexpr uint8_t EVENT_LOG_FILE_KNOWN_FLAGS =
-    EVENT_LOG_FILE_FLAG_ZSTD | EVENT_LOG_FILE_FLAG_FINALIZED;
+    EVENT_LOG_FILE_FLAG_ZSTD | EVENT_LOG_FILE_FLAG_FINALIZED
+    | EVENT_LOG_FILE_FLAG_AUTHORITATIVE
+    | EVENT_LOG_FILE_FLAG_AUTHORITATIVE_PUBLISHED;
 static constexpr std::streamoff EVENT_LOG_FILE_PREAMBLE_BYTES = 6;
+
+#if defined(__linux__)
+namespace event_log_detail {
+
+[[noreturn]] inline void throw_errno(std::string_view operation)
+{
+    const int error = errno;
+    throw std::runtime_error(std::string(operation) + ": "
+                             + std::strerror(error));
+}
+
+inline void split_authoritative_ledger_path(const std::string& path,
+                                            std::string& directory,
+                                            std::string& name)
+{
+    if (path.empty() || path.find('\0') != std::string::npos)
+        throw std::invalid_argument("authoritative event ledger path is invalid");
+    const auto slash = path.find_last_of('/');
+    directory = slash == std::string::npos ? "."
+              : slash == 0 ? "/" : path.substr(0, slash);
+    name = slash == std::string::npos ? path : path.substr(slash + 1);
+    if (name.empty() || name == "." || name == ".."
+        || name.find('/') != std::string::npos)
+        throw std::invalid_argument(
+            "authoritative event ledger requires a concrete file name");
+}
+
+// The reservation keeps a directory descriptor, but the published ledger is
+// later consumed by pathname.  Requiring a directory private to the effective
+// uid prevents another local account from replacing that pathname between the
+// publication protocol and replay.  This deliberately rejects shared runtime
+// directories such as /tmp; live callers must provision a private state dir.
+inline void require_private_authoritative_directory(int directory_fd)
+{
+    struct stat status{};
+    if (::fstat(directory_fd, &status) != 0)
+        throw_errno("stat authoritative event ledger directory");
+    if (!S_ISDIR(status.st_mode))
+        throw std::runtime_error(
+            "authoritative event ledger parent is not a directory");
+    if (status.st_uid != ::geteuid()
+        || (status.st_mode & (S_IRWXG | S_IRWXO)) != 0)
+        throw std::runtime_error(
+            "authoritative event ledger parent must be private to the effective uid");
+}
+
+inline int open_private_authoritative_directory(const std::string& path,
+                                                std::string& name)
+{
+    std::string directory;
+    split_authoritative_ledger_path(path, directory, name);
+
+    open_how how{};
+    how.flags = static_cast<std::uint64_t>(O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    how.resolve = static_cast<std::uint64_t>(RESOLVE_NO_SYMLINKS
+                                             | RESOLVE_NO_MAGICLINKS);
+    const int directory_fd = static_cast<int>(::syscall(
+        SYS_openat2, AT_FDCWD, directory.c_str(), &how, sizeof(how)));
+    if (directory_fd < 0)
+        throw_errno("open authoritative event ledger directory");
+    try
+    {
+        require_private_authoritative_directory(directory_fd);
+    }
+    catch (...)
+    {
+        (void)::close(directory_fd);
+        throw;
+    }
+    return directory_fd;
+}
+
+inline int open_regular_event_log_for_replay(const std::string& path)
+{
+    // This initial descriptor only identifies the file envelope.  It stays
+    // compatible with historical replay paths; an authoritative envelope is
+    // always reopened below through the stricter private openat2 path before
+    // any authoritative contents are accepted.
+    const int file_fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (file_fd < 0)
+        throw_errno("open event log for replay");
+
+    struct stat status{};
+    if (::fstat(file_fd, &status) != 0)
+    {
+        const int error = errno;
+        (void)::close(file_fd);
+        errno = error;
+        throw_errno("validate event log for replay");
+    }
+    if (!S_ISREG(status.st_mode))
+    {
+        (void)::close(file_fd);
+        throw std::runtime_error("EventReplayer: source is not a regular file");
+    }
+    return file_fd;
+}
+
+inline int open_private_authoritative_ledger_for_replay(
+    const std::string& path)
+{
+    std::string name;
+    const int directory_fd = open_private_authoritative_directory(path, name);
+    open_how how{};
+    how.flags = static_cast<std::uint64_t>(
+        O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    how.resolve = static_cast<std::uint64_t>(RESOLVE_BENEATH
+                                             | RESOLVE_NO_SYMLINKS
+                                             | RESOLVE_NO_MAGICLINKS);
+    const int file_fd = static_cast<int>(::syscall(
+        SYS_openat2, directory_fd, name.c_str(), &how, sizeof(how)));
+    const int open_error = errno;
+    (void)::close(directory_fd);
+    if (file_fd < 0)
+    {
+        errno = open_error;
+        throw_errno("open authoritative event ledger for replay");
+    }
+
+    struct stat status{};
+    if (::fstat(file_fd, &status) != 0)
+    {
+        const int error = errno;
+        (void)::close(file_fd);
+        errno = error;
+        throw_errno("validate authoritative event ledger for replay");
+    }
+    if (!S_ISREG(status.st_mode)
+        || status.st_nlink != 1
+        || status.st_uid != ::geteuid()
+        || (status.st_mode & (S_IRWXG | S_IRWXO)) != 0)
+    {
+        (void)::close(file_fd);
+        throw std::runtime_error(
+            "authoritative event ledger replay file is not private regular data");
+    }
+    return file_fd;
+}
+
+inline void require_no_authoritative_partial_sibling(const std::string& path)
+{
+    std::string name;
+    const int directory_fd = open_private_authoritative_directory(path, name);
+    const std::string partial_name = name + ".partial";
+    struct stat sibling_status{};
+    const int result = ::fstatat(directory_fd, partial_name.c_str(),
+                                 &sibling_status, AT_SYMLINK_NOFOLLOW);
+    const int error = errno;
+    (void)::close(directory_fd);
+    if (result == 0)
+        throw std::runtime_error(
+            "EventReplayer: ledger has an unresolved partial sibling");
+    if (error != ENOENT)
+    {
+        errno = error;
+        throw_errno("inspect authoritative event ledger partial sibling");
+    }
+}
+
+} // namespace event_log_detail
+#endif
+
+// A live ledger is not a convenience log.  It is reserved before provider
+// open through directory/file descriptors so a symlink, existing target, or
+// stale partial cannot be mistaken for the session's authoritative truth.
+// The normal EventLogger compatibility constructor remains available for
+// backtests and existing replay fixtures; live composition uses this move-only
+// reservation and finalizes it only after the event stream itself is durable.
+class AuthoritativeEventLedgerReservation
+{
+public:
+    explicit AuthoritativeEventLedgerReservation(std::string final_path)
+        : final_path_(std::move(final_path))
+    {
+#if defined(__linux__)
+        reserve();
+#else
+        throw std::runtime_error(
+            "authoritative event ledger requires the supported POSIX openat2 path");
+#endif
+    }
+
+    ~AuthoritativeEventLedgerReservation() noexcept { close_noexcept(); }
+
+    AuthoritativeEventLedgerReservation(
+        const AuthoritativeEventLedgerReservation&) = delete;
+    AuthoritativeEventLedgerReservation& operator=(
+        const AuthoritativeEventLedgerReservation&) = delete;
+
+    AuthoritativeEventLedgerReservation(
+        AuthoritativeEventLedgerReservation&& other) noexcept
+    {
+        move_from(std::move(other));
+    }
+
+    AuthoritativeEventLedgerReservation& operator=(
+        AuthoritativeEventLedgerReservation&& other) noexcept
+    {
+        if (this != &other)
+        {
+            close_noexcept();
+            move_from(std::move(other));
+        }
+        return *this;
+    }
+
+    [[nodiscard]] int data_fd() const noexcept { return data_fd_; }
+    [[nodiscard]] bool reserved() const noexcept
+    {
+        return data_fd_ >= 0 && directory_fd_ >= 0 && !published_;
+    }
+    [[nodiscard]] bool published() const noexcept { return published_; }
+    [[nodiscard]] const std::string& final_path() const noexcept
+    {
+        return final_path_;
+    }
+    [[nodiscard]] const std::string& partial_path() const noexcept
+    {
+        return partial_path_;
+    }
+
+    void sync_data()
+    {
+#if defined(__linux__)
+        if (!reserved())
+            throw std::logic_error("authoritative event ledger is not writable");
+        if (::fdatasync(data_fd_) != 0)
+            throw_errno("fdatasync event ledger");
+#else
+        throw std::runtime_error(
+            "authoritative event ledger requires the supported POSIX openat2 path");
+#endif
+    }
+
+    // The caller must flush its descriptor-backed stream before this method.
+    // Failure deliberately leaves the `.partial` file in place as forensic
+    // evidence; it is never promoted to an authoritative replay file.
+    //
+    // Do not rename `partial_name_` by pathname here.  The reservation owns
+    // the inode through data_fd_, but a hostile writer of the containing
+    // directory could otherwise rename that pathname after reserve() and
+    // before publication.  Publish a new final name from /proc/self/fd/N
+    // instead, so the kernel links the inode we validated and synced rather
+    // than whichever inode currently has the `.partial` spelling.
+    void finalize(uint8_t published_file_flags)
+    {
+#if defined(__linux__)
+        if (!reserved())
+            throw std::logic_error(
+                "authoritative event ledger is not an unpublished reservation");
+        // The descriptor pins the original directory inode, but replay later
+        // resolves final_path_ again.  Refuse publication if that directory
+        // no longer satisfies the private-parent invariant.
+        event_log_detail::require_private_authoritative_directory(directory_fd_);
+        constexpr uint8_t required_published_flags =
+            EVENT_LOG_FILE_FLAG_FINALIZED
+            | EVENT_LOG_FILE_FLAG_AUTHORITATIVE
+            | EVENT_LOG_FILE_FLAG_AUTHORITATIVE_PUBLISHED;
+        if ((published_file_flags & required_published_flags)
+            != required_published_flags)
+            throw std::logic_error(
+                "authoritative event ledger has invalid publication flags");
+        if (::fdatasync(data_fd_) != 0)
+            throw_errno("fdatasync event ledger");
+        char descriptor_path[64]{};
+        const auto descriptor_path_size = std::snprintf(
+            descriptor_path, sizeof(descriptor_path), "/proc/self/fd/%d",
+            data_fd_);
+        if (descriptor_path_size < 0
+            || static_cast<std::size_t>(descriptor_path_size)
+                >= sizeof(descriptor_path))
+            throw std::runtime_error("format event ledger descriptor path");
+        if (::linkat(AT_FDCWD, descriptor_path, directory_fd_,
+                     final_name_.c_str(), AT_SYMLINK_FOLLOW) != 0)
+            throw_errno("publish event ledger");
+
+        // First make the final name durable while retaining the forensic
+        // `.partial` name.  If this sync fails, the ledger's on-disk header
+        // still lacks AUTHORITATIVE_PUBLISHED and EventReplayer rejects the
+        // final spelling even if a hostile directory writer removed the
+        // sibling partial.
+        if (::fsync(directory_fd_) != 0)
+            throw_errno("fsync published event ledger directory");
+
+        // Mark the exact descriptor inode as published while the forensic
+        // sibling still exists.  A failed marker sync therefore remains
+        // unreplayable regardless of any later path cleanup outcome.
+        constexpr off_t flags_offset =
+            static_cast<off_t>(EVENT_LOG_FILE_MAGIC.size() + 1U);
+        const auto written = ::pwrite(data_fd_, &published_file_flags,
+                                      sizeof(published_file_flags),
+                                      flags_offset);
+        if (written < 0)
+            throw_errno("mark authoritative event ledger published");
+        if (written != static_cast<ssize_t>(sizeof(published_file_flags)))
+            throw std::runtime_error(
+                "short write marking authoritative event ledger published");
+        if (::fdatasync(data_fd_) != 0)
+            throw_errno("fdatasync published event ledger marker");
+
+        // The final name above refers to the validated descriptor.  The
+        // reservation's partial name must disappear before replay accepts
+        // it.  ENOENT is also safe: the final link and its marker are already
+        // durable, and retaining a stale error would otherwise falsely claim
+        // that the valid final ledger was unpublished.  Any other failure
+        // leaves the partial in place (or fails closed via the marker guard).
+        if (::unlinkat(directory_fd_, partial_name_.c_str(), 0) != 0
+            && errno != ENOENT)
+            throw_errno("remove event ledger partial");
+        published_ = true;
+        // fdatasync and the first directory fsync above already made the
+        // authoritative name durable.  POSIX close may report a delayed
+        // error after that point, but treating it as a failed publication
+        // would leave callers believing a valid final ledger was invalid.
+        // Retire the descriptor best-effort instead of manufacturing that
+        // contradictory failure state.
+        close_data_noexcept();
+#else
+        throw std::runtime_error(
+            "authoritative event ledger requires the supported POSIX openat2 path");
+#endif
+    }
+
+    // Deliberately leave the descriptor-reserved `.partial` in place without
+    // publishing it.  This is used when live engine construction fails after
+    // reservation but before a run can establish a coherent authoritative
+    // event stream.  A partial is forensic evidence, never replay input.
+    void abandon() noexcept
+    {
+        if (published_) return;
+        close_noexcept();
+    }
+
+private:
+    std::string final_path_;
+    std::string partial_path_;
+    std::string final_name_;
+    std::string partial_name_;
+    int directory_fd_ = -1;
+    int data_fd_ = -1;
+    bool published_ = false;
+
+#if defined(__linux__)
+    [[noreturn]] static void throw_errno(std::string_view operation)
+    {
+        event_log_detail::throw_errno(operation);
+    }
+
+    void reserve()
+    {
+        directory_fd_ = event_log_detail::open_private_authoritative_directory(
+            final_path_, final_name_);
+        partial_name_ = final_name_ + ".partial";
+        const auto slash = final_path_.find_last_of('/');
+        const std::string directory = slash == std::string::npos ? "."
+            : slash == 0 ? "/" : final_path_.substr(0, slash);
+        partial_path_ = (directory == "/" ? directory : directory + "/")
+                      + partial_name_;
+
+        // A session may only publish the final path it reserved before the
+        // provider opens.  Starting with an existing final would defer the
+        // collision until shutdown, leaving the new session without a
+        // publishable authoritative audit record.
+        struct stat final_status{};
+        if (::fstatat(directory_fd_, final_name_.c_str(), &final_status,
+                      AT_SYMLINK_NOFOLLOW) == 0)
+        {
+            close_noexcept();
+            throw std::runtime_error(
+                "authoritative event ledger final path already exists");
+        }
+        if (errno != ENOENT)
+        {
+            const int error = errno;
+            close_noexcept();
+            errno = error;
+            throw_errno("inspect authoritative event ledger final path");
+        }
+
+        data_fd_ = ::openat(directory_fd_, partial_name_.c_str(),
+                             O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                             S_IRUSR | S_IWUSR);
+        if (data_fd_ < 0)
+        {
+            const int error = errno;
+            close_noexcept();
+            errno = error;
+            throw_errno("reserve event ledger partial");
+        }
+
+        struct stat status{};
+        if (::fstat(data_fd_, &status) != 0)
+        {
+            const int error = errno;
+            close_noexcept();
+            errno = error;
+            throw_errno("validate event ledger partial");
+        }
+        if (!S_ISREG(status.st_mode) || status.st_nlink != 1)
+        {
+            close_noexcept();
+            throw std::runtime_error(
+                "authoritative event ledger partial is not a new regular file");
+        }
+        if (::fchmod(data_fd_, S_IRUSR | S_IWUSR) != 0)
+        {
+            const int error = errno;
+            close_noexcept();
+            errno = error;
+            throw_errno("secure authoritative event ledger partial");
+        }
+    }
+
+    void close_data_noexcept() noexcept
+    {
+        if (data_fd_ < 0) return;
+        const int fd = data_fd_;
+        data_fd_ = -1;
+        (void)::close(fd);
+    }
+#endif
+
+    void close_noexcept() noexcept
+    {
+#if defined(__linux__)
+        if (data_fd_ >= 0)
+        {
+            (void)::close(data_fd_);
+            data_fd_ = -1;
+        }
+        if (directory_fd_ >= 0)
+        {
+            (void)::close(directory_fd_);
+            directory_fd_ = -1;
+        }
+#endif
+    }
+
+    void move_from(AuthoritativeEventLedgerReservation&& other) noexcept
+    {
+        final_path_ = std::move(other.final_path_);
+        partial_path_ = std::move(other.partial_path_);
+        final_name_ = std::move(other.final_name_);
+        partial_name_ = std::move(other.partial_name_);
+        directory_fd_ = std::exchange(other.directory_fd_, -1);
+        data_fd_ = std::exchange(other.data_fd_, -1);
+        published_ = std::exchange(other.published_, false);
+    }
+};
+
+#if defined(__linux__)
+// Minimal unbuffered ostream bridge for an already-reserved ledger FD.  The
+// EventLogger needs tell/seek for its indexed binary format; this buffer keeps
+// those operations descriptor-relative and never re-opens the path by name.
+class AuthoritativeLedgerStreambuf final : public std::streambuf
+{
+public:
+    explicit AuthoritativeLedgerStreambuf(int fd) noexcept : fd_(fd) {}
+
+protected:
+    std::streamsize xsputn(const char* source, std::streamsize size) override
+    {
+        if (fd_ < 0 || size < 0) return 0;
+        std::streamsize written = 0;
+        while (written < size)
+        {
+            const auto remaining = static_cast<std::size_t>(size - written);
+            const auto result = ::write(fd_, source + written, remaining);
+            if (result > 0)
+            {
+                written += static_cast<std::streamsize>(result);
+                continue;
+            }
+            if (result < 0 && errno == EINTR) continue;
+            break;
+        }
+        return written;
+    }
+
+    int_type overflow(int_type character) override
+    {
+        if (traits_type::eq_int_type(character, traits_type::eof()))
+            return traits_type::not_eof(character);
+        const char one = traits_type::to_char_type(character);
+        return xsputn(&one, 1) == 1 ? character : traits_type::eof();
+    }
+
+    int sync() override { return fd_ >= 0 ? 0 : -1; }
+
+    pos_type seekoff(off_type offset, std::ios_base::seekdir direction,
+                     std::ios_base::openmode which) override
+    {
+        if (fd_ < 0 || (which & std::ios_base::out) == 0)
+            return pos_type(off_type(-1));
+        int whence = SEEK_SET;
+        switch (direction)
+        {
+        case std::ios_base::beg: whence = SEEK_SET; break;
+        case std::ios_base::cur: whence = SEEK_CUR; break;
+        case std::ios_base::end: whence = SEEK_END; break;
+        default: return pos_type(off_type(-1));
+        }
+        const auto position = ::lseek(fd_, static_cast<off_t>(offset), whence);
+        return position < 0 ? pos_type(off_type(-1))
+                            : pos_type(static_cast<off_type>(position));
+    }
+
+    pos_type seekpos(pos_type position,
+                     std::ios_base::openmode which) override
+    {
+        return seekoff(static_cast<off_type>(position), std::ios_base::beg,
+                       which);
+    }
+
+private:
+    int fd_ = -1;
+};
+#endif
 
 
 class EventLogger
@@ -662,25 +1198,52 @@ public:
                          std::uint64_t max_bytes = 0,
                          int max_files = 5)
         : path_(path)
-        , out_(path, std::ios::binary | std::ios::trunc)
+        , file_out_(path, std::ios::binary | std::ios::trunc)
+        , out_(&file_out_)
         , compress_(compress)
         , cctx_(nullptr, &ZSTD_freeCCtx)
         , event_count_(0)
         , max_bytes_(max_bytes)
         , max_files_(max_files)
     {
-        if (!out_)
-            throw std::runtime_error("EventLogger: cannot open " + path);
-        if (compress_) {
-            cctx_.reset(ZSTD_createCCtx());
-            if (!cctx_)
-                throw std::runtime_error("EventLogger: failed to create zstd context");
-        }
-        write_file_preamble();
+        initialize();
+    }
+
+    explicit EventLogger(std::shared_ptr<AuthoritativeEventLedgerReservation> reservation,
+                         bool compress = true)
+        : path_(reservation ? reservation->final_path() : std::string{})
+        , reservation_(std::move(reservation))
+        , compress_(compress)
+        , cctx_(nullptr, &ZSTD_freeCCtx)
+        , event_count_(0)
+    {
+        if (!reservation_ || !reservation_->reserved())
+            throw std::runtime_error(
+                "EventLogger: missing authoritative ledger reservation");
+#if defined(__linux__)
+        ledger_streambuf_ = std::make_unique<AuthoritativeLedgerStreambuf>(
+            reservation_->data_fd());
+        ledger_out_ = std::make_unique<std::ostream>(ledger_streambuf_.get());
+        out_ = ledger_out_.get();
+        initialize();
+#else
+        throw std::runtime_error(
+            "EventLogger: authoritative ledger requires supported POSIX path");
+#endif
     }
 
     ~EventLogger() noexcept
     {
+        // A descriptor-reserved live ledger must be explicitly finalized by
+        // the shutdown protocol.  Publishing from stack unwinding would turn
+        // a constructor failure or incomplete teardown into an apparently
+        // authoritative final file.  Compatibility loggers keep their legacy
+        // destructor-finalize behaviour.
+        if (reservation_)
+        {
+            abandon_unpublished();
+            return;
+        }
         try {
             finalize();
         } catch (...) {
@@ -691,6 +1254,18 @@ public:
 
     EventLogger(const EventLogger&) = delete;
     EventLogger& operator=(const EventLogger&) = delete;
+
+    // Close a secure live ledger without publishing its final pathname.  This
+    // operation is intentionally noexcept so constructor unwinding and
+    // terminal safety handling cannot accidentally promote a partial file.
+    void abandon_unpublished() noexcept
+    {
+        if (!reservation_ || state_ == logger_state::finalized
+            || state_ == logger_state::abandoned)
+            return;
+        reservation_->abandon();
+        state_ = logger_state::abandoned;
+    }
 
     void log(const event& e)
     {
@@ -764,7 +1339,7 @@ public:
         }
 
         try {
-            const auto record_position = out_.tellp();
+            const auto record_position = out_->tellp();
             if (record_position == std::streampos(-1))
                 throw std::runtime_error("EventLogger: cannot determine record offset");
             const auto record_offset = static_cast<std::streamoff>(record_position);
@@ -773,20 +1348,20 @@ public:
             if (sample_index)
                 index_entry.file_offset = static_cast<uint64_t>(record_offset);
 
-            event_serial::write_u8(out_, static_cast<uint8_t>(e.get_type()));
-            event_serial::write_u32(out_, encoded_size_u32);
+            event_serial::write_u8(*out_, static_cast<uint8_t>(e.get_type()));
+            event_serial::write_u32(*out_, encoded_size_u32);
             if (encoded_size > 0) {
-                out_.write(reinterpret_cast<const char*>(encoded_data),
-                           static_cast<std::streamsize>(encoded_size));
+                out_->write(reinterpret_cast<const char*>(encoded_data),
+                            static_cast<std::streamsize>(encoded_size));
             }
-            if (!out_)
+            if (!*out_)
                 throw std::runtime_error("EventLogger: record write failed");
 
             if (sample_index)
                 index_.push_back(index_entry);
             ++event_count_;
 
-            const auto end_position = out_.tellp();
+            const auto end_position = out_->tellp();
             if (end_position == std::streampos(-1))
                 throw std::runtime_error("EventLogger: cannot determine log size");
             const auto log_size = static_cast<std::streamoff>(end_position);
@@ -802,11 +1377,15 @@ public:
     void flush()
     {
         if (state_ == logger_state::finalized) return;
+        if (state_ == logger_state::abandoned)
+            throw std::logic_error("EventLogger: authoritative ledger was abandoned");
         rethrow_if_poisoned();
         try {
-            out_.flush();
-            if (!out_)
+            out_->flush();
+            if (!*out_)
                 throw std::runtime_error("EventLogger: flush failed");
+            if (reservation_)
+                reservation_->sync_data();
         } catch (...) {
             poison(std::current_exception());
         }
@@ -815,10 +1394,12 @@ public:
     void finalize()
     {
         if (state_ == logger_state::finalized) return;
+        if (state_ == logger_state::abandoned)
+            throw std::logic_error("EventLogger: authoritative ledger was abandoned");
         rethrow_if_poisoned();
 
         try {
-            const auto index_position = out_.tellp();
+            const auto index_position = out_->tellp();
             if (index_position == std::streampos(-1))
                 throw std::runtime_error("EventLogger: cannot determine index offset");
             const auto signed_index_offset =
@@ -829,17 +1410,21 @@ public:
             const auto index_count = event_serial::checked_u32_length(
                 index_.size(), "index count");
             for (const auto& entry : index_) {
-                event_serial::write_i64(out_, entry.timestamp_us);
-                event_serial::write_u64(out_, entry.file_offset);
+                event_serial::write_i64(*out_, entry.timestamp_us);
+                event_serial::write_u64(*out_, entry.file_offset);
             }
             event_serial::write_u64(
-                out_, static_cast<uint64_t>(signed_index_offset));
-            event_serial::write_u32(out_, index_count);
-            event_serial::write_u32(out_, EVENT_LOG_INDEX_MAGIC);
-            out_.flush();
-            if (!out_)
+                *out_, static_cast<uint64_t>(signed_index_offset));
+            event_serial::write_u32(*out_, index_count);
+            event_serial::write_u32(*out_, EVENT_LOG_INDEX_MAGIC);
+            out_->flush();
+            if (!*out_)
                 throw std::runtime_error("EventLogger: finalize write failed");
             mark_file_finalized();
+            if (reservation_)
+                reservation_->finalize(
+                    file_flags(/*finalized=*/true)
+                    | EVENT_LOG_FILE_FLAG_AUTHORITATIVE_PUBLISHED);
             state_ = logger_state::finalized;
         } catch (...) {
             poison(std::current_exception());
@@ -847,10 +1432,16 @@ public:
     }
 
 private:
-    enum class logger_state { open, finalized, poisoned };
+    enum class logger_state { open, finalized, abandoned, poisoned };
 
     std::string path_;
-    std::ofstream out_;
+    std::shared_ptr<AuthoritativeEventLedgerReservation> reservation_;
+    std::ofstream file_out_;
+#if defined(__linux__)
+    std::unique_ptr<AuthoritativeLedgerStreambuf> ledger_streambuf_;
+#endif
+    std::unique_ptr<std::ostream> ledger_out_;
+    std::ostream* out_ = nullptr;
     bool compress_;
     std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> cctx_;
     std::vector<uint8_t> compressed_buf_;
@@ -876,7 +1467,8 @@ private:
     void ensure_open() const
     {
         rethrow_if_poisoned();
-        if (state_ == logger_state::finalized)
+        if (state_ == logger_state::finalized
+            || state_ == logger_state::abandoned)
             throw std::logic_error("EventLogger: cannot log after finalize");
     }
 
@@ -893,13 +1485,25 @@ private:
         std::rethrow_exception(failure_);
     }
 
+    void initialize()
+    {
+        if (!out_ || !*out_)
+            throw std::runtime_error("EventLogger: cannot open " + path_);
+        if (compress_) {
+            cctx_.reset(ZSTD_createCCtx());
+            if (!cctx_)
+                throw std::runtime_error("EventLogger: failed to create zstd context");
+        }
+        write_file_preamble();
+    }
+
     void write_file_preamble()
     {
-        out_.write(reinterpret_cast<const char*>(EVENT_LOG_FILE_MAGIC.data()),
-                   static_cast<std::streamsize>(EVENT_LOG_FILE_MAGIC.size()));
-        event_serial::write_u8(out_, EVENT_LOG_FILE_VERSION);
-        event_serial::write_u8(out_, file_flags(/*finalized=*/false));
-        if (!out_)
+        out_->write(reinterpret_cast<const char*>(EVENT_LOG_FILE_MAGIC.data()),
+                    static_cast<std::streamsize>(EVENT_LOG_FILE_MAGIC.size()));
+        event_serial::write_u8(*out_, EVENT_LOG_FILE_VERSION);
+        event_serial::write_u8(*out_, file_flags(/*finalized=*/false));
+        if (!*out_)
             throw std::runtime_error("EventLogger: preamble write failed");
     }
 
@@ -908,6 +1512,8 @@ private:
         uint8_t flags = compress_ ? EVENT_LOG_FILE_FLAG_ZSTD : uint8_t{0};
         if (finalized)
             flags |= EVENT_LOG_FILE_FLAG_FINALIZED;
+        if (reservation_)
+            flags |= EVENT_LOG_FILE_FLAG_AUTHORITATIVE;
         return flags;
     }
 
@@ -915,19 +1521,22 @@ private:
     {
         constexpr std::streamoff flags_offset =
             static_cast<std::streamoff>(EVENT_LOG_FILE_MAGIC.size() + 1U);
-        out_.seekp(flags_offset, std::ios::beg);
-        if (!out_)
+        out_->seekp(flags_offset, std::ios::beg);
+        if (!*out_)
             throw std::runtime_error("EventLogger: cannot update finalize marker");
-        event_serial::write_u8(out_, file_flags(/*finalized=*/true));
-        out_.flush();
-        if (!out_)
+        event_serial::write_u8(*out_, file_flags(/*finalized=*/true));
+        out_->flush();
+        if (!*out_)
             throw std::runtime_error("EventLogger: finalize marker write failed");
     }
 
     void rotate()
     {
+        if (reservation_)
+            throw std::runtime_error(
+                "EventLogger: authoritative ledger cannot rotate");
         finalize();
-        out_.close();
+        file_out_.close();
 
         auto nth = [&](int i) -> std::string {
             return path_ + "." + std::to_string(i);
@@ -942,8 +1551,9 @@ private:
             std::remove(path_.c_str());
         }
 
-        out_.open(path_, std::ios::binary | std::ios::trunc);
-        if (!out_)
+        file_out_.open(path_, std::ios::binary | std::ios::trunc);
+        out_ = &file_out_;
+        if (!*out_)
             throw std::runtime_error("EventLogger: reopen after rotate failed: " + path_);
         index_.clear();
         event_count_ = 0;
@@ -971,25 +1581,60 @@ public:
                            int64_t replay_from_us = 0,
                            int64_t replay_to_us = INT64_MAX,
                            EventReplayLimits limits = {})
+#if defined(__linux__)
+        : in_()
+#else
         : in_(path, std::ios::binary)
+#endif
         , compressed_(false)
         , dctx_(nullptr, &ZSTD_freeDCtx)
         , replay_from_us_(replay_from_us)
         , replay_to_us_(replay_to_us)
         , limits_(limits)
     {
+        // A secure live session writes only to a descriptor-reserved
+        // `<final>.partial` until the data and parent directory have both
+        // been synced and atomically published.  Treat a leftover partial as
+        // forensic evidence, never as an authoritative replay input.
+        if (std::string_view(path).ends_with(".partial"))
+            throw std::runtime_error(
+                "EventReplayer: partial ledger is not authoritative");
+#if defined(__linux__)
+        reopen_regular_source(path);
+#endif
         if (!in_)
             throw std::runtime_error("EventReplayer: cannot open " + path);
 
-        in_.seekg(0, std::ios::end);
-        const auto file_end = in_.tellg();
-        if (file_end == std::streampos(-1))
-            throw std::runtime_error("EventReplayer: cannot determine file size");
-
-        const auto file_size = static_cast<std::streamoff>(file_end);
-        if (file_size < 0)
-            throw std::runtime_error("EventReplayer: invalid file size");
-        const bool has_file_preamble = read_file_preamble(file_size);
+        auto file_size = source_file_size();
+        bool has_file_preamble = read_file_preamble(file_size);
+#if defined(__linux__)
+        // A final name accompanied by its authoritative reservation's
+        // `.partial` sibling denotes a failed or interrupted publication.
+        // Ordinary compatibility logs deliberately retain their historical
+        // replay behavior even if an unrelated sibling happens to exist.
+        if (has_file_preamble && file_authoritative_)
+        {
+            // The first read only identifies the format.  Re-open the live
+            // ledger through its trusted parent directory before trusting
+            // any of its contents, so replay cannot be redirected through a
+            // symlink or a locally writable directory entry.
+            reopen_authoritative_source(path);
+            file_size = source_file_size();
+            reset_file_preamble_state();
+            has_file_preamble = read_file_preamble(file_size);
+            if (!has_file_preamble || !file_authoritative_)
+                throw std::runtime_error(
+                    "EventReplayer: authoritative ledger changed during secure open");
+            if (!file_authoritative_published_ || !file_finalized_)
+                throw std::runtime_error(
+                    "EventReplayer: authoritative ledger was not published");
+            event_log_detail::require_no_authoritative_partial_sibling(path);
+        }
+#else
+        if (has_file_preamble && file_authoritative_)
+            throw std::runtime_error(
+                "EventReplayer: authoritative ledgers require supported POSIX paths");
+#endif
         data_end_ = file_size;
 
         constexpr std::streamoff trailer_bytes = 16;
@@ -1172,8 +1817,80 @@ private:
     std::streamoff data_begin_ = 0;
     std::streamoff data_end_ = 0;
     bool file_finalized_ = false;
+    bool file_authoritative_ = false;
+    bool file_authoritative_published_ = false;
     bool failed_ = false;
     std::exception_ptr failure_;
+
+    std::streamoff source_file_size()
+    {
+        in_.clear();
+        in_.seekg(0, std::ios::end);
+        const auto file_end = in_.tellg();
+        if (file_end == std::streampos(-1))
+            throw std::runtime_error(
+                "EventReplayer: cannot determine file size");
+        const auto file_size = static_cast<std::streamoff>(file_end);
+        if (file_size < 0)
+            throw std::runtime_error("EventReplayer: invalid file size");
+        return file_size;
+    }
+
+    void reset_file_preamble_state() noexcept
+    {
+        data_begin_ = 0;
+        data_end_ = 0;
+        compressed_ = false;
+        file_finalized_ = false;
+        file_authoritative_ = false;
+        file_authoritative_published_ = false;
+    }
+
+#if defined(__linux__)
+    void reopen_regular_source(const std::string& path)
+    {
+        reopen_source_from_descriptor(
+            event_log_detail::open_regular_event_log_for_replay(path),
+            "regular event log");
+    }
+
+    void reopen_authoritative_source(const std::string& path)
+    {
+        reopen_source_from_descriptor(
+            event_log_detail::open_private_authoritative_ledger_for_replay(path),
+            "authoritative ledger");
+    }
+
+    void reopen_source_from_descriptor(int source_fd, std::string_view label)
+    {
+        char descriptor_path[64]{};
+        const auto descriptor_path_size = std::snprintf(
+            descriptor_path, sizeof(descriptor_path), "/proc/self/fd/%d",
+            source_fd);
+        if (descriptor_path_size < 0
+            || static_cast<std::size_t>(descriptor_path_size)
+                >= sizeof(descriptor_path))
+        {
+            (void)::close(source_fd);
+            throw std::runtime_error(
+                "EventReplayer: format " + std::string(label)
+                    + " descriptor path");
+        }
+
+        in_.close();
+        in_.clear();
+        in_.open(descriptor_path, std::ios::binary);
+        const int close_error = ::close(source_fd);
+        if (!in_)
+            throw std::runtime_error(
+                "EventReplayer: cannot reopen " + std::string(label)
+                    + " source");
+        if (close_error != 0)
+            throw std::runtime_error(
+                "EventReplayer: cannot retire " + std::string(label)
+                    + " descriptor");
+    }
+#endif
 
     std::streamoff current_position() const
     {
@@ -1233,10 +1950,23 @@ private:
             throw std::runtime_error("EventReplayer: unsupported file version");
         if ((flags & ~EVENT_LOG_FILE_KNOWN_FLAGS) != 0)
             throw std::runtime_error("EventReplayer: unsupported file flags");
+        const bool finalized = (flags & EVENT_LOG_FILE_FLAG_FINALIZED) != 0;
+        const bool authoritative =
+            (flags & EVENT_LOG_FILE_FLAG_AUTHORITATIVE) != 0;
+        const bool authoritative_published =
+            (flags & EVENT_LOG_FILE_FLAG_AUTHORITATIVE_PUBLISHED) != 0;
+        // Publication is the final durable transition of an authoritative
+        // file.  Any other combination is torn/corrupt metadata, never a
+        // compatibility log that may bypass private-path validation.
+        if (authoritative_published && (!authoritative || !finalized))
+            throw std::runtime_error(
+                "EventReplayer: invalid authoritative publication flags");
 
         data_begin_ = EVENT_LOG_FILE_PREAMBLE_BYTES;
         compressed_ = (flags & EVENT_LOG_FILE_FLAG_ZSTD) != 0;
-        file_finalized_ = (flags & EVENT_LOG_FILE_FLAG_FINALIZED) != 0;
+        file_finalized_ = finalized;
+        file_authoritative_ = authoritative;
+        file_authoritative_published_ = authoritative_published;
         return true;
     }
 

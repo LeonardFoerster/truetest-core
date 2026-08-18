@@ -125,8 +125,24 @@ public:
 
         while (inbound.try_pop(ev))
         {
-            try { on_event(ev); }
-            catch (...) {}
+            try
+            {
+                on_event(ev);
+            }
+            catch (...)
+            {
+                // Stop-drain is still part of the worker's delivery
+                // contract.  Silently discarding a final event lets an
+                // authoritative logger publish a ledger missing exactly the
+                // shutdown evidence it was meant to retain.  Keep draining
+                // for ownership cleanup, but make the failure sticky and
+                // notify the engine just as the normal loop would.
+                error_count_.fetch_add(1, std::memory_order_relaxed);
+                exception_ = std::current_exception();
+                if (failure_flag_)
+                    failure_flag_->store(true, std::memory_order_release);
+                notify_failure();
+            }
         }
     }
 
