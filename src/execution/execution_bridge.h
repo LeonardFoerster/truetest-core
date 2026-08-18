@@ -10,6 +10,7 @@
 #include "../core/event.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -158,6 +159,7 @@ public:
             return false;
         }
 
+        ingress_failure_latched_.store(false, std::memory_order_release);
         accepting_orders_.store(true, std::memory_order_release);
         // Start background transport thread (only for live order paths).
         // The thread owns all actual calls to order_tx.
@@ -391,9 +393,28 @@ private:
             return;
         }
 
+        const bool fill_kind = msg.k == parsed_exec::kind::partial_fill
+            || msg.k == parsed_exec::kind::full_fill;
+        if (msg.k == parsed_exec::kind::invalid
+            || !std::isfinite(msg.last_fill_qty)
+            || !std::isfinite(msg.last_fill_price)
+            || !std::isfinite(msg.cumulative_qty)
+            || !std::isfinite(msg.commission)
+            || msg.last_fill_qty < 0.0
+            || msg.last_fill_price < 0.0
+            || msg.cumulative_qty < 0.0
+            || (fill_kind && (!(msg.last_fill_qty > 0.0)
+                              || !(msg.last_fill_price > 0.0))))
+        {
+            fail_terminal_ingress(
+                "ExecutionBridge: malformed execution report", msg.symbol);
+            return;
+        }
+
         uint64_t engine_id = 0;
         double total_qty = 0.0;
         double tracked_cumulative = 0.0;
+        const char* invalid_tracking = nullptr;
         {
             bool unknown = false;
             {
@@ -419,26 +440,67 @@ private:
             auto eit = by_engine_id_.find(engine_id);
             if (eit == by_engine_id_.end()) return;
 
+            if (fill_kind
+                && (msg.symbol != eit->second.symbol
+                    || msg.side != eit->second.side))
+            {
+                invalid_tracking =
+                    "ExecutionBridge: fill identity differs from submitted order";
+            }
+
             if (!msg.exchange_order_id.empty() && eit->second.exchange_id.empty())
                 eit->second.exchange_id = msg.exchange_order_id;
 
-            if (msg.k == parsed_exec::kind::partial_fill ||
-                msg.k == parsed_exec::kind::full_fill)
+            if (fill_kind && !invalid_tracking)
             {
-                eit->second.cumulative_qty += msg.last_fill_qty;
+                const double next_cumulative =
+                    eit->second.cumulative_qty + msg.last_fill_qty;
+                const double tolerance = std::max(
+                    1e-9, std::abs(eit->second.total_qty) * 1e-9);
+                if (!std::isfinite(next_cumulative)
+                    || next_cumulative > eit->second.total_qty + tolerance
+                    || (msg.cumulative_qty > 0.0
+                        && std::abs(msg.cumulative_qty - next_cumulative)
+                            > tolerance))
+                {
+                    invalid_tracking =
+                        "ExecutionBridge: fill cumulative quantity is inconsistent";
+                }
+                else if (msg.k == parsed_exec::kind::full_fill
+                         && std::abs(next_cumulative
+                                     - eit->second.total_qty) > tolerance)
+                {
+                    invalid_tracking =
+                        "ExecutionBridge: terminal fill does not complete order";
+                }
+                else
+                {
+                    eit->second.cumulative_qty = next_cumulative;
+                    if (msg.k == parsed_exec::kind::partial_fill
+                        && std::abs(next_cumulative
+                                    - eit->second.total_qty) <= tolerance)
+                        msg.k = parsed_exec::kind::full_fill;
+                }
             }
 
             total_qty = eit->second.total_qty;
             tracked_cumulative = eit->second.cumulative_qty;
 
-            if (msg.k == parsed_exec::kind::full_fill   ||
+            if (!invalid_tracking &&
+                (msg.k == parsed_exec::kind::full_fill   ||
                 msg.k == parsed_exec::kind::canceled    ||
                 msg.k == parsed_exec::kind::rejected    ||
-                msg.k == parsed_exec::kind::expired)
+                msg.k == parsed_exec::kind::expired))
             {
                 by_client_id_.erase(msg.client_order_id);
                 by_engine_id_.erase(engine_id);
             }
+        }
+
+        if (invalid_tracking)
+        {
+            fail_terminal_ingress(invalid_tracking, msg.symbol);
+            return;
         }
 
         if (msg.k != parsed_exec::kind::partial_fill &&
@@ -478,6 +540,29 @@ private:
     {
         std::lock_guard<std::mutex> lk(status_mu_);
         pending_status_.push_back({st, std::string(note)});
+    }
+
+    void fail_terminal_ingress(std::string_view reason,
+                               std::string_view symbol)
+    {
+        if (ingress_failure_latched_.exchange(
+                true, std::memory_order_acq_rel))
+            return;
+        {
+            std::lock_guard<std::mutex> admission_lock(venue_admission_mu_);
+            close_terminal_admission();
+        }
+        set_error(std::string(reason));
+        handle_status(IFillTransport::lifecycle::error, reason);
+
+        submit_result fatal;
+        fatal.symbol = std::string(symbol);
+        fatal.error = std::string(reason);
+        fatal.op = submit_result::operation::submit;
+        fatal.ok = false;
+        fatal.fatal = true;
+        std::lock_guard<std::mutex> lk(submit_results_mu_);
+        pending_submit_results_.push_back(std::move(fatal));
     }
 
     void dispatch_unknown_fill(const parsed_exec& msg)
@@ -579,6 +664,7 @@ private:
     std::thread transport_thread_;
     std::atomic<bool> transport_running_{false};
     std::atomic<bool> accepting_orders_{false};
+    std::atomic<bool> ingress_failure_latched_{false};
 
     void transport_loop();
     void process_one_submit(const submit_request& req);

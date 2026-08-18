@@ -110,45 +110,73 @@ void portfolio::apply_netted_fill(const fill_event& fill)
 void portfolio::apply_lot_fill(const fill_event& fill, std::uint64_t opener_order_id,
                                const std::string& strategy_name)
 {
-    const bool is_opener = (opener_order_id == fill.get_order_id());
-    auto it = lots_.find(opener_order_id);
+    constexpr double eps = 1e-12;
+    const double fill_qty = fill.get_filled_quantity();
+    if (fill_qty <= eps)
+        return;
 
-    if (is_opener)
+    // A physical fill can finish an old lot and open a residual lot in the
+    // opposite direction. Keep the residual under the fill order itself so
+    // later partial fills of that order continue the new lot.
+    const auto add_to_fill_opener = [&](double open_qty)
     {
-        if (it == lots_.end())
+        if (open_qty <= eps)
+            return;
+
+        auto opener = lots_.find(fill.get_order_id());
+        if (opener == lots_.end())
         {
             lot l;
             l.symbol           = fill.get_symbol();
             l.side             = fill.get_side();
-            l.qty_open         = fill.get_filled_quantity();
+            l.qty_open         = open_qty;
             l.entry_price      = fill.get_fill_price();
-            l.entry_filled_qty = fill.get_filled_quantity();
+            l.entry_filled_qty = open_qty;
             l.strategy_name    = strategy_name;
             l.ts_open          = fill.get_timestamp();
-            lots_.emplace(opener_order_id, std::move(l));
+            lots_.emplace(fill.get_order_id(), std::move(l));
         }
         else
         {
-            // Partial fills on the same opener - roll into weighted avg.
-            auto& l = it->second;
-            double new_filled = l.entry_filled_qty + fill.get_filled_quantity();
+            auto& l = opener->second;
+            const double new_filled = l.entry_filled_qty + open_qty;
             if (new_filled > 0.0)
                 l.entry_price =
                     (l.entry_price * l.entry_filled_qty +
-                     fill.get_fill_price() * fill.get_filled_quantity()) / new_filled;
+                     fill.get_fill_price() * open_qty) / new_filled;
             l.entry_filled_qty = new_filled;
-            l.qty_open        += fill.get_filled_quantity();
+            l.qty_open        += open_qty;
         }
+    };
+
+    if (opener_order_id == fill.get_order_id())
+    {
+        add_to_fill_opener(fill_qty);
         return;
     }
 
-    // Closer: reduce the referenced lot. A closer with no matching lot is a
-    // stale reference - portfolio state is authoritative, so drop silently.
-    if (it == lots_.end()) return;
-    auto& l = it->second;
-    l.qty_open -= fill.get_filled_quantity();
-    if (l.qty_open < 1e-12)
-        lots_.erase(it);
+    auto old_opener = lots_.find(opener_order_id);
+    if (old_opener == lots_.end())
+    {
+        // A later partial fill can arrive after an earlier fill consumed the
+        // old opener exactly. No quantity remains to close, so this entire
+        // physical fill is new exposure under its own order id. The same rule
+        // keeps a stale attribution visible as an offsetting lot instead of
+        // silently dropping a real fill from lot accounting.
+        add_to_fill_opener(fill_qty);
+        return;
+    }
+
+    // Clamp the close leg to the referenced lot. Any overshoot is real
+    // opposite-side exposure and therefore becomes a new lot, rather than
+    // driving qty_open negative and silently discarding the residual.
+    const double close_qty = std::min(fill_qty,
+                                      std::max(0.0, old_opener->second.qty_open));
+    old_opener->second.qty_open -= close_qty;
+    if (old_opener->second.qty_open <= eps)
+        lots_.erase(old_opener);
+
+    add_to_fill_opener(fill_qty - close_qty);
 }
 
 std::vector<std::uint64_t>

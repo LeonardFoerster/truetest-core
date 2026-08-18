@@ -157,6 +157,29 @@ public:
 
     void submit_order(const order_event& o) override
     {
+        submit_order_impl(o, false);
+    }
+
+    // Hybrid taker path: the shared book may also contain locally resting
+    // strategy orders. Only venue/synthetic external depth is eligible as a
+    // counterparty, so a strategy can never trade with itself here.
+    void submit_order_against_external(const order_event& o)
+    {
+        submit_order_impl(o, true);
+    }
+
+    double remaining_quantity_base(std::uint64_t order_id) const noexcept
+    {
+        const auto body = ob_ ? ob_->get_order(order_id) : nullptr;
+        if (!body || !(qty_scale_ > 0.0))
+            return 0.0;
+        return static_cast<double>(body->get_remaining_quantity())
+            / qty_scale_;
+    }
+
+private:
+    void submit_order_impl(const order_event& o, bool external_only)
+    {
         if (o.get_order_type() == order_type::stop || o.get_order_type() == order_type::stop_limit)
             return;
 
@@ -190,7 +213,11 @@ public:
             // square-root guess on top of the same depth.
             if (walked_book_impact_ && l2_seeded_)
             {
-                const double vwap = walked_book_vwap(o.get_side(), o.get_quantity());
+                const quantity requested = static_cast<quantity>(
+                    std::round(o.get_quantity() * qty_scale_));
+                const double vwap = external_only
+                    ? ob_->external_vwap(book_side, requested)
+                    : walked_book_vwap(o.get_side(), o.get_quantity());
                 if (vwap > 0.0) {
                     ref_price = vwap;
                     walked_used = true;
@@ -246,7 +273,9 @@ public:
                 pre_ask = infos.get_asks().front().price_.to_double();
         }
 
-        trades resulting_trades = ob_->add_order(book_order);
+        trades resulting_trades = external_only
+            ? ob_->add_order_against_external(book_order)
+            : ob_->add_order(book_order);
 
         // GTC remainder rests on the book. Track it so later quote
         // updates that cross its level (delivered via on_book_trades)
@@ -331,6 +360,7 @@ public:
         }
     }
 
+public:
     bool poll_fills(std::vector<fill_event>& out) override
     {
         if (pending_fills_.empty())

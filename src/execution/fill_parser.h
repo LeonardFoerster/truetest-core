@@ -56,6 +56,7 @@ struct parsed_exec
 {
     enum class kind
     {
+        invalid,
         ack,
         partial_fill,
         full_fill,
