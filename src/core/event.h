@@ -78,7 +78,8 @@ public:
                 double high,
                 double low,
                 double close,
-                int64_t volume = 0
+                int64_t volume = 0,
+                std::uint64_t quantity_scale = 1
         )
 
                 :event(event_type::market, timestamp)
@@ -88,6 +89,7 @@ public:
                 , low_ (low)
                 , close_ (close)
                 , volume_ (volume)
+                , quantity_scale_ (quantity_scale)
         { }
 
         const std::string& get_symbol() const { return symbol_; }
@@ -96,6 +98,7 @@ public:
         double get_low() const { return low_; }
         double get_close() const { return close_; }
         int64_t get_volume() const { return volume_; }
+        std::uint64_t get_quantity_scale() const { return quantity_scale_; }
 
         std::string to_string() const override 
         {
@@ -111,6 +114,7 @@ private:
         double low_;
         double close_; 
         int64_t volume_;
+        std::uint64_t quantity_scale_ = 1;
 
 };
 
@@ -398,19 +402,22 @@ public:
                 const std::string& symbol,
                 double price,
                 int64_t quantity,
-                tick_side side = tick_side::unknown
+                tick_side side = tick_side::unknown,
+                std::uint64_t quantity_scale = 1
         )
                 : event(event_type::tick, timestamp)
                 , symbol_(symbol)
                 , price_(price)
                 , quantity_(quantity)
                 , side_(side)
+                , quantity_scale_(quantity_scale)
         { }
 
         const std::string& get_symbol() const { return symbol_; }
         double get_price() const { return price_; }
         int64_t get_quantity() const { return quantity_; }
         tick_side get_side() const { return side_; }
+        std::uint64_t get_quantity_scale() const { return quantity_scale_; }
 
         std::string to_string() const override
         {
@@ -429,6 +436,7 @@ private:
         double price_;
         int64_t quantity_;
         tick_side side_;
+        std::uint64_t quantity_scale_ = 1;
 };
 
 
@@ -450,10 +458,12 @@ public:
                 const l2_level* bids,
                 std::size_t bid_count,
                 const l2_level* asks,
-                std::size_t ask_count
+                std::size_t ask_count,
+                std::uint64_t quantity_scale = 1
         )
                 : event(event_type::l2_snapshot, timestamp)
                 , symbol_(symbol)
+                , quantity_scale_(quantity_scale)
         {
                 bid_count_ = static_cast<std::uint8_t>(
                     std::min(bid_count, kL2SnapshotMaxLevels));
@@ -470,6 +480,7 @@ public:
         std::size_t ask_count() const { return ask_count_; }
         const l2_level& bid(std::size_t i) const { return bids_[i]; }
         const l2_level& ask(std::size_t i) const { return asks_[i]; }
+        std::uint64_t get_quantity_scale() const { return quantity_scale_; }
 
         std::string to_string() const override
         {
@@ -484,6 +495,7 @@ private:
         std::array<l2_level, kL2SnapshotMaxLevels> asks_{};
         std::uint8_t bid_count_ = 0;
         std::uint8_t ask_count_ = 0;
+        std::uint64_t quantity_scale_ = 1;
 };
 
 
@@ -495,19 +507,22 @@ public:
                 const std::string& symbol,
                 tick_side side,
                 double price,
-                int64_t new_quantity
+                int64_t new_quantity,
+                std::uint64_t quantity_scale = 1
         )
                 : event(event_type::l2_update, timestamp)
                 , symbol_(symbol)
                 , side_(side)
                 , price_(price)
                 , new_quantity_(new_quantity)
+                , quantity_scale_(quantity_scale)
         { }
 
         const std::string& get_symbol() const { return symbol_; }
         tick_side get_side() const { return side_; }
         double get_price() const { return price_; }
         int64_t get_new_quantity() const { return new_quantity_; }
+        std::uint64_t get_quantity_scale() const { return quantity_scale_; }
 
         std::string to_string() const override
         {
@@ -522,6 +537,7 @@ private:
         tick_side side_;
         double price_;
         int64_t new_quantity_;
+        std::uint64_t quantity_scale_ = 1;
 };
 
 

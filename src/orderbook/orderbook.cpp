@@ -84,6 +84,7 @@ order_node* orderbook::alloc_node()
     n->next = nullptr;
     n->prev = nullptr;
     n->order = nullptr;
+    n->external_l2 = false;
     return n;
 }
 
@@ -91,6 +92,7 @@ void orderbook::free_node(order_node* n)
 {
     n->order.reset();
     n->prev = nullptr;
+    n->external_l2 = false;
     n->next = free_nodes_;
     free_nodes_ = n;
 }
@@ -247,7 +249,7 @@ trades orderbook::match_orders()
     return result;
 }
 
-trades orderbook::add_order(order_pointer order)
+trades orderbook::add_order_impl(order_pointer order, bool external_l2)
 {
     if (order_map_.count(order->get_order_id()))
         return {};
@@ -279,6 +281,7 @@ trades orderbook::add_order(order_pointer order)
 
     order_node* n = alloc_node();
     n->order = order;
+    n->external_l2 = external_l2;
 
     auto& levels = (order->get_side() == side::buy) ? bid_levels_ : ask_levels_;
     auto& lvl = find_or_insert_level(levels, order->get_price(), order->get_side());
@@ -287,6 +290,131 @@ trades orderbook::add_order(order_pointer order)
     order_map_[order->get_order_id()] = n;
 
     return match_orders();
+}
+
+trades orderbook::add_order(order_pointer order)
+{
+    return add_order_impl(std::move(order), false);
+}
+
+trades orderbook::add_external_order(order_pointer order)
+{
+    return add_order_impl(std::move(order), true);
+}
+
+trades orderbook::add_order_against_external(order_pointer incoming)
+{
+    trades result;
+    if (!incoming || order_map_.count(incoming->get_order_id()))
+        return result;
+
+    auto& contra_levels = incoming->get_side() == side::buy
+        ? ask_levels_ : bid_levels_;
+    const auto crosses = [&](Price level_price) noexcept {
+        return incoming->get_side() == side::buy
+            ? level_price <= incoming->get_price()
+            : level_price >= incoming->get_price();
+    };
+
+    if (incoming->get_order_type() == ob_order_type::fill_or_kill)
+    {
+        quantity available = 0;
+        const quantity required = incoming->get_remaining_quantity();
+        for (const auto& level : contra_levels)
+        {
+            if (!crosses(level.price))
+                break;
+            for (auto* node = level.head; node; node = node->next)
+            {
+                if (!node->external_l2)
+                    continue;
+                const quantity remaining =
+                    node->order->get_remaining_quantity();
+                if (remaining >= required - available)
+                {
+                    available = required;
+                    break;
+                }
+                available += remaining;
+            }
+            if (available == required)
+                break;
+        }
+        if (available < required)
+            return result;
+    }
+
+    for (auto level_it = contra_levels.begin();
+         level_it != contra_levels.end()
+             && incoming->get_remaining_quantity() > 0; )
+    {
+        if (!crosses(level_it->price))
+            break;
+
+        auto* node = level_it->head;
+        while (node && incoming->get_remaining_quantity() > 0)
+        {
+            auto* next = node->next;
+            if (!node->external_l2)
+            {
+                node = next;
+                continue;
+            }
+
+            const quantity trade_qty = std::min(
+                incoming->get_remaining_quantity(),
+                node->order->get_remaining_quantity());
+            incoming->fill(trade_qty);
+            node->order->fill(trade_qty);
+            level_it->total_qty -= trade_qty;
+
+            if (incoming->get_side() == side::buy)
+            {
+                result.emplace_back(
+                    trade_info{incoming->get_order_id(),
+                               incoming->get_price(), trade_qty},
+                    trade_info{node->order->get_order_id(),
+                               node->order->get_price(), trade_qty});
+            }
+            else
+            {
+                result.emplace_back(
+                    trade_info{node->order->get_order_id(),
+                               node->order->get_price(), trade_qty},
+                    trade_info{incoming->get_order_id(),
+                               incoming->get_price(), trade_qty});
+            }
+
+            if (node->order->is_filled())
+            {
+                const auto id = node->order->get_order_id();
+                level_it->remove(node); // post-fill remaining is zero
+                order_map_.erase(id);
+                free_node(node);
+            }
+            node = next;
+        }
+
+        if (level_it->empty())
+            level_it = contra_levels.erase(level_it);
+        else
+            ++level_it;
+    }
+
+    if (incoming->get_remaining_quantity() > 0
+        && incoming->get_order_type() == ob_order_type::good_till_cancel)
+    {
+        order_node* node = alloc_node();
+        node->order = incoming;
+        auto& own_levels = incoming->get_side() == side::buy
+            ? bid_levels_ : ask_levels_;
+        auto& level = find_or_insert_level(
+            own_levels, incoming->get_price(), incoming->get_side());
+        level.append(node);
+        order_map_[incoming->get_order_id()] = node;
+    }
+
+    return result;
 }
 
 void orderbook::cancel_order(order_id oid)
@@ -355,6 +483,59 @@ std::size_t orderbook::size() const
     return order_map_.size();
 }
 
+namespace {
+double best_external_price(const std::vector<price_level>& levels) noexcept
+{
+    for (const auto& level : levels)
+    {
+        for (auto* node = level.head; node; node = node->next)
+            if (node->external_l2)
+                return level.price.to_double();
+    }
+    return 0.0;
+}
+}
+
+double orderbook::best_external_bid_price() const noexcept
+{
+    return best_external_price(bid_levels_);
+}
+
+double orderbook::best_external_ask_price() const noexcept
+{
+    return best_external_price(ask_levels_);
+}
+
+double orderbook::external_vwap(side taker_side,
+                                quantity requested) const noexcept
+{
+    if (requested == 0)
+        return 0.0;
+    const auto& levels = taker_side == side::buy
+        ? ask_levels_ : bid_levels_;
+    quantity remaining = requested;
+    long double cost = 0.0L;
+    for (const auto& level : levels)
+    {
+        for (auto* node = level.head; node && remaining > 0;
+             node = node->next)
+        {
+            if (!node->external_l2)
+                continue;
+            const quantity take = std::min(
+                remaining, node->order->get_remaining_quantity());
+            cost += static_cast<long double>(take)
+                * static_cast<long double>(level.price.to_double());
+            remaining -= take;
+        }
+        if (remaining == 0)
+            break;
+    }
+    if (remaining != 0)
+        return 0.0;
+    return static_cast<double>(cost / static_cast<long double>(requested));
+}
+
 orderbook_lvl_infos orderbook::get_order_infos() const
 {
     lvl_infos bid_infos, ask_infos;
@@ -385,7 +566,7 @@ void orderbook::apply_l2_snapshot(const std::pair<Price, quantity>* bids,
                                    const std::pair<Price, quantity>* asks,
                                    std::size_t ask_count)
 {
-    clear();
+    clear_external_l2();
 
     for (std::size_t i = 0; i < bid_count; ++i)
     {
@@ -395,6 +576,7 @@ void orderbook::apply_l2_snapshot(const std::pair<Price, quantity>* bids,
                               OrderIdGenerator::next(), side::buy, p, q);
         order_node* n = alloc_node();
         n->order = o;
+        n->external_l2 = true;
         auto& lvl = find_or_insert_level(bid_levels_, p, side::buy);
         lvl.append(n);
         order_map_[o->get_order_id()] = n;
@@ -408,6 +590,7 @@ void orderbook::apply_l2_snapshot(const std::pair<Price, quantity>* bids,
                               OrderIdGenerator::next(), side::sell, p, q);
         order_node* n = alloc_node();
         n->order = o;
+        n->external_l2 = true;
         auto& lvl = find_or_insert_level(ask_levels_, p, side::sell);
         lvl.append(n);
         order_map_[o->get_order_id()] = n;
@@ -417,22 +600,7 @@ void orderbook::apply_l2_snapshot(const std::pair<Price, quantity>* bids,
 void orderbook::apply_l2_update(side side, Price price, quantity new_qty)
 {
     auto& levels = (side == side::buy) ? bid_levels_ : ask_levels_;
-
-    for (auto& lvl : levels)
-    {
-        if (lvl.price == price)
-        {
-            while (lvl.head)
-            {
-                order_node* n = lvl.head;
-                lvl.remove(n);
-                order_map_.erase(n->order->get_order_id());
-                free_node(n);
-            }
-            break;
-        }
-    }
-    remove_level_if_empty(levels, price);
+    clear_external_l2_at(levels, price);
 
     if (new_qty > 0)
     {
@@ -440,8 +608,63 @@ void orderbook::apply_l2_update(side side, Price price, quantity new_qty)
                               OrderIdGenerator::next(), side, price, new_qty);
         order_node* n = alloc_node();
         n->order = o;
+        n->external_l2 = true;
         auto& lvl = find_or_insert_level(levels, price, side);
         lvl.append(n);
         order_map_[o->get_order_id()] = n;
     }
+}
+
+void orderbook::clear_external_l2_at(std::vector<price_level>& levels,
+                                     Price price)
+{
+    for (auto level_it = levels.begin(); level_it != levels.end(); ++level_it)
+    {
+        if (level_it->price != price)
+            continue;
+        auto* node = level_it->head;
+        while (node)
+        {
+            auto* next = node->next;
+            if (node->external_l2)
+            {
+                const auto id = node->order->get_order_id();
+                level_it->remove(node);
+                order_map_.erase(id);
+                free_node(node);
+            }
+            node = next;
+        }
+        if (level_it->empty())
+            levels.erase(level_it);
+        return;
+    }
+}
+
+void orderbook::clear_external_l2()
+{
+    auto clear_side = [&](std::vector<price_level>& levels) {
+        for (auto level_it = levels.begin(); level_it != levels.end(); )
+        {
+            auto* node = level_it->head;
+            while (node)
+            {
+                auto* next = node->next;
+                if (node->external_l2)
+                {
+                    const auto id = node->order->get_order_id();
+                    level_it->remove(node);
+                    order_map_.erase(id);
+                    free_node(node);
+                }
+                node = next;
+            }
+            if (level_it->empty())
+                level_it = levels.erase(level_it);
+            else
+                ++level_it;
+        }
+    };
+    clear_side(bid_levels_);
+    clear_side(ask_levels_);
 }

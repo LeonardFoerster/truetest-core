@@ -45,6 +45,8 @@ std::string MonteCarloReporter::render_json(const McAggregate& agg,
     oss << "  \"n_trials\": " << agg.n_trials << ",\n";
     oss << "  \"generator\": \"" << cfg.generator_name << "\",\n";
     oss << "  \"strategy\": \"" << cfg.strategy_name << "\",\n";
+    oss << "  \"initial_balance\": " << cfg.initial_balance << ",\n";
+    oss << "  \"risk_fraction\": " << cfg.risk_fraction << ",\n";
     oss << "  \"mean_pnl\": " << agg.mean_pnl << ",\n";
     oss << "  \"median_pnl\": " << agg.median_pnl << ",\n";
     oss << "  \"p5_pnl\": " << agg.p5_pnl << ",\n";

@@ -37,6 +37,7 @@ struct mm_calibration
     // large bar return (e.g. a gap) widens the seeded book so far that
     // no crossing limit reaches it and taker fills silently stop.
     double max_half_spread_pct = 0.05;
+    double quantity_scale = 1e8;
 };
 
 class MarketMaker
@@ -91,4 +92,5 @@ private:
     double base_spread_pct_ = 0.002;
     double vol_spread_mult_ = 0.25;
     double max_half_spread_pct_ = 0.05;
+    double quantity_scale_ = 1e8;
 };

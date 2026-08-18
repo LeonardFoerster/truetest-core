@@ -102,6 +102,10 @@ struct order_node
     order_pointer order;
     order_node* next = nullptr;
     order_node* prev = nullptr;
+    // Venue L2 aggregates and locally resting strategy orders share price
+    // levels but not ownership. Snapshot/update replacement may remove only
+    // external nodes; local GTC bodies must remain cancellable/fillable.
+    bool external_l2 = false;
 };
 
 struct price_level
@@ -146,6 +150,13 @@ public:
                                Price price, quantity qty);
 
     trades add_order(order_pointer order);
+    // Synthetic venue quotes use the normal crossing engine but carry
+    // external ownership so local takers can never self-match against other
+    // strategy orders sharing this book.
+    trades add_external_order(order_pointer order);
+    // Match one incoming local taker solely against external depth. A GTC
+    // remainder rests locally; IOC/FOK remainders never enter the book.
+    trades add_order_against_external(order_pointer order);
     void cancel_order(order_id order_id);
     bool modify_order(order_id id, Price new_price, quantity new_qty);
     // Live book body for id after add/modify (nullptr if unknown). Used by
@@ -153,6 +164,19 @@ public:
     order_pointer get_order(order_id id) const;
     std::size_t size() const;
     orderbook_lvl_infos get_order_infos() const;
+    double best_bid_price() const noexcept
+    {
+        return bid_levels_.empty() ? 0.0
+                                   : bid_levels_.front().price.to_double();
+    }
+    double best_ask_price() const noexcept
+    {
+        return ask_levels_.empty() ? 0.0
+                                   : ask_levels_.front().price.to_double();
+    }
+    double best_external_bid_price() const noexcept;
+    double best_external_ask_price() const noexcept;
+    double external_vwap(side taker_side, quantity requested) const noexcept;
 
     void apply_l2_snapshot(const std::pair<Price, quantity>* bids, std::size_t bid_count,
                            const std::pair<Price, quantity>* asks, std::size_t ask_count);
@@ -187,7 +211,10 @@ private:
 
     price_level& find_or_insert_level(std::vector<price_level>& levels, Price price, side s);
     void remove_level_if_empty(std::vector<price_level>& levels, Price price);
+    void clear_external_l2();
+    void clear_external_l2_at(std::vector<price_level>& levels, Price price);
 
     bool can_match(side side, Price price) const;
+    trades add_order_impl(order_pointer order, bool external_l2);
     trades match_orders();
 };

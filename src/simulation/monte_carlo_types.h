@@ -173,6 +173,9 @@ struct McRunConfig {
 
     // Initial equity for each trial (passed through to engine_config and reports)
     double initial_balance = 10000.0;
+    // Platform sizing default. Applied before strategy_params so an explicit
+    // --param risk_fraction=... remains the most specific override.
+    double risk_fraction = 0.02;
 
     // Realism / engine settings to apply to every trial (must match single-run
     // semantics when CLI sets fee/latency/impact — FR-02; maker-queue — FR-mc-queue).

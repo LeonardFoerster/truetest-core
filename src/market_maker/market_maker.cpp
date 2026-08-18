@@ -19,6 +19,7 @@ void MarketMaker::set_calibration(const mm_calibration& c)
     base_spread_pct_ = c.base_spread_pct;
     vol_spread_mult_ = c.vol_spread_mult;
     max_half_spread_pct_ = c.max_half_spread_pct;
+    quantity_scale_ = c.quantity_scale;
 }
 
 void MarketMaker::add_orders(std::shared_ptr<orderbook> ob, double current_price, int num_orders)
@@ -31,13 +32,15 @@ void MarketMaker::add_orders(std::shared_ptr<orderbook> ob, double current_price
 
         auto buy_order = ob->create_order(
             ob_order_type::good_till_cancel, OrderIdGenerator::next(), side::buy,
-            Price::from_double(buy_price), static_cast<quantity>(100 * 1e8));
+            Price::from_double(buy_price),
+            static_cast<quantity>(std::round(100 * quantity_scale_)));
         auto sell_order = ob->create_order(
             ob_order_type::good_till_cancel, OrderIdGenerator::next(), side::sell,
-            Price::from_double(sell_price), static_cast<quantity>(100 * 1e8));
+            Price::from_double(sell_price),
+            static_cast<quantity>(std::round(100 * quantity_scale_)));
 
-        ob->add_order(buy_order);
-        ob->add_order(sell_order);
+        ob->add_external_order(buy_order);
+        ob->add_external_order(sell_order);
     }
 }
 
@@ -125,8 +128,9 @@ trades MarketMaker::replenish(std::shared_ptr<orderbook> ob, double current_pric
         const order_id id = OrderIdGenerator::next();
         auto ob_order = ob->create_order(
             ob_order_type::good_till_cancel, id,
-            ob_side, p, static_cast<quantity>(std::round(mo.quantity * 1e8)));
-        auto trs = ob->add_order(ob_order);
+            ob_side, p,
+            static_cast<quantity>(std::round(mo.quantity * quantity_scale_)));
+        auto trs = ob->add_external_order(ob_order);
         crossings.insert(crossings.end(), trs.begin(), trs.end());
         live.push_back(id);
     }

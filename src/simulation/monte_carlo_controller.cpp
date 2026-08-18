@@ -37,7 +37,7 @@ void load_synthetic_path_into_handler(const SyntheticPath& path,
         // Reuse the existing sink logic pattern
         handler->load_into_queue(bar.date, bar.symbol,
                                  bar.open, bar.high, bar.low, bar.close,
-                                 bar.volume);
+                                 bar.volume, bar.quantity_scale);
     }
     // Note: caller may need to sort if multi-symbol, but single symbol here
 }
@@ -256,6 +256,12 @@ TrialResult MonteCarloController::run_single_trial_with_path(std::size_t trial_i
         }
         // Costs first, then --param overrides (same order as single-run CLI).
         apply_execution_cost_params(*strategy, config_);
+        try {
+            strategy->set_param("risk_fraction", config_.risk_fraction);
+        } catch (const std::exception&) {
+            // Not every strategy exposes equity-fraction sizing. This mirrors
+            // the single-run CLI's capability-based platform default.
+        }
         apply_strategy_params(*strategy, config_.strategy_params);
         if (config_.reuse_objects_between_trials)
         {

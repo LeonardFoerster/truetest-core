@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -162,6 +163,7 @@ inline std::vector<uint8_t> serialise(const market_event& e)
     };
     auto append_f64 = [&](double v) { append(&v, 8); };
     auto append_i64 = [&](int64_t v) { append(&v, 8); };
+    auto append_u64 = [&](uint64_t v) { append(&v, 8); };
 
     append_ts(e.get_timestamp());
     append_str(e.get_symbol());
@@ -170,6 +172,7 @@ inline std::vector<uint8_t> serialise(const market_event& e)
     append_f64(e.get_low());
     append_f64(e.get_close());
     append_i64(e.get_volume());
+    append_u64(e.get_quantity_scale());
     return buf;
 }
 
@@ -233,6 +236,8 @@ inline std::vector<uint8_t> serialise(const order_event& e)
     append_f64(e.get_stop_price());
     append_u64(e.get_order_id());
     append_ts(e.get_earliest_eligible_ts());
+    append_u64(e.get_opener_order_id());
+    append_str(e.get_strategy_name());
     return buf;
 }
 
@@ -268,6 +273,8 @@ inline std::vector<uint8_t> serialise(const fill_event& e)
     append_u64(e.get_fill_id());
     uint8_t src = static_cast<uint8_t>(e.get_source());
     append(&src, 1);
+    append_u64(e.get_opener_order_id());
+    append_str(e.get_strategy_name());
     return buf;
 }
 
@@ -290,6 +297,7 @@ inline std::vector<uint8_t> serialise(const tick_event& e)
     };
     auto append_f64 = [&](double v) { append(&v, 8); };
     auto append_i64 = [&](int64_t v) { append(&v, 8); };
+    auto append_u64 = [&](uint64_t v) { append(&v, 8); };
 
     append_ts(e.get_timestamp());
     append_str(e.get_symbol());
@@ -297,6 +305,7 @@ inline std::vector<uint8_t> serialise(const tick_event& e)
     append_i64(e.get_quantity());
     uint8_t sd = static_cast<uint8_t>(e.get_side());
     append(&sd, 1);
+    append_u64(e.get_quantity_scale());
     return buf;
 }
 
@@ -320,6 +329,7 @@ inline std::vector<uint8_t> serialise(const l2_snapshot_event& e)
     auto append_f64 = [&](double v) { append(&v, 8); };
     auto append_i64 = [&](int64_t v) { append(&v, 8); };
     auto append_u32 = [&](uint32_t v) { append(&v, 4); };
+    auto append_u64 = [&](uint64_t v) { append(&v, 8); };
 
     append_ts(e.get_timestamp());
     append_str(e.get_symbol());
@@ -333,6 +343,7 @@ inline std::vector<uint8_t> serialise(const l2_snapshot_event& e)
         append_f64(e.ask(i).price);
         append_i64(e.ask(i).quantity);
     }
+    append_u64(e.get_quantity_scale());
     return buf;
 }
 
@@ -381,6 +392,7 @@ inline std::vector<uint8_t> serialise(const l2_update_event& e)
     };
     auto append_f64 = [&](double v) { append(&v, 8); };
     auto append_i64 = [&](int64_t v) { append(&v, 8); };
+    auto append_u64 = [&](uint64_t v) { append(&v, 8); };
 
     append_ts(e.get_timestamp());
     append_str(e.get_symbol());
@@ -388,6 +400,7 @@ inline std::vector<uint8_t> serialise(const l2_update_event& e)
     append(&sd, 1);
     append_f64(e.get_price());
     append_i64(e.get_new_quantity());
+    append_u64(e.get_quantity_scale());
     return buf;
 }
 
@@ -490,8 +503,13 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         double low = r.read_f64();
         double close = r.read_f64();
         int64_t volume = r.read_i64();
+        std::uint64_t quantity_scale = 1;
+        if (r.remaining() == sizeof(std::uint64_t))
+            quantity_scale = r.read_u64();
+        else if (r.remaining() != 0)
+            throw std::runtime_error("event_log: invalid market extension length");
         return finish(std::make_shared<market_event>(
-            ts, symbol, open, high, low, close, volume));
+            ts, symbol, open, high, low, close, volume, quantity_scale));
     }
     case event_type::signal: {
         auto ts = r.read_ts();
@@ -511,9 +529,19 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         double stop_price = r.read_f64();
         uint64_t oid = r.read_u64();
         auto elig_ts = r.read_ts();
+        uint64_t opener_order_id = 0;
+        std::string strategy_name;
+        if (r.remaining() != 0) {
+            if (r.remaining() < sizeof(std::uint64_t) + sizeof(std::uint16_t))
+                throw std::runtime_error("event_log: invalid order attribution extension");
+            opener_order_id = r.read_u64();
+            strategy_name = r.read_str();
+        }
         auto ev = std::make_shared<order_event>(ts, symbol, ot, sd, qty, price, tif, stop_price);
         ev->set_order_id(oid);
         ev->set_earliest_eligible_ts(elig_ts);
+        ev->set_opener_order_id(opener_order_id);
+        ev->set_strategy_name(strategy_name);
         return finish(std::move(ev));
     }
     case event_type::fill: {
@@ -527,6 +555,8 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         double remaining = 0.0;
         uint64_t fill_id = 0;
         fill_source src = fill_source::unknown;
+        uint64_t opener_order_id = 0;
+        std::string strategy_name;
         // The original fill wire shape ended after commission. It was then
         // extended with remaining_qty + fill_id, and later fill_source. Only
         // those complete historic forms are valid; a partial extension must
@@ -544,10 +574,21 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
             src = read_enum(r, fill_source::exchange, "fill source");
             break;
         default:
-            throw std::runtime_error("event_log: invalid fill extension length");
+            // V2 attribution extends the complete 17-byte fill shape with
+            // opener id plus a bounded length-prefixed strategy name.
+            if (r.remaining() < 17U + sizeof(std::uint64_t)
+                                  + sizeof(std::uint16_t))
+                throw std::runtime_error("event_log: invalid fill extension length");
+            remaining = r.read_f64();
+            fill_id = r.read_u64();
+            src = read_enum(r, fill_source::exchange, "fill source");
+            opener_order_id = r.read_u64();
+            strategy_name = r.read_str();
+            break;
         }
         auto ev = std::make_shared<fill_event>(ts, symbol, oid, sd, qty, price,
-                                               commission, remaining, fill_id);
+                                               commission, remaining, fill_id,
+                                               strategy_name, opener_order_id);
         ev->set_source(src);
         return finish(std::move(ev));
     }
@@ -557,7 +598,13 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         double price = r.read_f64();
         int64_t qty = r.read_i64();
         auto sd = read_enum(r, tick_side::unknown, "tick side");
-        return finish(std::make_shared<tick_event>(ts, symbol, price, qty, sd));
+        std::uint64_t quantity_scale = 1;
+        if (r.remaining() == sizeof(std::uint64_t))
+            quantity_scale = r.read_u64();
+        else if (r.remaining() != 0)
+            throw std::runtime_error("event_log: invalid tick extension length");
+        return finish(std::make_shared<tick_event>(
+            ts, symbol, price, qty, sd, quantity_scale));
     }
     case event_type::l2_snapshot: {
         auto ts = r.read_ts();
@@ -584,8 +631,14 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
             (void)r.read_f64();
             (void)r.read_i64();
         }
+        std::uint64_t quantity_scale = 1;
+        if (r.remaining() == sizeof(std::uint64_t))
+            quantity_scale = r.read_u64();
+        else if (r.remaining() != 0)
+            throw std::runtime_error("event_log: invalid L2 snapshot extension length");
         return finish(std::make_shared<l2_snapshot_event>(
-            ts, symbol, bids.data(), bid_n, asks.data(), ask_n));
+            ts, symbol, bids.data(), bid_n, asks.data(), ask_n,
+            quantity_scale));
     }
     case event_type::l2_update: {
         auto ts = r.read_ts();
@@ -593,8 +646,13 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         auto sd = read_enum(r, tick_side::unknown, "tick side");
         double price = r.read_f64();
         int64_t new_qty = r.read_i64();
+        std::uint64_t quantity_scale = 1;
+        if (r.remaining() == sizeof(std::uint64_t))
+            quantity_scale = r.read_u64();
+        else if (r.remaining() != 0)
+            throw std::runtime_error("event_log: invalid L2 update extension length");
         return finish(std::make_shared<l2_update_event>(
-            ts, symbol, sd, price, new_qty));
+            ts, symbol, sd, price, new_qty, quantity_scale));
     }
     case event_type::cancel: {
         auto ts = r.read_ts();
@@ -646,13 +704,59 @@ static constexpr size_t   EVENT_LOG_MAX_INDEX_ENTRIES = 1'000'000;
 // so new files are unambiguously distinguishable from headerless logs.
 static constexpr std::array<uint8_t, 4> EVENT_LOG_FILE_MAGIC{
     0xFF, static_cast<uint8_t>('T'), static_cast<uint8_t>('T'), static_cast<uint8_t>('L')};
-static constexpr uint8_t EVENT_LOG_FILE_VERSION = 1;
+static constexpr uint8_t EVENT_LOG_LEGACY_FILE_VERSION = 1;
+static constexpr uint8_t EVENT_LOG_FILE_VERSION = 2;
 static constexpr uint8_t EVENT_LOG_FILE_FLAG_ZSTD = 1U << 0;
 static constexpr uint8_t EVENT_LOG_FILE_FLAG_FINALIZED = 1U << 1;
+// Rotated files are independently finalized segments, not self-contained
+// ledgers. They remain readable for inspection but require manifest stitching
+// before they can be authoritative accounting input.
+static constexpr uint8_t EVENT_LOG_FILE_FLAG_SEGMENTED = 1U << 2;
 static constexpr uint8_t EVENT_LOG_FILE_KNOWN_FLAGS =
-    EVENT_LOG_FILE_FLAG_ZSTD | EVENT_LOG_FILE_FLAG_FINALIZED;
+    EVENT_LOG_FILE_FLAG_ZSTD | EVENT_LOG_FILE_FLAG_FINALIZED
+    | EVENT_LOG_FILE_FLAG_SEGMENTED;
 static constexpr std::streamoff EVENT_LOG_FILE_PREAMBLE_BYTES = 6;
 
+
+// Rejects /dev/null, FIFOs, device nodes, and symlinks resolving to any of
+// those as a durable event-log target. std::ofstream::open() succeeds
+// silently against all of these while every write is discarded, which would
+// defeat the "--log-events is the mandatory durable truth" guarantee
+// (docs/governance/01-prod.md, docs/operations/01-futures-phase0-operator-sop.md).
+//
+// Deliberately NOT enforced inside EventLogger's own constructor: this repo's
+// existing fault-injection tests (EventLog.*DurableFinalizeFailureHaltsEngine)
+// construct EventLogger directly against /dev/full — a character device that
+// *fails writes loudly* (ENOSPC), the opposite problem from /dev/null, and a
+// legitimate way to exercise the halt-on-durable-write-failure path. Blocking
+// all non-regular files at the EventLogger layer would break that. This
+// predicate is for operator-facing path validation instead — see its call
+// site in the mainnet CLI gate (src/bin/main.inc).
+// See docs/todos/08-H-persistence-observability.md H-07.
+inline bool is_acceptable_durable_log_target(const std::string& path)
+{
+    if (path.empty())
+        return false;
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(path, ec);
+    if (ec)
+        return false; // could not determine target state (e.g. a symlink
+                       // loop) -> fail closed rather than guess
+    if (exists)
+    {
+        // is_regular_file() follows symlinks, so a symlink to /dev/null is
+        // correctly rejected here too.
+        const bool regular = std::filesystem::is_regular_file(path, ec);
+        return regular && !ec;
+    }
+    // Not yet created: require the parent directory to exist so a later
+    // ofstream::open(..., trunc) actually creates a genuine regular file.
+    const auto parent = std::filesystem::path(path).parent_path();
+    if (parent.empty())
+        return true; // relative path in CWD
+    const bool parent_is_dir = std::filesystem::is_directory(parent, ec);
+    return parent_is_dir && !ec;
+}
 
 class EventLogger
 {
@@ -908,6 +1012,8 @@ private:
         uint8_t flags = compress_ ? EVENT_LOG_FILE_FLAG_ZSTD : uint8_t{0};
         if (finalized)
             flags |= EVENT_LOG_FILE_FLAG_FINALIZED;
+        if (max_bytes_ > 0)
+            flags |= EVENT_LOG_FILE_FLAG_SEGMENTED;
         return flags;
     }
 
@@ -928,18 +1034,44 @@ private:
     {
         finalize();
         out_.close();
+        if (out_.fail())
+            throw std::runtime_error("EventLogger: close before rotate failed");
 
         auto nth = [&](int i) -> std::string {
             return path_ + "." + std::to_string(i);
         };
+        auto remove_path = [](const std::string& path) {
+            std::error_code ec;
+            (void)std::filesystem::remove(path, ec);
+            if (ec)
+                throw std::runtime_error(
+                    "EventLogger: rotate remove failed for " + path +
+                    ": " + ec.message());
+        };
+        auto rename_if_present = [](const std::string& from,
+                                    const std::string& to) {
+            std::error_code ec;
+            const bool exists = std::filesystem::exists(from, ec);
+            if (ec)
+                throw std::runtime_error(
+                    "EventLogger: rotate stat failed for " + from +
+                    ": " + ec.message());
+            if (!exists)
+                return;
+            std::filesystem::rename(from, to, ec);
+            if (ec)
+                throw std::runtime_error(
+                    "EventLogger: rotate rename failed from " + from +
+                    " to " + to + ": " + ec.message());
+        };
         if (max_files_ > 0) {
             std::string oldest = nth(max_files_);
-            std::remove(oldest.c_str());
+            remove_path(oldest);
             for (int i = max_files_ - 1; i >= 1; --i)
-                std::rename(nth(i).c_str(), nth(i + 1).c_str());
-            std::rename(path_.c_str(), nth(1).c_str());
+                rename_if_present(nth(i), nth(i + 1));
+            rename_if_present(path_, nth(1));
         } else {
-            std::remove(path_.c_str());
+            remove_path(path_);
         }
 
         out_.open(path_, std::ios::binary | std::ios::trunc);
@@ -1054,6 +1186,10 @@ public:
         if (pos == std::streampos(-1)) return false;
         return static_cast<std::streamoff>(pos) < data_end_;
     }
+
+    uint8_t file_version() const noexcept { return file_version_; }
+    bool file_finalized() const noexcept { return file_finalized_; }
+    bool file_segmented() const noexcept { return file_segmented_; }
 
     event_pointer next()
     {
@@ -1172,6 +1308,8 @@ private:
     std::streamoff data_begin_ = 0;
     std::streamoff data_end_ = 0;
     bool file_finalized_ = false;
+    bool file_segmented_ = false;
+    uint8_t file_version_ = 0; // 0 = headerless legacy stream
     bool failed_ = false;
     std::exception_ptr failure_;
 
@@ -1229,14 +1367,17 @@ private:
         uint8_t flags = 0;
         read_exact(&version, 1, "file preamble version");
         read_exact(&flags, 1, "file preamble flags");
-        if (version != EVENT_LOG_FILE_VERSION)
+        if (version != EVENT_LOG_FILE_VERSION &&
+            version != EVENT_LOG_LEGACY_FILE_VERSION)
             throw std::runtime_error("EventReplayer: unsupported file version");
         if ((flags & ~EVENT_LOG_FILE_KNOWN_FLAGS) != 0)
             throw std::runtime_error("EventReplayer: unsupported file flags");
 
+        file_version_ = version;
         data_begin_ = EVENT_LOG_FILE_PREAMBLE_BYTES;
         compressed_ = (flags & EVENT_LOG_FILE_FLAG_ZSTD) != 0;
         file_finalized_ = (flags & EVENT_LOG_FILE_FLAG_FINALIZED) != 0;
+        file_segmented_ = (flags & EVENT_LOG_FILE_FLAG_SEGMENTED) != 0;
         return true;
     }
 

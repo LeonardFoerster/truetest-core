@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <cmath>
+#include <limits>
 #include <string>
 
 class Price {
@@ -11,8 +12,28 @@ public:
     constexpr Price() : raw_(0) {}
     constexpr explicit Price(int64_t raw) : raw_(raw) {}
 
+    static bool try_from_double(double d, Price& out) noexcept {
+        if (!std::isfinite(d)) return false;
+        const long double scaled = static_cast<long double>(d)
+            * static_cast<long double>(SCALE);
+        const long double rounded = std::round(scaled);
+        if (rounded < static_cast<long double>(
+                          std::numeric_limits<int64_t>::min())
+            || rounded > static_cast<long double>(
+                          std::numeric_limits<int64_t>::max()))
+            return false;
+        out = Price(static_cast<int64_t>(rounded));
+        return true;
+    }
+
+    static bool is_representable(double d) noexcept {
+        Price ignored;
+        return try_from_double(d, ignored);
+    }
+
     static Price from_double(double d) {
-        return Price(static_cast<int64_t>(std::llround(d * SCALE)));
+        return Price(static_cast<int64_t>(std::llround(
+            static_cast<long double>(d) * static_cast<long double>(SCALE))));
     }
 
     double to_double() const { return static_cast<double>(raw_) / SCALE; }
