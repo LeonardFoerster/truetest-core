@@ -72,7 +72,32 @@ engine::engine(std::shared_ptr<data_handler> dh,
                                       : MarketMaker())
 {
     if (config_.provider)
-        provider_funding_ingress_ = config_.provider->funding_ingress();
+    {
+        provider_execution_ingress_ = config_.provider->execution_ingress();
+        // A provider that opts into the unified FIFO must not also expose the
+        // legacy funding queue to this engine; applying both would violate the
+        // source-order/exactly-once contract before strategy startup.
+        provider_funding_ingress_ = provider_execution_ingress_
+            ? nullptr : config_.provider->funding_ingress();
+        if (auto adapter = config_.provider->get_execution_adapter())
+        {
+            private_execution_adapter_ = adapter.get();
+            private_execution_support_ = adapter->get_async_support();
+        }
+        if (provider_execution_ingress_ && !private_execution_support_)
+            throw std::runtime_error(
+                "unified private ingress requires async lifecycle support");
+        // A live execution adapter is a private-account producer contract,
+        // not an optional enhancement.  Refuse the legacy reader-side bridge
+        // path before strategy construction; otherwise a provider extension
+        // could bypass ordered ingress/final-producer proof merely by omitting
+        // `execution_ingress()`.
+        if (config_.mode == engine_mode::live
+            && config_.provider->get_execution_adapter()
+            && (!provider_execution_ingress_ || !private_execution_support_))
+            throw std::runtime_error(
+                "live execution provider requires unified private ingress and transactional lifecycle support");
+    }
     if (config_.mode == engine_mode::live && config_.provider
         && (!config_.live_safety_session
             || !config_.live_safety_session->owns_provider(config_.provider)
@@ -83,6 +108,28 @@ engine::engine(std::shared_ptr<data_handler> dh,
         && config_.kill_switch
         && !config_.live_safety_session->set_kill_switch(config_.kill_switch))
         throw std::runtime_error("live safety session already began shutdown");
+    if (config_.mode == engine_mode::live)
+    {
+        // Composition must have reserved this before provider configuration
+        // and open.  Do not silently fall back to opening a caller-supplied
+        // pathname here: that would reintroduce the TOCTOU surface the live
+        // ledger reservation exists to remove.
+        if (config_.event_log_path.empty()
+            || !config_.authoritative_event_ledger
+            || config_.authoritative_event_ledger->final_path()
+                != config_.event_log_path
+            || !config_.authoritative_event_ledger->reserved())
+            throw std::runtime_error(
+                "live engine requires a pre-reserved authoritative event ledger");
+        if (config_.log_max_bytes != 0)
+            throw std::runtime_error(
+                "live authoritative event ledger does not permit rotation");
+
+        // This happens before the initial private FIFO drain below.  If
+        // construction subsequently fails, the reservation remains an
+        // unpublished `.partial` forensic artifact rather than a clean log.
+        ensure_event_logger();
+    }
     market_maker_.set_calibration({config_.mm_levels_per_side,
                                    config_.mm_base_depth,
                                    config_.mm_base_spread_pct,
@@ -163,15 +210,18 @@ engine::engine(std::shared_ptr<data_handler> dh,
         if (auto ba = config_.provider->get_bracket_adapter())
             exit_manager_.set_bracket_adapter(std::move(ba));
 
-        // Install the bridge-side hook that turns inbound fills for
-        // venue-bracket legs (which never went through route_order, so
-        // by_client_id_ misses them) into engine-recognized fill_events.
+        // Legacy bridges resolve unknown bracket fills on the reader thread.
+        // Unified private ingress deliberately forbids that: all untracked
+        // legs must be resolved by ExitManager on the engine thread.
         if (auto adapter = config_.provider->get_execution_adapter())
         {
             if (auto* cap = adapter->get_async_support())
             {
-                auto armed_for_unknown = callbacks_armed_flag_;
-                cap->set_unknown_fill_handler(
+                private_execution_support_ = cap;
+                if (!provider_execution_ingress_)
+                {
+                    auto armed_for_unknown = callbacks_armed_flag_;
+                    cap->set_unknown_fill_handler(
                     [this, armed_for_unknown](const parsed_exec& msg, std::uint64_t fill_id)
                         -> std::optional<synth_result>
                     {
@@ -202,6 +252,7 @@ engine::engine(std::shared_ptr<data_handler> dh,
                         return synth_result{
                             std::move(fe), opener, std::move(strategy_name)};
                     });
+                }
             }
         }
     }
@@ -231,6 +282,23 @@ engine::engine(std::shared_ptr<data_handler> dh,
                                 : nullptr)
         {
             auto recovered = adapter->list_open();
+            std::unordered_set<std::uint64_t> recovered_openers;
+            std::uint64_t max_recovered_opener = 0;
+            for (const auto& rb : recovered)
+            {
+                if (rb.opener_order_id == 0
+                    || !recovered_openers.insert(rb.opener_order_id).second)
+                    throw std::runtime_error(
+                        "reconciliation refused startup: recovered bracket opener identity is missing or duplicated");
+                max_recovered_opener = std::max(
+                    max_recovered_opener, rb.opener_order_id);
+            }
+            if (max_recovered_opener == std::numeric_limits<std::uint64_t>::max()
+                || !OrderIdGenerator::advance_to_at_least(
+                    max_recovered_opener + 1))
+                throw std::runtime_error(
+                    "reconciliation refused startup: recovered bracket identity cannot be reserved");
+
             struct recovered_scope
             {
                 std::size_t count = 0;
@@ -290,6 +358,21 @@ engine::engine(std::shared_ptr<data_handler> dh,
                           << " sl=" << (rb.stop_loss   ? *rb.stop_loss   : 0.0)
                           << " tp=" << (rb.take_profit ? *rb.take_profit : 0.0)
                           << "\n";
+                // Seed attribution before the bracket enters ExitManager.
+                // A later native-leg fill has a synthetic closer ID, so its
+                // durable opener is the only safe attribution fallback.
+                if (rb.strategy_name.empty())
+                {
+                    unowned_recovered_openers_.insert(rb.opener_order_id);
+                }
+                else if (!order_meta_.emplace(
+                             rb.opener_order_id,
+                             order_meta{rb.opener_order_id,
+                                        rb.strategy_name}).second)
+                {
+                    throw std::runtime_error(
+                        "reconciliation refused startup: recovered opener metadata collided");
+                }
                 exit_manager_.rehydrate(rb);
             }
         }
@@ -368,10 +451,11 @@ engine::engine(std::shared_ptr<data_handler> dh,
     prewarm_object_pools();
 
     // Provider private streams may become ready before engine construction.
-    // Consume any already-admitted funding now, on the constructing/event-loop
-    // thread, before strategy or risk can observe account state.
-    if (!drain_provider_funding_updates())
-        throw std::runtime_error("provider funding ingress failed during construction");
+    // Consume every already-admitted private record now, on the constructing
+    // event-loop thread, before strategy or risk can observe account state.
+    std::size_t initial_private_event_count = 0;
+    if (!drain_private_account_updates(initial_private_event_count))
+        throw std::runtime_error("provider private ingress failed during construction");
 
     // Constructor rollback safety: callbacks remain disarmed until every
     // potentially-throwing initialization/reconciliation step has completed.
@@ -511,6 +595,17 @@ void engine::switch_symbol(const std::string& new_symbol)
 
 void engine::log_event(const event& ev)
 {
+    if (config_.authoritative_event_ledger)
+    {
+        if (!logging_worker_)
+            throw std::runtime_error(
+                "live authoritative event logger is not available");
+        if (!logging_worker_->worker_started())
+            logging_worker_->log_event_before_worker_start(ev);
+        return;
+    }
+
+    // Ordinary threaded runs retain their existing LoggingWorker-only path.
     if (config_.is_threaded())
         return;
     if (event_logger_)
@@ -608,7 +703,16 @@ void engine::publish_event(const event_pointer& ev)
                 else if (std::string_view(name) == "risk_stats") st.ring_drops_risk_stats.store(drops, std::memory_order_relaxed);
                 else if (std::string_view(name) == "mm")         st.ring_drops_mm.store(drops, std::memory_order_relaxed);
             }
-            if (safety && config_.drop_policy == ring_drop_policy::halt_on_drop)
+            // A loss from the live authoritative logging ring invalidates
+            // its completeness proof regardless of a programmatic caller's
+            // generic drop policy.  Main selects halt_on_drop for live, but
+            // the engine must not let a direct composition defer this safety
+            // failure until shutdown.
+            const bool authoritative_ledger_drop =
+                config_.authoritative_event_ledger
+                && std::string_view(name) == "logging";
+            if ((safety && config_.drop_policy == ring_drop_policy::halt_on_drop)
+                || authoritative_ledger_drop)
             {
                 char msg[128];
                 std::snprintf(msg, sizeof(msg),
@@ -635,22 +739,28 @@ void engine::publish_event(const event_pointer& ev)
         break;
 
     case thread_preset::light:
+        if (config_.authoritative_event_ledger)
+            TT_PUSH(logging_ring_, logging_drops_, "logging",
+                    config_.authoritative_event_ledger != nullptr, logging_diag_);
         TT_PUSH(observer_ring_, observer_drops_, "observer", true, observer_diag_);
         break;
 
     case thread_preset::standard:
-        TT_PUSH(logging_ring_,    logging_drops_,    "logging",    false, logging_diag_);
+        TT_PUSH(logging_ring_,    logging_drops_,    "logging",
+                config_.authoritative_event_ledger != nullptr, logging_diag_);
         TT_PUSH(risk_stats_ring_, risk_stats_drops_, "risk_stats", true,  risk_stats_diag_);
         break;
 
     case thread_preset::full:
-        TT_PUSH(logging_ring_, logging_drops_, "logging", false, logging_diag_);
+        TT_PUSH(logging_ring_, logging_drops_, "logging",
+                config_.authoritative_event_ledger != nullptr, logging_diag_);
         TT_PUSH(risk_ring_,    risk_drops_,    "risk",    true,  risk_diag_);
         TT_PUSH(stats_ring_,   stats_drops_,   "stats",   false, stats_diag_);
         break;
 
     case thread_preset::extended:
-        TT_PUSH(logging_ring_, logging_drops_, "logging", false, logging_diag_);
+        TT_PUSH(logging_ring_, logging_drops_, "logging",
+                config_.authoritative_event_ledger != nullptr, logging_diag_);
         TT_PUSH(risk_ring_,    risk_drops_,    "risk",    true,  risk_diag_);
         TT_PUSH(stats_ring_,   stats_drops_,   "stats",   false, stats_diag_);
         TT_PUSH(mm_ring_,      mm_drops_,      "mm",      false, mm_diag_);
@@ -757,9 +867,109 @@ std::unique_ptr<LoggingWorker> engine::make_logging_worker()
     else if (!config_.text_log_path.empty())
         text_sink = LoggingWorker::log_sink::file_sink;
 
+    if (config_.authoritative_event_ledger)
+    {
+        auto logger = std::make_unique<EventLogger>(
+            config_.authoritative_event_ledger, config_.compress_log);
+        return std::make_unique<LoggingWorker>(
+            std::move(logger), text_sink, config_.text_log_path,
+            config_.log_max_bytes, config_.log_max_files);
+    }
+
     return std::make_unique<LoggingWorker>(
         config_.event_log_path, text_sink, config_.text_log_path, config_.compress_log,
         config_.log_max_bytes, config_.log_max_files);
+}
+
+void engine::ensure_event_logger(bool recreate_non_authoritative)
+{
+    if (config_.authoritative_event_ledger)
+    {
+        // Construct the one secure owner before the constructor's initial
+        // private FIFO drain.  Its worker thread starts later, but it can
+        // write those startup records directly through the same descriptor.
+        if (logging_worker_)
+            return;
+        logging_worker_ = make_logging_worker();
+        return;
+    }
+
+    if (!config_.event_log_path.empty()
+        && (recreate_non_authoritative || !event_logger_))
+        event_logger_ = std::make_unique<EventLogger>(
+            config_.event_log_path, config_.compress_log);
+}
+
+void engine::finalize_authoritative_event_ledger(
+    bool final_private_drain_proven) noexcept
+{
+    if (!config_.authoritative_event_ledger)
+        return;
+
+    try
+    {
+        if (!final_private_drain_proven)
+        {
+            if (logging_worker_)
+                logging_worker_->abandon_event_log();
+            else if (event_logger_)
+                event_logger_->abandon_unpublished();
+
+            // The secure descriptor may contain useful partial evidence, but
+            // it cannot be promoted when the provider did not prove that the
+            // final private FIFO was quiesced and fully accounted.
+            trigger_halt(
+                "authoritative event ledger final private drain was not proven");
+            try {
+                std::cerr << "  ! authoritative event ledger left partial: "
+                          << "final private drain was not proven\n";
+            }
+            catch (...) {}
+            return;
+        }
+
+        if (logging_worker_)
+        {
+            if (logging_drops_ != 0 || logging_worker_->has_failed()
+                || logging_worker_->error_count() != 0)
+            {
+                logging_worker_->abandon_event_log();
+                trigger_halt(
+                    "authoritative event ledger lost or failed to record an event");
+                try {
+                    std::cerr << "  ! authoritative event ledger left partial: "
+                              << "logging worker recorded an error or ring drop\n";
+                }
+                catch (...) {}
+                return;
+            }
+            logging_worker_->finalize_event_log();
+            return;
+        }
+        if (event_logger_)
+        {
+            event_logger_->finalize();
+            return;
+        }
+
+        throw std::runtime_error(
+            "authoritative event ledger lost its sole logger before finalization");
+    }
+    catch (const std::exception& e)
+    {
+        // EventLogger leaves an unpublished reservation in place on failure.
+        // Do not mask it with a retry or claim a clean return path.
+        trigger_halt("authoritative event ledger finalization failed");
+        try {
+            std::cerr << "  ! authoritative event ledger finalization failed: "
+                      << e.what() << "\n";
+        }
+        catch (...) {}
+    }
+    catch (...)
+    {
+        trigger_halt("authoritative event ledger finalization failed");
+    }
 }
 
 // Wave 2 skeleton helpers (setup/teardown, pending drain, paper tape, marks)
@@ -824,6 +1034,23 @@ void engine::start_workers()
         return -1;
     };
 
+    auto start_logging_worker = [&]() {
+        // Only the live secure ledger is created before constructor-time
+        // private draining and must survive into its worker thread.  Ordinary
+        // modes keep their historical fresh worker per run lifecycle.
+        if (!config_.authoritative_event_ledger || !logging_worker_)
+            logging_worker_ = make_logging_worker();
+        wire_failure(*logging_worker_);
+        // Mark before the thread is made runnable.  From this point onward
+        // live log_event() routes only through logging_ring_, preventing a
+        // direct-write/ring-write duplicate at the startup boundary.
+        logging_worker_->mark_worker_started();
+        worker_threads_.emplace_back([this]() {
+            logging_worker_->run(*logging_ring_);
+        });
+        pin_to_core(worker_threads_.back(), find_core(core_role::logging));
+    };
+
     switch (config_.threading)
     {
     case thread_preset::inline_mode:
@@ -831,6 +1058,15 @@ void engine::start_workers()
 
     case thread_preset::light:
     {
+        // Light normally has no logging worker.  A threaded live run is an
+        // exception: its authoritative ledger must never synchronously write
+        // the hot path after startup, so give it the same single SPSC sink.
+        if (config_.authoritative_event_ledger)
+        {
+            logging_ring_ = std::make_shared<EventRing>();
+            start_logging_worker();
+        }
+
         observer_ring_ = std::make_shared<EventRing>();
         observer_worker_ = std::make_unique<ObserverWorker>(risk_manager_, halt_flag_, order_tracker_.active_count_atomic(),
             config_.initial_balance, config_.rolling_window, config_.risk_free_rate,
@@ -851,19 +1087,13 @@ void engine::start_workers()
         logging_ring_ = std::make_shared<EventRing>();
         risk_stats_ring_ = std::make_shared<EventRing>();
 
-        logging_worker_ = make_logging_worker();
+        start_logging_worker();
         risk_stats_worker_ = std::make_unique<RiskStatsWorker>(risk_manager_, halt_flag_, order_tracker_.active_count_atomic(),
             config_.initial_balance, config_.rolling_window, config_.risk_free_rate,
             config_.periods_per_year, config_.max_equity_points,
             [this](std::string_view reason) { trigger_halt(reason); },
             config_.mode != engine_mode::backtest);
-        wire_failure(*logging_worker_);
         wire_failure(*risk_stats_worker_);
-
-        worker_threads_.emplace_back([this]() {
-            logging_worker_->run(*logging_ring_);
-        });
-        pin_to_core(worker_threads_.back(), find_core(core_role::logging));
 
         worker_threads_.emplace_back([this]() {
             risk_stats_worker_->run(*risk_stats_ring_);
@@ -878,7 +1108,7 @@ void engine::start_workers()
         risk_ring_ = std::make_shared<EventRing>();
         stats_ring_ = std::make_shared<EventRing>();
 
-        logging_worker_ = make_logging_worker();
+        start_logging_worker();
         risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_, order_tracker_.active_count_atomic(),
             config_.initial_balance, config_.rolling_window, config_.risk_free_rate,
             config_.periods_per_year, config_.max_equity_points,
@@ -887,14 +1117,8 @@ void engine::start_workers()
         stats_worker_ = std::make_unique<StatsWorker>(config_.initial_balance, 1000,
             config_.rolling_window, config_.risk_free_rate,
             config_.periods_per_year, config_.max_equity_points);
-        wire_failure(*logging_worker_);
         wire_failure(*risk_worker_);
         wire_failure(*stats_worker_);
-
-        worker_threads_.emplace_back([this]() {
-            logging_worker_->run(*logging_ring_);
-        });
-        pin_to_core(worker_threads_.back(), find_core(core_role::logging));
 
         worker_threads_.emplace_back([this]() {
             risk_worker_->run(*risk_ring_);
@@ -926,7 +1150,7 @@ void engine::start_workers()
             mm_order_ring_ = std::make_shared<MMRing>();
         }
 
-        logging_worker_ = make_logging_worker();
+        start_logging_worker();
         risk_worker_ = std::make_unique<RiskWorker>(risk_manager_, halt_flag_, order_tracker_.active_count_atomic(),
             config_.initial_balance, config_.rolling_window, config_.risk_free_rate,
             config_.periods_per_year, config_.max_equity_points,
@@ -944,15 +1168,9 @@ void engine::start_workers()
                                config_.mm_base_spread_pct,
                                config_.mm_vol_spread_mult,
                                config_.mm_max_half_spread_pct});
-        wire_failure(*logging_worker_);
         wire_failure(*risk_worker_);
         wire_failure(*stats_worker_);
         if (mm_worker_) wire_failure(*mm_worker_);
-
-        worker_threads_.emplace_back([this]() {
-            logging_worker_->run(*logging_ring_);
-        });
-        pin_to_core(worker_threads_.back(), find_core(core_role::logging));
 
         worker_threads_.emplace_back([this]() {
             risk_worker_->run(*risk_ring_);
@@ -1056,12 +1274,80 @@ void engine::stop_workers()
     const auto reason = halt_flag_.load(std::memory_order_acquire)
         ? live_shutdown_reason::engine_halt
         : live_shutdown_reason::normal_end;
-    (void)finalize_live_shutdown(reason);
+    const bool shutdown_finished = finalize_live_shutdown(reason);
 
-    // Provider shutdown above joins the private account-stream producer.  The
-    // ring is now stable, so record every admitted settlement before flushing
-    // persistence or stopping worker consumers.
-    (void)drain_provider_funding_updates();
+    // A unified private FIFO is authoritative only after the provider proves
+    // its sole producer has joined.  Never call a ring drain "final" based on
+    // a remote close acknowledgement alone: a still-running reader could
+    // publish an event after the consumer has gone away.
+    std::size_t final_private_event_count = 0;
+    // A final file means every private fact admitted before provider quiesce
+    // was observed by this engine.  If that proof fails, preserve the secure
+    // descriptor's `.partial` artifact instead of publishing an incomplete
+    // authoritative ledger.
+    bool final_private_drain_proven = !config_.authoritative_event_ledger
+        || shutdown_finished;
+    if (provider_execution_ingress_)
+    {
+        const bool producer_joined = config_.provider
+            && config_.provider->private_execution_producer_joined();
+        if (!shutdown_finished || !producer_joined)
+        {
+            final_private_drain_proven = false;
+            trigger_halt("private execution producer was not proven joined before final drain");
+        }
+        else
+        {
+            if (!drain_provider_execution_updates(
+                    final_private_event_count,
+                    private_execution_drain_mode::final_accounting_only))
+                final_private_drain_proven = false;
+            bool unresolved_private_lifecycle = false;
+            if (private_execution_support_)
+            {
+                try
+                {
+                    unresolved_private_lifecycle = private_execution_support_
+                        ->has_unresolved_private_lifecycle();
+                }
+                catch (...)
+                {
+                    unresolved_private_lifecycle = true;
+                }
+            }
+            if (unresolved_private_lifecycle)
+            {
+                final_private_drain_proven = false;
+                trigger_halt("private lifecycle remained unresolved after final drain");
+            }
+        }
+    }
+    else
+    {
+        // A legacy funding-only handoff cannot prove a final authoritative
+        // ledger unless its provider explicitly proves the private producer
+        // has joined.  The same provider contract used by unified execution
+        // is intentionally required here: a REST close acknowledgement is
+        // not a source-of-truth barrier for an asynchronous account stream.
+        const bool legacy_producer_joined = config_.provider
+            && config_.provider->private_execution_producer_joined();
+        const bool legacy_drain_succeeded = drain_provider_funding_updates();
+        if (!legacy_drain_succeeded
+            || (config_.mode == engine_mode::live
+                && config_.authoritative_event_ledger
+                && (!shutdown_finished || !legacy_producer_joined)))
+        {
+            final_private_drain_proven = false;
+            if (!shutdown_finished || !legacy_producer_joined)
+                trigger_halt("private account producer was not proven joined before final drain");
+        }
+    }
+
+    // A final private record can have emitted an audit event after the normal
+    // run loop's last flush.  Flush here, before worker/ring teardown, so the
+    // shutdown ledger cannot claim a clean terminal state without its final
+    // source-of-truth evidence being persisted.
+    if (event_logger_) event_logger_->flush();
 
     // QuestDB: give the final funding drain and all earlier audit enqueues a
     // last flush opportunity before worker/ring teardown. Best-effort; strict
@@ -1090,6 +1376,12 @@ void engine::stop_workers()
             t.join();
     }
     worker_threads_.clear();
+
+    // Final private accounting was enqueued before worker shutdown.  The
+    // LoggingWorker drains its ring on stop, so only after its join can the
+    // single descriptor owner durably write the index and publish the live
+    // ledger.  Failure is terminal and deliberately leaves forensic state.
+    finalize_authoritative_event_ledger(final_private_drain_proven);
 
     // Workers joined — safe to stamp research counters onto export analytics.
     fold_research_counters_into_export_analytics();
@@ -1660,6 +1952,43 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         return false;
     }
 
+    // Staged latency/stop orders reach this boundary without revisiting
+    // route_order.  Service the private FIFO here as the final guard before
+    // any router submission so a new venue mutation cannot overtake an
+    // already-admitted private fill/lifecycle transition.
+    if (!drain_private_account_updates(event_count))
+    {
+        halt_requested = true;
+        return false;
+    }
+
+    // A native protective leg can still be resting/cancel-pending after its
+    // sibling has changed local state. Do not let an already-staged stop or
+    // latency order bypass the route-time gate and create fresh same-symbol
+    // venue exposure while that old leg could still execute. A tagged local
+    // exit is worse than a normal entry refusal: its ExitManager intent was
+    // already consumed, so retain accounting truth and reconcile rather than
+    // silently leave the position without a locally armed exit.
+    if (exit_manager_.native_bracket_blocks_symbol_admission(o->get_symbol()))
+    {
+        const char* reason = "native protective lifecycle unresolved; venue submit refused";
+        auto rejection = acquire_pooled(rejection_pool_, o->get_timestamp(),
+                                        o->get_symbol(), o->get_order_id(), reason);
+        log_event(*rejection);
+        publish_event(rejection);
+        if (!config_.is_threaded()) analytics_.on_event(rejection);
+        audit_sink_->record_rejection(*o, "native_bracket_lifecycle", reason);
+        order_tracker_.set_status(o->get_order_id(), order_status::rejected);
+        if (dashboard_builder_) dashboard_builder_->erase_open_order(o->get_order_id());
+        if (o->get_opener_order_id() != 0)
+        {
+            trigger_halt("native protective lifecycle blocked an engine-side exit; reconciliation required");
+            halt_requested = true;
+            return false;
+        }
+        return true;
+    }
+
     // ========================================================================
     // CANONICAL HOT-PATH ORDERING (Phase 3 deepdive cleanup)
     // This documents the enforced sequence for order + fill processing.
@@ -1799,8 +2128,38 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         }
     }
 
-    auto adapter = router_->resolve_adapter(o->get_symbol());
-    const bool async_submit = router_->is_async_submit(adapter.get());
+    std::shared_ptr<IExecutionAdapter> adapter;
+    bool async_submit = false;
+    try
+    {
+        adapter = router_->resolve_adapter(o->get_symbol());
+        if (!adapter)
+        {
+            latch_execution_adapter_boundary_failure(
+                "no execution adapter resolved before venue submit");
+            halt_requested = true;
+            return false;
+        }
+        // The unified FIFO is exclusive.  Run the contradiction check before
+        // the first observable order mutation (including tracker/audit
+        // state), not only after submit while polling fills.
+        if (!reject_legacy_fills_from_unified_adapter(adapter, halt_requested))
+            return false;
+        async_submit = router_->is_async_submit(adapter.get());
+    }
+    catch (...)
+    {
+        if (provider_execution_ingress_)
+            provider_execution_ingress_->latch_failure();
+        trigger_halt("execution adapter setup failed before venue submit");
+        if (private_execution_support_)
+        {
+            try { private_execution_support_->fail_private_execution_admission(); }
+            catch (...) {}
+        }
+        halt_requested = true;
+        return false;
+    }
 
     order_tracker_.set_status(o->get_order_id(),
         async_submit ? order_status::pending : order_status::open);
@@ -1830,10 +2189,25 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         "{}"
     );
 
-    adapter->set_mid_price(last_mid_price_.load(std::memory_order_relaxed));
-    adapter->set_l2_seeded(l2_seeded_symbols_.count(o->get_symbol()) > 0);
-
-    router_->submit(*o, adapter.get());
+    try
+    {
+        adapter->set_mid_price(last_mid_price_.load(std::memory_order_relaxed));
+        adapter->set_l2_seeded(l2_seeded_symbols_.count(o->get_symbol()) > 0);
+        router_->submit(*o, adapter.get());
+    }
+    catch (...)
+    {
+        if (provider_execution_ingress_)
+            provider_execution_ingress_->latch_failure();
+        trigger_halt("execution adapter threw during venue submit");
+        if (private_execution_support_)
+        {
+            try { private_execution_support_->fail_private_execution_admission(); }
+            catch (...) {}
+        }
+        halt_requested = true;
+        return false;
+    }
 
     drain_async_submit_results(adapter.get());
 
@@ -1893,9 +2267,35 @@ bool engine::process_adapter_fills(const std::shared_ptr<IExecutionAdapter>& ada
     if (!adapter)
         return true;
 
-    std::vector<fill_event> fills;
-    if (!router_->poll_fills(adapter.get(), fills))
+    // A provider that selected the unified FIFO has exactly one authoritative
+    // private-fill path.  Do not let a transitional/buggy adapter also feed
+    // the legacy poll_fills queue: consuming both would double-account a
+    // single venue execution outside its reservation/replay proof.
+    if (!reject_legacy_fills_from_unified_adapter(adapter, halt_requested))
+        return false;
+    if (provider_execution_ingress_
+        && adapter.get() == private_execution_adapter_)
         return true;
+
+    std::vector<fill_event> fills;
+    try
+    {
+        if (!router_->poll_fills(adapter.get(), fills))
+            return true;
+    }
+    catch (...)
+    {
+        if (provider_execution_ingress_)
+            provider_execution_ingress_->latch_failure();
+        trigger_halt("execution adapter fill poll threw");
+        if (private_execution_support_)
+        {
+            try { private_execution_support_->fail_private_execution_admission(); }
+            catch (...) {}
+        }
+        halt_requested = true;
+        return false;
+    }
 
     DEBUG_STAGE(stage_timer_, fill_processing);
     const bool mark_sim = (config_.mode == engine_mode::shadow);
@@ -1907,6 +2307,142 @@ bool engine::process_adapter_fills(const std::shared_ptr<IExecutionAdapter>& ada
             return false;
     }
     return true;
+}
+
+bool engine::reject_legacy_fills_from_unified_adapter(
+    const std::shared_ptr<IExecutionAdapter>& adapter, bool& halt_requested)
+{
+    if (!provider_execution_ingress_)
+        return true;
+
+    // A provider that claims one ordered private source must also expose one
+    // stable execution-adapter identity.  If route resolution suddenly
+    // returns a different adapter, neither its legacy queue nor its venue
+    // mutation authority is covered by the FIFO transaction proof.
+    if (!adapter || !private_execution_adapter_
+        || adapter.get() != private_execution_adapter_)
+    {
+        provider_execution_ingress_->latch_failure();
+        trigger_halt("unified private provider execution adapter identity changed");
+        if (private_execution_support_)
+        {
+            try { private_execution_support_->fail_private_execution_admission(); }
+            catch (...) {}
+        }
+        halt_requested = true;
+        return false;
+    }
+
+    std::vector<fill_event> legacy_fills;
+    try
+    {
+        (void)router_->poll_fills(adapter.get(), legacy_fills);
+    }
+    catch (...)
+    {
+        provider_execution_ingress_->latch_failure();
+        trigger_halt("unified private adapter legacy fill poll threw");
+        if (private_execution_support_)
+        {
+            try { private_execution_support_->fail_private_execution_admission(); }
+            catch (...) {}
+        }
+        halt_requested = true;
+        return false;
+    }
+
+    // Do not trust a transitional adapter's boolean return to prove that no
+    // fill was produced.  The vector is the concrete handoff: any item here
+    // is a second private-execution source and must close admission.
+    if (!legacy_fills.empty())
+    {
+        // Deliberately consume and expose the contradiction to the terminal
+        // safety path rather than leaving an unbounded second queue alive.
+        // The FIFO remains the only source allowed to account those fills.
+        provider_execution_ingress_->latch_failure();
+        trigger_halt("unified private adapter published legacy fills");
+        if (private_execution_support_)
+        {
+            try { private_execution_support_->fail_private_execution_admission(); }
+            catch (...) {}
+        }
+        halt_requested = true;
+        return false;
+    }
+    return true;
+}
+
+void engine::latch_execution_adapter_boundary_failure(
+    const char* reason) noexcept
+{
+    if (provider_execution_ingress_)
+        provider_execution_ingress_->latch_failure();
+    // The engine halt is deliberately before the optional provider callback:
+    // an extension must not be able to postpone the terminal boundary while
+    // a venue mutation remains queued.
+    trigger_halt(reason);
+    if (private_execution_support_)
+    {
+        try { private_execution_support_->fail_private_execution_admission(); }
+        catch (...) {}
+    }
+}
+
+bool engine::advance_execution_adapters_safely(
+    std::chrono::system_clock::time_point timestamp) noexcept
+{
+    if (!router_)
+        return true;
+    try
+    {
+        router_->advance_all(timestamp);
+        return true;
+    }
+    catch (...)
+    {
+        latch_execution_adapter_boundary_failure(
+            "execution adapter threw while advancing time");
+        return false;
+    }
+}
+
+bool engine::forward_l2_snapshot_safely(
+    const std::string& symbol,
+    const std::vector<std::pair<double, double>>& bids,
+    const std::vector<std::pair<double, double>>& asks) noexcept
+{
+    if (!router_)
+        return true;
+    try
+    {
+        router_->on_l2_snapshot(symbol, bids, asks);
+        return true;
+    }
+    catch (...)
+    {
+        latch_execution_adapter_boundary_failure(
+            "execution adapter threw while applying L2 snapshot");
+        return false;
+    }
+}
+
+bool engine::forward_l2_update_safely(const std::string& symbol,
+                                      order_side side, double price,
+                                      double quantity) noexcept
+{
+    if (!router_)
+        return true;
+    try
+    {
+        router_->on_l2_update(symbol, side, price, quantity);
+        return true;
+    }
+    catch (...)
+    {
+        latch_execution_adapter_boundary_failure(
+            "execution adapter threw while applying L2 update");
+        return false;
+    }
 }
 
 void engine::deliver_mm_book_trades(const std::string& symbol, const trades& trs,
@@ -1929,13 +2465,54 @@ void engine::deliver_mm_book_trades(const std::string& symbol, const trades& trs
 bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
                           const std::string& reason)
 {
-    auto adapter = router_->resolve_adapter(symbol);
+    std::shared_ptr<IExecutionAdapter> adapter;
+    try
+    {
+        adapter = router_->resolve_adapter(symbol);
+        if (!adapter)
+        {
+            latch_execution_adapter_boundary_failure(
+                "no execution adapter resolved before venue cancel");
+            return false;
+        }
+    }
+    catch (...)
+    {
+        if (provider_execution_ingress_)
+            provider_execution_ingress_->latch_failure();
+        trigger_halt("execution adapter setup failed before venue cancel");
+        return false;
+    }
 
+    std::size_t private_event_count = 0;
+    if (!drain_private_account_updates(private_event_count))
+        return false;
     drain_async_submit_results(adapter.get());
     if (halt_flag_.load(std::memory_order_acquire))
         return false;
 
-    bool cancelled = adapter->cancel_order(order_id);
+    bool legacy_halt = false;
+    if (!reject_legacy_fills_from_unified_adapter(adapter, legacy_halt))
+        return false;
+    (void)legacy_halt;
+
+    bool cancelled = false;
+    try
+    {
+        cancelled = adapter->cancel_order(order_id);
+    }
+    catch (...)
+    {
+        if (provider_execution_ingress_)
+            provider_execution_ingress_->latch_failure();
+        trigger_halt("execution adapter threw during venue cancel");
+        if (private_execution_support_)
+        {
+            try { private_execution_support_->fail_private_execution_admission(); }
+            catch (...) {}
+        }
+        return false;
+    }
 
     if (cancelled && adapter->supports_async_submit())
     {
@@ -1991,8 +2568,58 @@ bool engine::modify_order(const std::string& symbol, uint64_t order_id,
         pause_all_.load(std::memory_order_acquire))
         return false;
 
-    auto adapter = router_->resolve_adapter(symbol);
-    bool modified = adapter->modify_order(order_id, new_price, new_qty);
+    // An amend is a venue mutation too.  It cannot overtake a private
+    // terminal/fill already admitted by the sole source-of-truth FIFO.
+    std::size_t private_event_count = 0;
+    if (!drain_private_account_updates(private_event_count)
+        || halt_flag_.load(std::memory_order_acquire))
+        return false;
+    if (exit_manager_.native_bracket_blocks_symbol_admission(symbol))
+    {
+        trigger_halt("native protective lifecycle blocked amend; reconciliation required");
+        return false;
+    }
+
+    std::shared_ptr<IExecutionAdapter> adapter;
+    try
+    {
+        adapter = router_->resolve_adapter(symbol);
+        if (!adapter)
+        {
+            latch_execution_adapter_boundary_failure(
+                "no execution adapter resolved before venue amend");
+            return false;
+        }
+    }
+    catch (...)
+    {
+        if (provider_execution_ingress_)
+            provider_execution_ingress_->latch_failure();
+        trigger_halt("execution adapter setup failed before venue amend");
+        return false;
+    }
+    bool legacy_halt = false;
+    if (!reject_legacy_fills_from_unified_adapter(adapter, legacy_halt))
+        return false;
+    (void)legacy_halt;
+
+    bool modified = false;
+    try
+    {
+        modified = adapter->modify_order(order_id, new_price, new_qty);
+    }
+    catch (...)
+    {
+        if (provider_execution_ingress_)
+            provider_execution_ingress_->latch_failure();
+        trigger_halt("execution adapter threw during venue amend");
+        if (private_execution_support_)
+        {
+            try { private_execution_support_->fail_private_execution_admission(); }
+            catch (...) {}
+        }
+        return false;
+    }
 
     if (modified)
     {
@@ -2018,6 +2645,25 @@ bool engine::modify_order(const std::string& symbol, uint64_t order_id,
 
 void engine::unwind_positions(std::size_t& event_count)
 {
+    // Flattening is still a live mutation.  Reconcile all admitted private
+    // truth before snapshotting local exposure; otherwise an arriving fill
+    // could make this close stale and reverse the venue position.
+    std::size_t private_event_count = 0;
+    if (!drain_private_account_updates(private_event_count)
+        || halt_flag_.load(std::memory_order_acquire))
+        return;
+
+    // With the unified private protocol, a risk/operator flatten cannot be
+    // made atomic with the private reader publishing the next venue fill.  A
+    // stale blind close could therefore reverse exposure.  The live safety
+    // owner performs its kill/reconciliation path after this terminal halt;
+    // never send an additional speculative flatten from the engine loop.
+    if (provider_execution_ingress_)
+    {
+        trigger_halt("unified private lifecycle requires reconciliation before unwind");
+        return;
+    }
+
     // Snapshot before iterating — each fill mutates positions_.
     std::vector<std::pair<std::string, double>> to_close;
     to_close.reserve(portfolio_.get_positions().size());
@@ -2029,6 +2675,11 @@ void engine::unwind_positions(std::size_t& event_count)
 
     for (const auto& [symbol, qty] : to_close)
     {
+        if (exit_manager_.native_bracket_blocks_symbol_admission(symbol))
+        {
+            trigger_halt("native protective lifecycle blocked unwind; reconciliation required");
+            return;
+        }
         // Sign-aware flatten — shorts need market BUY, not SELL.
         const order_side close_side = (qty > 0.0)
             ? order_side::sell : order_side::buy;
@@ -2052,26 +2703,49 @@ void engine::unwind_positions(std::size_t& event_count)
         audit_sink_->record_status_transition(close_order->get_order_id(),
             order_status::pending, order_status::open, "risk_unwind");
 
-        auto adapter = router_->resolve_adapter(symbol);
-        adapter->set_mid_price(last_mid_price_.load(std::memory_order_relaxed));
-        adapter->set_l2_seeded(l2_seeded_symbols_.count(symbol) > 0);
-
-        router_->submit(*close_order, adapter.get());
-
-        drain_async_submit_results(adapter.get());
-
-        std::vector<fill_event> fills;
-        if (router_->poll_fills(adapter.get(), fills))
+        try
         {
-            bool unwind_halt = false;
-            for (auto& f : fills)
+            auto adapter = router_->resolve_adapter(symbol);
+            if (!adapter)
             {
-                // Already in halt/unwind — skip post-fill re-halt.
-                (void)handle_engine_fill(f, event_count, unwind_halt,
-                                         /*run_post_fill_risk=*/false,
-                                         /*mark_shadow_sim=*/false,
-                                         "risk_unwind");
+                latch_execution_adapter_boundary_failure(
+                    "no execution adapter resolved during risk unwind");
+                return;
             }
+            adapter->set_mid_price(last_mid_price_.load(std::memory_order_relaxed));
+            adapter->set_l2_seeded(l2_seeded_symbols_.count(symbol) > 0);
+
+            router_->submit(*close_order, adapter.get());
+
+            drain_async_submit_results(adapter.get());
+
+            bool unexpected_legacy_halt = false;
+            if (!reject_legacy_fills_from_unified_adapter(adapter,
+                                                          unexpected_legacy_halt))
+                return;
+            (void)unexpected_legacy_halt;
+
+            std::vector<fill_event> fills;
+            if ((!provider_execution_ingress_
+                 || adapter.get() != private_execution_adapter_)
+                && router_->poll_fills(adapter.get(), fills))
+            {
+                bool unwind_halt = false;
+                for (auto& f : fills)
+                {
+                    // Already in halt/unwind — skip post-fill re-halt.
+                    (void)handle_engine_fill(f, event_count, unwind_halt,
+                                             /*run_post_fill_risk=*/false,
+                                             /*mark_shadow_sim=*/false,
+                                             "risk_unwind");
+                }
+            }
+        }
+        catch (...)
+        {
+            latch_execution_adapter_boundary_failure(
+                "execution adapter threw during risk unwind");
+            return;
         }
     }
 }
@@ -2081,6 +2755,10 @@ void engine::apply_l2_snapshot(const std::string& symbol,
                                const std::vector<l2_level>& asks)
 {
     drain_object_pool_returns();
+
+    std::size_t private_event_count = 0;
+    if (!drain_private_account_updates(private_event_count))
+        return;
 
     // Tag L2-driven so MarketMaker::replenish stops seeding paper depth.
     l2_seeded_symbols_.insert(symbol);
@@ -2121,7 +2799,8 @@ void engine::apply_l2_snapshot(const std::string& symbol,
                                                     abids.begin() + n_bids);
     std::vector<std::pair<double, double>> aask_vec(aasks.begin(),
                                                     aasks.begin() + n_asks);
-    if (router_) router_->on_l2_snapshot(symbol, abid_vec, aask_vec);
+    if (!forward_l2_snapshot_safely(symbol, abid_vec, aask_vec))
+        return;
 
     auto ev = acquire_pooled(l2_snapshot_pool_,
         std::chrono::system_clock::now(), symbol,
@@ -2135,6 +2814,11 @@ void engine::apply_l2_update(const std::string& symbol,
 {
     drain_object_pool_returns();
 
+    size_t l2_event_count = 0;
+    bool l2_halt = false;
+    if (!drain_private_account_updates(l2_event_count))
+        return;
+
     auto ob = orderbook_registry_.get_or_create(symbol);
 
     side ob_side = (ts_side == tick_side::bid) ? side::buy : side::sell;
@@ -2144,7 +2828,9 @@ void engine::apply_l2_update(const std::string& symbol,
 
     // Forward L2 update to adapters for queue models (see apply_l2_snapshot).
     const order_side os = (ts_side == tick_side::bid) ? order_side::buy : order_side::sell;
-    if (router_) router_->on_l2_update(symbol, os, price, static_cast<double>(new_qty));
+    if (!forward_l2_update_safely(symbol, os, price,
+                                  static_cast<double>(new_qty)))
+        return;
 
     const auto l2_ts = std::chrono::system_clock::now();
     const int64_t l2_recv_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2162,13 +2848,11 @@ void engine::apply_l2_update(const std::string& symbol,
         halt_flag_.load(std::memory_order_acquire))
         return;
 
-    size_t l2_event_count = 0;
-    bool l2_halt = false;
-
     // Drain pending orders eligible at this L2 timestamp. Default
     // execution_bar_delay parks strategy emissions one ns ahead of
     // sim_time; without this drain, pure L2 streams never submit.
-    if (router_) router_->advance_all(l2_ts);
+    if (!advance_execution_adapters_safely(l2_ts))
+        return;
     drain_pending_orders(l2_ts, l2_event_count, l2_halt);
     if (l2_halt || halt_flag_.load(std::memory_order_acquire))
         return;
@@ -2251,6 +2935,32 @@ bool engine::route_order(order_event& order,
     {
         halt_requested = true;
         return false;
+    }
+
+    // Fresh strategy intents must not reserve an ID or enter a local pending
+    // queue ahead of already-admitted private venue truth.  process_order
+    // repeats this guard for staged stops/latency orders that bypass route on
+    // their later execution boundary.
+    if (!drain_private_account_updates(event_count))
+    {
+        halt_requested = true;
+        return false;
+    }
+
+    // This is deliberately before ID reservation and local pending queues.
+    // process_order repeats it for stops/latency entries that were admitted
+    // before a native sibling became unresolved. Do not trust a caller-
+    // provided nonzero opener id as a bypass: it is public event state and
+    // does not prove a safe closer.
+    if (exit_manager_.native_bracket_blocks_symbol_admission(order.get_symbol()))
+    {
+        if (order.get_opener_order_id() != 0)
+        {
+            trigger_halt("native protective lifecycle blocked an engine-side exit; reconciliation required");
+            halt_requested = true;
+            return false;
+        }
+        return true;
     }
 
     // Operator-pause gate: intercept here so every strategy call site is
@@ -2562,12 +3272,30 @@ bool engine::handle_engine_fill(fill_event& f,
                                 bool& halt_requested,
                                 bool run_post_fill_risk,
                                 bool mark_shadow_sim,
-                                const char* status_reason)
+                                const char* status_reason,
+                                bool permit_post_accounting_side_effects,
+                                bool* canonical_accounting_applied)
 {
+    if (canonical_accounting_applied)
+        *canonical_accounting_applied = false;
     stamp_fill_attribution(f);
 
     const uint64_t opener = f.get_opener_order_id();
     const std::string& strat = f.get_strategy_name();
+
+    // A fill for an order submitted before another same-symbol native bracket
+    // became unresolved remains authoritative economic truth. Account and
+    // audit it, but do not let the normal post-fill path place a second native
+    // bracket, dispatch a strategy that might route more orders, notify/cancel
+    // exits, or launch a risk unwind while the old venue leg can still fill.
+    const bool native_symbol_lifecycle_blocked =
+        permit_post_accounting_side_effects
+        && exit_manager_.native_bracket_blocks_symbol_admission(f.get_symbol());
+    if (native_symbol_lifecycle_blocked)
+    {
+        permit_post_accounting_side_effects = false;
+        run_post_fill_risk = false;
+    }
 
     // Economic admission is deliberately ahead of tracker, dashboard,
     // audit, log, strategy and worker publication.  A finite wire fill can
@@ -2611,9 +3339,17 @@ bool engine::handle_engine_fill(fill_event& f,
     }
     log_event(f);
     portfolio_.on_fill(f, opener, strat);
-    dispatch_fill_to_strategy(f);
+    // This is the canonical economic commit point.  Everything below may
+    // still request a terminal reconcile (or throw), but a source-of-truth
+    // private fill must then be committed to bridge replay state exactly
+    // once rather than retried/dropped as if accounting never happened.
+    if (canonical_accounting_applied)
+        *canonical_accounting_applied = true;
+    if (permit_post_accounting_side_effects)
+        dispatch_fill_to_strategy(f);
     adverse_selection_.on_fill(f);
-    exit_manager_.on_fill(f, opener);
+    if (permit_post_accounting_side_effects)
+        exit_manager_.on_fill(f, opener);
     risk_manager_.on_fill(f);
     const char* src =
         (f.get_source() == fill_source::exchange)  ? "exchange"
@@ -2622,7 +3358,9 @@ bool engine::handle_engine_fill(fill_event& f,
     audit_sink_->record_fill(f, opener, strat.c_str(), src);
     audit_sink_->record_status_transition(f.get_order_id(),
         order_status::open, new_status, status_reason);
-    notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+    if (permit_post_accounting_side_effects)
+        notify_position_change_all(f.get_symbol(),
+                                   portfolio_.position_open(f.get_symbol()));
     publish_event(fill_ptr);
     analytics_.on_event(fill_ptr);
 
@@ -2630,6 +3368,13 @@ bool engine::handle_engine_fill(fill_event& f,
         shadow_tracker_->on_simulated_fill(f);
 
     event_count++;
+
+    if (native_symbol_lifecycle_blocked)
+    {
+        trigger_halt("economic fill arrived while native protective lifecycle was unresolved; reconciliation required");
+        halt_requested = true;
+        return false;
+    }
 
     if (run_post_fill_risk)
     {
@@ -2707,8 +3452,23 @@ void engine::finalize_strategy_route(IStrategy& strategy,
 
 void engine::dispatch_fill_to_strategy(const fill_event& f)
 {
-    const std::string& name = lookup_strategy_name(f.get_order_id());
-    const std::uint64_t opener = lookup_opener(f.get_order_id());
+    // A native protective leg has a synthetic closer id but carries durable
+    // opener/strategy attribution directly on the fill.  Prefer that explicit
+    // proof over the order-meta fallback used by normal engine-submitted
+    // orders.
+    const std::uint64_t opener = f.get_opener_order_id() != 0
+        ? f.get_opener_order_id() : lookup_opener(f.get_order_id());
+    const std::string& mapped_name = lookup_strategy_name(f.get_order_id());
+    const std::string_view name = !f.get_strategy_name().empty()
+        ? std::string_view{f.get_strategy_name()}
+        : std::string_view{mapped_name};
+
+    // Recovery adapters may not expose an original strategy name.  Accounting
+    // and audit retain the venue truth, but dispatching that unowned fill to a
+    // newly configured primary strategy would mutate unrelated strategy state.
+    if (name.empty() && opener != 0
+        && unowned_recovered_openers_.contains(opener))
+        return;
 
     // Empty strategy_name is common when callers omit set_primary_strategy_name
     // (MonteCarlo, C API, many tests). Still deliver to primary so strategy
@@ -2764,6 +3524,7 @@ bool engine::drain_provider_funding_updates() noexcept
             || update.symbol_size > provider_funding_update::symbol_capacity
             || update.why != provider_funding_update::reason::funding_fee)
         {
+            provider_funding_ingress_->latch_failure();
             trigger_halt("provider funding ingress produced an invalid update");
             return false;
         }
@@ -2779,6 +3540,12 @@ bool engine::drain_provider_funding_updates() noexcept
             auto funding = acquire_pooled(
                 funding_pool_, ts, update.symbol_view(), 0.0,
                 update.cash_delta, std::string_view{"FUNDING_FEE"});
+            // The constructor's initial private drain runs before worker
+            // threads exist.  Record through the pre-reserved ledger owner
+            // here; once the logging worker has started, log_event() leaves
+            // delivery to publish_event's logging ring so this remains
+            // exactly-once.
+            log_event(*funding);
             publish_event(funding);
             applied_any = true;
         }
@@ -2787,6 +3554,7 @@ bool engine::drain_provider_funding_updates() noexcept
             // acquire_pooled already latches pool exhaustion. Cover every
             // other construction/audit/ring exception without allowing it to
             // escape a provider callback or teardown path.
+            provider_funding_ingress_->latch_failure();
             trigger_halt("provider funding update could not be applied");
             return false;
         }
@@ -2801,6 +3569,7 @@ bool engine::drain_provider_funding_updates() noexcept
         }
         catch (...)
         {
+            provider_funding_ingress_->latch_failure();
             trigger_halt("provider funding dashboard refresh failed");
             return false;
         }
@@ -2811,7 +3580,387 @@ bool engine::drain_provider_funding_updates() noexcept
     // records were consumed successfully.
     if (provider_funding_ingress_->failed())
     {
+        provider_funding_ingress_->latch_failure();
         trigger_halt("provider funding ingress overflow or malformed update");
+        return false;
+    }
+    return true;
+}
+
+bool engine::drain_private_account_updates(
+    std::size_t& event_count, private_execution_drain_mode mode) noexcept
+{
+    if (provider_execution_ingress_)
+        return drain_provider_execution_updates(event_count, mode);
+    return drain_provider_funding_updates();
+}
+
+bool engine::drain_provider_execution_updates(
+    std::size_t& event_count, private_execution_drain_mode mode) noexcept
+{
+    if (!provider_execution_ingress_)
+        return true;
+
+    bool fault_latched = false;
+    bool final_reconciliation_required = false;
+    const char* first_fault = nullptr;
+    const auto latch_fault = [&](const char* reason) noexcept {
+        if (!fault_latched)
+        {
+            fault_latched = true;
+            first_fault = reason;
+            // Stop admission/producer activity at the first unverifiable
+            // private transition.  We nevertheless keep consuming the
+            // finite set of records already admitted before the latch, in
+            // accounting-only mode, so a fault cannot hide later venue truth
+            // behind an indefinitely active producer.
+            provider_execution_ingress_->latch_failure();
+            // Make the engine terminal before invoking an extension port. A
+            // provider callback is useful to quiesce its own transports, but
+            // it must never be able to delay the write-once engine halt.
+            trigger_halt(reason);
+            if (private_execution_support_)
+            {
+                try
+                {
+                    private_execution_support_->fail_private_execution_admission();
+                }
+                catch (...) {}
+            }
+        }
+    };
+
+    private_execution_record record;
+    while (provider_execution_ingress_->try_pop(record))
+    {
+        // The producer assigns the sequence before publishing the ring slot.
+        // A gap invalidates ordering proof, but a later admitted economic
+        // record is still venue truth: continue in accounting-only mode so it
+        // is not silently abandoned behind the fault.
+        if (record.sequence != last_private_execution_sequence_ + 1)
+        {
+            latch_fault("private execution ingress sequence discontinuity");
+            if (record.sequence <= last_private_execution_sequence_)
+                continue;
+        }
+        last_private_execution_sequence_ = record.sequence;
+
+        if (!record.valid_shape()
+            || !system_clock_millis_is_representable(record.event_time_ms))
+        {
+            latch_fault("private execution ingress produced an invalid record");
+            continue;
+        }
+
+        const auto timestamp = std::chrono::system_clock::time_point{
+            std::chrono::milliseconds{record.event_time_ms}};
+
+        if (record.k == private_execution_record::kind::funding)
+        {
+            try
+            {
+                drain_object_pool_returns();
+                auto funding = acquire_pooled(
+                    funding_pool_, timestamp, record.symbol_view(), 0.0,
+                    record.cash_delta, std::string_view{"FUNDING_FEE"});
+                // See the legacy funding ingress path above: the secure
+                // pre-start logger records constructor-time venue truth;
+                // after worker start the logging ring is the sole sink.
+                log_event(*funding);
+                publish_event(funding);
+            }
+            catch (...)
+            {
+                latch_fault("private funding record could not be applied");
+            }
+            continue;
+        }
+
+        if (record.k == private_execution_record::kind::fatal
+            || record.k == private_execution_record::kind::unknown_lifecycle
+            || record.k == private_execution_record::kind::bracket_group_active
+            || record.k == private_execution_record::kind::bracket_group_completed)
+        {
+            // Group lifecycle will be accepted only through the typed
+            // ExitManager group resolver.  Until that proof is installed,
+            // leaving it unhandled is a protection-loss condition, never a
+            // harmless private-message drop.
+            latch_fault("unresolved private lifecycle record requires reconciliation");
+            continue;
+        }
+
+        if (!private_execution_support_)
+        {
+            latch_fault("private execution ingress has no lifecycle resolver");
+            continue;
+        }
+
+        private_execution_resolution resolution =
+            private_execution_resolution::fatal;
+        try
+        {
+            resolution = private_execution_support_->resolve_private_execution(record);
+        }
+        catch (...)
+        {
+            latch_fault("private execution resolver threw");
+            continue;
+        }
+        if (resolution == private_execution_resolution::duplicate)
+            continue;
+        if (resolution == private_execution_resolution::fatal)
+        {
+            latch_fault("private execution identity or cumulative proof failed");
+            continue;
+        }
+        if (resolution == private_execution_resolution::untracked)
+        {
+            // An unknown client/exchange identity is not permitted to become
+            // a synthetic fill.  A later typed native-bracket resolver may
+            // replace this branch, but it must prove every attribution field
+            // before any accounting is attempted.
+            latch_fault("unknown private venue lifecycle requires reconciliation");
+            continue;
+        }
+
+        const private_execution_reservation reservation{
+            record.sequence, record.engine_order_id};
+        if (!reservation.valid())
+        {
+            latch_fault("private execution resolver returned an invalid reservation");
+            continue;
+        }
+        const bool terminal_lifecycle = record.is_terminal()
+            || (record.k == private_execution_record::kind::full_fill
+                && record.lifecycle_only);
+        const auto rollback_private_transition = [&]() noexcept {
+            bool rolled_back = false;
+            try
+            {
+                rolled_back = private_execution_support_
+                    ->rollback_private_execution(reservation);
+            }
+            catch (...) {}
+            if (!rolled_back)
+                latch_fault("private execution rollback proof failed");
+        };
+        const auto commit_private_transition = [&]() -> bool {
+            bool committed = false;
+            try
+            {
+                committed = private_execution_support_
+                    ->commit_private_execution(reservation);
+            }
+            catch (...)
+            {
+                latch_fault("private execution commit threw");
+                return false;
+            }
+            if (!committed)
+            {
+                latch_fault("private execution commit proof failed");
+                return false;
+            }
+            bool terminal_acknowledged = !terminal_lifecycle;
+            if (terminal_lifecycle)
+            {
+                try
+                {
+                    terminal_acknowledged = private_execution_support_
+                        ->acknowledge_private_terminal(record.sequence);
+                }
+                catch (...)
+                {
+                    terminal_acknowledged = false;
+                }
+            }
+            if (!terminal_acknowledged)
+            {
+                latch_fault("private terminal retirement acknowledgement failed");
+                return false;
+            }
+            if (terminal_lifecycle)
+                pending_cancels_.erase(record.engine_order_id);
+            return true;
+        };
+
+        const bool accounting_only =
+            mode == private_execution_drain_mode::final_accounting_only
+            || fault_latched || halt_flag_.load(std::memory_order_acquire);
+
+        if (record.is_economic_fill() && !record.lifecycle_only)
+        {
+            bool canonical_accounting_applied = false;
+            try
+            {
+                std::string symbol{record.symbol_view()};
+                fill_event fill(timestamp, symbol, record.engine_order_id,
+                                record.side, record.last_fill_qty,
+                                record.last_fill_price, record.commission,
+                                record.remaining_qty, record.sequence);
+                fill.set_source(fill_source::exchange);
+
+                bool fill_halt = false;
+                const bool applied = handle_engine_fill(
+                    fill, event_count, fill_halt,
+                    /*run_post_fill_risk=*/!accounting_only,
+                    /*mark_shadow_sim=*/false,
+                    accounting_only ? "private_final_accounting" : nullptr,
+                    /*permit_post_accounting_side_effects=*/!accounting_only,
+                    &canonical_accounting_applied);
+                if (!canonical_accounting_applied)
+                {
+                    rollback_private_transition();
+                    latch_fault("private economic fill could not be fully applied");
+                    continue;
+                }
+
+                (void)commit_private_transition();
+                if (!applied)
+                    latch_fault("private economic fill requires reconciliation after accounting");
+                if (mode == private_execution_drain_mode::final_accounting_only)
+                    final_reconciliation_required = true;
+            }
+            catch (...)
+            {
+                if (canonical_accounting_applied)
+                    (void)commit_private_transition();
+                else
+                    rollback_private_transition();
+                latch_fault("private economic fill accounting threw");
+            }
+            continue;
+        }
+
+        // ACK and zero-delta lifecycle records are authoritative state proof,
+        // but never economic fills.  A lifecycle-only full reaches here only
+        // after bridge resolution proved its cumulative total was already
+        // accounted through economic execution records.
+        bool lifecycle_applied = false;
+        bool lifecycle_bridge_committed = false;
+        try
+        {
+            const auto previous =
+                order_tracker_.get_order_status(record.engine_order_id);
+            if (record.k == private_execution_record::kind::ack)
+            {
+                if (previous == order_status::pending)
+                    order_tracker_.set_status(record.engine_order_id,
+                                              order_status::open);
+                // The tracker transition is the canonical lifecycle commit.
+                // Once it has happened, the bridge must retain the matching
+                // source record even if a later observer (dashboard/audit)
+                // fails; the engine will halt with an incomplete ledger
+                // rather than reclassify the private ACK as a duplicate.
+                lifecycle_applied = true;
+                if (!commit_private_transition())
+                    continue;
+                lifecycle_bridge_committed = true;
+                if (previous == order_status::pending)
+                {
+                    if (dashboard_builder_)
+                        dashboard_builder_->update_open_order_status(
+                            record.engine_order_id, "open");
+                    audit_sink_->record_status_transition(
+                        record.engine_order_id, order_status::pending,
+                        order_status::open, "private order acknowledgement");
+                }
+                continue;
+            }
+
+            const bool lifecycle_full =
+                record.k == private_execution_record::kind::full_fill
+                && record.lifecycle_only;
+            const bool canceled =
+                record.k == private_execution_record::kind::canceled
+                || record.k == private_execution_record::kind::expired;
+            const bool rejected =
+                record.k == private_execution_record::kind::rejected;
+            if (!lifecycle_full && !canceled && !rejected)
+            {
+                rollback_private_transition();
+                latch_fault("unsupported private lifecycle record");
+                continue;
+            }
+
+            const auto next = lifecycle_full ? order_status::filled
+                            : rejected ? order_status::rejected
+                                       : order_status::cancelled;
+            order_tracker_.set_status(record.engine_order_id, next);
+            lifecycle_applied = true;
+            if (!commit_private_transition())
+                continue;
+            lifecycle_bridge_committed = true;
+            if (dashboard_builder_)
+                dashboard_builder_->erase_open_order(record.engine_order_id);
+
+            std::string symbol{record.symbol_view()};
+            const std::string reason = record.error_size != 0
+                ? std::string(record.error_view())
+                : (lifecycle_full ? "private full lifecycle confirmation"
+                   : rejected ? "private order rejected"
+                              : "private order canceled");
+            if (rejected)
+            {
+                auto rejection = acquire_pooled(rejection_pool_, timestamp,
+                                                symbol, record.engine_order_id,
+                                                reason);
+                log_event(*rejection);
+                publish_event(rejection);
+                if (!config_.is_threaded()) analytics_.on_event(rejection);
+            }
+            else if (canceled)
+            {
+                auto cancellation = acquire_pooled(cancel_pool_, timestamp,
+                                                   symbol, record.engine_order_id,
+                                                   reason);
+                log_event(*cancellation);
+                publish_event(cancellation);
+                if (!config_.is_threaded()) analytics_.on_event(cancellation);
+                audit_sink_->record_cancellation(
+                    record.engine_order_id, symbol.c_str(),
+                    lookup_strategy_name(record.engine_order_id).c_str(),
+                    reason.c_str());
+            }
+            audit_sink_->record_status_transition(record.engine_order_id,
+                previous, next, reason.c_str());
+
+        }
+        catch (...)
+        {
+            if (lifecycle_applied && !lifecycle_bridge_committed)
+                (void)commit_private_transition();
+            else if (!lifecycle_applied)
+                rollback_private_transition();
+            latch_fault("private lifecycle record could not be applied");
+        }
+    }
+
+    if (provider_execution_ingress_->failed())
+        latch_fault("private execution ingress overflow or malformed record");
+    if (private_execution_support_)
+    {
+        bool lifecycle_deadline_ok = false;
+        try
+        {
+            lifecycle_deadline_ok =
+                private_execution_support_->check_private_lifecycle_deadline();
+        }
+        catch (...) {}
+        if (!lifecycle_deadline_ok)
+            latch_fault("private cancel confirmation deadline expired or check threw");
+    }
+
+    if (mode == private_execution_drain_mode::final_accounting_only
+        && final_reconciliation_required)
+    {
+        latch_fault("economic private fill arrived during shutdown; reconciliation required");
+    }
+
+    if (fault_latched)
+    {
+        trigger_halt(first_fault ? first_fault
+                                 : "private execution accounting failure");
         return false;
     }
     return true;
@@ -2853,6 +4002,21 @@ void engine::drain_async_submit_results(IExecutionAdapter* adapter)
                         order_status::pending, order_status::open,
                         "venue submit acknowledged");
                 }
+                continue;
+            }
+            if (provider_execution_ingress_)
+            {
+                // For unified private truth, even a nominally definitive
+                // REST reject cannot retire the identity: a private fill or
+                // status may already be admitted.  Halt for reconciliation
+                // and let the FIFO account any such record before teardown.
+                trigger_halt("REST submit failure requires private reconciliation");
+                if (dashboard_builder_)
+                    dashboard_builder_->update_open_order_status(
+                        sr.engine_id, "submit_rest_failed_waiting_private");
+                audit_sink_->record_status_transition(
+                    sr.engine_id, order_status::pending, order_status::pending,
+                    "REST submit failed; awaiting private reconciliation");
                 continue;
             }
             if (!order_tracker_.is_active(sr.engine_id)) continue;
@@ -2915,23 +4079,14 @@ void engine::drain_async_submit_results(IExecutionAdapter* adapter)
         }
         else if (sr.ok)
         {
-            if (order_tracker_.is_active(sr.engine_id))
-            {
-                order_tracker_.set_status(sr.engine_id, order_status::cancelled);
-                if (dashboard_builder_) dashboard_builder_->erase_open_order(sr.engine_id);
-                auto cancel_ev = acquire_pooled(cancel_pool_,
-                    std::chrono::system_clock::now(), symbol, sr.engine_id, reason);
-                log_event(*cancel_ev);
-                publish_event(cancel_ev);
-                if (!config_.is_threaded())
-                    analytics_.on_event(cancel_ev);
-                // Unconditional via audit_sink (replaces questdb guard + #ifdef).
-                audit_sink_->record_cancellation(sr.engine_id, symbol.c_str(),
-                    lookup_strategy_name(sr.engine_id).c_str(),
-                    reason.empty() ? "manual" : reason.c_str());
-                audit_sink_->record_status_transition(sr.engine_id,
-                    order_status::open, order_status::cancelled, reason.empty() ? nullptr : reason.c_str());
-            }
+            // REST is only advisory.  The private user-data terminal is the
+            // sole authority permitted to retire the tracker, emit the cancel
+            // event, or release the bridge identity.  Retain pending metadata
+            // so the eventual private terminal carries the operator reason.
+            if (dashboard_builder_)
+                dashboard_builder_->update_open_order_status(
+                    sr.engine_id, "cancel_rest_acked_waiting_private");
+            continue;
         }
         else
         {
@@ -3119,7 +4274,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
     // Apply private-stream cash settlements before any adapter, risk, or
     // strategy action derived from this market record.
-    if (!drain_provider_funding_updates())
+    if (!drain_private_account_updates(event_count))
         return;
 
     // Already terminal (e.g. risk halt on a prior event / DataBridge race):
@@ -3134,7 +4289,8 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
     // Advance adapter clocks first so cancels whose in-flight window has
     // elapsed are drained before this event's matching runs.
-    if (router_) router_->advance_all(timestamp);
+    if (!advance_execution_adapters_safely(timestamp))
+        return;
 
     market_event mkt(
         timestamp,
@@ -3218,8 +4374,16 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
         drain_venue_bracket_meta();
         drain_async_submit_results(provider_adapter.get());
+        bool unexpected_legacy_halt = false;
+        if (provider_adapter
+            && !reject_legacy_fills_from_unified_adapter(
+                provider_adapter, unexpected_legacy_halt))
+            return;
         std::vector<fill_event> provider_fills;
-        if (provider_adapter && provider_adapter->poll_fills(provider_fills))
+        if (provider_adapter
+            && (!provider_execution_ingress_
+                || provider_adapter.get() != private_execution_adapter_)
+            && provider_adapter->poll_fills(provider_fills))
         {
             for (auto& f : provider_fills)
             {
@@ -3292,7 +4456,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 {
     drain_object_pool_returns();
 
-    if (!drain_provider_funding_updates())
+    if (!drain_private_account_updates(event_count))
         return;
 
     if (halt_flag_.load(std::memory_order_acquire))
@@ -3301,7 +4465,8 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     if (flatten_request_.exchange(false, std::memory_order_acq_rel))
         unwind_positions(event_count);
 
-    if (router_) router_->advance_all(rec.timestamp);
+    if (!advance_execution_adapters_safely(rec.timestamp))
+        return;
 
     tick_side ts = tick_side::unknown;
     if (rec.side == data_tick_side::bid) ts = tick_side::bid;
@@ -3354,8 +4519,16 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 
         drain_venue_bracket_meta();
         drain_async_submit_results(provider_adapter.get());
+        bool unexpected_legacy_halt = false;
+        if (provider_adapter
+            && !reject_legacy_fills_from_unified_adapter(
+                provider_adapter, unexpected_legacy_halt))
+            return;
         std::vector<fill_event> provider_fills;
-        if (provider_adapter && provider_adapter->poll_fills(provider_fills))
+        if (provider_adapter
+            && (!provider_execution_ingress_
+                || provider_adapter.get() != private_execution_adapter_)
+            && provider_adapter->poll_fills(provider_fills))
         {
             for (auto& f : provider_fills)
             {
@@ -3444,8 +4617,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridg
 {
     if (!data_handler_) throw std::runtime_error("missing dependencies");
 
-    if (!config_.event_log_path.empty())
-        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
+    ensure_event_logger(/*recreate_non_authoritative=*/true);
 
 #ifdef HAS_QUESTDB
     questdb_begin();
@@ -3476,9 +4648,14 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridg
     auto last_report_time = std::chrono::steady_clock::now();
     std::chrono::system_clock::time_point last_good_bar_ts{};
 
+    bridge->set_after_frame_callback([this, &event_count] {
+        (void)drain_private_account_updates(event_count);
+    });
     typename DataBridge<bar_record>::idle_callback funding_idle;
-    if (provider_funding_ingress_)
-        funding_idle = [this] { (void)drain_provider_funding_updates(); };
+    if (provider_execution_ingress_ || provider_funding_ingress_)
+        funding_idle = [this, &event_count] {
+            (void)drain_private_account_updates(event_count);
+        };
     auto stream_result = bridge->run_streaming(data_handler_, [&](const bar_record& rec) {
         auto timestamp = tt::date_parse::resolve_bar_clock(
             rec.open_time_ms, rec.date, last_good_bar_ts);
@@ -3568,6 +4745,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridg
             }
         }
     }, funding_idle);
+    bridge->set_after_frame_callback({});
 
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -3583,7 +4761,6 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridg
         cancel_day_orders();
     }
 
-    if (event_logger_) event_logger_->flush();
     stop_workers();
 #ifdef HAS_QUESTDB
     questdb_end();
@@ -3609,8 +4786,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> brid
 {
     if (!data_handler_) throw std::runtime_error("missing dependencies");
 
-    if (!config_.event_log_path.empty())
-        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
+    ensure_event_logger(/*recreate_non_authoritative=*/true);
 
 #ifdef HAS_QUESTDB
     questdb_begin();
@@ -3640,9 +4816,14 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> brid
 
     auto last_report_time = std::chrono::steady_clock::now();
 
+    bridge->set_after_frame_callback([this, &event_count] {
+        (void)drain_private_account_updates(event_count);
+    });
     typename DataBridge<tick_record>::idle_callback funding_idle;
-    if (provider_funding_ingress_)
-        funding_idle = [this] { (void)drain_provider_funding_updates(); };
+    if (provider_execution_ingress_ || provider_funding_ingress_)
+        funding_idle = [this, &event_count] {
+            (void)drain_private_account_updates(event_count);
+        };
     auto stream_result = bridge->run_streaming(data_handler_, [&](const tick_record& rec) {
         process_single_tick(rec, event_count);
         tick_count++;
@@ -3727,6 +4908,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> brid
             }
         }
     }, funding_idle);
+    bridge->set_after_frame_callback({});
 
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -3739,7 +4921,6 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> brid
         cancel_day_orders();
     }
 
-    if (event_logger_) event_logger_->flush();
     stop_workers();
 #ifdef HAS_QUESTDB
     questdb_end();
@@ -3765,8 +4946,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
 {
     if (!data_handler_) throw std::runtime_error("missing dependencies");
 
-    if (!config_.event_log_path.empty())
-        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
+    ensure_event_logger(/*recreate_non_authoritative=*/true);
 
 #ifdef HAS_QUESTDB
     questdb_begin();
@@ -3802,9 +4982,14 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
     std::chrono::system_clock::time_point current_event_ts =
         std::chrono::system_clock::now();
 
+    bridge->set_after_frame_callback([this, &event_count] {
+        (void)drain_private_account_updates(event_count);
+    });
     typename DataBridge<provider::event>::idle_callback funding_idle;
-    if (provider_funding_ingress_)
-        funding_idle = [this] { (void)drain_provider_funding_updates(); };
+    if (provider_execution_ingress_ || provider_funding_ingress_)
+        funding_idle = [this, &event_count] {
+            (void)drain_private_account_updates(event_count);
+        };
     auto stream_result = bridge->run_streaming(data_handler_, [&](const provider::event& ev) {
         std::visit([&](const auto& e) {
             using E = std::decay_t<decltype(e)>;
@@ -3827,7 +5012,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
             }
             else if constexpr (std::is_same_v<E, provider::l2_snapshot>)
             {
-                if (!drain_provider_funding_updates()) return;
+                if (!drain_private_account_updates(event_count)) return;
                 std::vector<l2_level> bids;
                 bids.reserve(e.bids.size());
                 for (const auto& lvl : e.bids)
@@ -3841,7 +5026,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
             }
             else if constexpr (std::is_same_v<E, provider::l2_update>)
             {
-                if (!drain_provider_funding_updates()) return;
+                if (!drain_private_account_updates(event_count)) return;
                 tick_side ts = (e.side == 0) ? tick_side::bid : tick_side::ask;
                 apply_l2_update(e.symbol, ts, e.price, e.new_quantity);
                 // (forward to queue models now centralized inside apply_l2_update)
@@ -3920,6 +5105,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
             }
         }
     }, funding_idle);
+    bridge->set_after_frame_callback({});
 
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -3932,7 +5118,6 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
         cancel_day_orders();
     }
 
-    if (event_logger_) event_logger_->flush();
     stop_workers();
 #ifdef HAS_QUESTDB
     questdb_end();
@@ -3972,8 +5157,7 @@ void engine::run()
         throw std::runtime_error("no data loaded — call IMarketSource::load_into() / DataWrapper::load() before run()");
     }
 
-    if (!config_.event_log_path.empty())
-        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
+    ensure_event_logger(/*recreate_non_authoritative=*/true);
 
 #ifdef HAS_DEBUG
     memory_sampler_.set_start(debug::memory_snapshot::capture());
@@ -4030,6 +5214,15 @@ void engine::run()
              && !halt_flag_.load(std::memory_order_acquire)
              && !worker_failed_.load(std::memory_order_acquire); ++i)
     {
+        // Batch/replay callers may still be backed by a live provider.  Do
+        // not let a bar's pending orders, stops, or strategy observe stale
+        // private venue truth merely because this path did not use
+        // DataBridge.
+        if (!drain_private_account_updates(event_count))
+        {
+            halt_requested = true;
+            break;
+        }
         DEBUG_STAGE(stage_timer_, market_create);
         const auto bar = data_handler_->bar_at(i);
         auto this_bar_ts = resolve_bar_ts(i, prev_bar_ts, bar);
@@ -4055,7 +5248,11 @@ void engine::run()
         { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[symbol] = mkt.get_open(); }
 
         // Advance adapter clocks so latency-gated cancels complete offline.
-        if (router_) router_->advance_all(sim_time);
+        if (!advance_execution_adapters_safely(sim_time))
+        {
+            halt_requested = true;
+            break;
+        }
 
         {
             DEBUG_STAGE(stage_timer_, pending_drain);
@@ -4092,8 +5289,19 @@ void engine::run()
             auto provider_adapter = config_.provider->get_execution_adapter();
             drain_venue_bracket_meta();
             drain_async_submit_results(provider_adapter.get());
+            bool unexpected_legacy_halt = false;
+            if (provider_adapter
+                && !reject_legacy_fills_from_unified_adapter(
+                    provider_adapter, unexpected_legacy_halt))
+            {
+                halt_requested = true;
+                break;
+            }
             std::vector<fill_event> provider_fills;
-            if (provider_adapter && provider_adapter->poll_fills(provider_fills))
+            if (provider_adapter
+                && (!provider_execution_ingress_
+                    || provider_adapter.get() != private_execution_adapter_)
+                && provider_adapter->poll_fills(provider_fills))
             {
                 for (auto& f : provider_fills)
                 {
@@ -4260,8 +5468,7 @@ void engine::run()
 
 void engine::run_tick_data()
 {
-    if (!config_.event_log_path.empty() && !event_logger_)
-        event_logger_ = std::make_unique<EventLogger>(config_.event_log_path, config_.compress_log);
+    ensure_event_logger();
 
     clear_pending_state();
 
@@ -4309,6 +5516,11 @@ void engine::run_tick_data()
              && !halt_flag_.load(std::memory_order_acquire)
              && !worker_failed_.load(std::memory_order_acquire); ++i)
     {
+        if (!drain_private_account_updates(event_count))
+        {
+            halt_requested = true;
+            break;
+        }
         const auto& tick = data_handler_->tick_at(i);
 
         last_sim_time_ = tick.timestamp;
@@ -4316,7 +5528,11 @@ void engine::run_tick_data()
         { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[tick.symbol] = tick.price; }
 
         // Latency-gated cancel windows need clock advance on the tick path too.
-        if (router_) router_->advance_all(tick.timestamp);
+        if (!advance_execution_adapters_safely(tick.timestamp))
+        {
+            halt_requested = true;
+            break;
+        }
 
         {
             DEBUG_STAGE(stage_timer_, mm_replenish);
@@ -4482,7 +5698,11 @@ void engine::run_replay(const std::string& log_path,
 
             last_mid_price_.store(mkt.get_open(), std::memory_order_release);
             { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[mkt.get_symbol()] = mkt.get_open(); }
-            if (router_) router_->advance_all(sim_time);
+            if (!advance_execution_adapters_safely(sim_time))
+            {
+                halt_requested = true;
+                break;
+            }
 
             drain_pending_orders(sim_time, event_count, halt_requested);
             if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
@@ -4549,7 +5769,11 @@ void engine::run_replay(const std::string& log_path,
 
             last_mid_price_.store(te.get_price(), std::memory_order_release);
             { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[te.get_symbol()] = te.get_price(); }
-            if (router_) router_->advance_all(sim_time);
+            if (!advance_execution_adapters_safely(sim_time))
+            {
+                halt_requested = true;
+                break;
+            }
 
             drain_pending_orders(sim_time, event_count, halt_requested);
             if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;

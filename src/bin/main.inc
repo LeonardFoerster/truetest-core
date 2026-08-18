@@ -2110,6 +2110,18 @@ static int run_provider_mode(const cli_options& o)
                              "on the spot sandbox.\n";
             return 1;
         }
+        if (prov_cfg.event_log_path.empty())
+        {
+            std::cerr << "  ! Live mode requires --log-events PATH for the "
+                         "authoritative event ledger.\n";
+            return 1;
+        }
+        if (prov_cfg.log_max_bytes != 0)
+        {
+            std::cerr << "  ! Live mode refuses --log-max-size: the "
+                         "authoritative event ledger cannot rotate.\n";
+            return 1;
+        }
         if (!o.live)
         {
             std::cerr << "  ! Live mode requires --live flag.\n";
@@ -2165,6 +2177,25 @@ static int run_provider_mode(const cli_options& o)
         return 1;
     }
 #endif
+
+    if (prov_cfg.mode == engine_mode::live)
+    {
+        // Reserve before *any* provider configuration/open.  The descriptor
+        // remains unpublished as `<path>.partial` until engine shutdown has
+        // drained the joined private FIFO and finalized its terminal record.
+        try
+        {
+            prov_cfg.authoritative_event_ledger =
+                std::make_shared<AuthoritativeEventLedgerReservation>(
+                    prov_cfg.event_log_path);
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "  ! Cannot reserve authoritative live event ledger: "
+                      << e.what() << "\n";
+            return 1;
+        }
+    }
 
     provider->configure(prov_cfg);
 
@@ -3145,16 +3176,13 @@ static int run_tui_configured_engine(const cli_options& o,
         config.mode = engine_mode::shadow;
     else if (mode_choice == 3)
     {
-        if (!truetest::target_allows_live_orders())
-        {
-            std::cerr << "  ! Live mode is only permitted on the engine_live binary "
-                         "(this is " << truetest::target_name() << ").\n";
-            return 1;
-        }
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-        if (!confirm_real_money_math())
-            return 0;
-        config.mode = engine_mode::live;
+        // This legacy path owns a local CSV data source, not a live provider
+        // session.  Refuse instead of constructing a nominally-live engine
+        // without the required provider-open ledger reservation and session.
+        std::cerr << "  ! The interactive CSV TUI cannot enter live mode. "
+                     "Use engine_live --provider <venue> --live --log-events "
+                     "<path> for the attended live composition.\n";
+        return 1;
     }
 
     // Soft portfolio limits were resolved as backtest earlier; re-resolve after

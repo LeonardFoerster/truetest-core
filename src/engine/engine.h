@@ -81,6 +81,8 @@ static constexpr std::size_t DEFAULT_RING_SIZE = 65536;
 using EventRing = RingBuffer<event_pointer, DEFAULT_RING_SIZE>;
 
 enum class live_shutdown_reason;
+class IAsyncSubmitSupport;
+class ProviderExecutionIngress;
 
 class engine
 {
@@ -214,6 +216,22 @@ private:
     std::unique_ptr<IOrderAuditSink> audit_sink_;
     std::unique_ptr<ExecutionRouter> router_;
     ProviderFundingIngress* provider_funding_ingress_ = nullptr;
+    // Provider-owned unified private-account FIFO.  When non-null it is the
+    // only authoritative private source; the legacy funding-only ingress and
+    // bridge poll_fills path must not be combined with it.
+    ProviderExecutionIngress* provider_execution_ingress_ = nullptr;
+    IAsyncSubmitSupport* private_execution_support_ = nullptr;
+    // Raw identity is stable for the lifetime of config_.provider.  It lets
+    // the engine distinguish its provider's unified private source from
+    // ordinary local/paper adapters without virtual dispatch in hot drains.
+    IExecutionAdapter* private_execution_adapter_ = nullptr;
+    std::uint64_t last_private_execution_sequence_ = 0;
+
+    enum class private_execution_drain_mode : std::uint8_t
+    {
+        normal,
+        final_accounting_only,
+    };
 
     // Dashboard logic extracted to cold collaborator (Wave 1).
     // See core/docs/internal/engine-decomposition.md (E-30..) + engine-decomposition skill.
@@ -247,6 +265,15 @@ private:
     // Sole consumer for provider funding ingress. Only this engine-thread path
     // may acquire funding_pool_, mutate portfolio/audit, or publish the event.
     bool drain_provider_funding_updates() noexcept;
+    // Applies the authoritative unified provider-private FIFO before any
+    // strategy/risk/venue-capable boundary.  Final mode is accounting-only and
+    // is used solely after a provider proves its reader has joined.
+    bool drain_provider_execution_updates(
+        std::size_t& event_count,
+        private_execution_drain_mode mode = private_execution_drain_mode::normal) noexcept;
+    bool drain_private_account_updates(
+        std::size_t& event_count,
+        private_execution_drain_mode mode = private_execution_drain_mode::normal) noexcept;
 
     // Stamp per-lot attribution (opener_order_id + strategy_name) onto a
     // fill_event if not already present. Uses order_meta_ lookup as fallback.
@@ -262,7 +289,11 @@ private:
     // Canonical engine-book fill pipeline (tracker, portfolio, strategy,
     // exits, risk, audit, analytics, publish). Used by process_order,
     // provider async drain, and unwind so no path can skip post-fill risk.
-    // Returns false if post-fill risk triggered a terminal halt.
+    // Returns false if preflight failed or a post-accounting safety condition
+    // triggered a terminal halt.  When `canonical_accounting_applied` is
+    // supplied it is set only after portfolio accounting has committed; this
+    // lets the private-ingress transaction commit an already-observed venue
+    // fill even when later audit/risk/exit work requires reconciliation.
     // run_post_fill_risk: false for risk_unwind fills (already halting).
     // mark_shadow_sim: true for paper/sim fills in shadow dual-track mode.
     // status_reason: optional audit reason (e.g. "risk_unwind").
@@ -271,7 +302,9 @@ private:
                             bool& halt_requested,
                             bool run_post_fill_risk = true,
                             bool mark_shadow_sim = false,
-                            const char* status_reason = nullptr);
+                            const char* status_reason = nullptr,
+                            bool permit_post_accounting_side_effects = true,
+                            bool* canonical_accounting_applied = nullptr);
 
     // After strategy on_* + route_order: arm exit intents only when the
     // order was accepted; drain intents + resync position gates on
@@ -336,6 +369,21 @@ private:
     // post-fill risk halt.
     bool process_adapter_fills(const std::shared_ptr<IExecutionAdapter>& adapter,
                                std::size_t& event_count, bool& halt_requested);
+    bool reject_legacy_fills_from_unified_adapter(
+        const std::shared_ptr<IExecutionAdapter>& adapter,
+        bool& halt_requested);
+    // Adapter virtual methods are an extension boundary.  Never let an
+    // exception cross a market callback or convert a safety halt into
+    // std::terminate; latch admission before returning control to the loop.
+    void latch_execution_adapter_boundary_failure(const char* reason) noexcept;
+    bool advance_execution_adapters_safely(
+        std::chrono::system_clock::time_point timestamp) noexcept;
+    bool forward_l2_snapshot_safely(
+        const std::string& symbol,
+        const std::vector<std::pair<double, double>>& bids,
+        const std::vector<std::pair<double, double>>& asks) noexcept;
+    bool forward_l2_update_safely(const std::string& symbol, order_side side,
+                                  double price, double quantity) noexcept;
 
     // Routes MarketMaker quote-update crossings via IExecutionAdapter::
     // on_book_trades (LocalBookAdapter records fills; HybridExecutor
@@ -384,6 +432,11 @@ private:
     // Engine keeps the maps for reset/attribution compatibility; router receives non-owning refs.
     std::unordered_map<uint64_t, pending_cancel_meta> pending_cancels_;
     std::unordered_map<uint64_t, order_meta> order_meta_;
+    // A venue-recovered bracket may not carry durable strategy attribution.
+    // Retain that fact by opener id so a later protective-leg fill is booked
+    // and audited but is never misrouted to the process's current primary
+    // strategy merely because its strategy field is empty.
+    std::unordered_set<uint64_t> unowned_recovered_openers_;
 
     void register_order_meta(const order_event& o);
     uint64_t lookup_opener(uint64_t order_id) const;
@@ -463,6 +516,14 @@ private:
     void revoke_provider_callbacks();
 
     std::unique_ptr<LoggingWorker> make_logging_worker();
+
+    // Live owns one descriptor-reserved logger worker before the constructor's
+    // initial private drain.  It writes setup records directly until its
+    // thread starts, then consumes the normal logging SPSC ring.  Non-live
+    // modes retain the existing path-opened behavior.
+    void ensure_event_logger(bool recreate_non_authoritative = false);
+    void finalize_authoritative_event_ledger(
+        bool final_private_drain_proven) noexcept;
 
     // Wave 2 helpers: common skeleton for run* methods (E-40..E-44)
     // See core/docs/internal/engine-decomposition.md + engine-decomposition skill.

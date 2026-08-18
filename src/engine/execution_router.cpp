@@ -29,7 +29,7 @@ ExecutionRouter::ExecutionRouter(
     // adapters_ (ref) populated on resolve; creation logic now here (moved from engine get_adapter).
 }
 
-std::shared_ptr<IExecutionAdapter> ExecutionRouter::resolve_adapter(const std::string& symbol) noexcept
+std::shared_ptr<IExecutionAdapter> ExecutionRouter::resolve_adapter(const std::string& symbol)
 {
     auto it = adapters_.find(symbol);
     if (it != adapters_.end())
@@ -74,12 +74,12 @@ std::shared_ptr<IExecutionAdapter> ExecutionRouter::resolve_adapter(const std::s
     return adapter;
 }
 
-bool ExecutionRouter::is_async_submit(IExecutionAdapter* a) const noexcept
+bool ExecutionRouter::is_async_submit(IExecutionAdapter* a) const
 {
     return a && a->supports_async_submit();
 }
 
-void ExecutionRouter::submit(const order_event& o, IExecutionAdapter* a) noexcept
+void ExecutionRouter::submit(const order_event& o, IExecutionAdapter* a)
 {
     if (a)
         a->submit_order(o);
@@ -91,7 +91,7 @@ void ExecutionRouter::drain_submit_results(IExecutionAdapter* a) noexcept
     (void)a;
 }
 
-bool ExecutionRouter::poll_fills(IExecutionAdapter* a, std::vector<fill_event>& out) noexcept
+bool ExecutionRouter::poll_fills(IExecutionAdapter* a, std::vector<fill_event>& out)
 {
     if (a)
         return a->poll_fills(out);
@@ -105,7 +105,7 @@ void ExecutionRouter::submit_to_exchange_shadow(const order_event& o) noexcept
 }
 
 // Iteration moved from engine (net reduction + central). Includes provider adapter.
-void ExecutionRouter::advance_all(std::chrono::system_clock::time_point ts) noexcept
+void ExecutionRouter::advance_all(std::chrono::system_clock::time_point ts)
 {
     for (auto& [_, ad] : adapters_)
         if (ad) ad->advance_time(ts);
@@ -118,7 +118,7 @@ void ExecutionRouter::advance_all(std::chrono::system_clock::time_point ts) noex
 
 void ExecutionRouter::on_l2_snapshot(const std::string& symbol,
                                      const std::vector<std::pair<double, double>>& bids,
-                                     const std::vector<std::pair<double, double>>& asks) noexcept
+                                     const std::vector<std::pair<double, double>>& asks)
 {
     for (auto& [_, ad] : adapters_)
         if (ad) ad->on_l2_snapshot(symbol, bids, asks);
@@ -128,7 +128,7 @@ void ExecutionRouter::on_l2_snapshot(const std::string& symbol,
 }
 
 void ExecutionRouter::on_l2_update(const std::string& symbol, order_side os,
-                                   double price, double new_qty) noexcept
+                                   double price, double new_qty)
 {
     for (auto& [_, ad] : adapters_)
         if (ad) ad->on_l2_update(symbol, os, price, new_qty);

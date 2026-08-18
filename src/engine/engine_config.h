@@ -21,6 +21,7 @@ class ILatencyModel;
 class IImpactModel;
 class IProvider;
 class LiveSafetySession;
+class AuthoritativeEventLedgerReservation;
 class IQueuePositionModel;
 class IQueueModel;
 
@@ -130,6 +131,13 @@ struct engine_config
 
     std::string event_log_path;
     bool compress_log = true;
+
+    // Live composition reserves this descriptor-backed ledger before any
+    // provider configuration or open.  It is intentionally absent from
+    // backtest/shadow configuration: those modes retain the ordinary,
+    // path-opened EventLogger compatibility path.
+    std::shared_ptr<AuthoritativeEventLedgerReservation>
+        authoritative_event_ledger;
 
     std::string text_log_path;
     bool log_to_stdout = false;

@@ -48,21 +48,25 @@ public:
         std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& adapters_ref
     );
 
-    std::shared_ptr<IExecutionAdapter> resolve_adapter(const std::string& symbol) noexcept;
-    bool is_async_submit(IExecutionAdapter* a) const noexcept;
-    void submit(const order_event& o, IExecutionAdapter* a) noexcept;
+    // These methods cross the provider adapter port.  The port deliberately
+    // does not promise noexcept (venue transports may report a synchronous
+    // local failure), so do not turn a recoverable engine-side safety halt
+    // into std::terminate here.  The engine owns the catch/latch boundary.
+    std::shared_ptr<IExecutionAdapter> resolve_adapter(const std::string& symbol);
+    bool is_async_submit(IExecutionAdapter* a) const;
+    void submit(const order_event& o, IExecutionAdapter* a);
     void drain_submit_results(IExecutionAdapter* a) noexcept;
-    bool poll_fills(IExecutionAdapter* a, std::vector<fill_event>& out) noexcept;
+    bool poll_fills(IExecutionAdapter* a, std::vector<fill_event>& out);
     void submit_to_exchange_shadow(const order_event& o) noexcept;
 
     // Adapter map iteration moved fully into router (final cleanup).
     // Also forwards to provider's execution adapter when present (for live/shadow).
-    void advance_all(std::chrono::system_clock::time_point ts) noexcept;
+    void advance_all(std::chrono::system_clock::time_point ts);
     void on_l2_snapshot(const std::string& symbol,
                         const std::vector<std::pair<double, double>>& bids,
-                        const std::vector<std::pair<double, double>>& asks) noexcept;
+                        const std::vector<std::pair<double, double>>& asks);
     void on_l2_update(const std::string& symbol, order_side os,
-                      double price, double new_qty) noexcept;
+                      double price, double new_qty);
 
 private:
     // Backing map is the engine's execution_adapters_ (passed by ref). Router owns creation/lookup logic.
