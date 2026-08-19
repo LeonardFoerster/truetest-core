@@ -531,6 +531,20 @@ static bool validate_binance_futures_live_phase0(const cli_options& o,
                   "    Set --log-events to an operator-controlled path.\n";
         return false;
     }
+    // H-07 (docs/todos/08-H-persistence-observability.md): a plain
+    // std::ofstream::open() succeeds silently against /dev/null, a FIFO, or
+    // a device node, so the emptiness check above is not sufficient to
+    // guarantee the "mandatory durable truth" the mainnet ritual promises.
+    if (!sandbox && !o.event_log_path.empty()
+        && !is_acceptable_durable_log_target(o.event_log_path))
+    {
+        errors << "  ! Refusing mainnet futures live mode: --log-events target "
+                  "is not a regular file (rejects /dev/null, FIFOs, device "
+                  "nodes, and non-regular symlinks).\n"
+                  "    Point --log-events at an operator-controlled regular "
+                  "file path.\n";
+        return false;
+    }
     if (!sandbox && o.log_max_size_mb > 0)
     {
         errors << "  ! Refusing mainnet futures live mode with binary event "
