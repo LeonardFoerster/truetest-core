@@ -50,6 +50,9 @@ set(ENGINE_CORE_SOURCES
     src/engine/engine_observability.cpp
     src/engine/engine_pending.cpp
     src/engine/fill_processor.cpp
+    src/engine/order_attribution_store.cpp
+    src/engine/pending_order_scheduler.cpp
+    src/engine/order_intent_processor.cpp
     src/engine/execution_router.cpp
     src/engine/order_audit_sink.cpp
     src/engine/instrument_spec_cache.cpp
