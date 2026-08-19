@@ -92,7 +92,15 @@ src/core/tt_target.h
 src/engine/engine.cpp
 src/engine/engine.h
 src/engine/engine_config.h
+src/engine/engine_lifecycle.cpp
+src/engine/engine_market.cpp
+src/engine/engine_orders.cpp
+src/engine/engine_fills.cpp
+src/engine/engine_workers.cpp
+src/engine/engine_observability.cpp
 src/engine/engine_pending.cpp
+src/engine/fill_processor.h
+src/engine/fill_processor.cpp
 src/engine/live_safety_session.cpp
 src/engine/live_safety_session.h
 src/bin/main.inc
