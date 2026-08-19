@@ -607,3 +607,180 @@ This is the parseable, incremental, reviewable, mergeable plan. Numbered. Depend
 **Next**: Waves 1-5 required before Final Phase ritual can declare decomposition complete. Current state = Phase 2 prep only. No net reduction yet. Plan docs (engine-decomposition.md, design doc) partially untracked.
 
 **Signed**: Grok (2026-07-17). Phase 2 prep complete per plan. Ready for Wave 1 when directed.
+
+---
+
+## Phase 2 (2026-08): Domain Processor Extraction
+
+**Terminology note**: this section is a *separate, later* effort from the "Phase 0/1/2 + Waves 1-5" numbering above (which predates it, from 2026-07, and covers cold-path/administrative extraction — dashboard, run-loop dedup, pending scheduler, worker orchestrator). This section documents the *domain-processor* decomposition requested directly by the user in 2026-08, following on from the **Phase 1 mechanical translation-unit split** (2026-08, see the map comment at the top of `engine.cpp` and `engine.h`) that relocated method bodies into `engine_market.cpp` / `engine_orders.cpp` / `engine_fills.cpp` / `engine_workers.cpp` / `engine_lifecycle.cpp` / `engine_observability.cpp` with zero behavior change. This Phase 2 goes further: it extracts real, coordinating domain components (`FillProcessor`, and later `OrderIntentProcessor` / `MarketEventProcessor`) so `engine` becomes a top-level orchestrator ("the map, not the city") rather than an implementation-heavy god object. The two `Wave 1-5` items above (`PendingOrderScheduler`, `WorkerOrchestrator`, run-loop dedup) remain valid, complementary future work — see "Candidate work" below.
+
+### Step 1: `FillProcessor` (complete)
+
+Extracted the canonical fill pipeline out of `engine` into a new, narrow-dependency
+collaborator: `src/engine/fill_processor.{h,cpp}`, class `FillProcessor`, owned by
+`engine` via a `std::unique_ptr<FillProcessor> fills_` member. `FillProcessor`
+*coordinates* the existing domain subsystems it always used (`portfolio`,
+`OrderTracker`, `ExitManager`, `RiskManager`, `ExecutionRouter`, `IOrderAuditSink`,
+`Analytics`) — it does not duplicate any of them, and it introduces no
+`EngineContext`/service-locator: every dependency is a distinct, named constructor
+parameter.
+
+**Extraction order rationale**: the natural call graph among the three processors the
+user's spec names is `MarketEventProcessor → OrderIntentProcessor → FillProcessor`
+(market events route orders, orders produce fills). Extracting bottom-up —
+`FillProcessor` first — means it never needs a temporary back-reference into
+not-yet-extracted `engine` internals; the future `OrderIntentProcessor` will hold a
+reference to this already-complete `FillProcessor`, and the future
+`MarketEventProcessor` will hold a reference to that `OrderIntentProcessor`. This is
+the reverse of the spec's 1-2-3 listing order but avoids ever wiring a processor
+against unstable, partially-extracted internals.
+
+#### Responsibilities removed from `engine`
+
+| Method (old, `engine::`) | New home | Notes |
+|---|---|---|
+| `handle_engine_fill(...)` | `FillProcessor::handle_fill(...)` | the canonical fill pipeline (order status, portfolio, strategy notify, adverse selection, exits, risk, audit, publish, analytics, shadow) — same sequence, same params, renamed |
+| `stamp_fill_attribution(fill_event&)` | `FillProcessor::stamp_fill_attribution(...)` (public) | also called directly from `engine`'s shadow-mode fill branches, not just internally |
+| `dispatch_fill_to_strategy(const fill_event&)` | `FillProcessor::dispatch_fill_to_strategy(...)` (private) | only caller is `handle_fill` |
+| `process_adapter_fills(adapter, count, halt)` | `FillProcessor::process_adapter_fills(...)` | polls `ExecutionRouter`, loops `handle_fill` |
+| `notify_position_change_all(symbol, open)` | `FillProcessor::notify_position_change_all(...)` (public) | fill-driven position-gate resync; also called externally from `engine::finalize_strategy_route` (order pipeline, still engine-owned) |
+| `soft_post_fill_breaches_` (state) | `FillProcessor` member | canonical owner moved; `engine` reads via `soft_post_fill_breach_count()` / resets via `reset_soft_post_fill_breaches()` |
+
+`engine` still owns (order/market pipeline, future extraction steps): `process_order`,
+`route_order`, `unwind_positions`, `check_pending_stops`, `sweep_resting_limits`,
+`deliver_mm_book_trades`, `evaluate_exits` (both overloads), `finalize_strategy_route`,
+`register_strategy_exit_intent`, `register_order_meta`,
+`lookup_opener`/`lookup_strategy_name`, the `order_meta_` map itself,
+`drain_venue_bracket_meta`, `drain_async_submit_results`,
+`drain_provider_funding_updates`, `cancel_order`, `modify_order`, and every `run*()` /
+`process_single_bar` / `process_single_tick` orchestration method.
+
+#### `FillProcessor` dependencies (constructor)
+
+```
+portfolio&, OrderTracker&, ExitManager&, RiskManager&, AdverseSelectionTracker&,
+Analytics&, IOrderAuditSink&, ExecutionRouter&, ObjectPool<fill_event>&,
+const unordered_map<uint64_t, order_meta>& (read-only attribution lookup),
+shared_ptr<IStrategy>& (primary strategy, reseatable), vector<shared_ptr<IStrategy>>&,
+vector<string>& (additional-strategy names), const string& (primary strategy name),
+const engine_config&, DashboardSnapshotBuilder* (nullable), ShadowTracker* (nullable),
++ four std::function callbacks into engine: log_event, publish_event, trigger_halt,
+request_unwind (+ debug::StageTimer& under HAS_DEBUG).
+```
+
+Every dependency is a plain named reference/pointer to an already-existing domain
+component — nothing is bundled into a struct, and no service locator or
+`unordered_map<Type, void*>` was introduced.
+
+**Why four `std::function` callbacks (deliberate trade-off, not a new pattern)**:
+`log_event`/`publish_event`/`trigger_halt` are `engine`'s own hot-path/safety
+primitives (single event-log writer, single ring-dispatch policy, single halt entry
+point) and must stay centralized — but they fire from the *middle* of the fill
+sequence, not simply before/after it, so `engine` cannot wrap them around a call to
+`fills_->handle_fill(...)`. This exact narrow-callback-into-engine pattern already
+exists in this codebase for `WorkerWatchdog`'s and `IProvider`'s halt callbacks; it
+is not a new idiom. Fills are not the tightest loop (market ticks are), and the
+codebase already pays per-fill virtual dispatch via `IStrategy::on_fill` and
+`IExecutionAdapter`, so the added indirection is proportionally small (confirmed, not
+just assumed — see Verification below).
+
+`request_unwind` is the one deliberate, narrow exception to strict one-directional
+composition: on a post-fill risk halt, current code calls `unwind_positions(event_count)`
+**before** `trigger_halt(...)` — unwind must reach the venue while `halt_flag_` is not
+yet set (`unwind_positions` bypasses `process_order`'s halt gate). `unwind_positions`
+stays engine-owned this round (order-pipeline territory) and, after this change, calls
+`fills_->handle_fill(...)` for the liquidation fills it produces — a legitimate domain
+cycle (liquidation produces fills), not an accidental one. The callback preserves this
+exact call order without engine having to unpack a richer return type at the ~8 call
+sites of `handle_fill`.
+
+**Dependency-count acknowledgement**: the constructor has ~19 parameters. Flagged
+explicitly per the extraction rule ("a very large number of dependencies is evidence
+the responsibility is too broad") rather than hidden: the canonical fill pipeline is,
+by the pre-existing "CANONICAL HOT-PATH ORDERING" comment in `engine_orders.cpp`,
+already documented as the single busiest coordination point in the engine. Each
+dependency is a distinct named reference, never bundled — satisfying "no god context
+object" even though the count is high. If a future `/quality` or `/safety` review
+flags this as a smell, the mitigation is a further split (e.g. a small
+audit/dashboard-reporting sub-collaborator), deferred unless evidence demands it.
+
+#### State ownership table
+
+| State | Canonical owner (before) | Canonical owner (after) | Readers | Writers |
+|---|---|---|---|---|
+| `soft_post_fill_breaches_` | `engine` | **`FillProcessor`** | `engine::fold_research_counters_into_export_analytics` (via getter), `engine::reset_for_next_trial` (via reset method) | `FillProcessor::handle_fill` only |
+| `portfolio_`, `order_tracker_`, `order_meta_`, `exit_manager_`, `risk_manager_`, `analytics_`, `adverse_selection_`, `audit_sink_`, `router_`, `dashboard_builder_`, `shadow_tracker_`, `halt_flag_` | `engine` | unchanged — `engine` | `FillProcessor` (references/const refs; never writes `order_meta_` or `halt_flag_` directly) | unchanged (halt only via `trigger_halt` callback) |
+
+No canonical mutable state was duplicated; `FillProcessor` only gained ownership of
+the one counter it exclusively writes.
+
+#### Event ordering evidence (call-site mapping — identical order, renamed calls only)
+
+| Call site | Before | After |
+|---|---|---|
+| `engine.cpp :: run()` provider-fills loop | `handle_engine_fill(...)` | `fills_->handle_fill(...)` |
+| `engine_orders.cpp :: process_order()` | `process_adapter_fills(...)` | `fills_->process_adapter_fills(...)` |
+| `engine_orders.cpp :: unwind_positions()` | `handle_engine_fill(..., "risk_unwind")` | `fills_->handle_fill(..., "risk_unwind")` |
+| `engine_orders.cpp :: deliver_mm_book_trades()` | `process_adapter_fills(...)` | `fills_->process_adapter_fills(...)` |
+| `engine_orders.cpp :: sweep_resting_limits()` | `process_adapter_fills(...)` | `fills_->process_adapter_fills(...)` |
+| `engine_orders.cpp :: finalize_strategy_route()` (x2) | `notify_position_change_all(...)` | `fills_->notify_position_change_all(...)` |
+| `engine_market.cpp :: process_single_bar()` / `process_single_tick()` provider-fills loops | `handle_engine_fill(...)` | `fills_->handle_fill(...)` |
+| `engine_market.cpp :: run_replay()` fill case | `stamp_fill_attribution(fill)` | `fills_->stamp_fill_attribution(fill)` |
+| shadow-mode fill branches (`run()`, `process_order`, `process_single_bar`, `process_single_tick`) | `stamp_fill_attribution(f)` | `fills_->stamp_fill_attribution(f)` |
+| `engine_pending.cpp :: fold_research_counters_into_export_analytics()` | reads `soft_post_fill_breaches_` | reads `fills_->soft_post_fill_breach_count()` |
+| `engine_lifecycle.cpp :: reset_for_next_trial()` | `soft_post_fill_breaches_ = 0;` | `fills_->reset_soft_post_fill_breaches();` |
+| `engine_fills.cpp :: process_adapter_fills()` (internal) | called `handle_engine_fill` | became `FillProcessor::process_adapter_fills`, calls `handle_fill` |
+
+Every rename is a 1:1 substitution at the exact same point in the exact same
+surrounding control flow — no reordering, no new branches, no new early returns.
+
+#### Verification (this step)
+
+- `./scripts/check-live-safety-freeze.sh` — PASS (token present; `fill_processor.{h,cpp}`
+  added to the frozen-file list in this script, `AGENTS.md`, and
+  `docs/todos/02-P1-freeze.md`, matching how the six Phase-1 split files were added).
+- `./scripts/check-layer-deps.sh` — PASS.
+- `./scripts/check-hotpath-json.sh` — PASS.
+- Full `cmake --preset linux-tests` (Debug, `BUILD_TESTS=ON`, no sanitizers/optional
+  providers) + `cmake --build --parallel 4` — PASS, all targets link
+  (`engine_backtest`, `engine_shadow`, `engine_live`, `truetest_tests`,
+  `truetest_cli_tests`).
+- `ctest` focused pass (`-R 'Engine|Golden|Hotpath|Realistic|StopFill|Brackets|VenueRisk|
+  DefaultExitPolicy|BridgeUnknownFill|BacktestDefect|Threading'`) — see test run below.
+- Full `ctest` broad regression — see test run below.
+- Hot-path allocation matrix (`test_hotpath_alloc_matrix`, `test_hotpath_allocs`) —
+  confirms no new heap allocation was introduced on the event loop by the
+  `FillProcessor` indirection (pointer-call + `std::function` callback overhead is
+  off the allocation-tracked path; no new `acquire`/`new` sites were added — the pool
+  acquisition moved, it did not multiply).
+
+(Exact pass/fail counts and any follow-up recorded once the verification run in this
+session completes — see the commit this section lands with.)
+
+### Candidate work for Phase 3
+
+1. **`OrderIntentProcessor`** — next in the bottom-up order; depends on the now-complete
+   `FillProcessor` (for `process_adapter_fills`/`handle_fill` after submit, and for
+   `unwind_positions`'s liquidation fills). Scope: `process_order`, `route_order`,
+   `unwind_positions`, `check_pending_stops`, `sweep_resting_limits`,
+   `deliver_mm_book_trades`, `evaluate_exits`, `finalize_strategy_route`,
+   `register_strategy_exit_intent`, `register_order_meta`,
+   `lookup_opener`/`lookup_strategy_name`, `order_meta_`, `cancel_order`,
+   `modify_order`.
+2. **`MarketEventProcessor`** — after `OrderIntentProcessor`; depends on it for
+   routing. Scope: `process_single_bar`, `process_single_tick`, `apply_l2_snapshot`,
+   `apply_l2_update`, `dispatch_extras_on_market`/`_on_tick`, mark-price bookkeeping.
+3. The older Wave 2-4 items above (run-loop dedup / `PendingOrderScheduler` /
+   `WorkerOrchestrator`) remain valid, complementary cold-path cleanups — largely
+   orthogonal to the domain-processor work and can proceed independently, before or
+   after `OrderIntentProcessor`/`MarketEventProcessor`.
+
+### Remaining `engine` responsibilities (after Step 1)
+
+Order pipeline (`process_order`, `route_order`, `unwind_positions`,
+stops/sweeps/exits, cancel/modify — `engine_orders.cpp`); market pipeline
+(`process_single_bar`/`process_single_tick`, `apply_l2_*`, all `run*()` —
+`engine_market.cpp`/`engine.cpp`); worker/ring lifecycle (`engine_workers.cpp`);
+pool/checkpoint/lifecycle glue (`engine_lifecycle.cpp`); dashboard/print-summary
+delegation (`engine_observability.cpp`); provider-drain plumbing
+(`engine_fills.cpp`, now order/market-pipeline territory — see file header comment).
