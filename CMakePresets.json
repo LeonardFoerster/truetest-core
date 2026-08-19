@@ -164,6 +164,32 @@
       }
     },
     {
+      "name": "linux-ubsan",
+      "displayName": "Linux + UBSAN + Tests (Debug)",
+      "description": "UndefinedBehaviorSanitizer (standalone) + tests",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_TESTS": "ON",
+        "ENABLE_UBSAN": "ON"
+      }
+    },
+    {
+      "name": "linux-shared-lib",
+      "displayName": "Linux + Shared C API Library + Tests",
+      "description": "Build libtruetest shared library (C API) with test matrix",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BUILD_SHARED_LIB": "ON",
+        "BUILD_TESTS": "ON"
+      }
+    },
+    {
       "name": "linux-tsan",
       "displayName": "Linux + TSAN + Tests (Debug)",
       "description": "ThreadSanitizer (cannot be combined with ASAN/UBSAN)",
@@ -230,6 +256,8 @@
     { "name": "linux-providers-questdb", "configurePreset": "linux-providers-questdb", "jobs": 1 },
     { "name": "linux-web", "configurePreset": "linux-web", "jobs": 1 },
     { "name": "linux-asan", "configurePreset": "linux-asan", "jobs": 1 },
+    { "name": "linux-ubsan", "configurePreset": "linux-ubsan", "jobs": 1 },
+    { "name": "linux-shared-lib", "configurePreset": "linux-shared-lib", "jobs": 1 },
     { "name": "linux-tsan", "configurePreset": "linux-tsan", "jobs": 1 },
     { "name": "linux-benchmarks", "configurePreset": "linux-benchmarks", "jobs": 1 },
     { "name": "linux-release-native", "configurePreset": "linux-release-native", "jobs": 1 },

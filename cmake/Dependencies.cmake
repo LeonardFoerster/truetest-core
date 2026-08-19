@@ -286,6 +286,7 @@ function(tt_wire_imgui_desk target)
         return()
     endif()
 
+    set(_src "${CMAKE_SOURCE_DIR}/src")
     find_package(OpenGL REQUIRED)
     find_package(glfw3 QUIET)
     if(NOT glfw3_FOUND AND NOT TARGET glfw)
@@ -342,7 +343,7 @@ function(tt_wire_imgui_desk target)
     target_compile_definitions(${target} PRIVATE HAS_IMGUI_DESK)
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-                ${CMAKE_SOURCE_DIR}/src/ui/desk/assets
+                ${_src}/ui/desk/assets
                 $<TARGET_FILE_DIR:${target}>/desk_assets
         COMMENT "Copying TrueTest desk font assets")
 endfunction()
