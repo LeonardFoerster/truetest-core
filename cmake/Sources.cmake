@@ -42,7 +42,14 @@ set(IMGUI_DESK_SOURCES
 set(ENGINE_CORE_SOURCES
     # --- Engine core + supporting ---
     src/engine/engine.cpp
+    src/engine/engine_lifecycle.cpp
+    src/engine/engine_market.cpp
+    src/engine/engine_orders.cpp
+    src/engine/engine_fills.cpp
+    src/engine/engine_workers.cpp
+    src/engine/engine_observability.cpp
     src/engine/engine_pending.cpp
+    src/engine/fill_processor.cpp
     src/engine/execution_router.cpp
     src/engine/order_audit_sink.cpp
     src/engine/instrument_spec_cache.cpp
@@ -341,7 +348,12 @@ endif()
 # under BUILD_TESTS) while preserving the core failure behavior and limit.
 file(STRINGS src/engine/engine.cpp _engine_lines)
 list(LENGTH _engine_lines _engine_loc)
-set(ENGINE_LOC_MAX 4300)  # current ~4244 + buffer; tighten after further cleanup
+set(ENGINE_LOC_MAX 1400)  # current ~1055 + buffer after the 2026-08 Phase 1 TU
+                          # split (engine.cpp now holds only ctor/dtor, log_event,
+                          # publish_event, trigger_halt, request_operator_kill,
+                          # finalize_live_shutdown, and run(); everything else
+                          # moved to sibling engine_*.cpp files — see the map
+                          # comment at the top of engine.cpp). Was 4300.
 if(_engine_loc GREATER ENGINE_LOC_MAX)
     file(STRINGS src/engine/engine.cpp _waiver_lines REGEX "ENGINE_LOC_WAIVER:")
     if(NOT _waiver_lines)
