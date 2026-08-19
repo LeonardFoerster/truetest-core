@@ -29,13 +29,11 @@ TEST(ExecutionRouterCharacterization, ShadowAndSubmitResultMethodsRemainPartialS
     OrderbookRegistry books;
     engine_config cfg;
     std::unordered_set<std::string> seeded;
-    std::unordered_map<uint64_t, pending_cancel_meta> cancels;
-    std::unordered_map<uint64_t, order_meta> metadata;
     std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>> adapters;
     auto adapter = std::make_shared<CountingAdapter>();
     adapters.emplace("BTCUSDT", adapter);
     ExecutionRouter router(
-        books, cfg, seeded, nullptr, cancels, metadata, adapters);
+        books, cfg, seeded, nullptr, adapters);
 
     order_event order(std::chrono::system_clock::now(), "BTCUSDT",
                       order_type::market, order_side::buy, 1.0);
