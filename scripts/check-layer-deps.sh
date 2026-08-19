@@ -192,6 +192,11 @@ src/engine/instrument_spec_cache.h
 src/engine/order_audit_sink.h
 src/engine/fill_processor.h
 src/engine/live_safety_session.h
+src/engine/order_attribution_store.h
+src/engine/pending_order_scheduler.h
+src/engine/order_intent_processor.h
+src/engine/engine_hotpath_sink.h
+src/engine/risk_unwind_sink.h
 "
 backref_violations=0
 for hdr in $ENGINE_COLLABORATOR_HEADERS; do
