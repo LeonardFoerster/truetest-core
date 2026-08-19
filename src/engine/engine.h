@@ -49,6 +49,7 @@ namespace truetest::ui { struct streaming_stats; }
 #include "instrument_spec_cache.h"
 #include "checkpoint.h"
 #include "dashboard_snapshot_builder.h"
+#include "fill_processor.h"
 
 #ifdef HAS_QUESTDB
 #include "data/questdb/store.h"
@@ -81,6 +82,21 @@ static constexpr std::size_t DEFAULT_RING_SIZE = 65536;
 using EventRing = RingBuffer<event_pointer, DEFAULT_RING_SIZE>;
 
 enum class live_shutdown_reason;
+
+// ============================================================
+// LIVE-SAFETY SURFACE — Phase 1 freeze (see engine.cpp for the full banner
+// and scripts/check-live-safety-freeze.sh for the authoritative path list).
+//
+// Engine decomposition Phase 1 (mechanical translation-unit split, 2026-08):
+// this header's declarations are unchanged; only where each `engine::`
+// method is *defined* moved. engine.cpp keeps ctor/dtor, log_event,
+// publish_event, trigger_halt, request_operator_kill, finalize_live_shutdown,
+// and run(). Every other private/public method below is now defined in one
+// of: engine_lifecycle.cpp, engine_market.cpp, engine_orders.cpp,
+// engine_fills.cpp, engine_workers.cpp, engine_observability.cpp, or (pre-
+// existing) engine_pending.cpp — grouped by responsibility, not alphabetized.
+// See the map comment at the top of engine.cpp for the full breakdown.
+// ============================================================
 
 class engine
 {
@@ -130,7 +146,6 @@ private:
     // Last market/tick sim timestamp for cancel/amend audit (EL-CANCEL-WALLCLOCK).
     // Updated on every bar/tick event path; cancel_event uses this, not wall clock.
     std::chrono::system_clock::time_point last_sim_time_{};
-    std::size_t soft_post_fill_breaches_{0};
     std::size_t data_rows_rejected_{0};
 
     // Instrument spec cache (moved out; engine delegates). Cold path.
@@ -248,26 +263,11 @@ private:
     // may acquire funding_pool_, mutate portfolio/audit, or publish the event.
     bool drain_provider_funding_updates() noexcept;
 
-    // Stamp per-lot attribution (opener_order_id + strategy_name) onto a
-    // fill_event if not already present. Uses order_meta_ lookup as fallback.
-    // Called from all fill processing paths (and adapters now set it at
-    // creation for paper/shadow fills). Part of Phase 1 deepdive per-lot
-    // consolidation.
-    void stamp_fill_attribution(fill_event& f);
-
-    // Canonical engine-book fill pipeline (tracker, portfolio, strategy,
-    // exits, risk, audit, analytics, publish). Used by process_order,
-    // provider async drain, and unwind so no path can skip post-fill risk.
-    // Returns false if post-fill risk triggered a terminal halt.
-    // run_post_fill_risk: false for risk_unwind fills (already halting).
-    // mark_shadow_sim: true for paper/sim fills in shadow dual-track mode.
-    // status_reason: optional audit reason (e.g. "risk_unwind").
-    bool handle_engine_fill(fill_event& f,
-                            std::size_t& event_count,
-                            bool& halt_requested,
-                            bool run_post_fill_risk = true,
-                            bool mark_shadow_sim = false,
-                            const char* status_reason = nullptr);
+    // Fill pipeline (stamp_fill_attribution, handle_engine_fill,
+    // dispatch_fill_to_strategy, process_adapter_fills,
+    // notify_position_change_all) extracted to FillProcessor — Phase 2 engine
+    // decomposition (2026-08). See core/docs/internal/engine-decomposition.md
+    // "Phase 2: Domain Processors" and the fills_ member below.
 
     // After strategy on_* + route_order: arm exit intents only when the
     // order was accepted; drain intents + resync position gates on
@@ -328,12 +328,6 @@ private:
                              const std::chrono::system_clock::time_point& sim_time,
                              std::size_t& event_count, bool& halt_requested);
 
-    // Canonical fill pipeline for one adapter's pending fills (poll +
-    // portfolio/analytics/exits/risk + publish). Returns false on a
-    // post-fill risk halt.
-    bool process_adapter_fills(const std::shared_ptr<IExecutionAdapter>& adapter,
-                               std::size_t& event_count, bool& halt_requested);
-
     // Routes MarketMaker quote-update crossings via IExecutionAdapter::
     // on_book_trades (LocalBookAdapter records fills; HybridExecutor
     // forwards; live bridges no-op) so resting strategy limits fill when
@@ -351,7 +345,6 @@ private:
     double marked_account_equity(std::string_view current_symbol,
                                  double current_mark) const;
     void sync_strategy_account_equity(IStrategy& strategy) const;
-    void notify_position_change_all(const std::string& symbol, bool open);
 
     void process_single_bar(const bar_record& rec, std::size_t& event_count,
                             const std::chrono::system_clock::time_point& timestamp);
@@ -406,9 +399,12 @@ private:
     uint64_t lookup_opener(uint64_t order_id) const;
     const std::string& lookup_strategy_name(uint64_t order_id) const;
 
-    // Routes a fill back to the strategy that emitted the originating
-    // order, by matching strategy_name against primary/additional sets.
-    void dispatch_fill_to_strategy(const fill_event& f);
+    // Fill pipeline — Phase 2 engine decomposition (2026-08). Constructed in
+    // the ctor body after router_/dashboard_builder_/order_meta_ are valid
+    // (FillProcessor holds references to them); declared here (after all its
+    // dependency members) so it is destroyed before them. See
+    // core/docs/internal/engine-decomposition.md "Phase 2: Domain Processors".
+    std::unique_ptr<FillProcessor> fills_;
 
     std::atomic<bool> halt_flag_{false};
 

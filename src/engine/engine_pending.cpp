@@ -337,7 +337,7 @@ void engine::feed_paper_trade_and_drain(const std::string& symbol,
     if (it == execution_adapters_.end() || !it->second)
         return;
     it->second->on_trade(symbol, price, qty, ts);
-    process_adapter_fills(it->second, event_count, halt_requested);
+    fills_->process_adapter_fills(it->second, event_count, halt_requested);
 }
 
 void engine::add_strategy(std::shared_ptr<IStrategy> strategy, const std::string& name)
@@ -403,10 +403,11 @@ void engine::report_run_summary(std::size_t event_count,
 
 void engine::fold_research_counters_into_export_analytics()
 {
-    // Soft post-fill is counted on the engine event loop (analytics_ + local
-    // counter). Threaded get_analytics() returns a worker Analytics that never
-    // saw those counters — fold after join so export/report is honest.
-    const std::size_t soft = soft_post_fill_breaches_;
+    // Soft post-fill is counted on the engine event loop (analytics_ + a
+    // counter now owned by FillProcessor, its sole writer). Threaded
+    // get_analytics() returns a worker Analytics that never saw those
+    // counters — fold after join so export/report is honest.
+    const std::size_t soft = fills_->soft_post_fill_breach_count();
     const std::size_t rejects = data_rows_rejected_ > 0
         ? data_rows_rejected_
         : analytics_.data_rows_rejected();
