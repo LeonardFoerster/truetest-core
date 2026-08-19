@@ -759,6 +759,11 @@ session completes — see the commit this section lands with.)
 
 ### Candidate work for Phase 3
 
+> ✅ **Item 1 (`OrderIntentProcessor`) completed** in a later session — see
+> "OrderIntentProcessor Extraction" near the end of this document for the
+> full closure report. Item 2 (`MarketEventProcessor`) remains open. This
+> listing is left as-written for the historical rationale trail.
+
 1. **`OrderIntentProcessor`** — next in the bottom-up order; depends on the now-complete
    `FillProcessor` (for `process_adapter_fills`/`handle_fill` after submit, and for
    `unwind_positions`'s liquidation fills). Scope: `process_order`, `route_order`,
@@ -972,6 +977,10 @@ determinism/hot-path/provider-isolation all unaffected in every case):
   `engine_orders.cpp`/`engine_market.cpp`), so the decomposition's own stated
   target ("engine.cpp is the map") is not affected by deferring this further
   split.
+  **Update (2026-08-19, later session): `OrderIntentProcessor` has since
+  been extracted** — see "OrderIntentProcessor Extraction" below for the
+  full report. `engine_orders.cpp` now holds only two one-line forwards.
+  `MarketEventProcessor` remains unextracted, per the same rationale.
 - Three dashboard debug-snapshot fields are stubbed to 0 with `TODO`
   comments — observability-only, never read by any trading-decision path.
 - A stray leftover comment in `engine.cpp` — zero-risk, but `engine.cpp` is
@@ -1000,3 +1009,376 @@ re-run fresh at closure and remain green.
 `OrderIntentProcessor`/`MarketEventProcessor` extraction and a
 `FillProcessor` unit-test fixture are the only recommended future work, both
 non-blocking, both already scoped above.
+
+---
+
+## OrderIntentProcessor Extraction (2026-08-19, later session — closes the follow-up above)
+
+**Objective**: complete the `OrderIntentProcessor` follow-up left open by the
+Phase 3 Closure above, via its own preparation report + a staged
+implementation (prep extraction → Phase 1 canonical submit path → Phase 2
+routing/triggering/exits/unwind → Phase 3 cancel/modify/end-of-stream
+lifecycle), each stage verified independently (byte-identical scenario
+comparison against the pre-stage baseline, ASAN + full test suite, two fresh
+independent safety-subagent reviews) before the next stage began. This
+section is the final closure audit run after Phase 3 landed, per the
+"FINAL CLOSURE" task: verify the boundary is actually clean, fix only clear
+structural leaks, update docs/guards, and stop — not a re-litigation of any
+already-shipped stage.
+
+### 1. Responsibility audit
+
+Every public and private method on `OrderIntentProcessor`
+(`order_intent_processor.{h,cpp}`, read in full) was classified:
+
+| Method | Classification |
+|---|---|
+| `process`, `unwind_positions`, `drain_async_submit_results`, `marked_account_equity`, `route`, `check_pending_stops`, `sweep_resting_limits`, `evaluate_exits` (×2), `finalize_route`, `register_strategy_exit_intent`, `drain_due`, `cancel`, `modify`, `finalize_end_of_stream`, `clear_pending_stops`, `clear_pending_cancels`, `resolve_instrument_spec`, `apply_instrument_spec`, `mid_for_symbol` | LEGITIMATE ORDER DOMAIN |
+| `deliver_mm_book_trades` | LEGITIMATE ORDER DOMAIN (market-*triggered* order-fill mechanics — delivers synthetic MM crossings to resting strategy orders via the adapter, then hands off to `FillProcessor`; it does not decide anything market-domain, it reacts to a market move already computed elsewhere). Flagged as the natural seam if/when `MarketEventProcessor` is extracted, not as a leak from this extraction — Phase 2 scoped it here deliberately and this pass did not touch it. |
+| `acquire_pooled<T>` (private template) | UNRELATED (infrastructure, not domain — mirrors `FillProcessor`'s identical helper) |
+
+No SCHEDULING LEAK: `drain_due`, `finalize_end_of_stream`, and `cancel`
+consume `PendingOrderScheduler` exclusively through its published query/pop
+API (`latency_due`, `pop_due_latency`, `has_retained_ready`,
+`compact_bar_delay_due`, `ready_count`, `take_ready_order`,
+`retain_ready_suffix`, `clear_ready`, `expire_all`, `day_orders`,
+`clear_day_orders`, `mark_day_order`, `next_seq`) — grepped for any direct
+touch of scheduler internals; none found.
+
+No FILL LEAK: every fill-handling call is a delegation
+(`fills_.process_adapter_fills`, `fills_.handle_fill`,
+`fills_.stamp_fill_attribution`, `fills_.notify_position_change_all`) — no
+reimplementation of tracker/portfolio/exit/risk fill bookkeeping.
+
+No MARKET LEAK: `process_single_bar`/`process_single_tick`/`apply_l2_*`
+remain exclusively in `engine_market.cpp`, untouched by this class.
+
+No ENGINE LIFECYCLE LEAK: no worker start/stop, pool prewarm, or checkpoint
+logic present.
+
+No OBSERVABILITY LEAK: every `dashboard_builder_->...` call site in this
+file is a write (`cache_open_order`, `update_open_order_status`,
+`erase_open_order`) — none are reads used to make a routing/risk decision
+(re-verified for this file specifically; see
+`docs/architecture/05-engine-boundaries.md` §4 for the full cross-file
+audit).
+
+No PROVIDER-SPECIFIC LEAK: only `IExecutionAdapter`/`IProvider` interface
+types are touched; grepped for vendor name references — none found.
+
+**Verdict: no structural leaks found. No method bodies were changed by this
+closure pass** (only the one construction-order fix in `engine.h`, §2 below,
+and documentation/comment hygiene, §8 below).
+
+### 2. Constructor audit
+
+`OrderIntentProcessor`'s constructor takes 33 parameters — every one
+independently checked:
+
+- **Used?** Yes for all 33 — grepped the `.cpp` for each member name; every
+  one has at least one read (several, like `halt_flag_`/`router_`/
+  `order_pool_`, have dozens).
+- **Const where possible?** Already const wherever the collaborator is
+  read-only from here: `IRiskCheck*`, `halt_flag_`, `pause_all_`,
+  `last_mark_symbol_`, `last_mark_prices_`, `last_sim_time_`,
+  `l2_seeded_symbols_`, `mm_threaded_`, `config_`. Non-const where a mutating
+  call is actually made: `attribution_` (`register_order`),
+  `pending_scheduler_` (`schedule_latency`/`mark_day_order`/...),
+  `last_mid_price_` (anchor re-centering stores), `execution_adapters_`
+  (adapter map lookups return non-const `shared_ptr`), the four
+  `ObjectPool<T>&` (acquire mutates pool state).
+- **Ownership explicit?** Yes — every dependency is a distinct named
+  reference or nullable pointer (`IRiskCheck*`, `DashboardSnapshotBuilder*`,
+  `ShadowTracker*`, `portfolio*` all documented nullable in the header); no
+  `shared_ptr`/`unique_ptr` taken by value, no hidden copy.
+- **Lifetime safe?** Yes — every reference is a member `engine` constructs
+  and owns for its own lifetime, and `orders_` (`engine`'s `unique_ptr` to
+  this class) is declared after every member it references in `engine.h`
+  (construction-order proof from the Preparation Report, re-verified below
+  in §2's construction-order fix).
+- **Hot-path?** Most are (event-loop-thread only, per the header's own
+  per-member comments); none of the 33 references themselves allocate to
+  bind — they are all references/pointers to already-existing engine
+  members.
+- **Hidden broad responsibility?** No — each parameter maps to one
+  previously-existing, independently-scoped `engine::` dependency; nothing
+  was bundled into a struct to shrink the count (bundling was considered and
+  rejected — see `docs/architecture/05-engine-boundaries.md` §7).
+
+**Reported honestly**: 33 parameters is large. It is large because
+`OrderIntentProcessor` is the union of what were, before this effort, six
+independently-scoped `engine::` methods/state groups
+(`process_order`, `route_order`, stop/sweep triggering, exit firing,
+cancel/modify, end-of-stream lifecycle) that all happen to share most of
+their dependency set (risk, portfolio, tracker, router, fills, attribution,
+scheduler, pools, marks, config). No `EngineContext` / bundled dependency
+object was introduced to hide this; the count is a direct, auditable
+measure of the class's true fan-in.
+
+### 3. Backreference audit
+
+Grepped `order_intent_processor.{h,cpp}`, `pending_order_scheduler.{h,cpp}`,
+`order_attribution_store.{h,cpp}`, and `fill_processor.{h,cpp}` for
+`#include "engine.h"`, `class engine`, `engine&`, `EngineContext`,
+`EngineServices`, `ServiceLocator` — every hit is inside a comment
+explaining the absence of the pattern, never actual usage. Additionally
+confirmed `FillProcessor` has zero reference to `OrderIntentProcessor` (no
+include, no forward-declare, no member) — the dependency direction is
+strictly `OrderIntentProcessor → FillProcessor`, never the reverse; the only
+path information flows backward is the pre-existing `IRiskUnwindSink&`
+interface `FillProcessor` holds (implemented by `engine`, which forwards one
+line to `orders_->unwind_positions(...)` — not a concrete
+`OrderIntentProcessor&`, and not invoked until well after both are fully
+constructed).
+
+`scripts/check-layer-deps.sh` Check B already enforces the header half of
+this mechanically (see §10 below) — this audit additionally covered the
+three `.cpp` files, which the script does not scan (matching the script's
+existing, deliberate header-only scope).
+
+### 4. State ownership audit (final)
+
+| State | Canonical owner | Notes |
+|---|---|---|
+| Order attribution (opener/strategy per order_id) | `OrderAttributionStore` | Referenced by `OrderIntentProcessor` (read+write) and `FillProcessor` (read-only `const&`) — one map, two reference types, never duplicated |
+| Pending latency/bar-delay scheduling, DAY-TIF id retention | `PendingOrderScheduler` | Referenced by `OrderIntentProcessor` only, through its narrow query/pop API |
+| Order lifecycle (submit/route/cancel/modify/exit/unwind) | `OrderIntentProcessor` | No duplication — `engine`'s own `cancel_order`/`modify_order` are one-line forwards, not a second implementation |
+| Pending stops, pending cancel-acks | `OrderIntentProcessor` | Owned outright since Phase 3 (previously engine-referenced); sole reader+writer of each lives here |
+| Portfolio, order tracker | `engine` (plain members), referenced | `RiskManager`/`ExitManager`/`OrderIntentProcessor`/`FillProcessor` all take references, none copy or shadow |
+| Risk policy | `RiskManager` | Unchanged by this extraction — `OrderIntentProcessor` calls `risk_manager_.check_order`/`open_order_limit_reached`, never reimplements a risk rule |
+| Exit policy/state | `ExitManager` | Unchanged — `OrderIntentProcessor` calls `exit_manager_.on_price`/`on_bar`/`register_pending`, never stores exit state itself |
+| Fill processing | `FillProcessor` | Unchanged — `OrderIntentProcessor` delegates every fill-handling call, never reimplements |
+| Day TIF state | `PendingOrderScheduler` (`day_order_ids_`) | Confirmed still outside the scheduler's *pending-timing* concern in name only — it is a scheduler-owned list, consumed by `OrderIntentProcessor::cancel`/`finalize_end_of_stream` through `day_orders()`/`mark_day_order()`/`clear_day_orders()`, never duplicated |
+| Mark state (`last_mid_price_`, `last_mark_prices_`, `last_sim_time_`) | `engine` (plain members) | `OrderIntentProcessor` holds references (some mutable — anchor re-centering — some const); no shadow copy |
+
+No duplicate authoritative state found anywhere in this audit.
+
+### 5. Canonical process flow (final)
+
+```
+OrderIntent (strategy signal or exit-manager close)
+  -> OrderIntentProcessor::route()
+       -> attribution_.register_order()            [OrderAttributionStore]
+       -> resolve/apply instrument spec
+       -> risk_manager_.open_order_limit_reached()  [RiskManager, pre-stage]
+       -> stage decision: pending stop | latency queue | bar-delay queue | immediate
+  -> OrderIntentProcessor::process()  (immediate or released-from-staging)
+       -> risk_check_ (IRiskCheck, venue-specific pre-trade, optional)
+       -> risk_manager_.check_order()                [RiskManager]
+       -> router_.resolve_adapter() -> router_.submit()   [ExecutionRouter -> IExecutionAdapter/IProvider]
+       -> fills_.process_adapter_fills()              [FillProcessor]
+  -> FillProcessor::handle_fill()
+       -> order_tracker_, portfolio_, exit_manager_.on_fill(), risk_manager_.on_fill(), audit, dashboard
+       -> post-fill risk breach? -> IRiskUnwindSink::request_unwind()
+            -> engine::request_unwind() -> orders_->unwind_positions()
+                 -> OrderIntentProcessor builds a flatten order per open
+                    position -> router_.submit() -> FillProcessor::handle_fill(
+                    run_post_fill_risk=false)   [recursion-breaker]
+```
+
+Also, still through the same `route()`/`process()` core:
+
+- **stop trigger**: `check_pending_stops()` converts a triggered
+  `pending_stops_` entry into a market/limit `order_event` and calls
+  `process()` directly (already id-assigned, no re-route).
+- **resting-limit sweep**: `sweep_resting_limits()` asks the resolved
+  adapter to sweep its own book, then drains fills via `FillProcessor`.
+- **exit fire**: `evaluate_exits()` asks `ExitManager` for closes, then
+  calls `route(anchor_immediate=true)` for each — the legitimate
+  exit→order→fill→risk→(unwind→order→fill)→route recursion.
+- **cancel**: `cancel()` resolves the adapter, drains async results,
+  requests the venue cancel, updates tracker/dashboard/audit; async-pending
+  cancels are finalized later by `drain_async_submit_results()`.
+- **modify**: `modify()` gates on halt/pause, requests the venue amend,
+  records the amend event/audit on success.
+- **risk unwind**: see the flow above — reached only via
+  `IRiskUnwindSink::request_unwind`, never called directly by
+  `OrderIntentProcessor` on itself outside `process()`'s own halt branch.
+
+### 6. Recursion audit
+
+The legitimate cycle —
+`evaluate_exits → route(anchor_immediate=true) → process → ExecutionRouter →
+FillProcessor::handle_fill → post-fill risk breach →
+IRiskUnwindSink::request_unwind → engine::request_unwind →
+OrderIntentProcessor::unwind_positions → ExecutionRouter →
+FillProcessor::handle_fill(run_post_fill_risk=false)` — was re-traced
+end-to-end against the current code (not assumed from the Phase 2 report).
+Every hop is a named collaborator call (`exit_manager_.on_price`/`on_bar`,
+`route`, `process`, `router_.submit`/`poll_fills`, `fills_.handle_fill`,
+`risk_unwind_sink_.request_unwind`, `orders_->unwind_positions`); at no
+point does the recursion pass through `engine` as a generic service bag —
+`engine`'s only role in the cycle is implementing the two narrow interfaces
+(`EngineHotPathSink`, `IRiskUnwindSink`) that let `FillProcessor` reach
+`orders_` without a concrete back-reference. The `run_post_fill_risk=false`
+flag on the unwind-triggered `handle_fill` call is confirmed still present
+and is the sole recursion-breaker (unwind fills can't re-trigger another
+unwind). Unwind still runs strictly before `trigger_halt` in `process()`'s
+halt branch (S3: halt is write-once terminal; unwind must reach the venue
+while `halt_flag_` is not yet set) — unchanged.
+
+### 7. Engine-as-map audit
+
+Re-read `engine.h`, `engine.cpp`, `engine_orders.cpp`, `engine_pending.cpp`,
+and `engine_market.cpp` end-to-end as a new contributor would:
+
+- **`engine.cpp`** (1131 LOC): ctor (composition-root wiring only), dtor,
+  `log_event`/`publish_event`/`trigger_halt`/`request_unwind` (one-line
+  forward)/`request_operator_kill`/`finalize_live_shutdown`, and `run()`
+  (the bar-mode loop, narrated top-to-bottom, calling `orders_->drain_due`/
+  `check_pending_stops`/`sweep_resting_limits`/`deliver_mm_book_trades`/
+  `evaluate_exits`/`route`/`finalize_route`/`finalize_end_of_stream` — no
+  inline order-domain decisioning). Matches the target skeleton exactly; no
+  changes needed.
+- **`engine_orders.cpp`** (36 LOC, down from 866 at the Phase 3 Architectural
+  Hardening audit): exactly two one-line forwards
+  (`cancel_order`→`orders_->cancel`, `modify_order`→`orders_->modify`) plus
+  a header comment mapping every removed responsibility to its new home.
+  This is the target end-state for a "kept for external API compatibility"
+  wrapper file.
+- **`engine_pending.cpp`** (217 LOC, down from 449): `clear_pending_state`,
+  `prepare_event_logging`/`finalize_inline_event_log`,
+  `prepare_mark_prices_for_run`, `feed_paper_trade_and_drain`,
+  `add_strategy`, `setup_event_loop_infra`/`teardown_event_loop_infra`,
+  `report_run_summary`, `fold_research_counters_into_export_analytics`,
+  `total_live_quotes` — all genuine engine lifecycle/glue, zero order-domain
+  decisioning left (`mid_for_symbol`/`drain_pending_orders` bodies fully
+  removed, comments point to their new home).
+- **`engine_market.cpp`** (1665 LOC): market-domain dispatch
+  (`process_single_bar`/`process_single_tick`, `apply_l2_*`, the `run*()`
+  streaming variants, `run_replay`). One order-domain-*looking* call site
+  audited specifically: `run_replay`'s durable-event-log replay switch
+  (`attribution_->register_order`, `order_tracker_.set_status`, ...) —
+  confirmed this is pure state-reconstruction from a previously-recorded,
+  already-decided event stream (no risk check, no adapter submit, no
+  routing decision made here), not a duplicate order-domain implementation.
+  Legitimate engine-level responsibility (log replay), not a leak.
+
+**Conclusion**: `engine.cpp` is the map, not the city, and — for the
+order-domain slice specifically — no longer contains any of the city's
+detail at all; `engine_market.cpp` remains the one file still holding
+detailed domain logic (market-event dispatch), consciously deferred (§9 of
+`docs/architecture/05-engine-boundaries.md`).
+
+### 8. API hygiene
+
+Applied (all confirmed safe — no behavior change, comment/wording only):
+
+- `order_attribution_store.h`: removed stale "(future) OrderIntentProcessor"
+  wording (it now exists) while keeping the still-valid construction-cycle
+  rationale.
+- `fill_processor.h`: removed stale "a future OrderIntentProcessor" wording;
+  added a pointer to the now-verified absence of a `FillProcessor →
+  OrderIntentProcessor` back-reference.
+- `pending_order_scheduler.h`: corrected two comments that still said
+  `pending_stops_` and the scheduler's caller were "engine-owned, for now" —
+  both are `OrderIntentProcessor`'s since Phase 3.
+
+Checked and found already clean (no change needed):
+
+- No unused `#include` in `order_intent_processor.{h,cpp}` — every header is
+  used by at least one member/call.
+- No dead forwarding functions beyond the two legitimate
+  `engine::cancel_order`/`modify_order` wrappers (still required — see
+  `test_engine_async_support.cpp` and other test call sites that invoke
+  `engine.cancel_order(...)`/`engine.modify_order(...)` directly).
+- No duplicate helpers between `OrderIntentProcessor` and `FillProcessor`
+  (each has its own `acquire_pooled<T>` template scoped to its own pool
+  set — infrastructure boilerplate, not domain-logic duplication, matching
+  the pre-existing `FillProcessor`/`engine` convention).
+- No migration-only wrapper methods left on `OrderIntentProcessor` itself.
+
+One correctness (not hygiene) fix applied during this closure pass, found by
+independent safety review: `engine.h` declared `orders_` (which holds
+references to `pause_all_` and `mm_threaded_`) *before* those two members,
+so they would have been destroyed before `orders_` in `~engine()` — inert
+today (both trivially-destructible, no custom destructor touches them) but
+a latent trap for any future change. Fixed by moving both declarations
+above `orders_`; rebuilt, full suite + gate scripts re-ran green, and the
+byte-identical scenario comparison was re-confirmed after the fix.
+
+### 9. Final acceptance checklist
+
+- [x] `OrderIntentProcessor` does not depend on `engine` (§3).
+- [x] `FillProcessor` does not depend on `OrderIntentProcessor` (§3).
+- [x] No constructor dependency cycle exists (Preparation Report's
+      `OrderAttributionStore`/`IRiskUnwindSink` leaf-collaborator/interface
+      resolutions, re-verified still in place).
+- [x] `PendingOrderScheduler` contains scheduling only (§1, §4).
+- [x] Attribution has one canonical owner (§4).
+- [x] `RiskManager` still owns generic risk policy (§4, §5).
+- [x] `ExitManager` still owns exit policy/state (§4, §5).
+- [x] `ExecutionRouter` remains the execution boundary (unchanged this pass).
+- [x] `FillProcessor` remains the fill boundary (§1, §4).
+- [x] Provider-specific code remains behind provider abstractions (§1).
+- [x] `engine` no longer implements detailed order-domain behavior (§7).
+- [x] `engine` remains understandable as top-level orchestration (§7).
+- [x] No god context object was introduced (§2 — 33 named parameters, not one bundle).
+- [x] No authoritative state was duplicated (§4).
+
+### 10. Architectural guards
+
+`scripts/check-layer-deps.sh` Check B's `ENGINE_COLLABORATOR_HEADERS` list
+already covers `order_attribution_store.h`, `pending_order_scheduler.h`,
+`order_intent_processor.h`, `engine_hotpath_sink.h`, and `risk_unwind_sink.h`
+(added incrementally as each was extracted across the prep/Phase 1/Phase 2
+work) — re-run at this closure and confirmed still passing
+(`layer-deps: OK`). No new collaborator headers were introduced in this
+closure pass, and no new guard framework was created — the existing
+deny-list mechanism already covers the full current collaborator set.
+
+### 11. Verification performed at this closure
+
+- Byte-identical scenario comparison (5 scenarios: default day-order path,
+  latency queue, bar-delay + bracket exits, MC reuse ×8, risk-halt +
+  unwind) against the true pre-Phase-3 baseline — PASS, both before and
+  after the §8 construction-order fix.
+- ASAN build (`linux-asan` preset) + 449 focused tests
+  (Engine/ExecutionRouter/LiveSafety/Order/Bracket/Golden/Async/Venue/
+  Hotpath/Threading/TickToTrade/BacktestDefect/StopFillPricing) — PASS.
+- Full Debug suite: 1342/1342 — PASS (both before and after the §8 fix).
+- `check-layer-deps.sh` / `check-hotpath-json.sh` — both PASS.
+- Two independent, freshly-spawned safety-review subagents reading ground
+  truth cold via `git show HEAD:...` — both returned "No Safety Invariant
+  Violations" (one surfaced the §8 construction-order defect, since fixed
+  and re-verified).
+
+### LOC report (updated)
+
+| File | LOC at Phase 3 Architectural Hardening audit | LOC after OrderIntentProcessor extraction |
+|---|---|---|
+| `engine.h` | 662 | 667 |
+| `engine.cpp` | 1087 | 1131 |
+| `engine_orders.cpp` | 866 | 36 |
+| `engine_market.cpp` | 1692 | 1665 |
+| `engine_pending.cpp` | 449 | 217 |
+| `engine_lifecycle.cpp` | (not separately tracked) | 245 |
+| `order_intent_processor.h` (new) | 0 | 304 |
+| `order_intent_processor.cpp` (new) | 0 | 1274 |
+| `pending_order_scheduler.h`/`.cpp` (new) | 0 | 174 / 124 |
+| `order_attribution_store.h`/`.cpp` (new) | 0 | 72 / 36 |
+
+`engine_orders.cpp` shrank by 830 lines (the order-domain detail moved to
+`order_intent_processor.cpp`, which is larger than the sum removed because
+it also absorbed `pending_stops_`/`pending_cancels_` ownership,
+documentation comments, and the state these previously-split-across-files
+methods now share in one place). `engine.h`/`engine.cpp` grew slightly
+(new member declarations, interface implementations, construction wiring) —
+expected and consistent with the `FillProcessor` precedent.
+
+### Next recommended architectural step
+
+**`MarketEventProcessor`** is the only remaining candidate named anywhere in
+this document, and the codebase is in a clean state to attempt it whenever
+a future session is explicitly asked to: `OrderIntentProcessor` now exists
+as a proven, independent domain-processor for it to depend on (matching the
+"market events route orders" dependency direction already assumed in the
+original Phase 2 candidate-work note), the `EngineHotPathSink`/
+`IRiskUnwindSink`-style interface pattern is established for any similar
+construction-order need, and `scripts/check-layer-deps.sh` Check B is ready
+to take a new collaborator header the moment one is extracted. **No
+technical blocker remains.** Per this session's explicit instruction,
+`MarketEventProcessor` was **not started** — this is a scoping note for a
+future session, not a task in progress.
+
+**OrderIntentProcessor extraction: CLOSED.**
