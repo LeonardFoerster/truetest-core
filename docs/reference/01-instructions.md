@@ -161,6 +161,8 @@ cmake --preset linux-venues            # Binance + Bitget + Bitunix
 cmake --preset linux-providers-questdb # all venues + QuestDB
 cmake --preset linux-web
 cmake --preset linux-asan             # ASAN+UBSAN (+ Binance)
+cmake --preset linux-ubsan            # UBSAN only
+cmake --preset linux-shared-lib       # BUILD_SHARED_LIB=ON (+ tests)
 cmake --preset linux-tsan
 cmake --preset linux-benchmarks       # DEBUG + Google Benchmark
 cmake --preset linux-release-native    # Release + NATIVE_OPT (all engines)
@@ -172,7 +174,7 @@ cmake --preset linux-release-low-memory # portable Release + tests, LTO off
 - Feature: `ENABLE_QUESTDB`, `ENABLE_DEBUG` (Abseil), `ENABLE_BENCHMARKS`, `ENABLE_WEB` (civetweb — see [05-web-ui.md](05-web-ui.md)), `ENABLE_IMGUI` (GLFW/OpenGL desk).
 - Compatibility only: `ENABLE_LIVE_DATA` is a deprecated no-op. Live market data is provided by the concrete venue options above.
 - Build: `CMAKE_BUILD_TYPE=Release`, `ENABLE_LTO` (first-party Release targets; disable for lower peak memory), `ENABLE_NATIVE_OPT` (all three engines when ON), `BUILD_TESTS`, `BUILD_SHARED_LIB`.
-- Sanitizers (Debug): `ENABLE_TSAN` is mutually exclusive with ASAN/UBSAN; ASAN+UBSAN together is allowed (`linux-asan` preset).
+- Sanitizers (Debug): `ENABLE_TSAN` is mutually exclusive with ASAN/UBSAN; `linux-asan` enables ASAN+UBSAN together, `linux-ubsan` enables UBSAN only.
 - Perf reference build: Release + ENABLE_DEBUG + NATIVE_OPT + BENCHMARKS.
 
 **Build audit header**: Every binary prints `AUDIT: git=... timestamp=... pins=...` (truetest_version.h generated).

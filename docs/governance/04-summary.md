@@ -157,9 +157,9 @@ Strategies can emit both `order_event`s and `exit_intent` vectors (for per-lot b
 
 ## Build & Extensibility
 
-**Minimal build** (zero external runtime deps):
+**Preferred build path** (zero external runtime deps):
 ```bash
-cmake -B build && cmake --build build
+cmake --preset linux-tests
 ```
 
 Source registration is centralized in `cmake/Sources.cmake` (core + tests; no globs). Optional venue/backend TUs live in `cmake/Dependencies.cmake`. Common real setups use presets (`cmake --list-presets`); preset binaries land in `out/build/<preset>/`, ad-hoc builds in `build/`. Build presets default to one job, and `ctest --preset linux-tests` is the serial test entry point.

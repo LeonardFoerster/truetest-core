@@ -243,7 +243,10 @@ cmake --build --preset linux-web --target web_assets   # if npm is available
 
 # Sanitizers / release-native
 cmake --preset linux-asan && cmake --build --preset linux-asan
+cmake --preset linux-ubsan && cmake --build --preset linux-ubsan
 cmake --preset linux-release-native && cmake --build --preset linux-release-native
+# Shared API library build target
+cmake --preset linux-shared-lib && cmake --build --preset linux-shared-lib
 # Portable Release + tests when link-time optimization would exceed RAM
 cmake --preset linux-release-low-memory && cmake --build --preset linux-release-low-memory
 ```
