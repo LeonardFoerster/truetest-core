@@ -784,3 +784,219 @@ stops/sweeps/exits, cancel/modify — `engine_orders.cpp`); market pipeline
 pool/checkpoint/lifecycle glue (`engine_lifecycle.cpp`); dashboard/print-summary
 delegation (`engine_observability.cpp`); provider-drain plumbing
 (`engine_fills.cpp`, now order/market-pipeline territory — see file header comment).
+
+---
+
+## Phase 3: Architectural Hardening (2026-08-19)
+
+**Objective** (user-requested, distinct from the Wave 1-5 numbering above and
+from "Phase 2: Domain Processor Extraction"): harden the architecture so
+Engine does not become a magnet again — boundaries, dependency direction,
+ownership clarity, extension points, tests, and guardrails. Explicitly **not**
+primarily a LOC-reduction pass. Durable output lives in the new
+`docs/architecture/05-engine-boundaries.md`; this section records the audit
+and what was/was not executed.
+
+### Step 1: Responsibility audit (read-only)
+
+Read `engine.h` (662 LOC), `engine.cpp` (1087 LOC, full file), all
+`engine_*.cpp` translation units (LOC below), `fill_processor.{h,cpp}`,
+`dashboard_snapshot_builder.h`, `scripts/check-layer-deps.sh`,
+`scripts/check-live-safety-freeze.sh`, `cmake/Sources.cmake`'s
+`ENGINE_LOC_MAX` guard, and `docs/architecture/{01-target-architecture,02-model}.md`.
+
+Classification against the A-I categories:
+
+| Category | Present in `engine`? | Verdict |
+|---|---|---|
+| A. legitimate orchestration | Yes — ctor wiring, `run()`, `publish_event`, dispatch in `engine_market.cpp` | Keep |
+| B. lifecycle | Yes — dtor, `stop_workers`/`start_workers`, `prewarm_object_pools`, checkpoint restore | Keep |
+| C. configuration/wiring | Yes — ctor's seam construction (`router_`, `audit_sink_`, `dashboard_builder_`, `fills_`) | Keep — this *is* composition-root wiring, not domain logic |
+| D. mutable domain state | Yes — `portfolio_`, `order_tracker_`, `analytics_`, `risk_manager_`, `exit_manager_`, `order_meta_` | Keep — `engine` is the correct single owner (see state-ownership matrix); no duplication found |
+| E. detailed domain logic | Yes — `process_order`/`route_order`/`evaluate_exits`/`check_pending_stops`/`sweep_resting_limits` (`engine_orders.cpp`), `process_single_bar`/`process_single_tick` (`engine_market.cpp`) | **Should eventually move** — these are the two remaining category-E blocks (see §7 "consciously retained technical debt" in the new boundaries doc); not moved this pass, see rationale below |
+| F. observability | Yes — delegates to `dashboard_builder_` | Already correctly delegated (Phase 2 Wave 1); audited clean, see §4 of the boundaries doc |
+| G. provider-specific logic | No unjustified instance found | Audited clean (grep for binance/bitget/bitunix/bybit/gate across `src/engine/`) |
+| H. safety | Yes — `trigger_halt`, `halt_flag_`, `callbacks_armed_flag_`, live-safety session integration in the ctor | Keep — this is exactly the frozen live-safety surface; never weakened |
+| I. temporary/legacy coupling | `pending_orders_`/`pending_stops_` (Wave 3 candidate) and worker/ring lifecycle (Wave 4 candidate) already flagged in-code with "Planned extraction Wave N" comments | Pre-existing, unchanged this pass |
+
+LOC per translation unit at audit time (`wc -l`):
+
+```
+   662 engine.h
+  1087 engine.cpp
+  1692 engine_market.cpp
+   866 engine_orders.cpp
+   592 engine_workers.cpp
+   449 engine_pending.cpp
+   240 engine_lifecycle.cpp
+   236 engine_fills.cpp
+   221 engine_observability.cpp
+   158 fill_processor.h
+   301 fill_processor.cpp
+```
+
+### Steps 2-8: findings
+
+All findings and the durable artifacts (invariants table, dependency rules,
+state-ownership matrix, observability-boundary audit, provider-boundary
+audit, "when do I modify Engine?" guide, consciously retained debt) were
+written to **`docs/architecture/05-engine-boundaries.md`** rather than
+duplicated here — see that file for the full detail. Summary of what changed
+mechanically:
+
+- `scripts/check-layer-deps.sh` gained two new, additive checks (not a
+  rewrite): a vendor-provider header-leak guard (Check A) and an
+  engine-collaborator backreference guard (Check B). Both ran clean against
+  the current tree (no pre-existing violations) — see the script for the
+  exact rule.
+- No source file under the Phase 1 live-safety freeze
+  (`scripts/check-live-safety-freeze.sh`'s `FROZEN_FILES`) was touched.
+  `engine.cpp`/`engine.h` are unchanged by Phase 3.
+
+### Step 8 (readability review) verdict
+
+Re-read `engine.cpp` end-to-end as a new contributor would. It reads as:
+ctor (wiring/seam construction) → `log_event`/`publish_event` (hot dispatch)
+→ `trigger_halt`/`request_operator_kill`/`finalize_live_shutdown` (safety
+entry points) → dtor (ordered teardown) → `run()` (the bar-mode event loop,
+narrated top-to-bottom: pending drain → stop check → resting-limit sweep →
+paper-tape feed → venue-fill drain → MM replenish → publish → exits →
+strategy → route → report). This matches the target skeleton (startup →
+event loop → dispatch → shutdown) with no artificial indirection layers
+(no `impl_->run()`, no generic dispatcher). **No changes needed.**
+
+### Step 9: regression guards
+
+Already present before this phase (verified, not newly added):
+`ENGINE_LOC_MAX` guard in `cmake/Sources.cmake` (1400, current ~1087, with a
+documented waiver-comment escape hatch); `tests/test_hotpath_allocs.cpp` +
+`tests/test_hotpath_alloc_matrix.cpp` for hot-path zero-alloc discipline;
+`check-live-safety-freeze.sh` for the frozen-surface token/CCB gate.
+
+Added this phase: the two `check-layer-deps.sh` checks above (semantic,
+not size-based, per the task's stated preference).
+
+### Step 10: documentation
+
+`docs/architecture/05-engine-boundaries.md` created and indexed at
+`docs/00-INDEX.md` item 13. Contains the invariants table, dependency rules,
+state-ownership matrix, observability/provider boundary audit findings, and
+the "When do I modify Engine?" contributor guide.
+
+### Why `OrderIntentProcessor`/`MarketEventProcessor` were not extracted this pass
+
+Both remain "Candidate work for Phase 3" per the note at the end of the
+"Phase 2" section above, and the Step 1 audit confirms they are the correct
+next domain-processor extractions (bottom-up from the completed
+`FillProcessor`, per the original extraction-order rationale). They were
+**not implemented** in this session because:
+
+1. Their scope (`process_order`, `route_order`, `evaluate_exits`,
+   `check_pending_stops`, `sweep_resting_limits`, `process_single_bar`,
+   `process_single_tick`) sits directly on the documented
+   "CANONICAL HOT-PATH ORDERING" and inside the Phase 1 live-safety freeze.
+2. The repo's own established ritual for this exact class of change —
+   design doc iterated to zero open issues with a fresh reviewer subagent,
+   worktree isolation, full build matrix, golden regression, MC reuse
+   campaign, hot-path alloc matrix, and a clean multi-hour `engine_shadow`
+   run before two-person CCB sign-off — is exactly what `FillProcessor`
+   itself went through (see "Phase 2: Domain Processor Extraction" above).
+   Compressing that into the same pass as a documentation/tooling audit
+   would violate this phase's own mandatory safety and performance
+   constraints.
+3. The Phase 3 success metric ("how many ordinary features require
+   touching Engine?") is already satisfied for new strategies, providers,
+   risk rules, analytics metrics, dashboard elements, and standard exit
+   policies without this extraction (see §6 of the boundaries doc). The
+   remaining gap is narrower: new *order-lifecycle* or *market-event*
+   handling concerns.
+
+**Recommendation for a future session**: run this as its own
+design-first Wave (`OrderIntentProcessor` before `MarketEventProcessor`,
+matching the dependency direction — market events route orders), following
+the exact process that shipped `FillProcessor`, with its own design
+document, worktree, and verification ritual.
+
+### LOC report (all phases, this engine-decomposition effort)
+
+| Milestone | `engine.cpp` | `engine.h` | Source |
+|---|---|---|---|
+| Before Phase 1 (mechanical TU split) | 4999 | 666 | commit `350bf40` (parent of the split) |
+| After Phase 1 + Phase 2 (landed together in commit `e32304e`: TU split into `engine_{lifecycle,market,orders,fills,workers,observability}.cpp` + `FillProcessor` extraction) | 1087 | 662 | commit `e32304e` |
+| After Phase 3 (this session — docs + dependency-guard scripts only) | 1087 (unchanged) | 662 (unchanged) | current `HEAD` |
+
+Note: Phase 1 (mechanical split) and Phase 2 (`FillProcessor` extraction)
+landed in the same commit in this repository's actual history, even though
+the user-facing narrative (and this document's section headings) treats them
+as sequential phases — both are visible in `e32304e`'s commit message and
+diffstat. Reported here for accuracy rather than reconstructing an
+intermediate state that never existed as a distinct commit.
+
+As emphasized throughout this phase: LOC was explicitly **not** the primary
+metric. The primary metric — "how many ordinary features require touching
+`engine.cpp`?" — is answered in §6 of `docs/architecture/05-engine-boundaries.md`.
+
+**Signed off for Phase 3 (this session)**: audit complete, dependency guards
+added and passing, documentation complete. `OrderIntentProcessor`/
+`MarketEventProcessor` extraction explicitly deferred as scoped future work
+(see rationale above) — not a silent gap.
+
+---
+
+## Closure (2026-08-19)
+
+Independent final verification was performed against baseline `350bf40`
+(pre-Phase-1) vs. `HEAD` (`66b595d` + this session's uncommitted Phase 3
+docs/tooling): byte-level diffs of the five highest-risk hot-path functions
+(`handle_engine_fill`→`FillProcessor::handle_fill`, `process_order`,
+`route_order`, `run()`, `process_single_bar`) confirmed mechanical-move-only
+with no reordering; 1342/1342 tests passed (Debug) and 409/409 passed under
+AddressSanitizer on the engine/threading/safety/golden/hotpath subset;
+`GoldenRegression.SmaBasic` matched; a real baseline-vs-current benchmark run
+(`BM_Engine_Throughput_100k`) showed no regression (+2.9%, within noise); the
+two Phase 3 dependency guards were proven to fire on deliberately-introduced
+violations, not merely present as dead tooling. Full findings, evidence, and
+methodology are the verification transcript this repository's history does
+not separately persist as a file — the summary above and the triage below
+are the durable record.
+
+Seven findings surfaced, all triaged as **non-blocking** per the closure
+policy (correctness/safety/ownership/lifetime/concurrency/ordering/
+determinism/hot-path/provider-isolation all unaffected in every case):
+
+- `FillProcessor` has no unit test independent of a full `engine` —
+  maintainability-only, deferred.
+- `OrderIntentProcessor`/`MarketEventProcessor` remain unextracted — already
+  documented above as consciously deferred; `engine.cpp` itself does not
+  contain this logic (it lives in the Phase-1-intended sibling TUs
+  `engine_orders.cpp`/`engine_market.cpp`), so the decomposition's own stated
+  target ("engine.cpp is the map") is not affected by deferring this further
+  split.
+- Three dashboard debug-snapshot fields are stubbed to 0 with `TODO`
+  comments — observability-only, never read by any trading-decision path.
+- A stray leftover comment in `engine.cpp` — zero-risk, but `engine.cpp` is
+  itself the frozen live-safety surface, so even a comment-only edit would
+  require the full CCB+shadow-run ritual; not worth that process cost for
+  this finding.
+- One unrelated, correctly-tokened safety commit (`66b595d`, mainnet
+  log-target validation) landed in the same commit range — not a
+  decomposition defect.
+- A pre-existing `fill_event` copy-tracker signal, confirmed identical
+  between baseline and current via a real rebuild-and-run comparison — not
+  introduced by this work.
+- ThreadSanitizer was not run (no pre-built TSan directory; would require a
+  full from-scratch configure+build) — recorded as a follow-up, not silently
+  omitted; no failing evidence exists, and the ASan run already covered the
+  same threading-relevant test subset cleanly.
+
+No code changes were made during closure: every finding was correctly
+deferrable under the stated policy, so `VERIFY → FIX BLOCKERS ONLY →
+REVERIFY → CLOSE` terminated at "no blockers found." All gate scripts
+(`check-layer-deps.sh`, `check-live-safety-freeze.sh`,
+`check-hotpath-json.sh`) and the full Debug test suite (1342/1342) were
+re-run fresh at closure and remain green.
+
+**Engine decomposition (Phases 1-3) is CLOSED — PASS WITH FOLLOW-UPS.**
+`OrderIntentProcessor`/`MarketEventProcessor` extraction and a
+`FillProcessor` unit-test fixture are the only recommended future work, both
+non-blocking, both already scoped above.

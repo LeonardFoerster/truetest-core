@@ -5,7 +5,7 @@
 **Topic navigation** (by task): [`docs/README.md`](README.md).  
 **Authoritative gates/tasks**: root `AGENTS.md`, `docs/governance/`, `docs/todos/`, `reports/phase0/`.
 
-**Last updated**: 2026-08-15 (live-safety decision + backtest-defect backlog navigation)
+**Last updated**: 2026-08-19 (engine-decomposition Phase 3: added `docs/architecture/05-engine-boundaries.md`)
 
 ## Recommended 01-N order
 
@@ -21,19 +21,20 @@
 10. `docs/architecture/01-target-architecture.md` — Target architecture sketch.
 11. `docs/architecture/02-model.md` — Model selection + anti-patterns.
 12. `docs/architecture/03-realism.md` — Latency/impact/queue/fill/fee models.
-13. `docs/operations/01-futures-phase0-operator-sop.md` — Qualifying Phase 0 SOP (Binance mainnet).
-14. `docs/operations/02-futures-testnet.md` — Non-qualifying testnet drills.
-15. `docs/operations/03-bitget-demo.md` — Bitget demo (not Phase 0 qualifying).
-16. `docs/platforms/README.md` (+ `bitget.md`, `bitunix.md`) — Multi-venue status.
-17. `docs/architecture/04-performance.md` — Capacities, threading, limits.
-18. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md`, `07-strategy-development.md` — Specialized reference (strategy authors → 07).
-19. `docs/archive/` — Historical only (MERGE_PLAN, gaps snapshot, QuestDB logs, Edge1). Not current status.
-20. `docs/internal/engine-decomposition.md` + `engine-decomposition-design.md` — `engine.{h,cpp}` decomposition plan (+ skill `engine-decomposition`).
-21. `docs/internal/data-pipeline.md` — Market-data path redesign (`MarketSeries`, `DataWrapper`; mostly shipped).
-22. `docs/internal/imgui-desk-design.md` — ImGui desk status and remaining research-panel wiring.
-23. `docs/skills/00-OVERVIEW.md` — Proposed agent skills and retained execution records.
-24. `docs/decisions/2026-08-14-live-safety-repair.md` — Approved live-safety repair decision and acceptance criteria.
-25. `docs/todos/10-BF-backtest-engine-bugfixes.md` — Backtest defect backlog and frozen-surface sequencing.
+13. `docs/architecture/05-engine-boundaries.md` — Engine invariants, state-ownership matrix, dependency-direction rules, "when do I modify Engine?" (engine-decomposition Phase 3).
+14. `docs/operations/01-futures-phase0-operator-sop.md` — Qualifying Phase 0 SOP (Binance mainnet).
+15. `docs/operations/02-futures-testnet.md` — Non-qualifying testnet drills.
+16. `docs/operations/03-bitget-demo.md` — Bitget demo (not Phase 0 qualifying).
+17. `docs/platforms/README.md` (+ `bitget.md`, `bitunix.md`) — Multi-venue status.
+18. `docs/architecture/04-performance.md` — Capacities, threading, limits.
+19. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md`, `07-strategy-development.md` — Specialized reference (strategy authors → 07).
+20. `docs/archive/` — Historical only (MERGE_PLAN, gaps snapshot, QuestDB logs, Edge1). Not current status.
+21. `docs/internal/engine-decomposition.md` + `engine-decomposition-design.md` — `engine.{h,cpp}` decomposition plan (+ skill `engine-decomposition`).
+22. `docs/internal/data-pipeline.md` — Market-data path redesign (`MarketSeries`, `DataWrapper`; mostly shipped).
+23. `docs/internal/imgui-desk-design.md` — ImGui desk status and remaining research-panel wiring.
+24. `docs/skills/00-OVERVIEW.md` — Proposed agent skills and retained execution records.
+25. `docs/decisions/2026-08-14-live-safety-repair.md` — Approved live-safety repair decision and acceptance criteria.
+26. `docs/todos/10-BF-backtest-engine-bugfixes.md` — Backtest defect backlog and frozen-surface sequencing.
 
 ## Processing notes
 
