@@ -16,23 +16,28 @@
 struct engine_config;
 class OrderbookRegistry;
 
-// Skeleton-local redeclarations of meta types to match the exact design
-// signatures using bare names. These mirror the nested structs currently
-// private in engine (hoisting / dedup happens in later integration PRs).
+// Skeleton-local redeclaration of the cancel-metadata type to match the
+// exact design signature using a bare name (hoisting / dedup happens in
+// later integration PRs).
 //
 // See core/docs/internal/engine-decomposition.md + engine-decomposition skill for router extraction history
 // and Phase 2 history. This remains a partial seam: async submit-result
 // draining and exchange-shadow dual submission still live in engine.
+//
+// NOTE: order attribution metadata (former `struct order_meta` here) moved
+// to order_attribution_store.h as of the OrderIntentProcessor preparatory
+// extraction. pending_cancel_meta below is now owned outright by
+// OrderIntentProcessor (Phase 3) — ExecutionRouter never read its own
+// former reference to the map (stored but unused in every method body,
+// same dead-reference pattern order_meta_ had; see
+// tests/test_execution_router_characterization.cpp history), so that
+// parameter was removed here rather than repointed. The struct definition
+// stays in this header (OrderIntentProcessor already includes it for the
+// ExecutionRouter& type) rather than being relocated for a one-line saving.
 struct pending_cancel_meta
 {
     std::string symbol;
     std::string reason;
-};
-
-struct order_meta
-{
-    uint64_t opener_order_id = 0;
-    std::string strategy_name;
 };
 
 class ExecutionRouter final
@@ -43,8 +48,6 @@ public:
         const engine_config& cfg,
         std::unordered_set<std::string>& l2_seeded,
         IProvider* provider, // may be null
-        std::unordered_map<uint64_t, pending_cancel_meta>& pending_cancels_ref,
-        std::unordered_map<uint64_t, order_meta>& order_meta_ref,
         std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& adapters_ref
     );
 
@@ -73,6 +76,4 @@ private:
     const engine_config& cfg_;
     std::unordered_set<std::string>& l2_seeded_;
     IProvider* provider_;
-    std::unordered_map<uint64_t, pending_cancel_meta>& pending_cancels_;
-    std::unordered_map<uint64_t, order_meta>& order_meta_;
 };

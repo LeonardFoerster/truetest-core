@@ -342,6 +342,14 @@ engine::engine(std::shared_ptr<data_handler> dh,
     }
 #endif
 
+    // OrderIntentProcessor preparatory extraction (see the "OrderIntentProcessor
+    // Preparation Report" §6/§7): both leaf collaborators are zero-dependency,
+    // so construction order between them and relative to audit_sink_ does not
+    // matter — what matters is that attribution_ exists before FillProcessor
+    // is constructed below (FillProcessor holds a reference into it).
+    attribution_ = std::make_unique<OrderAttributionStore>();
+    pending_scheduler_ = std::make_unique<PendingOrderScheduler>();
+
     // Router wiring (adapters map passed by ref so resolve populates the original execution_adapters_ for iterator compat).
     // See core/docs/internal/engine-decomposition.md (execution router extraction) and engine-decomposition/SKILL.md.
     router_ = std::make_unique<ExecutionRouter>(
@@ -349,8 +357,6 @@ engine::engine(std::shared_ptr<data_handler> dh,
         config_,
         l2_seeded_symbols_,
         config_.provider.get(),
-        pending_cancels_,
-        order_meta_,
         execution_adapters_
     );
 
@@ -400,25 +406,59 @@ engine::engine(std::shared_ptr<data_handler> dh,
     );
 
     // Phase 2 engine decomposition: FillProcessor wiring. Constructed after
-    // router_/instrument_spec_cache_/dashboard_builder_ (all needed, all
-    // valid by this point) and after exit_manager_/order_meta_ (plain
-    // members, already default-constructed). See fills_ member declaration
+    // router_/instrument_spec_cache_/dashboard_builder_/attribution_ (all
+    // needed, all valid by this point) and after exit_manager_ (a plain
+    // member, already default-constructed). See fills_ member declaration
     // in engine.h for the destruction-order rationale, and
     // core/docs/internal/engine-decomposition.md "Phase 2: Domain
     // Processors" for the full dependency list + callback rationale.
     fills_ = std::make_unique<FillProcessor>(
         portfolio_, order_tracker_, exit_manager_, risk_manager_, adverse_selection_,
-        analytics_, *audit_sink_, *router_, fill_pool_, order_meta_,
+        analytics_, *audit_sink_, *router_, fill_pool_, *attribution_,
         strategy_, additional_strategies_, additional_strategy_names_,
         primary_strategy_name_, config_,
         dashboard_builder_.get(), shadow_tracker_.get(),
         [this](const event& e) { log_event(e); },
         [this](const event_pointer& e) { publish_event(e); },
         [this](std::string_view r) { trigger_halt(r); },
-        [this](std::size_t& ec) { unwind_positions(ec); }
+        // unwind_positions moved to OrderIntentProcessor (Phase 1); the
+        // IRiskUnwindSink interface replaced the former std::function
+        // callback in Phase 2 (see risk_unwind_sink.h). `*this` (engine)
+        // implements IRiskUnwindSink; its request_unwind() dereferences
+        // orders_ only when actually invoked — deep in the event loop, long
+        // after orders_ (constructed below) exists. See risk_unwind_sink.h
+        // for the full construction-order proof.
+        *this
 #ifdef HAS_DEBUG
         , stage_timer_
 #endif
+    );
+
+    // OrderIntentProcessor wiring. Phase 1 (canonical submit path) +
+    // Phase 2 (routing/triggering/exits/pending-due-drain) + Phase 3
+    // (cancel/modify/end-of-stream lifecycle) additions. Constructed after
+    // every dependency it references — attribution_/pending_scheduler_/
+    // router_/fills_/audit_sink_/instrument_spec_cache_/dashboard_builder_/
+    // shadow_tracker_/pools/mark-price state — is valid; market_maker_/
+    // orderbook_registry_/exit_manager_/execution_adapters_/pause_all_/
+    // mm_threaded_/last_sim_time_ are plain engine members, always valid by
+    // the time the constructor body runs. pending_stops_/pending_cancels_
+    // are no longer passed — OrderIntentProcessor owns them outright as of
+    // Phase 3. See order_intent_processor.h for the full dependency list and
+    // the Preparation Report's Phase 1/2/3 deliverables for the
+    // construction-order rationale.
+    orders_ = std::make_unique<OrderIntentProcessor>(
+        portfolio_, order_tracker_, risk_manager_, risk_check_.get(),
+        analytics_, *audit_sink_, *router_, *fills_, *attribution_,
+        *pending_scheduler_, exit_manager_, *instrument_spec_cache_,
+        market_maker_, orderbook_registry_,
+        execution_adapters_,
+        order_pool_, rejection_pool_, cancel_pool_, amend_pool_,
+        halt_flag_, pause_all_, last_mid_price_, last_mark_symbol_, last_mark_prices_,
+        last_mark_prices_mu_, last_sim_time_, l2_seeded_symbols_, mm_threaded_,
+        dashboard_builder_.get(), shadow_tracker_.get(),
+        exchange_portfolio_.has_value() ? &*exchange_portfolio_ : nullptr,
+        config_, *this
     );
 
     prewarm_object_pools();
@@ -640,6 +680,11 @@ void engine::publish_event(const event_pointer& ev)
     }
 
 #undef TT_PUSH
+}
+
+void engine::request_unwind(std::size_t& event_count)
+{
+    orders_->unwind_positions(event_count);
 }
 
 void engine::trigger_halt(std::string_view reason) noexcept
@@ -887,7 +932,7 @@ void engine::run()
         {
             DEBUG_STAGE(stage_timer_, pending_drain);
             // Per-order mid + book re-center (open mark already stored above).
-            drain_pending_orders(sim_time, event_count, halt_requested, symbol);
+            orders_->drain_due(sim_time, event_count, halt_requested, symbol);
         }
         if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
@@ -897,11 +942,11 @@ void engine::run()
 
         {
             DEBUG_STAGE(stage_timer_, stop_check);
-            check_pending_stops(symbol, mkt.get_open(), mkt.get_high(),
+            orders_->check_pending_stops(symbol, mkt.get_open(), mkt.get_high(),
                                 mkt.get_low(), sim_time, event_count,
                                 halt_requested);
         }
-        const double swept_volume = sweep_resting_limits(
+        const double swept_volume = orders_->sweep_resting_limits(
             symbol, mkt.get_low(), mkt.get_high(), sim_time,
             event_count, halt_requested, bar_volume);
 
@@ -921,7 +966,7 @@ void engine::run()
                 last_mid_price_.load(std::memory_order_relaxed));
             auto provider_adapter = config_.provider->get_execution_adapter();
             drain_venue_bracket_meta();
-            drain_async_submit_results(provider_adapter.get());
+            orders_->drain_async_submit_results(provider_adapter.get());
             std::vector<fill_event> provider_fills;
             if (provider_adapter && provider_adapter->poll_fills(provider_fills))
             {
@@ -959,7 +1004,7 @@ void engine::run()
             {
                 auto mm_trades = market_maker_.replenish(
                     ob, last_mid_price_.load(std::memory_order_relaxed));
-                deliver_mm_book_trades(symbol, mm_trades, sim_time,
+                orders_->deliver_mm_book_trades(symbol, mm_trades, sim_time,
                                        event_count, halt_requested);
             }
         }
@@ -980,7 +1025,7 @@ void engine::run()
                         static_cast<quantity>(std::round(
                             mm_order.get_quantity() * config_.qty_scale)));
                     auto mm_trades = mm_ob->add_external_order(mm_ob_order);
-                    deliver_mm_book_trades(mm_order.get_symbol(), mm_trades,
+                    orders_->deliver_mm_book_trades(mm_order.get_symbol(), mm_trades,
                                            sim_time, event_count, halt_requested);
                 }
             }
@@ -999,7 +1044,7 @@ void engine::run()
         event_count++;
 
         // Canonical: exits before strategy decision (matches tick path).
-        if (evaluate_exits(symbol,
+        if (orders_->evaluate_exits(symbol,
                            mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
                            sim_time, event_count, mkt.get_recv_ns()))
             break;
@@ -1019,8 +1064,8 @@ void engine::run()
             order_opt->set_recv_ns(mkt.get_recv_ns());
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
-            route_order(*order_opt, sim_time, event_count, halt_requested);
-            finalize_strategy_route(*strategy_, primary_strategy_name_, *order_opt,
+            orders_->route(*order_opt, sim_time, event_count, halt_requested);
+            orders_->finalize_route(*strategy_, primary_strategy_name_, *order_opt,
                                     halt_requested);
         }
         if (!halt_flag_.load(std::memory_order_acquire))
@@ -1044,8 +1089,7 @@ void engine::run()
         write_checkpoint_if_due(event_count);
     }
 
-    drain_final_pending(event_count, halt_requested);
-    cancel_day_orders();
+    orders_->finalize_end_of_stream(event_count, halt_requested);
 
     report_run_summary(event_count, start);
 

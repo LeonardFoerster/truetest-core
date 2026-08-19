@@ -174,10 +174,15 @@ void engine::reset_for_next_trial(uint64_t new_seed)
         // since state moved, the builder will handle in its own reset if we add later.
     }
 
-    // Phase 4 MC reuse hardening: clear order_meta_ for clean per-trial isolation
-    // (opener/strategy attribution must not leak between independent trials).
-    order_meta_.clear();
-    pending_cancels_.clear();
+    // Phase 4 MC reuse hardening: clear attribution for clean per-trial
+    // isolation (opener/strategy attribution must not leak between
+    // independent trials). Canonical owner is attribution_
+    // (OrderAttributionStore) as of the OrderIntentProcessor preparatory
+    // extraction.
+    attribution_->clear();
+    // pending_cancels_ owned by OrderIntentProcessor as of Phase 3 — clear
+    // via its own narrow reset hook.
+    orders_->clear_pending_cancels();
 
     // Clear shadow_tracker for per-trial isolation (divergence tracking not
     // relevant across MC trials; see MC controller comment).

@@ -13,6 +13,20 @@
 // canonical trading state beyond the one soft-post-fill-breach counter it exclusively
 // writes (see state-ownership table).
 //
+// OrderIntentProcessor preparatory extraction (see the "OrderIntentProcessor
+// Preparation Report" §7): order attribution metadata (opener_order_id /
+// strategy_name per order_id) is read through attribution_
+// (OrderAttributionStore&) rather than a raw engine-owned map. This removes
+// the construction-order cycle an OrderIntentProcessor -> this class ->
+// OrderIntentProcessor-owned attribution design would otherwise create:
+// FillProcessor is constructed before OrderIntentProcessor (now fully
+// extracted — see order_intent_processor.h) and therefore needs a stable,
+// independently-constructed attribution owner. Nothing else about this
+// class changed — same subsystems, same call order. FillProcessor has no
+// dependency on OrderIntentProcessor itself (see the layer-deps Check B
+// guard and the OrderIntentProcessor closure report for the verified
+// absence of any such back-reference).
+//
 // LIVE-SAFETY SURFACE: this file is part of the frozen surface (see
 // scripts/check-live-safety-freeze.sh). Any edit requires the LIVE_SAFETY_CCB_APPROVED
 // token in the commit message.
@@ -25,7 +39,9 @@
 #include "analytics/adverse_selection_tracker.h"
 #include "analytics/analytics.h"
 #include "order_audit_sink.h"
-#include "execution_router.h"     // ExecutionRouter + shared order_meta struct
+#include "execution_router.h"         // ExecutionRouter
+#include "order_attribution_store.h"  // OrderAttributionStore + shared order_meta struct
+#include "risk_unwind_sink.h"         // IRiskUnwindSink
 #include "types/object_pool.h"
 #include "strategy/strategy_interface.h"
 #include "core/event.h"
@@ -34,7 +50,6 @@
 #include <memory>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #ifdef HAS_DEBUG
@@ -58,7 +73,7 @@ public:
         IOrderAuditSink& audit_sink,
         ExecutionRouter& router,
         ObjectPool<fill_event>& fill_pool,
-        const std::unordered_map<uint64_t, order_meta>& order_meta,
+        const OrderAttributionStore& attribution,
         std::shared_ptr<IStrategy>& strategy,
         std::vector<std::shared_ptr<IStrategy>>& additional_strategies,
         std::vector<std::string>& additional_strategy_names,
@@ -69,7 +84,7 @@ public:
         std::function<void(const event&)> log_event,
         std::function<void(const event_pointer&)> publish_event,
         std::function<void(std::string_view)> trigger_halt,
-        std::function<void(std::size_t&)> request_unwind
+        IRiskUnwindSink& risk_unwind_sink
 #ifdef HAS_DEBUG
         , debug::StageTimer& stage_timer
 #endif
@@ -112,9 +127,9 @@ public:
 private:
     void dispatch_fill_to_strategy(const fill_event& f) const;
 
-    // Thin, non-domain attribution lookups over order_meta_ (mirror engine's own
-    // one-line map::find wrappers; not a duplicated subsystem — order_meta_ itself
-    // stays canonically owned/written by engine's order pipeline).
+    // Thin, non-domain attribution lookups delegating to attribution_ (not a
+    // duplicated subsystem — OrderAttributionStore is the sole canonical
+    // owner/writer of order attribution metadata; see order_attribution_store.h).
     uint64_t lookup_opener(uint64_t order_id) const;
     const std::string& lookup_strategy_name(uint64_t order_id) const;
 
@@ -132,7 +147,7 @@ private:
     IOrderAuditSink& audit_sink_;
     ExecutionRouter& router_;
     ObjectPool<fill_event>& fill_pool_;
-    const std::unordered_map<uint64_t, order_meta>& order_meta_;
+    const OrderAttributionStore& attribution_;
     std::shared_ptr<IStrategy>& strategy_;
     std::vector<std::shared_ptr<IStrategy>>& additional_strategies_;
     std::vector<std::string>& additional_strategy_names_;
@@ -142,13 +157,20 @@ private:
     ShadowTracker* shadow_tracker_;
 
     // Narrow callbacks into engine's own hot-path/safety primitives (single event-log
-    // writer, single ring-dispatch policy, single halt entry point, and the one
-    // order-pipeline emergency-liquidation path) — see class-header rationale in
-    // engine-decomposition.md for why these stay callbacks instead of moving here.
+    // writer, single ring-dispatch policy, single halt entry point) — see class-header
+    // rationale in engine-decomposition.md for why these stay callbacks instead of
+    // moving here.
     std::function<void(const event&)> log_event_;
     std::function<void(const event_pointer&)> publish_event_;
     std::function<void(std::string_view)> trigger_halt_;
-    std::function<void(std::size_t&)> request_unwind_;
+
+    // Emergency-liquidation request (Phase 2 OrderIntentProcessor extraction):
+    // narrow interface reference, not a std::function — see risk_unwind_sink.h
+    // for the construction-order proof this is the required shape (engine
+    // implements it, forwarding to orders_->unwind_positions(...) only at
+    // invocation time, since OrderIntentProcessor is constructed after
+    // FillProcessor).
+    IRiskUnwindSink& risk_unwind_sink_;
 
 #ifdef HAS_DEBUG
     debug::StageTimer& stage_timer_;

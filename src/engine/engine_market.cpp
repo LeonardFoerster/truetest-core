@@ -151,11 +151,11 @@ void engine::apply_l2_snapshot(const std::string& symbol,
     std::size_t l2_event_count = 0;
     bool l2_halt = false;
     if (router_) router_->advance_all(l2_ts);
-    drain_pending_orders(l2_ts, l2_event_count, l2_halt, symbol);
+    orders_->drain_due(l2_ts, l2_event_count, l2_halt, symbol);
     if (l2_halt || halt_flag_.load(std::memory_order_acquire))
         return;
     if (l2_mark > 0.0)
-        (void)evaluate_exits(symbol, l2_mark, l2_ts,
+        (void)orders_->evaluate_exits(symbol, l2_mark, l2_ts,
                              l2_event_count, l2_recv_ns);
 }
 
@@ -241,13 +241,13 @@ void engine::apply_l2_update(const std::string& symbol,
     // pure L2 streams would never release their queued strategy orders.
     if (router_) router_->advance_all(l2_ts);
     if (l2_mark > 0.0)
-        drain_pending_orders(l2_ts, l2_event_count, l2_halt, symbol);
+        orders_->drain_due(l2_ts, l2_event_count, l2_halt, symbol);
     if (l2_halt || halt_flag_.load(std::memory_order_acquire))
         return;
 
     // Mid/last price for ExitManager on pure L2 streams (no tick/bar).
     if (l2_mark > 0.0
-        && evaluate_exits(symbol, l2_mark, l2_ts,
+        && orders_->evaluate_exits(symbol, l2_mark, l2_ts,
                           l2_event_count, l2_recv_ns))
         return;
 
@@ -257,8 +257,8 @@ void engine::apply_l2_update(const std::string& symbol,
             o->set_recv_ns(l2_recv_ns);
             o->set_strategy_name(primary_strategy_name_);
             bool route_halt = false;
-            route_order(*o, l2_ts, l2_event_count, route_halt);
-            finalize_strategy_route(*strategy_, primary_strategy_name_, *o, route_halt);
+            orders_->route(*o, l2_ts, l2_event_count, route_halt);
+            orders_->finalize_route(*strategy_, primary_strategy_name_, *o, route_halt);
             if (route_halt || halt_flag_.load(std::memory_order_acquire))
                 return;
         }
@@ -273,8 +273,8 @@ void engine::apply_l2_update(const std::string& symbol,
             o->set_recv_ns(l2_recv_ns);
             o->set_strategy_name(additional_strategy_names_[i]);
             bool route_halt = false;
-            route_order(*o, l2_ts, l2_event_count, route_halt);
-            finalize_strategy_route(*s, additional_strategy_names_[i], *o, route_halt);
+            orders_->route(*o, l2_ts, l2_event_count, route_halt);
+            orders_->finalize_route(*s, additional_strategy_names_[i], *o, route_halt);
             if (route_halt || halt_flag_.load(std::memory_order_acquire))
                 return;
         }
@@ -313,7 +313,7 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
         auto& s = additional_strategies_[i];
         if (!s) continue;
 
-        if (evaluate_exits(mkt.get_symbol(),
+        if (orders_->evaluate_exits(mkt.get_symbol(),
                            mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
                            ts, event_count, mkt.get_recv_ns()))
             return;
@@ -324,8 +324,8 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
             o->set_recv_ns(mkt.get_recv_ns());
             o->set_strategy_name(additional_strategy_names_[i]);
             bool halt = false;
-            route_order(*o, ts, event_count, halt);
-            finalize_strategy_route(*s, additional_strategy_names_[i], *o, halt);
+            orders_->route(*o, ts, event_count, halt);
+            orders_->finalize_route(*s, additional_strategy_names_[i], *o, halt);
             if (halt || halt_flag_.load(std::memory_order_acquire)) return;
         }
     }
@@ -342,7 +342,7 @@ void engine::dispatch_extras_on_tick(const tick_event& te,
         auto& s = additional_strategies_[i];
         if (!s) continue;
 
-        if (evaluate_exits(te.get_symbol(), te.get_price(), ts,
+        if (orders_->evaluate_exits(te.get_symbol(), te.get_price(), ts,
                            event_count, te.get_recv_ns()))
             return;
 
@@ -352,47 +352,21 @@ void engine::dispatch_extras_on_tick(const tick_event& te,
             o->set_recv_ns(te.get_recv_ns());
             o->set_strategy_name(additional_strategy_names_[i]);
             bool halt = false;
-            route_order(*o, ts, event_count, halt);
-            finalize_strategy_route(*s, additional_strategy_names_[i], *o, halt);
+            orders_->route(*o, ts, event_count, halt);
+            orders_->finalize_route(*s, additional_strategy_names_[i], *o, halt);
             if (halt || halt_flag_.load(std::memory_order_acquire)) return;
         }
     }
 }
 
-double engine::marked_account_equity(std::string_view current_symbol,
-                                     double current_mark) const
-{
-    double equity = portfolio_.get_cash();
-    const auto& positions = portfolio_.get_positions();
-    if (positions.empty())
-        return equity;
-    if (positions.size() == 1 && current_mark > 0.0)
-    {
-        const auto& [symbol, position] = *positions.begin();
-        if (symbol == current_symbol)
-            return equity + position.qty * current_mark;
-    }
-    std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-    for (const auto& [symbol, position] : positions)
-    {
-        if (std::abs(position.qty) <= 1e-12)
-            continue;
-        double position_mark = 0.0;
-        if (symbol == current_symbol && current_mark > 0.0)
-            position_mark = current_mark;
-        else if (auto it = last_mark_prices_.find(symbol);
-                 it != last_mark_prices_.end() && it->second > 0.0)
-            position_mark = it->second;
-        else
-            return std::numeric_limits<double>::quiet_NaN();
-        equity += position.qty * position_mark;
-    }
-    return equity;
-}
+// marked_account_equity moved to OrderIntentProcessor::marked_account_equity
+// (Phase 1) — public there (unlike this former private engine method)
+// precisely because sync_strategy_account_equity below is a second caller
+// that stays engine-owned. See order_intent_processor.cpp.
 
 void engine::sync_strategy_account_equity(IStrategy& strategy) const
 {
-    const double equity = marked_account_equity(
+    const double equity = orders_->marked_account_equity(
         last_mark_symbol_, last_mid_price_.load(std::memory_order_relaxed));
     strategy.set_account_equity(std::isfinite(equity) ? equity : 0.0);
 }
@@ -415,7 +389,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     // Operator-requested flatten: drain on the next event so the timestamp
     // we close at is from the live stream rather than wall-clock-now.
     if (flatten_request_.exchange(false, std::memory_order_acq_rel))
-        unwind_positions(event_count);
+        orders_->unwind_positions(event_count);
 
     // Advance adapter clocks first so cancels whose in-flight window has
     // elapsed are drained before this event's matching runs.
@@ -445,7 +419,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     // Drain delayed orders at open mid for each order's symbol (not the
     // event symbol alone — multi-symbol pending must not walk the wrong book).
     bool halt = false;
-    drain_pending_orders(timestamp, event_count, halt, mkt.get_symbol());
+    orders_->drain_due(timestamp, event_count, halt, mkt.get_symbol());
     // Risk halt (or other terminal) during pending drain: do not continue into
     // strategy / route_order on this bar (was previously loop-scoped only).
     if (halt || halt_flag_.load(std::memory_order_acquire))
@@ -459,10 +433,10 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         // Single stop pass (EL-STREAM-DOUBLE-STOPS): matches batch run().
         // Stops + bar-range sweep before MM/provider fills.
         bool halt = false;
-        check_pending_stops(mkt.get_symbol(), mkt.get_open(),
+        orders_->check_pending_stops(mkt.get_symbol(), mkt.get_open(),
                             mkt.get_high(), mkt.get_low(),
                             timestamp, event_count, halt);
-        swept_volume = sweep_resting_limits(
+        swept_volume = orders_->sweep_resting_limits(
             mkt.get_symbol(), mkt.get_low(), mkt.get_high(),
             timestamp, event_count, halt, bar_volume);
         // Match tick/history paths: do not generate new MM/provider fills
@@ -478,7 +452,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         auto mm_trades = market_maker_.replenish(
             ob, last_mid_price_.load(std::memory_order_relaxed));
         bool halt = false;
-        deliver_mm_book_trades(mkt.get_symbol(), mm_trades,
+        orders_->deliver_mm_book_trades(mkt.get_symbol(), mm_trades,
                                timestamp, event_count, halt);
     }
 
@@ -507,7 +481,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         }
 
         drain_venue_bracket_meta();
-        drain_async_submit_results(provider_adapter.get());
+        orders_->drain_async_submit_results(provider_adapter.get());
         std::vector<fill_event> provider_fills;
         if (provider_adapter && provider_adapter->poll_fills(provider_fills))
         {
@@ -552,7 +526,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         analytics_.on_mark(mkt.get_symbol(), mkt.get_close());
     event_count++;
 
-    if (evaluate_exits(mkt.get_symbol(),
+    if (orders_->evaluate_exits(mkt.get_symbol(),
                        mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
                        timestamp, event_count, mkt.get_recv_ns()))
         return;
@@ -568,8 +542,8 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         if (!primary_strategy_name_.empty())
             order_opt->set_strategy_name(primary_strategy_name_);
         bool route_halt = false;
-        route_order(*order_opt, timestamp, event_count, route_halt);
-        finalize_strategy_route(*strategy_, primary_strategy_name_, *order_opt, route_halt);
+        orders_->route(*order_opt, timestamp, event_count, route_halt);
+        orders_->finalize_route(*strategy_, primary_strategy_name_, *order_opt, route_halt);
     }
     if (!halt_flag_.load(std::memory_order_acquire))
         dispatch_extras_on_market(mkt, timestamp, event_count);
@@ -586,7 +560,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         return;
 
     if (flatten_request_.exchange(false, std::memory_order_acq_rel))
-        unwind_positions(event_count);
+        orders_->unwind_positions(event_count);
 
     if (router_) router_->advance_all(rec.timestamp);
 
@@ -614,7 +588,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
             auto mm_trades = market_maker_.replenish(
                 ob, last_mid_price_.load(std::memory_order_relaxed));
             bool halt = false;
-            deliver_mm_book_trades(rec.symbol, mm_trades,
+            orders_->deliver_mm_book_trades(rec.symbol, mm_trades,
                                    rec.timestamp, event_count, halt);
         }
     }
@@ -643,7 +617,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         }
 
         drain_venue_bracket_meta();
-        drain_async_submit_results(provider_adapter.get());
+        orders_->drain_async_submit_results(provider_adapter.get());
         std::vector<fill_event> provider_fills;
         if (provider_adapter && provider_adapter->poll_fills(provider_fills))
         {
@@ -680,13 +654,13 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 
     {
         DEBUG_STAGE(stage_timer_, pending_drain);
-        drain_pending_orders(rec.timestamp, event_count, halt, rec.symbol);
+        orders_->drain_due(rec.timestamp, event_count, halt, rec.symbol);
     }
     if (halt || halt_flag_.load(std::memory_order_acquire)) return;
 
     {
         DEBUG_STAGE(stage_timer_, stop_check);
-        check_pending_stops(rec.symbol, rec.price, rec.price, rec.price,
+        orders_->check_pending_stops(rec.symbol, rec.price, rec.price, rec.price,
                             rec.timestamp, event_count, halt);
     }
     if (halt || halt_flag_.load(std::memory_order_acquire)) return;
@@ -703,7 +677,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         analytics_.on_mark(rec.symbol, rec.price);
     event_count++;
 
-    if (evaluate_exits(rec.symbol, rec.price, rec.timestamp,
+    if (orders_->evaluate_exits(rec.symbol, rec.price, rec.timestamp,
                        event_count, te.get_recv_ns()))
         return;
 
@@ -721,8 +695,8 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         order_opt->set_recv_ns(te.get_recv_ns());
         if (!primary_strategy_name_.empty())
             order_opt->set_strategy_name(primary_strategy_name_);
-        route_order(*order_opt, rec.timestamp, event_count, halt);
-        finalize_strategy_route(*strategy_, primary_strategy_name_, *order_opt, halt);
+        orders_->route(*order_opt, rec.timestamp, event_count, halt);
+        orders_->finalize_route(*strategy_, primary_strategy_name_, *order_opt, halt);
     }
     if (!halt_flag_.load(std::memory_order_acquire))
         dispatch_extras_on_tick(te, rec.timestamp, event_count);
@@ -867,8 +841,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridg
         && config_.mode == engine_mode::backtest)
     {
         bool halt = halt_flag_.load(std::memory_order_acquire);
-        drain_final_pending(event_count, halt);
-        cancel_day_orders();
+        orders_->finalize_end_of_stream(event_count, halt);
     }
 
     stop_workers();
@@ -1023,8 +996,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> brid
         && config_.mode == engine_mode::backtest)
     {
         bool halt = halt_flag_.load(std::memory_order_acquire);
-        drain_final_pending(event_count, halt);
-        cancel_day_orders();
+        orders_->finalize_end_of_stream(event_count, halt);
     }
 
     stop_workers();
@@ -1220,8 +1192,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
         && config_.mode == engine_mode::backtest)
     {
         bool halt = halt_flag_.load(std::memory_order_acquire);
-        drain_final_pending(event_count, halt);
-        cancel_day_orders();
+        orders_->finalize_end_of_stream(event_count, halt);
     }
 
     stop_workers();
@@ -1313,21 +1284,21 @@ void engine::run_tick_data()
             {
                 auto mm_trades = market_maker_.replenish(
                     ob, last_mid_price_.load(std::memory_order_relaxed));
-                deliver_mm_book_trades(tick.symbol, mm_trades, tick.timestamp,
+                orders_->deliver_mm_book_trades(tick.symbol, mm_trades, tick.timestamp,
                                        event_count, halt_requested);
             }
         }
 
         {
             DEBUG_STAGE(stage_timer_, pending_drain);
-            drain_pending_orders(tick.timestamp, event_count, halt_requested,
+            orders_->drain_due(tick.timestamp, event_count, halt_requested,
                                  tick.symbol);
         }
         if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
         {
             DEBUG_STAGE(stage_timer_, stop_check);
-            check_pending_stops(tick.symbol, tick.price, tick.price,
+            orders_->check_pending_stops(tick.symbol, tick.price, tick.price,
                                 tick.price, tick.timestamp, event_count,
                                 halt_requested);
         }
@@ -1360,7 +1331,7 @@ void engine::run_tick_data()
             analytics_.on_mark(tick.symbol, tick.price);
         event_count++;
 
-        if (evaluate_exits(tick.symbol, tick.price, tick.timestamp,
+        if (orders_->evaluate_exits(tick.symbol, tick.price, tick.timestamp,
                            event_count, te.get_recv_ns()))
             break;
 
@@ -1388,9 +1359,9 @@ void engine::run_tick_data()
             order_opt->set_recv_ns(te.get_recv_ns());
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
-            route_order(*order_opt, tick.timestamp, event_count, halt_requested);
+            orders_->route(*order_opt, tick.timestamp, event_count, halt_requested);
             if (strategy_)
-                finalize_strategy_route(*strategy_, primary_strategy_name_, *order_opt,
+                orders_->finalize_route(*strategy_, primary_strategy_name_, *order_opt,
                                         halt_requested);
         }
         if (!halt_flag_.load(std::memory_order_acquire))
@@ -1423,8 +1394,7 @@ void engine::run_tick_data()
 
     bar_agg.flush();
 
-    drain_final_pending(event_count, halt_requested);
-    cancel_day_orders();
+    orders_->finalize_end_of_stream(event_count, halt_requested);
 
     report_run_summary(event_count, start);
 
@@ -1529,7 +1499,10 @@ void engine::run_replay(const std::string& log_path,
         case event_type::order:
         {
             const auto& order = static_cast<const order_event&>(*ev);
-            register_order_meta(order);
+            // Direct call (engine still owns the OrderAttributionStore
+            // instance) — the register_order_meta forward was removed in
+            // Phase 3 since this is its only remaining caller.
+            attribution_->register_order(order);
             order_tracker_.set_status(order.get_order_id(), order_status::open);
             publish_event(ev);
             analytics_.on_event(ev);

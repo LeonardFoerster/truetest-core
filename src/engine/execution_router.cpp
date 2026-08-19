@@ -14,8 +14,6 @@ ExecutionRouter::ExecutionRouter(
     const engine_config& cfg,
     std::unordered_set<std::string>& l2_seeded,
     IProvider* provider,
-    std::unordered_map<uint64_t, pending_cancel_meta>& pending_cancels_ref,
-    std::unordered_map<uint64_t, order_meta>& order_meta_ref,
     std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& adapters_ref
 )
     : adapters_(adapters_ref)
@@ -23,8 +21,6 @@ ExecutionRouter::ExecutionRouter(
     , cfg_(cfg)
     , l2_seeded_(l2_seeded)
     , provider_(provider)
-    , pending_cancels_(pending_cancels_ref)
-    , order_meta_(order_meta_ref)
 {
     // adapters_ (ref) populated on resolve; creation logic now here (moved from engine get_adapter).
 }

@@ -27,7 +27,7 @@ FillProcessor::FillProcessor(
     IOrderAuditSink& audit_sink,
     ExecutionRouter& router,
     ObjectPool<fill_event>& fill_pool,
-    const std::unordered_map<uint64_t, order_meta>& order_meta,
+    const OrderAttributionStore& attribution,
     std::shared_ptr<IStrategy>& strategy,
     std::vector<std::shared_ptr<IStrategy>>& additional_strategies,
     std::vector<std::string>& additional_strategy_names,
@@ -38,20 +38,20 @@ FillProcessor::FillProcessor(
     std::function<void(const event&)> log_event,
     std::function<void(const event_pointer&)> publish_event,
     std::function<void(std::string_view)> trigger_halt,
-    std::function<void(std::size_t&)> request_unwind
+    IRiskUnwindSink& risk_unwind_sink
 #ifdef HAS_DEBUG
     , debug::StageTimer& stage_timer
 #endif
     )
     : portfolio_(portfolio), order_tracker_(order_tracker), exit_manager_(exit_manager),
       risk_manager_(risk_manager), adverse_selection_(adverse_selection), analytics_(analytics),
-      audit_sink_(audit_sink), router_(router), fill_pool_(fill_pool), order_meta_(order_meta),
+      audit_sink_(audit_sink), router_(router), fill_pool_(fill_pool), attribution_(attribution),
       strategy_(strategy), additional_strategies_(additional_strategies),
       additional_strategy_names_(additional_strategy_names),
       primary_strategy_name_(primary_strategy_name), config_(config),
       dashboard_builder_(dashboard_builder), shadow_tracker_(shadow_tracker),
       log_event_(std::move(log_event)), publish_event_(std::move(publish_event)),
-      trigger_halt_(std::move(trigger_halt)), request_unwind_(std::move(request_unwind))
+      trigger_halt_(std::move(trigger_halt)), risk_unwind_sink_(risk_unwind_sink)
 #ifdef HAS_DEBUG
       , stage_timer_(stage_timer)
 #endif
@@ -60,15 +60,12 @@ FillProcessor::FillProcessor(
 
 uint64_t FillProcessor::lookup_opener(uint64_t order_id) const
 {
-    auto it = order_meta_.find(order_id);
-    return it != order_meta_.end() ? it->second.opener_order_id : 0;
+    return attribution_.opener_for(order_id);
 }
 
 const std::string& FillProcessor::lookup_strategy_name(uint64_t order_id) const
 {
-    static const std::string empty;
-    auto it = order_meta_.find(order_id);
-    return it != order_meta_.end() ? it->second.strategy_name : empty;
+    return attribution_.strategy_for(order_id);
 }
 
 std::shared_ptr<fill_event> FillProcessor::acquire_pooled_fill(const fill_event& f)
@@ -228,13 +225,14 @@ bool FillProcessor::handle_fill(fill_event& f,
                     "{}");
                 return true;
             }
-            // Unwind (order-pipeline emergency liquidation, still engine-owned)
-            // must run BEFORE trigger_halt: unwind_positions bypasses
-            // process_order's halt gate but still needs the router to accept
-            // the closing order while halt_flag_ is not yet set. Preserves the
-            // exact pre-extraction order (see engine-decomposition.md).
+            // Unwind (order-pipeline emergency liquidation, owned by
+            // OrderIntentProcessor as of Phase 2) must run BEFORE trigger_halt:
+            // unwind_positions bypasses process()'s halt gate but still needs
+            // the router to accept the closing order while halt_flag_ is not
+            // yet set. Preserves the exact pre-extraction order (see
+            // engine-decomposition.md and risk_unwind_sink.h).
             if (config_.risk_unwind)
-                request_unwind_(event_count);
+                risk_unwind_sink_.request_unwind(event_count);
             trigger_halt_("risk post-fill limit breached - engine halted");
             halt_requested = true;
             return false;

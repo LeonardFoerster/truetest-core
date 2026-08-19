@@ -49,7 +49,12 @@ namespace truetest::ui { struct streaming_stats; }
 #include "instrument_spec_cache.h"
 #include "checkpoint.h"
 #include "dashboard_snapshot_builder.h"
+#include "order_attribution_store.h"
+#include "pending_order_scheduler.h"
+#include "risk_unwind_sink.h"
 #include "fill_processor.h"
+#include "engine_hotpath_sink.h"
+#include "order_intent_processor.h"
 
 #ifdef HAS_QUESTDB
 #include "data/questdb/store.h"
@@ -72,7 +77,6 @@ namespace truetest::ui { struct streaming_stats; }
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <queue>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -98,7 +102,19 @@ enum class live_shutdown_reason;
 // See the map comment at the top of engine.cpp for the full breakdown.
 // ============================================================
 
-class engine
+// Implements EngineHotPathSink (log_event/publish_event/trigger_halt) so
+// OrderIntentProcessor — and future domain processors — can reach these
+// centralized primitives through a narrow interface reference instead of a
+// concrete engine& back-reference. The three methods below already exist as
+// engine's own hot-path primitives; this only adds `override` to them. See
+// engine_hotpath_sink.h and the "OrderIntentProcessor Preparation Report" §9.
+//
+// Also implements IRiskUnwindSink so FillProcessor can request emergency
+// liquidation without a concrete OrderIntentProcessor& (which does not exist
+// yet at FillProcessor's construction time) — see risk_unwind_sink.h for the
+// construction-order proof. request_unwind() forwards to
+// orders_->unwind_positions(...), deref'd only when actually invoked.
+class engine : public EngineHotPathSink, public IRiskUnwindSink
 {
 private:
     engine_config config_;
@@ -154,8 +170,8 @@ private:
     // Symbols already carrying real L2 depth - MarketMaker::replenish is
     // suppressed here so paper liquidity can't corrupt the fill sim.
     std::unordered_set<std::string> l2_seeded_symbols_;
-    const instrument_spec* resolve_instrument_spec(const std::string& symbol);
-    bool apply_instrument_spec(order_event& o, const instrument_spec& spec) const;
+    // resolve_instrument_spec / apply_instrument_spec moved to
+    // OrderIntentProcessor (Phase 2) — route()'s own helpers now.
 
     std::unique_ptr<BarAggregator> tick_aggregator_;
     std::chrono::milliseconds tick_bar_interval_{60000};
@@ -198,7 +214,16 @@ private:
     std::shared_ptr<EventRing> mm_ring_;
     std::shared_ptr<MMRing> mm_order_ring_;
 
-    void publish_event(const event_pointer& ev);
+    void publish_event(const event_pointer& ev) override;
+
+    // IRiskUnwindSink override — forwards to orders_->unwind_positions(...).
+    // Defined out-of-line in engine.cpp (after orders_ is declared) even
+    // though it is a one-line forward, matching log_event/publish_event's
+    // declared-here/defined-in-.cpp convention. Safe to call any time after
+    // construction completes; orders_ is never null once the constructor
+    // returns (see orders_ member declaration for the construction-order
+    // rationale).
+    void request_unwind(std::size_t& event_count) override;
 
 #ifdef HAS_QUESTDB
     std::shared_ptr<truetest::questdb::QuestdbStore> questdb_store_;
@@ -247,18 +272,24 @@ private:
 
     truetest::exits::ExitManager exit_manager_;
 
-    // After an accepted strategy order: drain strategy exit intents, apply
-    // platform DefaultExitPolicy (config.exit_defaults), register with ExitManager.
-    void register_strategy_exit_intent(IStrategy& strategy,
-                                       const std::string& strategy_name,
-                                       const order_event& order);
+    // register_strategy_exit_intent / finalize_strategy_route / evaluate_exits
+    // (both overloads) / route_order / sweep_resting_limits /
+    // check_pending_stops / deliver_mm_book_trades moved to
+    // OrderIntentProcessor (Phase 2 — see order_intent_processor.{h,cpp} and
+    // the orders_ member declaration below). exit_manager_ stays engine-owned
+    // (the canonical exit-policy/state owner) and is referenced by
+    // OrderIntentProcessor, not duplicated. Call sites here now say
+    // orders_->finalize_route(...) / orders_->evaluate_exits(...) /
+    // orders_->route(...) / orders_->sweep_resting_limits(...) /
+    // orders_->check_pending_stops(...) / orders_->deliver_mm_book_trades(...).
 
     // Invoked by the engine on each fill-poll cycle to register any
     // venue-bracket-leg metadata produced by the unknown_fill_handler
     // installed on the provider's ExecutionBridge. Safe to call when
     // there is no bridge - it just no-ops.
     void drain_venue_bracket_meta();
-    void drain_async_submit_results(IExecutionAdapter* adapter);
+    // drain_async_submit_results moved to OrderIntentProcessor; call sites
+    // here now say orders_->drain_async_submit_results(...).
     // Sole consumer for provider funding ingress. Only this engine-thread path
     // may acquire funding_pool_, mutate portfolio/audit, or publish the event.
     bool drain_provider_funding_updates() noexcept;
@@ -269,72 +300,13 @@ private:
     // decomposition (2026-08). See core/docs/internal/engine-decomposition.md
     // "Phase 2: Domain Processors" and the fills_ member below.
 
-    // After strategy on_* + route_order: arm exit intents only when the
-    // order was accepted; drain intents + resync position gates on
-    // pause/reject so optimistic strategy locks cannot stick forever.
-    void finalize_strategy_route(IStrategy& strategy,
-                                 const std::string& strategy_name,
-                                 const order_event& order,
-                                 bool halted);
+    void log_event(const event& ev) override;
 
-    // Returns true if an exit fire caused the engine to halt.
-    bool evaluate_exits(const std::string& symbol, double px,
-                        std::chrono::system_clock::time_point ts,
-                        std::size_t& event_count,
-                        std::int64_t recv_ns);
-
-    // Bar variant: probes the bar's low/high so an intra-bar wick through
-    // SL/TP fires the bracket. Tick paths keep the price-only overload.
-    // The open is needed for gap-aware anchored fire prices.
-    bool evaluate_exits(const std::string& symbol,
-                        double open, double low, double high, double close,
-                        std::chrono::system_clock::time_point ts,
-                        std::size_t& event_count,
-                        std::int64_t recv_ns);
-
-    void log_event(const event& ev);
-
-    bool process_order(const std::shared_ptr<order_event>& o,
-                       std::size_t& event_count,
-                       bool& halt_requested);
-
-    void unwind_positions(std::size_t& event_count);
-
-    // anchor_immediate: bracket fires (ExitManager closes) execute now
-    // against a book re-centered at order.get_price() — the SL/TP level or
-    // gap open computed within the trigger bar — instead of being deferred
-    // by execution_bar_delay to the next bar's open. Mirror of the native
-    // stop anchoring in check_pending_stops.
-    bool route_order(order_event& order,
-                     const std::chrono::system_clock::time_point& sim_time,
-                     std::size_t& event_count, bool& halt_requested,
-                     bool anchor_immediate = false);
-
-    // Bar-mode traversal fills for resting strategy limits: a limit whose
-    // level lies inside the bar's [low, high] traded through intrabar even
-    // if the MM re-quote anchors (open/close/stop refs) never crossed it.
-    // bar_volume caps aggregate fill qty (FR-bar-sweep-ignores-volume); 0 = uncapped.
-    double sweep_resting_limits(const std::string& symbol,
-                                double low, double high,
-                                const std::chrono::system_clock::time_point& ts,
-                                std::size_t& event_count, bool& halt_requested,
-                                double bar_volume = 0.0);
-
-    // Stops trigger on the bar's high/low and fill anchored at the stop
-    // price (or the open when the bar gaps through). Tick callers pass
-    // open == high == low == tick price.
-    void check_pending_stops(std::string_view event_symbol,
-                             double open, double high, double low,
-                             const std::chrono::system_clock::time_point& sim_time,
-                             std::size_t& event_count, bool& halt_requested);
-
-    // Routes MarketMaker quote-update crossings via IExecutionAdapter::
-    // on_book_trades (LocalBookAdapter records fills; HybridExecutor
-    // forwards; live bridges no-op) so resting strategy limits fill when
-    // the seeded book moves through their level.
-    void deliver_mm_book_trades(const std::string& symbol, const trades& trs,
-                                const std::chrono::system_clock::time_point& ts,
-                                std::size_t& event_count, bool& halt_requested);
+    // process_order / unwind_positions moved to OrderIntentProcessor (Phase 1
+    // of the domain-processor extraction that follows FillProcessor). See
+    // orders_ member declaration below for the dependency/construction-order
+    // rationale, and order_intent_processor.{h,cpp} for the implementation.
+    // Call sites here now say orders_->process(...) / orders_->unwind_positions(...).
 
     void dispatch_extras_on_market(const market_event& mkt,
                                    const std::chrono::system_clock::time_point& ts,
@@ -342,8 +314,9 @@ private:
     void dispatch_extras_on_tick(const tick_event& te,
                                  const std::chrono::system_clock::time_point& ts,
                                  std::size_t& event_count);
-    double marked_account_equity(std::string_view current_symbol,
-                                 double current_mark) const;
+    // marked_account_equity moved to OrderIntentProcessor (public there,
+    // unlike this former private method, since sync_strategy_account_equity
+    // below is a second caller that stays engine-owned).
     void sync_strategy_account_equity(IStrategy& strategy) const;
 
     void process_single_bar(const bar_record& rec, std::size_t& event_count,
@@ -351,62 +324,87 @@ private:
 
     void process_single_tick(const tick_record& rec, std::size_t& event_count);
 
-    std::vector<std::shared_ptr<order_event>> pending_stops_;
+    // pending_stops_ moved to OrderIntentProcessor (Phase 3) — every reader
+    // and writer (route()'s staging push, check_pending_stops()'s
+    // trigger/erase, cancel()'s search/erase) now lives there; canonical
+    // ownership moved with them. clear_pending_state() below calls
+    // orders_->clear_pending_stops() instead of touching a member directly.
 
-    // Pending order scheduling state.
-    // Planned extraction Wave 3 (PendingOrderScheduler) per core/docs/internal/engine-decomposition.md#E-50
-    // + engine-decomposition skill. Must preserve exact determinism for MC/golden.
-    struct pending_entry
-    {
-        std::shared_ptr<order_event> order;
-        uint64_t seq;
-    };
-    static bool pending_cmp(const pending_entry& a, const pending_entry& b)
-    {
-        if (a.order->get_earliest_eligible_ts() != b.order->get_earliest_eligible_ts())
-            return a.order->get_earliest_eligible_ts() > b.order->get_earliest_eligible_ts();
-        return a.seq > b.seq;
-    }
-    std::priority_queue<pending_entry, std::vector<pending_entry>,
-                        decltype(&engine::pending_cmp)> pending_orders_{&engine::pending_cmp};
-    struct bar_delayed_entry
-    {
-        std::shared_ptr<order_event> order;
-        uint64_t seq;
-        std::size_t remaining_symbol_events;
-    };
-    // execution_bar_delay is event-count based, not wall-clock based. Keep it
-    // separate from latency orders so an unrelated symbol can never release it.
-    // Both buffers are reserved before the run. The ready buffer lets the
-    // drain compact in one stable pass before submitting, without per-order
-    // vector::erase shifts or hot-path growth.
-    std::vector<bar_delayed_entry> bar_delayed_orders_;
-    std::vector<bar_delayed_entry> bar_delayed_ready_;
     // Reused L2 adapter payloads. Reserved during cold initialization so a
-    // snapshot does not allocate on the provider→engine hot path.
+    // snapshot does not allocate on the provider→engine hot path. Market-
+    // domain, unrelated to order-attribution/pending-scheduling extraction.
     std::vector<std::pair<double, double>> l2_bid_scratch_;
     std::vector<std::pair<double, double>> l2_ask_scratch_;
-    uint64_t order_seq_ = 0;
 
-    std::vector<std::pair<std::string, uint64_t>> day_order_ids_;
+    // pending_cancels_ moved to OrderIntentProcessor (Phase 3) — its sole
+    // writer (cancel()) and sole reader/eraser (drain_async_submit_results())
+    // both live there. ExecutionRouter's former reference to this map was
+    // confirmed dead code (never read in any method body) and removed
+    // rather than repointed — see execution_router.h.
 
-    // Types and maps now owned/co-owned via ExecutionRouter (structs declared in execution_router.h for shared use).
-    // Engine keeps the maps for reset/attribution compatibility; router receives non-owning refs.
-    std::unordered_map<uint64_t, pending_cancel_meta> pending_cancels_;
-    std::unordered_map<uint64_t, order_meta> order_meta_;
+    // OrderIntentProcessor preparatory extraction (2026-08): canonical owner
+    // of order-attribution metadata (order_id -> opener_order_id/strategy_name,
+    // former order_meta_ map) and deterministic latency/bar-delay pending-
+    // order scheduling (former pending_orders_/bar_delayed_orders_/
+    // bar_delayed_ready_/order_seq_/day_order_ids_). Both are narrow, zero-
+    // engine-dependency leaf collaborators — see order_attribution_store.h /
+    // pending_order_scheduler.h and the "OrderIntentProcessor Preparation
+    // Report" §7/§8 for why each was extracted. Constructed in the ctor body
+    // before router_/dashboard_builder_/fills_ (FillProcessor holds a
+    // reference to *attribution_); declared here, before fills_, so both are
+    // destroyed after it.
+    std::unique_ptr<OrderAttributionStore> attribution_;
+    std::unique_ptr<PendingOrderScheduler> pending_scheduler_;
 
-    void register_order_meta(const order_event& o);
-    uint64_t lookup_opener(uint64_t order_id) const;
-    const std::string& lookup_strategy_name(uint64_t order_id) const;
+    // register_order_meta/lookup_opener/lookup_strategy_name forwards
+    // removed in Phase 3: their last remaining callers (route()'s
+    // registration, cancel()'s/drain_final_pending's strategy-name lookups)
+    // all moved into OrderIntentProcessor, which calls attribution_'s own
+    // methods directly. The one surviving cold caller — the authoritative
+    // ledger-replay path in engine_market.cpp — now calls
+    // attribution_->register_order(order) directly (engine still owns the
+    // OrderAttributionStore instance; no forward needed for one call site).
 
     // Fill pipeline — Phase 2 engine decomposition (2026-08). Constructed in
-    // the ctor body after router_/dashboard_builder_/order_meta_ are valid
+    // the ctor body after router_/dashboard_builder_/attribution_ are valid
     // (FillProcessor holds references to them); declared here (after all its
     // dependency members) so it is destroyed before them. See
     // core/docs/internal/engine-decomposition.md "Phase 2: Domain Processors".
     std::unique_ptr<FillProcessor> fills_;
 
     std::atomic<bool> halt_flag_{false};
+
+    // pause_all_ and mm_threaded_ moved up here (2026-08, Phase 3 safety
+    // review finding) so both are declared — and therefore destroyed —
+    // *after* orders_ below, matching every other member orders_ holds by
+    // reference. Previously both were declared after orders_ (pause_all_
+    // grouped with the other atomic run-state flags, mm_threaded_ next to
+    // mm_worker_), which meant they were destroyed *before* orders_ in
+    // ~engine() — inert only because OrderIntentProcessor has no custom
+    // destructor that touches them, but a latent use-after-destruction trap
+    // for any future change. See pause_all_'s/mm_threaded_'s prior locations
+    // below for the rest of their original context comments.
+    std::atomic<bool> pause_all_{false};
+    // Narrow same-thread predicate mirroring `!mm_worker_` for
+    // OrderIntentProcessor (Phase 2), so it depends on a plain bool rather
+    // than the concrete MarketMakerWorker type. Set exactly where mm_worker_
+    // is created (engine_workers.cpp); never reset, matching mm_worker_'s
+    // own never-nulled lifecycle. Read only from the event-loop thread,
+    // after start_workers() (which also runs on that thread) has returned —
+    // no atomic needed.
+    bool mm_threaded_ = false;
+
+    // OrderIntentProcessor — Phase 1 of the domain-processor extraction that
+    // follows FillProcessor. Owns the canonical normal order-submission path
+    // (process_order/unwind_positions/drain_async_submit_results/
+    // marked_account_equity). Constructed last in the ctor body (needs
+    // *fills_, *router_, *attribution_, halt_flag_, pause_all_,
+    // mm_threaded_, and every other collaborator above to already exist)
+    // and declared last here — after every member it references — so it
+    // is the first thing destroyed. See order_intent_processor.h and the
+    // "OrderIntentProcessor Preparation Report" Phase-1 deliverable for the
+    // full dependency/construction-order rationale.
+    std::unique_ptr<OrderIntentProcessor> orders_;
 
     // Heap-allocated armed flag for provider callbacks.
     // Callbacks (which may fire after engine destruction) capture a
@@ -427,7 +425,8 @@ private:
     std::atomic<bool> worker_failed_{false};
     std::atomic<bool> run_failed_{false};
     std::atomic<bool> live_shutdown_failure_reported_{false};
-    std::atomic<bool> pause_all_{false};
+    // pause_all_ moved up next to halt_flag_ (declared before orders_, see
+    // above) — Phase 3 construction-order fix; was here originally.
     std::atomic<bool> flatten_request_{false};
 
     std::size_t logging_drops_ = 0;
@@ -454,6 +453,11 @@ private:
     std::unique_ptr<ObserverWorker> observer_worker_;
     std::unique_ptr<RiskStatsWorker> risk_stats_worker_;
     std::unique_ptr<MarketMakerWorker> mm_worker_;
+    // mm_threaded_ moved up next to halt_flag_/pause_all_ (declared before
+    // orders_, see above) — Phase 3 construction-order fix; was here
+    // originally, set exactly where mm_worker_ is created below
+    // (engine_workers.cpp), never reset, matching mm_worker_'s own
+    // never-nulled lifecycle.
 
     // Worker/ring lifecycle state.
     // Planned extraction Wave 4 (WorkerOrchestrator) per core/docs/internal/engine-decomposition.md#E-60
@@ -486,17 +490,12 @@ private:
     void finalize_inline_event_log() noexcept;
     void setup_event_loop_infra();
     void teardown_event_loop_infra();
-    void drain_final_pending(std::size_t& event_count, bool& halt_requested);
-    void cancel_day_orders();
-    // Per-symbol mark for multi-symbol pending fills (EL-MULTISYM-MID).
-    // last_mark_prices_[sym] if positive, else last_mid_price_.
-    double mid_for_symbol(const std::string& symbol) const;
-    // Drain time-eligible latency orders plus bar-delayed orders whose next
-    // counted observation belongs to event_symbol. Re-center each order's
-    // book at that symbol's mark before submission.
-    void drain_pending_orders(const std::chrono::system_clock::time_point& sim_time,
-                              std::size_t& event_count, bool& halt_requested,
-                              std::string_view event_symbol);
+    // mid_for_symbol / drain_pending_orders moved to OrderIntentProcessor
+    // (Phase 2, renamed drain_due) — call sites now say orders_->drain_due(...).
+    // drain_final_pending / cancel_day_orders moved to OrderIntentProcessor
+    // (Phase 3, consolidated into finalize_end_of_stream — both were always
+    // called back-to-back, at all 5 call sites) — call sites now say
+    // orders_->finalize_end_of_stream(...).
     // Paper maker-queue: feed a trade print into resolved adapters then drain fills.
     // No-op unless config_.maker_queue_model is set (QueueAware needs a tape).
     void feed_paper_trade_and_drain(const std::string& symbol,
@@ -564,6 +563,11 @@ public:
 
     void add_strategy(std::shared_ptr<IStrategy> strategy, const std::string& name);
     void switch_symbol(const std::string& new_symbol);
+    // Public API preserved exactly (external callers — tests today, operator/
+    // TUI potentially later — call engine.cancel_order(...)/modify_order(...)
+    // directly). Implementation moved to OrderIntentProcessor::cancel/modify
+    // (Phase 3); these are now one-line forwards to orders_->cancel(...)/
+    // orders_->modify(...).
     bool cancel_order(const std::string& symbol, uint64_t order_id,
                       const std::string& reason = "");
     bool modify_order(const std::string& symbol, uint64_t order_id,
@@ -589,10 +593,11 @@ public:
 
     // Resets internal heavy objects (portfolio [incl. lots], analytics, exit_manager,
     // order_tracker, risk_manager, market_maker, adverse_selection, orderbook_registry,
-    // shadow_tracker, order_meta_, instrument/l2 caches, tick aggregator, UI caches, etc.)
-    // so they can be reused for the next Monte Carlo trial without full reconstruction.
+    // shadow_tracker, attribution_ (order-attribution store), instrument/l2 caches,
+    // tick aggregator, UI caches, etc.) so they can be reused for the next Monte
+    // Carlo trial without full reconstruction.
     //
-    // Phase 4 hardening: now clears more for per-trial isolation (order_meta_,
+    // Phase 4 hardening: now clears more for per-trial isolation (attribution_,
     // shadow_tracker). Rings, workers, event_logger_, and dashboard timing are left
     // mostly untouched (workers repopulate via rings; full reset complex/unnecessary
     // for MC). See implementation comments.
@@ -653,7 +658,7 @@ public:
     // so the dashboard banner, halt_flag_, and the recent-events ring stay
     // in sync. Idempotent: only the first caller per run wins, the rest
     // are no-ops. `reason` is truncated to streaming_stats::shutdown_reason_cap.
-    void trigger_halt(std::string_view reason) noexcept;
+    void trigger_halt(std::string_view reason) noexcept override;
 
     // Terminal operator action. The shared live session performs one
     // kill-before-close sequence and returns the cached result to all callers.

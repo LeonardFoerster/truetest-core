@@ -205,6 +205,7 @@ void engine::start_workers()
             config_.rolling_window, config_.risk_free_rate,
             config_.periods_per_year, config_.max_equity_points);
         if (async_mm)
+        {
             mm_worker_ = std::make_unique<MarketMakerWorker>(
                 config_.seed != 0 ? static_cast<unsigned>(config_.seed + 3) : 42u,
                 *mm_order_ring_,
@@ -214,6 +215,8 @@ void engine::start_workers()
                                config_.mm_vol_spread_mult,
                                config_.mm_max_half_spread_pct,
                                config_.qty_scale});
+            mm_threaded_ = true;
+        }
         wire_failure(*logging_worker_);
         wire_failure(*risk_worker_);
         wire_failure(*stats_worker_);
