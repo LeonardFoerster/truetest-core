@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -37,6 +38,19 @@ public:
                           double /*trade_qty*/,
                           std::chrono::system_clock::time_point /*trade_ts*/) {}
 
+    // A sell aggressor consumes bids only; a buy aggressor consumes asks
+    // only. Strict recorded replay may reject an unknown aggressor rather
+    // than inventing fills on both sides of the book.
+    virtual void on_trade(const std::string& symbol,
+                          double trade_price,
+                          double trade_qty,
+                          std::optional<order_side> aggressor_side,
+                          std::chrono::system_clock::time_point trade_ts)
+    {
+        (void)aggressor_side;
+        on_trade(symbol, trade_price, trade_qty, trade_ts);
+    }
+
     // Drains time-sensitive state (e.g. cancel-in-flight windows).
     virtual void advance_time(std::chrono::system_clock::time_point /*ts*/) {}
 
@@ -45,11 +59,30 @@ public:
         const std::vector<std::pair<double, double>>& /*bids*/,
         const std::vector<std::pair<double, double>>& /*asks*/) {}
 
+    virtual void on_l2_snapshot(
+        const std::string& symbol,
+        const std::vector<std::pair<double, double>>& bids,
+        const std::vector<std::pair<double, double>>& asks,
+        std::chrono::system_clock::time_point /*event_ts*/)
+    {
+        on_l2_snapshot(symbol, bids, asks);
+    }
+
     virtual void on_l2_update(
         const std::string& /*symbol*/,
         order_side /*side*/,
         double /*price*/,
         double /*new_size*/) {}
+
+    virtual void on_l2_update(
+        const std::string& symbol,
+        order_side side,
+        double price,
+        double new_size,
+        std::chrono::system_clock::time_point /*event_ts*/)
+    {
+        on_l2_update(symbol, side, price, new_size);
+    }
 
     // Optional hook for adapters that maintain a seeded book (LocalBookAdapter
     // and QueueAwareBookAdapter). Default no-op.

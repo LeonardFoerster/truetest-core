@@ -36,6 +36,9 @@ struct risk_size_inputs
     // Optional hard cap on position notional as fraction of equity (0 = off).
     // Independent of risk_fraction — do not reuse risk_fraction for this.
     double max_notional_frac = 0.0;
+
+    // Optional hard cap on max dollar loss per trade (e.g. from RiskManager limits).
+    double max_loss_per_trade_cap = 0.0;
 };
 
 // Adverse fill estimates (long buy lifts; short sell dumps).
@@ -92,7 +95,13 @@ inline double compute_risk_quantity(const risk_size_inputs& in)
     if (!(denom > 1e-12))
         return 0.0;
 
-    const double risk_budget = in.equity * in.risk_fraction;
+    double risk_budget = in.equity * in.risk_fraction;
+    if (in.max_loss_per_trade_cap > 0.0)
+    {
+        const double max_allowed = in.max_loss_per_trade_cap * 0.95;
+        if (risk_budget > max_allowed)
+            risk_budget = max_allowed;
+    }
     const double fixed_round_trip = 2.0 * std::max(0.0, in.fixed_fee_per_leg);
     if (risk_budget <= fixed_round_trip)
         return 0.0;

@@ -28,8 +28,7 @@
 // default is CONSERVATIVE (size_ahead = +inf so on_trade never fills);
 // bar sweep_resting_range still fills on [low,high]. Opt-in
 // set_join_front_without_l2(true) restores legacy join-front.
-// V1 limitations: trade side ignored (correct when at top-of-book, approx
-// otherwise); market/stop orders are not handled here — use HybridPaperAdapter
+// Market/stop orders are not handled here — use HybridPaperAdapter
 // (limits → queue-aware, market/stop → LocalBook). Hybrid queue limits
 // fail-closed on modify (no cancel+resubmit rewrite).
 class QueueAwareBookAdapter : public IExecutionAdapter
@@ -88,6 +87,9 @@ public:
     void set_join_front_without_l2(bool enable) { join_front_without_l2_ = enable; }
     bool join_front_without_l2() const { return join_front_without_l2_; }
 
+    void set_require_signed_trades(bool enable) { require_signed_trades_ = enable; }
+    bool require_signed_trades() const { return require_signed_trades_; }
+
     bool poll_fills(std::vector<fill_event>& out) override
     {
         if (pending_fills_.empty()) return false;
@@ -144,10 +146,36 @@ public:
                         const std::vector<std::pair<double, double>>& bids,
                         const std::vector<std::pair<double, double>>& asks) override
     {
+        on_l2_snapshot(symbol, bids, asks, current_time_);
+    }
+
+    void on_l2_snapshot(const std::string& symbol,
+                        const std::vector<std::pair<double, double>>& bids,
+                        const std::vector<std::pair<double, double>>& asks,
+                        std::chrono::system_clock::time_point event_ts) override
+    {
+        current_time_ = event_ts;
+
+        // A full snapshot is replacement data. Retaining omitted levels made
+        // later prints consume stale queue-ahead volume. We cannot infer the
+        // missing level's queue position, so block its passive fills until a
+        // new observed level establishes it.
+        for (auto it = levels_.begin(); it != levels_.end(); )
+        {
+            if (std::get<0>(it->first) == symbol)
+                it = levels_.erase(it);
+            else
+                ++it;
+        }
+        for (auto& [_, po] : orders_)
+        {
+            if (po.symbol == symbol)
+                po.size_ahead = std::numeric_limits<double>::infinity();
+        }
         for (const auto& [px, sz] : bids)
-            on_l2_update(symbol, order_side::buy, px, sz);
+            on_l2_update(symbol, order_side::buy, px, sz, event_ts);
         for (const auto& [px, sz] : asks)
-            on_l2_update(symbol, order_side::sell, px, sz);
+            on_l2_update(symbol, order_side::sell, px, sz, event_ts);
     }
 
     void on_l2_update(const std::string& symbol,
@@ -155,6 +183,16 @@ public:
                       double price,
                       double new_size) override
     {
+        on_l2_update(symbol, side, price, new_size, current_time_);
+    }
+
+    void on_l2_update(const std::string& symbol,
+                      order_side side,
+                      double price,
+                      double new_size,
+                      std::chrono::system_clock::time_point event_ts) override
+    {
+        current_time_ = event_ts;
         const auto key = make_key(symbol, side, price);
         auto& lv = levels_[key];
         const double old_size = lv.aggregate_size;
@@ -192,8 +230,19 @@ public:
                   double trade_qty,
                   std::chrono::system_clock::time_point trade_ts) override
     {
+        on_trade(symbol, trade_price, trade_qty, std::nullopt, trade_ts);
+    }
+
+    void on_trade(const std::string& symbol,
+                  double trade_price,
+                  double trade_qty,
+                  std::optional<order_side> aggressor_side,
+                  std::chrono::system_clock::time_point trade_ts) override
+    {
         if (!(trade_qty > 0.0)) return;
         current_time_ = trade_ts;
+        if (require_signed_trades_ && !aggressor_side)
+            return;
 
         // No resting limits and no tracked levels → pure no-op (paper tape under
         // maker_queue feeds every bar/tick; do not grow levels_ unboundedly).
@@ -210,6 +259,7 @@ public:
             for (const auto& [oid, po] : orders_)
             {
                 if (po.symbol == symbol
+                    && (!aggressor_side || po.side != *aggressor_side)
                     && std::abs(po.price - trade_price) < 1e-12)
                 {
                     trade_candidates_.push_back(oid);
@@ -247,13 +297,13 @@ public:
                 double commission = 0.0;
                 if (fee_model_)
                     commission = fee_model_->compute_commission(
-                        po.side, fill_qty, trade_price, /*is_taker=*/false);
+                        po.side, fill_qty, po.price, /*is_taker=*/false);
 
                 // remaining after this fill — engine uses is_partial() to keep
                 // order_status::partially_filled / open-order rows correct.
                 const double rem = std::max(0.0, po.qty_remaining - fill_qty);
                 fill_event f(trade_ts, po.symbol, po.order_id,
-                             po.side, fill_qty, trade_price, commission, rem);
+                             po.side, fill_qty, po.price, commission, rem);
                 if (!po.strategy_name.empty()) f.set_strategy_name(po.strategy_name);
                 if (po.opener_order_id != 0) f.set_opener_order_id(po.opener_order_id);
                 f.set_recv_ns(po.recv_ns);
@@ -283,8 +333,16 @@ public:
             if (lit != levels_.end())
                 lit->second.trades_since_update += trade_qty;
         };
-        mark_existing(order_side::buy);
-        mark_existing(order_side::sell);
+        if (aggressor_side)
+            mark_existing(*aggressor_side == order_side::sell
+                              ? order_side::buy : order_side::sell);
+        else
+        {
+            // Unsigned legacy tape is approximate only. Strict replay returns
+            // above before this ambiguity can affect queue attribution.
+            mark_existing(order_side::buy);
+            mark_existing(order_side::sell);
+        }
     }
 
     // Bar-mode: OHLCV [low, high] traded through our limit even when the
@@ -309,7 +367,9 @@ public:
         for (const auto& [oid, po] : orders_)
         {
             if (po.symbol != symbol) continue;
-            if (pending_cancels_.count(oid)) continue;
+            // A requested cancel leaves the quote live until advance_time()
+            // reaches its effective timestamp.  Treating it as gone here
+            // would make bar replay more optimistic than the tape path.
             const bool traversed = (po.side == order_side::buy)
                 ? (low <= po.price) : (high >= po.price);
             if (!traversed) continue;
@@ -449,6 +509,7 @@ private:
     std::shared_ptr<IFeeModel>     fee_model_;
     std::shared_ptr<ILatencyModel> latency_model_;
     bool join_front_without_l2_{false}; // default: conservative no-L2 join
+    bool require_signed_trades_{false};
     std::size_t max_pending_fills_{4096};
     std::size_t dropped_fills_for_cap_{0};
     double last_sweep_fill_qty_{0.0};

@@ -127,6 +127,17 @@ public:
             aggressive_limits_->on_l2_snapshot(symbol, bids, asks);
     }
 
+    void on_l2_snapshot(const std::string& symbol,
+                        const std::vector<std::pair<double, double>>& bids,
+                        const std::vector<std::pair<double, double>>& asks,
+                        std::chrono::system_clock::time_point event_ts) override
+    {
+        if (queue_) queue_->on_l2_snapshot(symbol, bids, asks, event_ts);
+        if (local_) local_->on_l2_snapshot(symbol, bids, asks, event_ts);
+        if (has_distinct_aggressive_limits())
+            aggressive_limits_->on_l2_snapshot(symbol, bids, asks, event_ts);
+    }
+
     void on_l2_update(const std::string& symbol,
                       order_side side,
                       double price,
@@ -139,6 +150,19 @@ public:
                 symbol, side, price, new_size);
     }
 
+    void on_l2_update(const std::string& symbol,
+                      order_side side,
+                      double price,
+                      double new_size,
+                      std::chrono::system_clock::time_point event_ts) override
+    {
+        if (queue_) queue_->on_l2_update(symbol, side, price, new_size, event_ts);
+        if (local_) local_->on_l2_update(symbol, side, price, new_size, event_ts);
+        if (has_distinct_aggressive_limits())
+            aggressive_limits_->on_l2_update(
+                symbol, side, price, new_size, event_ts);
+    }
+
     void on_trade(const std::string& symbol,
                   double trade_price,
                   double trade_qty,
@@ -149,6 +173,21 @@ public:
         if (has_distinct_aggressive_limits())
             aggressive_limits_->on_trade(
                 symbol, trade_price, trade_qty, trade_ts);
+    }
+
+    void on_trade(const std::string& symbol,
+                  double trade_price,
+                  double trade_qty,
+                  std::optional<order_side> aggressor_side,
+                  std::chrono::system_clock::time_point trade_ts) override
+    {
+        if (queue_)
+            queue_->on_trade(symbol, trade_price, trade_qty, aggressor_side, trade_ts);
+        if (local_)
+            local_->on_trade(symbol, trade_price, trade_qty, aggressor_side, trade_ts);
+        if (has_distinct_aggressive_limits())
+            aggressive_limits_->on_trade(
+                symbol, trade_price, trade_qty, aggressor_side, trade_ts);
     }
 
     void on_book_trades(const trades& trs,

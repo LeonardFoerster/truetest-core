@@ -140,6 +140,15 @@ public:
                   double trade_qty,
                   std::chrono::system_clock::time_point trade_ts) override
     {
+        on_trade(symbol, trade_price, trade_qty, std::nullopt, trade_ts);
+    }
+
+    void on_trade(const std::string& symbol,
+                  double trade_price,
+                  double trade_qty,
+                  std::optional<order_side> aggressor_side,
+                  std::chrono::system_clock::time_point trade_ts) override
+    {
         if (open_orders_.empty() || !(trade_qty > 0.0) || !(trade_price > 0.0))
             return;
 
@@ -149,6 +158,16 @@ public:
         {
             open_order& oo = *it;
             if (oo.symbol != symbol || trade_ts < oo.submit_ts)
+            {
+                ++it;
+                continue;
+            }
+
+            // An aggressor can consume only the opposite resting side. The
+            // unsigned legacy path remains available for low-fidelity tape
+            // sources; strict replay must refuse it before reaching here.
+            if (aggressor_side && oo.type != order_type::market
+                && oo.side == *aggressor_side)
             {
                 ++it;
                 continue;
@@ -229,11 +248,29 @@ public:
         if (queue_model_) queue_model_->on_snapshot(symbol, bids, asks);
     }
 
+    void on_l2_snapshot(
+        const std::string& symbol,
+        const std::vector<std::pair<double, double>>& bids,
+        const std::vector<std::pair<double, double>>& asks,
+        std::chrono::system_clock::time_point event_ts) override
+    {
+        if (queue_model_) queue_model_->on_snapshot_at(symbol, bids, asks, event_ts);
+    }
+
     void on_l2_update(
         const std::string& symbol, order_side side,
         double price, double new_size) override
     {
         if (queue_model_) queue_model_->on_update(symbol, side, price, new_size);
+    }
+
+    void on_l2_update(
+        const std::string& symbol, order_side side,
+        double price, double new_size,
+        std::chrono::system_clock::time_point event_ts) override
+    {
+        if (queue_model_)
+            queue_model_->on_update_at(symbol, side, price, new_size, event_ts);
     }
 
     std::size_t open_order_count() const { return open_orders_.size(); }

@@ -244,6 +244,24 @@ double portfolio::get_equity(const std::unordered_map<std::string, mark_point>& 
     return equity;
 }
 
+double portfolio::get_strategy_position_qty(const std::string& strategy_name,
+                                            const std::string& symbol) const
+{
+    constexpr double eps = 1e-12;
+    double net = 0.0;
+    for (const auto& [id, l] : lots_)
+    {
+        if (l.symbol == symbol && (strategy_name.empty() || l.strategy_name == strategy_name))
+        {
+            if (l.side == order_side::buy)
+                net += l.qty_open;
+            else
+                net -= l.qty_open;
+        }
+    }
+    return std::abs(net) > eps ? net : 0.0;
+}
+
 // Phase A (MC object reuse): reset to initial constructed state.
 void portfolio::reset()
 {

@@ -77,6 +77,9 @@ public:
 
     std::vector<std::uint64_t> open_lots_by_symbol(const std::string& symbol) const;
 
+    // Strategy-scoped open position quantity for a symbol.
+    double get_strategy_position_qty(const std::string& strategy_name, const std::string& symbol) const;
+
     void restore_state(double cash, std::size_t total_trades,
                        std::unordered_map<std::string, position> positions)
     {
