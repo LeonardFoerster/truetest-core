@@ -19,6 +19,7 @@
 #include "indicator/sma.h"
 #include "market_maker/market_maker.h"
 #include "orderbook/orderbook.h"
+#include "risk/risk_accounting.h"
 #include "strategy/sma_strategy.h"
 #include "threading/ring_buffer.h"
 #include "types/price.h"
@@ -30,6 +31,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -270,5 +272,99 @@ static void BM_Engine_Throughput_100k(benchmark::State& state)
 }
 // Run with fewer iterations — one full run is already 100K bars.
 BENCHMARK(BM_Engine_Throughput_100k)->Unit(benchmark::kMillisecond)->Iterations(3);
+
+// ─── R3: authoritative order ledger + risk view (order hot path) ────────────
+// Both run once per candidate order inside OrderIntentProcessor::process, so
+// they sit directly on the order hot path. Budget: allocation-free steady
+// state and O(#symbols) — never O(#orders ever seen). See
+// docs/internal/r3-authoritative-risk-accounting.md.
+
+// One full lifecycle (register -> pending -> open -> partial fill -> fill)
+// through the ledger, including the incremental per-symbol aggregates.
+static void BM_RiskLedger_Lifecycle(benchmark::State& state)
+{
+    const auto ts = std::chrono::system_clock::time_point(
+        std::chrono::milliseconds(1'000));
+    OrderTracker ledger;
+    ledger.reserve(4096);
+
+    std::uint64_t id = 0;
+    for (auto _ : state)
+    {
+        ++id;
+        order_event o(ts, "BENCHUSDT", order_type::limit, order_side::buy,
+                      10.0, 100.0);
+        o.set_order_id(id);
+        ledger.register_order(o);
+        ledger.set_status(id, order_status::pending);
+        ledger.set_status(id, order_status::open);
+        ledger.on_fill(fill_event(ts, "BENCHUSDT", id, order_side::buy,
+                                  4.0, 100.0, 0.0, 6.0));
+        ledger.on_fill(fill_event(ts, "BENCHUSDT", id, order_side::buy,
+                                  6.0, 100.0, 0.0, 0.0));
+        benchmark::DoNotOptimize(ledger.active_count());
+        // The ledger keeps one record per order id ever seen; reset before it
+        // dominates the measurement with pure map growth.
+        if (ledger.orders_seen() > 100'000)
+        {
+            state.PauseTiming();
+            ledger.reset();
+            ledger.reserve(4096);
+            state.ResumeTiming();
+        }
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+BENCHMARK(BM_RiskLedger_Lifecycle)->Unit(benchmark::kNanosecond);
+
+// Building the authoritative risk snapshot for one candidate order, over a
+// portfolio of `state.range(0)` instruments each carrying resting orders.
+static void BM_RiskView_Build(benchmark::State& state)
+{
+    const auto ts = std::chrono::system_clock::time_point(
+        std::chrono::milliseconds(1'000));
+    const int symbols = static_cast<int>(state.range(0));
+
+    OrderTracker ledger;
+    ledger.reserve(1024);
+    portfolio port(1'000'000.0);
+    std::unordered_map<std::string, mark_point> marks;
+    std::vector<std::string> names;
+    names.reserve(static_cast<std::size_t>(symbols));
+
+    std::uint64_t id = 0;
+    for (int i = 0; i < symbols; ++i)
+    {
+        names.push_back("SYM" + std::to_string(i));
+        const auto& sym = names.back();
+        marks[sym] = mark_point{100.0 + i, ts};
+        port.on_fill(fill_event(ts, sym, ++id, order_side::buy, 3.0, 100.0, 0.0));
+        for (int k = 0; k < 4; ++k)
+        {
+            order_event o(ts, sym, order_type::limit,
+                          (k % 2 == 0) ? order_side::buy : order_side::sell,
+                          2.0, 100.0);
+            o.set_order_id(++id);
+            ledger.register_order(o);
+            ledger.set_status(o.get_order_id(), order_status::open);
+        }
+    }
+
+    const auto mark_for = [&](const std::string& sym) -> mark_point {
+        auto it = marks.find(sym);
+        return (it != marks.end()) ? it->second : mark_point{};
+    };
+
+    risk_snapshot snap;
+    for (auto _ : state)
+    {
+        truetest::risk::build_risk_view(snap, names.front(), port, ledger,
+                                        ts, /*max_mark_age_ms=*/1'000, mark_for);
+        benchmark::DoNotOptimize(snap.portfolio.gross_exposure);
+        benchmark::ClobberMemory();
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+BENCHMARK(BM_RiskView_Build)->Arg(1)->Arg(4)->Arg(16)->Unit(benchmark::kNanosecond);
 
 BENCHMARK_MAIN();
