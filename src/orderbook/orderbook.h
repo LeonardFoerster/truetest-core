@@ -106,6 +106,9 @@ struct order_node
     // levels but not ownership. Snapshot/update replacement may remove only
     // external nodes; local GTC bodies must remain cancellable/fillable.
     bool external_l2 = false;
+    // Synthetic counterparty depth is matchable in simulations, but it is not
+    // observed venue liquidity and must not feed an external market signal.
+    bool synthetic_liquidity = false;
 };
 
 struct price_level
@@ -138,6 +141,23 @@ struct price_level
     }
 };
 
+// Top of book derived solely from externally supplied L2 nodes. Local
+// resting orders can share a price level but are deliberately excluded from
+// both prices and quantities so signal consumers cannot self-reference.
+struct external_bbo
+{
+    Price bid_price{};
+    quantity bid_quantity = 0;
+    Price ask_price{};
+    quantity ask_quantity = 0;
+
+    [[nodiscard]] bool valid() const noexcept
+    {
+        return bid_price.raw() > 0 && ask_price.raw() > bid_price.raw()
+            && bid_quantity > 0 && ask_quantity > 0;
+    }
+};
+
 class orderbook
 {
 public:
@@ -154,6 +174,7 @@ public:
     // external ownership so local takers can never self-match against other
     // strategy orders sharing this book.
     trades add_external_order(order_pointer order);
+    trades add_synthetic_order(order_pointer order);
     // Match one incoming local taker solely against external depth. A GTC
     // remainder rests locally; IOC/FOK remainders never enter the book.
     trades add_order_against_external(order_pointer order);
@@ -176,6 +197,7 @@ public:
     }
     double best_external_bid_price() const noexcept;
     double best_external_ask_price() const noexcept;
+    [[nodiscard]] external_bbo best_external_bbo() const noexcept;
     double external_vwap(side taker_side, quantity requested) const noexcept;
 
     void apply_l2_snapshot(const std::pair<Price, quantity>* bids, std::size_t bid_count,
@@ -215,6 +237,9 @@ private:
     void clear_external_l2_at(std::vector<price_level>& levels, Price price);
 
     bool can_match(side side, Price price) const;
-    trades add_order_impl(order_pointer order, bool external_l2);
+    static std::pair<Price, quantity> best_external_level(
+        const std::vector<price_level>& levels) noexcept;
+    trades add_order_impl(order_pointer order, bool external_l2,
+                          bool synthetic_liquidity = false);
     trades match_orders();
 };

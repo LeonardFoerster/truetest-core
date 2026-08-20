@@ -249,7 +249,8 @@ trades orderbook::match_orders()
     return result;
 }
 
-trades orderbook::add_order_impl(order_pointer order, bool external_l2)
+trades orderbook::add_order_impl(order_pointer order, bool external_l2,
+                                 bool synthetic_liquidity)
 {
     if (order_map_.count(order->get_order_id()))
         return {};
@@ -282,6 +283,7 @@ trades orderbook::add_order_impl(order_pointer order, bool external_l2)
     order_node* n = alloc_node();
     n->order = order;
     n->external_l2 = external_l2;
+    n->synthetic_liquidity = synthetic_liquidity;
 
     auto& levels = (order->get_side() == side::buy) ? bid_levels_ : ask_levels_;
     auto& lvl = find_or_insert_level(levels, order->get_price(), order->get_side());
@@ -300,6 +302,11 @@ trades orderbook::add_order(order_pointer order)
 trades orderbook::add_external_order(order_pointer order)
 {
     return add_order_impl(std::move(order), true);
+}
+
+trades orderbook::add_synthetic_order(order_pointer order)
+{
+    return add_order_impl(std::move(order), true, true);
 }
 
 trades orderbook::add_order_against_external(order_pointer incoming)
@@ -489,7 +496,7 @@ double best_external_price(const std::vector<price_level>& levels) noexcept
     for (const auto& level : levels)
     {
         for (auto* node = level.head; node; node = node->next)
-            if (node->external_l2)
+            if (node->external_l2 && !node->synthetic_liquidity)
                 return level.price.to_double();
     }
     return 0.0;
@@ -506,6 +513,36 @@ double orderbook::best_external_ask_price() const noexcept
     return best_external_price(ask_levels_);
 }
 
+std::pair<Price, quantity> orderbook::best_external_level(
+    const std::vector<price_level>& levels) noexcept
+{
+    for (const auto& level : levels)
+    {
+        quantity total = 0;
+        bool has_external = false;
+        for (auto* node = level.head; node; node = node->next)
+        {
+            if (!node->external_l2 || node->synthetic_liquidity)
+                continue;
+            const quantity remaining = node->order->get_remaining_quantity();
+            if (std::numeric_limits<quantity>::max() - total < remaining)
+                return {level.price, std::numeric_limits<quantity>::max()};
+            total += remaining;
+            has_external = true;
+        }
+        if (has_external && total > 0)
+            return {level.price, total};
+    }
+    return {};
+}
+
+external_bbo orderbook::best_external_bbo() const noexcept
+{
+    const auto [bid_price, bid_quantity] = best_external_level(bid_levels_);
+    const auto [ask_price, ask_quantity] = best_external_level(ask_levels_);
+    return {bid_price, bid_quantity, ask_price, ask_quantity};
+}
+
 double orderbook::external_vwap(side taker_side,
                                 quantity requested) const noexcept
 {
@@ -520,7 +557,7 @@ double orderbook::external_vwap(side taker_side,
         for (auto* node = level.head; node && remaining > 0;
              node = node->next)
         {
-            if (!node->external_l2)
+            if (!node->external_l2 || node->synthetic_liquidity)
                 continue;
             const quantity take = std::min(
                 remaining, node->order->get_remaining_quantity());
@@ -577,6 +614,7 @@ void orderbook::apply_l2_snapshot(const std::pair<Price, quantity>* bids,
         order_node* n = alloc_node();
         n->order = o;
         n->external_l2 = true;
+        n->synthetic_liquidity = false;
         auto& lvl = find_or_insert_level(bid_levels_, p, side::buy);
         lvl.append(n);
         order_map_[o->get_order_id()] = n;
@@ -591,6 +629,7 @@ void orderbook::apply_l2_snapshot(const std::pair<Price, quantity>* bids,
         order_node* n = alloc_node();
         n->order = o;
         n->external_l2 = true;
+        n->synthetic_liquidity = false;
         auto& lvl = find_or_insert_level(ask_levels_, p, side::sell);
         lvl.append(n);
         order_map_[o->get_order_id()] = n;
@@ -609,6 +648,7 @@ void orderbook::apply_l2_update(side side, Price price, quantity new_qty)
         order_node* n = alloc_node();
         n->order = o;
         n->external_l2 = true;
+        n->synthetic_liquidity = false;
         auto& lvl = find_or_insert_level(levels, price, side);
         lvl.append(n);
         order_map_[o->get_order_id()] = n;
@@ -626,7 +666,7 @@ void orderbook::clear_external_l2_at(std::vector<price_level>& levels,
         while (node)
         {
             auto* next = node->next;
-            if (node->external_l2)
+            if (node->external_l2 && !node->synthetic_liquidity)
             {
                 const auto id = node->order->get_order_id();
                 level_it->remove(node);
@@ -650,7 +690,7 @@ void orderbook::clear_external_l2()
             while (node)
             {
                 auto* next = node->next;
-                if (node->external_l2)
+                if (node->external_l2 && !node->synthetic_liquidity)
                 {
                     const auto id = node->order->get_order_id();
                     level_it->remove(node);
