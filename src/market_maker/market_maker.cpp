@@ -39,8 +39,8 @@ void MarketMaker::add_orders(std::shared_ptr<orderbook> ob, double current_price
             Price::from_double(sell_price),
             static_cast<quantity>(std::round(100 * quantity_scale_)));
 
-        ob->add_external_order(buy_order);
-        ob->add_external_order(sell_order);
+        ob->add_synthetic_order(buy_order);
+        ob->add_synthetic_order(sell_order);
     }
 }
 
@@ -130,7 +130,7 @@ trades MarketMaker::replenish(std::shared_ptr<orderbook> ob, double current_pric
             ob_order_type::good_till_cancel, id,
             ob_side, p,
             static_cast<quantity>(std::round(mo.quantity * quantity_scale_)));
-        auto trs = ob->add_external_order(ob_order);
+        auto trs = ob->add_synthetic_order(ob_order);
         crossings.insert(crossings.end(), trs.begin(), trs.end());
         live.push_back(id);
     }

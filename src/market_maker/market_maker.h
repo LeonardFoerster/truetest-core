@@ -12,6 +12,15 @@
 #include <unordered_map>
 #include <vector>
 
+// SCOPE BOUNDARY (R1/A02): this file is a *simulation* component. It seeds
+// synthetic counterparty liquidity into a backtest orderbook so bar-mode
+// replay has something to fill against. It is not a trading strategy, carries
+// no inventory state, and its ladder is not a quote decision.
+//
+// The inventory-aware market-making *strategy* lives in
+// src/strategy/market_making/ and never includes this header (enforced by
+// scripts/check-layer-deps.sh, check C). Keep the two apart: merging them
+// would let simulation furniture decide real quotes.
 struct mm_order
 {
     order_side side;
