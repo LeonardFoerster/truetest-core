@@ -57,6 +57,7 @@ struct trade_record
 struct open_position_report
 {
     std::string symbol;
+    std::string strategy_name;
     double quantity = 0.0;      // signed: >0 long, <0 short
     double avg_entry = 0.0;
     double mark = 0.0;
@@ -175,7 +176,7 @@ public:
     // heavy work (equity curve, return stats, benchmark) the worker does.
     void on_mark(const std::string& symbol, double price)
     {
-        open_positions_[symbol].last_price = price;
+        set_symbol_price(symbol, price);
         last_close_ = price;
         update_risk_equity(cash_ + position_value());
     }
@@ -320,25 +321,70 @@ private:
     double initial_cash_;
     double cash_;
 
-    // Per-symbol open-position state. A single global position would net
-    // unrelated instruments against each other and mark them at the wrong
-    // price in multi-symbol runs.
+    struct strategy_symbol_key
+    {
+        std::string strategy;
+        std::string symbol;
+
+        bool operator==(const strategy_symbol_key& other) const noexcept
+        {
+            return strategy == other.strategy && symbol == other.symbol;
+        }
+    };
+
+    struct strategy_symbol_key_hash
+    {
+        std::size_t operator()(const strategy_symbol_key& k) const noexcept
+        {
+            std::size_t h1 = std::hash<std::string>{}(k.strategy);
+            std::size_t h2 = std::hash<std::string>{}(k.symbol);
+            return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+        }
+    };
+
+    // Per-(strategy, symbol) open-position state. Isolates multi-strategy
+    // positions on the same instrument and avoids accidental netting or
+    // misattributed PnL between different strategies.
     struct open_position
     {
+        std::string symbol;
+        std::string strategy_name;
         double qty = 0.0;
         double avg_entry = 0.0;
         double open_commission = 0.0;
         double last_price = 0.0;   // last seen close/tick/fill price for this symbol
         std::chrono::system_clock::time_point entry_time{};
     };
-    std::unordered_map<std::string, open_position> open_positions_;
+    std::unordered_map<strategy_symbol_key, open_position, strategy_symbol_key_hash> open_positions_;
+    std::unordered_map<std::string, double> symbol_last_prices_;
 
-    // Sum of qty * last_price across symbols (mark-to-market value).
+    void set_symbol_price(const std::string& symbol, double price)
+    {
+        symbol_last_prices_[symbol] = price;
+        for (auto& [k, pos] : open_positions_)
+        {
+            if (k.symbol == symbol)
+                pos.last_price = price;
+        }
+    }
+
+    // Sum of qty * last_price across open strategy positions (mark-to-market value).
     double position_value() const
     {
         double v = 0.0;
         for (const auto& [_, p] : open_positions_)
-            if (std::abs(p.qty) > 1e-12) v += p.qty * p.last_price;
+        {
+            if (std::abs(p.qty) > 1e-12)
+            {
+                double px = p.last_price;
+                if (!(px > 0.0))
+                {
+                    auto it = symbol_last_prices_.find(p.symbol);
+                    if (it != symbol_last_prices_.end()) px = it->second;
+                }
+                v += p.qty * px;
+            }
+        }
         return v;
     }
     bool any_position_open() const

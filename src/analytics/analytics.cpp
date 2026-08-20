@@ -41,6 +41,7 @@ void Analytics::reset(double initial_cash)
     initial_cash_ = initial_cash;
     cash_ = initial_cash;
     open_positions_.clear();
+    symbol_last_prices_.clear();
 
     equity_stride_ = 1;
     equity_counter_ = 0;
@@ -183,13 +184,13 @@ void Analytics::on_funding(const funding_event& fe)
     // Linear scan over the (few) tracked symbols rather than constructing a
     // std::string key from the event's fixed-capacity symbol buffer.
     const std::string_view funding_symbol = fe.get_symbol();
-    for (const auto& [symbol, pos] : open_positions_)
+    for (const auto& [k, pos] : open_positions_)
     {
-        if (symbol != funding_symbol)
+        if (pos.symbol != funding_symbol)
             continue;
         const double notional = pos.qty * pos.last_price;
         if (!std::isfinite(notional) || std::abs(notional) <= 1e-9)
-            break;
+            continue;
         const double rate = -fe.get_cash_delta() / notional;
         if (std::isfinite(rate))
         {
@@ -228,7 +229,7 @@ void Analytics::on_market(const market_event& m)
         first_price_set_ = true;
     }
 
-    open_positions_[m.get_symbol()].last_price = m.get_close();
+    set_symbol_price(m.get_symbol(), m.get_close());
 
     market_events_total_++;
     if (any_position_open())
@@ -283,7 +284,7 @@ void Analytics::on_market(const market_event& m)
 void Analytics::on_tick(const tick_event& t)
 {
     last_close_ = t.get_price();
-    open_positions_[t.get_symbol()].last_price = t.get_price();
+    set_symbol_price(t.get_symbol(), t.get_price());
     update_risk_equity(cash_ + position_value());
 
     // Phase 2.3 - update vol from tick mid (price)
@@ -365,8 +366,12 @@ void Analytics::on_fill(const fill_event& f)
     const double side_sign = (f.get_side() == order_side::buy) ? +1.0 : -1.0;
     double qty_left = filled_qty;
 
-    auto& pos = open_positions_[f.get_symbol()];
+    strategy_symbol_key pos_key{*strat_name, f.get_symbol()};
+    auto& pos = open_positions_[pos_key];
+    pos.symbol = f.get_symbol();
+    pos.strategy_name = *strat_name;
     pos.last_price = fill_price;
+    symbol_last_prices_[f.get_symbol()] = fill_price;
 
     if (std::abs(pos.qty) > 1e-12 && pos.qty * side_sign < 0.0)
     {
@@ -610,11 +615,12 @@ AnalyticsReport Analytics::snapshot() const
     r.realized_pnl = total_win_ - total_loss_;
     r.unrealized_pnl = 0.0;
     r.open_positions.clear();
-    for (const auto& [sym, pos] : open_positions_)
+    for (const auto& [k, pos] : open_positions_)
     {
         if (std::abs(pos.qty) <= 1e-12) continue;
         open_position_report op;
-        op.symbol = sym;
+        op.symbol = pos.symbol;
+        op.strategy_name = pos.strategy_name;
         op.quantity = pos.qty;
         op.avg_entry = pos.avg_entry;
         op.mark = pos.last_price > 0.0 ? pos.last_price : pos.avg_entry;
