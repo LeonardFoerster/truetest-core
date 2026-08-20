@@ -217,4 +217,31 @@ if (( backref_violations > 0 )); then
     exit 1
 fi
 
+# --- Check C: strategy/market_making vs. market_maker separation (R1/A02) ---
+# src/market_maker/ seeds synthetic counterparty liquidity for bar-mode
+# simulation. src/strategy/market_making/ is a trading strategy that consumes
+# canonical market state plus authoritative inventory and emits quote intents.
+# Fusing the two would let a simulation artefact decide real quotes, so the
+# edge is denied in both directions.
+mm_split_violations=0
+while IFS= read -r -d '' file; do
+    if grep -qE '^[[:space:]]*#include[[:space:]]*"(\.\./)*market_maker/' "$file"; then
+        echo "FORBIDDEN: $file includes market_maker/ — the inventory-aware market-making strategy must not depend on the synthetic liquidity seeder (R1/A02)" >&2
+        mm_split_violations=$((mm_split_violations + 1))
+    fi
+done < <(find src/strategy/market_making -type f \( -name '*.h' -o -name '*.cpp' \) -print0 2>/dev/null)
+
+while IFS= read -r -d '' file; do
+    if grep -qE '^[[:space:]]*#include[[:space:]]*"(\.\./)*strategy/market_making/' "$file"; then
+        echo "FORBIDDEN: $file includes strategy/market_making/ — the synthetic liquidity seeder must not depend on the market-making strategy (R1/A02)" >&2
+        mm_split_violations=$((mm_split_violations + 1))
+    fi
+done < <(find src/market_maker -type f \( -name '*.h' -o -name '*.cpp' \) -print0 2>/dev/null)
+
+if (( mm_split_violations > 0 )); then
+    echo "" >&2
+    echo "$mm_split_violations market-maker/market-making separation violation(s) detected." >&2
+    exit 1
+fi
+
 echo "layer-deps: OK"
