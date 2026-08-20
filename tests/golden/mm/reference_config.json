@@ -1,0 +1,42 @@
+{
+  "strategy_id": "inventory_aware_mm_ref",
+  "levels": 1,
+  "fair_value": {
+    "microprice_weight": 0.5,
+    "imbalance_weight": 0.0,
+    "short_flow_weight": 0.0
+  },
+  "inventory": {
+    "hard_limit_base": "1.0",
+    "soft_limit_ratio": 0.5,
+    "reducing_bias_ratio": 0.8,
+    "reservation_skew_bps_at_hard_limit": 4.0,
+    "soft_limit_skew_boost": 0.0,
+    "size_skew_strength": 0.5,
+    "min_size_multiplier": 0.0,
+    "max_size_multiplier": 2.0,
+    "reducing_size_factor": 0.25
+  },
+  "spread": {
+    "min_half_spread_bps": 6.0,
+    "max_half_spread_bps": 50.0,
+    "fee_buffer_bps": 0.5,
+    "maker_fee_multiplier": 1.0,
+    "volatility_multiplier": 1.0,
+    "toxicity_multiplier": 1.0,
+    "latency_buffer_bps": 0.0,
+    "latency_multiplier": 1.0
+  },
+  "quotes": {
+    "base_size": "0.10",
+    "level_spacing_bps": 2.0,
+    "post_only": true,
+    "minimum_refresh_ticks": 0,
+    "minimum_quote_lifetime_ms": 0
+  },
+  "safety": {
+    "max_market_data_age_ms": 250,
+    "pause_on_sequence_gap": true,
+    "require_authoritative_inventory": true
+  }
+}

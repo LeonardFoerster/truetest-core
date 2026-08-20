@@ -1,12 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include "strategy/sma_strategy.h"
-#include "strategy/mean_reversion_strategy.h"
-#include "strategy/ma_crossover_strategy.h"
-#include "strategy/breakout_strategy.h"
-#include "strategy/larry_connor_strategy.h"
-#include "strategy/structure_continuation_strategy.h"
+#include "strategy/sma/sma_strategy.h"
+#include "strategy/mean_reversion/mean_reversion_strategy.h"
+#include "strategy/ma_crossover/ma_crossover_strategy.h"
+#include "strategy/breakout/breakout_strategy.h"
+#include "strategy/larry_connor/larry_connor_strategy.h"
+#include "strategy/structure_continuation/structure_continuation_strategy.h"
 #include "strategy/strategy_interface.h"
 #include "strategy/strategy_registry.h"
 #include "strategy/strategy_factory.h"

@@ -2,6 +2,7 @@
 #include "execution/queue_position_model.h"
 
 #include <chrono>
+#include <limits>
 
 using tp = std::chrono::system_clock::time_point;
 using ms = std::chrono::milliseconds;
@@ -14,7 +15,7 @@ static tp at(int64_t ms_since_epoch)
 TEST(L2SnapshotQueueModel, ReturnsLevelSizeAtOurPrice)
 {
     L2SnapshotQueueModel m;
-    m.on_snapshot("BTC", {{100.0, 5.0}, {99.5, 10.0}}, {{100.5, 3.0}, {101.0, 8.0}});
+    m.on_snapshot_at("BTC", {{100.0, 5.0}, {99.5, 10.0}}, {{100.5, 3.0}, {101.0, 8.0}}, at(0));
     EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy,  100.0, at(0)), 5.0);
     EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy,  99.5,  at(0)), 10.0);
     EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::sell, 100.5, at(0)), 3.0);
@@ -26,7 +27,7 @@ TEST(L2SnapshotQueueModel, ReturnsLevelSizeAtOurPrice)
 TEST(L2SnapshotQueueModel, NoLevelMeansZeroQueue)
 {
     L2SnapshotQueueModel m;
-    m.on_snapshot("BTC", {{100.0, 5.0}}, {{100.5, 3.0}});
+    m.on_snapshot_at("BTC", {{100.0, 5.0}}, {{100.5, 3.0}}, at(0));
     EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy,  100.5, at(0)), 0.0);
     EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy,  99.0,  at(0)), 0.0);
     EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::sell, 100.0, at(0)), 0.0);
@@ -37,32 +38,27 @@ TEST(L2SnapshotQueueModel, NoLevelMeansZeroQueue)
 TEST(L2SnapshotQueueModel, UpdateOverwritesAndRemoves)
 {
     L2SnapshotQueueModel m;
-    m.on_snapshot("BTC", {{100.0, 5.0}}, {});
+    m.on_snapshot_at("BTC", {{100.0, 5.0}}, {}, at(0));
 
-    m.on_update("BTC", order_side::buy, 100.0, 2.0);
-    EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy, 100.0, at(0)), 2.0);
+    m.on_update_at("BTC", order_side::buy, 100.0, 2.0, at(1));
+    EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy, 100.0, at(1)), 2.0);
 
-    m.on_update("BTC", order_side::buy, 100.0, 0.0);
-    EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy, 100.0, at(0)), 0.0);
+    m.on_update_at("BTC", order_side::buy, 100.0, 0.0, at(2));
+    EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy, 100.0, at(2)), 0.0);
 }
 
-// Stale snapshots (> max_staleness) refuse to estimate. Returning 0
-// degrades to legacy behaviour rather than feeding the adapter a stale
-// queue number that would silently bias fills.
-TEST(L2SnapshotQueueModel, StaleSnapshotReturnsZero)
+// Stale snapshots refuse to estimate. +inf blocks passive fills rather than
+// degrading into an optimistic legacy fill-on-cross path.
+TEST(L2SnapshotQueueModel, StaleSnapshotBlocksQueueEstimate)
 {
     L2SnapshotQueueModel m(ms(500));
 
-    // Snapshot at t=0 (epoch) - system_clock::now() in on_snapshot is
-    // wall-clock, not the test's at(...) value. Submit ts also has to
-    // be wall-clock to compare against. Use real clock to seed.
-    const auto t0 = std::chrono::system_clock::now();
-    m.on_snapshot("BTC", {{100.0, 5.0}}, {});
-    EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy, 100.0, t0), 5.0);
+    m.on_snapshot_at("BTC", {{100.0, 5.0}}, {}, at(0));
+    EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy, 100.0, at(0)), 5.0);
 
     // Submit ts 2s ahead - way past 500ms staleness.
-    EXPECT_DOUBLE_EQ(m.queue_ahead("BTC", order_side::buy, 100.0,
-                                   t0 + std::chrono::seconds(2)), 0.0);
+    EXPECT_EQ(m.queue_ahead("BTC", order_side::buy, 100.0,
+                            at(2000)), std::numeric_limits<double>::infinity());
 }
 
 TEST(NoQueueModel, AlwaysZero)

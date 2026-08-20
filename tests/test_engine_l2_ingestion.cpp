@@ -83,6 +83,57 @@ TEST(EngineL2Ingestion, UpdateRemovesLevelAtZeroQty)
     EXPECT_FALSE(found_bid_at_42000);
 }
 
+TEST(EngineL2Ingestion, SequencedDeltaBatchCommitsAllMutationsAtomically)
+{
+    auto dh = std::make_shared<data_handler>();
+    auto strat = std::make_shared<NullStrategy>();
+    engine eng(dh, std::make_shared<orderbook>(), strat, engine_config{});
+    const auto t0 = std::chrono::system_clock::time_point(std::chrono::milliseconds(1));
+    eng.apply_l2_snapshot("BTCUSDT", {{100.0, 10}}, {{101.0, 10}}, t0, 1, 100);
+
+    provider::l2_delta_batch batch;
+    batch.timestamp = t0 + std::chrono::milliseconds(1);
+    batch.symbol = "BTCUSDT";
+    batch.first_update_id = 101;
+    batch.final_update_id = 101;
+    batch.quantity_scale = 1;
+    batch.updates = {
+        {batch.timestamp, batch.symbol, 0, 100.0, 0, 1},
+        {batch.timestamp, batch.symbol, 1, 101.0, 0, 1},
+        {batch.timestamp, batch.symbol, 1, 102.0, 20, 1},
+    };
+    eng.apply_l2_delta_batch(batch);
+
+    EXPECT_FALSE(eng.is_halted());
+    const auto book = eng.get_orderbook_registry().get("BTCUSDT");
+    ASSERT_NE(book, nullptr);
+    EXPECT_DOUBLE_EQ(book->best_external_bid_price(), 0.0);
+    EXPECT_DOUBLE_EQ(book->best_external_ask_price(), 102.0);
+}
+
+TEST(EngineL2Ingestion, SequencedDeltaGapHaltsBeforeBookMutation)
+{
+    auto dh = std::make_shared<data_handler>();
+    auto strat = std::make_shared<NullStrategy>();
+    engine eng(dh, std::make_shared<orderbook>(), strat, engine_config{});
+    const auto t0 = std::chrono::system_clock::time_point(std::chrono::milliseconds(1));
+    eng.apply_l2_snapshot("BTCUSDT", {{100.0, 10}}, {{101.0, 10}}, t0, 1, 100);
+
+    provider::l2_delta_batch gap;
+    gap.timestamp = t0 + std::chrono::milliseconds(1);
+    gap.symbol = "BTCUSDT";
+    gap.first_update_id = 102;
+    gap.final_update_id = 102;
+    gap.quantity_scale = 1;
+    gap.updates = {{gap.timestamp, gap.symbol, 0, 99.0, 50, 1}};
+    eng.apply_l2_delta_batch(gap);
+
+    EXPECT_TRUE(eng.is_halted());
+    const auto book = eng.get_orderbook_registry().get("BTCUSDT");
+    ASSERT_NE(book, nullptr);
+    EXPECT_DOUBLE_EQ(book->best_external_bid_price(), 100.0);
+}
+
 TEST(EngineL2Ingestion, InvalidSnapshotHaltsWithoutMutatingExistingBook)
 {
     auto dh = std::make_shared<data_handler>();

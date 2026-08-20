@@ -411,3 +411,24 @@ TEST(Portfolio, MultiSymbol_CashTracking)
     p.on_fill(buy_b);
     EXPECT_DOUBLE_EQ(p.get_cash(), initial_cash - 1000.0 - 1000.0);
 }
+
+TEST(Portfolio, StrategyPositionQtyIsolation)
+{
+    portfolio p;
+    auto ts = now();
+    // Strategy A opens 10 BTC long (order_id 101)
+    fill_event f_a(ts, "BTC", 101, order_side::buy, 10.0, 50000.0, 0.0);
+    p.on_fill(f_a, 101, "strat_a");
+
+    // Strategy B opens 3 BTC short (order_id 201)
+    fill_event f_b(ts, "BTC", 201, order_side::sell, 3.0, 50000.0, 0.0);
+    p.on_fill(f_b, 201, "strat_b");
+
+    // Total netted position is +7.0
+    EXPECT_DOUBLE_EQ(p.get_positions().at("BTC").qty, 7.0);
+
+    // Strategy-scoped positions are strictly isolated:
+    EXPECT_DOUBLE_EQ(p.get_strategy_position_qty("strat_a", "BTC"), 10.0);
+    EXPECT_DOUBLE_EQ(p.get_strategy_position_qty("strat_b", "BTC"), -3.0);
+    EXPECT_DOUBLE_EQ(p.get_strategy_position_qty("strat_c", "BTC"), 0.0);
+}

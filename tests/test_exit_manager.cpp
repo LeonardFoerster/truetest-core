@@ -731,3 +731,26 @@ TEST(ExitManager, OpenersFor_TracksPendingAndArmed)
     ASSERT_FALSE(r.empty());
     EXPECT_EQ(m.openers_for("s", "X"), 1u);
 }
+
+TEST(ExitManager, PartialSignalCloserPreservesRemainingBracket)
+{
+    ExitManager m;
+    // Opener: buy 10 units at 100 with SL 90 and TP 120
+    m.register_pending(make_long_intent("s", "X", 100, 90.0, 120.0));
+    m.on_fill(make_opener_fill(100, "X", order_side::buy, 10.0, 100.0));
+    EXPECT_EQ(m.openers_for("s", "X"), 1u);
+
+    // Strategy sends a manual partial closer for 3 units (order 200, referencing opener 100)
+    fill_event partial_close(t0, "X", 200, order_side::sell, 3.0, 105.0, 0.0);
+    m.on_fill(partial_close, 100);
+
+    // Bracket for opener 100 must still be armed and tracked for remaining 7 units!
+    EXPECT_EQ(m.openers_for("s", "X"), 1u);
+
+    // Now price drops to 89.0 -> triggers SL
+    auto triggered = m.on_price("X", 89.0, t0);
+    ASSERT_EQ(triggered.size(), 1u);
+    EXPECT_DOUBLE_EQ(triggered[0].get_quantity(), 7.0);
+    EXPECT_EQ(triggered[0].get_opener_order_id(), 100u);
+    EXPECT_EQ(m.openers_for("s", "X"), 0u);
+}

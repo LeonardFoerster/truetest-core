@@ -1,0 +1,372 @@
+{
+  "note": "Golden inputs for the inventory-aware market-making strategy (R1). Outputs live in expected.json and are produced by tests/reference/mm_strategy_reference.py, which shares no code with the C++ implementation.",
+  "cases": [
+    {
+      "name": "neutral_reference_book",
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "60000.00", "qty": "4.20" },
+        "best_ask": { "price": "60000.50", "qty": "1.40" },
+        "short_horizon_volatility_bps": 0.30,
+        "toxicity_risk_bps": 0.10,
+        "latency_risk_bps": 0.10,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000001"
+      },
+      "inventory": {
+        "signed_base_position": "0.00",
+        "worst_case_position_if_all_buys_fill": "0.00",
+        "worst_case_position_if_all_sells_fill": "0.00",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    },
+    {
+      "name": "long_inventory_030",
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "60000.00", "qty": "4.20" },
+        "best_ask": { "price": "60000.50", "qty": "1.40" },
+        "short_horizon_volatility_bps": 0.30,
+        "toxicity_risk_bps": 0.10,
+        "latency_risk_bps": 0.10,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000002"
+      },
+      "inventory": {
+        "signed_base_position": "0.30",
+        "worst_case_position_if_all_buys_fill": "0.34",
+        "worst_case_position_if_all_sells_fill": "0.26",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    },
+    {
+      "name": "short_inventory_030",
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "60000.00", "qty": "4.20" },
+        "best_ask": { "price": "60000.50", "qty": "1.40" },
+        "short_horizon_volatility_bps": 0.30,
+        "toxicity_risk_bps": 0.10,
+        "latency_risk_bps": 0.10,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000003"
+      },
+      "inventory": {
+        "signed_base_position": "-0.30",
+        "worst_case_position_if_all_buys_fill": "-0.26",
+        "worst_case_position_if_all_sells_fill": "-0.34",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    },
+    {
+      "name": "soft_band_long_060",
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "60000.00", "qty": "3.00" },
+        "best_ask": { "price": "60000.70", "qty": "1.00" },
+        "short_horizon_volatility_bps": 1.10,
+        "toxicity_risk_bps": 0.30,
+        "latency_risk_bps": 0.20,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000004"
+      },
+      "inventory": {
+        "signed_base_position": "0.60",
+        "worst_case_position_if_all_buys_fill": "0.60",
+        "worst_case_position_if_all_sells_fill": "0.60",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    },
+    {
+      "name": "reducing_band_short_085",
+      "config_overrides": { "inventory": { "soft_limit_skew_boost": 0.5 } },
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "59990.00", "qty": "1.30" },
+        "best_ask": { "price": "59991.30", "qty": "2.72" },
+        "short_horizon_volatility_bps": 2.30,
+        "toxicity_risk_bps": 0.70,
+        "latency_risk_bps": 0.30,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000005"
+      },
+      "inventory": {
+        "signed_base_position": "-0.853",
+        "worst_case_position_if_all_buys_fill": "-0.813",
+        "worst_case_position_if_all_sells_fill": "-0.893",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    },
+    {
+      "name": "long_hard_limit",
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "60000.00", "qty": "4.20" },
+        "best_ask": { "price": "60000.50", "qty": "1.37" },
+        "short_horizon_volatility_bps": 0.30,
+        "toxicity_risk_bps": 0.10,
+        "latency_risk_bps": 0.10,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000006"
+      },
+      "inventory": {
+        "signed_base_position": "1.00",
+        "worst_case_position_if_all_buys_fill": "1.00",
+        "worst_case_position_if_all_sells_fill": "0.91",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    },
+    {
+      "name": "pending_buys_close_the_bid",
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "60000.00", "qty": "4.20" },
+        "best_ask": { "price": "60000.50", "qty": "1.37" },
+        "short_horizon_volatility_bps": 0.30,
+        "toxicity_risk_bps": 0.10,
+        "latency_risk_bps": 0.10,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000007"
+      },
+      "inventory": {
+        "signed_base_position": "0.20",
+        "worst_case_position_if_all_buys_fill": "1.00",
+        "worst_case_position_if_all_sells_fill": "0.20",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    },
+    {
+      "name": "four_level_ladder",
+      "config_overrides": { "levels": 4, "quotes": { "level_spacing_bps": 3.0 } },
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "60000.00", "qty": "2.30" },
+        "best_ask": { "price": "60001.10", "qty": "1.73" },
+        "short_horizon_volatility_bps": 1.30,
+        "toxicity_risk_bps": 0.30,
+        "latency_risk_bps": 0.10,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000008"
+      },
+      "inventory": {
+        "signed_base_position": "0.10",
+        "worst_case_position_if_all_buys_fill": "0.10",
+        "worst_case_position_if_all_sells_fill": "0.10",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    },
+    {
+      "name": "high_volatility_wide_book",
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "59930.00", "qty": "0.70" },
+        "best_ask": { "price": "60070.30", "qty": "0.30" },
+        "short_horizon_volatility_bps": 23.70,
+        "toxicity_risk_bps": 4.30,
+        "latency_risk_bps": 1.30,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000009"
+      },
+      "inventory": {
+        "signed_base_position": "-0.13",
+        "worst_case_position_if_all_buys_fill": "-0.13",
+        "worst_case_position_if_all_sells_fill": "-0.13",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    },
+    {
+      "name": "coarse_tick_and_lot_grid",
+      "config_overrides": { "quotes": { "base_size": "0.37" } },
+      "market": {
+        "symbol": "ETHUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "3210.50", "qty": "12.30" },
+        "best_ask": { "price": "3211.00", "qty": "7.73" },
+        "short_horizon_volatility_bps": 1.70,
+        "toxicity_risk_bps": 0.90,
+        "latency_risk_bps": 0.30,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000010"
+      },
+      "inventory": {
+        "signed_base_position": "0.23",
+        "worst_case_position_if_all_buys_fill": "0.23",
+        "worst_case_position_if_all_sells_fill": "0.23",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "ETHUSDT",
+        "tick_size": "0.50",
+        "lot_size": "0.01",
+        "maker_fee_bps": 2.0
+      }
+    },
+    {
+      "name": "stale_feed_pauses",
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000900100000,
+        "best_bid": { "price": "60000.00", "qty": "4.20" },
+        "best_ask": { "price": "60000.50", "qty": "1.40" },
+        "short_horizon_volatility_bps": 0.30,
+        "toxicity_risk_bps": 0.10,
+        "latency_risk_bps": 0.10,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000011"
+      },
+      "inventory": {
+        "signed_base_position": "0.00",
+        "worst_case_position_if_all_buys_fill": "0.00",
+        "worst_case_position_if_all_sells_fill": "0.00",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    },
+    {
+      "name": "sequence_gap_pauses",
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "60000.00", "qty": "4.20" },
+        "best_ask": { "price": "60000.50", "qty": "1.40" },
+        "short_horizon_volatility_bps": 0.30,
+        "toxicity_risk_bps": 0.10,
+        "latency_risk_bps": 0.10,
+        "sequence_valid": false,
+        "snapshot_id": "snap-000012"
+      },
+      "inventory": {
+        "signed_base_position": "0.00",
+        "worst_case_position_if_all_buys_fill": "0.00",
+        "worst_case_position_if_all_sells_fill": "0.00",
+        "authoritative": true
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    },
+    {
+      "name": "unknown_inventory_pauses",
+      "market": {
+        "symbol": "BTCUSDT",
+        "event_time_ns": 1770000000000000000,
+        "receive_time_ns": 1770000000000100000,
+        "decision_time_ns": 1770000000000150000,
+        "best_bid": { "price": "60000.00", "qty": "4.20" },
+        "best_ask": { "price": "60000.50", "qty": "1.40" },
+        "short_horizon_volatility_bps": 0.30,
+        "toxicity_risk_bps": 0.10,
+        "latency_risk_bps": 0.10,
+        "sequence_valid": true,
+        "snapshot_id": "snap-000013"
+      },
+      "inventory": {
+        "signed_base_position": "0.00",
+        "worst_case_position_if_all_buys_fill": "0.00",
+        "worst_case_position_if_all_sells_fill": "0.00",
+        "authoritative": false
+      },
+      "instrument": {
+        "symbol": "BTCUSDT",
+        "tick_size": "0.10",
+        "lot_size": "0.0001",
+        "maker_fee_bps": 1.0
+      }
+    }
+  ]
+}

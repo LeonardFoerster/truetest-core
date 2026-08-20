@@ -54,6 +54,70 @@ TEST(Orderbook, L2UpdateAtSharedPriceReplacesOnlyExternalLiquidity)
     EXPECT_EQ(levels.get_bids().front().quantity_, 5u);
 }
 
+TEST(Orderbook, ExternalBboExcludesLocalOrdersAndOwnQuantity)
+{
+    orderbook ob;
+    ob.apply_l2_snapshot({{P(100.0), 100}}, {{P(101.0), 200}});
+
+    // Better local prices and additional same-level local quantity must not
+    // contaminate the external signal view.
+    auto local_bid = ob.create_order(ob_order_type::good_till_cancel, 9'000'010,
+                                     side::buy, P(100.5), 999);
+    auto local_ask = ob.create_order(ob_order_type::good_till_cancel, 9'000'011,
+                                     side::sell, P(101.0), 888);
+    auto synthetic_bid = ob.create_order(ob_order_type::good_till_cancel, 9'000'012,
+                                         side::buy, P(100.75), 777);
+    EXPECT_TRUE(ob.add_order(local_bid).empty());
+    EXPECT_TRUE(ob.add_order(local_ask).empty());
+    EXPECT_TRUE(ob.add_synthetic_order(synthetic_bid).empty());
+
+    const auto bbo = ob.best_external_bbo();
+    EXPECT_TRUE(bbo.valid());
+    EXPECT_EQ(bbo.bid_price, P(100.0));
+    EXPECT_EQ(bbo.bid_quantity, 100u);
+    EXPECT_EQ(bbo.ask_price, P(101.0));
+    EXPECT_EQ(bbo.ask_quantity, 200u);
+}
+
+TEST(Orderbook, ExternalViewsAndL2ReplacementExcludeAndPreserveSyntheticDepth)
+{
+    orderbook ob;
+    ob.apply_l2_snapshot({{P(100.0), 100}}, {{P(101.0), 100}});
+    auto synthetic_bid = ob.create_order(ob_order_type::good_till_cancel, 9'000'030,
+                                         side::buy, P(100.5), 50);
+    const auto synthetic_id = synthetic_bid->get_order_id();
+    EXPECT_TRUE(ob.add_synthetic_order(synthetic_bid).empty());
+
+    EXPECT_DOUBLE_EQ(ob.best_external_bid_price(), 100.0);
+    EXPECT_DOUBLE_EQ(ob.external_vwap(side::sell, 100), 100.0);
+
+    // A venue snapshot replaces observed L2 only; engine-owned synthetic
+    // liquidity remains independently tagged and therefore cannot vanish.
+    ob.apply_l2_snapshot({{P(99.0), 75}}, {{P(102.0), 75}});
+    EXPECT_NE(ob.get_order(synthetic_id), nullptr);
+    EXPECT_DOUBLE_EQ(ob.best_external_bid_price(), 99.0);
+    EXPECT_DOUBLE_EQ(ob.external_vwap(side::sell, 75), 99.0);
+}
+
+TEST(Orderbook, ExternalBboSkipsEmptyExternalBestLevel)
+{
+    orderbook ob;
+    auto empty = ob.create_order(ob_order_type::good_till_cancel, 9'000'020,
+                                 side::buy, P(101.0), 0);
+    auto populated = ob.create_order(ob_order_type::good_till_cancel, 9'000'021,
+                                     side::buy, P(100.0), 50);
+    auto ask = ob.create_order(ob_order_type::good_till_cancel, 9'000'022,
+                               side::sell, P(102.0), 60);
+    EXPECT_TRUE(ob.add_external_order(empty).empty());
+    EXPECT_TRUE(ob.add_external_order(populated).empty());
+    EXPECT_TRUE(ob.add_external_order(ask).empty());
+
+    const auto bbo = ob.best_external_bbo();
+    EXPECT_TRUE(bbo.valid());
+    EXPECT_EQ(bbo.bid_price, P(100.0));
+    EXPECT_EQ(bbo.bid_quantity, 50u);
+}
+
 TEST(Orderbook, AddOrder_SingleAsk)
 {
     orderbook ob;

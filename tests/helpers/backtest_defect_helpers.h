@@ -23,8 +23,8 @@
 #include "simulation/monte_carlo_controller.h"
 #include "simulation/monte_carlo_types.h"
 #include "simulation/generators/gbm_generator.h"
-#include "strategy/ma_crossover_strategy.h"
-#include "strategy/sma_strategy.h"
+#include "strategy/ma_crossover/ma_crossover_strategy.h"
+#include "strategy/sma/sma_strategy.h"
 #include "strategy/strategy_interface.h"
 #include "strategy/strategy_registry.h"
 

@@ -19,7 +19,7 @@
 #include "exits/default_exit_policy.h"
 #include "market_maker/market_maker.h"
 #include "orderbook/orderbook.h"
-#include "strategy/sma_strategy.h"
+#include "strategy/sma/sma_strategy.h"
 #include "strategy/strategy_interface.h"
 
 #include <chrono>
@@ -328,6 +328,45 @@ TEST(EngineConfig, RiskSoftPortfolioLimitsResolveByMode)
     EXPECT_FALSE(resolve_risk_soft_portfolio_limits(true, "backtest"));
     EXPECT_FALSE(resolve_risk_soft_portfolio_limits(true, "shadow"));
     EXPECT_FALSE(resolve_risk_soft_portfolio_limits(true, ""));
+
+    // Explicit override flags in backtest vs live/shadow
+    EXPECT_TRUE(resolve_risk_soft_portfolio_limits(false, "backtest", true));
+    EXPECT_FALSE(resolve_risk_soft_portfolio_limits(false, "backtest", false));
+    EXPECT_FALSE(resolve_risk_soft_portfolio_limits(false, "live", true)); // live mode always fails closed
+    EXPECT_FALSE(resolve_risk_soft_portfolio_limits(false, "shadow", true)); // shadow mode always fails closed
+}
+
+// Daily loss breach in backtest mode must not halt the engine event loop.
+TEST(EngineIntegration, RiskDailyLossSoftContinuesRun)
+{
+    silence_cout quiet;
+
+    auto dh = make_declining_bars(500);
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<relentless_buyer>(50.0);
+
+    MarketMaker mm(3);
+    mm.add_orders(ob, 100.0, 500);
+
+    engine_config cfg;
+    cfg.initial_balance = 10000.0;
+    cfg.seed            = 3;
+    cfg.threading       = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.risk_soft_portfolio_limits = true;
+    cfg.exit_defaults.mode   = truetest::exits::exit_policy_mode::strategy_only;
+    cfg.exit_defaults.sl_pct = 0.0;
+    cfg.exit_defaults.tp_pct = 0.0;
+    cfg.risk.max_daily_loss     = 50.0; // tight $50 daily loss limit
+    cfg.risk.max_loss_per_trade = 1e9;
+    cfg.risk.max_drawdown       = 1.0;
+
+    engine eng(dh, ob, strat, std::move(cfg));
+    eng.run();
+
+    EXPECT_EQ(strat->calls(), 500);
+    EXPECT_FALSE(eng.get_halt_flag().load(std::memory_order_acquire));
+    EXPECT_GT(eng.total_audit_rejections(), 0u);
 }
 
 // soft-post-mode-gate: even if risk_soft_portfolio_limits is left true,

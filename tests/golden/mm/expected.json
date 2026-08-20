@@ -1,0 +1,394 @@
+{
+  "cases": [
+    {
+      "ask_size": "0.10000000",
+      "bid_size": "0.10000000",
+      "fair_value": "60000.3125",
+      "inventory_utilization": 0.0,
+      "market_age_ns": 50000,
+      "market_snapshot_id": 1,
+      "microprice": "60000.3750",
+      "mid": "60000.2500",
+      "name": "neutral_reference_book",
+      "quotes": [
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "59964.3000",
+          "quantity": "0.10000000",
+          "side": "BUY"
+        },
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "60036.4000",
+          "quantity": "0.10000000",
+          "side": "SELL"
+        }
+      ],
+      "reason_codes": [
+        "NORMAL"
+      ],
+      "reservation_price": "60000.3125",
+      "state": "ACTIVE",
+      "target_half_spread_bps": 6.0
+    },
+    {
+      "ask_size": "0.11500000",
+      "bid_size": "0.08500000",
+      "fair_value": "60000.3125",
+      "inventory_utilization": 0.3,
+      "market_age_ns": 50000,
+      "market_snapshot_id": 2,
+      "microprice": "60000.3750",
+      "mid": "60000.2500",
+      "name": "long_inventory_030",
+      "quotes": [
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "59957.1000",
+          "quantity": "0.08500000",
+          "side": "BUY"
+        },
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "60029.2000",
+          "quantity": "0.11500000",
+          "side": "SELL"
+        }
+      ],
+      "reason_codes": [
+        "NORMAL"
+      ],
+      "reservation_price": "59993.1125",
+      "state": "ACTIVE",
+      "target_half_spread_bps": 6.0
+    },
+    {
+      "ask_size": "0.08500000",
+      "bid_size": "0.11500000",
+      "fair_value": "60000.3125",
+      "inventory_utilization": -0.3,
+      "market_age_ns": 50000,
+      "market_snapshot_id": 3,
+      "microprice": "60000.3750",
+      "mid": "60000.2500",
+      "name": "short_inventory_030",
+      "quotes": [
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "59971.5000",
+          "quantity": "0.11500000",
+          "side": "BUY"
+        },
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "60043.6000",
+          "quantity": "0.08500000",
+          "side": "SELL"
+        }
+      ],
+      "reason_codes": [
+        "NORMAL"
+      ],
+      "reservation_price": "60007.5125",
+      "state": "ACTIVE",
+      "target_half_spread_bps": 6.0
+    },
+    {
+      "ask_size": "0.13000000",
+      "bid_size": "0.07000000",
+      "fair_value": "60000.4375",
+      "inventory_utilization": 0.6,
+      "market_age_ns": 50000,
+      "market_snapshot_id": 4,
+      "microprice": "60000.5250",
+      "mid": "60000.3500",
+      "name": "soft_band_long_060",
+      "quotes": [
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "59950.0000",
+          "quantity": "0.07000000",
+          "side": "BUY"
+        },
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "60022.1000",
+          "quantity": "0.13000000",
+          "side": "SELL"
+        }
+      ],
+      "reason_codes": [
+        "INVENTORY_SOFT_LIMIT"
+      ],
+      "reservation_price": "59986.0374",
+      "state": "ACTIVE",
+      "target_half_spread_bps": 6.0
+    },
+    {
+      "ask_size": "0.01430000",
+      "bid_size": "0.14260000",
+      "fair_value": "59990.5352",
+      "inventory_utilization": -0.853,
+      "market_age_ns": 50000,
+      "market_snapshot_id": 5,
+      "microprice": "59990.4204",
+      "mid": "59990.6500",
+      "name": "reducing_band_short_085",
+      "quotes": [
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "59982.2000",
+          "quantity": "0.14260000",
+          "side": "BUY"
+        },
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "60054.3000",
+          "quantity": "0.01430000",
+          "side": "SELL"
+        }
+      ],
+      "reason_codes": [
+        "INVENTORY_REDUCING_BIAS"
+      ],
+      "reservation_price": "60018.2294",
+      "state": "ACTIVE",
+      "target_half_spread_bps": 6.0
+    },
+    {
+      "ask_size": "0.15000000",
+      "bid_size": "0.00000000",
+      "fair_value": "60000.3135",
+      "inventory_utilization": 1.0,
+      "market_age_ns": 50000,
+      "market_snapshot_id": 6,
+      "microprice": "60000.3770",
+      "mid": "60000.2500",
+      "name": "long_hard_limit",
+      "quotes": [
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "60012.3000",
+          "quantity": "0.15000000",
+          "side": "SELL"
+        }
+      ],
+      "reason_codes": [
+        "INVENTORY_HARD_LIMIT"
+      ],
+      "reservation_price": "59976.3134",
+      "state": "REDUCING_ONLY",
+      "target_half_spread_bps": 6.0
+    },
+    {
+      "ask_size": "0.11000000",
+      "bid_size": "0.00000000",
+      "fair_value": "60000.3135",
+      "inventory_utilization": 0.2,
+      "market_age_ns": 50000,
+      "market_snapshot_id": 7,
+      "microprice": "60000.3770",
+      "mid": "60000.2500",
+      "name": "pending_buys_close_the_bid",
+      "quotes": [
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "60031.6000",
+          "quantity": "0.11000000",
+          "side": "SELL"
+        }
+      ],
+      "reason_codes": [
+        "INVENTORY_HARD_LIMIT"
+      ],
+      "reservation_price": "59995.5135",
+      "state": "REDUCING_ONLY",
+      "target_half_spread_bps": 6.0
+    },
+    {
+      "ask_size": "0.10500000",
+      "bid_size": "0.09500000",
+      "fair_value": "60000.5889",
+      "inventory_utilization": 0.1,
+      "market_age_ns": 50000,
+      "market_snapshot_id": 8,
+      "microprice": "60000.6278",
+      "mid": "60000.5500",
+      "name": "four_level_ladder",
+      "quotes": [
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "59962.1000",
+          "quantity": "0.09500000",
+          "side": "BUY"
+        },
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "60034.2000",
+          "quantity": "0.10500000",
+          "side": "SELL"
+        },
+        {
+          "level": 1,
+          "post_only": true,
+          "price": "59944.1000",
+          "quantity": "0.09500000",
+          "side": "BUY"
+        },
+        {
+          "level": 1,
+          "post_only": true,
+          "price": "60052.2000",
+          "quantity": "0.10500000",
+          "side": "SELL"
+        },
+        {
+          "level": 2,
+          "post_only": true,
+          "price": "59926.1000",
+          "quantity": "0.09500000",
+          "side": "BUY"
+        },
+        {
+          "level": 2,
+          "post_only": true,
+          "price": "60070.2000",
+          "quantity": "0.10500000",
+          "side": "SELL"
+        },
+        {
+          "level": 3,
+          "post_only": true,
+          "price": "59908.1000",
+          "quantity": "0.09500000",
+          "side": "BUY"
+        },
+        {
+          "level": 3,
+          "post_only": true,
+          "price": "60088.2000",
+          "quantity": "0.10500000",
+          "side": "SELL"
+        }
+      ],
+      "reason_codes": [
+        "NORMAL"
+      ],
+      "reservation_price": "59998.1889",
+      "state": "ACTIVE",
+      "target_half_spread_bps": 6.0
+    },
+    {
+      "ask_size": "0.09350000",
+      "bid_size": "0.10650000",
+      "fair_value": "60014.1800",
+      "inventory_utilization": -0.13,
+      "market_age_ns": 50000,
+      "market_snapshot_id": 9,
+      "microprice": "60028.2100",
+      "mid": "60000.1500",
+      "name": "high_volatility_wide_book",
+      "quotes": [
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "59832.4000",
+          "quantity": "0.10650000",
+          "side": "BUY"
+        },
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "60202.2000",
+          "quantity": "0.09350000",
+          "side": "SELL"
+        }
+      ],
+      "reason_codes": [
+        "NORMAL"
+      ],
+      "reservation_price": "60017.3007",
+      "state": "ACTIVE",
+      "target_half_spread_bps": 30.8
+    },
+    {
+      "ask_size": "0.41000000",
+      "bid_size": "0.32000000",
+      "fair_value": "3210.7785",
+      "inventory_utilization": 0.23,
+      "market_age_ns": 50000,
+      "market_snapshot_id": 10,
+      "microprice": "3210.8070",
+      "mid": "3210.7500",
+      "name": "coarse_tick_and_lot_grid",
+      "quotes": [
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "3208.5000",
+          "quantity": "0.32000000",
+          "side": "BUY"
+        },
+        {
+          "level": 0,
+          "post_only": true,
+          "price": "3212.5000",
+          "quantity": "0.41000000",
+          "side": "SELL"
+        }
+      ],
+      "reason_codes": [
+        "NORMAL"
+      ],
+      "reservation_price": "3210.4831",
+      "state": "ACTIVE",
+      "target_half_spread_bps": 6.0
+    },
+    {
+      "market_age_ns": 900000000,
+      "market_snapshot_id": 11,
+      "name": "stale_feed_pauses",
+      "quotes": [],
+      "reason_codes": [
+        "STALE_MARKET_DATA"
+      ],
+      "state": "PAUSED"
+    },
+    {
+      "market_age_ns": 50000,
+      "market_snapshot_id": 12,
+      "name": "sequence_gap_pauses",
+      "quotes": [],
+      "reason_codes": [
+        "SEQUENCE_GAP"
+      ],
+      "state": "PAUSED"
+    },
+    {
+      "market_age_ns": 50000,
+      "market_snapshot_id": 13,
+      "name": "unknown_inventory_pauses",
+      "quotes": [],
+      "reason_codes": [
+        "UNKNOWN_INVENTORY"
+      ],
+      "state": "PAUSED"
+    }
+  ],
+  "generator": "tests/reference/mm_strategy_reference.py",
+  "note": "regenerate with --write after an intentional semantic change"
+}

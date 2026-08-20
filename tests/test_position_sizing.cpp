@@ -144,3 +144,20 @@ TEST(PositionSizing, DegenerateStopDoesNotInfiniteSize)
     ASSERT_LT(qty, 1e6);
     EXPECT_NEAR(estimate_stop_loss(in, qty), 200.0, 1e-6);
 }
+
+TEST(PositionSizing, MaxLossPerTradeCapClampsSize)
+{
+    risk_size_inputs in;
+    in.equity                 = 100000.0;
+    in.risk_fraction          = 0.05; // 5% = $5000 budget
+    in.entry_price            = 100.0;
+    in.stop_price             = 95.0; // 5% stop
+    in.is_long                = true;
+    in.max_loss_per_trade_cap = 1000.0; // Cap dollar loss at $1000
+
+    // Without cap: 5000 / 5 = 1000 units ($5000 risk)
+    // With cap: 1000 * 0.95 = 950 risk budget -> 950 / 5 = 190 units
+    const double qty = compute_risk_quantity(in);
+    EXPECT_NEAR(qty, 190.0, 1e-9);
+    EXPECT_NEAR(estimate_stop_loss(in, qty), 950.0, 1e-9);
+}

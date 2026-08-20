@@ -11,7 +11,7 @@
 #include "orderbook/orderbook.h"
 #include "orderbook/fill_model.h"
 #include "market_maker/market_maker.h"
-#include "strategy/ma_crossover_strategy.h"
+#include "strategy/ma_crossover/ma_crossover_strategy.h"
 #include "strategy/strategy_interface.h"
 
 #include <chrono>

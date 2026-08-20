@@ -33,7 +33,7 @@ TEST(TradeTapeShadowQueue, FillsOnlyAfterQueueDrains)
 {
     auto qm = std::make_shared<L2SnapshotQueueModel>(ms(60'000));
     const auto t0 = std::chrono::system_clock::now();
-    qm->on_snapshot("X", {{100.0, 5.0}}, {});
+    qm->on_snapshot_at("X", {{100.0, 5.0}}, {}, t0);
 
     TradeTapeShadowAdapter a;
     a.set_queue_model(qm);
@@ -65,7 +65,7 @@ TEST(TradeTapeShadowQueue, ImprovingBBOFillsImmediately)
 {
     auto qm = std::make_shared<L2SnapshotQueueModel>(ms(60'000));
     const auto t0 = std::chrono::system_clock::now();
-    qm->on_snapshot("X", {{100.0, 5.0}}, {});
+    qm->on_snapshot_at("X", {{100.0, 5.0}}, {}, t0);
 
     TradeTapeShadowAdapter a;
     a.set_queue_model(qm);
@@ -89,7 +89,7 @@ TEST(TradeTapeShadowQueue, QueueBlockedAtSessionEnd)
 {
     auto qm = std::make_shared<L2SnapshotQueueModel>(ms(60'000));
     const auto t0 = std::chrono::system_clock::now();
-    qm->on_snapshot("X", {{100.0, 100.0}}, {});  // huge queue ahead
+    qm->on_snapshot_at("X", {{100.0, 100.0}}, {}, t0);  // huge queue ahead
 
     TradeTapeShadowAdapter a;
     a.set_queue_model(qm);

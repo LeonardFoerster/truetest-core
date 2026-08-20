@@ -829,3 +829,49 @@ TEST(Analytics, FillCarriesStrategyWhenRecordedOrderIsUnavailable)
     ASSERT_EQ(report.trades.size(), 1u);
     EXPECT_EQ(report.trades.front().strategy_name, "ledger_strategy");
 }
+
+TEST(Analytics, MultiStrategyConcurrentPositions_IsolatedPnL)
+{
+    Analytics a(100000.0);
+
+    // Strategy A opens 10 BTC Long @ 50,000 (Order 101)
+    auto fill_a_open = std::make_shared<fill_event>(
+        epoch_ms(1), "BTCUSDT", 101, order_side::buy, 10.0, 50000.0,
+        0.0, 0.0, 1, "strat_a", 101);
+    a.on_event(fill_a_open);
+
+    // Strategy B opens 3 BTC Short @ 51,000 (Order 201)
+    auto fill_b_open = std::make_shared<fill_event>(
+        epoch_ms(2), "BTCUSDT", 201, order_side::sell, 3.0, 51000.0,
+        0.0, 0.0, 1, "strat_b", 201);
+    a.on_event(fill_b_open);
+
+    // At this point, no trades have closed yet; both positions are open and isolated.
+    auto r_mid = a.generate_report();
+    EXPECT_EQ(r_mid.total_trades, 0u);
+    EXPECT_DOUBLE_EQ(r_mid.realized_pnl, 0.0);
+
+    // Strategy A closes 10 BTC Long @ 55,000 (Order 102) -> PnL: +50,000
+    auto fill_a_close = std::make_shared<fill_event>(
+        epoch_ms(3), "BTCUSDT", 102, order_side::sell, 10.0, 55000.0,
+        0.0, 0.0, 1, "strat_a", 101);
+    a.on_event(fill_a_close);
+
+    // Strategy B closes 3 BTC Short @ 49,000 (Order 202) -> PnL: (51000 - 49000) * 3 = +6,000
+    auto fill_b_close = std::make_shared<fill_event>(
+        epoch_ms(4), "BTCUSDT", 202, order_side::buy, 3.0, 49000.0,
+        0.0, 0.0, 1, "strat_b", 201);
+    a.on_event(fill_b_close);
+
+    auto r_final = a.generate_report();
+    EXPECT_EQ(r_final.total_trades, 2u);
+    EXPECT_DOUBLE_EQ(r_final.realized_pnl, 56000.0);
+
+    ASSERT_EQ(r_final.per_strategy.count("strat_a"), 1u);
+    EXPECT_DOUBLE_EQ(r_final.per_strategy.at("strat_a").total_pnl, 50000.0);
+    EXPECT_EQ(r_final.per_strategy.at("strat_a").trade_count, 1u);
+
+    ASSERT_EQ(r_final.per_strategy.count("strat_b"), 1u);
+    EXPECT_DOUBLE_EQ(r_final.per_strategy.at("strat_b").total_pnl, 6000.0);
+    EXPECT_EQ(r_final.per_strategy.at("strat_b").trade_count, 1u);
+}

@@ -181,19 +181,29 @@ TEST(BinanceCombinedParser, PartialBookDepth_ProducesL2Snapshot)
     EXPECT_DOUBLE_EQ(snap.asks[0].price, 42001.0);
 }
 
-TEST(BinanceCombinedParser, DepthUpdateFrame_ProducesL2Snapshot)
+TEST(BinanceCombinedParser, DepthUpdateFrame_ExpandsToL2Deltas)
 {
-    // Diff-stream (@depth@100ms) frames have "e":"depthUpdate". Parser
-    // should still route them to an l2_snapshot (the engine's apply_l2
-    // path layers the update into the registry).
+    // Diff-stream (@depth@100ms) frames must not be treated as snapshots:
+    // omitted levels remain on the book. DataBridge uses parse_records(),
+    // which emits each venue delta in frame order.
     auto p = make_parser();
     const std::string frame =
         R"({"e":"depthUpdate","E":1704067200000,"s":"BTCUSDT",)"
         R"("U":1,"u":10,"b":[["42000.0","1.5"]],"a":[["42001.0","0.8"]]})";
 
-    auto ev = p.parse_record(frame);
-    ASSERT_TRUE(ev.has_value());
-    ASSERT_TRUE(std::holds_alternative<provider::l2_snapshot>(*ev));
+    const auto events = p.parse_records(frame);
+    ASSERT_EQ(events.size(), 1u);
+    ASSERT_TRUE(std::holds_alternative<provider::l2_delta_batch>(events[0]));
+    const auto& batch = std::get<provider::l2_delta_batch>(events[0]);
+    ASSERT_EQ(batch.first_update_id, 1u);
+    ASSERT_EQ(batch.final_update_id, 10u);
+    ASSERT_EQ(batch.updates.size(), 2u);
+    const auto& bid = batch.updates[0];
+    const auto& ask = batch.updates[1];
+    EXPECT_EQ(bid.side, 0u);
+    EXPECT_EQ(ask.side, 1u);
+    EXPECT_DOUBLE_EQ(bid.price, 42000.0);
+    EXPECT_DOUBLE_EQ(ask.price, 42001.0);
 }
 
 TEST(BinanceCombinedParser, UnknownFrame_ReturnsNullopt)

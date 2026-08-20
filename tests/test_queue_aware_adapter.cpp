@@ -92,6 +92,31 @@ TEST(QueueAwareBookAdapter, TradeConsumesAheadFirst_NoFill)
     EXPECT_EQ(a.live_order_count(), 1u);
 }
 
+TEST(QueueAwareBookAdapter, SignedTradeConsumesOnlyOppositePassiveSide)
+{
+    auto qm = std::make_shared<BackCancelModel>();
+    QueueAwareBookAdapter a(qm);
+    a.on_l2_update("X", order_side::buy, 100.0, 0.0);
+    a.on_l2_update("X", order_side::sell, 100.0, 0.0);
+    a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 2.0));
+    a.submit_order(make_limit(2, "X", order_side::sell, 100.0, 2.0));
+
+    // A buyer-aggressor lifted the offer. It must not also consume our bid.
+    a.on_trade("X", 100.0, 2.0, order_side::buy, t_at(100));
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(a.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills.front().get_order_id(), 2u);
+    EXPECT_EQ(a.live_order_count(), 1u);
+
+    // A seller-aggressor subsequently hits only the remaining bid.
+    a.on_trade("X", 100.0, 2.0, order_side::sell, t_at(101));
+    ASSERT_TRUE(a.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 2u);
+    EXPECT_EQ(fills.back().get_order_id(), 1u);
+    EXPECT_EQ(a.live_order_count(), 0u);
+}
+
 TEST(QueueAwareBookAdapter, TradeExceedsAhead_FillsTheExcess)
 {
     auto qm = std::make_shared<BackCancelModel>();
@@ -345,6 +370,55 @@ TEST(QueueAwareBookAdapter, CancelWithLatency_DefersUntilAdvanceTime)
     EXPECT_EQ(a.live_order_count(), 0u);
 }
 
+TEST(QueueAwareBookAdapter, CancelWithLatency_BarSweepCanFillBeforeEffectiveCancel)
+{
+    auto qm  = std::make_shared<BackCancelModel>();
+    auto lat = std::make_shared<FixedLatencyModel>(
+        latency_duration(0),
+        latency_duration(0),
+        std::chrono::duration_cast<latency_duration>(100ms));
+    QueueAwareBookAdapter a(qm, nullptr, lat);
+
+    a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 5.0));
+    a.advance_time(t0());
+
+    // Request at 50ms; cancellation cannot become effective until 150ms.
+    a.advance_time(t_at(50));
+    ASSERT_TRUE(a.cancel_order(1));
+
+    // The bar traverses the bid at 100ms.  The order is still live and must
+    // be treated consistently with the tape path during the cancel race.
+    EXPECT_TRUE(a.sweep_resting_range("X", 99.0, 101.0, t_at(100), 5.0));
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(a.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].get_order_id(), 1u);
+    EXPECT_NEAR(fills[0].get_filled_quantity(), 5.0, 1e-9);
+    EXPECT_EQ(a.live_order_count(), 0u);
+}
+
+TEST(QueueAwareBookAdapter, CancelWithLatency_BarSweepCannotFillAfterEffectiveCancel)
+{
+    auto qm  = std::make_shared<BackCancelModel>();
+    auto lat = std::make_shared<FixedLatencyModel>(
+        latency_duration(0),
+        latency_duration(0),
+        std::chrono::duration_cast<latency_duration>(100ms));
+    QueueAwareBookAdapter a(qm, nullptr, lat);
+
+    a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 5.0));
+    a.advance_time(t0() + 50ms);
+    ASSERT_TRUE(a.cancel_order(1));
+
+    // At 150ms the cancel is effective, so a subsequently traversing bar
+    // must find no remaining quote.
+    a.advance_time(t_at(150));
+    EXPECT_FALSE(a.sweep_resting_range("X", 99.0, 101.0, t_at(151), 5.0));
+    std::vector<fill_event> fills;
+    EXPECT_FALSE(a.poll_fills(fills));
+    EXPECT_EQ(a.live_order_count(), 0u);
+}
+
 // ---- Snapshot --------------------------------------------------------
 
 TEST(QueueAwareBookAdapter, SnapshotSeedsBothSides)
@@ -363,6 +437,24 @@ TEST(QueueAwareBookAdapter, SnapshotSeedsBothSides)
     // Sell at 101: size_ahead = 7 (from asks).
     // Both orders fully at the back -> avg 100% (10000 bps).
     EXPECT_EQ(a.avg_queue_position_bps(), 10000u);
+}
+
+TEST(QueueAwareBookAdapter, ReplacementSnapshotDoesNotRetainRemovedLevelQueue)
+{
+    auto qm = std::make_shared<BackCancelModel>();
+    QueueAwareBookAdapter a(qm);
+    a.on_l2_snapshot("X", {{100.0, 20.0}}, {}, t_at(0));
+    a.submit_order(make_limit(1, "X", order_side::buy, 100.0, 2.0, t_at(1)));
+
+    // The replacement snapshot omits the former bid level. It must not leave
+    // its 20 units of stale queue state behind and then manufacture a fill
+    // from an unrelated later print.
+    a.on_l2_snapshot("X", {{99.0, 10.0}}, {}, t_at(2));
+    a.on_trade("X", 100.0, 50.0, order_side::sell, t_at(3));
+
+    std::vector<fill_event> fills;
+    EXPECT_FALSE(a.poll_fills(fills));
+    EXPECT_EQ(a.live_order_count(), 1u);
 }
 
 // ---- Diagnostics ------------------------------------------------------

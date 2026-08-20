@@ -18,7 +18,7 @@
 #include "data/data_handler.h"
 #include "market_maker/market_maker.h"
 #include "orderbook/orderbook.h"
-#include "strategy/sma_strategy.h"
+#include "strategy/sma/sma_strategy.h"
 
 #include <nlohmann/json.hpp>
 

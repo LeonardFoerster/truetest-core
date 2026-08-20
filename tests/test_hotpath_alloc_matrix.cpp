@@ -12,7 +12,7 @@
 
 #include "engine/engine.h"
 #include "execution/latency_model.h"
-#include "strategy/sma_strategy.h"
+#include "strategy/sma/sma_strategy.h"
 
 #include <cstdlib>
 #include <iostream>

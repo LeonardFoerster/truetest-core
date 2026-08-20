@@ -51,6 +51,24 @@ TEST(TradeTapeShadowAdapter, BuyLimit_CrossingTradeFillsAtTradePrice)
     EXPECT_EQ(a.open_order_count(), 0u);
 }
 
+TEST(TradeTapeShadowAdapter, SignedTradeConsumesOnlyOppositePassiveSide)
+{
+    TradeTapeShadowAdapter a;
+    a.submit_order(make_limit(1, order_side::buy, 100.0, 1.0, tp{}));
+    a.submit_order(make_limit(2, order_side::sell, 100.0, 1.0, tp{}));
+
+    a.on_trade("X", 100.0, 1.0, order_side::buy, tp{ms(100)});
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(a.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills.front().get_order_id(), 2u);
+
+    a.on_trade("X", 100.0, 1.0, order_side::sell, tp{ms(101)});
+    ASSERT_TRUE(a.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 2u);
+    EXPECT_EQ(fills.back().get_order_id(), 1u);
+}
+
 TEST(TradeTapeShadowAdapter, BuyLimit_TradeAbovePriceDoesNotFill)
 {
     TradeTapeShadowAdapter a;
