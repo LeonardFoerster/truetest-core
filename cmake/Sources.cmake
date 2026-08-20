@@ -80,14 +80,23 @@ set(ENGINE_CORE_SOURCES
     src/orderbook/orderbook.cpp
 
     # --- Strategies ---
-    src/strategy/mean_reversion_strategy.cpp
-    src/strategy/sma_strategy.cpp
-    src/strategy/ma_crossover_strategy.cpp
-    src/strategy/hedge_demo_strategy.cpp
-    src/strategy/breakout_strategy.cpp
-    src/strategy/larry_connor_strategy.cpp
-    src/strategy/coiled_spring_strategy.cpp
-    src/strategy/structure_continuation_strategy.cpp
+    src/strategy/mean_reversion/mean_reversion_strategy.cpp
+    src/strategy/sma/sma_strategy.cpp
+    src/strategy/ma_crossover/ma_crossover_strategy.cpp
+    src/strategy/hedge_demo/hedge_demo_strategy.cpp
+    src/strategy/breakout/breakout_strategy.cpp
+    src/strategy/larry_connor/larry_connor_strategy.cpp
+    src/strategy/coiled_spring/coiled_spring_strategy.cpp
+    src/strategy/structure_continuation/structure_continuation_strategy.cpp
+    src/strategy/ema_rsi_atr_pullback/ema_rsi_atr_pullback_strategy.cpp
+
+    # --- Inventory-aware market-making strategy (risk register R1) ---
+    # Strategy layer, deliberately separate from src/market_maker/ (which is
+    # the synthetic liquidity seeder for bar-mode simulation).
+    src/strategy/market_making/mm_types.cpp
+    src/strategy/market_making/mm_config.cpp
+    src/strategy/market_making/mm_strategy.cpp
+    src/strategy/market_making/inventory_aware_mm_strategy.cpp
 
     # --- Market maker + risk ---
     src/market_maker/market_maker.cpp
@@ -212,6 +221,7 @@ set(TEST_SOURCES
 
     # --- Strategies ---
     tests/test_strategies.cpp
+    tests/test_ema_rsi_atr_pullback_strategy.cpp
     tests/test_monte_carlo_generators.cpp
     tests/test_monte_carlo_controller.cpp
 
@@ -221,8 +231,15 @@ set(TEST_SOURCES
     tests/test_report_generator.cpp
     tests/test_bar_aggregator.cpp
 
-    # --- Market maker ---
+    # --- Market maker (synthetic liquidity seeder) ---
     tests/test_market_maker.cpp
+
+    # --- Inventory-aware market-making strategy (risk register R1) ---
+    tests/test_mm_strategy_unit.cpp
+    tests/test_mm_strategy_property.cpp
+    tests/test_mm_strategy_integration.cpp
+    tests/test_mm_strategy_golden.cpp
+    tests/test_mm_strategy_queue_sensitivity.cpp
 
     # --- Threading & pools ---
     tests/test_thread_preset.cpp
