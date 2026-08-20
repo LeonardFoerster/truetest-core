@@ -415,7 +415,7 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 
 **Strategies & Indicators** (`src/strategy/`, `src/indicator/`):
 - `strategy_interface.h`, `strategy_registry.h`, `strategy_factory.h` — Extension points and registration.
-- Concrete strategies: `sma`, `mean-reversion`, `ma-crossover`, `breakout`, `coiled-spring`, `structure-continuation`, `larry_connor`, `hedge-demo`.
+- Concrete strategies: `sma`, `mean-reversion`, `ma-crossover`, `breakout`, `coiled-spring`, `structure-continuation`, `larry_connor`, `hedge-demo`, `ema-rsi-atr-pullback`.
 - Indicators: SMA, EMA, RSI, Bollinger, Stochastic, swing detection, etc.
 
 **Execution & Order Management** (`src/execution/`, `src/exits/`, `src/orderbook/`):

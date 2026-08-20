@@ -56,7 +56,7 @@ Phase 0 checklist until that gap closes.
 ### Strategy
 | Flag                  | What it does |
 |-----------------------|--------------|
-| `--strategy <names>`  | Comma-separated list (e.g. `sma,mean-reversion,structure-continuation`). First is primary. Registered set: `mean-reversion`, `sma`, `ma-crossover`, `breakout`, `coiled-spring`, `structure-continuation`, `larry_connor`, `hedge-demo`. Default if empty: `mean-reversion`. `adaptive-hybrid` is retired and explicitly refused. |
+| `--strategy <names>`  | Comma-separated list (e.g. `sma,mean-reversion,structure-continuation,ema-rsi-atr-pullback`). First is primary. Registered set: `mean-reversion`, `sma`, `ma-crossover`, `breakout`, `coiled-spring`, `structure-continuation`, `larry_connor`, `hedge-demo`, `ema-rsi-atr-pullback`. Default if empty: `mean-reversion`. `adaptive-hybrid` is retired and explicitly refused. |
 | `--format <tick\|bar>` | Input data format for local provider. |
 | `--sma-period <N>`    | SMA period (default 20). |
 | `--param key=val`     | Strategy parameter (repeatable). |

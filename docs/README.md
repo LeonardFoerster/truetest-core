@@ -113,7 +113,7 @@ Evidence for Phase 0 sessions lives outside this tree: **`reports/phase0/`**.
 5. **Monte Carlo / stochastic backtests** → MC section in [reference/01-instructions.md](reference/01-instructions.md) + [todos/03-MC-simulation.md](todos/03-MC-simulation.md)
 6. **AI coding agent** → [../AGENTS.md](../AGENTS.md) first, then this README + [00-INDEX.md](00-INDEX.md)
 7. **Multi-venue (Bitget / Bitunix)** → [platforms/README.md](platforms/README.md) + [operations/03-bitget-demo.md](operations/03-bitget-demo.md)
-8. **Write a strategy (`IStrategy`)** → [reference/07-strategy-development.md](reference/07-strategy-development.md) (retired Adaptive Hybrid rebuild contract: [06](reference/06-adaptive-hybrid-strategy.md))
+8. **Write a strategy (`IStrategy`)** → [reference/07-strategy-development.md](reference/07-strategy-development.md) **(must-read before coding a new strategy)**
 9. **Engine god-class decomposition** → [internal/engine-decomposition.md](internal/engine-decomposition.md)
 10. **Data ingress / CSV / DataWrapper** → [internal/data-pipeline.md](internal/data-pipeline.md)
 

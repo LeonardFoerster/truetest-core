@@ -405,6 +405,8 @@ Then: `/testing` → `TESTING VERDICT: PASS` → `/check-work` → thematic comm
 | Data pipeline plan | `docs/internal/data-pipeline.md` |
 | Multi-venue | `docs/platforms/` |
 
+Vor neuer `IStrategy`-Implementierung: vollständig `docs/reference/07-strategy-development.md` lesen.
+
 ---
 
 *Last updated: 2026-08-16 — serial preset defaults and low-memory build commands; pairs with workspace root AGENTS.md.*

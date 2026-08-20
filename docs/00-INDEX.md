@@ -27,7 +27,7 @@
 16. `docs/operations/03-bitget-demo.md` — Bitget demo (not Phase 0 qualifying).
 17. `docs/platforms/README.md` (+ `bitget.md`, `bitunix.md`) — Multi-venue status.
 18. `docs/architecture/04-performance.md` — Capacities, threading, limits.
-19. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md`, `07-strategy-development.md` — Specialized reference (strategy authors → 07).
+19. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md`, `07-strategy-development.md` — Specialized reference (strategy authors: **must read 07 before implementation**).
 20. `docs/archive/` — Historical only (MERGE_PLAN, gaps snapshot, QuestDB logs, Edge1). Not current status.
 21. `docs/internal/engine-decomposition.md` + `engine-decomposition-design.md` — `engine.{h,cpp}` decomposition plan (+ skill `engine-decomposition`).
 22. `docs/internal/data-pipeline.md` — Market-data path redesign (`MarketSeries`, `DataWrapper`; mostly shipped).
@@ -36,6 +36,7 @@
 25. `docs/decisions/2026-08-14-live-safety-repair.md` — Approved live-safety repair decision and acceptance criteria.
 26. `docs/todos/10-BF-backtest-engine-bugfixes.md` — Backtest defect backlog and frozen-surface sequencing.
 27. `docs/internal/r3-authoritative-risk-accounting.md` — Authoritative order/position ledger and mark-to-market risk snapshot (risk register R3): removed proxies, data flow, VaR and funding decisions.
+28. `docs/internal/r1-inventory-aware-market-making.md` — Inventory-aware market-making strategy (risk register R1): model, safety semantics, verification, known gaps.
 
 ## Processing notes
 
