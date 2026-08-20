@@ -112,75 +112,23 @@ std::vector<exit_intent> apply_default_exit_policy(
         return strategy_intents;
     }
 
-    auto platform = make_platform_exit_intent(order, p);
-
-    if (p.mode == exit_policy_mode::engine_only)
+    if (!strategy_intents.empty())
     {
-        if (platform)
-            return {*platform};
-        return {};
-    }
-
-    if (p.mode == exit_policy_mode::union_mode)
-    {
-        if (!platform)
-            return strategy_intents;
-        if (strategy_intents.empty())
-            return {*platform};
-
-        bool have_sl = false;
-        bool have_tp = false;
-        bool have_trail = false;
-        for (const auto& intent : strategy_intents)
+        if (p.mode == exit_policy_mode::engine_only)
         {
-            have_sl = have_sl || intent.stop_loss.has_value();
-            have_tp = have_tp || intent.take_profit.has_value();
-            have_trail = have_trail || intent.trailing_pct.has_value();
+            auto platform = make_platform_exit_intent(order, p);
+            if (platform)
+                return {*platform};
+            return {};
         }
-
-        exit_intent missing = std::move(*platform);
-        if (have_sl) missing.stop_loss.reset();
-        if (have_tp) missing.take_profit.reset();
-        if (have_trail) missing.trailing_pct.reset();
-        if (missing.stop_loss || missing.take_profit || missing.trailing_pct)
-            strategy_intents.push_back(std::move(missing));
         return strategy_intents;
     }
 
-    // floor
-    if (strategy_intents.empty())
-    {
-        if (platform)
-            return {*platform};
-        return {};
-    }
-
-    // Strategy provided a plan: inject missing SL (and missing TP if configured).
-    if (!intents_have_stop_loss(strategy_intents) && platform && platform->stop_loss)
-    {
-        // Prefer patching the first intent rather than a second full bracket.
-        strategy_intents.front().stop_loss = platform->stop_loss;
-        if (!strategy_intents.front().reference_entry)
-            strategy_intents.front().reference_entry = platform->reference_entry;
-    }
-    if (!intents_have_take_profit(strategy_intents) && platform && platform->take_profit
-        && p.tp_pct > 0.0)
-    {
-        strategy_intents.front().take_profit = platform->take_profit;
-        if (!strategy_intents.front().reference_entry)
-            strategy_intents.front().reference_entry = platform->reference_entry;
-    }
-    if (p.trail_pct > 0.0)
-    {
-        bool any_trail = false;
-        for (const auto& ei : strategy_intents)
-            if (ei.trailing_pct)
-                any_trail = true;
-        if (!any_trail)
-            strategy_intents.front().trailing_pct = p.trail_pct;
-    }
-
-    return strategy_intents;
+    // Strategy provided no intents: only arm if platform protection is explicitly configured
+    auto platform = make_platform_exit_intent(order, p);
+    if (platform)
+        return {*platform};
+    return {};
 }
 
 std::optional<exit_policy_mode> parse_exit_policy_mode(std::string_view s)

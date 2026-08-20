@@ -24,8 +24,8 @@ enum class exit_policy_mode : std::uint8_t
 struct default_exit_params
 {
     exit_policy_mode mode = exit_policy_mode::floor;
-    double sl_pct = 0.003;    // 0.3% default; 0 = no platform SL
-    double tp_pct = 0.01;     // 1% default; 0 = no platform TP
+    double sl_pct = 0.0;      // 0 = off / strategy-defined
+    double tp_pct = 0.0;      // 0 = off / strategy-defined
     double trail_pct = 0.0;   // 0 = off; fraction of best price for trailing
 };
 

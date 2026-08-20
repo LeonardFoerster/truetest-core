@@ -44,12 +44,29 @@ void ExitManager::on_fill(const fill_event& f, std::uint64_t opener_order_id)
 
         if (unaccounted_qty > 1e-12)
         {
+            auto rem = opener_remaining_qty_.find(opener_order_id);
+            if (rem != opener_remaining_qty_.end())
+            {
+                rem->second -= unaccounted_qty;
+                if (rem->second <= 1e-12)
+                {
+                    cancel(opener_order_id);
+                    return;
+                }
+                // Scale down remaining armed intent quantities proportionally
+                auto arange = armed_.equal_range(opener_order_id);
+                for (auto it = arange.first; it != arange.second; ++it)
+                {
+                    it->second.intent.qty = std::max(0.0, it->second.intent.qty - unaccounted_qty);
+                }
+                return;
+            }
             cancel(opener_order_id);
             return;
         }
 
         auto rem = opener_remaining_qty_.find(opener_order_id);
-        if (rem == opener_remaining_qty_.end() || rem->second <= 0.0)
+        if (rem == opener_remaining_qty_.end() || rem->second <= 1e-12)
             cancel(opener_order_id);
         return;
     }
