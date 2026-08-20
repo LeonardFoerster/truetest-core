@@ -114,9 +114,11 @@ public:
         }
         else if (event_type == "depthUpdate")
         {
-            auto snap = binance::parse_depth_snapshot(data_json);
-            if (!snap) return std::nullopt;
-            return provider::event{*snap};
+            // A diff frame can contain several level mutations. Returning a
+            // snapshot here used to make the engine erase every omitted
+            // level. Callers must use parse_records(), which emits all deltas
+            // atomically in the frame's venue order.
+            return std::nullopt;
         }
 
         // Partial-book streams (@depth{5|10|20}@...) have no "e"/"s",
@@ -131,6 +133,24 @@ public:
         }
 
         return std::nullopt;
+    }
+
+    std::vector<provider::event> parse_records(std::string_view line) override
+    {
+        const std::string stream_name = extract_stream_name(std::string(line));
+        std::string data_json = extract_data(std::string(line));
+        if (data_json.empty())
+            data_json.assign(line.data(), line.size());
+
+        if (binance::extract_string(data_json, "e") == "depthUpdate")
+        {
+            auto batch = binance::parse_depth_delta_batch(data_json);
+            if (!batch) return {};
+            return {provider::event{std::move(*batch)}};
+        }
+
+        (void)stream_name;
+        return IDataParser<provider::event>::parse_records(line);
     }
 
     empty_parse_status classify_empty_frame(std::string_view line) const override

@@ -51,6 +51,9 @@ struct l2_snapshot
 	std::vector<level> bids;
 	std::vector<level> asks;
 	uint64_t quantity_scale = 1;
+	// Venue book sequence when the snapshot is an authoritative bootstrap.
+	// Zero means legacy/unsequenced and is rejected by strict replay.
+	uint64_t last_update_id = 0;
 };
 
 struct l2_update
@@ -63,6 +66,23 @@ struct l2_update
 	uint64_t quantity_scale = 1;
 };
 
+// One venue diff frame. Keeping its mutations together is required: a
+// strategy must never observe a bid mutation from a frame before the ask
+// mutation carried in that same frame. U/u are Binance's inclusive update-id
+// range; zero values are unsequenced legacy data and cannot enter strict
+// recorded-L2 replay.
+struct l2_delta_batch
+{
+	std::chrono::system_clock::time_point timestamp;
+	std::string symbol;
+	uint64_t first_update_id = 0;
+	uint64_t final_update_id = 0;
+	uint64_t previous_final_update_id = 0;
+	bool has_previous_final_update_id = false;
+	std::vector<l2_update> updates;
+	uint64_t quantity_scale = 1;
+};
+
 struct status
 {
 	std::chrono::system_clock::time_point timestamp;
@@ -72,6 +92,6 @@ struct status
 	kind type;
 };
 
-using event = std::variant<bar, tick, l2_snapshot, l2_update, status>;
+using event = std::variant<bar, tick, l2_snapshot, l2_update, l2_delta_batch, status>;
 
 }

@@ -5,6 +5,7 @@
 #include "providers/binance/binance_parser.h"
 
 #include <chrono>
+#include <charconv>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -134,7 +135,23 @@ inline std::chrono::system_clock::time_point parse_event_time(std::string_view j
         return std::chrono::system_clock::time_point(
             std::chrono::milliseconds(ts_ms));
     }
-    return std::chrono::system_clock::now();
+    // Never repair replay provenance with wall clock. Callers decide whether
+    // legacy zero time is admissible; strict recorded replay rejects it.
+    return {};
+}
+
+inline bool parse_nonzero_u64(std::string_view json, std::string_view key,
+                              std::uint64_t& out)
+{
+    const auto value = extract_sv_number(json, key);
+    if (value.empty()) return false;
+    std::uint64_t parsed = 0;
+    const auto [ptr, ec] = std::from_chars(
+        value.data(), value.data() + value.size(), parsed);
+    if (ec != std::errc{} || ptr != value.data() + value.size() || parsed == 0)
+        return false;
+    out = parsed;
+    return true;
 }
 
 } // namespace depth_detail
@@ -151,6 +168,7 @@ inline std::optional<provider::l2_snapshot> parse_depth_snapshot(std::string_vie
         snap.symbol.assign(sym_sv.data(), sym_sv.size());
 
     snap.timestamp = depth_detail::parse_event_time(json);
+    (void)depth_detail::parse_nonzero_u64(json, "lastUpdateId", snap.last_update_id);
 
     if (!depth_detail::parse_side_levels(json, "bids", "b", snap.bids)
         || !depth_detail::parse_side_levels(json, "asks", "a", snap.asks))
@@ -205,6 +223,38 @@ inline std::vector<provider::l2_update> parse_depth_updates(std::string_view jso
     push_side(bids, /*bid=*/0);
     push_side(asks, /*ask=*/1);
     return updates;
+}
+
+inline std::optional<provider::l2_delta_batch>
+parse_depth_delta_batch(std::string_view json)
+{
+    provider::l2_delta_batch batch;
+    batch.timestamp = depth_detail::parse_event_time(json);
+    batch.quantity_scale = tt::quantity_scale::canonical_atoms;
+    const auto symbol = extract_sv_string(json, "s");
+    if (symbol.empty() || batch.timestamp.time_since_epoch().count() == 0
+        || !depth_detail::parse_nonzero_u64(json, "U", batch.first_update_id)
+        || !depth_detail::parse_nonzero_u64(json, "u", batch.final_update_id)
+        || batch.first_update_id > batch.final_update_id)
+        return std::nullopt;
+    batch.symbol.assign(symbol.data(), symbol.size());
+
+    std::uint64_t previous = 0;
+    if (depth_detail::parse_nonzero_u64(json, "pu", previous))
+    {
+        batch.previous_final_update_id = previous;
+        batch.has_previous_final_update_id = true;
+    }
+
+    batch.updates = parse_depth_updates(json);
+    if (batch.updates.empty()) return std::nullopt;
+    for (auto& update : batch.updates)
+    {
+        update.timestamp = batch.timestamp;
+        update.symbol = batch.symbol;
+        update.quantity_scale = batch.quantity_scale;
+    }
+    return batch;
 }
 
 } // namespace binance
