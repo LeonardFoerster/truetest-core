@@ -1,8 +1,8 @@
 #pragma once
-#include "../core/event.h"
-#include "../indicator/sma.h"
+#include "../../core/event.h"
+#include "../../indicator/sma.h"
 #include "exits/exit_intent.h"
-#include "strategy_interface.h"
+#include "../strategy_interface.h"
 
 #include <optional>
 #include <string>

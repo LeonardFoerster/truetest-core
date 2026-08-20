@@ -1,6 +1,6 @@
 #include "hedge_demo_strategy.h"
-#include "strategy_registry.h"
-#include "../core/event.h"
+#include "../strategy_registry.h"
+#include "../../core/event.h"
 
 REGISTER_STRATEGY("hedge-demo", []() {
     return std::make_shared<hedge_demo_strategy>();

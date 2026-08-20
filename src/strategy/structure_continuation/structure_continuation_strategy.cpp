@@ -1,6 +1,6 @@
 #include "structure_continuation_strategy.h"
-#include "strategy_registry.h"
-#include "../execution/position_sizing.h"
+#include "../strategy_registry.h"
+#include "../../execution/position_sizing.h"
 
 #include <algorithm>
 #include <cmath>

@@ -1,11 +1,11 @@
 #pragma once
 
 #include "strategy_interface.h"
-#include "mean_reversion_strategy.h"
-#include "sma_strategy.h"
-#include "ma_crossover_strategy.h"
-#include "breakout_strategy.h"
-#include "structure_continuation_strategy.h"
+#include "mean_reversion/mean_reversion_strategy.h"
+#include "sma/sma_strategy.h"
+#include "ma_crossover/ma_crossover_strategy.h"
+#include "breakout/breakout_strategy.h"
+#include "structure_continuation/structure_continuation_strategy.h"
 
 #include <cstddef>
 #include <memory>

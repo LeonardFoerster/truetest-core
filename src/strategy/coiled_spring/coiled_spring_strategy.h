@@ -1,6 +1,6 @@
 #pragma once
 
-#include "breakout_strategy.h"
+#include "../breakout/breakout_strategy.h"
 
 // Coiled Spring strategy (registered as "coiled-spring").
 // This is the canonical name for the multi-factor breakout / volatility expansion

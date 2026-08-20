@@ -1,6 +1,6 @@
 #pragma once
 
-#include "strategy_interface.h"
+#include "../strategy_interface.h"
 #include "indicator/ema.h"
 #include "indicator/stochastic.h"
 #include "indicator/swing_detector.h"
@@ -9,7 +9,7 @@
 
 #include "exits/exit_intent.h"
 
-#include "symbol_state_store.h"
+#include "../symbol_state_store.h"
 
 #include <deque>
 #include <optional>
