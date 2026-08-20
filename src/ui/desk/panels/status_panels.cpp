@@ -322,10 +322,19 @@ void draw_risk_panel(const dashboard_snapshot& snap)
         ImGui::PopStyleColor();
     };
 
-    ImGui::Text("Daily loss");
-    ImGui::SameLine(theme::kLabelColumnWidth);
-    ImGui::TextColored(theme::tx_faint(), "N/A (limit %s)",
-                       fmt_usd(snap.risk.daily_loss_limit).c_str());
+    // R3: risk.daily_loss is now the same realized-loss accumulator the
+    // max_daily_loss limit is enforced from (it used to be a hardcoded 0,
+    // which is why this read "N/A"). Rendered as a gauge here to match the
+    // ncurses risk panel — see AGENTS.md §8 on snapshot/renderer parity.
+    if (snap.risk.daily_loss_limit > 0.0)
+        gauge("Daily loss", snap.risk.daily_loss, snap.risk.daily_loss_limit);
+    else
+    {
+        ImGui::Text("Daily loss");
+        ImGui::SameLine(theme::kLabelColumnWidth);
+        ImGui::TextColored(theme::tx_faint(), "%s (no limit set)",
+                           fmt_usd(snap.risk.daily_loss).c_str());
+    }
     gauge("Drawdown", snap.risk.max_drawdown_pct, snap.risk.max_drawdown_limit, true);
     gauge("Exposure", snap.risk.exposure, snap.risk.exposure_limit);
     ImGui::Text("Open orders");

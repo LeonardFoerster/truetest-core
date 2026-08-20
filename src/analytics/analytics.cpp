@@ -67,6 +67,7 @@ void Analytics::reset(double initial_cash)
     last_mid_price_ = 0.0;
     current_spread_bps_ = 0.0;
     current_funding_8h_rate_ = 0.0;
+    funding_rate_known_ = false;
 
     total_funding_pnl_ = 0.0;
     total_slippage_ = 0.0;
@@ -171,6 +172,32 @@ void Analytics::on_funding(const funding_event& fe)
     // This makes funding visible in reports, TUI sparkline, and risk_view().
     cash_ += fe.get_cash_delta();
     total_funding_pnl_ += fe.get_cash_delta();
+
+    // R3: derive the realized 8h funding rate from the settlement itself.
+    // The venue identity is funding_fee = -position_notional * rate, so
+    // rate = -cash_delta / signed_position_notional. This is the only
+    // funding-rate producer the repository has (a dedicated rate feed can
+    // still override it through set_current_funding_rate_8h). Spot never
+    // emits funding_event, so spot instruments never acquire perpetual
+    // semantics through this path.
+    // Linear scan over the (few) tracked symbols rather than constructing a
+    // std::string key from the event's fixed-capacity symbol buffer.
+    const std::string_view funding_symbol = fe.get_symbol();
+    for (const auto& [symbol, pos] : open_positions_)
+    {
+        if (symbol != funding_symbol)
+            continue;
+        const double notional = pos.qty * pos.last_price;
+        if (!std::isfinite(notional) || std::abs(notional) <= 1e-9)
+            break;
+        const double rate = -fe.get_cash_delta() / notional;
+        if (std::isfinite(rate))
+        {
+            current_funding_8h_rate_ = rate;
+            funding_rate_known_ = true;
+        }
+        break;
+    }
 
     // Mirror the equity calculation from on_market
     double equity = cash_ + position_value();

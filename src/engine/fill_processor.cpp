@@ -163,12 +163,26 @@ bool FillProcessor::handle_fill(fill_event& f,
     const uint64_t opener = f.get_opener_order_id();
     const std::string& strat = f.get_strategy_name();
 
-    const auto new_status = f.is_partial()
-        ? order_status::partially_filled : order_status::filled;
-    order_tracker_.set_status(f.get_order_id(), new_status);
+    // R3: the ledger is the authoritative applier. It accumulates filled
+    // quantity under its invariants (never above original), drops duplicate
+    // fill events, and derives the resulting lifecycle state — a status flag
+    // set from f.is_partial() alone could not do any of the three.
+    const bool applied = order_tracker_.on_fill(f);
+    if (!applied)
+    {
+        // Duplicate venue fill (reconciler replay / transport retry). The
+        // ledger already carries it; applying it again would double-count
+        // position, cash and P&L. Nothing downstream may observe it.
+        audit_sink_.record_event(
+            "order_lifecycle", f.get_symbol().c_str(), "",
+            f.get_order_id(), "duplicate_fill",
+            "fill id already applied - ignored", "{}");
+        return true;
+    }
+    const auto new_status = order_tracker_.get_order_status(f.get_order_id());
     if (dashboard_builder_) {
         dashboard_builder_->cache_fill(f);
-        if (f.is_partial())
+        if (new_status == order_status::partially_filled)
             dashboard_builder_->update_open_order_status(f.get_order_id(), "partial");
         else
             dashboard_builder_->erase_open_order(f.get_order_id());

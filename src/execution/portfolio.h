@@ -1,5 +1,6 @@
 #pragma once
 #include "../core/event.h"
+#include "mark_point.h"
 
 #include <chrono>
 #include <cstddef>
@@ -64,6 +65,9 @@ public:
     double get_equity(double last_price) const;
     // Per-symbol marks; symbols missing from `marks` fall back to `fallback_price`.
     double get_equity(const std::unordered_map<std::string, double>& marks,
+                      double fallback_price = 0.0) const;
+    // R3 overload: the engine's mark store carries observation timestamps.
+    double get_equity(const std::unordered_map<std::string, mark_point>& marks,
                       double fallback_price = 0.0) const;
     double get_total_funding_pnl() const { return total_funding_pnl_; }
 

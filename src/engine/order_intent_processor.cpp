@@ -58,7 +58,7 @@ OrderIntentProcessor::OrderIntentProcessor(
     const std::atomic<bool>& pause_all,
     std::atomic<double>& last_mid_price,
     const std::string& last_mark_symbol,
-    const std::unordered_map<std::string, double>& last_mark_prices,
+    const std::unordered_map<std::string, mark_point>& last_mark_prices,
     std::mutex& last_mark_prices_mu,
     const std::chrono::system_clock::time_point& last_sim_time,
     const std::unordered_set<std::string>& l2_seeded_symbols,
@@ -108,8 +108,8 @@ double OrderIntentProcessor::marked_account_equity(std::string_view current_symb
         if (symbol == current_symbol && current_mark > 0.0)
             position_mark = current_mark;
         else if (auto it = last_mark_prices_.find(symbol);
-                 it != last_mark_prices_.end() && it->second > 0.0)
-            position_mark = it->second;
+                 it != last_mark_prices_.end() && it->second.usable())
+            position_mark = it->second.price;
         else
             return std::numeric_limits<double>::quiet_NaN();
         equity += position.qty * position_mark;
@@ -174,24 +174,19 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
     // ========================================================================
 
     {
-        double order_mark = std::numeric_limits<double>::quiet_NaN();
-        const double latest_mark =
-            last_mid_price_.load(std::memory_order_relaxed);
-        if (last_mark_symbol_ == o->get_symbol()
-            && std::isfinite(latest_mark) && latest_mark > 0.0)
-        {
-            order_mark = latest_mark;
-        }
-        else
-        {
-            std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-            if (auto it = last_mark_prices_.find(o->get_symbol());
-                it != last_mark_prices_.end()
-                && std::isfinite(it->second) && it->second > 0.0)
-                order_mark = it->second;
-        }
-        const double marked_equity = marked_account_equity(
-            o->get_symbol(), order_mark);
+        // R3: one authoritative pass produces the candidate's mark, the
+        // account equity, and the mark-to-market instrument/portfolio views.
+        // Before R3 this took two separate walks over the position map under
+        // two separate lock acquisitions, and the two could disagree.
+        auto snap = analytics_.risk_view();
+        build_authoritative_risk_view(*o, snap);
+        snap.portfolio.daily_realized_loss = risk_manager_.daily_realized_loss();
+
+        // 0.0 when the mark is missing — the same "unusable mark" signal the
+        // venue check already fails closed on. A stale-but-present mark is
+        // still handed over, exactly as before R3.
+        const double order_mark = snap.instrument.mark_price;
+        const double marked_equity = snap.portfolio.equity;
 
         // Venue-specific pre-trade check (futures notional / leverage /
         // liquidation distance) runs first. Refusals here are pure
@@ -227,19 +222,31 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
             }
         }
 
-        auto snap = analytics_.risk_view();
-        snap.equity = std::isfinite(marked_equity) ? marked_equity : 0.0;
         // This candidate has not been transitioned into the active lifecycle
-        // yet, so the tracker count is the exact pre-trade capacity.
+        // yet, so the ledger count is the exact pre-trade capacity.
         auto existing_active_orders = order_tracker_.active_count();
         // A pending stop already owns exactly one slot before it fires. Its
-        // conversion to a market/limit order is not a second candidate.
-        if (order_tracker_.is_active(o->get_order_id()) &&
-            existing_active_orders > 0)
-            --existing_active_orders;
+        // conversion to a market/limit order is not a second candidate. Its
+        // remaining quantity is likewise already inside the ledger's pending
+        // exposure, so subtract it from the candidate's own side to avoid
+        // double-counting the same order in the worst case.
+        if (order_tracker_.is_active(o->get_order_id()))
+        {
+            if (existing_active_orders > 0)
+                --existing_active_orders;
+            const double already_pending =
+                order_tracker_.pending_qty(o->get_order_id());
+            double& same_side = (o->get_side() == order_side::buy)
+                ? snap.instrument.open_buy_qty
+                : snap.instrument.open_sell_qty;
+            same_side = std::max(0.0, same_side - already_pending);
+            if (snap.instrument.open_order_count > 0)
+                --snap.instrument.open_order_count;
+        }
         o->set_pretrade_open_order_count(existing_active_orders);
+        risk_rule rule = risk_rule::none;
         auto action = risk_manager_.check_order(*o, portfolio_, snap,
-                                                existing_active_orders);
+                                                existing_active_orders, &rule);
         // Backtest research only: portfolio risk breaches reject the trade —
         // never stop the market replay. Live/shadow keep terminal halt even if
         // the soft flag was left true by misconfiguration.
@@ -254,6 +261,8 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
                 : (soft_pf
                        ? "order rejected by risk manager (soft portfolio limits)"
                        : "order rejected by risk manager");
+            // Stable machine-readable rule id for the audit trail (R3 §10).
+            const char* rule_code = to_string(rule);
 
             auto rej = acquire_pooled(rejection_pool_,
                 o->get_timestamp(), o->get_symbol(), o->get_order_id(), reason);
@@ -262,9 +271,7 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
 
             // Migrated to sink (PR-04)
             audit_sink_.record_order_submitted(*o, "rejected");
-            audit_sink_.record_rejection(*o,
-                (action == risk_action::halt) ? "risk_halt" : "risk_reject",
-                reason);
+            audit_sink_.record_rejection(*o, rule_code, reason);
             audit_sink_.record_event(
                 "risk_decision",
                 o->get_symbol().c_str(),
@@ -272,7 +279,7 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
                 o->get_order_id(),
                 (action == risk_action::halt) ? "halt" : "reject",
                 reason,
-                "{}"
+                rule_code
             );
 
             order_tracker_.set_status(o->get_order_id(), order_status::rejected);
@@ -295,6 +302,12 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
     auto adapter = router_.resolve_adapter(o->get_symbol());
     const bool async_submit = router_.is_async_submit(adapter.get());
 
+    // Authoritative ledger registration happens before the order can go live
+    // (and before any fill can reference it): symbol, side, quantity and
+    // price are what makes the open-order state a risk input rather than a
+    // bare status flag. Idempotent — stop conversions and pending releases
+    // re-enter here with the same id.
+    order_tracker_.register_order(*o);
     order_tracker_.set_status(o->get_order_id(),
         async_submit ? order_status::pending : order_status::open);
     if (dashboard_builder_) {
@@ -408,6 +421,7 @@ void OrderIntentProcessor::unwind_positions(std::size_t& event_count)
         close_order->set_order_id(OrderIdGenerator::next());
         close_order->set_strategy_name("risk_unwind");
 
+        order_tracker_.register_order(*close_order);
         order_tracker_.set_status(close_order->get_order_id(), order_status::open);
         if (dashboard_builder_) dashboard_builder_->cache_open_order(*close_order);
         hotpath_.log_event(*close_order);
@@ -588,14 +602,44 @@ bool OrderIntentProcessor::apply_instrument_spec(order_event& o, const instrumen
     return instrument_spec_cache_.apply_instrument_spec(o, spec);
 }
 
+void OrderIntentProcessor::build_authoritative_risk_view(
+    const order_event& order, risk_snapshot& snap) const
+{
+    // Sim clock, never wall clock: mark ages must be deterministic under
+    // replay. Falls back to the order's own timestamp before the first
+    // market event of a run.
+    const auto now = (last_sim_time_.time_since_epoch().count() != 0)
+        ? last_sim_time_ : order.get_timestamp();
+
+    std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
+    truetest::risk::build_risk_view(
+        snap, order.get_symbol(), portfolio_, order_tracker_, now,
+        config_.risk.max_mark_age_ms,
+        [this, now](const std::string& symbol) -> mark_point {
+            if (auto it = last_mark_prices_.find(symbol);
+                it != last_mark_prices_.end())
+                return it->second;
+            // The hot loops publish the current symbol's mark to the atomic
+            // one step before the map; same observation, so use it rather
+            // than reporting a missing mark for the symbol being traded.
+            if (symbol == last_mark_symbol_)
+            {
+                const double px =
+                    last_mid_price_.load(std::memory_order_relaxed);
+                if (std::isfinite(px) && px > 0.0)
+                    return mark_point{px, now};
+            }
+            return {};
+        });
+}
+
 double OrderIntentProcessor::mid_for_symbol(const std::string& symbol) const
 {
     {
         std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
         if (auto it = last_mark_prices_.find(symbol);
-            it != last_mark_prices_.end()
-            && std::isfinite(it->second) && it->second > 0.0)
-            return it->second;
+            it != last_mark_prices_.end() && it->second.usable())
+            return it->second.price;
     }
     return std::numeric_limits<double>::quiet_NaN();
 }
@@ -653,7 +697,10 @@ bool OrderIntentProcessor::route(order_event& order,
     // Reserve the authoritative lifecycle slot before an order can be queued
     // by latency/bar-delay or staged as a stop. This is the sole capacity
     // check at route time; process() subtracts this candidate when it
-    // performs the remaining venue and portfolio checks.
+    // performs the remaining venue and portfolio checks. Registration must
+    // precede the slot reservation so a staged order already carries its
+    // quantity in the ledger's pending exposure.
+    order_tracker_.register_order(order);
     const auto existing_active_orders = order_tracker_.active_count();
     if (risk_manager_.open_order_limit_reached(existing_active_orders))
     {
@@ -663,7 +710,8 @@ bool OrderIntentProcessor::route(order_event& order,
         hotpath_.log_event(*rej);
         hotpath_.publish_event(rej);
         audit_sink_.record_order_submitted(order, "rejected");
-        audit_sink_.record_rejection(order, "risk_reject", reason);
+        audit_sink_.record_rejection(order,
+            to_string(risk_rule::max_open_orders), reason);
         order_tracker_.set_status(order.get_order_id(), order_status::rejected);
         return true;
     }
@@ -1203,6 +1251,10 @@ bool OrderIntentProcessor::modify(const std::string& symbol, uint64_t order_id,
 
     if (modified)
     {
+        // The ledger's original quantity must follow a venue amendment, or a
+        // shrunk order could never reach filled == original and would leak an
+        // open slot (and its pending exposure) forever.
+        order_tracker_.amend(order_id, new_price, new_qty);
         const auto now = (last_sim_time_.time_since_epoch().count() != 0)
             ? last_sim_time_
             : std::chrono::system_clock::now();
@@ -1234,7 +1286,9 @@ void OrderIntentProcessor::finalize_end_of_stream(std::size_t& event_count, bool
             return;
         const auto& sym = order->get_symbol();
         const auto order_id = order->get_order_id();
-        order_tracker_.set_status(order_id, order_status::cancelled);
+        // R3: EOS expiry is its own terminal state. It is not an operator
+        // cancel, and conflating the two hid genuine expiries in the audit.
+        order_tracker_.set_status(order_id, order_status::expired);
         if (dashboard_builder_) dashboard_builder_->erase_open_order(order_id);
         const auto ts = last_sim_time_.time_since_epoch().count() != 0
             ? last_sim_time_ : order->get_timestamp();
@@ -1248,7 +1302,7 @@ void OrderIntentProcessor::finalize_end_of_stream(std::size_t& event_count, bool
         audit_sink_.record_cancellation(order_id, sym.c_str(),
             attribution_.strategy_for(order_id).c_str(), reason);
         audit_sink_.record_status_transition(order_id,
-            order_status::pending, order_status::cancelled, reason);
+            order_status::pending, order_status::expired, reason);
         ++event_count;
     };
 

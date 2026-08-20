@@ -340,6 +340,8 @@ TEST(RiskManager, SpreadAndFundingFlipsAreNewExposure)
     funding.max_funding_8h_rate = 0.001;
     RiskManager funding_rm(funding);
     risk_snapshot nonsevere_funding;
+    // R3: the breaker only engages for a rate that actually has a producer.
+    nonsevere_funding.funding_rate_known = true;
     nonsevere_funding.current_funding_8h_rate = 0.0012;
     EXPECT_EQ(funding_rm.check_order(flip, port, nonsevere_funding, 0), risk_action::reject);
     nonsevere_funding.current_funding_8h_rate = 0.0016;
@@ -359,6 +361,7 @@ TEST(RiskManager, ExactCloseRemainsAllowedDuringCircuitBreaker)
     RiskManager rm(lim);
     risk_snapshot snap;
     snap.current_spread_bps = 500.0;
+    snap.funding_rate_known = true;
     snap.current_funding_8h_rate = 0.01;
     EXPECT_EQ(rm.check_order(close, port, snap, 0), risk_action::pass);
 }
@@ -400,6 +403,7 @@ TEST(RiskManager, FundingCircuitBreaker_SevereBreach_BlocksNewRisk_AllowsReducti
     port.on_fill(open_short);
 
     risk_snapshot snap;
+    snap.funding_rate_known = true;
     snap.current_funding_8h_rate = 0.01;  // 10x the limit -> severe breach
 
     order_event new_risk(epoch_ms(1), "AAPL", order_type::limit, order_side::sell, 5, 100.0);

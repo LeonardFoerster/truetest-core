@@ -14,6 +14,9 @@
 #include <vector>
 
 #include "core/event.h"  // order_event, fill_event
+#include "execution/mark_point.h"  // R3: marks carry observation timestamps
+#include "execution/order_tracker.h"  // R3: authoritative order ledger
+#include "risk/risk_manager.h"        // R3: daily realized loss for the risk panel
 
 // Cold-path includes for snapshot builder (no hot path impact).
 #include "types/object_pool.h"
@@ -65,6 +68,11 @@ public:
     // See 2026-07-18 memory-check HIGH-03.
     explicit DashboardSnapshotBuilder(
         const portfolio& port,
+        // R3: authoritative order ledger. The operator surfaces read their
+        // order counts from it instead of deriving them from cached rows plus
+        // fill counters.
+        const OrderTracker& order_tracker,
+        const RiskManager& risk_manager,
         const Analytics& analytics,
         const AdverseSelectionTracker& adverse,
         const truetest::exits::ExitManager& exits,
@@ -80,7 +88,7 @@ public:
         // (e.g. the web server's poller thread, a genuine concurrent reader —
         // see web/web_server.h). Unlike last_mid_price_ this is a plain
         // unordered_map, so every access must go through last_mark_prices_mu.
-        const std::unordered_map<std::string, double>& last_mark_prices,
+        const std::unordered_map<std::string, mark_point>& last_mark_prices,
         std::mutex& last_mark_prices_mu,
         OrderbookRegistry& orderbook_registry,
         const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters,
@@ -155,6 +163,8 @@ private:
 
     // Injected data sources (non-owning)
     const portfolio& portfolio_;
+    const OrderTracker& order_tracker_;
+    const RiskManager& risk_manager_;
     const Analytics& analytics_;
     const AdverseSelectionTracker& adverse_selection_;
     const truetest::exits::ExitManager& exit_manager_;
@@ -162,7 +172,7 @@ private:
     const engine_config& config_;
     const std::atomic<double>& last_mid_price_;
     const std::string& last_mark_symbol_;
-    const std::unordered_map<std::string, double>& last_mark_prices_;
+    const std::unordered_map<std::string, mark_point>& last_mark_prices_;
     std::mutex& last_mark_prices_mu_;
     OrderbookRegistry& orderbook_registry_;
     const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters_;

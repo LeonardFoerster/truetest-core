@@ -101,7 +101,7 @@ void engine::apply_l2_snapshot(const std::string& symbol,
         last_mid_price_.store(l2_mark, std::memory_order_release);
         last_mark_symbol_ = symbol;
         std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-        last_mark_prices_[symbol] = l2_mark;
+        last_mark_prices_[symbol] = mark_point{l2_mark, timestamp};
     }
     else
     {
@@ -196,7 +196,7 @@ void engine::apply_l2_update(const std::string& symbol,
         last_mid_price_.store(l2_mark, std::memory_order_release);
         last_mark_symbol_ = symbol;
         std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-        last_mark_prices_[symbol] = l2_mark;
+        last_mark_prices_[symbol] = mark_point{l2_mark, timestamp};
     }
     else
     {
@@ -414,7 +414,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     last_sim_time_ = timestamp;
     last_mid_price_.store(mkt.get_open(), std::memory_order_release);
     last_mark_symbol_ = mkt.get_symbol();
-    { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[mkt.get_symbol()] = mkt.get_open(); }
+    { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[mkt.get_symbol()] = mark_point{mkt.get_open(), timestamp}; }
 
     // Drain delayed orders at open mid for each order's symbol (not the
     // event symbol alone — multi-symbol pending must not walk the wrong book).
@@ -427,7 +427,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
     last_mid_price_.store(mkt.get_close(), std::memory_order_release);
     last_mark_symbol_ = mkt.get_symbol();
-    { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[mkt.get_symbol()] = mkt.get_close(); }
+    { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[mkt.get_symbol()] = mark_point{mkt.get_close(), timestamp}; }
 
     {
         // Single stop pass (EL-STREAM-DOUBLE-STOPS): matches batch run().
@@ -578,7 +578,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
     last_sim_time_ = rec.timestamp;
     last_mid_price_.store(rec.price, std::memory_order_release);
     last_mark_symbol_ = rec.symbol;
-    { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[rec.symbol] = rec.price; }
+    { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[rec.symbol] = mark_point{rec.price, rec.timestamp}; }
 
     {
         DEBUG_STAGE(stage_timer_, mm_replenish);
@@ -1272,7 +1272,7 @@ void engine::run_tick_data()
         last_sim_time_ = tick.timestamp;
         last_mid_price_.store(tick.price, std::memory_order_release);
         last_mark_symbol_ = tick.symbol;
-        { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[tick.symbol] = tick.price; }
+        { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[tick.symbol] = mark_point{tick.price, tick.timestamp}; }
 
         // Latency-gated cancel windows need clock advance on the tick path too.
         if (router_) router_->advance_all(tick.timestamp);
@@ -1476,7 +1476,8 @@ void engine::run_replay(const std::string& log_path,
             last_mark_symbol_ = mkt.get_symbol();
             {
                 std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-                last_mark_prices_[mkt.get_symbol()] = mkt.get_close();
+                last_mark_prices_[mkt.get_symbol()] =
+                    mark_point{mkt.get_close(), mkt.get_timestamp()};
             }
             publish_event(ev);
             analytics_.on_event(ev);
@@ -1490,7 +1491,8 @@ void engine::run_replay(const std::string& log_path,
             last_mark_symbol_ = tick.get_symbol();
             {
                 std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-                last_mark_prices_[tick.get_symbol()] = tick.get_price();
+                last_mark_prices_[tick.get_symbol()] =
+                    mark_point{tick.get_price(), tick.get_timestamp()};
             }
             publish_event(ev);
             analytics_.on_event(ev);
@@ -1503,6 +1505,10 @@ void engine::run_replay(const std::string& log_path,
             // instance) — the register_order_meta forward was removed in
             // Phase 3 since this is its only remaining caller.
             attribution_->register_order(order);
+            // R3: replay must rebuild the authoritative ledger, not just a
+            // status flag — the replayed run's risk decisions depend on the
+            // same open-order quantities the original run saw.
+            order_tracker_.register_order(order);
             order_tracker_.set_status(order.get_order_id(), order_status::open);
             publish_event(ev);
             analytics_.on_event(ev);
@@ -1512,14 +1518,16 @@ void engine::run_replay(const std::string& log_path,
         {
             auto& fill = static_cast<fill_event&>(*ev);
             fills_->stamp_fill_attribution(fill);
-            order_tracker_.set_status(
-                fill.get_order_id(),
-                fill.is_partial() ? order_status::partially_filled
-                                  : order_status::filled);
+            const bool replay_applied = order_tracker_.on_fill(fill);
+            const bool replay_partial =
+                order_tracker_.get_order_status(fill.get_order_id())
+                    == order_status::partially_filled;
+            if (!replay_applied)
+                break;   // duplicate fill id in the log: already accounted
             if (dashboard_builder_)
             {
                 dashboard_builder_->cache_fill(fill);
-                if (fill.is_partial())
+                if (replay_partial)
                     dashboard_builder_->update_open_order_status(
                         fill.get_order_id(), "partial");
                 else
@@ -1600,7 +1608,8 @@ void engine::run_replay(const std::string& log_path,
                 last_mark_symbol_ = snapshot.get_symbol();
                 {
                     std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-                    last_mark_prices_[snapshot.get_symbol()] = mark;
+                    last_mark_prices_[snapshot.get_symbol()] =
+                        mark_point{mark, snapshot.get_timestamp()};
                 }
                 analytics_.on_mark(snapshot.get_symbol(), mark);
             }
@@ -1638,7 +1647,8 @@ void engine::run_replay(const std::string& log_path,
                 last_mark_symbol_ = update.get_symbol();
                 {
                     std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-                    last_mark_prices_[update.get_symbol()] = mark;
+                    last_mark_prices_[update.get_symbol()] =
+                        mark_point{mark, update.get_timestamp()};
                 }
                 analytics_.on_mark(update.get_symbol(), mark);
             }

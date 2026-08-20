@@ -180,8 +180,16 @@ public:
         update_risk_equity(cash_ + position_value());
     }
 
-    // Phase 2.4 — allow external update of the current 8h funding rate    // (called from provider when better funding rate data is available)
-    void set_current_funding_rate_8h(double rate) { current_funding_8h_rate_ = rate; }
+    // Phase 2.4 — allow external update of the current 8h funding rate
+    // (called from a provider when a dedicated funding-rate feed exists).
+    // R3: also derived from funding settlements in on_funding(), which is the
+    // producer the repository actually has — see the R3 design note §7.
+    void set_current_funding_rate_8h(double rate)
+    {
+        current_funding_8h_rate_ = rate;
+        funding_rate_known_ = true;
+    }
+    bool funding_rate_known() const { return funding_rate_known_; }
 
     // Phase 2.1 - cumulative funding P&L (cash deltas from funding events)
     double total_funding_pnl() const { return total_funding_pnl_; }
@@ -196,8 +204,9 @@ public:
     {
         risk_snapshot r;
         r.max_drawdown   = max_drawdown_ * 100.0;
-        r.total_orders   = total_orders_;
-        r.total_fills    = total_fills_;
+        // R3: total_orders_/total_fills_ are reporting counters and are
+        // deliberately NOT carried into the risk snapshot. Open-order state
+        // comes from the authoritative ledger (OrderTracker).
         if (!trades_.empty())
         {
             r.has_last_trade = true;
@@ -209,6 +218,9 @@ public:
         r.realized_vol_1h = realized_vol_1h_;
         r.current_spread_bps = current_spread_bps_;
         r.current_funding_8h_rate = current_funding_8h_rate_;
+        // R3: an unknown funding rate must not read as "0.0, therefore inside
+        // the limit". The breaker only engages once a rate actually exists.
+        r.funding_rate_known = funding_rate_known_;
         return r;
     }
 
@@ -373,6 +385,7 @@ private:
     // Phase 2.4 - current spread and funding rate (updated from L2 / funding events)
     double current_spread_bps_ = 0.0;
     double current_funding_8h_rate_ = 0.0;
+    bool   funding_rate_known_ = false;
 
     // Phase 2.1 - accumulated funding cash P&L
     double total_funding_pnl_ = 0.0;

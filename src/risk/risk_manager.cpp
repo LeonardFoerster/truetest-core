@@ -1,55 +1,57 @@
 #include "risk_manager.h"
 #include "../analytics/analytics.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace {
 
 constexpr double kQtyEps = 1e-12;
 
-double signed_order_quantity(const order_event& order)
-{
-    return (order.get_side() == order_side::buy)
-        ? order.get_quantity()
-        : -order.get_quantity();
-}
+// R3: there is deliberately no cost-basis-derived price helper any more.
+// Cost basis is P&L accounting; current exposure is mark-to-market only.
 
-double position_price(const position& pos)
+struct valuation
 {
-    return std::abs(pos.qty) > kQtyEps
-        ? std::abs(pos.cost_basis / pos.qty)
-        : 0.0;
-}
+    double price = 0.0;
+    bool   usable = false;
+    bool   degraded = false;   // fell back to the candidate's own limit price
+};
 
-double valuation_price(const order_event& order, const position* pos)
+// Resolve the price used to value current and worst-case exposure.
+// Precedence: fresh mark > stale mark (unless fresh marks are required) >
+// the candidate order's own limit price. Never cost basis.
+valuation resolve_valuation(const order_event& order,
+                            const instrument_risk_view& view,
+                            bool require_fresh_mark)
 {
-    if (order.get_price() > 0.0)
-        return order.get_price();
-    return pos ? position_price(*pos) : 0.0;
-}
+    valuation out;
+    if (view.mark_state == mark_quality::valid
+        && std::isfinite(view.mark_price) && view.mark_price > 0.0)
+    {
+        out.price = view.mark_price;
+        out.usable = true;
+        return out;
+    }
+    if (require_fresh_mark)
+        return out;   // stale/missing mark must not be laundered into a price
 
-double projected_position_notional(const order_event& order,
-                                   const position* pos)
-{
-    const double current_qty = pos ? pos->qty : 0.0;
-    const double projected_qty = current_qty + signed_order_quantity(order);
-    const double price = valuation_price(order, pos);
-    return std::abs(projected_qty) * price;
-}
-
-bool reduces_position_exposure(const order_event& order, const position* pos)
-{
-    if (!pos || std::abs(pos->qty) <= kQtyEps ||
-        order.get_quantity() <= kQtyEps)
-        return false;
-
-    // A reduction must close existing inventory without crossing zero. A
-    // flip is a new exposure and therefore must face every circuit breaker.
-    const bool order_opposes_position =
-        (pos->qty > 0.0 && order.get_side() == order_side::sell) ||
-        (pos->qty < 0.0 && order.get_side() == order_side::buy);
-    return order_opposes_position &&
-           order.get_quantity() <= std::abs(pos->qty) + kQtyEps;
+    if (view.mark_state == mark_quality::stale
+        && std::isfinite(view.mark_price) && view.mark_price > 0.0)
+    {
+        out.price = view.mark_price;
+        out.usable = true;
+        out.degraded = true;
+        return out;
+    }
+    const double order_price = order.get_price();
+    if (std::isfinite(order_price) && order_price > 0.0)
+    {
+        out.price = order_price;
+        out.usable = true;
+        out.degraded = true;
+    }
+    return out;
 }
 
 } // namespace
@@ -98,30 +100,96 @@ void RiskManager::update_daily_reset(std::chrono::system_clock::time_point now)
 risk_action RiskManager::check_order(const order_event& order,
                                      const portfolio& port,
                                      const risk_snapshot& snap,
-                                     std::size_t open_order_count)
+                                     std::size_t open_order_count,
+                                     risk_rule* rule_out)
 {
+    const auto deny = [&](risk_rule rule, risk_action action) {
+        if (rule_out) *rule_out = rule;
+        return action;
+    };
+    if (rule_out) *rule_out = risk_rule::none;
+
     const auto& positions = port.get_positions();
     const auto it = positions.find(order.get_symbol());
-    const position* current_pos = (it != positions.end()) ? &it->second : nullptr;
-    const bool reducing_exposure = reduces_position_exposure(order, current_pos);
-    const double projected_notional = projected_position_notional(order, current_pos);
+    // Authoritative signed position quantity — produced only by fills.
+    const double position_qty = (it != positions.end()) ? it->second.qty : 0.0;
+
+    const auto effect = classify_inventory_effect(
+        order.get_side(), order.get_quantity(), position_qty);
+    const bool reducing_exposure = (effect == inventory_effect::reducing);
+
+    // ---- worst-case inventory including already-open orders ---------------
+    // Pending orders are real future exposure: a candidate buy must be judged
+    // against current position + every open buy + itself, not against the
+    // position alone. Consumers without an order ledger (the observational
+    // risk workers) contribute zero pending quantity and are flagged so that
+    // structural absence never masquerades as "no open orders".
+    const auto& view = snap.instrument;
+    const double open_buy_qty  = snap.ledger_authoritative ? view.open_buy_qty  : 0.0;
+    const double open_sell_qty = snap.ledger_authoritative ? view.open_sell_qty : 0.0;
+    const double candidate_qty = std::max(0.0, order.get_quantity());
+    const double candidate_buy =
+        (order.get_side() == order_side::buy) ? candidate_qty : 0.0;
+    const double candidate_sell =
+        (order.get_side() == order_side::sell) ? candidate_qty : 0.0;
+
+    const double worst_case_long_qty  = position_qty + open_buy_qty + candidate_buy;
+    const double worst_case_short_qty = position_qty - open_sell_qty - candidate_sell;
+    const double worst_case_abs_qty =
+        std::max(std::abs(worst_case_long_qty), std::abs(worst_case_short_qty));
 
     // Portfolio DD: block new risk only. Reduce-only / exit orders must still
     // pass so inventory can be flattened after a breach (soft backtest and
     // live halt paths both need this — otherwise exits are rejected too).
     if (!reducing_exposure &&
         snap.max_drawdown / 100.0 >= limits_.max_drawdown)
-        return risk_action::halt;
+        return deny(risk_rule::drawdown, risk_action::halt);
 
-    // The engine-owned OrderTracker supplies the exact lifecycle count before
-    // this candidate becomes active. Analytics counters are reporting only.
+    // The engine-owned OrderTracker ledger supplies the exact lifecycle count
+    // before this candidate becomes active. Analytics counters are reporting
+    // only and are structurally absent from risk_snapshot since R3.
     // This capacity limit deliberately has no reduce-only exemption.
     if (open_order_limit_reached(open_order_count))
-        return risk_action::reject;
+        return deny(risk_rule::max_open_orders, risk_action::reject);
+
+    // ---- hard inventory limit (quantity, no mark required) ----------------
+    // Applies to the worst case, so a stack of resting buys cannot walk the
+    // book past the limit one acknowledged order at a time. Risk-reducing
+    // orders stay permitted after a breach.
+    if (limits_.max_symbol_inventory_qty > 0.0 && !reducing_exposure)
+    {
+        if (!view.exposure_tracked && snap.ledger_authoritative)
+        {
+            // Ledger could not aggregate this symbol: fail closed rather than
+            // read an untracked symbol as flat.
+            return deny(risk_rule::hard_inventory_limit, risk_action::reject);
+        }
+        if (worst_case_abs_qty > limits_.max_symbol_inventory_qty + kQtyEps)
+            return deny(risk_rule::hard_inventory_limit, risk_action::reject);
+    }
+
+    // ---- mark-to-market valuation ----------------------------------------
+    const bool needs_valuation =
+        limits_.max_position_value > 0.0 ||
+        limits_.max_portfolio_exposure > 0.0 ||
+        limits_.max_position_pct_of_equity > 0.0;
+
+    const auto val = resolve_valuation(order, view, limits_.require_fresh_mark);
+
+    // A stale or missing mark must never quietly produce a "valid" risk
+    // number. Inventory-increasing orders are refused; reductions stay
+    // possible so bad market data cannot trap inventory.
+    if (!reducing_exposure && !val.usable &&
+        (needs_valuation || limits_.require_fresh_mark))
+        return deny(risk_rule::stale_mark, risk_action::reject);
+
+    const double mark = val.price;
+    const double worst_case_notional = worst_case_abs_qty * mark;
 
     if (!reducing_exposure &&
-        projected_notional > limits_.max_position_value)
-        return risk_action::reject;
+        limits_.max_position_value > 0.0 &&
+        worst_case_notional > limits_.max_position_value)
+        return deny(risk_rule::position_limit, risk_action::reject);
 
     // Percentage-of-equity caps are meaningful only with a finite positive
     // account valuation. A missing mark must not turn a configured cap off.
@@ -129,37 +197,54 @@ risk_action RiskManager::check_order(const order_event& order,
     if (!reducing_exposure &&
         limits_.max_position_pct_of_equity > 0.0 &&
         (!std::isfinite(snap.equity) || snap.equity <= 0.0))
-        return risk_action::reject;
+        return deny(risk_rule::invalid_equity, risk_action::reject);
 
     // Phase 2.3 - max position as % of equity
     if (!reducing_exposure &&
         limits_.max_position_pct_of_equity > 0.0) {
         double max_notional = snap.equity * limits_.max_position_pct_of_equity;
-        if (projected_notional > max_notional)
-            return risk_action::reject;
+        if (worst_case_notional > max_notional)
+            return deny(risk_rule::position_pct_of_equity, risk_action::reject);
     }
 
-    double projected_total_exposure = 0.0;
-    for (const auto& [sym, pos] : positions)
+    // ---- portfolio-level aggregation --------------------------------------
+    // Mark-to-market gross exposure across every instrument. When the caller
+    // supplied an authoritative portfolio view, the candidate's symbol is
+    // swapped for its worst case; otherwise the remaining symbols are valued
+    // from this order's mark as a single-symbol fallback (cost basis is never
+    // used as an exposure proxy).
+    double projected_total_exposure = worst_case_notional;
+    if (snap.ledger_authoritative)
     {
-        if (sym == order.get_symbol())
-            projected_total_exposure += projected_notional;
-        else
-            projected_total_exposure += std::abs(pos.cost_basis);
+        projected_total_exposure +=
+            std::max(0.0, snap.portfolio.gross_exposure - view.position_notional);
     }
-    if (it == positions.end())
-        projected_total_exposure += projected_notional;
+    else if (limits_.max_portfolio_exposure > 0.0 && !reducing_exposure)
+    {
+        // No authoritative portfolio view: the candidate's own mark is the
+        // only price available, so any *other* held instrument is genuinely
+        // unvaluable here. Refuse to increase inventory rather than value a
+        // foreign symbol at this order's price (or, as before R3, at its cost
+        // basis). Reductions stay exempt.
+        for (const auto& [sym, pos] : positions)
+        {
+            if (sym == order.get_symbol() || std::abs(pos.qty) <= kQtyEps)
+                continue;
+            return deny(risk_rule::stale_mark, risk_action::reject);
+        }
+    }
 
     if (!reducing_exposure &&
+        limits_.max_portfolio_exposure > 0.0 &&
         projected_total_exposure > limits_.max_portfolio_exposure)
-        return risk_action::reject;
+        return deny(risk_rule::portfolio_exposure, risk_action::reject);
 
     // Phase 2.3 - portfolio-wide % of equity
     if (!reducing_exposure &&
         limits_.max_position_pct_of_equity > 0.0) {
         double max_portfolio_notional = snap.equity * limits_.max_position_pct_of_equity;
         if (projected_total_exposure > max_portfolio_notional)
-            return risk_action::reject;
+            return deny(risk_rule::position_pct_of_equity, risk_action::reject);
     }
 
     // Phase 2.4 - spread circuit breaker (populated in Analytics from L2 snapshots when --depth-stream is active).
@@ -169,20 +254,22 @@ risk_action RiskManager::check_order(const order_event& order,
         limits_.max_spread_bps > 0.0 && snap.current_spread_bps > limits_.max_spread_bps) {
         // Severe breaches (e.g. > 2x limit) escalate to halt to stop trading in obviously broken books
         if (snap.current_spread_bps > limits_.max_spread_bps * 2.0) {
-            return risk_action::halt;
+            return deny(risk_rule::spread_limit, risk_action::halt);
         }
-        return risk_action::reject;
+        return deny(risk_rule::spread_limit, risk_action::reject);
     }
 
-    // Funding rate circuit breaker (rate can be fed via Analytics::set_current_funding_rate_8h
-    // from the provider when ACCOUNT_UPDATE or dedicated funding rate messages are parsed).
+    // Funding-rate circuit breaker. R3: the rate is only enforced when a
+    // producer actually supplied one (derived from funding settlements) —
+    // an unknown rate must not read as "0.0, therefore inside the limit".
     // BF-01: same reduce-only exemption as the spread breaker above.
     if (!reducing_exposure &&
-        limits_.max_funding_8h_rate > 0.0 && snap.current_funding_8h_rate > limits_.max_funding_8h_rate) {
+        limits_.max_funding_8h_rate > 0.0 && snap.funding_rate_known &&
+        snap.current_funding_8h_rate > limits_.max_funding_8h_rate) {
         if (snap.current_funding_8h_rate > limits_.max_funding_8h_rate * 1.5) {
-            return risk_action::halt;
+            return deny(risk_rule::funding_limit, risk_action::halt);
         }
-        return risk_action::reject;
+        return deny(risk_rule::funding_limit, risk_action::reject);
     }
 
     if (limits_.max_orders_per_minute > 0)
@@ -190,7 +277,7 @@ risk_action RiskManager::check_order(const order_event& order,
         auto cutoff = order.get_timestamp() - std::chrono::seconds(60);
         prune_old_entries(order_timestamps_, cutoff);
         if (static_cast<int>(order_timestamps_.size()) >= limits_.max_orders_per_minute)
-            return risk_action::reject;
+            return deny(risk_rule::orders_per_minute, risk_action::reject);
         order_timestamps_.push_back({order.get_timestamp()});
     }
 
@@ -198,7 +285,7 @@ risk_action RiskManager::check_order(const order_event& order,
     {
         update_daily_reset(order.get_timestamp());
         if (daily_loss_ >= limits_.max_daily_loss)
-            return risk_action::halt;
+            return deny(risk_rule::daily_loss, risk_action::halt);
     }
 
     return risk_action::pass;
@@ -206,18 +293,25 @@ risk_action RiskManager::check_order(const order_event& order,
 
 risk_action RiskManager::check_post_fill(const fill_event& fill,
                                          const portfolio& /* port */,
-                                         const risk_snapshot& snap)
+                                         const risk_snapshot& snap,
+                                         risk_rule* rule_out)
 {
+    const auto deny = [&](risk_rule rule, risk_action action) {
+        if (rule_out) *rule_out = rule;
+        return action;
+    };
+    if (rule_out) *rule_out = risk_rule::none;
+
     if (snap.max_drawdown / 100.0 >= limits_.max_drawdown)
-        return risk_action::halt;
+        return deny(risk_rule::drawdown, risk_action::halt);
 
     if (snap.has_last_trade &&
         snap.last_trade_pnl < -limits_.max_loss_per_trade)
-        return risk_action::halt;
+        return deny(risk_rule::loss_per_trade, risk_action::halt);
 
     if (limits_.max_trades_per_hour > 0 &&
         static_cast<int>(trade_timestamps_.size()) >= limits_.max_trades_per_hour)
-        return risk_action::halt;
+        return deny(risk_rule::trades_per_hour, risk_action::halt);
 
     if (limits_.max_daily_loss > 0.0)
     {
@@ -232,7 +326,7 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
             last_daily_trade_seq_added_ = snap.last_trade_seq;
         }
         if (daily_loss_ >= limits_.max_daily_loss)
-            return risk_action::halt;
+            return deny(risk_rule::daily_loss, risk_action::halt);
     }
 
     return risk_action::pass;
@@ -240,24 +334,25 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
 
 // Legacy overloads - collapse the heavy AnalyticsReport to the thin
 // risk_snapshot and dispatch into the real path so logic lives in one
-// place.
+// place. R3: AnalyticsReport::total_orders/total_fills are reporting
+// counters and are deliberately NOT copied into the risk snapshot.
 risk_action RiskManager::check_order(const order_event& order,
                                      const portfolio& port,
                                      const AnalyticsReport& snap,
-                                     std::size_t open_order_count)
+                                     std::size_t open_order_count,
+                                     risk_rule* rule_out)
 {
     risk_snapshot rs;
     rs.max_drawdown = snap.max_drawdown;
-    rs.total_orders = snap.total_orders;
-    rs.total_fills  = snap.total_fills;
     // Phase 2 fields (best effort from full report; modern path uses risk_snapshot directly)
     rs.equity = snap.final_equity;  // approximate
-    return check_order(order, port, rs, open_order_count);
+    return check_order(order, port, rs, open_order_count, rule_out);
 }
 
 risk_action RiskManager::check_post_fill(const fill_event& fill,
                                          const portfolio& port,
-                                         const AnalyticsReport& snap)
+                                         const AnalyticsReport& snap,
+                                         risk_rule* rule_out)
 {
     risk_snapshot rs;
     rs.max_drawdown = snap.max_drawdown;
@@ -268,7 +363,7 @@ risk_action RiskManager::check_post_fill(const fill_event& fill,
 	        rs.last_trade_seq = snap.trades.size();
 	    }
     rs.equity = snap.final_equity;
-    return check_post_fill(fill, port, rs);
+    return check_post_fill(fill, port, rs, rule_out);
 }
 
 void RiskManager::on_fill(const fill_event& fill)

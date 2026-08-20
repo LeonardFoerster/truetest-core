@@ -158,7 +158,10 @@ private:
     // (see web/web_server.h) — a real cross-thread access, not hypothetical.
     // Guard every read/write with last_mark_prices_mu_.
     mutable std::mutex last_mark_prices_mu_;
-    std::unordered_map<std::string, double> last_mark_prices_;
+    // R3: value carries the observation timestamp so risk can classify the
+    // mark as valid/stale/missing instead of marking to an arbitrarily old
+    // price. Stamped from the sim clock, never wall clock (determinism).
+    std::unordered_map<std::string, mark_point> last_mark_prices_;
     // Last market/tick sim timestamp for cancel/amend audit (EL-CANCEL-WALLCLOCK).
     // Updated on every bar/tick event path; cancel_event uses this, not wall clock.
     std::chrono::system_clock::time_point last_sim_time_{};

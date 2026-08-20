@@ -368,6 +368,8 @@ engine::engine(std::shared_ptr<data_handler> dh,
     // Pass all needed non-owning refs for identical snapshot data + caches.
     dashboard_builder_ = std::make_unique<DashboardSnapshotBuilder>(
         portfolio_,
+        order_tracker_,
+        risk_manager_,
         analytics_,
         adverse_selection_,
         exit_manager_,
@@ -924,7 +926,7 @@ void engine::run()
 
         last_mid_price_.store(mkt.get_open(), std::memory_order_release);
         last_mark_symbol_ = symbol;
-        { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[symbol] = mkt.get_open(); }
+        { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[symbol] = mark_point{mkt.get_open(), mkt.get_timestamp()}; }
 
         // Advance adapter clocks so latency-gated cancels complete offline.
         if (router_) router_->advance_all(sim_time);
@@ -938,7 +940,7 @@ void engine::run()
 
         last_mid_price_.store(mkt.get_close(), std::memory_order_release);
         last_mark_symbol_ = symbol;
-        { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[symbol] = mkt.get_close(); }
+        { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[symbol] = mark_point{mkt.get_close(), mkt.get_timestamp()}; }
 
         {
             DEBUG_STAGE(stage_timer_, stop_check);

@@ -22,6 +22,9 @@ void engine::clear_pending_state()
         ? static_cast<std::size_t>(config_.risk.max_open_orders)
         : DEFAULT_RING_SIZE;
     pending_scheduler_->reserve_bar_delay_capacity(configured);
+    // R3: size the authoritative ledger once per run so no order-lifecycle
+    // transition rehashes under the event loop.
+    order_tracker_.reserve(configured * 4);
     l2_bid_scratch_.clear();
     l2_ask_scratch_.clear();
     if (l2_bid_scratch_.capacity() < kL2SnapshotMaxLevels)

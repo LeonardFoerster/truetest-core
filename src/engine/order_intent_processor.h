@@ -41,6 +41,8 @@
 #include "engine_hotpath_sink.h"
 #include "execution/portfolio.h"
 #include "execution/order_tracker.h"
+#include "execution/mark_point.h"
+#include "risk/risk_accounting.h"
 #include "risk/risk_manager.h"
 #include "risk/futures_risk_check.h"
 #include "analytics/analytics.h"
@@ -100,7 +102,7 @@ public:
         const std::atomic<bool>& pause_all,              // operator pause gate (route()/modify())
         std::atomic<double>& last_mid_price,            // read+write: anchor paths re-center it
         const std::string& last_mark_symbol,
-        const std::unordered_map<std::string, double>& last_mark_prices,
+        const std::unordered_map<std::string, mark_point>& last_mark_prices,
         std::mutex& last_mark_prices_mu,
         const std::chrono::system_clock::time_point& last_sim_time, // audit timestamps (cancel/modify/EOS)
         const std::unordered_set<std::string>& l2_seeded_symbols,
@@ -237,6 +239,12 @@ private:
     const instrument_spec* resolve_instrument_spec(const std::string& symbol);
     bool apply_instrument_spec(order_event& o, const instrument_spec& spec) const;
 
+    // R3: fill the authoritative mark-to-market views on `snap` for this
+    // candidate order (position ledger + open-order ledger + timestamped
+    // marks). Holds last_mark_prices_mu_ for exactly one pass.
+    void build_authoritative_risk_view(const order_event& order,
+                                       risk_snapshot& snap) const;
+
     // Former engine::mid_for_symbol — private now: drain_due()'s own
     // per-order mark lookup, no other caller (mirrors marked_account_equity,
     // which stayed public because a second, still-engine-owned caller needs
@@ -283,7 +291,7 @@ private:
     const std::atomic<bool>& pause_all_;
     std::atomic<double>& last_mid_price_;
     const std::string& last_mark_symbol_;
-    const std::unordered_map<std::string, double>& last_mark_prices_;
+    const std::unordered_map<std::string, mark_point>& last_mark_prices_;
     std::mutex& last_mark_prices_mu_;
     const std::chrono::system_clock::time_point& last_sim_time_;
     const std::unordered_set<std::string>& l2_seeded_symbols_;

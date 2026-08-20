@@ -412,6 +412,11 @@ struct cli_options
     int risk_daily_reset_hour = 0;
     int risk_max_trades_per_hour = 0;
     int risk_max_orders_per_minute = 0;
+    // R3 — authoritative risk accounting.
+    double risk_max_inventory_qty = 0.0;      // hard per-symbol inventory cap (base qty)
+    double risk_max_funding_8h_rate = 0.0;    // funding circuit breaker (fraction)
+    long long risk_max_mark_age_ms = 0;       // 0 = staleness classification off
+    bool risk_require_fresh_mark = false;     // stale/missing mark blocks new inventory
     bool risk_unwind = false;
 
 #ifdef HAS_QUESTDB
@@ -788,6 +793,12 @@ static void load_config_file(const std::string& path, cli_options& o)
         ri("daily_reset_hour", o.risk_daily_reset_hour);
         ri("max_trades_per_hour", o.risk_max_trades_per_hour);
         ri("max_orders_per_minute", o.risk_max_orders_per_minute);
+        rd("max_symbol_inventory_qty", o.risk_max_inventory_qty);
+        rd("max_funding_8h_rate", o.risk_max_funding_8h_rate);
+        if (r.contains("max_mark_age_ms") && r["max_mark_age_ms"].is_number_integer())
+            o.risk_max_mark_age_ms = r["max_mark_age_ms"].get<long long>();
+        if (r.contains("require_fresh_mark") && r["require_fresh_mark"].is_boolean())
+            o.risk_require_fresh_mark = r["require_fresh_mark"].get<bool>();
     }
 
     get_size("rolling_window", o.rolling_window);
@@ -896,7 +907,11 @@ static void dump_config(const cli_options& o)
         {"max_daily_loss", o.risk_max_daily_loss},
         {"daily_reset_hour", o.risk_daily_reset_hour},
         {"max_trades_per_hour", o.risk_max_trades_per_hour},
-        {"max_orders_per_minute", o.risk_max_orders_per_minute}
+        {"max_orders_per_minute", o.risk_max_orders_per_minute},
+        {"max_symbol_inventory_qty", o.risk_max_inventory_qty},
+        {"max_funding_8h_rate", o.risk_max_funding_8h_rate},
+        {"max_mark_age_ms", o.risk_max_mark_age_ms},
+        {"require_fresh_mark", o.risk_require_fresh_mark}
     };
 #ifdef HAS_QUESTDB
     j["persist"] = o.persist;
@@ -1192,6 +1207,17 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--daily-reset-hour", o.risk_daily_reset_hour, "UTC hour (0-23) to reset daily loss counter")->default_val(0);
     app.add_option("--max-trades-per-hour", o.risk_max_trades_per_hour, "Maximum fills per rolling hour (0 = no limit)")->default_val(0);
     app.add_option("--max-orders-per-minute", o.risk_max_orders_per_minute, "Maximum orders per rolling minute (0 = no limit)")->default_val(0);
+    // R3 (authoritative risk accounting). The inventory cap is applied to the
+    // worst case: position + every open order on the increasing side + the
+    // candidate, so resting orders cannot walk past it one ack at a time.
+    app.add_option("--max-inventory-qty", o.risk_max_inventory_qty,
+                   "Hard per-symbol inventory cap in base quantity, worst-case incl. open orders (0 = no limit)")->default_val(0.0);
+    app.add_option("--max-funding-8h-rate", o.risk_max_funding_8h_rate,
+                   "Funding circuit breaker as a fraction of notional per 8h, e.g. 0.0005 (0 = no limit)")->default_val(0.0);
+    app.add_option("--max-mark-age-ms", o.risk_max_mark_age_ms,
+                   "Age above which a mark counts as stale for risk (0 = no staleness classification)")->default_val(0);
+    app.add_flag("--risk-require-fresh-mark", o.risk_require_fresh_mark,
+                 "Refuse inventory-increasing orders when the mark is stale or missing (reductions stay allowed)");
     app.add_flag("--risk-unwind", o.risk_unwind, "On risk halt, unwind all positions before stopping");
     app.add_option("--output", o.output, "Write results to file (default: stdout)");
     app.add_option("--output-format", o.output_format, "Output format: json or csv")->default_val("json");
@@ -1343,6 +1369,10 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--daily-reset-hour")) opts.risk_daily_reset_hour = file_opts.risk_daily_reset_hour;
     if (!was_set("--max-trades-per-hour")) opts.risk_max_trades_per_hour = file_opts.risk_max_trades_per_hour;
     if (!was_set("--max-orders-per-minute")) opts.risk_max_orders_per_minute = file_opts.risk_max_orders_per_minute;
+    if (!was_set("--max-inventory-qty")) opts.risk_max_inventory_qty = file_opts.risk_max_inventory_qty;
+    if (!was_set("--max-funding-8h-rate")) opts.risk_max_funding_8h_rate = file_opts.risk_max_funding_8h_rate;
+    if (!was_set("--max-mark-age-ms")) opts.risk_max_mark_age_ms = file_opts.risk_max_mark_age_ms;
+    if (!was_set("--risk-require-fresh-mark")) opts.risk_require_fresh_mark = file_opts.risk_require_fresh_mark;
 #ifdef HAS_QUESTDB
     if (!was_set("--persist")) opts.persist = file_opts.persist;
     if (!was_set("--run-tag")) opts.run_tag = file_opts.run_tag;
@@ -2084,6 +2114,10 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.risk.daily_reset_hour = o.risk_daily_reset_hour;
     prov_cfg.risk.max_trades_per_hour = o.risk_max_trades_per_hour;
     prov_cfg.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
+    prov_cfg.risk.max_symbol_inventory_qty = o.risk_max_inventory_qty;
+    prov_cfg.risk.max_funding_8h_rate = o.risk_max_funding_8h_rate;
+    prov_cfg.risk.max_mark_age_ms = o.risk_max_mark_age_ms;
+    prov_cfg.risk.require_fresh_mark = o.risk_require_fresh_mark;
     prov_cfg.risk_unwind = o.risk_unwind;
 
     // Soft portfolio limits: reject-only in backtest; hard halt in live/shadow.
@@ -3141,6 +3175,10 @@ static int run_tui_configured_engine(const cli_options& o,
     config.risk.daily_reset_hour = o.risk_daily_reset_hour;
     config.risk.max_trades_per_hour = o.risk_max_trades_per_hour;
     config.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
+    config.risk.max_symbol_inventory_qty = o.risk_max_inventory_qty;
+    config.risk.max_funding_8h_rate = o.risk_max_funding_8h_rate;
+    config.risk.max_mark_age_ms = o.risk_max_mark_age_ms;
+    config.risk.require_fresh_mark = o.risk_require_fresh_mark;
     config.risk_unwind = o.risk_unwind;
     // Non-provider path is always engine_backtest binary → soft by default.
     // Still route through the resolver so mode typos / future flags stay consistent.

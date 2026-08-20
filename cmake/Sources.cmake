@@ -184,6 +184,12 @@ set(TEST_SOURCES
 
     # --- Risk & safety ---
     tests/test_risk_manager.cpp
+    # --- R3: authoritative risk accounting ---
+    tests/test_order_ledger.cpp
+    tests/test_engine_risk_ledger.cpp
+    tests/test_risk_accounting.cpp
+    tests/test_risk_enforcement.cpp
+    tests/test_risk_property.cpp
     tests/test_futures_risk_check.cpp
     tests/test_live_safety.cpp
     tests/test_dashboard_snapshot.cpp

@@ -146,6 +146,8 @@ const char* QuestdbStore::status_str(order_status s)
         case order_status::filled:           return "filled";
         case order_status::cancelled:        return "cancelled";
         case order_status::rejected:         return "rejected";
+        case order_status::expired:          return "expired";
+        case order_status::unknown:          return "unknown";
     }
     return "unknown";
 }

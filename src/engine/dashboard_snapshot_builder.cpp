@@ -31,6 +31,8 @@ using EventRing = RingBuffer<event_pointer, 65536>;
 
 DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     const portfolio& port,
+    const OrderTracker& order_tracker,
+    const RiskManager& risk_manager,
     const Analytics& analytics,
     const AdverseSelectionTracker& adverse,
     const truetest::exits::ExitManager& exits,
@@ -38,7 +40,7 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     const engine_config& config,
     const std::atomic<double>& last_mid_price,
     const std::string& last_mark_symbol,
-    const std::unordered_map<std::string, double>& last_mark_prices,
+    const std::unordered_map<std::string, mark_point>& last_mark_prices,
     std::mutex& last_mark_prices_mu,
     OrderbookRegistry& orderbook_registry,
     const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters,
@@ -64,6 +66,8 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     DebugSamplers debug_samplers
 )
     : portfolio_(port)
+    , order_tracker_(order_tracker)
+    , risk_manager_(risk_manager)
     , analytics_(analytics)
     , adverse_selection_(adverse)
     , exit_manager_(exits)
@@ -218,8 +222,8 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
         row.mark = 0.0;
         {
             std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-            if (auto it = last_mark_prices_.find(sym); it != last_mark_prices_.end() && it->second > 0.0)
-                row.mark = it->second;
+            if (auto it = last_mark_prices_.find(sym); it != last_mark_prices_.end() && it->second.usable())
+                row.mark = it->second.price;
         }
         if (row.mark <= 0.0 && sym == last_mark_symbol_)
             row.mark = last_mid;
@@ -263,7 +267,10 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
     out.perf.markout_samples = adverse_selection_.sample_count();
     out.perf.total_fills     = portfolio_.get_total_fills();
     out.perf.total_trades    = portfolio_.get_total_trades();
-    out.perf.total_orders    = open_orders_cache_.size() + portfolio_.get_total_fills();
+    // R3: lifetime order count from the authoritative ledger. The old
+    // "cached open rows + fills" derivation double-counted multi-fill orders
+    // and silently dropped rejected/expired ones.
+    out.perf.total_orders    = order_tracker_.orders_seen();
     out.perf.win_rate        = analytics_.win_rate_pct();
     out.perf.sharpe          = analytics_.rolling_sharpe();
     out.perf.sortino         = 0.0;
@@ -271,11 +278,12 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
 
     // Risk
     out.risk.halted             = halt_flag_.load(std::memory_order_acquire);
-    out.risk.daily_loss         = 0.0;
+    // R3: the same accumulator max_daily_loss is enforced from (was 0.0).
+    out.risk.daily_loss         = risk_manager_.daily_realized_loss();
     out.risk.daily_loss_limit   = config_.risk.max_daily_loss;
     out.risk.max_drawdown_pct   = analytics_.max_drawdown_pct();
     out.risk.max_drawdown_limit = config_.risk.max_drawdown * 100.0;
-    out.risk.open_orders        = open_orders_cache_.size();
+    out.risk.open_orders        = order_tracker_.active_count();
     out.risk.open_orders_limit  = (config_.risk.max_open_orders > 0) ? static_cast<std::size_t>(config_.risk.max_open_orders) : 0;
 
     double exposure = 0.0;
@@ -285,8 +293,8 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
         double mark = 0.0;
         {
             std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-            if (auto it = last_mark_prices_.find(sym); it != last_mark_prices_.end() && it->second > 0.0)
-                mark = it->second;
+            if (auto it = last_mark_prices_.find(sym); it != last_mark_prices_.end() && it->second.usable())
+                mark = it->second.price;
         }
         if (mark <= 0.0 && sym == last_mark_symbol_)
             mark = last_mid;
@@ -346,8 +354,8 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
         {
             {
                 std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-                if (auto it = last_mark_prices_.find(a.symbol); it != last_mark_prices_.end() && it->second > 0.0)
-                    row.mark = it->second;
+                if (auto it = last_mark_prices_.find(a.symbol); it != last_mark_prices_.end() && it->second.usable())
+                    row.mark = it->second.price;
             }
             if (row.mark == 0.0 && a.symbol == last_mark_symbol_)
                 row.mark = last_mid;
@@ -791,8 +799,7 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
         out.health.min_tick_to_trade_us  = static_cast<double>(lv.min_ns) / 1000.0;
         out.health.max_tick_to_trade_us  = static_cast<double>(lv.max_ns) / 1000.0;
 
-        out.health.orders_total = open_orders_cache_.size()
-                                + portfolio_.get_total_fills();
+        out.health.orders_total = order_tracker_.orders_seen();
         out.health.fills_total  = portfolio_.get_total_fills();
         out.health.trades_total = portfolio_.get_total_trades();
 

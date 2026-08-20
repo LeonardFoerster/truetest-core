@@ -155,6 +155,9 @@ src/providers/bitget/bitget_futures_register.cpp
 src/providers/bitget/bitget_futures_bracket_adapter.h
 src/risk/risk_manager.h
 src/risk/futures_risk_check.h
+src/risk/risk_accounting.h
+src/execution/order_tracker.h
+src/execution/mark_point.h
 src/execution/live_safety.h
 src/threading/worker.h
 src/threading/worker_watchdog.h

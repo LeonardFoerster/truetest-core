@@ -94,6 +94,13 @@ FROZEN_FILES=(
     "src/providers/bitget/bitget_futures_bracket_adapter.h"
     "src/risk/risk_manager.h"
     "src/risk/futures_risk_check.h"
+    # R3 (authoritative risk accounting): the open-order ledger, the mark
+    # freshness basis, and the risk-view builder are now the inputs every
+    # pre-trade decision is made from. Weakening any of them silently weakens
+    # every limit, so they carry the same CCB requirement as risk_manager.h.
+    "src/execution/order_tracker.h"
+    "src/execution/mark_point.h"
+    "src/risk/risk_accounting.h"
     "src/execution/live_safety.h"
     "src/threading/worker.h"
     "src/threading/worker_watchdog.h"

@@ -228,6 +228,22 @@ double portfolio::get_equity(const std::unordered_map<std::string, double>& mark
     return equity;
 }
 
+double portfolio::get_equity(const std::unordered_map<std::string, mark_point>& marks,
+                             double fallback_price) const
+{
+    double equity = cash_;
+    for (const auto& [sym, pos] : positions_)
+    {
+        if (std::abs(pos.qty) <= 1e-12)
+            continue;
+        double px = fallback_price;
+        if (auto it = marks.find(sym); it != marks.end() && it->second.usable())
+            px = it->second.price;
+        equity += pos.qty * px;
+    }
+    return equity;
+}
+
 // Phase A (MC object reuse): reset to initial constructed state.
 void portfolio::reset()
 {
