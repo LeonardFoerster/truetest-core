@@ -63,9 +63,11 @@ public:
     void advance_all(std::chrono::system_clock::time_point ts) noexcept;
     void on_l2_snapshot(const std::string& symbol,
                         const std::vector<std::pair<double, double>>& bids,
-                        const std::vector<std::pair<double, double>>& asks) noexcept;
+                        const std::vector<std::pair<double, double>>& asks,
+                        std::chrono::system_clock::time_point event_ts) noexcept;
     void on_l2_update(const std::string& symbol, order_side os,
-                      double price, double new_qty) noexcept;
+                      double price, double new_qty,
+                      std::chrono::system_clock::time_point event_ts) noexcept;
 
 private:
     // Backing map is the engine's execution_adapters_ (passed by ref). Router owns creation/lookup logic.

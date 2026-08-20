@@ -127,21 +127,23 @@ void ExecutionRouter::advance_all(std::chrono::system_clock::time_point ts) noex
 
 void ExecutionRouter::on_l2_snapshot(const std::string& symbol,
                                      const std::vector<std::pair<double, double>>& bids,
-                                     const std::vector<std::pair<double, double>>& asks) noexcept
+                                     const std::vector<std::pair<double, double>>& asks,
+                                     std::chrono::system_clock::time_point event_ts) noexcept
 {
     for (auto& [_, ad] : adapters_)
-        if (ad) ad->on_l2_snapshot(symbol, bids, asks);
+        if (ad) ad->on_l2_snapshot(symbol, bids, asks, event_ts);
     if (provider_)
         if (auto pa = provider_->get_execution_adapter())
-            pa->on_l2_snapshot(symbol, bids, asks);
+            pa->on_l2_snapshot(symbol, bids, asks, event_ts);
 }
 
 void ExecutionRouter::on_l2_update(const std::string& symbol, order_side os,
-                                   double price, double new_qty) noexcept
+                                   double price, double new_qty,
+                                   std::chrono::system_clock::time_point event_ts) noexcept
 {
     for (auto& [_, ad] : adapters_)
-        if (ad) ad->on_l2_update(symbol, os, price, new_qty);
+        if (ad) ad->on_l2_update(symbol, os, price, new_qty, event_ts);
     if (provider_)
         if (auto pa = provider_->get_execution_adapter())
-            pa->on_l2_update(symbol, os, price, new_qty);
+            pa->on_l2_update(symbol, os, price, new_qty, event_ts);
 }
