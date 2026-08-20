@@ -35,6 +35,7 @@
 24. `docs/skills/00-OVERVIEW.md` — Proposed agent skills and retained execution records.
 25. `docs/decisions/2026-08-14-live-safety-repair.md` — Approved live-safety repair decision and acceptance criteria.
 26. `docs/todos/10-BF-backtest-engine-bugfixes.md` — Backtest defect backlog and frozen-surface sequencing.
+27. `docs/internal/r3-authoritative-risk-accounting.md` — Authoritative order/position ledger and mark-to-market risk snapshot (risk register R3): removed proxies, data flow, VaR and funding decisions.
 
 ## Processing notes
 
