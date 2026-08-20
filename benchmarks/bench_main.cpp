@@ -20,6 +20,7 @@
 #include "market_maker/market_maker.h"
 #include "orderbook/orderbook.h"
 #include "risk/risk_accounting.h"
+#include "strategy/market_making/inventory_aware_mm_strategy.h"
 #include "strategy/sma_strategy.h"
 #include "threading/ring_buffer.h"
 #include "types/price.h"
@@ -29,6 +30,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <algorithm>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -366,5 +368,169 @@ static void BM_RiskView_Build(benchmark::State& state)
     state.SetItemsProcessed(state.iterations());
 }
 BENCHMARK(BM_RiskView_Build)->Arg(1)->Arg(4)->Arg(16)->Unit(benchmark::kNanosecond);
+
+// ─── Inventory-aware market-making strategy (R1) ────────────────────────────
+// Regression budget, not a venue requirement: p99 <= 50 us, p99.9 <= 100 us
+// on the reference hardware documented in
+// check-ups/2026-08-20-r1-benchmark.md.
+
+namespace mmbench {
+
+using namespace truetest::mm;
+
+mm_instrument instrument()
+{
+    instrument_spec spec;
+    spec.symbol = "BTCUSDT";
+    spec.tick_size = 0.10;
+    spec.lot_size = 0.0001;
+    spec.maker_rate = 0.0001;
+    mm_instrument out{};
+    (void)make_mm_instrument(spec, out);
+    return out;
+}
+
+mm_config config(unsigned levels)
+{
+    mm_config cfg;
+    cfg.strategy_id = "inventory_aware_mm_bench";
+    cfg.levels = levels;
+    cfg.inventory.hard_limit_base = 100'000'000;   // 1.0 base unit
+    cfg.inventory.reservation_skew_bps_at_hard_limit = 4.0;
+    cfg.spread.min_half_spread_bps = 6.0;
+    cfg.spread.fee_buffer_bps = 0.5;
+    cfg.quotes.base_size = 10'000'000;             // 0.10 base unit
+    return cfg;
+}
+
+constexpr timestamp_ns base_time_ns = 1'770'000'000'000'000'000LL;
+
+market_snapshot snapshot(int step)
+{
+    market_snapshot m;
+    m.event_time_ns = base_time_ns + step * 1'000'000LL;
+    m.receive_time_ns = m.event_time_ns + 100'000;
+    m.best_bid = Price(600'000'000 + (step % 97) * 1000);
+    m.best_ask = Price(m.best_bid.raw() + 5000);
+    m.best_bid_qty = 100'000'000 + (step % 13) * 10'000'000;
+    m.best_ask_qty = 100'000'000 + (step % 7) * 10'000'000;
+    m.short_horizon_volatility_bps = 0.1 * static_cast<double>(step % 40);
+    m.toxicity_risk_bps = 0.05 * static_cast<double>(step % 20);
+    m.latency_risk_bps = 0.02 * static_cast<double>(step % 10);
+    m.sequence_valid = true;
+    m.snapshot_id = static_cast<std::uint64_t>(step);
+    return m;
+}
+
+inventory_snapshot inventory(int step, qty_atoms hard)
+{
+    inventory_snapshot inv;
+    // Walks the whole utilisation range including both hard limits.
+    const int band = step % 21;
+    inv.signed_base_position = static_cast<qty_atoms>((band - 10) * (hard / 10));
+    inv.worst_case_position_if_all_buys_fill = inv.signed_base_position;
+    inv.worst_case_position_if_all_sells_fill = inv.signed_base_position;
+    inv.authoritative = true;
+    return inv;
+}
+
+strategy_context context(const market_snapshot& m, const mm_instrument& ins)
+{
+    strategy_context ctx;
+    ctx.decision_time_ns = m.receive_time_ns + 50'000;
+    ctx.instrument = ins;
+    ctx.symbol_id = 1;
+    return ctx;
+}
+
+} // namespace mmbench
+
+static void BM_MMStrategy_Evaluate(benchmark::State& state)
+{
+    using namespace mmbench;
+    const auto ins = instrument();
+    const auto cfg = config(static_cast<unsigned>(state.range(0)));
+    truetest::mm::InventoryAwareMarketMakingStrategy strat;
+    if (!strat.configure(cfg).ok)
+        state.SkipWithError("benchmark config rejected");
+
+    int step = 0;
+    for (auto _ : state)
+    {
+        const auto m = snapshot(step);
+        const auto inv = inventory(step, cfg.inventory.hard_limit_base);
+        const auto ctx = context(m, ins);
+        auto res = strat.evaluate(m, inv, ctx);
+        benchmark::DoNotOptimize(res.decision.intents.size());
+        ++step;
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+BENCHMARK(BM_MMStrategy_Evaluate)->Arg(1)->Arg(4)->Arg(8)->Unit(benchmark::kNanosecond);
+
+// One million calls with the per-call latency distribution reported as
+// counters, which is what the p99/p99.9 regression budget is stated against.
+static void BM_MMStrategy_LatencyDistribution(benchmark::State& state)
+{
+    using namespace mmbench;
+    constexpr int kCalls = 1'000'000;
+
+    const auto ins = instrument();
+    const auto cfg = config(static_cast<unsigned>(state.range(0)));
+    truetest::mm::InventoryAwareMarketMakingStrategy strat;
+    if (!strat.configure(cfg).ok)
+        state.SkipWithError("benchmark config rejected");
+
+    // Inputs are built up front so the measured window contains nothing but
+    // evaluate(). No logging, no formatting, no allocation inside the loop.
+    std::vector<truetest::mm::market_snapshot> markets;
+    std::vector<truetest::mm::inventory_snapshot> inventories;
+    std::vector<truetest::mm::strategy_context> contexts;
+    markets.reserve(kCalls);
+    inventories.reserve(kCalls);
+    contexts.reserve(kCalls);
+    for (int i = 0; i < kCalls; ++i)
+    {
+        markets.push_back(snapshot(i));
+        inventories.push_back(inventory(i, cfg.inventory.hard_limit_base));
+        contexts.push_back(context(markets.back(), ins));
+    }
+
+    std::vector<std::int64_t> samples(static_cast<std::size_t>(kCalls), 0);
+
+    for (auto _ : state)
+    {
+        for (int i = 0; i < kCalls; ++i)
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            auto res = strat.evaluate(markets[static_cast<std::size_t>(i)],
+                                      inventories[static_cast<std::size_t>(i)],
+                                      contexts[static_cast<std::size_t>(i)]);
+            const auto t1 = std::chrono::steady_clock::now();
+            benchmark::DoNotOptimize(res.decision.intents.size());
+            samples[static_cast<std::size_t>(i)] =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        }
+
+        state.PauseTiming();
+        std::sort(samples.begin(), samples.end());
+        const auto pct = [&](double p) {
+            const auto idx = static_cast<std::size_t>(p * static_cast<double>(kCalls - 1));
+            return static_cast<double>(samples[idx]);
+        };
+        state.counters["p50_ns"] = pct(0.50);
+        state.counters["p95_ns"] = pct(0.95);
+        state.counters["p99_ns"] = pct(0.99);
+        state.counters["p999_ns"] = pct(0.999);
+        state.counters["max_ns"] = static_cast<double>(samples.back());
+        state.ResumeTiming();
+    }
+    state.SetItemsProcessed(state.iterations() * kCalls);
+}
+BENCHMARK(BM_MMStrategy_LatencyDistribution)
+    ->Arg(1)
+    ->Arg(8)
+    ->Unit(benchmark::kMillisecond)
+    ->Iterations(3);
 
 BENCHMARK_MAIN();
