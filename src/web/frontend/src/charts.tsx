@@ -3,6 +3,7 @@
    Ported from the Claude Design prototype (charts.jsx).
    ========================================================================= */
 import { fmt } from "./format";
+import { histogramCountScale, normalizedPosition, normalizedRange } from "./chartMath";
 
 /* ---------- Live equity + drawdown chart ---------- */
 export function EquityChart({ data, w = 720, h = 230 }: any) {
@@ -18,9 +19,9 @@ export function EquityChart({ data, w = 720, h = 230 }: any) {
   const eqs = data.map((d: any) => d.eq);
   const min = Math.min(...eqs),
     max = Math.max(...eqs);
-  const rng = max - min || 1;
+  const yRange = normalizedRange(min, max);
   const sx = (i: number) => padL + (i / (data.length - 1)) * iw;
-  const sy = (v: number) => padT + (1 - (v - min) / rng) * eqH;
+  const sy = (v: number) => padT + (1 - normalizedPosition(v, yRange)) * eqH;
 
   let line = "",
     area = "";
@@ -46,7 +47,10 @@ export function EquityChart({ data, w = 720, h = 230 }: any) {
   const col = up ? "var(--up)" : "var(--down)";
 
   // y gridlines
-  const grid = [0, 0.5, 1].map((t) => ({ y: padT + t * eqH, v: max - t * rng }));
+  const grid = [0, 0.5, 1].map((t) => ({
+    y: padT + t * eqH,
+    v: max * (1 - t) + min * t,
+  }));
 
   return (
     <svg width="100%" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ display: "block" }}>
@@ -92,24 +96,53 @@ export function BTChart({ strat, bench, markers, w = 1140, h = 320, brushStart =
     gap = 10;
   const eqH = h - padT - padB - ddH - gap;
 
-  const all = strat.map((d: any) => d.v).concat(bench.map((d: any) => d.v));
-  const min = Math.min(...all),
-    max = Math.max(...all);
-  const rng = max - min || 1;
-  const n = strat.length;
-  const sx = (i: number) => padL + (i / (n - 1)) * iw;
-  const sy = (v: number) => padT + (1 - (v - min) / rng) * eqH;
+  if (!Array.isArray(strat) || strat.length === 0) {
+    return (
+      <svg width="100%" viewBox={`0 0 ${w} ${h}`} role="img" aria-label="Equity curve unavailable">
+        <text x={w / 2} y={h / 2} textAnchor="middle" fill="var(--tx-faint)">
+          Equity curve unavailable
+        </text>
+      </svg>
+    );
+  }
 
-  const path = (arr: any[]) => arr.map((d, i) => (i ? "L" : "M") + sx(i).toFixed(1) + " " + sy(d.v).toFixed(1)).join(" ");
+  let min = Infinity,
+    max = -Infinity,
+    minTs = Infinity,
+    maxTs = -Infinity;
+  for (const point of strat) {
+    min = Math.min(min, point.v);
+    max = Math.max(max, point.v);
+    minTs = Math.min(minTs, point.tsMs);
+    maxTs = Math.max(maxTs, point.tsMs);
+  }
+  for (const point of bench) {
+    min = Math.min(min, point.v);
+    max = Math.max(max, point.v);
+    minTs = Math.min(minTs, point.tsMs);
+    maxTs = Math.max(maxTs, point.tsMs);
+  }
+  const yRange = normalizedRange(min, max);
+  const n = strat.length;
+  const timeRange = maxTs - minTs || 1;
+  const sxTime = (tsMs: number) => padL + ((tsMs - minTs) / timeRange) * iw;
+  const sy = (v: number) => padT + (1 - normalizedPosition(v, yRange)) * eqH;
+
+  const path = (arr: any[]) => arr.map((d, i) => (i ? "L" : "M") + sxTime(d.tsMs).toFixed(1) + " " + sy(d.v).toFixed(1)).join(" ");
   const stratP = path(strat),
     benchP = path(bench);
 
   const ddTop = padT + eqH + gap + 18;
-  const minDD = Math.min(...strat.map((d: any) => d.dd), -0.001);
+  let minDD = -0.001;
+  for (const point of strat)
+    minDD = Math.min(minDD, point.dd ?? 0);
   const ddY = (v: number) => ddTop + (v / minDD) * (ddH - 18);
-  let ddArea = `M${padL} ${ddTop} ` + strat.map((d: any, i: number) => "L" + sx(i).toFixed(1) + " " + ddY(d.dd).toFixed(1)).join(" ") + ` L${sx(n - 1).toFixed(1)} ${ddTop} Z`;
+  let ddArea = `M${sxTime(strat[0].tsMs).toFixed(1)} ${ddTop} ` + strat.map((d: any) => "L" + sxTime(d.tsMs).toFixed(1) + " " + ddY(d.dd).toFixed(1)).join(" ") + ` L${sxTime(strat[n - 1].tsMs).toFixed(1)} ${ddTop} Z`;
 
-  const grid = [0, 0.25, 0.5, 0.75, 1].map((t) => ({ y: padT + t * eqH, v: max - t * rng }));
+  const grid = [0, 0.25, 0.5, 0.75, 1].map((t) => ({
+    y: padT + t * eqH,
+    v: max * (1 - t) + min * t,
+  }));
   const bw = brushStart * iw + padL,
     bwEnd = brushEnd * iw + padL;
 
@@ -132,11 +165,11 @@ export function BTChart({ strat, bench, markers, w = 1140, h = 320, brushStart =
           </text>
         </g>
       ))}
-      <path d={stratP + ` L${sx(n - 1).toFixed(1)} ${padT + eqH} L${padL} ${padT + eqH} Z`} fill="url(#btfill)" />
+      <path d={stratP + ` L${sxTime(strat[n - 1].tsMs).toFixed(1)} ${padT + eqH} L${sxTime(strat[0].tsMs).toFixed(1)} ${padT + eqH} Z`} fill="url(#btfill)" />
       <path d={benchP} fill="none" stroke="var(--tx-lo)" strokeWidth="1.4" strokeDasharray="4 3" opacity="0.85" />
       <path d={stratP} fill="none" stroke="var(--up)" strokeWidth="2" strokeLinejoin="round" />
       {markers.map((m: any, i: number) => {
-        const x = sx(m.i),
+        const x = sxTime(m.tsMs),
           y = sy(m.v);
         const c = m.side === "long" ? "var(--up)" : "var(--down)";
         return m.kind === "entry" ? (
@@ -165,21 +198,23 @@ export function Histogram({ bins, w = 300, h = 200 }: any) {
     padB = 22;
   const iw = w - padL - padR,
     ih = h - padT - padB;
-  const maxC = Math.max(...bins.map((b: any) => b.c));
-  const bw = iw / bins.length;
+  const countScale = histogramCountScale(bins);
+  const bw = bins.length > 0 ? iw / bins.length : iw;
   return (
     <svg width="100%" viewBox={`0 0 ${w} ${h}`} style={{ display: "block" }}>
       <line x1={padL} x2={w - padR} y1={padT + ih} y2={padT + ih} stroke="var(--line)" strokeWidth="1" />
       {bins.map((b: any, i: number) => {
-        const bh = (b.c / maxC) * ih;
+        const bh = (b.c / countScale) * ih;
         const x = padL + i * bw;
         const mid = (b.x0 + b.x1) / 2;
-        const col = mid >= 0 ? "var(--up)" : "var(--down)";
-        return <rect key={i} x={x + 1} y={padT + ih - bh} width={bw - 2} height={bh} fill={col} opacity={mid >= 0 ? 0.7 : 0.6} rx="1" />;
+        const zero = b.x0 === 0 && b.x1 === 0;
+        const col = zero ? "var(--tx-faint)" : mid > 0 ? "var(--up)" : "var(--down)";
+        return <rect key={i} x={x + 1} y={padT + ih - bh} width={bw - 2} height={bh} fill={col} opacity={zero ? 0.5 : mid > 0 ? 0.7 : 0.6} rx="1" />;
       })}
       {/* zero line */}
       {(() => {
         const zi = bins.findIndex((b: any) => b.x0 <= 0 && b.x1 > 0);
+        if (zi < 0 || bins[zi].x1 <= bins[zi].x0) return null;
         const zx = padL + (zi + (0 - bins[zi].x0) / (bins[zi].x1 - bins[zi].x0)) * bw;
         return <line x1={zx} x2={zx} y1={padT} y2={padT + ih} stroke="var(--tx-faint)" strokeWidth="1" strokeDasharray="2 2" />;
       })()}

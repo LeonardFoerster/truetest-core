@@ -273,7 +273,7 @@ export default function App() {
             </div>
             <span className="badge badge-backtest">
               <span className="g" />
-              BACKTEST
+              {results.offline ? "RESULTS UNAVAILABLE" : "BACKTEST"}
             </span>
           </div>
         )}
@@ -312,6 +312,18 @@ export default function App() {
           <LiveDashboard status={status} live={live.data} onResume={() => setOverride(null)} />
         ) : results.report ? (
           <BacktestReview report={results.report} />
+        ) : results.offline ? (
+          <div
+            role="alert"
+            style={{
+              margin: 24,
+              padding: 18,
+              border: "1px solid var(--down)",
+              color: "var(--down)",
+            }}
+          >
+            Backtest results are unavailable or have not been safely published. No demo financial data was substituted.
+          </div>
         ) : (
           <SkeletonGrid />
         )}

@@ -119,21 +119,35 @@ export interface Health {
 }
 
 export interface BacktestHeadline {
+  valuationComplete: boolean;
+  valuationReason: string;
+  portfolioTimeSeriesValid: boolean;
+  portfolioTimeSeriesReason: string;
   totalReturn: number;
-  sharpe: number;
-  sortino: number;
-  calmar: number;
-  maxDD: number;
+  sharpe: number | null;
+  sharpeReason: string;
+  sortino: number | null;
+  sortinoReason: string;
+  calmar: number | null;
+  calmarReason: string;
+  maxDD: number | null;
+  maxDDReason: string;
   winRate: number;
-  profitFactor: number;
+  profitFactor: number | null;
+  profitFactorUnbounded: boolean;
+  profitFactorReason: string;
   totalTrades: number;
   finalEquity: number;
   startEquity: number;
-  cagr: number;
+  cagr: number | null;
+  cagrReason: string;
   avgTrade: number;
 }
 
 export interface BacktestBench {
+  valid: boolean;
+  reason: string;
+  symbol: string;
   alpha: number;
   beta: number;
   infoRatio: number;
@@ -152,28 +166,34 @@ export interface Backtest {
 
 export interface BTPoint {
   i: number;
+  tsMs: number;
   v: number;
   dd?: number;
 }
 
 export interface BTMarker {
   i: number;
+  tsMs: number;
   kind: "entry" | "exit";
   side: Side;
   v: number;
 }
 
 export interface BlotterRow {
-  id: number;
-  day: number;
+  id: string;
+  orderId: string;
+  tsMs: number;
   sym: string;
   strat: string;
-  side: Side;
+  side: FillSide;
   qty: number;
   fill: number;
   intended: number;
+  intendedValid: boolean;
   slipBps: number;
+  slippageValid: boolean;
   comm: number;
+  commCurrency: string;
   pnl: number;
 }
 
@@ -187,7 +207,9 @@ export interface BreakdownRow {
   key: string;
   pnl: number;
   win: number;
-  pf: number;
+  pf: number | null;
+  pfUnbounded: boolean;
+  pfReason: string;
   trades: number;
 }
 

@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "test:contracts": "node --experimental-strip-types tests/report-contracts.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

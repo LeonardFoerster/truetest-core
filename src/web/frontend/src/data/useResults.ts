@@ -1,15 +1,14 @@
 /* =========================================================================
    TrueTest — backtest results hook.
 
-   Fetches /api/results once, runs it through adaptReport. Falls back to the
-   bundled fixture if no engine is reachable so the Backtest Review renders
-   offline.
+   Fetches /api/results once and runs it through adaptReport. Unavailable or
+   unpublished results remain visibly unavailable; financial fixtures are
+   never substituted for engine output.
    ========================================================================= */
 import { useEffect, useState } from "react";
-import { adaptReport, type ReportData } from "../adapters/report";
-import type { ResultsReport } from "../wire";
-import { fixtureReport } from "../fixtures";
+import { adaptReportJson, REPORT_LIMITS, type ReportData } from "../adapters/report";
 import { authHeaders } from "./store";
+import { readBoundedResponseText } from "./readBoundedResponse";
 
 export interface ResultsState {
   report: ReportData | null;
@@ -22,19 +21,28 @@ export function useResults(): ResultsState {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     const url = "/api/results";
 
-    fetch(url, { headers: authHeaders() })
-      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
-      .then((j: ResultsReport) => {
-        if (!cancelled) setState({ report: adaptReport(j), loading: false, offline: false });
+    fetch(url, { headers: authHeaders(), signal: controller.signal })
+      .then(async (r) => {
+        if (!r.ok) throw r.status;
+        const text = await readBoundedResponseText(r, REPORT_LIMITS.reportBytes);
+        return adaptReportJson(text);
+      })
+      .then((report) => {
+        if (!cancelled) setState({ report, loading: false, offline: false });
       })
       .catch(() => {
-        if (!cancelled) setState({ report: fixtureReport, loading: false, offline: true });
+        // A 503 is the backend's explicit fail-closed "report not safely
+        // published" state. Never replace it (or a network failure) with
+        // plausible demo financial results.
+        if (!cancelled) setState({ report: null, loading: false, offline: true });
       });
 
     return () => {
       cancelled = true;
+      controller.abort("results_view_unmounted");
     };
   }, []);
 

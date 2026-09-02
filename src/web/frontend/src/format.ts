@@ -23,15 +23,23 @@ export const fmt = {
     return (v >= 0 ? "+$" : "−$") + Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
   },
   pct(v: number, d = 2) {
-    return (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(d) + "%";
+    return (v >= 0 ? "+" : "−") + percentMagnitude(v, d) + "%";
   },
   pctP(v: number, d = 2) {
-    return (v * 100).toFixed(d) + "%";
+    return (v < 0 ? "−" : "") + percentMagnitude(v, d) + "%";
   },
   bps(v: number) {
     return v.toFixed(1);
   },
 };
+
+function percentMagnitude(v: number, digits: number): string {
+  const magnitude = Math.abs(v);
+  if (magnitude <= 1e12) return (magnitude * 100).toFixed(digits);
+  const [mantissa, rawExponent] = magnitude.toExponential(digits).split("e");
+  const exponent = Number(rawExponent) + 2;
+  return `${mantissa}e${exponent >= 0 ? "+" : ""}${exponent}`;
+}
 
 export const cls = (v: number) => (v > 0 ? "up" : v < 0 ? "down" : "flat");
 export const tri = (side: string) => (side === "long" || side === "buy" ? "▲" : "▼");

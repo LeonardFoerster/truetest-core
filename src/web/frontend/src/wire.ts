@@ -69,7 +69,7 @@ export interface WireStrategy {
   name: string;
   pnl: number;
   trade_count: number;
-  win_count: number;
+  win_count?: number; // additive in schema v1; absent in older fixtures
   win_rate: number; // engine scale; adapter normalizes to 0..1
   profit_factor: number;
   total_win: number;
@@ -272,15 +272,23 @@ export interface WireSubAnalytics {
   trade_count: number;
   win_count: number;
   win_rate: number; // 0..100
+  total_win: number;
+  total_loss: number;
   profit_factor: number;
+  profit_factor_valid: boolean;
+  profit_factor_unbounded: boolean;
+  profit_factor_reason: string;
 }
 
 export interface WireTrade {
-  order_id: number;
+  order_id: string; // uint64 decimal string; never cross JS Number precision
+  fill_id: string; // uint64 decimal string; "0" requires venue_execution_id
+  venue_execution_id: string;
   side: "buy" | "sell";
   quantity: number;
   fill_price: number;
   commission: number;
+  commission_currency: string;
   intended_price: number;
   ts_ms: number;
   pnl: number;
@@ -292,25 +300,68 @@ export interface ResultsReport {
   schema_version: number;
   initial_equity: number;
   final_equity: number;
+  gross_realized_pnl: number;
+  realized_pnl: number;
+  funding_pnl: number;
+  unrealized_pnl: number;
+  total_commission: number;
+  reconciliation_residual: number;
+  accounting_reconciled: boolean;
+  accounting_reconciliation_reason: string;
+  valuation_complete?: boolean;
+  valuation_reason?: string;
+  portfolio_time_series_valid?: boolean;
+  portfolio_time_series_reason?: string;
+  ambiguous_portfolio_mark_sequences_rejected?: number;
+  return_observation_basis?: string;
+  equity_curve_sample_stride?: number;
   cumulative_return: number;
   annualized_return: number;
+  annualized_return_valid?: boolean;
+  annualized_return_reason?: string;
+  annualized_return_basis?: string;
   sharpe_ratio: number;
+  sharpe_ratio_valid?: boolean;
+  sharpe_ratio_reason?: string;
   sortino_ratio: number;
+  sortino_ratio_valid?: boolean;
+  sortino_ratio_reason?: string;
   max_drawdown: number; // positive %
   calmar_ratio: number;
+  calmar_ratio_valid?: boolean;
+  calmar_ratio_reason?: string;
   rolling_sharpe: number;
   rolling_max_drawdown: number;
   win_rate: number; // 0..100
+  total_win: number;
+  total_loss: number;
   profit_factor: number;
+  profit_factor_valid: boolean;
+  profit_factor_unbounded: boolean;
+  profit_factor_reason: string;
   total_trades: number;
   winning_trades: number;
   total_orders: number;
   total_fills: number;
+  duplicate_fill_replays_ignored: number;
+  conflicting_fill_replays_rejected: number;
+  missing_fill_identities_rejected: number;
+  invalid_fill_payloads_rejected: number;
+  unreconciled_funding_events_rejected: number;
+  duplicate_funding_replays_ignored: number;
+  conflicting_funding_replays_rejected: number;
+  late_fill_events_rejected: number;
+  late_funding_events_rejected: number;
+  late_market_events_rejected?: number;
+  duplicate_market_marks_ignored?: number;
+  conflicting_market_marks_rejected?: number;
   avg_win: number;
   avg_loss: number;
   largest_winner: number;
   largest_loser: number;
   time_in_market_pct: number;
+  time_in_market_valid?: boolean;
+  time_in_market_reason?: string;
   avg_holding_period_ms: number;
   avg_slippage: number;
   avg_slippage_signed: number;
@@ -324,6 +375,11 @@ export interface ResultsReport {
   tick_to_trade_samples: number;
   buy_and_hold_return: number;
   strategy_vs_benchmark: number;
+  benchmark_valid?: boolean;
+  benchmark_reason?: string;
+  benchmark_symbol?: string;
+  benchmark_equity_curve_sample_stride?: number;
+  benchmark_curve_observation_basis?: string;
   alpha: number;
   beta: number;
   information_ratio: number;
@@ -331,6 +387,8 @@ export interface ResultsReport {
   equity_curve: [number, number][]; // [ts_ms, equity]
   benchmark_equity_curve: [number, number][];
   trade_returns: number[];
+  trade_rows_kind: "physical_fill_legs";
+  trade_returns_kind: "closing_fill_legs";
   per_symbol: Record<string, WireSubAnalytics>;
   per_strategy: Record<string, WireSubAnalytics>;
   trades: WireTrade[];
