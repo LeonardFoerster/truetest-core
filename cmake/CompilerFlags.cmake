@@ -46,6 +46,11 @@ function(tt_apply_common_flags target)
             -Wextra
             -Wpedantic
             -Wconversion)
+        if(TRUETEST_DETERMINISTIC_BUILD)
+            target_compile_options(${target} PRIVATE
+                -fno-fast-math
+                -ffp-contract=off)
+        endif()
         if(ENABLE_LTO)
             target_compile_options(${target} PRIVATE
                 $<$<CONFIG:Release>:-flto>)

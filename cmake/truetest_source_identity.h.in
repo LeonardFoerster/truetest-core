@@ -1,0 +1,8 @@
+// clang-format off
+// Generated at build time. Do not edit.
+#pragma once
+
+#define TRUETEST_GIT_SHA          "@TRUETEST_GIT_SHA@"
+#define TRUETEST_GIT_DIRTY        "@TRUETEST_GIT_DIRTY@"
+#define TRUETEST_GIT_DIFF_SHA256  "@TRUETEST_GIT_DIFF_SHA256@"
+// clang-format on

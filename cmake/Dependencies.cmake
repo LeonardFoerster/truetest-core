@@ -48,6 +48,57 @@ function(_tt_fetchcontent_make_available_with_policy_minimum dependency minimum)
     endif()
 
     FetchContent_MakeAvailable("${dependency}")
+    FetchContent_GetProperties("${dependency}" SOURCE_DIR _tt_dependency_source)
+    set("${dependency}_SOURCE_DIR" "${_tt_dependency_source}" PARENT_SCOPE)
+endfunction()
+
+function(_tt_verify_deterministic_dependency dependency source_dir expected_commit)
+    if(NOT TRUETEST_DETERMINISTIC_BUILD)
+        return()
+    endif()
+    if(DEFINED _tt_audited_git_executable
+       AND NOT _tt_audited_git_executable STREQUAL "")
+        set(_tt_dependency_git "${_tt_audited_git_executable}")
+        file(SHA256 "${_tt_dependency_git}" _tt_dependency_git_sha256)
+        if(NOT _tt_dependency_git_sha256 STREQUAL _tt_audited_git_sha256)
+            message(FATAL_ERROR
+                "linux-deterministic-v1 audited git executable changed")
+        endif()
+    else()
+        find_program(_tt_dependency_git git REQUIRED)
+    endif()
+    execute_process(
+        COMMAND "${_tt_dependency_git}" rev-parse --verify HEAD
+        WORKING_DIRECTORY "${source_dir}"
+        RESULT_VARIABLE _tt_head_result
+        OUTPUT_VARIABLE _tt_head
+        ERROR_VARIABLE _tt_head_error
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(
+        COMMAND "${_tt_dependency_git}" status --porcelain
+            --untracked-files=all
+        WORKING_DIRECTORY "${source_dir}"
+        RESULT_VARIABLE _tt_status_result
+        OUTPUT_VARIABLE _tt_status
+        ERROR_VARIABLE _tt_status_error
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(
+        COMMAND "${_tt_dependency_git}" ls-files -v
+        WORKING_DIRECTORY "${source_dir}"
+        RESULT_VARIABLE _tt_index_flags_result
+        OUTPUT_VARIABLE _tt_index_flags
+        ERROR_VARIABLE _tt_index_flags_error
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _tt_head_result EQUAL 0 OR NOT _tt_status_result EQUAL 0
+       OR NOT _tt_index_flags_result EQUAL 0
+       OR NOT _tt_head STREQUAL "${expected_commit}"
+       OR NOT _tt_status STREQUAL ""
+       OR _tt_index_flags MATCHES "(^|\n)[a-zS] ")
+        message(FATAL_ERROR
+            "linux-deterministic-v1 dependency '${dependency}' is not the "
+            "expected clean commit ${expected_commit}: HEAD='${_tt_head}', "
+            "status='${_tt_status}', errors='${_tt_head_error}${_tt_status_error}'")
+    endif()
 endfunction()
 
 # ── tt_fetch_dependencies() ─────────────────────────────────────────────────
@@ -56,15 +107,18 @@ function(tt_fetch_dependencies)
     FetchContent_Declare(
         cli11
         GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
-        GIT_TAG        v2.4.2
+        GIT_TAG        6c7b07a878ad834957b98d0f9ce1dbe0cb204fc9
     )
     _tt_fetchcontent_make_available_with_policy_minimum(cli11 3.10)
+    _tt_verify_deterministic_dependency(
+        cli11 "${cli11_SOURCE_DIR}"
+        6c7b07a878ad834957b98d0f9ce1dbe0cb204fc9)
 
     # zstd — binary event-log compression
     FetchContent_Declare(
         zstd
         GIT_REPOSITORY https://github.com/facebook/zstd.git
-        GIT_TAG        v1.5.6
+        GIT_TAG        794ea1b0afca0f020f4e57b6732332231fb23c70
         SOURCE_SUBDIR  build/cmake
     )
     set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
@@ -75,15 +129,21 @@ function(tt_fetch_dependencies)
     # pre-1.0 decoders keeps unused legacy code out of every static link.
     set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
     _tt_fetchcontent_make_available_with_policy_minimum(zstd 3.10)
+    _tt_verify_deterministic_dependency(
+        zstd "${zstd_SOURCE_DIR}"
+        794ea1b0afca0f020f4e57b6732332231fb23c70)
 
     # nlohmann/json — config-file parsing (NOT hot-path JSON)
     FetchContent_Declare(
         nlohmann_json
         GIT_REPOSITORY https://github.com/nlohmann/json.git
-        GIT_TAG        v3.11.3
+        GIT_TAG        9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03
     )
     set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(nlohmann_json)
+    _tt_verify_deterministic_dependency(
+        nlohmann-json "${nlohmann_json_SOURCE_DIR}"
+        9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03)
 endfunction()
 
 # ── tt_fetch_tests_dependencies() ───────────────────────────────────────────
@@ -91,12 +151,15 @@ function(tt_fetch_tests_dependencies)
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG        v1.15.2
+        GIT_TAG        b514bdc898e2951020cbdca1304b75f5950d1f59
     )
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     set(BUILD_GMOCK            OFF CACHE BOOL "" FORCE)
     set(INSTALL_GTEST          OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
+    _tt_verify_deterministic_dependency(
+        googletest "${googletest_SOURCE_DIR}"
+        b514bdc898e2951020cbdca1304b75f5950d1f59)
 endfunction()
 
 # ── tt_fetch_bench_dependencies() ───────────────────────────────────────────
@@ -104,7 +167,7 @@ function(tt_fetch_bench_dependencies)
     FetchContent_Declare(
         benchmark
         GIT_REPOSITORY https://github.com/google/benchmark.git
-        GIT_TAG        v1.8.5
+        GIT_TAG        a6ad7fbbdc2e14fab82bb8a6d27760d700198cbf
     )
     set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
     set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
@@ -209,7 +272,6 @@ function(tt_wire_optional_backends target)
         endif()
         target_sources(${target} PRIVATE
             ${_src}/web/snapshot_json.cpp
-            ${_src}/web/report_json.cpp
             ${_src}/web/web_server.cpp)
         target_link_libraries(${target} PUBLIC civetweb-c-library)
         target_compile_definitions(${target} PUBLIC HAS_WEB)
@@ -226,7 +288,7 @@ function(tt_wire_optional_backends target)
             FetchContent_Declare(
                 abseil-cpp
                 GIT_REPOSITORY https://github.com/abseil/abseil-cpp.git
-                GIT_TAG        20240722.0
+                GIT_TAG        4447c7562e3bc702ade25105912dce503f0c4010
             )
             set(ABSL_PROPAGATE_CXX_STD   ON CACHE BOOL "" FORCE)
             set(ABSL_USE_SYSTEM_INCLUDES ON CACHE BOOL "" FORCE)

@@ -40,6 +40,11 @@ set(IMGUI_DESK_SOURCES
 # main.cpp is intentionally NOT part of engine_core — each executable owns
 # its own copy, compiled with a distinct TT_TARGET define.
 set(ENGINE_CORE_SOURCES
+    # --- Deterministic-run primitives and cold-path artifacts (R6) ---
+    src/reproducibility/canonical_json.cpp
+    src/reproducibility/run_manifest.cpp
+    src/reproducibility/sha256.cpp
+
     # --- Engine core + supporting ---
     src/engine/engine.cpp
     src/engine/engine_lifecycle.cpp
@@ -59,12 +64,14 @@ set(ENGINE_CORE_SOURCES
     src/engine/checkpoint.cpp
     src/engine/dashboard_snapshot_builder.cpp
     src/engine/live_safety_session.cpp
+    src/engine/deterministic_lifecycle_sink.cpp
 
     # --- Analytics & reporting ---
     src/analytics/adverse_selection_tracker.cpp
     src/analytics/analytics.cpp
     src/analytics/ascii_widgets.cpp
     src/analytics/report_generator.cpp
+    src/analytics/results_json.cpp
 
     # --- Footprint aggregation (footprint.md §2.2) ---
     src/analytics/footprint/footprint_aggregator.cpp
@@ -116,7 +123,10 @@ set(ENGINE_CORE_SOURCES
 
     # --- Monte Carlo / synthetic simulation (integrated from monte-carlo branch) ---
     src/simulation/imonte_carlo_generator.cpp
+    src/simulation/monte_carlo_aggregate.cpp
     src/simulation/monte_carlo_controller.cpp
+    src/simulation/deterministic_trial_artifacts.cpp
+    src/simulation/deterministic_mc_manifest.cpp
     src/simulation/monte_carlo_reporter.cpp
     src/simulation/generators/gbm_generator.cpp
     src/providers/synthetic/synthetic_transport.cpp
@@ -131,6 +141,9 @@ set(TEST_SOURCES
     # --- Core / helpers ---
     tests/test_main.cpp
     tests/helpers/alloc_counter.cpp
+    tests/test_reproducibility_primitives.cpp
+    tests/test_run_manifest.cpp
+    tests/test_deterministic_trial_artifacts.cpp
 
     # --- Basic types & low-level ---
     tests/test_price.cpp
@@ -149,6 +162,9 @@ set(TEST_SOURCES
     tests/test_date_parse.cpp
     tests/test_data_bridge.cpp
     tests/test_binance_kline_csv.cpp
+    tests/test_strict_market_csv.cpp
+    tests/test_truetest_api_contract.cpp
+    src/api/truetest_api.cpp
 
     # --- Orderbook & execution model ---
     tests/test_orderbook.cpp
@@ -205,6 +221,9 @@ set(TEST_SOURCES
 
     # --- Exits / brackets ---
     tests/test_exit_manager.cpp
+    tests/test_forensic_lifecycle.cpp
+    tests/test_forensic_lifecycle_engine.cpp
+    tests/test_forensic_lifecycle_workstream_b.cpp
     tests/test_default_exit_policy.cpp
     tests/test_default_exit_policy_engine.cpp
     tests/test_bracket_adapter.cpp
@@ -222,12 +241,17 @@ set(TEST_SOURCES
     # --- Strategies ---
     tests/test_strategies.cpp
     tests/test_ema_rsi_atr_pullback_strategy.cpp
+    tests/test_ema_rsi_atr_pullback_strategy_contract.cpp
+    tests/test_sensitivity_oos.cpp
+    tests/test_observability_evidence.cpp
     tests/test_monte_carlo_generators.cpp
+    tests/test_monte_carlo_aggregate.cpp
     tests/test_monte_carlo_controller.cpp
 
     # --- Analytics & reporting ---
     tests/test_adverse_selection.cpp
     tests/test_analytics.cpp
+    tests/test_shadow_tracker.cpp
     tests/test_report_generator.cpp
     tests/test_bar_aggregator.cpp
 
