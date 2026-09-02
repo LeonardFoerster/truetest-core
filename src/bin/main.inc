@@ -10,6 +10,7 @@
 #include <random>
 #include <exception>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 #include <unistd.h>
@@ -80,11 +81,6 @@
 #include "providers/binance/binance_replay_transport.h"
 #endif
 
-#ifdef HAS_IMGUI_DESK
-#include "providers/footprint/footprint_venue_capabilities.h"
-#include "ui/desk/footprint_live_source.h"
-#endif
-
 #ifdef HAS_DEBUG
 #include "debug/debug_log.h"
 #endif
@@ -100,6 +96,34 @@
 // report until the operator exits.
 static std::atomic<bool> g_web_stop{false};
 #endif
+
+#ifdef HAS_IMGUI_DESK
+template <typename Work>
+static void run_with_imgui_desk(truetest::ui::desk::DeskApp& desk, Work&& work,
+                                bool keep_open_on_success)
+{
+    std::exception_ptr worker_error;
+    std::jthread worker([&] {
+        try {
+            work();
+        } catch (...) {
+            worker_error = std::current_exception();
+            desk.request_stop();
+            return;
+        }
+        if (!keep_open_on_success) desk.request_stop();
+    });
+
+    // GLFW and both ImGui backends remain owned by the application-main
+    // thread. Closing the desk only ends this render loop: it deliberately
+    // does not request an engine/provider stop. join() therefore waits for a
+    // still-live stream to finish through its existing shutdown path.
+    desk.run();
+    worker.join();
+    if (worker_error) std::rethrow_exception(worker_error);
+}
+#endif
+
 static void install_shutdown_handler()
 {
     truetest::bin::reset_shutdown_signal();
@@ -379,22 +403,6 @@ struct cli_options
     // ImGui personal strategy desk (HAS_IMGUI_DESK). Mutually exclusive with
     // rich ncurses TUI when both are available — desk wins if --desk is set.
     bool desk = false;
-    // Starts the desk with deterministic "DEMO DATA" research panels already
-    // enabled (same effect as the menu toggle) - lets headless visual QA
-    // (footprint.md §3) and manual smoke checks reach the research surfaces
-    // without a mouse click.
-    bool desk_demo_data = false;
-
-    // footprint.md §1: "Automatic activation with --desk in HAS_IMGUI_DESK
-    // builds; --no-footprint will disable collection." Collection never
-    // affects trading behavior either way - it only feeds the desk's
-    // Orderflow footprint panel.
-    bool no_footprint = false;
-    // Exact-decimal tick-size override for the active symbol
-    // (footprint.md §2.1 footprint.tick_size_overrides.<venue>.<symbol> /
-    // --footprint-tick-size). Kept as a STRING end to end so the whole
-    // price-bucketing chain stays exact - never parsed to a double.
-    std::string footprint_tick_size;
 
     // Embedded web UI (HAS_WEB). Read-only; off by default.
     bool web = false;
@@ -436,28 +444,43 @@ static bool provider_is_binance_futures(const std::string& name)
     return name == "binance-futures";
 }
 
-// Phase-0 live discipline for futures venues (Binance USDT-M + Bitget UTA).
-// Mainnet/live without sandbox flags: refuse if no venue caps or daily-loss.
-// Sandbox (Binance --testnet; Bitget --demo|--testnet): warn only.
+static bool provider_is_bitget(const std::string& name)
+{
+    return name.rfind("bitget", 0) == 0;
+}
+
+static bool provider_is_bitunix(const std::string& name)
+{
+    return name.rfind("bitunix", 0) == 0;
+}
+
+// Phase-0 live discipline. Every mainnet live venue requires a daily-loss
+// limit and an atomically reserved durable event ledger. Leveraged futures
+// venues additionally require at least one venue-specific exposure cap.
 static bool is_futures_live_provider(const std::string& name)
 {
     if (provider_is_binance_futures(name))
         return true;
-    // bitget / bitget-futures (spot Bitget is not in scope)
-    return name.rfind("bitget", 0) == 0;
+    return name.rfind("bitget", 0) == 0 ||
+           name.rfind("bitunix", 0) == 0;
 }
 
-static bool futures_live_sandbox_flags(const cli_options& o)
+static bool live_sandbox_flags(const cli_options& o)
 {
-    // Bitget paptrading accepts --demo or --testnet; Binance futures only --testnet.
-    if (o.provider_name.rfind("bitget", 0) == 0)
+    // Sandbox status is an endpoint property, not a generic CLI intent.
+    // Bitget routes both flags to UTA paptrading; Binance routes --testnet.
+    // Bitunix currently has no sandbox endpoint and must remain mainnet-gated.
+    if (provider_is_bitget(o.provider_name))
         return o.demo || o.testnet;
-    return o.testnet;
+    if (o.provider_name == "binance" ||
+        provider_is_binance_futures(o.provider_name))
+        return o.testnet;
+    return false;
 }
 
-static bool validate_binance_futures_live_phase0(const cli_options& o,
-                                                 std::ostream& errors,
-                                                 std::ostream& warnings)
+static bool validate_live_phase0(const cli_options& o,
+                                 std::ostream& errors,
+                                 std::ostream& warnings)
 {
     if (!std::isfinite(o.min_liquidation_distance_pct)
         || (o.min_liquidation_distance_pct < 0.0
@@ -487,37 +510,76 @@ static bool validate_binance_futures_live_phase0(const cli_options& o,
         return false;
     }
 
+    // Bitunix exposes no sandbox endpoint in any engine mode.  Refuse the
+    // flags before the live-only Phase-0 gates so shadow/backtest cannot print
+    // a reassuring demo/testnet label while the provider factory still uses
+    // mainnet public endpoints.
+    if (provider_is_bitunix(o.provider_name) && (o.demo || o.testnet))
+    {
+        errors << "  ! Bitunix does not implement a demo/testnet endpoint; "
+                  "refusing sandbox flags instead of routing them to mainnet.\n";
+        return false;
+    }
+
     const bool resolved_live = (o.mode == "live" || o.live);
-    if (!is_futures_live_provider(o.provider_name) || !resolved_live)
+    if (!resolved_live)
         return true;
 
-    const bool sandbox = futures_live_sandbox_flags(o);
+    const bool sandbox = live_sandbox_flags(o);
+    const bool futures_provider = is_futures_live_provider(o.provider_name);
 
-    const bool has_venue_caps =
-        o.max_notional_usdt > 0.0 ||
-        o.max_leverage > 0.0 ||
+    const bool has_all_futures_caps =
+        o.max_notional_usdt > 0.0 &&
+        o.max_leverage > 0.0 &&
         o.min_liquidation_distance_pct > 0.0;
 
-    if (!has_venue_caps)
+    if (futures_provider && !has_all_futures_caps)
     {
         if (!sandbox)
         {
-            errors << "  ! Refusing mainnet futures live mode without venue risk caps.\n"
-                      "    Set at least one of --max-notional, --max-leverage, "
-                      "or --min-liq-distance-pct.\n";
+            errors << "  ! Refusing mainnet futures live mode without all "
+                      "three venue risk caps.\n"
+                      "    Set positive --max-notional, --max-leverage, and "
+                      "--min-liq-distance-pct values.\n";
             return false;
         }
-        warnings << "  [Phase 0] WARNING: No venue risk caps set "
-                    "(--max-notional / --max-leverage / --min-liq-distance-pct).\n"
+        warnings << "  [Phase 0] WARNING: One or more venue risk caps are "
+                    "disabled (--max-notional / --max-leverage / "
+                    "--min-liq-distance-pct).\n"
                     "           These are strongly recommended before mainnet validation runs.\n";
+    }
+
+    if (futures_provider && !sandbox)
+    {
+        if (o.disarm_deadman || o.dead_man_countdown_ms <= 0)
+        {
+            errors << "  ! Refusing mainnet futures live mode with the "
+                      "dead-man's switch disabled.\n";
+            return false;
+        }
+        if (!o.risk_unwind)
+        {
+            errors << "  ! Refusing mainnet futures live mode without "
+                      "--risk-unwind.\n";
+            return false;
+        }
+        if (!(o.reconcile_tolerance_bps > 0.0) ||
+            o.reconcile_tolerance_bps > 3.0)
+        {
+            errors << "  ! Refusing mainnet futures live mode unless "
+                      "--reconcile-tolerance-bps is in (0,3].\n";
+            return false;
+        }
     }
 
     if (o.risk_max_daily_loss <= 0.0)
     {
         if (!sandbox)
         {
-            errors << "  ! Refusing mainnet futures live mode with --max-daily-loss disabled.\n"
-                      "    Set a conservative positive --max-daily-loss.\n";
+            errors << (futures_provider
+                           ? "  ! Refusing mainnet futures live mode with --max-daily-loss disabled.\n"
+                           : "  ! Refusing mainnet spot live mode with --max-daily-loss disabled.\n")
+                   << "    Set a conservative positive --max-daily-loss.\n";
             return false;
         }
         warnings << "  [Phase 0] WARNING: --max-daily-loss is 0 (disabled). "
@@ -526,17 +588,42 @@ static bool validate_binance_futures_live_phase0(const cli_options& o,
 
     if (!sandbox && o.event_log_path.empty())
     {
-        errors << "  ! Refusing mainnet futures live mode without a durable "
-                  "binary event log.\n"
+        errors << (futures_provider
+                       ? "  ! Refusing mainnet futures live mode without a durable "
+                       : "  ! Refusing mainnet spot live mode without a durable ")
+               << "binary event log.\n"
                   "    Set --log-events to an operator-controlled path.\n";
+        return false;
+    }
+    if (!sandbox &&
+        !is_acceptable_durable_log_target(o.event_log_path))
+    {
+        errors << (futures_provider
+                       ? "  ! Refusing mainnet futures live mode because the binary "
+                       : "  ! Refusing mainnet spot live mode because the binary ")
+               << "event-log target is not a regular file (or cannot be "
+                  "created as a new file in a writable, symlink-free "
+                  "existing directory).\n";
         return false;
     }
     if (!sandbox && o.log_max_size_mb > 0)
     {
-        errors << "  ! Refusing mainnet futures live mode with binary event "
-                  "log rotation enabled.\n"
+        errors << (futures_provider
+                       ? "  ! Refusing mainnet futures live mode with binary event "
+                       : "  ! Refusing mainnet spot live mode with binary event ")
+               << "log rotation enabled.\n"
                   "    Use --log-max-size 0 until rotated segments have an "
                   "authoritative stitching manifest.\n";
+        return false;
+    }
+
+    if (!sandbox && !o.thread_preset_str.empty() &&
+        (o.thread_preset_str == "inline" ||
+         o.thread_preset_str == "light"))
+    {
+        errors << "  ! Refusing mainnet live mode without a dedicated "
+                  "logging worker; use --thread-preset standard, full, or "
+                  "extended.\n";
         return false;
     }
 
@@ -1196,16 +1283,6 @@ static void register_cli_options(CLI::App& app, cli_options& o)
 #ifdef HAS_IMGUI_DESK
     app.add_flag("--desk", o.desk,
                  "Open the ImGui strategy desk (Monitor/Execute; personal tool)");
-    app.add_flag("--desk-demo-data", o.desk_demo_data,
-                 "Start the desk with deterministic DEMO DATA research panels "
-                 "already enabled (headless visual QA / manual smoke)");
-    app.add_flag("--no-footprint", o.no_footprint,
-                 "Disable footprint public-trade collection (auto-enabled "
-                 "with --desk; never affects trading behavior either way)");
-    app.add_option("--footprint-tick-size", o.footprint_tick_size,
-                   "Exact decimal tick-size override for the footprint panel "
-                   "(e.g. \"0.01\") - only used when official instrument "
-                   "metadata disagrees or is unavailable");
 #endif
 
 #ifdef HAS_WEB
@@ -1524,7 +1601,7 @@ static int run_dry_run(const cli_options& o)
                      "(this is " << truetest::target_name() << ").\n";
         valid = false;
     }
-    if (!validate_binance_futures_live_phase0(o, std::cerr, std::cout))
+    if (!validate_live_phase0(o, std::cerr, std::cout))
         valid = false;
     if (!o.fee_model.empty() && o.fee_model != "fixed" && o.fee_model != "tiered")
     {
@@ -1798,16 +1875,6 @@ struct exchange_credentials {
     std::string passphrase;
 };
 
-static bool provider_is_bitget(const std::string& name)
-{
-    return name.rfind("bitget", 0) == 0;
-}
-
-static bool provider_is_bitunix(const std::string& name)
-{
-    return name.rfind("bitunix", 0) == 0;
-}
-
 static exchange_credentials resolve_exchange_credentials(
     const std::string& provider_name,
     const std::string& arg_key,
@@ -1915,35 +1982,48 @@ static int run_provider_mode(const cli_options& o)
         return run_monte_carlo_mode(o);
     }
 
-    if (!validate_binance_futures_live_phase0(o, std::cerr, std::cout))
+    if (!validate_live_phase0(o, std::cerr, std::cout))
         return 1;
 
-    std::shared_ptr<IProvider> provider;
-    try {
-        provider = ProviderRegistry::instance().create(o.provider_name, pcfg);
-    } catch (const std::exception& e) {
-        std::cerr << "  ! " << e.what() << "\n";
-        if (o.provider_name == "binance")
-            std::cerr << "    Example: --provider binance --symbol btcusdt --stream trade\n";
-        else if (provider_is_bitget(o.provider_name))
-            std::cerr << "    Example: --provider bitget-futures --symbol BTCUSDT "
-                         "--stream trade [--demo]\n";
-        else if (provider_is_bitunix(o.provider_name))
-            std::cerr << "    Example: --provider bitunix-futures --symbol BTCUSDT "
-                         "--stream trade\n";
-        else if (o.provider_name == "local")
-            std::cerr << "    Example: --provider local --path market_data.csv\n";
-        else if (o.provider_name == "synthetic" || o.provider_name == "montecarlo")
-            std::cerr << "    Example: --provider synthetic --mc-params \"mu=0.0,sigma=0.65,n_steps=2000\"\n";
-        else
-        {
-            std::cerr << "    Available providers:";
-            for (const auto& n : ProviderRegistry::instance().available())
-                std::cerr << " " << n;
-            std::cerr << "\n";
+    // Keep provider construction itself behind the mainnet durable-ledger
+    // readiness gate. Current provider constructors are passive, but making
+    // that an ordering invariant prevents a future factory from opening I/O
+    // before the audit trail exists.
+    auto create_provider = [&]() -> std::shared_ptr<IProvider> {
+        try {
+            auto created =
+                ProviderRegistry::instance().create(o.provider_name, pcfg);
+            if (!created)
+                throw std::runtime_error("provider factory returned null");
+            return created;
+        } catch (const std::exception& e) {
+            std::cerr << "  ! " << e.what() << "\n";
+            if (o.provider_name == "binance")
+                std::cerr << "    Example: --provider binance --symbol btcusdt --stream trade\n";
+            else if (provider_is_bitget(o.provider_name))
+                std::cerr << "    Example: --provider bitget-futures --symbol BTCUSDT "
+                             "--stream trade [--demo]\n";
+            else if (provider_is_bitunix(o.provider_name))
+                std::cerr << "    Example: --provider bitunix-futures --symbol BTCUSDT "
+                             "--stream trade\n";
+            else if (o.provider_name == "local")
+                std::cerr << "    Example: --provider local --path market_data.csv\n";
+            else if (o.provider_name == "synthetic" ||
+                     o.provider_name == "montecarlo")
+                std::cerr << "    Example: --provider synthetic --mc-params "
+                             "\"mu=0.0,sigma=0.65,n_steps=2000\"\n";
+            else
+            {
+                std::cerr << "    Available providers:";
+                for (const auto& n : ProviderRegistry::instance().available())
+                    std::cerr << " " << n;
+                std::cerr << "\n";
+            }
+            return {};
         }
-        return 1;
-    }
+    };
+
+    std::shared_ptr<IProvider> provider;
 
     std::string resolved_raw = o.strategy.empty() ? "mean-reversion" : o.strategy;
     auto strategy_names = split_csv(resolved_raw);
@@ -1983,13 +2063,13 @@ static int run_provider_mode(const cli_options& o)
     }
 
     engine_config prov_cfg;
+    std::unique_ptr<EventLogger> preopened_event_logger;
     prov_cfg.seed = o.seed;
     prov_cfg.event_log_path = o.event_log_path;
     prov_cfg.compress_log = o.compress_log;
     prov_cfg.log_max_bytes = o.log_max_size_mb * 1024ull * 1024ull;
     prov_cfg.log_max_files = o.log_keep;
     prov_cfg.disable_pinning = o.no_pin;
-    prov_cfg.provider = provider;
     prov_cfg.initial_balance = o.balance;
     prov_cfg.checkpoint_path = o.checkpoint_path;
     prov_cfg.resume_checkpoint_path = o.resume_path;
@@ -2165,8 +2245,7 @@ static int run_provider_mode(const cli_options& o)
         // Sandbox confirmation is provider-aware: Bitget honors --demo|--testnet
         // as paptrading; Binance only honors --testnet. Never skip mainnet
         // real-money math because of a foreign venue's --demo flag.
-        if (futures_live_sandbox_flags(o)
-            || (provider_is_bitunix(o.provider_name) && (o.demo || o.testnet)))
+        if (live_sandbox_flags(o))
         {
             std::cout << "  [SANDBOX] Live mode will submit orders to the "
                          "venue demo/testnet endpoints.\n";
@@ -2181,13 +2260,61 @@ static int run_provider_mode(const cli_options& o)
     {
         std::cout << "  [DEMO] Routing Bitget provider to UTA paptrading.\n";
     }
-    else if (provider_is_bitunix(o.provider_name) && (o.demo || o.testnet))
-    {
-        std::cout << "  [SANDBOX] Bitunix sandbox flags set (verify venue hosts).\n";
-    }
     else if (o.testnet)
     {
         std::cout << "  [TESTNET] Routing Binance provider to the spot testnet.\n";
+    }
+
+    // Close the path-validation TOCTOU before any provider state is opened.
+    // The retained descriptor pins the verified regular-file inode; the
+    // EventLogger later opens /proc/self/fd/<n>, never the mutable pathname.
+    if (prov_cfg.mode == engine_mode::live && !live_sandbox_flags(o))
+    {
+        if (!preset_has_separate_logging(prov_cfg.threading))
+        {
+            std::cerr << "  ! Refusing mainnet live mode without a dedicated "
+                         "logging worker; select --thread-preset standard, "
+                         "full, or extended.\n";
+            return 1;
+        }
+        try
+        {
+            prov_cfg.event_log_reservation =
+                DurableEventLogReservation::acquire(prov_cfg.event_log_path);
+            preopened_event_logger = std::make_unique<EventLogger>(
+                prov_cfg.event_log_path, prov_cfg.compress_log,
+                prov_cfg.log_max_bytes, prov_cfg.log_max_files,
+                prov_cfg.event_log_reservation);
+            preopened_event_logger->verify_durable_ready();
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "  ! Refusing mainnet live mode: " << e.what()
+                      << "\n";
+            return 1;
+        }
+    }
+
+    provider = create_provider();
+    if (!provider)
+        return 1;
+    prov_cfg.provider = provider;
+
+    // Provider factory construction is now behind the first readiness proof.
+    // Re-check the exact retained logger immediately before any provider
+    // configure/open hook, closing the remaining factory-duration window.
+    if (preopened_event_logger)
+    {
+        try
+        {
+            preopened_event_logger->verify_durable_ready();
+        }
+        catch (const std::exception& e)
+        {
+            std::cerr << "  ! Refusing mainnet live mode after provider "
+                         "construction: " << e.what() << "\n";
+            return 1;
+        }
     }
 
 #ifdef HAS_WEB
@@ -2407,7 +2534,9 @@ static int run_provider_mode(const cli_options& o)
     if (is_streaming)
     {
         // engine embeds multi-MiB ObjectPools — heap only (default stack is 8 MiB).
-        auto eng = std::make_unique<engine>(dh, nullptr, prov_strategy, std::move(prov_cfg));
+        auto eng = std::make_unique<engine>(
+            dh, nullptr, prov_strategy, std::move(prov_cfg),
+            std::move(preopened_event_logger));
         eng->set_primary_strategy_name(resolved);
         for (auto& es : extra_strategies)
             eng->add_strategy(es.second, es.first);
@@ -2449,13 +2578,13 @@ static int run_provider_mode(const cli_options& o)
         std::unique_ptr<truetest::ui::desk::DeskApp> imgui_desk;
         if (o.desk)
         {
+            truetest::ui::desk::DeskAppConfig desk_config;
+            desk_config.snapshot = make_snap_fn();
+            desk_config.console = dashboard;
+            desk_config.actions = make_operator_actions();
+            desk_config.title = std::string("TrueTest Desk — ") + truetest::target_name();
             imgui_desk = std::make_unique<truetest::ui::desk::DeskApp>(
-                make_snap_fn(), dashboard);
-            imgui_desk->set_actions(make_operator_actions());
-            if (o.desk_demo_data)
-                imgui_desk->set_demo_enabled(true);
-            std::string title = std::string("TrueTest Desk — ") + truetest::target_name();
-            imgui_desk->set_title(std::move(title));
+                std::move(desk_config));
             if (!imgui_desk->start())
             {
                 std::cerr << "  ! --desk: failed to start ImGui window; "
@@ -2526,156 +2655,90 @@ static int run_provider_mode(const cli_options& o)
             }
         }
 
-        // Unified event-stream path - provider-agnostic. A complete
-        // MarketDataFeed carries the matching parser for this public stream;
-        // L2 frames populate the engine's orderbook_registry_ directly so
-        // LocalBookAdapter can match against real exchange levels. Providers
-        // without such a feed stay on the existing specialized bar/tick
-        // bridges.
-        if (market_data_feed)
-        {
-            auto parser = market_data_feed->parser;
-            auto bridge = std::make_shared<DataBridge<provider::event>>(
-                transport, parser,
-                [](const provider::event& ev, std::shared_ptr<data_handler> h) {
-                    provider::event_sink(ev, std::move(h));
-                });
+        auto run_streaming_engine = [&] {
+            // Unified event-stream path - provider-agnostic. A complete
+            // MarketDataFeed carries the matching parser for this public stream;
+            // L2 frames populate the engine's orderbook_registry_ directly so
+            // LocalBookAdapter can match against real exchange levels. Providers
+            // without such a feed stay on the existing specialized bar/tick
+            // bridges.
+            if (market_data_feed)
+            {
+                auto parser = market_data_feed->parser;
+                auto bridge = std::make_shared<DataBridge<provider::event>>(
+                    transport, parser,
+                    [](const provider::event& ev, std::shared_ptr<data_handler> h) {
+                        provider::event_sink(ev, std::move(h));
+                    });
+
+                truetest::bin::bridge_shutdown_monitor bridge_monitor(bridge);
+                eng->run_streaming(bridge);
+            }
+            else if (is_tick)
+            {
+                std::shared_ptr<IDataParser<tick_record>> parser;
+#ifdef HAS_BINANCE
+                if (o.provider_name == "binance")
+                    parser = std::make_shared<BinanceTradeParser>();
+                else
+#endif
+                    parser = std::make_shared<CsvTickParser>();
+
+                auto bridge = std::make_shared<DataBridge<tick_record>>(
+                    transport, parser, tick_record_sink);
+                truetest::bin::bridge_shutdown_monitor bridge_monitor(bridge);
+                eng->run_streaming(bridge);
+            }
+            else
+            {
+                std::shared_ptr<IDataParser<bar_record>> parser;
+#ifdef HAS_BINANCE
+                if (o.provider_name == "binance")
+                    parser = std::make_shared<BinanceKlineParser>();
+                else
+#endif
+                    parser = std::make_shared<CsvBarParser>();
+
+                auto bridge = std::make_shared<DataBridge<bar_record>>(
+                    transport, parser, bar_record_sink);
+                truetest::bin::bridge_shutdown_monitor bridge_monitor(bridge);
+                eng->run_streaming(bridge);
+            }
+
+            if (dashboard)
+            {
+#ifdef HAS_RICH_TUI
+                if (rich_tui) rich_tui->stop();
+                else
+#endif
+                    dashboard->stop();
+            }
+
+            const bool shutdown_ok = eng->finalize_live_shutdown(
+                live_shutdown_reason::normal_end);
+            run_ok = shutdown_ok && eng->run_succeeded();
+
+            // Failed streams and failed shutdowns do not publish a normal
+            // completion summary/export; their partial state is diagnostic only.
+            // Skip the multi-line analytics report when the TUI owns stdout -
+            // the box on screen is already the report surface, and dumping
+            // another fixed-width report below it was the "final analysis
+            // windows" complaint. Non-TUI runs still print it. File export
+            // via --output is unaffected in either case.
+            if (run_ok)
+            {
+                if (!dashboard || !dashboard->is_tui())
+                    eng->print_summary();
+                export_results(eng->get_analytics(), o.output, o.output_format);
+            }
+        };
 
 #ifdef HAS_IMGUI_DESK
-            // footprint.md §1/§2.1: auto-activate with --desk; --no-footprint
-            // disables collection. Installed as an opt-in DataBridge research
-            // tap (§2.1) - never on the engine's own event path, never
-            // touching eng/provider behavior either way.
-            std::shared_ptr<truetest::ui::desk::FootprintLiveSource> footprint_live_source;
-            if (o.desk && !o.no_footprint)
-            {
-                std::optional<double> official_tick_size;
-                if (auto spec = provider->get_instrument(o.symbol); spec && spec->tick_size > 0.0)
-                    official_tick_size = spec->tick_size;
-
-                std::optional<double> override_tick_size;
-                if (!o.footprint_tick_size.empty())
-                {
-                    try { override_tick_size = std::stod(o.footprint_tick_size); }
-                    catch (...) {
-                        std::cerr << "  ! --footprint-tick-size: not a number, ignoring\n";
-                    }
-                }
-
-                const auto resolution = truetest::footprint::resolve_footprint_tick_size(
-                    official_tick_size, override_tick_size);
-                if (resolution.status == truetest::footprint::tick_size_status::resolved)
-                {
-                    // Match the actual registered provider names (see
-                    // provider_is_binance_futures/provider_is_bitget/
-                    // provider_is_bitunix above), not bare "binance"/
-                    // "bitget"/"bitunix" - the launch script and the
-                    // --provider examples above both use the "-futures"
-                    // names, which these exact-string checks used to miss,
-                    // silently leaving venue at "unknown" for every
-                    // real-world run.
-                    truetest::footprint::venue_id venue = truetest::footprint::venue_id::unknown;
-                    if (provider_is_binance_futures(o.provider_name)) venue = truetest::footprint::venue_id::binance_usdm;
-                    else if (provider_is_bitget(o.provider_name)) venue = truetest::footprint::venue_id::bitget_usdtm;
-                    else if (provider_is_bitunix(o.provider_name)) venue = truetest::footprint::venue_id::bitunix_futures;
-
-                    truetest::ui::desk::FootprintLiveSourceConfig fp_cfg;
-                    fp_cfg.venue = venue;
-                    fp_cfg.symbol_label = o.symbol;
-                    fp_cfg.tick_size = resolution.tick_size;
-                    fp_cfg.qty_atom_scale = 1e8; // satoshi-like default; per-venue precision is Phase 4b
-
-                    footprint_live_source =
-                        std::make_shared<truetest::ui::desk::FootprintLiveSource>(fp_cfg);
-
-#ifdef HAS_BINANCE
-                    // Only Binance gets exact-decimal wiring today (native
-                    // trade id + string-exact price/qty via
-                    // BinanceCombinedParser::configure_exact_decimal(), which
-                    // needs the SAME exact string the tick-size resolution
-                    // above just validated). Other venues on this event-stream
-                    // path still get a working, float-derived footprint tap
-                    // for free via try_tap_push()'s fallback conversion.
-                    if (!o.footprint_tick_size.empty())
-                        if (auto* combined = dynamic_cast<BinanceCombinedParser*>(parser.get()))
-                            combined->configure_exact_decimal(o.footprint_tick_size);
-#endif
-
-                    bridge->set_research_tap([footprint_live_source](const provider::event& ev) {
-                        footprint_live_source->tap(ev);
-                    });
-                    if (imgui_desk)
-                        imgui_desk->set_live_footprint_source(footprint_live_source);
-                }
-                else if (dashboard)
-                {
-                    dashboard->push_event(truetest::ui::event_severity::warn,
-                        "footprint: tick size unavailable/conflicting for this "
-                        "symbol - collection disabled this run");
-                }
-            }
-#endif
-
-            truetest::bin::bridge_shutdown_monitor bridge_monitor(bridge);
-            eng->run_streaming(bridge);
-        }
-        else if (is_tick)
-        {
-            std::shared_ptr<IDataParser<tick_record>> parser;
-#ifdef HAS_BINANCE
-            if (o.provider_name == "binance")
-                parser = std::make_shared<BinanceTradeParser>();
-            else
-#endif
-                parser = std::make_shared<CsvTickParser>();
-
-            auto bridge = std::make_shared<DataBridge<tick_record>>(
-                transport, parser, tick_record_sink);
-            truetest::bin::bridge_shutdown_monitor bridge_monitor(bridge);
-            eng->run_streaming(bridge);
-        }
+        if (imgui_desk)
+            run_with_imgui_desk(*imgui_desk, run_streaming_engine, false);
         else
-        {
-            std::shared_ptr<IDataParser<bar_record>> parser;
-#ifdef HAS_BINANCE
-            if (o.provider_name == "binance")
-                parser = std::make_shared<BinanceKlineParser>();
-            else
 #endif
-                parser = std::make_shared<CsvBarParser>();
-
-            auto bridge = std::make_shared<DataBridge<bar_record>>(
-                transport, parser, bar_record_sink);
-            truetest::bin::bridge_shutdown_monitor bridge_monitor(bridge);
-            eng->run_streaming(bridge);
-        }
-
-        if (dashboard)
-        {
-#ifdef HAS_RICH_TUI
-            if (rich_tui) rich_tui->stop();
-            else
-#endif
-                dashboard->stop();
-        }
-
-        const bool shutdown_ok = eng->finalize_live_shutdown(
-            live_shutdown_reason::normal_end);
-        run_ok = shutdown_ok && eng->run_succeeded();
-
-        // Failed streams and failed shutdowns do not publish a normal
-        // completion summary/export; their partial state is diagnostic only.
-        // Skip the multi-line analytics report when the TUI owns stdout -
-        // the box on screen is already the report surface, and dumping
-        // another fixed-width report below it was the "final analysis
-        // windows" complaint. Non-TUI runs still print it. File export
-        // via --output is unaffected in either case.
-        if (run_ok)
-        {
-            if (!dashboard || !dashboard->is_tui())
-                eng->print_summary();
-            export_results(eng->get_analytics(), o.output, o.output_format);
-        }
+            run_streaming_engine();
     }
     else
     {
@@ -2760,7 +2823,9 @@ static int run_provider_mode(const cli_options& o)
         }
 
         // engine embeds multi-MiB ObjectPools — heap only (default stack is 8 MiB).
-        auto eng = std::make_unique<engine>(dh, nullptr, prov_strategy, std::move(prov_cfg));
+        auto eng = std::make_unique<engine>(
+            dh, nullptr, prov_strategy, std::move(prov_cfg),
+            std::move(preopened_event_logger));
         if (data_rejects > 0)
             eng->set_data_rows_rejected(data_rejects);
         eng->set_primary_strategy_name(resolved);
@@ -2779,17 +2844,18 @@ static int run_provider_mode(const cli_options& o)
                 if (ok) out.debug.target = truetest::target_name();
                 return ok;
             };
-            batch_desk = std::make_unique<truetest::ui::desk::DeskApp>(snap_fn);
             truetest::ui::operator_actions ops;
             ops.pause_toggle = [&eng]() {
                 eng->set_pause_all(!eng->is_pause_all());
             };
             ops.pause_state = [&eng]() { return eng->is_pause_all(); };
             ops.flatten     = [&eng]() { eng->request_flatten(); };
-            batch_desk->set_actions(std::move(ops));
-            if (o.desk_demo_data)
-                batch_desk->set_demo_enabled(true);
-            batch_desk->set_title(std::string("TrueTest Desk — ") + truetest::target_name());
+            truetest::ui::desk::DeskAppConfig desk_config;
+            desk_config.snapshot = std::move(snap_fn);
+            desk_config.actions = std::move(ops);
+            desk_config.title = std::string("TrueTest Desk — ") + truetest::target_name();
+            batch_desk = std::make_unique<truetest::ui::desk::DeskApp>(
+                std::move(desk_config));
             if (!batch_desk->start())
             {
                 std::cerr << "  ! --desk: failed to start ImGui window\n";
@@ -2798,28 +2864,32 @@ static int run_provider_mode(const cli_options& o)
         }
 #endif
 
-        if (is_tick)
-            eng->run_tick_data();
-        else
-            eng->run();
+        auto run_batch_engine = [&] {
+            if (is_tick)
+                eng->run_tick_data();
+            else
+                eng->run();
 
-        const bool shutdown_ok = eng->finalize_live_shutdown(
-            live_shutdown_reason::normal_end);
-        run_ok = shutdown_ok && eng->run_succeeded();
-        if (run_ok)
-        {
-            eng->print_summary();
-            export_results(eng->get_analytics(), o.output, o.output_format);
-        }
+            const bool shutdown_ok = eng->finalize_live_shutdown(
+                live_shutdown_reason::normal_end);
+            run_ok = shutdown_ok && eng->run_succeeded();
+            if (run_ok)
+            {
+                eng->print_summary();
+                export_results(eng->get_analytics(), o.output, o.output_format);
+            }
+        };
 
 #ifdef HAS_IMGUI_DESK
-        if (batch_desk && batch_desk->is_running())
+        if (batch_desk)
         {
-            std::cerr << "  desk open with final snapshot — close the window to exit\n";
-            while (batch_desk->is_running())
-                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            std::cerr << "  desk open — final snapshot remains visible after the run; "
+                         "close the window to exit\n";
+            run_with_imgui_desk(*batch_desk, run_batch_engine, true);
         }
+        else
 #endif
+            run_batch_engine();
 
 #ifdef HAS_WEB
         // Backtest is blocking and done; keep the server alive so the operator
