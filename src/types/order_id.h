@@ -61,6 +61,14 @@ public:
         return counter().fetch_add(1, std::memory_order_relaxed);
     }
 
+    // Cold introspection: the id next() would return, without consuming it.
+    static uint64_t peek() noexcept {
+        auto& sequence = thread_sequence();
+        if (sequence.active)
+            return sequence.next;
+        return counter().load(std::memory_order_relaxed);
+    }
+
     static void reset(uint64_t start = 1) noexcept {
         auto& sequence = thread_sequence();
         if (sequence.active)
