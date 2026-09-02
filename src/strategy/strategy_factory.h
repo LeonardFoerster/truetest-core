@@ -1,17 +1,26 @@
 #pragma once
 
 #include "strategy_interface.h"
-#include "mean_reversion/mean_reversion_strategy.h"
-#include "sma/sma_strategy.h"
-#include "ma_crossover/ma_crossover_strategy.h"
-#include "breakout/breakout_strategy.h"
-#include "structure_continuation/structure_continuation_strategy.h"
+#include "strategy_registry.h"
 
 #include <cstddef>
+#include <exception>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <vector>
+
+// F-10 (docs/todos/11-F-forensic-lifecycle-audit.md): this used to be a
+// second, hardcoded strategy table living next to StrategyRegistry. The
+// registry is what actually validates and constructs `--strategy`, so the
+// table here drifted: it listed six strategies, omitted the ones registered
+// later (ema-rsi-atr-pullback among them), and silently fell back to
+// mean-reversion for any name it did not recognise — so a typo produced a
+// different strategy rather than an error.
+//
+// It is now a thin adapter over StrategyRegistry. One registry, one list,
+// one construction path. `strategy_params` is preserved as a convenience:
+// values are applied through the strategy's own parameter schema, so a
+// strategy that does not expose a knob simply keeps its default.
 
 struct strategy_params {
     std::size_t sma_period = 20;
@@ -26,23 +35,43 @@ public:
     static std::shared_ptr<IStrategy> create(
         const std::string& name, const strategy_params& params = {})
     {
-        if (name == "sma")
-            return std::make_shared<sma_strategy>(params.sma_period);
-        if (name == "ma-crossover")
-            return std::make_shared<ma_crossover_strategy>(params.sma_period);
-        if (name == "breakout" || name == "coiled-spring")
-            return std::make_shared<breakout_strategy>(params.balance, 0.005); // 0.5% risk per guide (Coiled Spring)
-        if (name == "structure-continuation")
-            return std::make_shared<structure_continuation_strategy>(0.01, 2, 32); // explicit to ensure definition is linked
-        if (name == "adaptive-hybrid")
-            throw std::runtime_error(
-                "adaptive-hybrid is unavailable: the prototype is retired pending a safe rebuild");
-        return std::make_shared<mean_reversion_strategy>(
-            params.sma_period, params.balance, params.risk_fraction,
-            params.sl_pct, params.tp_pct);
+        auto strategy = StrategyRegistry::instance().create(name);
+        if (strategy)
+            apply_params(*strategy, params);
+        return strategy;
     }
 
-    static std::vector<std::string> available() {
-        return {"mean-reversion", "sma", "ma-crossover", "breakout", "coiled-spring", "structure-continuation"};
+    static bool has(const std::string& name)
+    {
+        return StrategyRegistry::instance().has(name);
+    }
+
+    static std::vector<std::string> available()
+    {
+        return StrategyRegistry::instance().available();
+    }
+
+private:
+    // Schema-driven so a strategy that does not declare a knob is left
+    // alone rather than being handed a constructor argument it never had.
+    static void apply_params(IStrategy& strategy, const strategy_params& params)
+    {
+        const auto schema = strategy.get_param_schema();
+        auto set_if = [&](const char* param, double value) {
+            for (const auto& p : schema)
+            {
+                if (p.name != param) continue;
+                try { strategy.set_param(param, value); }
+                catch (const std::exception&) { /* out of range for this strategy */ }
+                return;
+            }
+        };
+        set_if("period", static_cast<double>(params.sma_period));
+        set_if("sma_period", static_cast<double>(params.sma_period));
+        set_if("balance", params.balance);
+        set_if("equity", params.balance);
+        set_if("risk_fraction", params.risk_fraction);
+        set_if("sl_pct", params.sl_pct);
+        set_if("tp_pct", params.tp_pct);
     }
 };

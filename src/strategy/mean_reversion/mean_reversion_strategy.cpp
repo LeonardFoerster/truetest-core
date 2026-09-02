@@ -380,7 +380,9 @@ std::vector<param_def> mean_reversion_strategy::get_param_schema() const
         {"fib_tp_extension", fib_tp_extension_, 1.0, 3.0, "Fib TP extension"},
         {"atr_buffer_mult_sl", atr_buffer_mult_sl_, 0.0, 1.0, "ATR buffer SL"},
         {"atr_buffer_mult_tp", atr_buffer_mult_tp_, 0.0, 1.0, "ATR buffer TP"},
-        {"exit_style", 0.0, 0.0, 0.0, "pct | atr | fib"},
+        {"exit_style", exit_style_ == "pct" ? 0.0
+                         : exit_style_ == "atr" ? 1.0 : 2.0,
+         0.0, 2.0, "0=pct | 1=atr | 2=fib"},
         {"scale_out_ratio", scale_out_ratio_, 0.0, 1.0, "Fraction at first TP"},
         {"trail_atr_mult", trail_atr_mult_, 0.5, 5.0, "Trailing ATR mult for runner"},
     };

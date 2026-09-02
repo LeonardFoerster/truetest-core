@@ -56,7 +56,7 @@ bool ema_rsi_atr_pullback_strategy::is_valid_bar(const market_event& mkt)
 
     if (!std::isfinite(o) || !std::isfinite(h) || !std::isfinite(l) || !std::isfinite(c))
         return false;
-    if (o <= 0.0 || c <= 0.0)
+    if (o <= 0.0 || h <= 0.0 || l <= 0.0 || c <= 0.0)
         return false;
     if (h < l)
         return false;
@@ -173,7 +173,10 @@ std::optional<order_event> ema_rsi_atr_pullback_strategy::on_market(const market
                               (rsi_prev >= short_rsi_threshold_) &&
                               (rsi_curr < short_rsi_threshold_);
 
-    // Always update prev_rsi for the next bar
+    // Consume this bar's RSI observation before testing orderability. A
+    // sizing or routing rejection therefore cannot replay this same recross:
+    // the engine returns the optimistic entry state to flat through
+    // set_position_open(false), and only a later, fresh recross may enter.
     st.prev_rsi = curr_rsi;
 
     if (!long_signal && !short_signal)
