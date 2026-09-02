@@ -11,6 +11,8 @@
 #include "orderbook/orderbook.h"
 #include "strategy/strategy_interface.h"
 
+#include <limits>
+
 namespace {
 
 class NullStrategy : public IStrategy
@@ -124,6 +126,33 @@ TEST(EngineL2Ingestion, InvalidUpdateHaltsWithoutDeletingExistingLevel)
     ASSERT_FALSE(infos.get_bids().empty());
     EXPECT_DOUBLE_EQ(infos.get_bids().front().price_.to_double(), 100.0);
     EXPECT_EQ(infos.get_bids().front().quantity_, 100'000'000u);
+}
+
+TEST(EngineL2Ingestion, AggregateSnapshotOverflowHaltsAndPreservesOldDepth)
+{
+    auto dh = std::make_shared<data_handler>();
+    auto strat = std::make_shared<NullStrategy>();
+    engine_config cfg;
+    cfg.qty_scale = 1.0;
+    engine eng(dh, std::make_shared<orderbook>(), strat, std::move(cfg));
+
+    eng.apply_l2_snapshot("BTCUSDT", {{100.0, 7}}, {{101.0, 9}}, {}, 1);
+    auto book = eng.get_orderbook_registry().get("BTCUSDT");
+    ASSERT_NE(book, nullptr);
+
+    constexpr auto max = std::numeric_limits<std::int64_t>::max();
+    eng.apply_l2_snapshot(
+        "BTCUSDT", {{99.0, max}, {99.0, max}, {99.0, max}},
+        {{102.0, 1}}, {}, 1);
+
+    EXPECT_TRUE(eng.is_halted());
+    const auto infos = book->get_order_infos();
+    ASSERT_FALSE(infos.get_bids().empty());
+    ASSERT_FALSE(infos.get_asks().empty());
+    EXPECT_DOUBLE_EQ(infos.get_bids().front().price_.to_double(), 100.0);
+    EXPECT_EQ(infos.get_bids().front().quantity_, 7u);
+    EXPECT_DOUBLE_EQ(infos.get_asks().front().price_.to_double(), 101.0);
+    EXPECT_EQ(infos.get_asks().front().quantity_, 9u);
 }
 
 TEST(EngineL2Ingestion, InvalidPriceAndSideHaltBeforeBookMutation)

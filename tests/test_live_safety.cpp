@@ -578,10 +578,11 @@ public:
         ++calls;
         std::lock_guard<std::mutex> lock(mu_);
         events_.emplace_back("kill");
-        return true;
+        return succeed.load(std::memory_order_acquire);
     }
 
     std::atomic<int> calls{0};
+    std::atomic<bool> succeed{true};
 
 private:
     std::vector<std::string>& events_;
@@ -607,7 +608,12 @@ public:
     {
         halt_callback = std::move(cb);
     }
-    void quiesce_for_live_shutdown() override { record("quiesce"); }
+    void quiesce_for_live_shutdown() override
+    {
+        record("quiesce");
+        if (throw_on_quiesce)
+            throw std::runtime_error("quiesce failure");
+    }
     void finish_live_shutdown(live_shutdown_disposition d) override
     {
         disposition = d;
@@ -623,6 +629,7 @@ public:
     std::vector<std::string> events;
     std::mutex events_mu;
     std::function<void(std::string_view)> halt_callback;
+    bool throw_on_quiesce = false;
     bool throw_on_finish = false;
 
 private:
@@ -634,6 +641,52 @@ private:
 
     lifecycle state = lifecycle::closed;
 };
+
+} // namespace
+
+namespace {
+
+void expect_failed_live_shutdown_abandons_reserved_log(
+    const std::shared_ptr<ShutdownOrderProvider>& provider,
+    const std::string& path)
+{
+    std::remove(path.c_str());
+    auto reservation = DurableEventLogReservation::acquire(path);
+    auto logger = std::make_unique<EventLogger>(
+        path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+    auto session = std::make_shared<LiveSafetySession>(
+        provider, true, std::chrono::milliseconds{50});
+    ASSERT_TRUE(session->open_provider());
+
+    auto data = std::make_shared<data_handler>();
+    data->load_into_queue(
+        "2024-01-01", "TEST", 100.0, 101.0, 99.0, 100.0, 1000);
+
+    engine_config cfg;
+    cfg.mode = engine_mode::live;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.provider = provider;
+    cfg.live_safety_session = session;
+    cfg.reconciler = std::make_shared<NoopReconciler>();
+    cfg.event_log_path = path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+    {
+        engine eng(data, std::make_shared<orderbook>(),
+                   std::make_shared<NullStrategy>(), std::move(cfg),
+                   std::move(logger));
+        eng.run();
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.run_succeeded());
+    }
+
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+    std::remove(path.c_str());
+}
 
 } // namespace
 
@@ -779,6 +832,86 @@ TEST(LiveSafety, FinishFailureCannotReportSuccessfulLiveRun)
     EXPECT_EQ(provider->events[0], "quiesce");
     EXPECT_EQ(provider->events[1], "kill");
     EXPECT_EQ(provider->events[2], "finish");
+}
+
+TEST(LiveSafety, ShadowQuiesceFailureCannotReportSuccessfulRun)
+{
+    auto provider = std::make_shared<ShutdownOrderProvider>();
+    auto session = std::make_shared<LiveSafetySession>(
+        provider, false, std::chrono::milliseconds{50});
+    ASSERT_TRUE(session->open_provider());
+
+    engine_config cfg;
+    cfg.mode = engine_mode::shadow;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.provider = provider;
+    cfg.live_safety_session = session;
+    engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
+               std::make_shared<NullStrategy>(), std::move(cfg));
+
+    provider->throw_on_quiesce = true;
+    EXPECT_FALSE(eng.finalize_live_shutdown(
+        live_shutdown_reason::normal_end));
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+    EXPECT_EQ(provider->kill->calls.load(), 0);
+    ASSERT_EQ(provider->events.size(), 2u);
+    EXPECT_EQ(provider->events[0], "quiesce");
+    EXPECT_EQ(provider->events[1], "finish");
+    EXPECT_EQ(provider->disposition,
+              live_shutdown_disposition::preserve_dead_man_switch);
+}
+
+TEST(LiveSafety, UnopenedShadowSessionIsSuccessfulNoop)
+{
+    auto provider = std::make_shared<ShutdownOrderProvider>();
+    auto session = std::make_shared<LiveSafetySession>(
+        provider, false, std::chrono::milliseconds{50});
+
+    engine_config cfg;
+    cfg.mode = engine_mode::shadow;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.provider = provider;
+    cfg.live_safety_session = session;
+    engine eng(std::make_shared<data_handler>(), std::make_shared<orderbook>(),
+               std::make_shared<NullStrategy>(), std::move(cfg));
+
+    EXPECT_TRUE(eng.finalize_live_shutdown(
+        live_shutdown_reason::normal_end));
+    EXPECT_FALSE(eng.is_halted());
+    EXPECT_TRUE(provider->events.empty());
+
+    const auto report = session->shutdown_once(
+        live_shutdown_reason::normal_end);
+    EXPECT_FALSE(report.shutdown_required);
+    EXPECT_FALSE(report.quiesce_succeeded);
+    EXPECT_FALSE(report.provider_closed);
+}
+
+TEST(LiveSafety, QuiesceFailurePreventsReservedLedgerSeal)
+{
+    auto provider = std::make_shared<ShutdownOrderProvider>();
+    provider->throw_on_quiesce = true;
+    expect_failed_live_shutdown_abandons_reserved_log(
+        provider, "/tmp/truetest_shutdown_quiesce_failure.bin");
+}
+
+TEST(LiveSafety, KillFailurePreventsReservedLedgerSeal)
+{
+    auto provider = std::make_shared<ShutdownOrderProvider>();
+    provider->kill->succeed.store(false, std::memory_order_release);
+    expect_failed_live_shutdown_abandons_reserved_log(
+        provider, "/tmp/truetest_shutdown_kill_failure.bin");
+}
+
+TEST(LiveSafety, FinishFailurePreventsReservedLedgerSeal)
+{
+    auto provider = std::make_shared<ShutdownOrderProvider>();
+    provider->throw_on_finish = true;
+    expect_failed_live_shutdown_abandons_reserved_log(
+        provider, "/tmp/truetest_shutdown_finish_failure.bin");
 }
 
 TEST(LiveSafety, OperatorKillReportsFailureWhenProviderCannotFinishClosing)

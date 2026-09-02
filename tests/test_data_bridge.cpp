@@ -113,6 +113,20 @@ private:
 
 // --- Batch mode tests ---
 
+TEST(DataBridge, ConstructorRejectsMissingTransportOrParser)
+{
+	auto transport = std::make_shared<MockBatchTransport>(
+		std::vector<std::string>{});
+	auto parser = std::make_shared<CsvBarParser>();
+
+	EXPECT_THROW(
+		(DataBridge<bar_record>{nullptr, parser, bar_record_sink}),
+		std::invalid_argument);
+	EXPECT_THROW(
+		(DataBridge<bar_record>{transport, nullptr, bar_record_sink}),
+		std::invalid_argument);
+}
+
 TEST(DataBridge, BatchLoadsBarRecords)
 {
 	SilenceBridge quiet;
@@ -390,6 +404,25 @@ TEST(DataBridge, StreamingCallbackFiresPerRecord)
 	EXPECT_EQ(callback_count.load(), 5);
 }
 
+TEST(DataBridge, StreamingCallbackExceptionStopsAndClosesTransport)
+{
+	SilenceBridge quiet;
+	auto transport = std::make_shared<MockStreamingTransport>();
+	auto bridge = std::make_shared<DataBridge<bar_record>>(
+		transport, std::make_shared<CsvBarParser>(), bar_record_sink);
+	transport->enqueue("date,symbol,open,high,low,close,volume");
+	transport->enqueue("2024-01-01,TEST,100,105,95,102,1000");
+
+	const auto result = bridge->run_streaming(
+		std::make_shared<data_handler>(), [](const bar_record&) {
+			throw std::runtime_error("callback failure");
+		});
+
+	EXPECT_FALSE(result.success());
+	EXPECT_EQ(result.termination, stream_termination::runtime_failure);
+	EXPECT_FALSE(transport->is_open());
+}
+
 TEST(DataBridge, StreamingTransportFailureIsNotFalseCompletion)
 {
 	SilenceBridge quiet;
@@ -454,8 +487,8 @@ TEST(DataBridge, PrelatchedHaltDoesNotReopenTransport)
 	auto bridge = std::make_shared<DataBridge<bar_record>>(
 		transport, std::make_shared<FrameBarParser>(), bar_record_sink);
 	std::atomic<bool> halt{true};
-	bridge->set_halt_flag(&halt);
-	auto result = bridge->run_streaming(std::make_shared<data_handler>());
+	auto result = bridge->run_streaming(
+		std::make_shared<data_handler>(), nullptr, nullptr, &halt);
 	EXPECT_FALSE(result.success());
 	EXPECT_EQ(result.termination, stream_termination::engine_halt);
 	EXPECT_FALSE(transport->is_open());
@@ -468,11 +501,13 @@ TEST(DataBridge, ConcurrentHaltWakesBlockingStreamAsEngineHalt)
 	auto bridge = std::make_shared<DataBridge<bar_record>>(
 		transport, std::make_shared<CsvBarParser>(), bar_record_sink);
 	std::atomic<bool> halt{false};
-	bridge->set_halt_flag(&halt);
 	transport->enqueue("date,symbol,open,high,low,close,volume");
 
 	StreamResult result;
-	std::thread runner([&] { result = bridge->run_streaming(std::make_shared<data_handler>()); });
+	std::thread runner([&] {
+		result = bridge->run_streaming(
+			std::make_shared<data_handler>(), nullptr, nullptr, &halt);
+	});
 	transport->wait_for_blocking_reads(2);
 	const auto start = std::chrono::steady_clock::now();
 	halt.store(true, std::memory_order_release);

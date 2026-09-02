@@ -2,18 +2,57 @@
 
 #include "engine/engine.h"
 #include "engine/engine_config.h"
+#include "engine/live_safety_session.h"
+#include "core/event_log.h"
 #include "data/data_handler.h"
 #include "execution/execution_adapter.h"
 #include "execution/async_support.h"
+#include "exits/bracket_adapter.h"
+#include "exits/exit_intent.h"
 #include "providers/provider.h"
 #include "strategy/strategy_interface.h"
 #include "ui/console_dashboard.h"
 
+#include <atomic>
+#include <cstdio>
+#include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <vector>
 #include <string>
+#include <string_view>
+#include <unistd.h>
 
 namespace {
+
+class CountingBracketAdapter final
+    : public truetest::exits::IBracketAdapter
+{
+public:
+    truetest::exits::bracket_caps capabilities() const override
+    {
+        return {.stop_market = true};
+    }
+
+    truetest::exits::bracket_handles place(
+        std::uint64_t,
+        const truetest::exits::exit_intent&,
+        double) override
+    {
+        ++place_calls;
+        return {};
+    }
+
+    void cancel(
+        std::uint64_t,
+        const truetest::exits::bracket_handles&) override
+    {
+        ++cancel_calls;
+    }
+
+    int place_calls = 0;
+    int cancel_calls = 0;
+};
 
 // A fake adapter that supports async submit/cancel and implements IAsyncSubmitSupport.
 // Used to test the new engine integration paths without any real provider or network.
@@ -24,10 +63,16 @@ public:
     int cancel_count = 0;
     std::uint64_t last_submit_id = 0;
     bool async_enabled = true;
+    bool throw_on_result_poll = false;
+    bool emit_uncertain_submit_on_second_post_submit_poll = false;
+    bool emit_fill_on_second_post_submit_poll = false;
     std::optional<submit_result> result_on_submit;
+    int post_submit_result_polls = 0;
+    int post_submit_fill_polls = 0;
 
     std::vector<submit_result> pending_submit_results;
     std::vector<synth_meta>    pending_synth_meta;
+    std::vector<fill_event>    pending_fills;
 
     unknown_fill_handler handler;
 
@@ -52,9 +97,25 @@ public:
         return true;
     }
 
-    bool poll_fills(std::vector<fill_event>& /*out*/) override
+    bool poll_fills(std::vector<fill_event>& out) override
     {
-        return false; // async fills come via other paths in this test
+        if (submit_count != 0)
+        {
+            ++post_submit_fill_polls;
+            if (emit_fill_on_second_post_submit_poll
+                && post_submit_fill_polls == 2)
+            {
+                fill_event fill(
+                    std::chrono::system_clock::now(), "TEST", last_submit_id,
+                    order_side::buy, 1.0, 100.0, 0.0, 0.0, 7);
+                fill.set_source(fill_source::exchange);
+                pending_fills.push_back(std::move(fill));
+            }
+        }
+        if (pending_fills.empty()) return false;
+        out.insert(out.end(), pending_fills.begin(), pending_fills.end());
+        pending_fills.clear();
+        return true;
     }
 
     bool supports_async_submit() const override { return async_enabled; }
@@ -88,6 +149,25 @@ public:
 
     bool poll_submit_results(std::vector<submit_result>& out) override
     {
+        if (throw_on_result_poll && submit_count != 0)
+            throw std::runtime_error("injected async result poll failure");
+        if (submit_count != 0)
+        {
+            ++post_submit_result_polls;
+            if (emit_uncertain_submit_on_second_post_submit_poll
+                && post_submit_result_polls == 2)
+            {
+                pending_submit_results.push_back(submit_result{
+                    .engine_id = last_submit_id,
+                    .symbol = "TEST",
+                    .exchange_order_id = {},
+                    .error = "delayed ambiguous post-write outcome",
+                    .op = submit_result::operation::submit,
+                    .ok = false,
+                    .uncertain = true,
+                });
+            }
+        }
         if (pending_submit_results.empty()) return false;
         out.insert(out.end(), pending_submit_results.begin(), pending_submit_results.end());
         pending_submit_results.clear();
@@ -127,6 +207,11 @@ public:
     void close() override {}
     std::shared_ptr<IDataTransport> get_transport() override { return nullptr; }
     std::shared_ptr<IExecutionAdapter> get_execution_adapter() override { return adapter; }
+    std::shared_ptr<truetest::exits::IBracketAdapter>
+    get_bracket_adapter() override { return bracket_adapter; }
+
+    std::shared_ptr<CountingBracketAdapter> bracket_adapter =
+        std::make_shared<CountingBracketAdapter>();
 };
 
 // Very simple strategy that fires one market order
@@ -157,6 +242,43 @@ public:
     void set_position_open(const std::string&, bool) override {}
 };
 
+class OneShotBracketStrategy final : public IStrategy
+{
+public:
+    std::optional<order_event> on_market(const market_event& mkt) override
+    {
+        if (fired_) return std::nullopt;
+        fired_ = true;
+        pending_ = truetest::exits::make_long_exit_intent(
+            mkt.get_symbol(), mkt.get_close(), 1.0,
+            /*sl_pct=*/0.01, /*tp_pct=*/0.01, "shutdown-test");
+        return order_event(mkt.get_timestamp(), mkt.get_symbol(),
+                           order_type::market, order_side::buy,
+                           1.0, mkt.get_close());
+    }
+
+    std::optional<truetest::exits::exit_intent>
+    take_pending_exit_intent() override
+    {
+        auto pending = std::move(pending_);
+        pending_.reset();
+        return pending;
+    }
+
+    void on_fill(const fill_event&, std::uint64_t) override
+    {
+        ++fill_callbacks;
+    }
+
+    void set_position_open(const std::string&, bool) override {}
+
+    int fill_callbacks = 0;
+
+private:
+    bool fired_ = false;
+    std::optional<truetest::exits::exit_intent> pending_;
+};
+
 std::shared_ptr<data_handler> make_bars()
 {
     auto dh = std::make_shared<data_handler>();
@@ -164,6 +286,30 @@ std::shared_ptr<data_handler> make_bars()
     dh->load_into_queue("2024-01-01", "TEST", 100.0, 102.0, 99.5, 101.0, 1000);
     return dh;
 }
+
+std::shared_ptr<data_handler> make_one_bar()
+{
+    auto dh = std::make_shared<data_handler>();
+    dh->load_into_queue(
+        "2024-01-01", "TEST", 100.0, 101.0, 99.0, 100.0, 1000);
+    return dh;
+}
+
+struct TempLedger
+{
+    std::string path;
+
+    explicit TempLedger(std::string_view name)
+    {
+        static std::atomic<std::uint64_t> sequence{0};
+        path = "/tmp/truetest_async_" +
+            std::to_string(static_cast<unsigned long>(::getpid())) + "_" +
+            std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)) +
+            "_" + std::string(name);
+    }
+
+    ~TempLedger() { std::remove(path.c_str()); }
+};
 
 } // namespace
 
@@ -242,6 +388,180 @@ TEST(EngineAsyncSupport, AmbiguousPostWriteSubmitTriggersTerminalHalt)
 
     EXPECT_TRUE(eng.is_halted());
     EXPECT_FALSE(eng.run_succeeded());
+}
+
+TEST(EngineAsyncSupport,
+     AmbiguousPostWriteSubmitPreventsReservedLedgerFinalization)
+{
+    TempLedger ledger("ambiguous-submit.bin");
+    auto reservation = DurableEventLogReservation::acquire(ledger.path);
+    auto logger = std::make_unique<EventLogger>(
+        ledger.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    auto dh = make_bars();
+    auto provider = std::make_shared<FakeAsyncProvider>();
+    auto strat = std::make_shared<OneShotStrategy>();
+    provider->adapter->result_on_submit = submit_result{
+        .engine_id = 0,
+        .symbol = {},
+        .exchange_order_id = {},
+        .error = "ambiguous post-write outcome",
+        .op = submit_result::operation::submit,
+        .ok = false,
+        .uncertain = true,
+    };
+
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.execution_bar_delay = 0;
+    cfg.event_log_path = ledger.path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+    cfg.exit_defaults.mode =
+        truetest::exits::exit_policy_mode::strategy_only;
+    {
+        engine eng(dh, nullptr, strat, std::move(cfg), std::move(logger));
+        eng.run();
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.run_succeeded());
+    }
+
+    ASSERT_EQ(provider->adapter->submit_count, 1);
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+}
+
+TEST(EngineAsyncSupport,
+     AsyncOutcomeProcessingExceptionPreventsReservedLedgerFinalization)
+{
+    TempLedger ledger("outcome-processing-failure.bin");
+    auto reservation = DurableEventLogReservation::acquire(ledger.path);
+    auto logger = std::make_unique<EventLogger>(
+        ledger.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    auto dh = make_bars();
+    auto provider = std::make_shared<FakeAsyncProvider>();
+    auto strat = std::make_shared<OneShotStrategy>();
+    provider->adapter->throw_on_result_poll = true;
+
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.execution_bar_delay = 0;
+    cfg.event_log_path = ledger.path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+    cfg.exit_defaults.mode =
+        truetest::exits::exit_policy_mode::strategy_only;
+    {
+        engine eng(dh, nullptr, strat, std::move(cfg), std::move(logger));
+        eng.run();
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.run_succeeded());
+    }
+
+    ASSERT_EQ(provider->adapter->submit_count, 1);
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+}
+
+TEST(EngineAsyncSupport,
+     ShutdownDrainRejectsDelayedAmbiguousSubmitBeforeReservedSeal)
+{
+    TempLedger ledger("shutdown-delayed-ambiguous-submit.bin");
+    auto reservation = DurableEventLogReservation::acquire(ledger.path);
+    auto logger = std::make_unique<EventLogger>(
+        ledger.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    auto provider = std::make_shared<FakeAsyncProvider>();
+    provider->adapter->emit_uncertain_submit_on_second_post_submit_poll = true;
+    auto session = std::make_shared<LiveSafetySession>(
+        provider, false, std::chrono::milliseconds{100});
+    ASSERT_TRUE(session->open_provider());
+
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.live_safety_session = session;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.execution_bar_delay = 0;
+    cfg.event_log_path = ledger.path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+    cfg.exit_defaults.mode =
+        truetest::exits::exit_policy_mode::strategy_only;
+    {
+        engine eng(make_one_bar(), nullptr,
+                   std::make_shared<OneShotStrategy>(), std::move(cfg),
+                   std::move(logger));
+        eng.run();
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.run_succeeded());
+    }
+
+    EXPECT_GE(provider->adapter->post_submit_result_polls, 2);
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+}
+
+TEST(EngineAsyncSupport,
+     ShutdownDrainDurablyRetainsFillProducedAfterLastEventLoopPoll)
+{
+    TempLedger ledger("shutdown-delayed-fill.bin");
+    auto reservation = DurableEventLogReservation::acquire(ledger.path);
+    auto logger = std::make_unique<EventLogger>(
+        ledger.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    auto provider = std::make_shared<FakeAsyncProvider>();
+    provider->adapter->emit_fill_on_second_post_submit_poll = true;
+    auto strategy = std::make_shared<OneShotBracketStrategy>();
+    auto session = std::make_shared<LiveSafetySession>(
+        provider, false, std::chrono::milliseconds{100});
+    ASSERT_TRUE(session->open_provider());
+
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.live_safety_session = session;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.execution_bar_delay = 0;
+    cfg.event_log_path = ledger.path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+    cfg.exit_defaults.mode =
+        truetest::exits::exit_policy_mode::strategy_only;
+    {
+        engine eng(make_one_bar(), nullptr, strategy, std::move(cfg),
+                   std::move(logger));
+        eng.run();
+        EXPECT_TRUE(eng.run_succeeded());
+    }
+
+    EXPECT_GE(provider->adapter->post_submit_fill_polls, 2);
+    EXPECT_EQ(strategy->fill_callbacks, 0)
+        << "post-shutdown fill retention must not re-enter strategy code";
+    EXPECT_EQ(provider->bracket_adapter->place_calls, 0);
+    EXPECT_EQ(provider->bracket_adapter->cancel_calls, 0);
+    EventReplayer replay(reservation->open_path());
+    ASSERT_TRUE(replay.file_finalized());
+    bool saw_fill = false;
+    while (replay.has_next())
+    {
+        auto ev = replay.next();
+        saw_fill = saw_fill || (ev && ev->get_type() == event_type::fill);
+    }
+    EXPECT_TRUE(saw_fill);
 }
 
 TEST(EngineAsyncSupport, FatalSubmitTriggersTerminalHalt)

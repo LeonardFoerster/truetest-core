@@ -1,6 +1,13 @@
 #include <gtest/gtest.h>
+#include "engine/market_maker_worker.h"
 #include "market_maker/market_maker.h"
 #include "orderbook/orderbook.h"
+
+#include <atomic>
+#include <chrono>
+#include <exception>
+#include <stdexcept>
+#include <string>
 
 TEST(MarketMaker, AddOrders_PopulatesBook)
 {
@@ -131,4 +138,49 @@ TEST(MarketMaker, Calibration_VolMultWidensSpread)
     };
     EXPECT_GT(ask_price(vol_orders), ask_price(flat_orders))
         << "vol_spread_mult must widen the seeded spread under volatility";
+}
+
+TEST(MarketMakerWorker, FullOutboundRingFailsClosedWithoutSilentLoss)
+{
+    MMRing outbound;
+    const auto filler = std::make_shared<market_event>(
+        std::chrono::system_clock::time_point{}, "FILLER",
+        100.0, 100.0, 100.0, 100.0, 1);
+    for (std::size_t i = 0; i < outbound.capacity(); ++i)
+        ASSERT_TRUE(outbound.try_push(filler));
+    ASSERT_TRUE(outbound.full());
+    const auto occupied_before = outbound.size();
+
+    mm_calibration calibration;
+    calibration.levels_per_side = 1;
+    MarketMakerWorker worker(42, outbound, calibration);
+    worker.set_max_consecutive_errors(1);
+    std::atomic<bool> failure_flag{false};
+    worker.set_failure_flag(failure_flag);
+
+    RingBuffer<event_pointer, 8> inbound;
+    ASSERT_TRUE(inbound.try_push(std::make_shared<market_event>(
+        std::chrono::system_clock::time_point{}, "TEST",
+        100.0, 101.0, 99.0, 100.0, 100)));
+
+    worker.run(inbound);
+
+    EXPECT_TRUE(failure_flag.load(std::memory_order_acquire));
+    ASSERT_TRUE(worker.has_failed());
+    EXPECT_EQ(worker.error_count(), 1u);
+    EXPECT_EQ(worker.events_processed(), 1u);
+    EXPECT_EQ(worker.orders_generated(), 0u);
+    EXPECT_EQ(outbound.size(), occupied_before);
+    EXPECT_TRUE(outbound.full());
+
+    try
+    {
+        std::rethrow_exception(worker.get_exception());
+        FAIL() << "full MarketMaker output ring must surface worker failure";
+    }
+    catch (const std::runtime_error& ex)
+    {
+        EXPECT_EQ(std::string(ex.what()),
+                  "market-maker output ring capacity exhausted");
+    }
 }

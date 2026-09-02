@@ -2,9 +2,11 @@
 
 #include "ui/desk/monitor_model.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
-#include <vector>
+#include <cstdint>
+#include <utility>
 
 namespace {
 
@@ -113,24 +115,4 @@ TEST(ImGuiMonitorModel, RebaselinesRateWhenCounterResetsOrTimeDoesNotAdvance)
     EXPECT_FALSE(telemetry.merge(snap, nullptr, t0 + std::chrono::seconds{4}));
     EXPECT_FALSE(telemetry.available());
     EXPECT_FALSE(telemetry.rate_available());
-}
-
-TEST(ImGuiMonitorModel, BuildsFilteredFillIndexBeforeClipping)
-{
-    truetest::ui::dashboard_snapshot snap;
-    snap.recent_fills.resize(4);
-    snap.recent_fills[0].side = 'B';
-    snap.recent_fills[1].side = 'S';
-    snap.recent_fills[2].side = 'L';
-    snap.recent_fills[3].side = 's';
-
-    std::vector<std::size_t> rows;
-    truetest::ui::desk::build_visible_fill_rows(snap, 0, rows);
-    EXPECT_EQ(rows, (std::vector<std::size_t>{0, 1, 2, 3}));
-
-    truetest::ui::desk::build_visible_fill_rows(snap, 1, rows);
-    EXPECT_EQ(rows, (std::vector<std::size_t>{0, 2}));
-
-    truetest::ui::desk::build_visible_fill_rows(snap, 2, rows);
-    EXPECT_EQ(rows, (std::vector<std::size_t>{1, 3}));
 }

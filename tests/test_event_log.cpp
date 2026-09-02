@@ -5,21 +5,30 @@
 #include "data/data_handler.h"
 #include "orderbook/orderbook.h"
 #include "market_maker/market_maker.h"
+#include "providers/provider.h"
 #include "types/order_id.h"
 
 #include <array>
 #include <atomic>
+#include <barrier>
+#include <concepts>
 #include <cstdio>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <thread>
+#include <type_traits>
 #include <unistd.h>
 #include <vector>
 
@@ -47,6 +56,31 @@ struct TempFile {
 // Anonymous namespace prevents ODR clashes with identically-named helpers in
 // other test TUs.
 namespace {
+template <typename Endpoint>
+concept DurableAckPublisher = requires(Endpoint& endpoint,
+                                       durable_log_ack ack) {
+    { endpoint.publish_ack(ack) } -> std::same_as<bool>;
+};
+
+template <typename Endpoint>
+concept DurableAckConsumer = requires(Endpoint& endpoint,
+                                      durable_log_ack& ack) {
+    { endpoint.try_take_ack(ack) } -> std::same_as<bool>;
+};
+
+using DurableAckProducer = DurableLogProtocol::ProducerEndpoint;
+using DurableAckConsumerEndpoint = DurableLogProtocol::ConsumerEndpoint;
+
+static_assert(std::movable<DurableAckProducer>);
+static_assert(!std::copyable<DurableAckProducer>);
+static_assert(std::movable<DurableAckConsumerEndpoint>);
+static_assert(!std::copyable<DurableAckConsumerEndpoint>);
+static_assert(DurableAckPublisher<DurableAckProducer>);
+static_assert(!DurableAckConsumer<DurableAckProducer>);
+static_assert(DurableAckConsumer<DurableAckConsumerEndpoint>);
+static_assert(!DurableAckPublisher<DurableAckConsumerEndpoint>);
+static_assert(std::copy_constructible<engine_config>);
+
 struct SilenceCout {
     std::ostringstream sink;
     std::streambuf* orig;
@@ -67,11 +101,13 @@ void write_raw_event_record(std::ostream& out,
 
 void write_event_log_preamble(std::ostream& out,
                               bool compressed,
-                              bool finalized = false)
+                              bool finalized = false,
+                              uint8_t version =
+                                  EVENT_LOG_PREVIOUS_FILE_VERSION)
 {
     out.write(reinterpret_cast<const char*>(EVENT_LOG_FILE_MAGIC.data()),
               static_cast<std::streamsize>(EVENT_LOG_FILE_MAGIC.size()));
-    event_serial::write_u8(out, EVENT_LOG_FILE_VERSION);
+    event_serial::write_u8(out, version);
     uint8_t flags = compressed ? EVENT_LOG_FILE_FLAG_ZSTD : uint8_t{0};
     if (finalized)
         flags |= EVENT_LOG_FILE_FLAG_FINALIZED;
@@ -398,20 +434,22 @@ TEST(EventLog, LoggerRejectsUnknownEventType)
     EXPECT_THROW(logger.log(unknown), std::runtime_error);
 }
 
-TEST(EventLog, LoggerRejectsTagDynamicTypeMismatchWithoutPoisoning)
+TEST(EventLog, LoggerRejectsTagDynamicTypeMismatchAndPoisonsLedger)
 {
     TempFile tf("logger_type_mismatch.bin");
-    EventLogger logger(tf.path, false);
-    const event mismatched(event_type::market, epoch_ms(1));
-    EXPECT_THROW(logger.log(mismatched), std::runtime_error);
-
-    logger.log(market_event(epoch_ms(2), "TEST", 1, 2, 0.5, 1.5, 10));
-    logger.finalize();
+    {
+        EventLogger logger(tf.path, false);
+        const event mismatched(event_type::market, epoch_ms(1));
+        EXPECT_THROW(logger.log(mismatched), std::runtime_error);
+        EXPECT_THROW(
+            logger.log(
+                market_event(epoch_ms(2), "TEST", 1, 2, 0.5, 1.5, 10)),
+            std::runtime_error);
+        EXPECT_THROW(logger.finalize(), std::runtime_error);
+    }
 
     EventReplayer replayer(tf.path);
-    const auto replayed = replayer.next();
-    ASSERT_NE(replayed, nullptr);
-    EXPECT_EQ(replayed->get_timestamp(), epoch_ms(2));
+    EXPECT_FALSE(replayer.file_finalized());
     EXPECT_FALSE(replayer.has_next());
 }
 
@@ -637,11 +675,294 @@ TEST(EventLog, HeaderedCompressedLogDeclaresCompression)
     EXPECT_TRUE(std::equal(EVENT_LOG_FILE_MAGIC.begin(), EVENT_LOG_FILE_MAGIC.end(),
                            preamble.begin()));
     EXPECT_EQ(preamble[4], EVENT_LOG_FILE_VERSION);
-    EXPECT_EQ(preamble[5],
-              EVENT_LOG_FILE_FLAG_ZSTD | EVENT_LOG_FILE_FLAG_FINALIZED);
+    // v3 never rewrites the preamble. Its append-only terminal seal is the
+    // sole finalization authority.
+    EXPECT_EQ(preamble[5], EVENT_LOG_FILE_FLAG_ZSTD);
 
     EventReplayer replayer(tf.path);
+    EXPECT_TRUE(replayer.file_finalized());
     EXPECT_NE(replayer.next(), nullptr);
+}
+
+TEST(EventLog, Crc32cMatchesCastagnoliKnownVector)
+{
+    constexpr std::string_view input = "123456789";
+    EventLogCrc32c crc;
+    crc.update(input.data(), input.size());
+    EXPECT_EQ(crc.value(), 0xE3069283U);
+}
+
+TEST(EventLog, SealedV3RejectsCorruptionInIntegrityCoveredPayload)
+{
+    TempFile tf("sealed_v3_payload_corruption.bin");
+    {
+        EventLogger logger(tf.path, false);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+        logger.finalize();
+    }
+
+    std::fstream file(tf.path, std::ios::binary | std::ios::in |
+                                   std::ios::out);
+    ASSERT_TRUE(file.good());
+    constexpr std::streamoff payload_byte =
+        EVENT_LOG_FILE_PREAMBLE_BYTES + 5;
+    file.seekg(payload_byte, std::ios::beg);
+    char byte = 0;
+    file.read(&byte, 1);
+    ASSERT_EQ(file.gcount(), 1);
+    byte = static_cast<char>(static_cast<unsigned char>(byte) ^ 0x01U);
+    file.seekp(payload_byte, std::ios::beg);
+    file.write(&byte, 1);
+    file.flush();
+    ASSERT_TRUE(file.good());
+    file.close();
+
+    EXPECT_THROW(EventReplayer(tf.path), std::runtime_error);
+}
+
+TEST(EventLog, SealedV3AuthorityIsRevokedAfterConstructionOnAppend)
+{
+    TempFile tf("sealed_v3_post_open_append.bin");
+    {
+        EventLogger logger(tf.path, false);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+        logger.finalize();
+    }
+
+    EventReplayer replayer(tf.path);
+    ASSERT_TRUE(replayer.file_finalized());
+    {
+        // Advisory locks define cooperation between TrueTest readers/writers;
+        // this direct write deliberately violates the lock to verify that the
+        // pinned metadata checks still revoke authority.
+        std::ofstream out(tf.path, std::ios::binary | std::ios::app);
+        const char junk = static_cast<char>(0xA5);
+        out.write(&junk, 1);
+    }
+
+    EXPECT_FALSE(replayer.file_finalized());
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+}
+
+TEST(EventLog, SealedV3RejectsEqualLengthRewriteAfterValidation)
+{
+    TempFile tf("sealed_v3_post_open_rewrite.bin");
+    {
+        EventLogger logger(tf.path, false);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+        logger.finalize();
+    }
+
+    EventReplayer replayer(tf.path);
+    ASSERT_TRUE(replayer.file_finalized());
+
+    std::fstream file(tf.path, std::ios::binary | std::ios::in |
+                                   std::ios::out);
+    ASSERT_TRUE(file.good());
+    file.seekg(EVENT_LOG_FILE_PREAMBLE_BYTES, std::ios::beg);
+    uint8_t type_byte = 0;
+    uint32_t payload_size = 0;
+    file.read(reinterpret_cast<char*>(&type_byte), sizeof(type_byte));
+    file.read(reinterpret_cast<char*>(&payload_size), sizeof(payload_size));
+    ASSERT_TRUE(file.good());
+    ASSERT_GT(payload_size, 0U);
+    std::vector<uint8_t> payload(payload_size);
+    file.read(reinterpret_cast<char*>(payload.data()),
+              static_cast<std::streamsize>(payload.size()));
+    ASSERT_TRUE(file.good());
+
+    payload.front() ^= 0x01U;
+    EventLogCrc32c record_crc;
+    record_crc.update(&type_byte, sizeof(type_byte));
+    record_crc.update(&payload_size, sizeof(payload_size));
+    record_crc.update(payload.data(), payload.size());
+    const uint32_t replacement_checksum = record_crc.value();
+    file.seekp(EVENT_LOG_FILE_PREAMBLE_BYTES + 5, std::ios::beg);
+    file.write(reinterpret_cast<const char*>(payload.data()),
+               static_cast<std::streamsize>(payload.size()));
+    file.write(reinterpret_cast<const char*>(&replacement_checksum),
+               sizeof(replacement_checksum));
+    file.flush();
+    ASSERT_TRUE(file.good());
+    file.close();
+
+    EXPECT_FALSE(replayer.file_finalized());
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
+}
+
+TEST(EventLog, SecondWriterIsRefusedBeforeItCanTruncateActiveLedger)
+{
+    TempFile tf("single_writer_lock.bin");
+    EventLogger first(tf.path, false);
+    first.log(market_event(epoch_ms(1), "PRESERVED", 1, 2, 0.5, 1.5, 10));
+
+    EXPECT_THROW(
+        {
+            EventLogger second(tf.path, false);
+        },
+        std::runtime_error);
+
+    first.finalize();
+    EventReplayer replayer(tf.path);
+    const auto replayed = replayer.next();
+    ASSERT_NE(replayed, nullptr);
+    EXPECT_EQ(static_cast<const market_event&>(*replayed).get_symbol(),
+              "PRESERVED");
+}
+
+TEST(EventLog, WriterLockHandoffPreservesOldSegmentUntilNewBaseIsLocked)
+{
+    TempFile tf("writer_lock_handoff.bin");
+    const std::string rotated = tf.path + ".1";
+
+    EventLogWriterLock rotating_writer;
+    ASSERT_NO_THROW(rotating_writer.acquire(tf.path, /*create=*/true));
+    ASSERT_EQ(::rename(tf.path.c_str(), rotated.c_str()), 0);
+
+    std::atomic<bool> contender_ready{false};
+    std::atomic<bool> contender_failed{false};
+    std::jthread contender([&](std::stop_token stop) {
+        try
+        {
+            EventLogWriterLock new_base_owner;
+            new_base_owner.acquire(tf.path, /*create=*/true);
+            contender_ready.store(true, std::memory_order_release);
+            while (!stop.stop_requested())
+                std::this_thread::yield();
+        }
+        catch (...)
+        {
+            contender_failed.store(true, std::memory_order_release);
+            contender_ready.store(true, std::memory_order_release);
+        }
+    });
+    while (!contender_ready.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    ASSERT_FALSE(contender_failed.load(std::memory_order_acquire));
+
+    // A contended successor must fail without releasing the lock that still
+    // protects the sealed segment under its rotated pathname.
+    EXPECT_THROW(
+        rotating_writer.handoff_to(tf.path, /*create=*/true),
+        std::runtime_error);
+    EventLogWriterLock rotated_probe;
+    EXPECT_THROW(
+        rotated_probe.acquire(rotated, /*create=*/false),
+        std::runtime_error);
+
+    contender.request_stop();
+    contender.join();
+
+    ASSERT_NO_THROW(
+        rotating_writer.handoff_to(tf.path, /*create=*/true));
+    EventLogWriterLock new_base_probe;
+    EXPECT_THROW(
+        new_base_probe.acquire(tf.path, /*create=*/false),
+        std::runtime_error);
+    ASSERT_NO_THROW(
+        rotated_probe.acquire(rotated, /*create=*/false));
+
+    rotated_probe.release();
+    rotating_writer.release();
+    ASSERT_EQ(std::remove(rotated.c_str()), 0);
+}
+
+TEST(EventLog, UnsealedV3RejectsCorruptedPerRecordChecksum)
+{
+    TempFile tf("unsealed_v3_record_checksum.bin");
+    const auto payload = event_serial::serialise(
+        market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+    {
+        EventLogger logger(tf.path, false);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+        logger.abandon();
+    }
+
+    const auto checksum_offset = EVENT_LOG_FILE_PREAMBLE_BYTES + 5 +
+        static_cast<std::streamoff>(payload.size());
+    std::fstream file(tf.path, std::ios::binary | std::ios::in |
+                                   std::ios::out);
+    ASSERT_TRUE(file.good());
+    file.seekg(checksum_offset, std::ios::beg);
+    char byte = 0;
+    file.read(&byte, 1);
+    ASSERT_EQ(file.gcount(), 1);
+    byte = static_cast<char>(static_cast<unsigned char>(byte) ^ 0x01U);
+    file.seekp(checksum_offset, std::ios::beg);
+    file.write(&byte, 1);
+    file.flush();
+    ASSERT_TRUE(file.good());
+    file.close();
+
+    EventReplayer inspection(tf.path);
+    EXPECT_FALSE(inspection.file_finalized());
+    EXPECT_THROW((void)inspection.next(), std::runtime_error);
+}
+
+TEST(EventLog, BytesAppendedAfterV3SealRevokeFinalizationAuthority)
+{
+    SilenceCout quiet;
+    TempFile tf("v3_append_after_seal.bin");
+    {
+        EventLogger logger(tf.path, false);
+        logger.log(market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+        logger.finalize();
+    }
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::app);
+        const char junk = static_cast<char>(0xA5);
+        out.write(&junk, 1);
+    }
+
+    EventReplayer inspection(tf.path);
+    EXPECT_EQ(inspection.file_version(), EVENT_LOG_FILE_VERSION);
+    EXPECT_FALSE(inspection.file_finalized());
+
+    engine_config cfg;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr,
+               std::move(cfg));
+    EXPECT_THROW(eng.run_replay(tf.path), std::runtime_error);
+}
+
+TEST(EventLog, PreviousV2IsInspectableButRefusedAsAuthoritativeLedger)
+{
+    SilenceCout quiet;
+    TempFile tf("previous-v2.bin");
+    const auto payload = event_serial::serialise(
+        market_event(epoch_ms(1), "TEST", 1, 2, 0.5, 1.5, 10));
+    const uint64_t index_offset =
+        static_cast<uint64_t>(EVENT_LOG_FILE_PREAMBLE_BYTES + 5) +
+        static_cast<uint64_t>(payload.size());
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        write_event_log_preamble(out, false, true);
+        write_raw_event_record(out, event_type::market, payload);
+        event_serial::write_u64(out, index_offset);
+        event_serial::write_u32(out, 0U);
+        event_serial::write_u32(out, EVENT_LOG_INDEX_MAGIC);
+    }
+
+    EventReplayer inspection(tf.path);
+    EXPECT_EQ(inspection.file_version(), EVENT_LOG_PREVIOUS_FILE_VERSION);
+    EXPECT_TRUE(inspection.file_finalized());
+    EXPECT_NE(inspection.next(), nullptr);
+
+    engine_config cfg;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr,
+               std::move(cfg));
+    EXPECT_THROW(eng.run_replay(tf.path), std::runtime_error);
+}
+
+TEST(EventLog, V3RejectsLegacyMutableFinalizedHeaderBit)
+{
+    TempFile tf("v3_mutable_finalized_flag.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        write_event_log_preamble(out, false, true, EVENT_LOG_FILE_VERSION);
+    }
+    EXPECT_THROW(EventReplayer(tf.path), std::runtime_error);
 }
 
 TEST(EventLog, HeaderlessRawAndCompressedLogsRemainReplayable)
@@ -1171,7 +1492,7 @@ TEST(EventLog, OversizedStringFieldIsRejectedInsteadOfTruncated)
     EXPECT_THROW((void)event_serial::serialise(cancel), std::length_error);
 }
 
-TEST(EventLog, FailedRecordDoesNotCorruptEmptyLogIndex)
+TEST(EventLog, FailedRecordPoisonsLedgerAndLeavesUnfinalizedEmptyPrefix)
 {
     TempFile tf("failed_record_empty_log.bin");
     const std::string oversized(
@@ -1184,11 +1505,12 @@ TEST(EventLog, FailedRecordDoesNotCorruptEmptyLogIndex)
     }
 
     EventReplayer replayer(tf.path, 1);
+    EXPECT_FALSE(replayer.file_finalized());
     EXPECT_FALSE(replayer.has_next());
     EXPECT_EQ(replayer.next(), nullptr);
 }
 
-TEST(EventLog, FailedRecordDoesNotPreventFollowingValidRecord)
+TEST(EventLog, FailedRecordPreventsFollowingRecordAndFinalization)
 {
     TempFile tf("failed_then_valid.bin");
     const std::string oversized(
@@ -1198,13 +1520,15 @@ TEST(EventLog, FailedRecordDoesNotPreventFollowingValidRecord)
         EventLogger logger(tf.path);
         const cancel_event cancel(epoch_ms(1), "TEST", 1U, oversized);
         EXPECT_THROW(logger.log(cancel), std::length_error);
-        logger.log(market_event(epoch_ms(2), "TEST", 1, 2, 0.5, 1.5, 10));
+        EXPECT_THROW(
+            logger.log(
+                market_event(epoch_ms(2), "TEST", 1, 2, 0.5, 1.5, 10)),
+            std::length_error);
+        EXPECT_THROW(logger.finalize(), std::length_error);
     }
 
     EventReplayer replayer(tf.path, 2'000);
-    const auto replayed = replayer.next();
-    ASSERT_NE(replayed, nullptr);
-    EXPECT_EQ(replayed->get_type(), event_type::market);
+    EXPECT_FALSE(replayer.file_finalized());
     EXPECT_FALSE(replayer.has_next());
 }
 
@@ -1613,12 +1937,17 @@ TEST(EventLog, DurableLogTargetPredicateAcceptsFreshRegularFilePath)
     EXPECT_TRUE(is_acceptable_durable_log_target(tf.path));
 }
 
-TEST(EventLog, DurableLogTargetPredicateAcceptsExistingRegularFile)
+TEST(EventLog, DurableLogTargetPredicateRejectsExistingLedgerWithoutChangingIt)
 {
-    SilenceCout quiet;
     TempFile tf("existing_regular_target");
-    { EventLogger logger(tf.path); }
-    EXPECT_TRUE(is_acceptable_durable_log_target(tf.path));
+    constexpr std::string_view sentinel = "prior-authoritative-ledger";
+    {
+        std::ofstream out(tf.path, std::ios::binary);
+        out.write(sentinel.data(), static_cast<std::streamsize>(sentinel.size()));
+    }
+    EXPECT_FALSE(is_acceptable_durable_log_target(tf.path));
+    std::ifstream in(tf.path, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(in), {}), sentinel);
 }
 
 TEST(EventLog, DurableLogTargetPredicateRejectsEmptyPath)
@@ -1631,6 +1960,27 @@ TEST(EventLog, DurableLogTargetPredicateRejectsMissingParentDirectory)
     TempFile tf("missing_parent");
     const std::string path = tf.path + "/no_such_subdir/log.bin";
     EXPECT_FALSE(is_acceptable_durable_log_target(path));
+}
+
+TEST(EventLog, DurableReservationRejectsWritableNonStickyParent)
+{
+    static std::atomic<std::uint64_t> seq{0};
+    const auto directory = std::filesystem::path{
+        "/tmp/truetest_untrusted_" + std::to_string(::getpid()) + "_" +
+        std::to_string(seq.fetch_add(1, std::memory_order_relaxed))};
+    ASSERT_TRUE(std::filesystem::create_directory(directory));
+    struct cleanup final
+    {
+        std::filesystem::path path;
+        ~cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+    } cleanup_directory{directory};
+    ASSERT_EQ(::chmod(directory.c_str(), 0777), 0);
+
+    const auto ledger = (directory / "ledger.bin").string();
+    EXPECT_FALSE(is_acceptable_durable_log_target(ledger));
+    EXPECT_THROW(
+        (void)DurableEventLogReservation::acquire(ledger),
+        std::runtime_error);
 }
 
 TEST(EventLog, DurableLogTargetPredicateRejectsSymlinkToDevNull)
@@ -1650,6 +2000,942 @@ TEST(EventLog, DurableLogTargetPredicateFailsClosedOnSymlinkLoop)
     // "not yet created" branch and accept based only on the parent dir.
     EXPECT_FALSE(is_acceptable_durable_log_target(tf.path));
     ::unlink(tf.path.c_str());
+}
+
+TEST(EventLog, DurableReservationRejectsPathReplacementBeforeLoggerReadiness)
+{
+    TempFile tf("reserved_target");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    ASSERT_TRUE(reservation->still_refers_to_reserved_file());
+
+    // A retained descriptor prevents redirection, but an unlinked inode is not
+    // an operator-recoverable ledger after process exit. Readiness therefore
+    // fails closed when the visible pathname no longer names the pinned inode.
+    ASSERT_EQ(::unlink(tf.path.c_str()), 0);
+    ASSERT_EQ(::symlink("/dev/null", tf.path.c_str()), 0);
+
+    EXPECT_THROW(
+        EventLogger(tf.path, false, 0, 5, reservation),
+        std::runtime_error);
+    ASSERT_EQ(::unlink(tf.path.c_str()), 0);
+}
+
+TEST(EventLog, ReservedLoggerFinalizationRejectsUnlinkedLedger)
+{
+    TempFile tf("reserved_unlinked_finalize");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    EventLogger logger(tf.path, false, 0, 5, reservation);
+    ASSERT_NO_THROW(logger.verify_durable_ready());
+    logger.log(market_event(epoch_ms(1), "PINNED", 1, 2, 1, 2, 1));
+
+    ASSERT_EQ(::unlink(tf.path.c_str()), 0);
+    EXPECT_THROW(logger.finalize(), std::runtime_error);
+}
+
+TEST(EventLog, DurableReadinessFailurePoisonsReservedLogger)
+{
+    TempFile tf("reserved_readiness_poison");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    EventLogger logger(tf.path, false, 0, 5, reservation);
+    logger.verify_durable_ready();
+
+    ASSERT_EQ(::unlink(tf.path.c_str()), 0);
+    EXPECT_THROW(logger.verify_durable_ready(), std::runtime_error);
+    EXPECT_THROW(
+        logger.log(market_event(epoch_ms(1), "POISON", 1, 2, 1, 2, 1)),
+        std::runtime_error);
+    EXPECT_THROW(logger.finalize(), std::runtime_error);
+
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+}
+
+TEST(EventLog, ReservedLoggerDetectsPathLossAtCriticalRecordCheckpoint)
+{
+    TempFile tf("reserved_unlinked_critical_record");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    EventLogger logger(tf.path, false, 0, 5, reservation);
+    ASSERT_NO_THROW(logger.verify_durable_ready());
+    ASSERT_EQ(::unlink(tf.path.c_str()), 0);
+
+    order_event order(epoch_ms(2), "PINNED", order_type::market,
+                      order_side::buy, 1.0);
+    order.set_order_id(99);
+    EXPECT_THROW(logger.log(order), std::runtime_error);
+}
+
+TEST(EventLog, ReservedLoggerBoundsMarketTailBeforeDurableCheckpoint)
+{
+    TempFile tf("reserved_unlinked_market_tail");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    EventLogger logger(tf.path, false, 0, 5, reservation);
+    ASSERT_NO_THROW(logger.verify_durable_ready());
+    ASSERT_EQ(::unlink(tf.path.c_str()), 0);
+
+    for (int i = 0; i < 255; ++i)
+    {
+        ASSERT_NO_THROW(logger.log(market_event(
+            epoch_ms(i + 1), "PINNED", 1, 2, 1, 2, 1)));
+    }
+    EXPECT_THROW(logger.log(market_event(
+        epoch_ms(256), "PINNED", 1, 2, 1, 2, 1)),
+        std::runtime_error);
+}
+
+TEST(EventLog, CriticalRecordCheckpointSurvivesProcessExitWithoutFinalization)
+{
+    TempFile tf("reserved_crash_prefix");
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (child == 0)
+    {
+        try
+        {
+            auto reservation = DurableEventLogReservation::acquire(tf.path);
+            EventLogger logger(tf.path, false, 0, 5, reservation);
+            logger.verify_durable_ready();
+            order_event order(epoch_ms(2), "CRASH", order_type::market,
+                              order_side::buy, 1.0);
+            order.set_order_id(7);
+            logger.log(order); // order records force an immediate fsync
+            ::_exit(0);        // deliberately bypass logger destruction
+        }
+        catch (...)
+        {
+            ::_exit(2);
+        }
+    }
+
+    int status = 0;
+    ASSERT_EQ(::waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    ASSERT_EQ(WEXITSTATUS(status), 0);
+
+    EventReplayer inspection(tf.path);
+    EXPECT_FALSE(inspection.file_finalized());
+    const auto recovered = inspection.next();
+    ASSERT_NE(recovered, nullptr);
+    ASSERT_EQ(recovered->get_type(), event_type::order);
+    EXPECT_EQ(static_cast<const order_event&>(*recovered).get_order_id(), 7U);
+    EXPECT_FALSE(inspection.has_next());
+}
+
+TEST(EventLog, ReservedLoggerDestructorNeverSealsWithoutCompletenessProof)
+{
+    TempFile tf("reserved_explicit_finalize_only");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    {
+        EventLogger logger(tf.path, false, 0, 5, reservation);
+        logger.verify_durable_ready();
+        order_event order(epoch_ms(2), "UNSEALED", order_type::market,
+                          order_side::buy, 1.0);
+        order.set_order_id(17);
+        logger.log(order);
+        // No explicit finalize: a destructor cannot prove the worker ring was
+        // complete, so the reserved ledger must remain diagnostic-only.
+    }
+
+    EventReplayer inspection(tf.path);
+    EXPECT_FALSE(inspection.file_finalized());
+    const auto recovered = inspection.next();
+    ASSERT_NE(recovered, nullptr);
+    EXPECT_EQ(static_cast<const order_event&>(*recovered).get_order_id(), 17U);
+}
+
+TEST(EventLog, DurableLogEndpointsPreserveExactSpscOrderConcurrently)
+{
+    constexpr std::uint64_t acknowledgement_count = 10'000;
+    auto endpoints = DurableLogProtocol::make_endpoints();
+    std::barrier handoff{2};
+    std::atomic<bool> producer_published_all{true};
+
+    bool consumer_received_all = true;
+    bool consumer_observed_exact_order = true;
+    {
+        std::jthread producer(
+            [endpoint = std::move(endpoints.producer), &handoff,
+             &producer_published_all]() mutable {
+                for (std::uint64_t sequence = 1;
+                     sequence <= acknowledgement_count; ++sequence)
+                {
+                    const auto ack = durable_log_ack{
+                        event_type::order, sequence, sequence * 17U};
+                    if (!endpoint.publish_ack(ack))
+                        producer_published_all.store(
+                            false, std::memory_order_relaxed);
+
+                    // The second phase prevents the producer from publishing
+                    // the next ACK until the sole consumer has popped this
+                    // one. The capacity-8 ring therefore cannot overflow and
+                    // a failed publish is a protocol defect, not test load.
+                    handoff.arrive_and_wait();
+                    handoff.arrive_and_wait();
+                }
+            });
+
+        for (std::uint64_t sequence = 1;
+             sequence <= acknowledgement_count; ++sequence)
+        {
+            handoff.arrive_and_wait();
+            durable_log_ack ack{};
+            if (!endpoints.consumer.try_take_ack(ack))
+            {
+                consumer_received_all = false;
+            }
+            else if (ack.type != event_type::order ||
+                     ack.entity_id != sequence ||
+                     ack.completed_steady_ns != sequence * 17U)
+            {
+                consumer_observed_exact_order = false;
+            }
+            handoff.arrive_and_wait();
+        }
+    }
+
+    EXPECT_TRUE(producer_published_all.load(std::memory_order_relaxed));
+    EXPECT_TRUE(consumer_received_all);
+    EXPECT_TRUE(consumer_observed_exact_order);
+    EXPECT_TRUE(endpoints.consumer.acknowledgements_empty());
+    EXPECT_FALSE(endpoints.consumer.compromised());
+}
+
+TEST(EventLog, ConsumerCompromiseIsObservedByDurableAckProducer)
+{
+    auto endpoints = DurableLogProtocol::make_endpoints();
+    std::barrier compromise_visible{2};
+    std::atomic<bool> producer_observed_compromise{false};
+    std::atomic<bool> producer_accepted_ack{true};
+
+    {
+        std::jthread producer(
+            [endpoint = std::move(endpoints.producer), &compromise_visible,
+             &producer_observed_compromise,
+             &producer_accepted_ack]() mutable {
+                compromise_visible.arrive_and_wait();
+                producer_observed_compromise.store(
+                    endpoint.compromised(), std::memory_order_relaxed);
+                producer_accepted_ack.store(
+                    endpoint.publish_ack(durable_log_ack{
+                        event_type::order, 77U, 99U}),
+                    std::memory_order_relaxed);
+            });
+
+        endpoints.consumer.compromise();
+        compromise_visible.arrive_and_wait();
+    }
+
+    EXPECT_TRUE(
+        producer_observed_compromise.load(std::memory_order_relaxed));
+    EXPECT_FALSE(producer_accepted_ack.load(std::memory_order_relaxed));
+    EXPECT_TRUE(endpoints.consumer.compromised());
+    EXPECT_TRUE(endpoints.consumer.acknowledgements_empty());
+}
+
+TEST(EventLog, LoggingWorkerAcknowledgesOnlyTheExactDurableOrder)
+{
+    TempFile tf("durable_worker_ack");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    auto logger = std::make_unique<EventLogger>(
+        tf.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+    auto protocol = DurableLogProtocol::make_endpoints();
+    LoggingWorker worker(
+        tf.path, LoggingWorker::log_sink::none, "", false, 0, 5,
+        reservation, std::move(logger), std::move(protocol.producer));
+
+    worker.on_event(std::make_shared<market_event>(
+        epoch_ms(1), "OBS", 1, 2, 1, 2, 1));
+    durable_log_ack ack;
+    EXPECT_FALSE(protocol.consumer.try_take_ack(ack));
+
+    auto order = std::make_shared<order_event>(
+        epoch_ms(2), "ACK", order_type::market, order_side::buy, 1.0);
+    order->set_order_id(991);
+    worker.on_event(order);
+
+    ASSERT_TRUE(protocol.consumer.try_take_ack(ack));
+    EXPECT_EQ(ack.type, event_type::order);
+    EXPECT_EQ(ack.entity_id, 991U);
+    EXPECT_FALSE(protocol.consumer.try_take_ack(ack));
+
+    // The ACK is published only after the reserved logger's immediate order
+    // checkpoint, so the same open file is already replayable here.
+    EventReplayer inspection(tf.path);
+    EXPECT_FALSE(inspection.file_finalized());
+    ASSERT_NE(inspection.next(), nullptr);
+    const auto durable_order = inspection.next();
+    ASSERT_NE(durable_order, nullptr);
+    EXPECT_EQ(static_cast<const order_event&>(*durable_order).get_order_id(),
+              991U);
+
+    EXPECT_NO_THROW(worker.finalize());
+    EventReplayer finalized(tf.path);
+    EXPECT_TRUE(finalized.file_finalized());
+}
+
+TEST(EventLog, LoggingWorkerFailureCompromisesAndCannotSealReservedLedger)
+{
+    TempFile tf("durable_worker_failure");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    auto logger = std::make_unique<EventLogger>(
+        tf.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+    auto protocol = DurableLogProtocol::make_endpoints();
+    LoggingWorker worker(
+        tf.path, LoggingWorker::log_sink::none, "", false, 0, 5,
+        reservation, std::move(logger), std::move(protocol.producer));
+
+    ASSERT_EQ(::unlink(tf.path.c_str()), 0);
+    auto order = std::make_shared<order_event>(
+        epoch_ms(2), "FAIL", order_type::market, order_side::buy, 1.0);
+    order->set_order_id(992);
+    EXPECT_THROW(worker.on_event(order), std::runtime_error);
+    EXPECT_TRUE(protocol.consumer.compromised());
+    durable_log_ack ack;
+    EXPECT_FALSE(protocol.consumer.try_take_ack(ack));
+    EXPECT_THROW(worker.finalize(), std::runtime_error);
+
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+}
+
+TEST(EventLog, CompromisedProtocolRefusesHealthyPrefixFinalization)
+{
+    TempFile tf("durable_protocol_compromised");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    auto logger = std::make_unique<EventLogger>(
+        tf.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+    auto protocol = DurableLogProtocol::make_endpoints();
+    LoggingWorker worker(
+        tf.path, LoggingWorker::log_sink::none, "", false, 0, 5,
+        reservation, std::move(logger), std::move(protocol.producer));
+    worker.on_event(std::make_shared<market_event>(
+        epoch_ms(1), "PREFIX", 1, 2, 1, 2, 1));
+
+    // Models a logging-ring drop/ACK protocol failure after otherwise valid
+    // records.  The healthy prefix still must never receive FINALIZED.
+    protocol.consumer.compromise();
+    EXPECT_THROW(worker.finalize(), std::runtime_error);
+
+    EventReplayer inspection(tf.path);
+    EXPECT_FALSE(inspection.file_finalized());
+}
+
+TEST(EventLog, DurableReservationRejectsFifoWithoutBlocking)
+{
+    TempFile tf("reserved_fifo");
+    ASSERT_EQ(::mkfifo(tf.path.c_str(), 0600), 0);
+    EXPECT_THROW(
+        (void)DurableEventLogReservation::acquire(tf.path),
+        std::runtime_error);
+    ASSERT_EQ(::unlink(tf.path.c_str()), 0);
+}
+
+TEST(EventLog, DurableReservationRejectsSymlinkEvenToRegularFile)
+{
+    TempFile target("reserved_regular");
+    TempFile link("reserved_link");
+    { std::ofstream out(target.path); out << "existing"; }
+    ASSERT_EQ(::symlink(target.path.c_str(), link.path.c_str()), 0);
+    EXPECT_THROW(
+        (void)DurableEventLogReservation::acquire(link.path),
+        std::runtime_error);
+    ASSERT_EQ(::unlink(link.path.c_str()), 0);
+}
+
+TEST(EventLog, DurableReservationRejectsExistingLedgerWithoutTruncatingIt)
+{
+    TempFile tf("reserved_existing_ledger");
+    constexpr std::string_view sentinel = "preserve-this-ledger";
+    {
+        std::ofstream out(tf.path, std::ios::binary);
+        out.write(sentinel.data(), static_cast<std::streamsize>(sentinel.size()));
+    }
+
+    EXPECT_THROW(
+        (void)DurableEventLogReservation::acquire(tf.path),
+        std::runtime_error);
+
+    std::ifstream in(tf.path, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(in), {}), sentinel);
+}
+
+TEST(EventLog, DurableReservationRejectsIntermediateDirectorySymlink)
+{
+    TempFile link("reserved_parent_symlink");
+    ASSERT_EQ(::symlink("/tmp", link.path.c_str()), 0);
+    const std::string target = link.path + "/truetest-must-not-create-" +
+        std::to_string(static_cast<unsigned long>(::getpid()));
+
+    EXPECT_FALSE(is_acceptable_durable_log_target(target));
+    EXPECT_THROW(
+        (void)DurableEventLogReservation::acquire(target),
+        std::runtime_error);
+    EXPECT_FALSE(std::filesystem::exists(target));
+    ASSERT_EQ(::unlink(link.path.c_str()), 0);
+}
+
+TEST(EventLog, ReservedDurableTargetRefusesRotation)
+{
+    TempFile tf("reserved_rotation");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    EXPECT_THROW(
+        EventLogger(tf.path, false, 1024, 2, std::move(reservation)),
+        std::runtime_error);
+}
+
+TEST(EventLog, DurableReservationCanBeClaimedByOnlyOneLogger)
+{
+    TempFile tf("reserved_single_claim");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    EventLogger first(tf.path, false, 0, 5, reservation);
+    first.verify_durable_ready();
+
+    order_event before(epoch_ms(1), "FIRST", order_type::market,
+                       order_side::buy, 1.0);
+    before.set_order_id(1);
+    first.log(before);
+
+    EXPECT_THROW(
+        EventLogger(tf.path, false, 0, 5, reservation),
+        std::runtime_error);
+
+    // The refused second constructor never opens O_TRUNC against the pinned
+    // inode; the first writer remains usable and both records survive.
+    order_event after(epoch_ms(2), "FIRST", order_type::market,
+                      order_side::buy, 1.0);
+    after.set_order_id(2);
+    first.log(after);
+    first.finalize();
+
+    EventReplayer replay(tf.path);
+    ASSERT_NE(replay.next(), nullptr);
+    const auto second = replay.next();
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(static_cast<const order_event&>(*second).get_order_id(), 2U);
+    EXPECT_FALSE(replay.has_next());
+}
+
+TEST(EventLog, DurableReservationRejectsPostAcquisitionHardlink)
+{
+    TempFile tf("reserved_hardlink_source");
+    TempFile alias("reserved_hardlink_alias");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    ASSERT_EQ(::link(tf.path.c_str(), alias.path.c_str()), 0);
+
+    EXPECT_THROW(
+        EventLogger(tf.path, false, 0, 5, reservation),
+        std::runtime_error);
+    EXPECT_EQ(std::filesystem::file_size(tf.path), 0U);
+    ASSERT_EQ(::unlink(alias.path.c_str()), 0);
+}
+
+TEST(EventLog, FailedReservedLoggerConstructionBurnsSessionClaimWithoutTruncation)
+{
+    TempFile tf("reserved_failed_claim");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+
+    EXPECT_THROW(
+        EventLogger(tf.path, false, 1, 5, reservation),
+        std::runtime_error);
+    EXPECT_THROW(
+        EventLogger(tf.path, false, 0, 5, reservation),
+        std::runtime_error);
+
+    EXPECT_EQ(std::filesystem::file_size(tf.path), 0U);
+}
+
+TEST(EventLog, PreopenedDurableLoggerIsTransferredWithoutReopenOrTruncate)
+{
+    TempFile tf("preopened_logger_transfer");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    auto logger = std::make_unique<EventLogger>(
+        tf.path, false, 0, 5, reservation);
+
+    ASSERT_NO_THROW(logger->verify_durable_ready());
+    logger->log(market_event(epoch_ms(1), "BEFORE", 1, 2, 1, 2, 1));
+
+    LoggingWorker worker(
+        tf.path, LoggingWorker::log_sink::none, "", false, 0, 5,
+        reservation, std::move(logger));
+    EXPECT_EQ(logger, nullptr);
+    worker.on_event(std::make_shared<market_event>(
+        epoch_ms(2), "AFTER", 2, 3, 2, 3, 1));
+    ASSERT_NO_THROW(worker.finalize());
+
+    EventReplayer replayer(reservation->open_path());
+    const auto first = replayer.next();
+    const auto second = replayer.next();
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(static_cast<const market_event&>(*first).get_symbol(), "BEFORE");
+    EXPECT_EQ(static_cast<const market_event&>(*second).get_symbol(), "AFTER");
+    EXPECT_FALSE(replayer.has_next());
+}
+
+namespace
+{
+class DurableBarrierAdapter final : public IExecutionAdapter
+{
+public:
+    explicit DurableBarrierAdapter(std::string path)
+        : path_(std::move(path)) {}
+
+    void submit_order(const order_event& order) override
+    {
+        ++submit_count;
+        submitted_order_id = order.get_order_id();
+        try
+        {
+            EventReplayer inspection(path_);
+            saw_unfinalized_file_at_submit = !inspection.file_finalized();
+            while (inspection.has_next())
+            {
+                const auto ev = inspection.next();
+                if (ev && ev->get_type() == event_type::order &&
+                    static_cast<const order_event&>(*ev).get_order_id() ==
+                        submitted_order_id)
+                    saw_exact_order_at_submit = true;
+            }
+        }
+        catch (...)
+        {
+            inspection_failed = true;
+        }
+    }
+
+    bool poll_fills(std::vector<fill_event>&) override { return false; }
+
+    void set_l2_seeded(bool) override
+    {
+        auto callback = std::move(before_admission);
+        if (callback)
+            callback();
+    }
+
+    int submit_count = 0;
+    std::uint64_t submitted_order_id = 0;
+    bool saw_unfinalized_file_at_submit = false;
+    bool saw_exact_order_at_submit = false;
+    bool inspection_failed = false;
+    std::function<void()> before_admission;
+
+private:
+    std::string path_;
+};
+
+class DurableBarrierProvider final : public IProvider
+{
+public:
+    explicit DurableBarrierProvider(std::string path)
+        : adapter(std::make_shared<DurableBarrierAdapter>(std::move(path))) {}
+
+    std::string name() const override { return "durable-barrier-test"; }
+    bool has_data_feed() const override { return false; }
+    bool has_execution() const override { return true; }
+    bool open() override { return true; }
+    void close() override {}
+    std::shared_ptr<IDataTransport> get_transport() override { return nullptr; }
+    std::shared_ptr<IExecutionAdapter> get_execution_adapter() override
+    {
+        return adapter;
+    }
+
+    std::shared_ptr<DurableBarrierAdapter> adapter;
+};
+
+class DurableBarrierStrategy final : public IStrategy
+{
+public:
+    std::optional<order_event> on_market(const market_event& market) override
+    {
+        if (fired_) return std::nullopt;
+        fired_ = true;
+        return order_event(market.get_timestamp(), market.get_symbol(),
+                           order_type::market, order_side::buy, 1.0,
+                           market.get_close());
+    }
+    void set_position_open(const std::string&, bool) override {}
+
+private:
+    bool fired_ = false;
+};
+}
+
+TEST(EventLog, MismatchedUniqueLoggerHandoffFailsClosedAndRemainsUnsealed)
+{
+    SilenceCout quiet;
+    TempFile logger_file("mismatched_handoff_logger");
+    TempFile configured_reservation_file("mismatched_handoff_reservation");
+    auto logger_reservation =
+        DurableEventLogReservation::acquire(logger_file.path);
+    auto configured_reservation =
+        DurableEventLogReservation::acquire(configured_reservation_file.path);
+    auto logger = std::make_unique<EventLogger>(
+        logger_file.path, false, 0, 5, logger_reservation);
+    logger->verify_durable_ready();
+
+    order_event durable_prefix(epoch_ms(1), "MISMATCH",
+                               order_type::market, order_side::buy, 1.0);
+    durable_prefix.set_order_id(701U);
+    logger->log(durable_prefix);
+
+    engine_config config;
+    config.threading = thread_preset::standard;
+    config.disable_pinning = true;
+    config.show_progress = false;
+    config.event_log_path = logger_file.path;
+    config.compress_log = false;
+    config.event_log_reservation = configured_reservation;
+
+    EXPECT_THROW(
+        {
+            engine rejected(
+                std::make_shared<data_handler>(), nullptr,
+                std::make_shared<DurableBarrierStrategy>(),
+                std::move(config), std::move(logger));
+        },
+        std::runtime_error);
+    EXPECT_EQ(logger, nullptr);
+
+    EventReplayer inspection(logger_reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+    const auto recovered = inspection.next();
+    ASSERT_NE(recovered, nullptr);
+    ASSERT_EQ(recovered->get_type(), event_type::order);
+    EXPECT_EQ(static_cast<const order_event&>(*recovered).get_order_id(),
+              701U);
+    EXPECT_FALSE(inspection.has_next());
+    EXPECT_EQ(std::filesystem::file_size(configured_reservation_file.path),
+              0U);
+}
+
+TEST(EventLog, ReservedLoggerRequiresDedicatedLoggingWorkerPreset)
+{
+    SilenceCout quiet;
+    const std::array unsupported_presets{
+        thread_preset::inline_mode,
+        thread_preset::light,
+    };
+
+    for (const auto preset : unsupported_presets)
+    {
+        SCOPED_TRACE(static_cast<int>(preset));
+        TempFile tf(
+            "reserved_nondedicated_preset_" +
+            std::to_string(static_cast<int>(preset)));
+        auto reservation = DurableEventLogReservation::acquire(tf.path);
+        auto logger = std::make_unique<EventLogger>(
+            tf.path, false, 0, 5, reservation);
+        logger->verify_durable_ready();
+
+        order_event durable_prefix(epoch_ms(1), "TOPOLOGY",
+                                   order_type::market,
+                                   order_side::buy, 1.0);
+        durable_prefix.set_order_id(702U);
+        logger->log(durable_prefix);
+
+        engine_config config;
+        config.threading = preset;
+        config.disable_pinning = true;
+        config.show_progress = false;
+        config.event_log_path = tf.path;
+        config.compress_log = false;
+        config.event_log_reservation = reservation;
+
+        EXPECT_THROW(
+            {
+                engine rejected(
+                    std::make_shared<data_handler>(), nullptr,
+                    std::make_shared<DurableBarrierStrategy>(),
+                    std::move(config), std::move(logger));
+            },
+            std::runtime_error);
+        EXPECT_EQ(logger, nullptr);
+
+        EventReplayer inspection(reservation->open_path());
+        EXPECT_FALSE(inspection.file_finalized());
+        const auto recovered = inspection.next();
+        ASSERT_NE(recovered, nullptr);
+        ASSERT_EQ(recovered->get_type(), event_type::order);
+        EXPECT_EQ(static_cast<const order_event&>(*recovered).get_order_id(),
+                  702U);
+        EXPECT_FALSE(inspection.has_next());
+    }
+}
+
+TEST(EventLog, CopiedEngineConfigCannotShareUniqueLoggerAuthority)
+{
+    SilenceCout quiet;
+    TempFile tf("copied_config_logger_authority");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    auto logger = std::make_unique<EventLogger>(
+        tf.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    engine_config config;
+    config.threading = thread_preset::standard;
+    config.disable_pinning = true;
+    config.show_progress = false;
+    config.event_log_path = tf.path;
+    config.compress_log = false;
+    config.event_log_reservation = reservation;
+    auto copied_config = config;
+
+    {
+        engine owner(
+            std::make_shared<data_handler>(), nullptr,
+            std::make_shared<DurableBarrierStrategy>(),
+            std::move(config), std::move(logger));
+        EXPECT_EQ(logger, nullptr);
+
+        EXPECT_THROW(
+            {
+                engine rejected_copy(
+                    std::make_shared<data_handler>(), nullptr,
+                    std::make_shared<DurableBarrierStrategy>(),
+                    std::move(copied_config));
+            },
+            std::runtime_error);
+    }
+
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+    EXPECT_FALSE(inspection.has_next());
+}
+
+TEST(EventLog, EngineNeverSubmitsBeforeExactReservedOrderIsDurable)
+{
+    SilenceCout quiet;
+    TempFile tf("engine_durable_order_barrier");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    auto logger = std::make_unique<EventLogger>(
+        tf.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    auto provider = std::make_shared<DurableBarrierProvider>(tf.path);
+    auto data = std::make_shared<data_handler>();
+    data->load_into_queue("1704067200000", "TEST",
+                          100.0, 101.0, 99.0, 100.0, 1000);
+    data->load_into_queue("1704067260000", "TEST",
+                          100.0, 101.0, 99.0, 100.0, 1000);
+
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.execution_bar_delay = 0;
+    cfg.event_log_path = tf.path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+    cfg.exit_defaults.mode =
+        truetest::exits::exit_policy_mode::strategy_only;
+
+    {
+        engine eng(data, nullptr,
+                   std::make_shared<DurableBarrierStrategy>(),
+                   std::move(cfg), std::move(logger));
+        eng.set_primary_strategy_name("durable-barrier");
+        eng.run();
+        EXPECT_TRUE(eng.run_succeeded());
+    }
+
+    ASSERT_EQ(provider->adapter->submit_count, 1);
+    EXPECT_NE(provider->adapter->submitted_order_id, 0U);
+    EXPECT_FALSE(provider->adapter->inspection_failed);
+    EXPECT_TRUE(provider->adapter->saw_unfinalized_file_at_submit);
+    EXPECT_TRUE(provider->adapter->saw_exact_order_at_submit);
+
+    EventReplayer finalized(tf.path);
+    EXPECT_TRUE(finalized.file_finalized());
+}
+
+TEST(EventLog, EngineLoggingFailurePreventsSubmitAndFinalization)
+{
+    SilenceCout quiet;
+    TempFile tf("engine_durable_order_failure");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    auto logger = std::make_unique<EventLogger>(
+        tf.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    auto provider = std::make_shared<DurableBarrierProvider>(tf.path);
+    auto data = std::make_shared<data_handler>();
+    data->load_into_queue("1704067200000", "TEST",
+                          100.0, 101.0, 99.0, 100.0, 1000);
+
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.execution_bar_delay = 0;
+    cfg.event_log_path = tf.path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+    cfg.exit_defaults.mode =
+        truetest::exits::exit_policy_mode::strategy_only;
+
+    // The retained inode stays open, but losing the operator-visible pathname
+    // makes the mandatory order checkpoint fail its identity proof.
+    ASSERT_EQ(::unlink(tf.path.c_str()), 0);
+    {
+        engine eng(data, nullptr,
+                   std::make_shared<DurableBarrierStrategy>(),
+                   std::move(cfg), std::move(logger));
+        eng.set_primary_strategy_name("durable-barrier-failure");
+        eng.run();
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.run_succeeded());
+    }
+
+    EXPECT_EQ(provider->adapter->submit_count, 0);
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+}
+
+TEST(EventLog, TerminalHaltBeforeAdmissionPreventsVenueSubmit)
+{
+    SilenceCout quiet;
+    TempFile tf("engine_terminal_admission_gate");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    auto logger = std::make_unique<EventLogger>(
+        tf.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    auto provider = std::make_shared<DurableBarrierProvider>(tf.path);
+    auto data = std::make_shared<data_handler>();
+    data->load_into_queue("1704067200000", "TEST",
+                          100.0, 101.0, 99.0, 100.0, 1000);
+
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.execution_bar_delay = 0;
+    cfg.event_log_path = tf.path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+    cfg.exit_defaults.mode =
+        truetest::exits::exit_policy_mode::strategy_only;
+
+    {
+        engine eng(data, nullptr,
+                   std::make_shared<DurableBarrierStrategy>(),
+                   std::move(cfg), std::move(logger));
+        eng.set_primary_strategy_name("terminal-admission-gate");
+        provider->adapter->before_admission = [&eng] {
+            std::thread halt_thread([&eng] {
+                eng.trigger_halt("test concurrent terminal halt");
+            });
+            halt_thread.join();
+        };
+        eng.run();
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.run_succeeded());
+    }
+
+    EXPECT_EQ(provider->adapter->submit_count, 0);
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+}
+
+TEST(EventLog, PostAckAdapterSetupFailurePreventsSubmitAndFinalization)
+{
+    SilenceCout quiet;
+    TempFile tf("engine_post_ack_setup_failure");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    auto logger = std::make_unique<EventLogger>(
+        tf.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    auto provider = std::make_shared<DurableBarrierProvider>(tf.path);
+    auto data = std::make_shared<data_handler>();
+    data->load_into_queue("1704067200000", "TEST",
+                          100.0, 101.0, 99.0, 100.0, 1000);
+
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.execution_bar_delay = 0;
+    cfg.event_log_path = tf.path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+    cfg.exit_defaults.mode =
+        truetest::exits::exit_policy_mode::strategy_only;
+
+    {
+        engine eng(data, nullptr,
+                   std::make_shared<DurableBarrierStrategy>(),
+                   std::move(cfg), std::move(logger));
+        eng.set_primary_strategy_name("post-ack-setup-failure");
+        provider->adapter->before_admission = [] {
+            throw std::runtime_error("injected adapter setup failure");
+        };
+        eng.run();
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.run_succeeded());
+    }
+
+    EXPECT_EQ(provider->adapter->submit_count, 0);
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+}
+
+TEST(EventLog, PathLossAfterAckBeforeAdmissionPreventsVenueSubmit)
+{
+    SilenceCout quiet;
+    TempFile tf("engine_post_ack_path_loss");
+    auto reservation = DurableEventLogReservation::acquire(tf.path);
+    auto logger = std::make_unique<EventLogger>(
+        tf.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    auto provider = std::make_shared<DurableBarrierProvider>(tf.path);
+    auto data = std::make_shared<data_handler>();
+    data->load_into_queue("1704067200000", "TEST",
+                          100.0, 101.0, 99.0, 100.0, 1000);
+
+    engine_config cfg;
+    cfg.provider = provider;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.execution_bar_delay = 0;
+    cfg.event_log_path = tf.path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+    cfg.exit_defaults.mode =
+        truetest::exits::exit_policy_mode::strategy_only;
+
+    {
+        engine eng(data, nullptr,
+                   std::make_shared<DurableBarrierStrategy>(),
+                   std::move(cfg), std::move(logger));
+        eng.set_primary_strategy_name("post-ack-path-loss");
+        provider->adapter->before_admission = [&tf] {
+            ASSERT_EQ(::unlink(tf.path.c_str()), 0);
+        };
+        eng.run();
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.run_succeeded());
+    }
+
+    EXPECT_EQ(provider->adapter->submit_count, 0);
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+}
+
+TEST(EventLog, DurableReadinessRefusesAnUnreservedLogger)
+{
+    TempFile tf("unreserved_readiness");
+    EventLogger logger(tf.path, false);
+    EXPECT_THROW(logger.verify_durable_ready(), std::logic_error);
 }
 
 TEST(EventLog, EventLoggerItselfStillAcceptsDevFullForFaultInjection)

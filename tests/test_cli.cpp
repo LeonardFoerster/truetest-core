@@ -3,8 +3,10 @@
 #include <cstdio>
 #include <array>
 #include <filesystem>
-#include <string>
 #include <fstream>
+#include <iterator>
+#include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -443,8 +445,58 @@ TEST(DryRun, LiveBinaryMainnetFuturesRequiresVenueCaps)
         "--mode live --live",
         out);
     EXPECT_EQ(rc, 1);
-    EXPECT_NE(out.find("Refusing mainnet futures live mode without venue risk caps"),
+    EXPECT_NE(out.find("without all three venue risk caps"),
               std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetSpotRequiresDailyLossAndDurableLog)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance --symbol BTCUSDT --mode live --live",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("mainnet spot live mode with --max-daily-loss disabled"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetSpotRequiresDurableLog)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance --symbol BTCUSDT --mode live --live "
+        "--max-daily-loss 5",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("mainnet spot live mode without a durable binary event log"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetSpotRejectsNonRegularEventLog)
+{
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance --symbol BTCUSDT --mode live --live "
+        "--max-daily-loss 5 --log-events /dev/null",
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("mainnet spot live mode because the binary event-log target"),
+              std::string::npos);
+}
+
+TEST(DryRun, LiveBinaryMainnetSpotAcceptsBaselineSafetyControls)
+{
+    const std::string path = "/tmp/truetest-spot-live-dry-run-" +
+        std::to_string(::getpid()) + ".bin";
+    std::filesystem::remove(path);
+    std::string out;
+    int rc = run_engine_live(
+        "--dry-run --provider binance --symbol BTCUSDT --mode live --live "
+        "--max-daily-loss 5 --log-events " + path,
+        out);
+    EXPECT_EQ(rc, 0);
+    EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+    std::filesystem::remove(path);
 }
 
 TEST(DryRun, LiveBinaryMainnetFuturesRequiresDailyLoss)
@@ -452,7 +504,9 @@ TEST(DryRun, LiveBinaryMainnetFuturesRequiresDailyLoss)
     std::string out;
     int rc = run_engine_live(
         "--dry-run --provider binance-futures --symbol BTCUSDT "
-        "--mode live --live --max-notional 25",
+        "--mode live --live --max-notional 25 --max-leverage 2 "
+        "--min-liq-distance-pct 0.07 --risk-unwind "
+        "--reconcile-tolerance-bps 3",
         out);
     EXPECT_EQ(rc, 1);
     EXPECT_NE(out.find("Refusing mainnet futures live mode with --max-daily-loss disabled"),
@@ -461,14 +515,19 @@ TEST(DryRun, LiveBinaryMainnetFuturesRequiresDailyLoss)
 
 TEST(DryRun, LiveBinaryMainnetFuturesAcceptsCapsAndDailyLoss)
 {
+    const std::string path = "/tmp/truetest-live-dry-run-" +
+        std::to_string(::getpid()) + ".bin";
+    std::filesystem::remove(path);
     std::string out;
     int rc = run_engine_live(
         "--dry-run --provider binance-futures --symbol BTCUSDT "
-        "--mode live --live --max-notional 25 --max-daily-loss 5 "
-        "--log-events /tmp/truetest-live-dry-run.bin",
+        "--mode live --live --max-notional 25 --max-leverage 2 "
+        "--min-liq-distance-pct 0.07 --max-daily-loss 5 --risk-unwind "
+        "--reconcile-tolerance-bps 3 --log-events " + path,
         out);
     EXPECT_EQ(rc, 0);
     EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+    std::filesystem::remove(path);
 }
 
 TEST(DryRun, LiveBinaryMainnetFuturesRequiresDurableEventLog)
@@ -476,7 +535,9 @@ TEST(DryRun, LiveBinaryMainnetFuturesRequiresDurableEventLog)
     std::string out;
     int rc = run_engine_live(
         "--dry-run --provider binance-futures --symbol BTCUSDT "
-        "--mode live --live --max-notional 25 --max-daily-loss 5",
+        "--mode live --live --max-notional 25 --max-leverage 2 "
+        "--min-liq-distance-pct 0.07 --max-daily-loss 5 --risk-unwind "
+        "--reconcile-tolerance-bps 3",
         out);
     EXPECT_EQ(rc, 1);
     EXPECT_NE(out.find("without a durable binary event log"),
@@ -488,7 +549,9 @@ TEST(DryRun, LiveBinaryMainnetFuturesRejectsNonRegularFileEventLog)
     std::string out;
     int rc = run_engine_live(
         "--dry-run --provider binance-futures --symbol BTCUSDT "
-        "--mode live --live --max-notional 25 --max-daily-loss 5 "
+        "--mode live --live --max-notional 25 --max-leverage 2 "
+        "--min-liq-distance-pct 0.07 --max-daily-loss 5 --risk-unwind "
+        "--reconcile-tolerance-bps 3 "
         "--log-events /dev/null",
         out);
     EXPECT_EQ(rc, 1);
@@ -503,11 +566,132 @@ TEST(DryRun, LiveBinaryMainnetFuturesAcceptsFreshRegularFileEventLogPath)
     std::string out;
     int rc = run_engine_live(
         "--dry-run --provider binance-futures --symbol BTCUSDT "
-        "--mode live --live --max-notional 25 --max-daily-loss 5 "
+        "--mode live --live --max-notional 25 --max-leverage 2 "
+        "--min-liq-distance-pct 0.07 --max-daily-loss 5 --risk-unwind "
+        "--reconcile-tolerance-bps 3 "
         "--log-events " + path,
         out);
     EXPECT_EQ(rc, 0);
     EXPECT_NE(out.find("Config is VALID"), std::string::npos);
+    std::filesystem::remove(path);
+}
+
+TEST(DryRun, LiveBinaryMainnetFuturesRequiresEveryPhase0Control)
+{
+    const std::string base =
+        "--dry-run --provider binance-futures --symbol BTCUSDT "
+        "--mode live --live --max-notional 25 --max-leverage 2 "
+        "--min-liq-distance-pct 0.07 --max-daily-loss 5 --risk-unwind "
+        "--reconcile-tolerance-bps 3 ";
+
+    struct case_type {
+        std::string args;
+        std::string expected;
+    };
+    const std::array cases{
+        case_type{
+            "--dry-run --provider binance-futures --symbol BTCUSDT "
+            "--mode live --live --max-notional 25 --max-leverage 2 "
+            "--max-daily-loss 5 --risk-unwind --reconcile-tolerance-bps 3",
+            "without all three venue risk caps"},
+        case_type{base + "--disarm-deadman", "dead-man's switch disabled"},
+        case_type{
+            "--dry-run --provider binance-futures --symbol BTCUSDT "
+            "--mode live --live --max-notional 25 --max-leverage 2 "
+            "--min-liq-distance-pct 0.07 --max-daily-loss 5 "
+            "--reconcile-tolerance-bps 3",
+            "without --risk-unwind"},
+        case_type{
+            "--dry-run --provider binance-futures --symbol BTCUSDT "
+            "--mode live --live --max-notional 25 --max-leverage 2 "
+            "--min-liq-distance-pct 0.07 --max-daily-loss 5 --risk-unwind "
+            "--reconcile-tolerance-bps 4",
+            "--reconcile-tolerance-bps is in (0,3]"},
+    };
+
+    for (const auto& test_case : cases)
+    {
+        std::string out;
+        EXPECT_EQ(run_engine_live(test_case.args, out), 1)
+            << test_case.args;
+        EXPECT_NE(out.find(test_case.expected), std::string::npos)
+            << test_case.args << "\n" << out;
+    }
+}
+
+TEST(DryRun, LiveBinaryMainnetRejectsInlineDurableLogging)
+{
+    const std::string path = "/tmp/truetest-live-inline-log-" +
+        std::to_string(::getpid()) + ".bin";
+    std::filesystem::remove(path);
+    std::string out;
+    const int rc = run_engine_live(
+        "--dry-run --provider binance --symbol BTCUSDT --mode live --live "
+        "--max-daily-loss 5 --thread-preset inline --log-events " + path,
+        out);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(out.find("without a dedicated logging worker"),
+              std::string::npos);
+    std::filesystem::remove(path);
+}
+
+TEST(DryRun, LiveBinaryBitunixSandboxFlagsAreRefusedNotMainnetRouted)
+{
+    for (const char* flag : {"--demo", "--testnet"})
+    {
+        std::string out;
+        const int rc = run_engine_live(
+            std::string("--dry-run --provider bitunix-futures ") +
+                "--symbol BTCUSDT --mode live --live " + flag,
+            out);
+        EXPECT_EQ(rc, 1) << flag;
+        EXPECT_NE(out.find("Bitunix does not implement a demo/testnet endpoint"),
+                  std::string::npos) << flag << "\n" << out;
+        EXPECT_EQ(out.find("[SANDBOX]"), std::string::npos) << out;
+    }
+}
+
+TEST(DryRun, BitunixSandboxFlagsAreRefusedInEveryMode)
+{
+    for (const char* mode : {"backtest", "shadow"})
+    {
+        for (const char* flag : {"--demo", "--testnet"})
+        {
+            std::string out;
+            const int rc = run_engine_live(
+                std::string("--dry-run --provider bitunix-futures ") +
+                    "--symbol BTCUSDT --mode " + mode + " " + flag,
+                out);
+            EXPECT_EQ(rc, 1) << mode << " " << flag << "\n" << out;
+            EXPECT_NE(
+                out.find("Bitunix does not implement a demo/testnet endpoint"),
+                std::string::npos) << mode << " " << flag << "\n" << out;
+            EXPECT_EQ(out.find("Config is VALID"), std::string::npos)
+                << mode << " " << flag << "\n" << out;
+        }
+    }
+}
+
+TEST(DryRun, LiveBinaryMainnetRejectsExistingLedgerWithoutChangingIt)
+{
+    const std::string path = "/tmp/truetest-live-existing-ledger-" +
+        std::to_string(::getpid()) + ".bin";
+    constexpr std::string_view sentinel = "existing-ledger-must-survive";
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out.write(sentinel.data(), static_cast<std::streamsize>(sentinel.size()));
+    }
+
+    std::string output;
+    const int rc = run_engine_live(
+        "--dry-run --provider binance --symbol BTCUSDT --mode live --live "
+        "--max-daily-loss 5 --log-events " + path,
+        output);
+    EXPECT_EQ(rc, 1);
+    EXPECT_NE(output.find("event-log target"), std::string::npos);
+
+    std::ifstream in(path, std::ios::binary);
+    EXPECT_EQ(std::string(std::istreambuf_iterator<char>(in), {}), sentinel);
     std::filesystem::remove(path);
 }
 
@@ -532,15 +716,21 @@ TEST(DryRun, LiveBinaryFuturesRejectsNonFiniteRiskCaps)
 
 TEST(DryRun, LiveBinaryFuturesRejectsRotatedAuthoritativeLog)
 {
+    const std::string path = "/tmp/truetest-live-rotated-dry-run-" +
+        std::to_string(::getpid()) + ".bin";
+    std::filesystem::remove(path);
     std::string out;
     const int rc = run_engine_live(
         "--dry-run --provider binance-futures --symbol BTCUSDT "
-        "--mode live --live --max-notional 25 --max-daily-loss 5 "
-        "--log-events /tmp/truetest-live-dry-run.bin "
+        "--mode live --live --max-notional 25 --max-leverage 2 "
+        "--min-liq-distance-pct 0.07 --max-daily-loss 5 --risk-unwind "
+        "--reconcile-tolerance-bps 3 "
+        "--log-events " + path + " "
         "--log-max-size 1 --log-keep 0",
         out);
     EXPECT_EQ(rc, 1);
     EXPECT_NE(out.find("rotation enabled"), std::string::npos);
+    std::filesystem::remove(path);
 }
 
 TEST(DryRun, LiveBinaryTestnetFuturesAllowsWarningOnlyCaps)
@@ -551,7 +741,7 @@ TEST(DryRun, LiveBinaryTestnetFuturesAllowsWarningOnlyCaps)
         "--mode live --live --testnet",
         out);
     EXPECT_EQ(rc, 0);
-    EXPECT_NE(out.find("No venue risk caps set"), std::string::npos);
+    EXPECT_NE(out.find("One or more venue risk caps"), std::string::npos);
     EXPECT_NE(out.find("--max-daily-loss is 0"), std::string::npos);
     EXPECT_NE(out.find("Config is VALID"), std::string::npos);
 }

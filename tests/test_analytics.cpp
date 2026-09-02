@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include "analytics/analytics.h"
+#include "helpers/alloc_counter.h"
 
 static auto epoch_ms(int64_t ms)
 {
@@ -87,6 +88,66 @@ TEST(Analytics, DrawdownTail_ZeroAtPeakPositiveBelowPeak)
     ASSERT_GE(dd.size(), 2u);
     for (double v : dd) EXPECT_GE(v, 0.0);  // never negative
     EXPECT_GT(dd.back(), 0.0);              // last point is below peak
+}
+
+TEST(Analytics, DrawdownTailMatchesRetainedCurveAfterInPlaceDecimation)
+{
+    Analytics a(/*initial_cash=*/1000.0, /*rolling_window=*/4,
+                /*risk_free_rate=*/0.0, /*periods_per_year=*/252,
+                /*max_equity_points=*/5);
+    a.reserve_hint(5);
+
+    constexpr std::array<double, 12> deltas{
+        100.0, 100.0, -50.0, 125.0, -300.0, 10.0,
+        20.0, 250.0, -100.0, -25.0, 50.0, -75.0};
+    for (std::size_t i = 0; i < deltas.size(); ++i)
+    {
+        funding_event funding(epoch_ms(static_cast<int64_t>(i)), "X",
+                              /*qty_change=*/0.0, deltas[i]);
+        a.on_funding(funding);
+    }
+
+    const auto equity = a.equity_tail(99);
+    const auto drawdown = a.drawdown_tail(99);
+    ASSERT_EQ(drawdown.size(), equity.size());
+    ASSERT_FALSE(equity.empty());
+
+    double peak = 0.0;
+    for (std::size_t i = 0; i < equity.size(); ++i)
+    {
+        peak = std::max(peak, equity[i]);
+        const double expected = peak > 0.0
+            ? std::max(0.0, (peak - equity[i]) / peak * 100.0)
+            : 0.0;
+        EXPECT_NEAR(drawdown[i], expected, 1e-12) << "tail index " << i;
+    }
+}
+
+TEST(Analytics, PrewarmedEquityCompactionAndDrawdownTailAllocateNothing)
+{
+    Analytics a(/*initial_cash=*/1000.0, /*rolling_window=*/4,
+                /*risk_free_rate=*/0.0, /*periods_per_year=*/252,
+                /*max_equity_points=*/8);
+    a.reserve_hint(8);
+
+    std::vector<double> tail;
+    tail.reserve(8);
+    truetest::test::alloc::snapshot allocations;
+    {
+        truetest::test::alloc::measure_window window;
+        for (int i = 0; i < 64; ++i)
+        {
+            funding_event funding(epoch_ms(i), "X", /*qty_change=*/0.0,
+                                  (i & 1) == 0 ? 1.0 : -0.5);
+            a.on_funding(funding);
+        }
+        a.copy_drawdown_tail(8, tail);
+        allocations = window.total();
+    }
+
+    EXPECT_EQ(allocations.count, 0U);
+    EXPECT_EQ(allocations.bytes, 0U);
+    EXPECT_LE(tail.size(), 8U);
 }
 
 TEST(Analytics, MarketEvent_TracksPrice)

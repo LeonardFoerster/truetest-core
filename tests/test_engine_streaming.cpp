@@ -9,6 +9,7 @@
 #include "execution/execution_adapter.h"
 #include "execution/latency_model.h"
 #include "providers/provider.h"
+#include "threading/worker_watchdog.h"
 
 #include <sstream>
 #include <thread>
@@ -16,6 +17,7 @@
 #include <atomic>
 #include <cstdio>
 #include <future>
+#include <unistd.h>
 
 namespace {
 // RAII helper to silence cout during noisy engine runs.
@@ -133,6 +135,18 @@ public:
             close_publish_succeeded = ingress.try_publish(
                 ts, "BTCUSDT", close_cash_delta);
         }
+        if (overflow_on_close && !closed)
+        {
+            const auto ts = std::chrono::system_clock::time_point{
+                std::chrono::milliseconds{1'700'000'000'000LL}};
+            for (std::size_t i = 0;
+                 i < ProviderFundingIngress::capacity; ++i)
+            {
+                (void)ingress.try_publish(
+                    ts, "BTCUSDT", static_cast<double>(i) + 1.0);
+            }
+            (void)ingress.try_publish(ts, "BTCUSDT", 1.0);
+        }
         closed = true;
     }
     std::shared_ptr<IDataTransport> get_transport() override { return {}; }
@@ -148,8 +162,47 @@ public:
     ProviderFundingIngress ingress;
     bool closed = false;
     bool publish_on_close = false;
+    bool overflow_on_close = false;
     bool close_publish_succeeded = false;
     double close_cash_delta = 0.0;
+};
+
+class ReusableLivenessProvider final : public IProvider
+{
+public:
+    std::string name() const override { return "reusable-liveness"; }
+    bool has_data_feed() const override { return false; }
+    bool has_execution() const override { return false; }
+    bool open() override { return true; }
+    void close() override {}
+    std::shared_ptr<IDataTransport> get_transport() override { return {}; }
+    std::shared_ptr<IExecutionAdapter> get_execution_adapter() override
+    {
+        return {};
+    }
+    std::vector<liveness_source> get_liveness_sources() override
+    {
+        return {{"reusable-provider", &last_alive_ms, 10}};
+    }
+
+    std::atomic<std::int64_t> last_alive_ms{
+        WorkerWatchdog::now_monotonic_ms()};
+};
+
+class SlowOnSecondRunStrategy final : public IStrategy
+{
+public:
+    std::optional<order_event> on_market(const market_event&) override
+    {
+        ++calls;
+        if (calls == 2)
+            std::this_thread::sleep_for(std::chrono::milliseconds{1'200});
+        return std::nullopt;
+    }
+
+    void set_position_open(const std::string&, bool) override {}
+
+    int calls = 0;
 };
 
 class IdleBeforeHeaderTransport final : public IDataTransport
@@ -187,6 +240,97 @@ private:
     int step_ = 0;
     std::string header_;
     std::string frame_;
+};
+
+class DeterministicOneBarStreamingTransport final : public IDataTransport
+{
+public:
+    bool open() override
+    {
+        index_ = 0;
+        open_ = true;
+        stop_requested_ = false;
+        return true;
+    }
+
+    void close() override { open_ = false; }
+    bool is_open() const override { return open_; }
+    bool is_streaming() const override { return true; }
+
+    std::optional<std::string> read_line() override
+    {
+        return read_line_blocking();
+    }
+
+    std::optional<std::string> read_line_blocking() override
+    {
+        if (!open_)
+            return std::nullopt;
+        if (index_ == 0)
+        {
+            ++index_;
+            return "date,symbol,open,high,low,close,volume";
+        }
+        if (index_ == 1)
+        {
+            ++index_;
+            return "2024-01-01,TEST,100,101,99,100,1000";
+        }
+        open_ = false;
+        return std::nullopt;
+    }
+
+    void request_stop() override
+    {
+        stop_requested_ = true;
+        open_ = false;
+    }
+
+    transport_terminal_status terminal_status() const override
+    {
+        if (stop_requested_)
+            return transport_terminal_status::operator_stop;
+        return index_ >= 2 ? transport_terminal_status::clean_eof
+                           : transport_terminal_status::unknown;
+    }
+
+private:
+    std::size_t index_ = 0;
+    bool open_ = false;
+    bool stop_requested_ = false;
+};
+
+class ThrowingStreamingStrategy final : public IStrategy
+{
+public:
+    std::optional<order_event> on_market(const market_event&) override
+    {
+        ++calls_;
+        throw std::runtime_error("deterministic streaming strategy failure");
+    }
+
+    void set_position_open(const std::string&, bool) override {}
+    int calls() const noexcept { return calls_; }
+
+private:
+    int calls_ = 0;
+};
+
+struct ScopedStreamingLedger final
+{
+    explicit ScopedStreamingLedger(std::string_view suffix)
+    {
+        static std::atomic<std::uint64_t> sequence{0};
+        path = "/tmp/truetest_engine_streaming_"
+            + std::to_string(static_cast<unsigned long>(::getpid())) + "_"
+            + std::to_string(sequence.fetch_add(1, std::memory_order_relaxed))
+            + "_" + std::string(suffix);
+        std::remove(path.c_str());
+    }
+
+    ~ScopedStreamingLedger() { std::remove(path.c_str()); }
+
+    std::string path;
 };
 }
 
@@ -505,6 +649,84 @@ TEST(EngineStreaming, FinalDrainAppliesFundingAfterProviderProducerStops)
     std::remove(path.c_str());
 }
 
+TEST(EngineStreaming, FinalFundingOverflowPreventsReservedLedgerSeal)
+{
+    SilenceOutput quiet;
+    const std::string path =
+        "/tmp/truetest_final_provider_funding_overflow_event_log.bin";
+    std::remove(path.c_str());
+    auto reservation = DurableEventLogReservation::acquire(path);
+    auto logger = std::make_unique<EventLogger>(
+        path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    auto provider = std::make_shared<IdleFundingProvider>();
+    provider->overflow_on_close = true;
+    auto session = std::make_shared<LiveSafetySession>(
+        provider, false, std::chrono::milliseconds{100});
+    ASSERT_TRUE(session->open_provider());
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.initial_balance = 1'000.0;
+    cfg.provider = provider;
+    cfg.live_safety_session = session;
+    cfg.event_log_path = path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+    {
+        engine eng(std::make_shared<data_handler>(),
+                   std::make_shared<orderbook>(),
+                   std::make_shared<StreamTestStrategy>(), std::move(cfg),
+                   std::move(logger));
+        auto bridge = std::make_shared<DataBridge<bar_record>>(
+            std::make_shared<IdleBeforeHeaderTransport>(),
+            std::make_shared<CsvBarParser>(), bar_record_sink);
+        const auto result = eng.run_streaming(bridge);
+        EXPECT_FALSE(result.success());
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.run_succeeded());
+    }
+
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+    std::remove(path.c_str());
+}
+
+TEST(EngineLifecycle, WatchdogRestartsForCleanSecondRun)
+{
+    SilenceOutput quiet;
+    auto provider = std::make_shared<ReusableLivenessProvider>();
+    auto strategy = std::make_shared<SlowOnSecondRunStrategy>();
+    auto data = std::make_shared<data_handler>();
+    data->load_into_queue(
+        "2024-01-01", "TEST", 100.0, 101.0, 99.0, 100.0, 1000);
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.provider = provider;
+    engine eng(data, std::make_shared<orderbook>(), strategy, std::move(cfg));
+
+    eng.run();
+    ASSERT_TRUE(eng.run_succeeded());
+    ASSERT_EQ(strategy->calls, 1);
+
+    provider->last_alive_ms.store(
+        WorkerWatchdog::now_monotonic_ms() - 1'000,
+        std::memory_order_release);
+    eng.run();
+
+    EXPECT_EQ(strategy->calls, 2);
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+}
+
 // Tick-counting strategy: just counts ticks, never trades
 class TickCountStrategy : public IStrategy
 {
@@ -734,6 +956,7 @@ TEST(EngineStreaming, LiveOperatorStopDoesNotForcePendingVenueMutation)
     EXPECT_TRUE(strategy->did_fire());
     EXPECT_EQ(provider->adapter->submits, 0);
     EXPECT_EQ(provider->adapter->cancels, 0);
+    EXPECT_EQ(eng.get_order_tracker().active_count(), 0u);
 }
 
 TEST(EngineStreaming, BarStreamBatchTransportFallback)
@@ -779,6 +1002,149 @@ TEST(EngineStreaming, TransportFailureMarksRunFailedAndPropagatesResult)
     EXPECT_EQ(result.termination, stream_termination::transport_failure);
     EXPECT_FALSE(result.success());
     EXPECT_FALSE(eng.run_succeeded());
+}
+
+TEST(EngineStreaming,
+     StrategyRuntimeFailureStopsWorkersDrainsRingsAndRefusesLedgerSeal)
+{
+    SilenceOutput silence;
+    ScopedStreamingLedger ledger("strategy_runtime_failure.bin");
+    auto reservation = DurableEventLogReservation::acquire(ledger.path);
+    auto logger = std::make_unique<EventLogger>(
+        ledger.path, false, 0, 5, reservation);
+    logger->verify_durable_ready();
+
+    auto strategy = std::make_shared<ThrowingStreamingStrategy>();
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    cfg.event_log_path = ledger.path;
+    cfg.compress_log = false;
+    cfg.event_log_reservation = reservation;
+
+    {
+        engine eng(std::make_shared<data_handler>(),
+                   std::make_shared<orderbook>(), strategy, std::move(cfg),
+                   std::move(logger));
+        auto bridge = std::make_shared<DataBridge<bar_record>>(
+            std::make_shared<DeterministicOneBarStreamingTransport>(),
+            std::make_shared<CsvBarParser>(), bar_record_sink);
+
+        const auto result = eng.run_streaming(bridge);
+
+        EXPECT_EQ(result.termination, stream_termination::runtime_failure);
+        EXPECT_FALSE(result.success());
+        EXPECT_EQ(strategy->calls(), 1);
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.run_succeeded());
+
+        ASSERT_NE(eng.get_logging_worker(), nullptr);
+        ASSERT_NE(eng.get_risk_stats_worker(), nullptr);
+        EXPECT_FALSE(eng.get_logging_worker()->is_running());
+        EXPECT_FALSE(eng.get_risk_stats_worker()->is_running());
+        ASSERT_NE(eng.get_logging_ring(), nullptr);
+        ASSERT_NE(eng.get_risk_stats_ring(), nullptr);
+        EXPECT_TRUE(eng.get_logging_ring()->empty());
+        EXPECT_TRUE(eng.get_risk_stats_ring()->empty());
+
+        // Halt is terminal for this engine instance. A fresh source cannot
+        // re-arm workers or re-enter strategy code after the failed callback.
+        auto retry_bridge = std::make_shared<DataBridge<bar_record>>(
+            std::make_shared<DeterministicOneBarStreamingTransport>(),
+            std::make_shared<CsvBarParser>(), bar_record_sink);
+        const auto retry = eng.run_streaming(retry_bridge);
+        EXPECT_EQ(retry.termination, stream_termination::engine_halt);
+        EXPECT_EQ(strategy->calls(), 1);
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.get_logging_worker()->is_running());
+        EXPECT_FALSE(eng.get_risk_stats_worker()->is_running());
+        EXPECT_TRUE(eng.get_logging_ring()->empty());
+        EXPECT_TRUE(eng.get_risk_stats_ring()->empty());
+    }
+
+    EventReplayer inspection(reservation->open_path());
+    EXPECT_FALSE(inspection.file_finalized());
+}
+
+TEST(EngineStreaming, NullBridgesAreRejectedBeforeWorkerStartup)
+{
+    SilenceOutput silence;
+    engine_config cfg;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    engine eng(std::make_shared<data_handler>(),
+               std::make_shared<orderbook>(),
+               std::make_shared<StreamTestStrategy>(), std::move(cfg));
+
+    EXPECT_THROW(
+        (void)eng.run_streaming(
+            std::shared_ptr<DataBridge<bar_record>>{}),
+        std::runtime_error);
+    EXPECT_THROW(
+        (void)eng.run_streaming(
+            std::shared_ptr<DataBridge<tick_record>>{}),
+        std::runtime_error);
+    EXPECT_THROW(
+        (void)eng.run_streaming(
+            std::shared_ptr<DataBridge<provider::event>>{}),
+        std::runtime_error);
+
+    EXPECT_EQ(eng.get_logging_worker(), nullptr);
+    EXPECT_EQ(eng.get_risk_stats_worker(), nullptr);
+    EXPECT_EQ(eng.get_logging_ring(), nullptr);
+    EXPECT_EQ(eng.get_risk_stats_ring(), nullptr);
+    EXPECT_FALSE(eng.is_halted());
+}
+
+TEST(EngineLifecycle, NullDataHandlerIsRejectedBeforeTickWorkerStartup)
+{
+    SilenceOutput silence;
+    engine_config cfg;
+    cfg.threading = thread_preset::standard;
+    cfg.disable_pinning = true;
+    cfg.show_progress = false;
+    engine eng(std::shared_ptr<data_handler>{},
+               std::make_shared<orderbook>(),
+               std::make_shared<StreamTestStrategy>(), std::move(cfg));
+
+    EXPECT_THROW(eng.run_tick_data(), std::runtime_error);
+    EXPECT_EQ(eng.get_logging_worker(), nullptr);
+    EXPECT_EQ(eng.get_risk_stats_worker(), nullptr);
+    EXPECT_EQ(eng.get_logging_ring(), nullptr);
+    EXPECT_EQ(eng.get_risk_stats_ring(), nullptr);
+    EXPECT_FALSE(eng.is_halted());
+}
+
+TEST(EngineStreaming, BridgeReuseAfterEngineDestructionHasNoStaleHaltOwner)
+{
+    SilenceOutput silence;
+    auto bridge = std::make_shared<DataBridge<bar_record>>(
+        std::make_shared<DeterministicOneBarStreamingTransport>(),
+        std::make_shared<CsvBarParser>(), bar_record_sink);
+    auto strategy = std::make_shared<StreamTestStrategy>();
+
+    {
+        engine_config cfg;
+        cfg.threading = thread_preset::inline_mode;
+        cfg.disable_pinning = true;
+        cfg.show_progress = false;
+        engine eng(std::make_shared<data_handler>(),
+                   std::make_shared<orderbook>(), strategy, std::move(cfg));
+        ASSERT_EQ(eng.run_streaming(bridge).termination,
+                  stream_termination::clean_eof);
+        ASSERT_EQ(strategy->get_call_count(), 1);
+        eng.trigger_halt("lifetime regression sentinel");
+    }
+
+    std::size_t callbacks = 0;
+    const auto result = bridge->run_streaming(
+        std::make_shared<data_handler>(),
+        [&](const bar_record&) { ++callbacks; });
+    EXPECT_EQ(result.termination, stream_termination::clean_eof);
+    EXPECT_EQ(callbacks, 1u);
 }
 
 // --- Tick streaming tests ---

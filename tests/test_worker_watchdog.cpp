@@ -20,6 +20,17 @@ public:
     }
 };
 
+class CountingWorker final : public Worker
+{
+public:
+    void on_event(const event_pointer&) override
+    {
+        events.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    std::atomic<unsigned> events{0};
+};
+
 struct SilenceStderr
 {
     std::ostringstream sink;
@@ -47,6 +58,63 @@ TEST(Worker, ConsecutiveErrorBudgetInvokesTerminalFailureCallback)
 
     EXPECT_TRUE(worker.has_failed());
     EXPECT_EQ(callbacks.load(std::memory_order_relaxed), 1u);
+}
+
+TEST(Worker, StopBeforeRunIsStickyAndStillDrainsQueuedEvents)
+{
+    RingBuffer<event_pointer, 8, DropOldest> ring;
+    ASSERT_TRUE(ring.try_push(event_pointer{}));
+    CountingWorker worker;
+    worker.stop();
+
+    std::atomic<bool> returned{false};
+    std::thread thread([&] {
+        worker.run(ring);
+        returned.store(true, std::memory_order_release);
+    });
+
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(250);
+    while (!returned.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+
+    const bool pre_start_stop_was_honoured =
+        returned.load(std::memory_order_acquire);
+    // Keeps the regression test joinable even against the old implementation,
+    // where run() overwrote the first stop request.
+    if (!pre_start_stop_was_honoured)
+        worker.stop();
+    thread.join();
+
+    EXPECT_TRUE(pre_start_stop_was_honoured);
+    EXPECT_FALSE(worker.is_running());
+    EXPECT_EQ(worker.events.load(std::memory_order_relaxed), 1U);
+    EXPECT_TRUE(ring.empty());
+}
+
+TEST(Worker, StopMakesRunningStateImmediatelyAndPermanentlyFalse)
+{
+    RingBuffer<event_pointer, 8, DropOldest> ring;
+    CountingWorker worker;
+    std::thread thread([&] { worker.run(ring); });
+
+    const auto deadline = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(250);
+    while (!worker.is_running()
+           && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    ASSERT_TRUE(worker.is_running());
+
+    worker.stop();
+    EXPECT_FALSE(worker.is_running());
+    for (int i = 0; i < 1'000; ++i)
+    {
+        EXPECT_FALSE(worker.is_running());
+        std::this_thread::yield();
+    }
+    thread.join();
+    EXPECT_FALSE(worker.is_running());
 }
 
 // --- Pure decision logic ----------------------------------------------------

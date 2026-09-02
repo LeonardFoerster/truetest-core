@@ -54,10 +54,10 @@ TEST(HotpathPoolPrewarm, L2Burst_NoControlBlockHeapAllocs)
         eng.apply_l2_update("BTCUSDT", tick_side::bid, 42000.0 + i, 100);
 
     const auto snap = window.total();
-    // Phase 5/6: dashboard snapshot builder runs (via refresh_if_due in publish/apply)
-    // and performs vector/string/ /proc work under the alloc window for these tests.
-    // Heap DRQ slots live in pool ctors (outside this window); L2 + dashboard
-    // snapshot still allocate cold-path vectors/strings under the measure.
+    // Dashboard capture is now a bounded fixed projection and contributes
+    // exactly zero heap operations (covered by DashboardProjection's strict
+    // allocation test). This broader burst still measures orderbook growth for
+    // 4,000 distinct price levels, plus any other non-dashboard work.
     //
     // Sanitizers slow wall-clock so more 100ms dashboard refreshes fall inside
     // the measure window (ASan ~9598–9630; TSan ~10248–10280 historical).
@@ -72,7 +72,7 @@ TEST(HotpathPoolPrewarm, L2Burst_NoControlBlockHeapAllocs)
 #endif
 #if defined(TT_HOTPATH_SANITIZER)
     EXPECT_LE(snap.count, 12000u) << "sanitizer allocs=" << snap.count
-        << " (dashboard refresh × sanitizer slowdown; not pool grow)";
+        << " (sanitizer slowdown of the full distinct-price burst)";
     EXPECT_LE(snap.bytes, 40000000u) << "sanitizer bytes=" << snap.bytes;
 #else
     EXPECT_LE(snap.count, 9000u) << "allocs=" << snap.count;

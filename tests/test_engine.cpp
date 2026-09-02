@@ -8,6 +8,9 @@
 #include <sstream>
 #include <thread>
 #include <chrono>
+#include <condition_variable>
+#include <exception>
+#include <mutex>
 
 // RAII helper to silence cout during noisy backtest runs.
 // Anonymous namespace: same struct name exists in other test TUs; without
@@ -53,6 +56,67 @@ public:
     void set_position_open(const std::string&, bool open) override { position_open_ = open; }
 };
 
+class CoordinatedThrowStrategy final : public IStrategy
+{
+public:
+    std::optional<order_event> on_market(const market_event&) override
+    {
+        std::unique_lock<std::mutex> lock(mu_);
+        entered_ = true;
+        entered_cv_.notify_one();
+        release_cv_.wait(lock, [this] { return release_; });
+        ++calls_;
+        throw std::runtime_error("coordinated strategy failure");
+    }
+
+    void set_position_open(const std::string&, bool) override {}
+
+    void wait_until_entered()
+    {
+        std::unique_lock<std::mutex> lock(mu_);
+        entered_cv_.wait(lock, [this] { return entered_; });
+    }
+
+    void release_failure()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            release_ = true;
+        }
+        release_cv_.notify_one();
+    }
+
+    int calls() const noexcept { return calls_.load(std::memory_order_acquire); }
+
+private:
+    std::mutex mu_;
+    std::condition_variable entered_cv_;
+    std::condition_variable release_cv_;
+    bool entered_ = false;
+    bool release_ = false;
+    std::atomic<int> calls_{0};
+};
+
+class ThrowOnCleanupProvider final : public IProvider
+{
+public:
+    std::string name() const override { return "throw-on-cleanup"; }
+    bool has_data_feed() const override { return false; }
+    bool has_execution() const override { return false; }
+    bool open() override { return true; }
+    void close() override {}
+    std::shared_ptr<IDataTransport> get_transport() override { return {}; }
+    std::shared_ptr<IExecutionAdapter> get_execution_adapter() override
+    {
+        if (adapter_queries_++ > 0)
+            throw std::runtime_error("injected cleanup callback failure");
+        return {};
+    }
+
+private:
+    int adapter_queries_ = 0;
+};
+
 static std::shared_ptr<data_handler> make_bar_data(int n)
 {
     auto dh = std::make_shared<data_handler>();
@@ -85,6 +149,19 @@ TEST(Engine, EmptyData_Throws)
     auto strat = std::make_shared<TestStrategy>();
     engine eng(dh, ob, strat);
     EXPECT_THROW(eng.run(), std::runtime_error);
+}
+
+TEST(Engine, DestructorContainsProviderCleanupExceptions)
+{
+    SilenceCout quiet;
+    engine_config cfg;
+    cfg.provider = std::make_shared<ThrowOnCleanupProvider>();
+
+    EXPECT_NO_THROW({
+        engine eng(std::make_shared<data_handler>(),
+                   std::make_shared<orderbook>(),
+                   std::make_shared<TestStrategy>(), std::move(cfg));
+    });
 }
 
 TEST(Engine, RunCompletes)
@@ -337,6 +414,52 @@ TEST(Engine, GracefulShutdown_RingsDrained)
     EXPECT_TRUE(eng.get_logging_ring()->empty());
     EXPECT_TRUE(eng.get_risk_ring()->empty());
     EXPECT_TRUE(eng.get_stats_ring()->empty());
+}
+
+TEST(Engine, StrategyExceptionStopsWorkersAndTerminallyHalts)
+{
+    SilenceCout quiet;
+    auto dh = make_bar_data(2);
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<CoordinatedThrowStrategy>();
+
+    engine_config cfg;
+    cfg.threading = thread_preset::light;
+    engine eng(dh, ob, strat, std::move(cfg));
+
+    std::exception_ptr failure;
+    std::thread runner([&] {
+        try { eng.run(); }
+        catch (...) { failure = std::current_exception(); }
+    });
+
+    strat->wait_until_entered();
+    auto* worker = eng.get_observer_worker();
+    const auto worker_start_deadline = std::chrono::steady_clock::now() +
+        std::chrono::seconds(2);
+    while (worker && !worker->is_running() &&
+           std::chrono::steady_clock::now() < worker_start_deadline)
+        std::this_thread::yield();
+    const bool worker_was_running = worker && worker->is_running();
+
+    strat->release_failure();
+    runner.join();
+
+    ASSERT_NE(failure, nullptr);
+    EXPECT_THROW(std::rethrow_exception(failure), std::runtime_error);
+    EXPECT_TRUE(worker_was_running);
+    ASSERT_NE(worker, nullptr);
+    EXPECT_FALSE(worker->is_running());
+    ASSERT_NE(eng.get_observer_ring(), nullptr);
+    EXPECT_TRUE(eng.get_observer_ring()->empty());
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+
+    // Halt and rollback compromise are sticky: retry cannot re-arm workers or
+    // invoke strategy code again on this engine instance.
+    EXPECT_NO_THROW(eng.run());
+    EXPECT_EQ(strat->calls(), 1);
+    EXPECT_TRUE(eng.is_halted());
 }
 
 TEST(Engine, ExtendedPreset_MMWorkerRuns)
