@@ -278,9 +278,8 @@ function(tt_wire_rich_tui target)
 endfunction()
 
 # ── tt_wire_imgui_desk(target) ──────────────────────────────────────────────
-# Personal ImGui strategy desk (Monitor/Execute). Cold path only.
-# Call on engine_shadow / engine_live when ENABLE_IMGUI=ON. Fetches Dear ImGui
-# + ImPlot once; links system GLFW + OpenGL.
+# ImGui trading command center. Cold path only. Call on engine_shadow / live
+# when ENABLE_IMGUI=ON; it uses Dear ImGui + system GLFW/OpenGL only.
 function(tt_wire_imgui_desk target)
     if(NOT ENABLE_IMGUI)
         return()
@@ -300,12 +299,7 @@ function(tt_wire_imgui_desk target)
             # Docking branch — multi-panel trading desk layout
             GIT_TAG        v1.91.8-docking
         )
-        FetchContent_Declare(
-            implot
-            GIT_REPOSITORY https://github.com/epezent/implot.git
-            GIT_TAG        v0.16
-        )
-        FetchContent_MakeAvailable(imgui implot)
+        FetchContent_MakeAvailable(imgui)
 
         add_library(truetest_imgui STATIC
             ${imgui_SOURCE_DIR}/imgui.cpp
@@ -313,13 +307,10 @@ function(tt_wire_imgui_desk target)
             ${imgui_SOURCE_DIR}/imgui_tables.cpp
             ${imgui_SOURCE_DIR}/imgui_widgets.cpp
             ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-            ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
-            ${implot_SOURCE_DIR}/implot.cpp
-            ${implot_SOURCE_DIR}/implot_items.cpp)
+            ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
         target_include_directories(truetest_imgui SYSTEM PUBLIC
             ${imgui_SOURCE_DIR}
-            ${imgui_SOURCE_DIR}/backends
-            ${implot_SOURCE_DIR})
+            ${imgui_SOURCE_DIR}/backends)
         target_link_libraries(truetest_imgui PUBLIC OpenGL::GL)
         if(TARGET glfw)
             target_link_libraries(truetest_imgui PUBLIC glfw)
@@ -334,7 +325,7 @@ function(tt_wire_imgui_desk target)
             target_compile_options(truetest_imgui PRIVATE -Wno-error -w)
         endif()
         set_target_properties(truetest_imgui PROPERTIES POSITION_INDEPENDENT_CODE ON)
-        message(STATUS "ENABLE_IMGUI: Dear ImGui v1.91.8-docking + ImPlot v0.16 + GLFW/OpenGL3")
+        message(STATUS "ENABLE_IMGUI: Dear ImGui v1.91.8-docking + GLFW/OpenGL3")
     endif()
 
     target_sources(${target} PRIVATE ${IMGUI_DESK_SOURCES})

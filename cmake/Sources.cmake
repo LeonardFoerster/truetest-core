@@ -20,19 +20,19 @@
 # ── IMGUI_DESK_SOURCES (target-private, ENABLE_IMGUI only) ──────────────────
 set(IMGUI_DESK_SOURCES
     src/ui/desk/desk_app.cpp
-    src/ui/desk/demo_research.cpp
-    src/ui/desk/footprint_camera.cpp
-    src/ui/desk/footprint_presentation_bridge.cpp
-    src/ui/desk/footprint_panel_state.cpp
-    src/ui/desk/footprint_live_source.cpp
-    src/ui/desk/desk_layout.cpp
-    src/ui/desk/panels/about_dialog.cpp
-    src/ui/desk/panels/debug_panel.cpp
-    src/ui/desk/panels/activity_panel.cpp
-    src/ui/desk/panels/market_panels.cpp
-    src/ui/desk/panels/research_panels.cpp
-    src/ui/desk/panels/research_workspace_panel.cpp
-    src/ui/desk/panels/status_panels.cpp
+    src/ui/desk/desk_format.cpp
+    src/ui/desk/desk_view_model.cpp
+    src/ui/desk/panels/top_bar.cpp
+    src/ui/desk/panels/account_strip.cpp
+    src/ui/desk/panels/market_watch.cpp
+    src/ui/desk/panels/instrument_panel.cpp
+    src/ui/desk/panels/positions_table.cpp
+    src/ui/desk/panels/orders_table.cpp
+    src/ui/desk/panels/protection_table.cpp
+    src/ui/desk/panels/fills_table.cpp
+    src/ui/desk/panels/account_risk_panel.cpp
+    src/ui/desk/panels/health_strip.cpp
+    src/ui/desk/widgets/confirm_modal.cpp
 )
 
 # ── ENGINE_CORE_SOURCES (identical across the three binaries) ────────────────
@@ -48,7 +48,10 @@ set(ENGINE_CORE_SOURCES
     src/engine/instrument_spec_cache.cpp
     src/engine/checkpoint.cpp
     src/engine/dashboard_snapshot_builder.cpp
+    src/engine/dashboard_snapshot_memory.cpp
+    src/engine/dashboard_snapshot_publication.cpp
     src/engine/live_safety_session.cpp
+    src/ui/snapshot_metrics.cpp
 
     # --- Analytics & reporting ---
     src/analytics/adverse_selection_tracker.cpp
@@ -177,6 +180,8 @@ set(TEST_SOURCES
     tests/test_futures_risk_check.cpp
     tests/test_live_safety.cpp
     tests/test_dashboard_snapshot.cpp
+    tests/test_snapshot_metrics.cpp
+    tests/test_snapshot_json.cpp
 
     # --- Exits / brackets ---
     tests/test_exit_manager.cpp
@@ -252,14 +257,11 @@ set(TEST_SOURCES
     tests/test_overlays.cpp
     tests/test_imgui_desk_state.cpp
     tests/test_imgui_monitor_model.cpp
-    tests/test_footprint_camera.cpp
+    src/ui/desk/desk_format.cpp
+    src/ui/desk/desk_view_model.cpp
     tests/test_footprint_presentation_bridge.cpp
-    tests/test_footprint_panel_state.cpp
     tests/test_footprint_live_source.cpp
-    src/ui/desk/demo_research.cpp
-    src/ui/desk/footprint_camera.cpp
     src/ui/desk/footprint_presentation_bridge.cpp
-    src/ui/desk/footprint_panel_state.cpp
     src/ui/desk/footprint_live_source.cpp
 
     # --- Golden regression ---
@@ -329,6 +331,11 @@ endif()
 if(ENABLE_WEB)
     list(APPEND TEST_SOURCES
         tests/test_web_server_auth.cpp)
+else()
+    # Keep the versioned serializer contract tested in the default build.
+    # ENABLE_WEB already compiles this implementation into engine_core.
+    list(APPEND TEST_SOURCES
+        src/web/snapshot_json.cpp)
 endif()
 
 # ── LOC regression guard ────────────────────────────────────────────────────

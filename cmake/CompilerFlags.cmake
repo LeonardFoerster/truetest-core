@@ -69,8 +69,12 @@ function(tt_apply_common_flags target)
         target_link_options   (${target} PRIVATE -fsanitize=address)
     endif()
     if(ENABLE_UBSAN AND NOT MSVC)
-        target_compile_options(${target} PRIVATE -fsanitize=undefined)
-        target_link_options   (${target} PRIVATE -fsanitize=undefined)
+        target_compile_options(${target} PRIVATE
+            -fsanitize=undefined
+            -fno-sanitize-recover=undefined)
+        target_link_options(${target} PRIVATE
+            -fsanitize=undefined
+            -fno-sanitize-recover=undefined)
     endif()
 endfunction()
 

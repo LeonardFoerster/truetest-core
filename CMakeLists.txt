@@ -113,8 +113,8 @@ _tt_add_engine_binary(engine_live     TT_TARGET_LIVE     src/bin/engine_live/mai
 tt_wire_rich_tui(engine_shadow)
 tt_wire_rich_tui(engine_live)
 
-# ImGui personal strategy desk (optional; GLFW + OpenGL3 + ImPlot).
-# Wired on shadow/live for Monitor/Execute; research launcher is Phase 4+.
+# ImGui trading command center (optional; GLFW + OpenGL3), wired on
+# shadow/live as an attended monitor and global-control surface.
 if(ENABLE_IMGUI)
     tt_wire_imgui_desk(engine_shadow)
     tt_wire_imgui_desk(engine_live)
@@ -170,6 +170,16 @@ if(BUILD_TESTS)
 
     include(GoogleTest)
     gtest_discover_tests(truetest_tests)
+
+    if(UNIX AND NOT APPLE)
+        add_executable(truetest_tui_lifecycle_tests
+            tests/test_tabbed_dashboard_lifecycle.cpp)
+        target_link_libraries(truetest_tui_lifecycle_tests PRIVATE
+            engine_core GTest::gtest_main util)
+        tt_apply_common_flags(truetest_tui_lifecycle_tests)
+        tt_wire_rich_tui(truetest_tui_lifecycle_tests)
+        gtest_discover_tests(truetest_tui_lifecycle_tests)
+    endif()
 
     # CLI integration tests — exec engine_backtest / engine_live as subprocesses
     add_executable(truetest_cli_tests tests/test_cli.cpp)

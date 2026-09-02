@@ -160,6 +160,7 @@
         "BUILD_TESTS": "ON",
         "ENABLE_ASAN": "ON",
         "ENABLE_UBSAN": "ON",
+        "ENABLE_IMGUI": "ON",
         "ENABLE_BINANCE": "ON"
       }
     },
@@ -173,6 +174,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "BUILD_TESTS": "ON",
+        "ENABLE_IMGUI": "ON",
         "ENABLE_TSAN": "ON"
       }
     },
@@ -241,6 +243,25 @@
       "configurePreset": "linux-tests",
       "output": { "outputOnFailure": true },
       "execution": { "jobs": 1, "noTestsAction": "error" }
+    },
+    {
+      "name": "linux-asan",
+      "configurePreset": "linux-asan",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1, "noTestsAction": "error" },
+      "environment": {
+        "ASAN_OPTIONS": "halt_on_error=1:detect_leaks=1",
+        "UBSAN_OPTIONS": "halt_on_error=1:print_stacktrace=1"
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "configurePreset": "linux-tsan",
+      "output": { "outputOnFailure": true },
+      "execution": { "jobs": 1, "noTestsAction": "error" },
+      "environment": {
+        "TSAN_OPTIONS": "halt_on_error=1"
+      }
     },
     {
       "name": "linux-release-low-memory",
