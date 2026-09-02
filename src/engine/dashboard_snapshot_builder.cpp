@@ -42,7 +42,7 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     std::mutex& last_mark_prices_mu,
     OrderbookRegistry& orderbook_registry,
     const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters,
-    IOrderAuditSink& audit_sink,
+    const std::unique_ptr<IOrderAuditSink>& audit_sink,
     const std::unordered_set<std::string>& l2_seeded_symbols,
     const ObjectPool<market_event>& market_pool,
     const ObjectPool<order_event>& order_pool,
@@ -806,7 +806,7 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
 
         // Unconditional audit_sink health (replaces remaining questdb guard + #ifdef).
         // strict_mode and last_flush default (0/-1) as sink seam does not yet surface full QuestdbStore::Health.
-        auto qh = audit_sink_.health();
+        auto qh = audit_sink_->health();
         out.health.questdb.active = qh.connected || qh.pending_lines > 0 || qh.dropped_lines > 0 || qh.fallback_lines > 0;
         out.health.questdb.connected = qh.connected;
         out.health.questdb.pending_lines = qh.pending_lines;

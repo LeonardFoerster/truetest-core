@@ -117,10 +117,11 @@ void engine::apply_l2_snapshot(const std::string& symbol,
     // / queue_ahead. Central place for all L2-driven paths (direct apply, replay,
     // streaming). Duplicated in provider event dispatch for the live shadow_exec
     // case; keep in sync.
+    // Public/stream dispatch cannot reach this method until construction has
+    // completed, so router_ and orders_ below are post-construction invariants.
     l2_bid_scratch_.assign(abids.begin(), abids.begin() + n_bids);
     l2_ask_scratch_.assign(aasks.begin(), aasks.begin() + n_asks);
-    if (router_) router_->on_l2_snapshot(
-        symbol, l2_bid_scratch_, l2_ask_scratch_);
+    router_->on_l2_snapshot(symbol, l2_bid_scratch_, l2_ask_scratch_);
 
     const auto l2_ts = timestamp.time_since_epoch().count() != 0
         ? timestamp : std::chrono::system_clock::now();
@@ -150,7 +151,7 @@ void engine::apply_l2_snapshot(const std::string& symbol,
     // because IStrategy exposes only on_l2_update.
     std::size_t l2_event_count = 0;
     bool l2_halt = false;
-    if (router_) router_->advance_all(l2_ts);
+    router_->advance_all(l2_ts);
     orders_->drain_due(l2_ts, l2_event_count, l2_halt, symbol);
     if (l2_halt || halt_flag_.load(std::memory_order_acquire))
         return;
@@ -209,7 +210,7 @@ void engine::apply_l2_update(const std::string& symbol,
 
     // Forward L2 update to adapters for queue models (see apply_l2_snapshot).
     const order_side os = (ts_side == tick_side::bid) ? order_side::buy : order_side::sell;
-    if (router_) router_->on_l2_update(
+    router_->on_l2_update(
         symbol, os, price,
         tt::quantity_scale::to_base(new_qty, quantity_scale));
 
@@ -239,7 +240,7 @@ void engine::apply_l2_update(const std::string& symbol,
     // Drain pending orders eligible at this L2 timestamp. Default
     // Bar delay counts later same-symbol observations; without this drain,
     // pure L2 streams would never release their queued strategy orders.
-    if (router_) router_->advance_all(l2_ts);
+    router_->advance_all(l2_ts);
     if (l2_mark > 0.0)
         orders_->drain_due(l2_ts, l2_event_count, l2_halt, symbol);
     if (l2_halt || halt_flag_.load(std::memory_order_acquire))
@@ -446,7 +447,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     }
 
     auto ob = orderbook_registry_.get_or_create(mkt.get_symbol());
-    if (!mm_worker_ &&
+    if (!mm_threaded_ &&
         !l2_seeded_symbols_.count(mkt.get_symbol()))
     {
         auto mm_trades = market_maker_.replenish(

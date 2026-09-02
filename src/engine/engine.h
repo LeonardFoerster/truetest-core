@@ -102,7 +102,7 @@ enum class live_shutdown_reason;
 // See the map comment at the top of engine.cpp for the full breakdown.
 // ============================================================
 
-// Implements EngineHotPathSink (log_event/publish_event/trigger_halt) so
+// Implements IEngineHotPathSink (log_event/publish_event/trigger_halt) so
 // OrderIntentProcessor — and future domain processors — can reach these
 // centralized primitives through a narrow interface reference instead of a
 // concrete engine& back-reference. The three methods below already exist as
@@ -114,7 +114,7 @@ enum class live_shutdown_reason;
 // yet at FillProcessor's construction time) — see risk_unwind_sink.h for the
 // construction-order proof. request_unwind() forwards to
 // orders_->unwind_positions(...), deref'd only when actually invoked.
-class engine : public EngineHotPathSink, public IRiskUnwindSink
+class engine final : private IEngineHotPathSink, private IRiskUnwindSink
 {
 private:
     engine_config config_;
@@ -217,12 +217,11 @@ private:
     void publish_event(const event_pointer& ev) override;
 
     // IRiskUnwindSink override — forwards to orders_->unwind_positions(...).
-    // Defined out-of-line in engine.cpp (after orders_ is declared) even
-    // though it is a one-line forward, matching log_event/publish_event's
-    // declared-here/defined-in-.cpp convention. Safe to call any time after
-    // construction completes; orders_ is never null once the constructor
-    // returns (see orders_ member declaration for the construction-order
-    // rationale).
+    // Defined out-of-line in engine.cpp (after orders_ is declared), matching
+    // log_event/publish_event's declared-here/defined-in-.cpp convention. Safe
+    // to call any time after construction completes; a defensive call before
+    // orders_ exists latches the same terminal post-fill-risk halt rather than
+    // silently skipping an emergency unwind.
     void request_unwind(std::size_t& event_count) override;
 
 #ifdef HAS_QUESTDB
@@ -385,13 +384,12 @@ private:
     // for any future change. See pause_all_'s/mm_threaded_'s prior locations
     // below for the rest of their original context comments.
     std::atomic<bool> pause_all_{false};
-    // Narrow same-thread predicate mirroring `!mm_worker_` for
-    // OrderIntentProcessor (Phase 2), so it depends on a plain bool rather
-    // than the concrete MarketMakerWorker type. Set exactly where mm_worker_
-    // is created (engine_workers.cpp); never reset, matching mm_worker_'s
-    // own never-nulled lifecycle. Read only from the event-loop thread,
-    // after start_workers() (which also runs on that thread) has returned —
-    // no atomic needed.
+    // Canonical same-thread predicate for whether MarketMakerWorker owns the
+    // book. Set exactly where mm_worker_ is created (engine_workers.cpp);
+    // never reset, matching mm_worker_'s own never-nulled lifecycle. All
+    // synchronous replenish gates use this value. Read only from the event-loop
+    // thread, after start_workers() (which also runs on that thread) has
+    // returned — no atomic needed.
     bool mm_threaded_ = false;
 
     // OrderIntentProcessor — Phase 1 of the domain-processor extraction that

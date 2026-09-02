@@ -52,7 +52,7 @@ public:
     // mutation. All non-owning refs. Builder is cold-path only.
     //
     // Lifetime contract: every injected reference (pools, rings, portfolio,
-    // analytics, exit_manager, config, registry, audit_sink, last_* refs,
+    // analytics, exit_manager, config, registry, the audit-sink owner, last_* refs,
     // execution_adapters map, debug samplers, control block pool) MUST outlive
     // this builder. The engine guarantees this by owning all of them for the
     // lifetime of the builder (which is a unique_ptr member of engine).
@@ -84,7 +84,7 @@ public:
         std::mutex& last_mark_prices_mu,
         OrderbookRegistry& orderbook_registry,
         const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters,
-        IOrderAuditSink& audit_sink,
+        const std::unique_ptr<IOrderAuditSink>& audit_sink,
         const std::unordered_set<std::string>& l2_seeded_symbols,
         // Pools for memory/debug stats (cold)
         const ObjectPool<market_event>& market_pool,
@@ -166,7 +166,9 @@ private:
     std::mutex& last_mark_prices_mu_;
     OrderbookRegistry& orderbook_registry_;
     const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters_;
-    IOrderAuditSink& audit_sink_;
+    // Reference the owning slot, not its replaceable pointee: QuestDB
+    // activation can swap the concrete sink between runs.
+    const std::unique_ptr<IOrderAuditSink>& audit_sink_;
     const std::unordered_set<std::string>& l2_seeded_symbols_;
 
     // Pools (for memory/debug stats)

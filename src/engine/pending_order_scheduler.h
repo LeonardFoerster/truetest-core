@@ -45,8 +45,9 @@ class PendingOrderScheduler final
 public:
     // ---- lifecycle -----------------------------------------------------
     // Former engine::clear_pending_state's pending-order-scheduling part
-    // (pending_stops_ and the L2 scratch buffers are NOT scheduler concerns
-    // — they stay engine-owned; see the Preparation Report §3/§8).
+    // (pending_stops_ and the L2 scratch buffers are NOT scheduler concerns;
+    // OrderIntentProcessor owns the former, while engine owns the latter.
+    // See the Preparation Report §3/§8.)
     void clear();
 
     // Former: `if (bar_delayed_orders_.capacity() == 0) bar_delayed_orders_.reserve(configured);`
@@ -66,8 +67,8 @@ public:
 
     void schedule_latency(std::shared_ptr<order_event> order, uint64_t seq);
     bool latency_due(std::chrono::system_clock::time_point sim_time) const;
-    // Precondition: latency_due(sim_time) is true. Copies-then-pops the top
-    // entry, exactly like the original `auto entry = pending_orders_.top(); pending_orders_.pop();`.
+    // Returns empty if the queue is empty. Otherwise copies-then-pops the top
+    // entry and moves its order out, preserving the original valid-input order.
     std::shared_ptr<order_event> pop_due_latency();
 
     // ---- bar-delay scheduling (former route_order's execution_bar_delay branch) ----
@@ -97,7 +98,8 @@ public:
     bool compact_bar_delay_due(std::string_view event_symbol);
 
     std::size_t ready_count() const noexcept { return bar_delayed_ready_.size(); }
-    // Moves the shared_ptr out of ready slot i (leaves that slot's pointer
+    // Returns empty when i is out of range. Otherwise moves the shared_ptr out
+    // of ready slot i (leaves that slot's pointer
     // null; the slot itself is discarded by the next clear_ready()/retain_
     // ready_suffix() call) — former `auto order = std::move(bar_delayed_ready_[i].order);`.
     std::shared_ptr<order_event> take_ready_order(std::size_t i);
@@ -108,7 +110,8 @@ public:
     // allocation); if capacity does not permit it, deliberately leaves the
     // suffix (and, per the original, any still-unconsumed already-submitted
     // prefix) resident in the ready buffer for the terminal EOS expiry path
-    // instead of growing or dropping it.
+    // instead of growing or dropping it. An invalid index also leaves the
+    // ready buffer intact so the caller can fail closed without losing orders.
     void retain_ready_suffix(std::size_t first_unsubmitted);
     void clear_ready() noexcept { bar_delayed_ready_.clear(); }
 

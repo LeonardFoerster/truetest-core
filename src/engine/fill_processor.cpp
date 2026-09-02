@@ -15,8 +15,6 @@
 
 #include "debug/stage_timer.h"
 
-#include <utility>
-
 FillProcessor::FillProcessor(
     portfolio& portfolio,
     OrderTracker& order_tracker,
@@ -24,7 +22,7 @@ FillProcessor::FillProcessor(
     RiskManager& risk_manager,
     AdverseSelectionTracker& adverse_selection,
     Analytics& analytics,
-    IOrderAuditSink& audit_sink,
+    const std::unique_ptr<IOrderAuditSink>& audit_sink,
     ExecutionRouter& router,
     ObjectPool<fill_event>& fill_pool,
     const OrderAttributionStore& attribution,
@@ -35,9 +33,7 @@ FillProcessor::FillProcessor(
     const engine_config& config,
     DashboardSnapshotBuilder* dashboard_builder,
     ShadowTracker* shadow_tracker,
-    std::function<void(const event&)> log_event,
-    std::function<void(const event_pointer&)> publish_event,
-    std::function<void(std::string_view)> trigger_halt,
+    IEngineHotPathSink& hotpath,
     IRiskUnwindSink& risk_unwind_sink
 #ifdef HAS_DEBUG
     , debug::StageTimer& stage_timer
@@ -50,8 +46,7 @@ FillProcessor::FillProcessor(
       additional_strategy_names_(additional_strategy_names),
       primary_strategy_name_(primary_strategy_name), config_(config),
       dashboard_builder_(dashboard_builder), shadow_tracker_(shadow_tracker),
-      log_event_(std::move(log_event)), publish_event_(std::move(publish_event)),
-      trigger_halt_(std::move(trigger_halt)), risk_unwind_sink_(risk_unwind_sink)
+      hotpath_(hotpath), risk_unwind_sink_(risk_unwind_sink)
 #ifdef HAS_DEBUG
       , stage_timer_(stage_timer)
 #endif
@@ -76,7 +71,7 @@ std::shared_ptr<fill_event> FillProcessor::acquire_pooled_fill(const fill_event&
     }
     catch (const pool_exhausted& e)
     {
-        trigger_halt_(e.what());
+        hotpath_.trigger_halt(e.what());
         throw;
     }
 }
@@ -174,7 +169,7 @@ bool FillProcessor::handle_fill(fill_event& f,
             dashboard_builder_->erase_open_order(f.get_order_id());
     }
     auto fill_ptr = acquire_pooled_fill(f);
-    log_event_(f);
+    hotpath_.log_event(f);
     portfolio_.on_fill(f, opener, strat);
     dispatch_fill_to_strategy(f);
     adverse_selection_.on_fill(f);
@@ -184,11 +179,11 @@ bool FillProcessor::handle_fill(fill_event& f,
         (f.get_source() == fill_source::exchange)  ? "exchange"
       : (f.get_source() == fill_source::simulated) ? "simulated"
       :                                              "local";
-    audit_sink_.record_fill(f, opener, strat.c_str(), src);
-    audit_sink_.record_status_transition(f.get_order_id(),
+    audit_sink_->record_fill(f, opener, strat.c_str(), src);
+    audit_sink_->record_status_transition(f.get_order_id(),
         order_status::open, new_status, status_reason);
     notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
-    publish_event_(fill_ptr);
+    hotpath_.publish_event(fill_ptr);
     analytics_.on_event(fill_ptr);
 
     if (mark_shadow_sim && config_.mode == engine_mode::shadow && shadow_tracker_)
@@ -215,7 +210,7 @@ bool FillProcessor::handle_fill(fill_event& f,
                 // a no-op unless QuestDB persistence is active (see
                 // QuestdbOrderAuditSink::record_event) — the allocation only
                 // happens when a compliance reviewer would want the record.
-                audit_sink_.record_event(
+                audit_sink_->record_event(
                     "risk_decision",
                     f.get_symbol().c_str(),
                     "",
@@ -233,7 +228,7 @@ bool FillProcessor::handle_fill(fill_event& f,
             // engine-decomposition.md and risk_unwind_sink.h).
             if (config_.risk_unwind)
                 risk_unwind_sink_.request_unwind(event_count);
-            trigger_halt_("risk post-fill limit breached - engine halted");
+            hotpath_.trigger_halt("risk post-fill limit breached - engine halted");
             halt_requested = true;
             return false;
         }
