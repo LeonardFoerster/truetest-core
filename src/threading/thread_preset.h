@@ -6,6 +6,7 @@
 enum class thread_preset
 {
     inline_mode,
+    logging_only,
     light,
     standard,
     full,
@@ -25,6 +26,7 @@ inline std::string preset_to_string(thread_preset p)
 {
     switch (p) {
     case thread_preset::inline_mode: return "inline";
+    case thread_preset::logging_only:return "logging";
     case thread_preset::light:       return "light";
     case thread_preset::standard:    return "standard";
     case thread_preset::full:        return "full";
@@ -36,6 +38,7 @@ inline std::string preset_to_string(thread_preset p)
 inline thread_preset string_to_preset(const std::string& s)
 {
     if (s == "inline")   return thread_preset::inline_mode;
+    if (s == "logging")  return thread_preset::logging_only;
     if (s == "light")    return thread_preset::light;
     if (s == "standard") return thread_preset::standard;
     if (s == "full")     return thread_preset::full;
@@ -47,6 +50,7 @@ inline int preset_worker_count(thread_preset p)
 {
     switch (p) {
     case thread_preset::inline_mode: return 0;
+    case thread_preset::logging_only:return 1;
     case thread_preset::light:       return 1;
     case thread_preset::standard:    return 2;
     case thread_preset::full:        return 3;
@@ -67,6 +71,7 @@ inline bool preset_has_separate_risk(thread_preset p)
 
 inline bool preset_has_separate_logging(thread_preset p)
 {
-    return p == thread_preset::standard || p == thread_preset::full
+    return p == thread_preset::logging_only
+        || p == thread_preset::standard || p == thread_preset::full
         || p == thread_preset::extended;
 }

@@ -187,6 +187,19 @@ enum class order_side
         sell
 };
 
+// Why an engine-owned protective close was fired.  This stays in the core
+// event vocabulary rather than making core depend on the exits layer: the
+// value is carried across the order, audit, and execution boundaries.
+enum class order_exit_reason : std::uint8_t
+{
+        none,
+        stop_loss,
+        take_profit,
+        trailing_stop,
+        time_stop,
+        slippage_flatten
+};
+
 class order_event : public event
 #ifdef HAS_DEBUG
     , public debug::CopyTracker<order_event>
@@ -221,6 +234,21 @@ public:
         uint64_t get_order_id() const { return order_id_; }
         void set_order_id(uint64_t id) { order_id_ = id; }
 
+        // One strategy decision can produce one routed command.  The engine
+        // currently assigns this alongside order_id; keeping it distinct in
+        // the event schema makes the lifecycle audit explicit and leaves room
+        // for a future multi-command signal without changing persisted rows.
+        uint64_t get_signal_id() const { return signal_id_; }
+        void set_signal_id(uint64_t id) { signal_id_ = id; }
+
+        // Non-zero only for an engine-owned protective exit.  The ticket is
+        // allocated before the close reaches route(), letting every terminal
+        // rejection path recognise it before a synchronous fill can occur.
+        uint64_t get_protective_exit_ticket() const { return protective_exit_ticket_; }
+        void set_protective_exit_ticket(uint64_t id) { protective_exit_ticket_ = id; }
+        order_exit_reason get_exit_reason() const { return exit_reason_; }
+        void set_exit_reason(order_exit_reason reason) { exit_reason_ = reason; }
+
         // Engine-stamped before the candidate enters the active lifecycle.
         // Worker-side risk rechecks use this immutable decision snapshot,
         // rather than racing the current global lifecycle count.
@@ -249,6 +277,38 @@ public:
         std::chrono::system_clock::time_point get_earliest_eligible_ts() const { return earliest_eligible_ts_; }
         void set_earliest_eligible_ts(std::chrono::system_clock::time_point ts) { earliest_eligible_ts_ = ts; }
 
+        std::chrono::system_clock::time_point get_submit_ts() const
+        {
+                return submit_ts_.time_since_epoch().count() != 0
+                    ? submit_ts_ : get_timestamp();
+        }
+        void set_submit_ts(std::chrono::system_clock::time_point ts) { submit_ts_ = ts; }
+        bool has_submit_ts() const { return submit_ts_.time_since_epoch().count() != 0; }
+
+        // F-08 (docs/todos/11-F-forensic-lifecycle-audit.md) — when the
+        // information that produced this order actually existed.
+        //
+        // A bar's timestamp is its OPEN time, so an order derived from
+        // close[N] inherits a timestamp one full bar interval BEFORE that
+        // close existed: the audit traced an order stamped 03:07:00 that was
+        // decided from the 03:08:00 close. This is not a price lookahead —
+        // execution is still correctly deferred by execution_bar_delay — but
+        // it mis-dates every order, and every time-windowed risk rule
+        // (orders_per_minute, trades_per_hour, daily_loss) inherits the error.
+        //
+        // The market-data clock is deliberately NOT overwritten: get_timestamp()
+        // stays the bar's open, which is what it means. This carries the
+        // decision instant alongside it, and defaults to the timestamp so an
+        // order nobody stamps behaves exactly as before.
+        std::chrono::system_clock::time_point get_decision_ts() const
+        {
+                return decision_ts_.time_since_epoch().count() != 0
+                        ? decision_ts_ : get_timestamp();
+        }
+        void set_decision_ts(std::chrono::system_clock::time_point ts) { decision_ts_ = ts; }
+        bool has_decision_ts() const { return decision_ts_.time_since_epoch().count() != 0; }
+
+
         std::string to_string() const override
         {
                 std::string side_str = (side_ == order_side::buy) ? "BUY" : "SELL";
@@ -266,6 +326,8 @@ public:
 
 private:
         uint64_t order_id_ = 0;
+        uint64_t signal_id_ = 0;
+        uint64_t protective_exit_ticket_ = 0;
         std::size_t pretrade_open_order_count_ = 0;
         std::string symbol_;
         order_type order_type_;
@@ -275,15 +337,122 @@ private:
         time_in_force tif_;
         double stop_price_;
         std::chrono::system_clock::time_point earliest_eligible_ts_;
+        std::chrono::system_clock::time_point submit_ts_{};
+        std::chrono::system_clock::time_point decision_ts_{};   // F-08
         std::string strategy_name_;
         uint64_t opener_order_id_ = 0;
+        order_exit_reason exit_reason_ = order_exit_reason::none;
 };
+
 
 enum class fill_source
 {
         unknown,
         simulated,
         exchange
+};
+
+// Execution provenance is deliberately scalar/enum-only: it travels with a
+// fill through the engine hot path without allocating. Names are rendered in
+// cold reporting code only.
+enum class fill_execution_model : std::uint8_t
+{
+        unclassified,
+        synthetic_local_liquidity,
+        l2_local_book,
+        queue_aware_paper,
+        recorded_trade_tape,
+        venue_reported
+};
+
+enum class fill_execution_reason : std::uint8_t
+{
+        unknown,
+        aggressive_ladder_match,
+        market_maker_requote,
+        bar_range_sweep,
+        recorded_trade_print,
+        venue_execution_report
+};
+
+inline constexpr std::string_view fill_execution_model_name(
+    fill_execution_model model) noexcept
+{
+        switch (model)
+        {
+        case fill_execution_model::synthetic_local_liquidity: return "synthetic_local_liquidity";
+        case fill_execution_model::l2_local_book: return "l2_local_book";
+        case fill_execution_model::queue_aware_paper: return "queue_aware_paper";
+        case fill_execution_model::recorded_trade_tape: return "recorded_trade_tape";
+        case fill_execution_model::venue_reported: return "venue_reported";
+        case fill_execution_model::unclassified: return "unclassified";
+        }
+        return "unclassified";
+}
+
+inline constexpr std::string_view fill_execution_reason_name(
+    fill_execution_reason reason) noexcept
+{
+        switch (reason)
+        {
+        case fill_execution_reason::aggressive_ladder_match: return "aggressive_ladder_match";
+        case fill_execution_reason::market_maker_requote: return "market_maker_requote";
+        case fill_execution_reason::bar_range_sweep: return "bar_range_sweep";
+        case fill_execution_reason::recorded_trade_print: return "recorded_trade_print";
+        case fill_execution_reason::venue_execution_report: return "venue_execution_report";
+        case fill_execution_reason::unknown: return "unknown";
+        }
+        return "unknown";
+}
+
+struct fill_provenance
+{
+        fill_execution_model model = fill_execution_model::unclassified;
+        fill_execution_reason reason = fill_execution_reason::unknown;
+        bool exploratory = false;
+        double intended_price = 0.0;
+        double reference_price = 0.0;
+        std::chrono::system_clock::time_point reference_timestamp{};
+        double modeled_spread_bps = 0.0;
+        double modeled_impact_bps = 0.0;
+        double fill_probability = 1.0;
+        std::chrono::nanoseconds modeled_latency{0};
+};
+
+enum class fill_cumulative_source : std::uint8_t
+{
+        absent,
+        venue_reported,
+        engine_accumulated,
+        simulated
+};
+
+// Fixed-capacity wire identity used on the execution hot path.  Assignment
+// is explicit and fails closed on oversize input; it never allocates.
+template <std::size_t Capacity>
+class bounded_event_text
+{
+public:
+        [[nodiscard]] bool assign(std::string_view value) noexcept
+        {
+                if (value.empty() || value.size() > Capacity)
+                        return false;
+                std::copy(value.begin(), value.end(), storage_.begin());
+                size_ = static_cast<std::uint16_t>(value.size());
+                return true;
+        }
+
+        void clear() noexcept { size_ = 0; }
+        [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+        [[nodiscard]] std::string_view view() const noexcept
+        {
+                return {storage_.data(), size_};
+        }
+
+private:
+        static_assert(Capacity <= static_cast<std::size_t>(UINT16_MAX));
+        std::array<char, Capacity> storage_{};
+        std::uint16_t size_ = 0;
 };
 
 class fill_event : public event
@@ -323,15 +492,75 @@ public:
         uint64_t get_order_id() const { return order_id_; }
         const std::string& get_symbol() const { return symbol_; }
         order_side get_side() const { return side_; }
-        double get_filled_quantity() const { return filled_quantity_; }
+        double get_filled_quantity() const
+        {
+                return has_economic_quantity_
+                        ? economic_quantity_ : filled_quantity_;
+        }
+        double get_reported_filled_quantity() const
+        {
+                return filled_quantity_;
+        }
+        // Preserve the raw venue slice for durable identity/reconnect replay,
+        // while every economic consumer observes the exact delta implied by
+        // the admitted cumulative cursor.
+        void set_economic_quantity(double value) noexcept
+        {
+                economic_quantity_ = value;
+                has_economic_quantity_ = true;
+        }
         double get_fill_price() const { return fill_price_; }
         double get_commission() const { return commission_; }
         double get_remaining_qty() const { return remaining_qty_; }
         uint64_t get_fill_id() const { return fill_id_; }
+        // Composite execution adapters merge child adapters whose diagnostic
+        // counters are independent. They must assign one adapter-level ID
+        // before exposing the fill to the canonical ingress gate.
+        void set_fill_id(uint64_t value) noexcept { fill_id_ = value; }
         bool is_partial() const { return remaining_qty_ > 0.0; }
+
+        [[nodiscard]] bool set_venue_execution_id(std::string_view value) noexcept
+        {
+                return venue_execution_id_.assign(value);
+        }
+        [[nodiscard]] std::string_view get_venue_execution_id() const noexcept
+        {
+                return venue_execution_id_.view();
+        }
+
+        [[nodiscard]] bool set_commission_currency(std::string_view value) noexcept
+        {
+                return commission_currency_.assign(value);
+        }
+        [[nodiscard]] std::string_view get_commission_currency() const noexcept
+        {
+                return commission_currency_.view();
+        }
+
+        void set_cumulative_filled_qty(double quantity,
+                                       fill_cumulative_source source) noexcept
+        {
+                cumulative_filled_qty_ = quantity;
+                cumulative_source_ = source;
+        }
+        [[nodiscard]] bool has_cumulative_filled_qty() const noexcept
+        {
+                return cumulative_source_ != fill_cumulative_source::absent;
+        }
+        [[nodiscard]] double get_cumulative_filled_qty() const noexcept
+        {
+                return cumulative_filled_qty_;
+        }
+        [[nodiscard]] fill_cumulative_source get_cumulative_source() const noexcept
+        {
+                return cumulative_source_;
+        }
 
         fill_source get_source() const { return source_; }
         void set_source(fill_source s) { source_ = s; }
+
+        const fill_provenance& get_provenance() const { return provenance_; }
+        void set_provenance(const fill_provenance& provenance) { provenance_ = provenance; }
 
         // Per-lot / attribution (populated by engine at fill synthesis time for
         // both simulated and exchange fills; mirrors order_event fields for
@@ -345,7 +574,7 @@ public:
 
         double get_total_cost() const
         {
-                double base = filled_quantity_ * fill_price_;
+                double base = get_filled_quantity() * fill_price_;
                 return (side_ == order_side::buy) ? base + commission_ : base - commission_;
         }
 
@@ -371,11 +600,18 @@ private:
         std::string symbol_;
         order_side side_;
         double filled_quantity_;
+        double economic_quantity_ = 0.0;
+        bool has_economic_quantity_ = false;
         double fill_price_;
         double commission_;
         double remaining_qty_ = 0.0;
         uint64_t fill_id_ = 0;
         fill_source source_ = fill_source::unknown;
+        fill_provenance provenance_{};
+        bounded_event_text<96> venue_execution_id_{};
+        bounded_event_text<24> commission_currency_{};
+        double cumulative_filled_qty_ = 0.0;
+        fill_cumulative_source cumulative_source_ = fill_cumulative_source::absent;
 
         // Per-lot attribution (enriched during deepdive refactor for consistent
         // propagation; default empty/0 for legacy compatibility).

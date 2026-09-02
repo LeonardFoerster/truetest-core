@@ -1,15 +1,12 @@
 #include "market_maker.h"
-#include <chrono>
 #include <cmath>
 #include <numeric>
 
 MarketMaker::MarketMaker()
-    : gen_(static_cast<unsigned>(std::chrono::system_clock::now().time_since_epoch().count()))
-    , dis_(0.0, 0.005) {}
+    : rng_(0) {}
 
-MarketMaker::MarketMaker(unsigned rng_seed)
-    : gen_(rng_seed)
-    , dis_(0.0, 0.005) {}
+MarketMaker::MarketMaker(std::uint64_t rng_seed)
+    : rng_(rng_seed) {}
 
 // Calibration survives reset(): it is configuration, not per-trial state.
 void MarketMaker::set_calibration(const mm_calibration& c)
@@ -26,7 +23,7 @@ void MarketMaker::add_orders(std::shared_ptr<orderbook> ob, double current_price
 {
     for (int i = 0; i < num_orders; ++i)
     {
-        double spread = dis_(gen_);
+        double spread = rng_.uniform(0.0, 0.005);
         double buy_price = current_price * (1 - spread);
         double sell_price = current_price * (1 + spread);
 
@@ -138,12 +135,9 @@ trades MarketMaker::replenish(std::shared_ptr<orderbook> ob, double current_pric
 }
 
 // Phase B (MC reuse)
-void MarketMaker::reset(unsigned rng_seed)
+void MarketMaker::reset(std::uint64_t rng_seed)
 {
-    if (rng_seed != 0)
-        gen_.seed(rng_seed);
-    else
-        gen_.seed(static_cast<unsigned>(std::chrono::system_clock::now().time_since_epoch().count()));
+    rng_.reset(rng_seed);
 
     price_history_.clear();
     live_quotes_.clear();

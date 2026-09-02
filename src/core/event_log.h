@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -23,6 +25,20 @@
 
 
 namespace event_serial {
+
+// Event-log v1-v3 scalar encoding is little-endian, two's-complement integer
+// and IEEE-754 binary64. The current implementation writes the scalar object
+// representation directly, so unsupported hosts fail at compile time instead
+// of silently producing a different hash or corrupt replay.
+static_assert(std::endian::native == std::endian::little,
+              "TrueTest event-log encoding requires a little-endian target");
+static_assert(sizeof(std::uint16_t) == 2 && sizeof(std::uint32_t) == 4
+              && sizeof(std::uint64_t) == 8 && sizeof(std::int32_t) == 4
+              && sizeof(std::int64_t) == 8,
+              "TrueTest event-log integer widths are part of the wire format");
+static_assert(sizeof(double) == 8
+              && std::numeric_limits<double>::is_iec559,
+              "TrueTest event-log floating point requires IEEE-754 binary64");
 
 
 inline void write_u8(std::ostream& out, uint8_t v)  { out.write(reinterpret_cast<const char*>(&v), 1); }
@@ -144,9 +160,10 @@ inline Enum read_enum(BufReader& reader, Enum last_value, std::string_view field
 }
 
 
-inline std::vector<uint8_t> serialise(const market_event& e)
+inline std::vector<uint8_t> serialise(
+    const market_event& e, std::vector<uint8_t> buf = {})
 {
-    std::vector<uint8_t> buf;
+    buf.clear();
     buf.reserve(128);
     auto append = [&](const void* ptr, std::size_t n) {
         const auto* b = static_cast<const uint8_t*>(ptr);
@@ -176,9 +193,10 @@ inline std::vector<uint8_t> serialise(const market_event& e)
     return buf;
 }
 
-inline std::vector<uint8_t> serialise(const signal_event& e)
+inline std::vector<uint8_t> serialise(
+    const signal_event& e, std::vector<uint8_t> buf = {})
 {
-    std::vector<uint8_t> buf;
+    buf.clear();
     buf.reserve(64);
     auto append = [&](const void* ptr, std::size_t n) {
         const auto* b = static_cast<const uint8_t*>(ptr);
@@ -203,9 +221,10 @@ inline std::vector<uint8_t> serialise(const signal_event& e)
     return buf;
 }
 
-inline std::vector<uint8_t> serialise(const order_event& e)
+inline std::vector<uint8_t> serialise(
+    const order_event& e, std::vector<uint8_t> buf = {})
 {
-    std::vector<uint8_t> buf;
+    buf.clear();
     buf.reserve(128);
     auto append = [&](const void* ptr, std::size_t n) {
         const auto* b = static_cast<const uint8_t*>(ptr);
@@ -238,13 +257,23 @@ inline std::vector<uint8_t> serialise(const order_event& e)
     append_ts(e.get_earliest_eligible_ts());
     append_u64(e.get_opener_order_id());
     append_str(e.get_strategy_name());
+    // V2 optional order-lifecycle extension. The reader accepts older V2
+    // records without it; new records retain the command/safety correlation
+    // fields needed to join a protective exit with its audit lifecycle.
+    append_u64(e.get_signal_id());
+    append_u64(e.get_protective_exit_ticket());
+    uint8_t exit_reason = static_cast<uint8_t>(e.get_exit_reason());
+    append(&exit_reason, 1);
+    append_ts(e.get_decision_ts());
+    append_ts(e.get_submit_ts());
     return buf;
 }
 
-inline std::vector<uint8_t> serialise(const fill_event& e)
+inline std::vector<uint8_t> serialise(
+    const fill_event& e, std::vector<uint8_t> buf = {})
 {
-    std::vector<uint8_t> buf;
-    buf.reserve(96);
+    buf.clear();
+    buf.reserve(320);
     auto append = [&](const void* ptr, std::size_t n) {
         const auto* b = static_cast<const uint8_t*>(ptr);
         buf.insert(buf.end(), b, b + n);
@@ -253,20 +282,23 @@ inline std::vector<uint8_t> serialise(const fill_event& e)
         int64_t us = std::chrono::duration_cast<std::chrono::microseconds>(tp.time_since_epoch()).count();
         append(&us, 8);
     };
-    auto append_str = [&](const std::string& s) {
+    auto append_str = [&](std::string_view s) {
         const uint16_t len = checked_string_length(s);
         append(&len, 2);
         append(s.data(), len);
     };
     auto append_f64 = [&](double v) { append(&v, 8); };
     auto append_u64 = [&](uint64_t v) { append(&v, 8); };
+    auto append_i64 = [&](int64_t v) { append(&v, 8); };
 
     append_ts(e.get_timestamp());
     append_str(e.get_symbol());
     append_u64(e.get_order_id());
     uint8_t sd = static_cast<uint8_t>(e.get_side());
     append(&sd, 1);
-    append_f64(e.get_filled_quantity());
+    // Native idempotency fingerprints the venue-reported slice. The economic
+    // cursor delta is deterministically re-derived by canonical replay.
+    append_f64(e.get_reported_filled_quantity());
     append_f64(e.get_fill_price());
     append_f64(e.get_commission());
     append_f64(e.get_remaining_qty());
@@ -275,12 +307,45 @@ inline std::vector<uint8_t> serialise(const fill_event& e)
     append(&src, 1);
     append_u64(e.get_opener_order_id());
     append_str(e.get_strategy_name());
+    // V3 execution-provenance extension. The fixed shape preserves the
+    // legacy/V1/V2 decoders above while making synthetic assumptions durable
+    // in event logs and replay artifacts.
+    const auto& provenance = e.get_provenance();
+    const uint8_t model = static_cast<uint8_t>(provenance.model);
+    const uint8_t reason = static_cast<uint8_t>(provenance.reason);
+    const uint8_t exploratory = provenance.exploratory ? 1U : 0U;
+    append(&model, 1);
+    append(&reason, 1);
+    append(&exploratory, 1);
+    append_f64(provenance.intended_price);
+    append_f64(provenance.reference_price);
+    append_ts(provenance.reference_timestamp);
+    append_f64(provenance.modeled_spread_bps);
+    append_f64(provenance.modeled_impact_bps);
+    append_f64(provenance.fill_probability);
+    append_i64(provenance.modeled_latency.count());
+
+    // V3 authoritative-fill identity extension.  The marker keeps the
+    // variable-length tail unambiguous from every complete historic shape.
+    // Native execution identity, fee currency, and cumulative source are
+    // required to reconstruct exactly-once accounting after restart/replay.
+    constexpr std::array<std::uint8_t, 4> identity_marker{
+        static_cast<std::uint8_t>('F'), static_cast<std::uint8_t>('I'),
+        static_cast<std::uint8_t>('D'), 3U};
+    append(identity_marker.data(), identity_marker.size());
+    append_str(e.get_venue_execution_id());
+    append_str(e.get_commission_currency());
+    append_f64(e.get_cumulative_filled_qty());
+    const auto cumulative_source =
+        static_cast<std::uint8_t>(e.get_cumulative_source());
+    append(&cumulative_source, 1);
     return buf;
 }
 
-inline std::vector<uint8_t> serialise(const tick_event& e)
+inline std::vector<uint8_t> serialise(
+    const tick_event& e, std::vector<uint8_t> buf = {})
 {
-    std::vector<uint8_t> buf;
+    buf.clear();
     buf.reserve(64);
     auto append = [&](const void* ptr, std::size_t n) {
         const auto* b = static_cast<const uint8_t*>(ptr);
@@ -309,9 +374,10 @@ inline std::vector<uint8_t> serialise(const tick_event& e)
     return buf;
 }
 
-inline std::vector<uint8_t> serialise(const l2_snapshot_event& e)
+inline std::vector<uint8_t> serialise(
+    const l2_snapshot_event& e, std::vector<uint8_t> buf = {})
 {
-    std::vector<uint8_t> buf;
+    buf.clear();
     buf.reserve(256);
     auto append = [&](const void* ptr, std::size_t n) {
         const auto* b = static_cast<const uint8_t*>(ptr);
@@ -347,9 +413,10 @@ inline std::vector<uint8_t> serialise(const l2_snapshot_event& e)
     return buf;
 }
 
-inline std::vector<uint8_t> serialise(const cancel_event& e)
+inline std::vector<uint8_t> serialise(
+    const cancel_event& e, std::vector<uint8_t> buf = {})
 {
-    std::vector<uint8_t> buf;
+    buf.clear();
     buf.reserve(64);
     auto append = [&](const void* ptr, std::size_t n) {
         const auto* b = static_cast<const uint8_t*>(ptr);
@@ -373,9 +440,10 @@ inline std::vector<uint8_t> serialise(const cancel_event& e)
     return buf;
 }
 
-inline std::vector<uint8_t> serialise(const l2_update_event& e)
+inline std::vector<uint8_t> serialise(
+    const l2_update_event& e, std::vector<uint8_t> buf = {})
 {
-    std::vector<uint8_t> buf;
+    buf.clear();
     buf.reserve(64);
     auto append = [&](const void* ptr, std::size_t n) {
         const auto* b = static_cast<const uint8_t*>(ptr);
@@ -404,9 +472,10 @@ inline std::vector<uint8_t> serialise(const l2_update_event& e)
     return buf;
 }
 
-inline std::vector<uint8_t> serialise(const amend_event& e)
+inline std::vector<uint8_t> serialise(
+    const amend_event& e, std::vector<uint8_t> buf = {})
 {
-    std::vector<uint8_t> buf;
+    buf.clear();
     buf.reserve(64);
     auto append = [&](const void* ptr, std::size_t n) {
         const auto* b = static_cast<const uint8_t*>(ptr);
@@ -432,9 +501,10 @@ inline std::vector<uint8_t> serialise(const amend_event& e)
     return buf;
 }
 
-inline std::vector<uint8_t> serialise(const rejection_event& e)
+inline std::vector<uint8_t> serialise(
+    const rejection_event& e, std::vector<uint8_t> buf = {})
 {
-    std::vector<uint8_t> buf;
+    buf.clear();
     buf.reserve(64);
     auto append = [&](const void* ptr, std::size_t n) {
         const auto* b = static_cast<const uint8_t*>(ptr);
@@ -458,9 +528,10 @@ inline std::vector<uint8_t> serialise(const rejection_event& e)
     return buf;
 }
 
-inline std::vector<uint8_t> serialise(const funding_event& e)
+inline std::vector<uint8_t> serialise(
+    const funding_event& e, std::vector<uint8_t> buf = {})
 {
-    std::vector<uint8_t> buf;
+    buf.clear();
     buf.reserve(80);
     auto append = [&](const void* ptr, std::size_t n) {
         const auto* b = static_cast<const uint8_t*>(ptr);
@@ -486,9 +557,15 @@ inline std::vector<uint8_t> serialise(const funding_event& e)
 }
 
 
-inline event_pointer deserialise(event_type type, const uint8_t* data, std::size_t size)
+inline event_pointer deserialise(event_type type,
+                                 const uint8_t* data,
+                                 std::size_t size,
+                                 uint8_t payload_version = 0)
 {
     BufReader r(data, size);
+    constexpr uint8_t current_schema_version = 3;
+    const bool require_current_shape =
+        payload_version >= current_schema_version;
     auto finish = [&r](event_pointer ev) {
         r.require_consumed();
         return ev;
@@ -506,7 +583,7 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         std::uint64_t quantity_scale = 1;
         if (r.remaining() == sizeof(std::uint64_t))
             quantity_scale = r.read_u64();
-        else if (r.remaining() != 0)
+        else if (r.remaining() != 0 || require_current_shape)
             throw std::runtime_error("event_log: invalid market extension length");
         return finish(std::make_shared<market_event>(
             ts, symbol, open, high, low, close, volume, quantity_scale));
@@ -531,17 +608,49 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         auto elig_ts = r.read_ts();
         uint64_t opener_order_id = 0;
         std::string strategy_name;
+        bool has_attribution_extension = false;
         if (r.remaining() != 0) {
             if (r.remaining() < sizeof(std::uint64_t) + sizeof(std::uint16_t))
                 throw std::runtime_error("event_log: invalid order attribution extension");
             opener_order_id = r.read_u64();
             strategy_name = r.read_str();
+            has_attribution_extension = true;
         }
+        uint64_t signal_id = 0;
+        uint64_t protective_ticket = 0;
+        order_exit_reason exit_reason = order_exit_reason::none;
+        std::chrono::system_clock::time_point decision_ts{};
+        std::chrono::system_clock::time_point submit_ts{};
+        bool has_lifecycle_extension = false;
+        if (r.remaining() != 0) {
+            constexpr std::size_t kLifecycleExtensionBytes =
+                sizeof(std::uint64_t) * 2 + sizeof(std::uint8_t) + sizeof(std::int64_t) * 2;
+            if (r.remaining() != kLifecycleExtensionBytes)
+                throw std::runtime_error("event_log: invalid order lifecycle extension");
+            signal_id = r.read_u64();
+            protective_ticket = r.read_u64();
+            exit_reason = read_enum(r, order_exit_reason::slippage_flatten,
+                                    "order exit reason");
+            decision_ts = r.read_ts();
+            submit_ts = r.read_ts();
+            has_lifecycle_extension = true;
+        }
+        if (require_current_shape
+            && (!has_attribution_extension || !has_lifecycle_extension))
+            throw std::runtime_error(
+                "event_log: current order payload is missing required extensions");
         auto ev = std::make_shared<order_event>(ts, symbol, ot, sd, qty, price, tif, stop_price);
         ev->set_order_id(oid);
         ev->set_earliest_eligible_ts(elig_ts);
         ev->set_opener_order_id(opener_order_id);
         ev->set_strategy_name(strategy_name);
+        ev->set_signal_id(signal_id);
+        ev->set_protective_exit_ticket(protective_ticket);
+        ev->set_exit_reason(exit_reason);
+        if (decision_ts.time_since_epoch().count() != 0)
+            ev->set_decision_ts(decision_ts);
+        if (submit_ts.time_since_epoch().count() != 0)
+            ev->set_submit_ts(submit_ts);
         return finish(std::move(ev));
     }
     case event_type::fill: {
@@ -557,6 +666,15 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         fill_source src = fill_source::unknown;
         uint64_t opener_order_id = 0;
         std::string strategy_name;
+        fill_provenance provenance;
+        std::string venue_execution_id;
+        std::string commission_currency;
+        double cumulative_filled_qty = 0.0;
+        fill_cumulative_source cumulative_source =
+            fill_cumulative_source::absent;
+        bool has_attribution_extension = false;
+        bool has_provenance_extension = false;
+        bool has_identity_extension = false;
         // The original fill wire shape ended after commission. It was then
         // extended with remaining_qty + fill_id, and later fill_source. Only
         // those complete historic forms are valid; a partial extension must
@@ -584,12 +702,88 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
             src = read_enum(r, fill_source::exchange, "fill source");
             opener_order_id = r.read_u64();
             strategy_name = r.read_str();
+            has_attribution_extension = true;
+            // V3 follows the complete V2 attribution extension with a fixed
+            // scalar/enum provenance payload. Do not accept a partial tail:
+            // doing so would turn a truncated synthetic assumption into a
+            // plausible but false replay record.
+            if (r.remaining() != 0)
+            {
+                constexpr std::size_t provenance_bytes =
+                    3U + 5U * sizeof(double) + 2U * sizeof(std::int64_t);
+                if (r.remaining() < provenance_bytes)
+                    throw std::runtime_error("event_log: invalid fill provenance extension length");
+                provenance.model = read_enum(
+                    r, fill_execution_model::venue_reported, "fill execution model");
+                provenance.reason = read_enum(
+                    r, fill_execution_reason::venue_execution_report, "fill execution reason");
+                const auto exploratory = r.read_u8();
+                if (exploratory > 1U)
+                    throw std::runtime_error("event_log: invalid fill exploratory flag");
+                provenance.exploratory = exploratory != 0U;
+                provenance.intended_price = r.read_f64();
+                provenance.reference_price = r.read_f64();
+                provenance.reference_timestamp = r.read_ts();
+                provenance.modeled_spread_bps = r.read_f64();
+                provenance.modeled_impact_bps = r.read_f64();
+                provenance.fill_probability = r.read_f64();
+                provenance.modeled_latency = std::chrono::nanoseconds(r.read_i64());
+                has_provenance_extension = true;
+
+                if (r.remaining() != 0)
+                {
+                    constexpr std::array<std::uint8_t, 4> identity_marker{
+                        static_cast<std::uint8_t>('F'),
+                        static_cast<std::uint8_t>('I'),
+                        static_cast<std::uint8_t>('D'), 3U};
+                    if (r.remaining() < identity_marker.size()
+                                      + 2U + 2U + sizeof(double) + 1U)
+                        throw std::runtime_error(
+                            "event_log: invalid fill identity extension length");
+                    for (const auto expected : identity_marker)
+                    {
+                        if (r.read_u8() != expected)
+                            throw std::runtime_error(
+                                "event_log: invalid fill identity extension marker");
+                    }
+                    venue_execution_id = r.read_str();
+                    commission_currency = r.read_str();
+                    cumulative_filled_qty = r.read_f64();
+                    cumulative_source = read_enum(
+                        r, fill_cumulative_source::simulated,
+                        "fill cumulative source");
+                    if ((!std::isfinite(cumulative_filled_qty)
+                         || cumulative_filled_qty < 0.0)
+                        || (cumulative_source == fill_cumulative_source::absent
+                            && cumulative_filled_qty != 0.0))
+                        throw std::runtime_error(
+                            "event_log: invalid fill cumulative quantity");
+                    has_identity_extension = true;
+                }
+            }
             break;
         }
+        if (require_current_shape
+            && (!has_attribution_extension || !has_provenance_extension
+                || !has_identity_extension))
+            throw std::runtime_error(
+                "event_log: current fill payload is missing required extensions");
         auto ev = std::make_shared<fill_event>(ts, symbol, oid, sd, qty, price,
                                                commission, remaining, fill_id,
                                                strategy_name, opener_order_id);
         ev->set_source(src);
+        ev->set_provenance(provenance);
+        if (!venue_execution_id.empty()
+            && !ev->set_venue_execution_id(venue_execution_id))
+            throw std::runtime_error(
+                "event_log: fill venue execution id exceeds event capacity");
+        if (!commission_currency.empty()
+            && !ev->set_commission_currency(commission_currency))
+            throw std::runtime_error(
+                "event_log: fill commission currency exceeds event capacity");
+        if (cumulative_source != fill_cumulative_source::absent)
+            ev->set_cumulative_filled_qty(
+                cumulative_filled_qty, cumulative_source);
         return finish(std::move(ev));
     }
     case event_type::tick: {
@@ -601,7 +795,7 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         std::uint64_t quantity_scale = 1;
         if (r.remaining() == sizeof(std::uint64_t))
             quantity_scale = r.read_u64();
-        else if (r.remaining() != 0)
+        else if (r.remaining() != 0 || require_current_shape)
             throw std::runtime_error("event_log: invalid tick extension length");
         return finish(std::make_shared<tick_event>(
             ts, symbol, price, qty, sd, quantity_scale));
@@ -634,7 +828,7 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         std::uint64_t quantity_scale = 1;
         if (r.remaining() == sizeof(std::uint64_t))
             quantity_scale = r.read_u64();
-        else if (r.remaining() != 0)
+        else if (r.remaining() != 0 || require_current_shape)
             throw std::runtime_error("event_log: invalid L2 snapshot extension length");
         return finish(std::make_shared<l2_snapshot_event>(
             ts, symbol, bids.data(), bid_n, asks.data(), ask_n,
@@ -649,7 +843,7 @@ inline event_pointer deserialise(event_type type, const uint8_t* data, std::size
         std::uint64_t quantity_scale = 1;
         if (r.remaining() == sizeof(std::uint64_t))
             quantity_scale = r.read_u64();
-        else if (r.remaining() != 0)
+        else if (r.remaining() != 0 || require_current_shape)
             throw std::runtime_error("event_log: invalid L2 update extension length");
         return finish(std::make_shared<l2_update_event>(
             ts, symbol, sd, price, new_qty, quantity_scale));
@@ -700,12 +894,20 @@ struct EventLogIndexEntry {
 static constexpr uint32_t EVENT_LOG_INDEX_MAGIC = 0x58495454;
 static constexpr size_t   EVENT_LOG_INDEX_INTERVAL = 1000;
 static constexpr size_t   EVENT_LOG_MAX_INDEX_ENTRIES = 1'000'000;
+// Startup-owned buffers cover every current event schema and the reader's
+// fail-closed decoded-payload limit. EventLogger reuses them for every record;
+// serialization and compression therefore do not grow the heap on the event
+// path. The sampled index covers the first 16,384,000 events without growth;
+// later records remain replayable and are reached by sequential scan.
+static constexpr size_t EVENT_LOG_PAYLOAD_CAPACITY = 1U << 20;
+static constexpr size_t EVENT_LOG_PREWARM_INDEX_ENTRIES = 16'384;
 // The leading 0xFF cannot be a legacy event_type (which is currently 0..10),
 // so new files are unambiguously distinguishable from headerless logs.
 static constexpr std::array<uint8_t, 4> EVENT_LOG_FILE_MAGIC{
     0xFF, static_cast<uint8_t>('T'), static_cast<uint8_t>('T'), static_cast<uint8_t>('L')};
 static constexpr uint8_t EVENT_LOG_LEGACY_FILE_VERSION = 1;
-static constexpr uint8_t EVENT_LOG_FILE_VERSION = 2;
+static constexpr uint8_t EVENT_LOG_PRIOR_FILE_VERSION = 2;
+static constexpr uint8_t EVENT_LOG_FILE_VERSION = 3;
 static constexpr uint8_t EVENT_LOG_FILE_FLAG_ZSTD = 1U << 0;
 static constexpr uint8_t EVENT_LOG_FILE_FLAG_FINALIZED = 1U << 1;
 // Rotated files are independently finalized segments, not self-contained
@@ -780,6 +982,7 @@ public:
             if (!cctx_)
                 throw std::runtime_error("EventLogger: failed to create zstd context");
         }
+        prewarm_hotpath_buffers();
         write_file_preamble();
     }
 
@@ -800,43 +1003,66 @@ public:
     {
         ensure_open();
 
-        std::vector<uint8_t> payload;
-
         switch (e.get_type()) {
         case event_type::market:
-            payload = event_serial::serialise(require_event<market_event>(e, "market")); break;
+            payload_buf_ = event_serial::serialise(
+                require_event<market_event>(e, "market"),
+                std::move(payload_buf_)); break;
         case event_type::signal:
-            payload = event_serial::serialise(require_event<signal_event>(e, "signal")); break;
+            payload_buf_ = event_serial::serialise(
+                require_event<signal_event>(e, "signal"),
+                std::move(payload_buf_)); break;
         case event_type::order:
-            payload = event_serial::serialise(require_event<order_event>(e, "order")); break;
+            payload_buf_ = event_serial::serialise(
+                require_event<order_event>(e, "order"),
+                std::move(payload_buf_)); break;
         case event_type::fill:
-            payload = event_serial::serialise(require_event<fill_event>(e, "fill")); break;
+            payload_buf_ = event_serial::serialise(
+                require_event<fill_event>(e, "fill"),
+                std::move(payload_buf_)); break;
         case event_type::tick:
-            payload = event_serial::serialise(require_event<tick_event>(e, "tick")); break;
+            payload_buf_ = event_serial::serialise(
+                require_event<tick_event>(e, "tick"),
+                std::move(payload_buf_)); break;
         case event_type::l2_snapshot:
-            payload = event_serial::serialise(require_event<l2_snapshot_event>(e, "l2 snapshot")); break;
+            payload_buf_ = event_serial::serialise(
+                require_event<l2_snapshot_event>(e, "l2 snapshot"),
+                std::move(payload_buf_)); break;
         case event_type::l2_update:
-            payload = event_serial::serialise(require_event<l2_update_event>(e, "l2 update")); break;
+            payload_buf_ = event_serial::serialise(
+                require_event<l2_update_event>(e, "l2 update"),
+                std::move(payload_buf_)); break;
         case event_type::cancel:
-            payload = event_serial::serialise(require_event<cancel_event>(e, "cancel")); break;
+            payload_buf_ = event_serial::serialise(
+                require_event<cancel_event>(e, "cancel"),
+                std::move(payload_buf_)); break;
         case event_type::amend:
-            payload = event_serial::serialise(require_event<amend_event>(e, "amend")); break;
+            payload_buf_ = event_serial::serialise(
+                require_event<amend_event>(e, "amend"),
+                std::move(payload_buf_)); break;
         case event_type::rejection:
-            payload = event_serial::serialise(require_event<rejection_event>(e, "rejection")); break;
+            payload_buf_ = event_serial::serialise(
+                require_event<rejection_event>(e, "rejection"),
+                std::move(payload_buf_)); break;
         case event_type::funding:
-            payload = event_serial::serialise(require_event<funding_event>(e, "funding")); break;
+            payload_buf_ = event_serial::serialise(
+                require_event<funding_event>(e, "funding"),
+                std::move(payload_buf_)); break;
         default:
             throw std::runtime_error("EventLogger: unknown event type");
         }
 
-        const uint8_t* encoded_data = payload.data();
-        std::size_t encoded_size = payload.size();
+        if (payload_buf_.size() > EVENT_LOG_PAYLOAD_CAPACITY)
+            throw std::length_error(
+                "EventLogger: serialized payload exceeds startup capacity");
+        const uint8_t* encoded_data = payload_buf_.data();
+        std::size_t encoded_size = payload_buf_.size();
         if (compress_) {
-            const size_t bound = ZSTD_compressBound(payload.size());
+            const size_t bound = ZSTD_compressBound(payload_buf_.size());
             compressed_buf_.resize(bound);
             const size_t compressed_size = ZSTD_compressCCtx(
                 cctx_.get(), compressed_buf_.data(), bound,
-                payload.data(), payload.size(), 1);
+                payload_buf_.data(), payload_buf_.size(), 1);
             if (ZSTD_isError(compressed_size))
                 throw std::runtime_error(std::string("zstd compress: ") + ZSTD_getErrorName(compressed_size));
             encoded_data = compressed_buf_.data();
@@ -853,15 +1079,9 @@ public:
 
         const bool sample_index =
             event_count_ % EVENT_LOG_INDEX_INTERVAL == 0 &&
-            index_.size() < EVENT_LOG_MAX_INDEX_ENTRIES;
+            index_.size() < index_.capacity();
         EventLogIndexEntry index_entry{};
         if (sample_index) {
-            if (index_.size() == index_.capacity()) {
-                const auto next_capacity = std::min(
-                    EVENT_LOG_MAX_INDEX_ENTRIES,
-                    std::max<std::size_t>(1, index_.capacity() * 2));
-                index_.reserve(next_capacity);
-            }
             index_entry.timestamp_us =
                 std::chrono::duration_cast<std::chrono::microseconds>(
                     e.get_timestamp().time_since_epoch()).count();
@@ -957,6 +1177,7 @@ private:
     std::ofstream out_;
     bool compress_;
     std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> cctx_;
+    std::vector<uint8_t> payload_buf_;
     std::vector<uint8_t> compressed_buf_;
     std::vector<EventLogIndexEntry> index_;
     size_t event_count_;
@@ -964,6 +1185,30 @@ private:
     std::exception_ptr failure_;
     std::uint64_t max_bytes_ = 0;
     int max_files_ = 5;
+
+    void prewarm_hotpath_buffers()
+    {
+        payload_buf_.reserve(EVENT_LOG_PAYLOAD_CAPACITY);
+        index_.reserve(std::min(
+            EVENT_LOG_MAX_INDEX_ENTRIES,
+            EVENT_LOG_PREWARM_INDEX_ENTRIES));
+        if (!compress_)
+            return;
+
+        const std::size_t compressed_capacity =
+            ZSTD_compressBound(EVENT_LOG_PAYLOAD_CAPACITY);
+        compressed_buf_.resize(compressed_capacity);
+        payload_buf_.resize(EVENT_LOG_PAYLOAD_CAPACITY, uint8_t{0});
+        const std::size_t result = ZSTD_compressCCtx(
+            cctx_.get(), compressed_buf_.data(), compressed_buf_.size(),
+            payload_buf_.data(), payload_buf_.size(), 1);
+        if (ZSTD_isError(result))
+            throw std::runtime_error(
+                std::string("EventLogger: zstd prewarm failed: ")
+                + ZSTD_getErrorName(result));
+        payload_buf_.clear();
+        compressed_buf_.clear();
+    }
 
     template <typename Event>
     static const Event& require_event(const event& value, std::string_view name)
@@ -1285,10 +1530,12 @@ private:
                     throw std::runtime_error(
                         "EventReplayer: zstd content size mismatch");
                 ev = event_serial::deserialise(
-                    static_cast<event_type>(type_byte), decompressed.data(), result);
+                    static_cast<event_type>(type_byte), decompressed.data(), result,
+                    file_version_);
             } else {
                 ev = event_serial::deserialise(
-                    static_cast<event_type>(type_byte), raw.data(), raw.size());
+                    static_cast<event_type>(type_byte), raw.data(), raw.size(),
+                    file_version_);
             }
 
             auto ts_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1367,8 +1614,9 @@ private:
         uint8_t flags = 0;
         read_exact(&version, 1, "file preamble version");
         read_exact(&flags, 1, "file preamble flags");
-        if (version != EVENT_LOG_FILE_VERSION &&
-            version != EVENT_LOG_LEGACY_FILE_VERSION)
+        if (version != EVENT_LOG_FILE_VERSION
+            && version != EVENT_LOG_PRIOR_FILE_VERSION
+            && version != EVENT_LOG_LEGACY_FILE_VERSION)
             throw std::runtime_error("EventReplayer: unsupported file version");
         if ((flags & ~EVENT_LOG_FILE_KNOWN_FLAGS) != 0)
             throw std::runtime_error("EventReplayer: unsupported file flags");

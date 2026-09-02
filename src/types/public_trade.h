@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <type_traits>
 
 // Trivially copyable, fixed-size ingress record for one observed public
@@ -13,6 +14,11 @@
 // the engine event loop and never allocates - it is copied by value through
 // the ring, so it stays POD and cache-line-friendly.
 namespace truetest::footprint {
+
+// SymbolTable's canonical invalid uint16 id, repeated at this POD boundary so
+// provider/UI footprint code need not depend on the concrete symbol registry.
+inline constexpr std::uint16_t kInvalidSymbolId =
+    std::numeric_limits<std::uint16_t>::max();
 
 enum class aggressor_side : std::uint8_t
 {
@@ -66,7 +72,7 @@ struct PublicTrade
     // and SymbolTable::intern_id - both interned once at startup, never on
     // this path).
     std::uint16_t venue_id  = 0;
-    std::uint16_t symbol_id = 0;
+    std::uint16_t symbol_id = kInvalidSymbolId;
 
     aggressor_side side = aggressor_side::unknown;
     std::uint8_t   reserved_ = 0; // explicit pad, keeps layout stable
