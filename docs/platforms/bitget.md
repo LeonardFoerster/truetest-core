@@ -108,7 +108,7 @@ BitgetFuturesProvider : IProvider
     │    public: wss://ws.bitget.com/v3/ws/public
     │    demo:   wss://wspap.bitget.com/v3/ws/public
     ├─ parser:   BitgetTradeParser / BitgetCombinedParser
-    ├─ backfill: BitgetBackfill (REST candles) → PrependTransport
+    ├─ backfill request N>0: explicit provider-open refusal (no REST/prepend)
     │
     ├─ paper/backtest: HybridExecutor (local book + fee/fill models)
     ├─ shadow:         TradeTapeShadowAdapter
@@ -177,7 +177,7 @@ src/providers/bitget/
   bitget_futures_dead_mans_switch.h
   bitget_futures_safety.h         # advisories (margin mode, liq distance)
   bitget_futures_bracket_adapter.h  # Phase 4
-  bitget_backfill.h               # REST candles → prepend JSON frames
+  bitget_backfill.h               # strict parsing scaffold; production fetch/prepend fail-closed disabled
   bitget_futures_provider.h       # IProvider composition root
   bitget_futures_register.cpp     # REGISTER_PROVIDER "bitget-futures" + "bitget"
 ```
@@ -452,7 +452,7 @@ Heartbeat: raw text `"ping"` → `"pong"` alle ~30s; Idle-Disconnect ~2 min.
 |---|---|---|
 | `trade` | `publicTrade` | default |
 | `ticker` | `ticker` | optional |
-| `kline1m` / `candle1m` | `kline` + `interval=1m` | backfill-fähig |
+| `kline1m` / `candle1m` | `kline` + `interval=1m` | direkter WS-Stream nur mit `--backfill 0`; Backfill nicht unterstützt |
 | `kline5m` … | analog | |
 
 | `--depth-stream` | Topic |
@@ -468,7 +468,7 @@ Heartbeat: raw text `"ping"` → `"pong"` alle ~30s; Idle-Disconnect ~2 min.
 |---|---|---|
 | Server time | GET | `/api/v2/public/time` |
 | Instruments | GET | `/api/v3/market/instruments?category=USDT-FUTURES&symbol=BTCUSDT` |
-| Candles backfill | GET | UTA market candles endpoint (docs: market/candles o.ä.) — **vor Merge gegen Live-Docs verifizieren**; Classic: `/api/v2/mix/market/candles` |
+| Candles backfill | — | **Nicht produktiv aktiv.** Parsing-/Design-Scaffold vorhanden; jeder positive Bitget-Backfill verweigert Provider-Open vor REST-I/O. |
 
 ### 7.6 Private REST (UTA v3) — Order Lifecycle
 
@@ -565,7 +565,8 @@ Startup:
 state=opening
 build FuturesRiskCheck if caps
 create public WS transport(s)
-optional backfill + PrependTransport
+if backfill > 0: refuse provider open (production backfill unsupported)
+otherwise continue without historical warmup
 Binance-style HybridExecutor OR TradeTapeShadowAdapter by mode
 transport->open()
 state=open

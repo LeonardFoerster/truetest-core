@@ -4,6 +4,12 @@
 
 **Status of this doc**: Design implemented (Waves 1-2 + fixes + docs hygiene). All non-negotiable invariants re-verified after list completeness fixes. See session transcript for ritual output. Last updated during autonomous completion of /cmake-update.
 
+> **Superseded invariant (2026-08 R4):** The historical requirement below that
+> every option combination preserve three binaries and identical packaging now
+> applies to the default/live-capable profile. `TRUETEST_RESEARCH_ONLY=ON`
+> intentionally produces only Backtest and Shadow and restricts install/CPack;
+> see `docs/reference/01-instructions.md`.
+
 ## Goals (Non-Negotiable Invariants)
 
 - Exact same binaries and behavior for every combination of options (three `TT_TARGET` binaries, `engine_core` OBJECT library with PUBLIC propagation of `HAS_*` and optional sources).

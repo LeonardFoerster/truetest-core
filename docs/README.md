@@ -31,6 +31,7 @@ docs/
 ├── internal/                 # active engineering design plans (not operator SoT)
 ├── decisions/                # dated engineering decisions and acceptance criteria
 ├── skills/                   # proposed agent-skill designs (planning only)
+├── improvements/             # trust-improvement plans for ema-rsi-atr-pullback
 ├── archive/                  # historical snapshots; not current status
 └── assets/                   # static images
 ```
@@ -69,6 +70,7 @@ Evidence for Phase 0 sessions lives outside this tree: **`reports/phase0/`**.
 - [`reference/05-web-ui.md`](reference/05-web-ui.md) — browser cockpit
 - [`reference/06-adaptive-hybrid-strategy.md`](reference/06-adaptive-hybrid-strategy.md) — retired prototype and rebuild contract
 - [`reference/07-strategy-development.md`](reference/07-strategy-development.md) — **IStrategy SDK** (indicators, entry, exit, TP/SL)
+- [`reference/08-reproducibility.md`](reference/08-reproducibility.md) — deterministic seed hierarchy, manifests, artifacts, hashing and replay
 - [`reference/LAUNCH_SCRIPTS.md`](reference/LAUNCH_SCRIPTS.md) — launcher inventory; see its status warning and prefer the direct commands in `01-instructions.md`
 
 ### Architecture
@@ -99,6 +101,10 @@ Evidence for Phase 0 sessions lives outside this tree: **`reports/phase0/`**.
 ### Skills (proposals + execution records)
 - [`skills/00-OVERVIEW.md`](skills/00-OVERVIEW.md) — proposed agent skills and retained execution records; no matching project SKILL.md files
 
+### Backtest validity improvements
+- [`improvements/00-overview.md`](improvements/00-overview.md) — ordered trust-improvement programme for the local `ema-rsi-atr-pullback` strategy
+- [`improvements/09-codex-verification-runbook.md`](improvements/09-codex-verification-runbook.md) — final implementation and verification gate
+
 ### Archive
 - [`archive/`](archive/) — MERGE_PLAN, production-readiness-gaps-2026-05, QuestDB hardening logs, Edge1 cointegration packs
 
@@ -110,7 +116,7 @@ Evidence for Phase 0 sessions lives outside this tree: **`reports/phase0/`**.
 2. **Phase 0 / live capital** → [governance/01-prod.md](governance/01-prod.md) + `reports/phase0/` + [operations/01-futures-phase0-operator-sop.md](operations/01-futures-phase0-operator-sop.md)
 3. **Safety PR review** → [../AGENTS.md](../AGENTS.md) + [governance/02-prerequisites.md](governance/02-prerequisites.md) + [todos/02-P1-freeze.md](todos/02-P1-freeze.md)
 4. **Full technical picture** → [reference/02-user-manual.md](reference/02-user-manual.md) + [reference/01-instructions.md](reference/01-instructions.md) + [architecture/](architecture/)
-5. **Monte Carlo / stochastic backtests** → MC section in [reference/01-instructions.md](reference/01-instructions.md) + [todos/03-MC-simulation.md](todos/03-MC-simulation.md)
+5. **Monte Carlo / deterministic replay** → [reference/08-reproducibility.md](reference/08-reproducibility.md) + MC section in [reference/01-instructions.md](reference/01-instructions.md)
 6. **AI coding agent** → [../AGENTS.md](../AGENTS.md) first, then this README + [00-INDEX.md](00-INDEX.md)
 7. **Multi-venue (Bitget / Bitunix)** → [platforms/README.md](platforms/README.md) + [operations/03-bitget-demo.md](operations/03-bitget-demo.md)
 8. **Write a strategy (`IStrategy`)** → [reference/07-strategy-development.md](reference/07-strategy-development.md) **(must-read before coding a new strategy)**
@@ -126,6 +132,6 @@ Evidence for Phase 0 sessions lives outside this tree: **`reports/phase0/`**.
 - Aspirational / unbuilt paths must say so explicitly: *“Planned … — current details live in …”*.
 - Broken links = documentation bugs.
 - Long-form phase/ritual content lives in `governance/01-prod.md` (or ops SOPs); `reference/01-instructions.md` keeps pointers + command templates.
-- Build lists: `cmake/Sources.cmake`; presets: `CMakePresets.json` (`out/build/<preset>/` vs ad-hoc `build/`). Build presets and test presets default to one job; `linux-release-low-memory` also disables LTO. Details: [reference/01-instructions.md](reference/01-instructions.md).
+- Build lists: `cmake/Sources.cmake`; presets: `CMakePresets.json` (`out/build/<preset>/` vs ad-hoc `build/`). Build presets and test presets default to one job; `linux-release-low-memory` disables LTO, while `linux-research-only` physically omits the Live target and runs the Research artifact guards. Details: [reference/01-instructions.md](reference/01-instructions.md).
 
 **Last updated**: 2026-08-16 — serial preset defaults and low-memory build guidance.

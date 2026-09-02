@@ -6,7 +6,7 @@
 
 Opt-in latency, impact, queue, probabilistic-fill, and fee models require their respective flags. Passive-side fill pricing is always on, and the synthetic market-maker has default calibration. **Completely bypassed in live** (live venue supplies truth). Realism is for backtest + shadow divergence measurement only.
 
-**Last updated**: 2026-07 (new content impl — synthesized from instructions.md + user-manual.md; pointers only).
+**Last updated**: 2026-08 (synthetic execution-provenance disclosure).
 
 ---
 
@@ -31,6 +31,23 @@ Used in backtest (local/synthetic) and shadow (real data + simulated fills). L2-
 - `--mm-levels ... --mm-base-depth ... --mm-spread-pct ...`
 
 `--realistic-fills` and `--bar-spread-bps` remain accepted as deprecated warn-noops.
+
+### Execution-claim disclosure
+
+The default local backtest path is explicitly `synthetic_local_liquidity`:
+`LocalBookAdapter` walks the MarketMaker ladder, and a fill may be outside the
+source bar's OHLC range. This is intentional model behavior, not evidence that
+the historical market traded there. Every local fill carries its intended and
+reference prices, reference timestamp, execution reason, spread/impact bps,
+fill probability, modeled latency, fee, and fill ID. JSON/CSV exports retain
+these fields and reports label any run containing such fills
+`exploratory_synthetic`.
+
+The present synthetic ladder defaults are configurable but **not externally
+calibrated**. Treat outputs as exploratory only; do not use them to support a
+historical execution-validity claim. Opt-in queue/tape/L2 paths are distinct
+models and must retain their own per-fill labels rather than being silently
+reported as synthetic liquidity.
 
 **Bypass note** (repeated): These models are **not active** for live execution. Divergence between shadow (realistic sim) and live (venue truth) is expected and measured via `shadow_tracker`.
 

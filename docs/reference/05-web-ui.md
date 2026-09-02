@@ -26,7 +26,7 @@ cmake --build --preset linux-web --target engine_shadow engine_backtest web_asse
 
 # Backtest review: serves the final report until Ctrl-C
 ./out/build/linux-web/engine_backtest --provider local --path market_data.csv --strategy sma \
-  --web --web-assets src/web/assets
+  --seed 424242 --web --web-assets src/web/assets
 ```
 
 Frontend dev (hot reload, proxies to a running engine on :8080):

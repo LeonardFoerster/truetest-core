@@ -427,12 +427,12 @@ went. Horizons: 10 ms, 100 ms, 1 s, 5 s.
    strategy PAUSE rather than guess, and the test suites keep using the
    `sim_ledger` double.
 
-3. **`engine_live` is part of the standard build.** `CMakeLists.txt` builds
-   all three binaries; there is no research-only build flag that omits
-   `engine_live`. Live orders remain impossible in `engine_backtest` and
-   `engine_shadow` through the constexpr `target_allows_live_orders()` gate,
-   so this is a pre-existing packaging risk, not one R1 introduces. It was
-   deliberately not refactored here.
+3. **Resolved after R1 — Research packaging boundary.** The default build still
+   produces all three binaries, but `TRUETEST_RESEARCH_ONLY=ON` now omits
+   `engine_live` from the target, compile, install, and binary-package graphs.
+   The `linux-research-only` preset and `build-security` CTests enforce that
+   boundary. The unchanged constexpr `target_allows_live_orders()` gate remains
+   the second protection layer for Backtest and Shadow.
 
 4. **Short-flow signal has no producer.** `market_snapshot::short_flow_signal`
    exists and is validated, but nothing publishes it;

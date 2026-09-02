@@ -4,7 +4,7 @@
 
 **Authoritative gates**: `docs/governance/01-prod.md`, root/core `AGENTS.md` safety red lines, plan `docs/platforms/bitget.md` §12–§14.
 
-**Last updated**: 2026-07-30 (Phase 4: backfill, brackets, advisories, funding account channel).
+**Last updated**: 2026-08-27 (Bitget candle backfill contained as unsupported/fail-closed; brackets, advisories, funding account channel remain separate capabilities).
 
 ---
 
@@ -46,7 +46,7 @@ Checklist:
 
 | Surface | Support in this provider | Notes |
 |---------|--------------------------|-------|
-| **UTA v3** (default) | Full Phase 0–3 path | Public WS + private WS + REST trade + DMS + brackets + backfill |
+| **UTA v3** (default) | Phase 0–3 path with explicit limitations | Public WS + private WS + REST trade + DMS + brackets; candle backfill is unsupported/fail-closed |
 | Classic mix/v2 | **Refused** | No classic countdown DMS; `api_surface=classic` fails open |
 
 Registry names (both map to the same UTA factory):
@@ -232,13 +232,13 @@ Always complete a kill-switch drill on **demo** before any mainnet discussion:
 
 | Feature | How to use | Notes |
 |---------|------------|-------|
-| **Kline backfill** | `--stream kline1m --backfill 500` | REST `/api/v3/market/candles` → PrependTransport; intervals normalized (`4h`→`4H`) |
+| **Kline backfill** | **Unsupported / fail-closed** | Any positive count refuses provider open before backfill REST/WS I/O. A correct implementation still requires an order-free warmup barrier, causal known-at time, provenance, and REST/WS boundary reconciliation. |
 | **Position advisories** | `--margin-type crossed` / `--liquidation-warn-pct 0.05` | Startup `[ADVISORY]` logs; strict margin still via settings gate |
 | **Venue brackets** | Engine ExitManager + `get_bracket_adapter()` | UTA `place-strategy-order` tpsl full; partial fractions decline |
 | **Funding** | Private WS `account` topic | Logs `[FUNDING]` / publishes `funding_event` when balance delta present |
 | **Classic surface** | Do not set `api_surface=classic` | Open refuses; UTA only |
 
-Backfill smoke (public REST, no keys):
+Containment check (no keys):
 
 ```bash
 ./build/engine_shadow \
@@ -249,7 +249,11 @@ Backfill smoke (public REST, no keys):
   --no-pin --status-format off --no-tui
 ```
 
-Expect `backfill loaded N bars` then live kline stream. First open candle after backfill may be held by closed-bar gate until the next interval starts.
+Expect provider open to fail before a backfill REST request, public WebSocket open,
+ExecutionBridge, or DMS setup. The visible diagnostic is currently generic. For a
+direct Bitget WebSocket Kline run, pass `--backfill 0`; that permits the stream to
+open but does **not** establish correctness of its still-open causal time semantics.
+`--dry-run` does not open the provider and therefore does not prove this containment.
 
 ---
 
@@ -257,7 +261,7 @@ Expect `backfill loaded N bars` then live kline stream. First open candle after 
 
 | Statement | Status |
 |-----------|--------|
-| Phases 0–4 code + unit tests + gate scripts | Implementation complete when tests green |
+| Phases 0–4 code + unit tests + gate scripts | Incomplete: Bitget candle backfill remains explicitly unsupported/fail-closed |
 | Demo drills documented | This SOP |
 | Mainnet tiny-size live | **Not authorized by this doc** |
 | Human CCB / Phase 0 evidence | Required before any mainnet capital |

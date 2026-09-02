@@ -9,14 +9,20 @@
 ### Core / Replay / Logging
 | Flag                          | What it does |
 |-------------------------------|--------------|
-| `--replay <path>`             | Authoritative ledger replay from a finalized, current-v2, non-rotated binary event log; recorded orders, fills and funding are applied once and strategies are not rerun. Use the same initial balance as the recorded run. |
+| `--replay <path>`             | Authoritative ledger replay from a finalized, current-v3, non-rotated binary event log; v3 retains native execution identity, fee currency and cumulative fill cursors. Recorded orders, committed amendments, fills and funding are applied once and strategies are not rerun. Use the same initial balance as the recorded run. |
 | `--replay-from / --replay-to` | Both bounds are currently refused for ledger replay: prefix state is unavailable and append order need not be monotonic in exchange-event time. |
 | `--log-events <path>`         | Write binary event log (market + order + fill events) for this run. |
 | `--log-file <path>`           | Write operational text log (L1) instead of stderr. |
 | `--log-max-size <MB>`         | Rotate logs after this size (L3). 0 = no rotation. |
 | `--log-keep <N>`              | How many rotated log files to keep. |
 | `--compress-log / --no-compress-log` | Toggle zstd compression of binary event logs (default on). |
-| `--seed <uint64>`             | Master RNG seed (0 = non-deterministic). |
+| `--seed <uint64>`             | Explicit deterministic master seed. Required by backtest and Monte Carlo; an explicitly supplied `0` is a valid deterministic seed. |
+| `--write-run-manifest <path>` | Start a deterministic local-backtest or Monte-Carlo run and atomically write schema-v1 manifest plus expected hashes. |
+| `--replay-run-manifest <path>` | Reconstruct deterministic inputs from a schema-v1 run manifest; ordinary config/seed/model overrides are refused. |
+| `--artifacts-dir <path>`      | New, non-overwriting destination for deterministic run/trial artifacts and receipt. Required for replay. |
+| `--verify-hashes`             | Compare replay output hashes and report `MATCH`/`MISMATCH`; mismatch exits non-zero. |
+| `--trial <index>`             | Replay one stable Monte-Carlo trial index from a run manifest. |
+| `--allow-dataset-mismatch`    | Explicit replay-only override. Recorded in the receipt and prevents `exact_reproduction=true`. |
 
 `--log-events` is intentionally refused together with `--replay`; replay reads
 an authoritative ledger and does not generate a second event log.
@@ -51,7 +57,8 @@ Phase 0 checklist until that gap closes.
 | `--mc-trials <N>`       | Number of independent trials. |
 | `--mc-model <name>`     | Generator: `gbm` (only gbm implemented today). |
 | `--mc-parallel`         | **Experimental**: run trials concurrently (use only with `--thread-preset inline`). |
-| `--mc-reuse-objects`    | Reuse `data_handler`/strategy/etc. between MC trials for speed (results not guaranteed bit-identical on caches). |
+| `--mc-workers <N>`      | Explicit worker bound for parallel Monte Carlo; persisted in deterministic manifests. |
+| `--mc-reuse-objects`    | Reuse reset-capable `data_handler`/strategy state between MC trials. Unsupported strategies fail closed; regression tests compare reuse against fresh objects. |
 
 ### Strategy
 | Flag                  | What it does |
@@ -73,8 +80,8 @@ Phase 0 checklist until that gap closes.
 | Flag                    | What it does |
 |-------------------------|--------------|
 | `--symbol <SYM>`        | Trading symbol (e.g. `BTCUSDT`). |
-| `--stream <type>`       | `trade`, `kline`, `kline_1m` / venue kline ids, etc. On Binance, kline streams only emit closed candles (`"x": true`); forming/in-progress candles are discarded, not forwarded early. |
-| `--depth-stream <spec>` | L2 depth on same WS (Binance e.g. `depth20@100ms`; Bitget e.g. `books5`). Enables queue/impact realism and real-book seeding. |
+| `--stream <type>`       | `trade`, `kline`, `kline_1m` / venue kline ids, etc. On Binance, the direct WebSocket parser only emits closed candles (`"x": true`); forming/in-progress updates are discarded. This does not certify REST warmup or REST/WS stitching, which remain unsupported; direct Binance Kline runs require `--backfill 0`. Bitget candle streaming is currently **explicitly unsupported/fail-closed** because the frozen engine boundary cannot carry candle-open and causal known/decision time separately. |
+| `--depth-stream <spec>` | L2 depth on the same WS. Bitget `books5` remains available. Binance partial-book streams (`depth5/10/20`) are currently **explicitly unsupported/fail-closed** because their payload has no exchange event time and the parser API has no separately typed receive time; do not use them for queue/impact claims. Binance diff streams are not certified as a substitute until snapshot bootstrap/replay parity is verified. |
 | `--live`                | Required safety flag for real-money orders (mainnet triggers math captcha; sandbox skips it). Only works on `engine_live` binary. |
 | `--testnet`             | Sandbox routing: Binance → spot/futures testnet hosts; Bitget → demo/paptrading (same as `--demo`). |
 | `--demo`                | Bitget demo/paptrading endpoints (also set by `--testnet` when provider is `bitget*`). |
@@ -111,8 +118,8 @@ Phase 0 checklist until that gap closes.
 ### Backfill / Order Realism / Debug
 | Flag                        | What it does |
 |-----------------------------|--------------|
-| `--backfill <N>`            | Historical bars to fetch before streaming (default 500). |
-| `--backfill-interval`       | Kline interval for backfill. |
+| `--backfill <N>`            | Provider-specific historical bars requested before streaming (default 500). Binance `kline*` and Bitget `kline*`/`candle*` backfill are currently explicitly unsupported and fail-closed: any positive value terminates startup before backfill REST or public WebSocket I/O. Direct venue candle streams require `--backfill 0`; trade streams do not enter this path. |
+| `--backfill-interval`       | Kline interval for providers with active backfill; it has no Binance/Bitget data effect while their candle backfill is disabled. |
 | `--aggression / --qty-scale / --fill-rng-seed / --spread-step` | LocalBookAdapter / fill-model tuning knobs. |
 | `--debug-fills / --debug-fills-budget` | Log first N fills with book state (intended vs. fill). |
 
@@ -122,7 +129,7 @@ Phase 0 checklist until that gap closes.
 | `--config <path>`       | Load JSON config file. |
 | `--preset <name>`       | Apply a named run profile: `futures-phase0`, `mc-robustness`, `backtest-local-l2`, or `shadow-tape` (aliases accepted). Use `--dump-config` to inspect resolved values. |
 | `--dump-config`         | Print resolved config as JSON and exit. |
-| `--dry-run`             | Validate everything, print summary, and exit (no engine run). |
+| `--dry-run`             | Run common static validation, print a summary, and exit without opening providers or running the engine. It does not currently detect startup capability refusals such as positive Binance/Bitget candle backfill. |
 | `--rolling-window / --risk-free-rate / --periods-per-year / --max-equity-points` | Analytics (Sharpe/Sortino, equity curve decimation, etc.). |
 
 ### Realism Models (backtest/shadow only)

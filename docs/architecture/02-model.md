@@ -33,7 +33,7 @@
 
 Sonnet has a measurable tendency to add "helpful" fallback/retry logic that violates invariants.
 
-**Monte Carlo / simulation layer note**: Generally safe for Sonnet. Invariants to preserve: deterministic per-trial seeding (`base_seed` derives `trial_id ^ magic`), no hidden shared state between trials, `MonteCarloReporter` allocation-light, `--mc-parallel` only with `--thread-preset inline` (conflicts with core pinning otherwise).
+**Monte Carlo / simulation layer note**: Invariants to preserve: an explicit master seed; versioned domain-separated `DeterministicSeedDeriver` sub-seeds keyed by stable trial index; no hidden shared state between trials; index-ordered deterministic reduction; `MonteCarloReporter` allocation-light; and `--mc-parallel` only with `--thread-preset inline` (conflicts with core pinning otherwise). See [`../reference/08-reproducibility.md`](../reference/08-reproducibility.md).
 
 ## Explicit Anti-Patterns (rejected; from instructions + AGENTS.md)
 

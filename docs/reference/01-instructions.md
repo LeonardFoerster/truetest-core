@@ -12,7 +12,7 @@
 <a id="philosophy-invariants"></a>
 ## 1. Philosophy, Invariants, Safety Model
 
-TrueTest is a modular C++23 engine for reproducible backtesting, divergence-aware shadow trading, and gated live execution from a **single source tree**. Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) differ only by the compile-time `TT_TARGET` define in `src/core/tt_target.h`. Live-order paths are physically removed via dead-code elimination in non-live targets (`target_allows_live_orders()` is constexpr false).
+TrueTest is a modular C++23 engine for reproducible backtesting, divergence-aware shadow trading, and gated live execution from a **single source tree**. The default/live-capable profile builds three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) that differ by the compile-time `TT_TARGET` define in `src/core/tt_target.h`; the Research-only profile omits the Live target. Live-order paths are physically removed via dead-code elimination in non-live targets (`target_allows_live_orders()` is constexpr false).
 
 **Core non-negotiable invariants** (full authoritative list + rationale in [../governance/01-prod.md](../governance/01-prod.md); also AGENTS.md):
 
@@ -121,6 +121,55 @@ This targeted command produces `engine_backtest` and `truetest_tests` under
 `out/build/linux-tests/`. Omit `--target ...` to build all default targets,
 including all three distinct `TT_TARGET` engine binaries.
 
+**Research-only build and distribution boundary:**
+
+```bash
+cmake --preset linux-research-only
+cmake --build --preset linux-research-only
+ctest --preset linux-research-only
+cmake --install out/build/linux-research-only \
+  --prefix out/build/linux-research-only-install
+cpack --config out/build/linux-research-only/CPackConfig.cmake
+```
+
+The preset explicitly sets `TRUETEST_RESEARCH_ONLY=ON`. In that configuration
+CMake never defines `engine_live`, never compiles its exclusive
+`src/bin/engine_live/main.cpp` entry point, and omits the binary from install
+and CPack rules. A direct `--target engine_live` build therefore fails because
+the target is unknown. This is a physical build/distribution boundary, not a
+runtime setting. It supplements rather than replaces the unchanged constexpr
+`target_allows_live_orders()` protection in `src/core/tt_target.h`.
+
+The `research_artifact_guard` CTest checks the target list, direct target
+failure, built binaries, `compile_commands.json`, staged install, install
+manifest, and TGZ contents. Its negative companion injects a dummy
+`engine_live`, a `TT_TARGET_LIVE` compile command, and a renamed wrapper into a
+validated guard-owned build directory and proves rejection. A third test proves
+that live-capable venue options and stale live build trees fail at configure
+time.
+
+Research CPack intentionally permits only the audited TGZ binary generator;
+`-G DEB` overrides and source packages fail closed. The repository retains the
+live implementation for explicitly live-capable builds, so a source archive is
+not a Research distribution. The Core tree has no checked-in CI workflow;
+external CI must run the `linux-research-only` configure/build/test sequence to
+activate the three `build-security` CTests.
+
+Use a clean, dedicated Research build tree. `ENABLE_BINANCE` and
+`ENABLE_BITGET` are incompatible with Research-only because their current
+shared provider registrations compile real order transports into
+`engine_core`; CMake reports a fatal conflict instead of silently weakening the
+boundary. Local/synthetic and shadow-only Bitunix remain available.
+
+`TRUETEST_RESEARCH_ONLY` defaults to `OFF` to preserve the prior three-binary
+build. Request that mode explicitly when live development is intended:
+
+```bash
+cmake --preset linux-tests -DTRUETEST_RESEARCH_ONLY=OFF
+cmake --build --preset linux-tests --target engine_live truetest_cli_tests
+ctest --preset linux-tests
+```
+
 **Source registration:** Core and test source lists live in `cmake/Sources.cmake` (the single obvious place to register a new strategy, simulation component, or test). Optional venue/backend `.cpp` files are wired in `cmake/Dependencies.cmake` under `if(ENABLE_*)`. No directory globs.
 
 **Path contract:**
@@ -153,6 +202,7 @@ ctest --test-dir out/build/linux-providers-questdb -j1
 ```bash
 cmake --list-presets
 cmake --preset linux-tests && cmake --build --preset linux-tests
+cmake --preset linux-research-only      # Release + tests; no engine_live target/artifact
 cmake --preset linux-dev               # venues + ImGui + tests (daily desk)
 cmake --preset linux-binance-questdb   # Binance + QuestDB + tests
 cmake --preset linux-bitget            # Bitget UTA
@@ -174,6 +224,7 @@ cmake --preset linux-release-low-memory # portable Release + tests, LTO off
 - Feature: `ENABLE_QUESTDB`, `ENABLE_DEBUG` (Abseil), `ENABLE_BENCHMARKS`, `ENABLE_WEB` (civetweb — see [05-web-ui.md](05-web-ui.md)), `ENABLE_IMGUI` (GLFW/OpenGL desk).
 - Compatibility only: `ENABLE_LIVE_DATA` is a deprecated no-op. Live market data is provided by the concrete venue options above.
 - Build: `CMAKE_BUILD_TYPE=Release`, `ENABLE_LTO` (first-party Release targets; disable for lower peak memory), `ENABLE_NATIVE_OPT` (all three engines when ON), `BUILD_TESTS`, `BUILD_SHARED_LIB`.
+- Distribution boundary: `TRUETEST_RESEARCH_ONLY=ON` omits the live target, exclusive live entry point, installation, and binary CPack artifact. Default `OFF` preserves compatibility. Research CPack is TGZ-only; `ENABLE_BINANCE` and `ENABLE_BITGET` are rejected until their market-data and live-order object graphs are separated.
 - Sanitizers (Debug): `ENABLE_TSAN` is mutually exclusive with ASAN/UBSAN; `linux-asan` enables ASAN+UBSAN together, `linux-ubsan` enables UBSAN only.
 - Perf reference build: Release + ENABLE_DEBUG + NATIVE_OPT + BENCHMARKS.
 
@@ -233,8 +284,8 @@ cmake --preset linux-release-low-memory # portable Release + tests, LTO off
 
 **Providers** (`IProvider`; see also `docs/platforms/`):
 - `local`: CSV OHLCV (bar) or tick-level; multi-path.
-- `binance` / `binance-futures` (`ENABLE_BINANCE`): Combined trade + depth WS, REST execution (HybridExecutor paper/shadow, signed REST + user-data WS live), L2 seeding when `--depth-stream`.
-- `bitget` / `bitget-futures` (`ENABLE_BITGET`): UTA USDT-M futures; `--demo`/`--testnet` → paptrading; depth e.g. `books5`. Ops: `docs/operations/03-bitget-demo.md`.
+- `binance` / `binance-futures` (`ENABLE_BINANCE`): Combined trade + depth WS, REST execution (HybridExecutor paper/shadow, signed REST + user-data WS live), L2 seeding when `--depth-stream`. Candle backfill is currently **explicitly unsupported and fail-closed**: direct Binance `kline*` runs must pass `--backfill 0` because the global default is 500. A positive count terminates startup before the backfill REST request or public WebSocket open. Trade streams are unaffected. Disabling backfill is containment only; it does not certify candle-time or REST/WS-boundary semantics.
+- `bitget` / `bitget-futures` (`ENABLE_BITGET`): UTA USDT-M futures; `--demo`/`--testnet` → paptrading; depth e.g. `books5`. Candle backfill is currently **explicitly unsupported and fail-closed**: direct Bitget `kline*`/`candle*` runs must pass `--backfill 0` because the global default is 500. This bypasses only the disabled backfill path and does not certify the still-open streaming time semantics. Bitget trade streams are unaffected. Ops: `docs/operations/03-bitget-demo.md`.
 - `bitunix` / `bitunix-futures` (`ENABLE_BITUNIX`): MD + paper/shadow Phase 0–1; live order routing refused.
 - `synthetic` / `montecarlo`: GBM paths (standalone or Monte Carlo).
 - Replay: binary event log (`--replay`) or `--replay-data`.
@@ -353,7 +404,9 @@ Lock-free SPSC RingBuffer (64k slots) per worker preset. Presets: inline (single
 
 Full `provider::event` variant + market/tick/l2/order/fill/funding. OrderTracker lifecycle statuses. Cancel/amend/partial/TIF handling.
 
-**Checkpoints**: Portfolio snapshots are diagnostic-only. `--resume` and direct `resume_checkpoint_path` are refused because v1 does not contain enough state for safe recovery. A future v2 must cover orders, lots, strategy, risk, and execution state. `--seed` remains the RNG/fixed-epoch determinism control.
+**Checkpoints**: Portfolio snapshots are diagnostic-only. `--resume` and direct `resume_checkpoint_path` are refused because v1 does not contain enough state for safe recovery. A future v2 must cover orders, lots, strategy, risk, and execution state. Backtest and Monte Carlo require an explicitly supplied deterministic `--seed`; the value `0` is valid only when explicitly present and never requests entropy.
+
+**Deterministic manifest replay**: `--write-run-manifest`, `--replay-run-manifest`, `--artifacts-dir`, `--verify-hashes`, and replay-only `--trial` provide the versioned R6 run contract. Dataset/build identity, full effective model configuration, per-trial lifecycle artifacts and hash semantics are specified in [08-reproducibility.md](08-reproducibility.md).
 
 **Replay**: `--replay events.bin` applies a current-v2 recorded economic ledger exactly once; it does not rerun a strategy or regenerate fills. Supply the same `--balance` as the recorded run. `--replay-from` and non-default `--replay-to` are refused: checkpoint prefix state is unavailable and record append order need not be monotonic in exchange-event time. Legacy/headerless logs remain available to `EventReplayer` for inspection but are not accepted as authoritative engine ledgers. `--replay-data` is the separate market-data path. Regression tests compare orders, fills, trades and PnL against the source run.
 
@@ -407,14 +460,68 @@ Use reports/phase0/PROGRESS.md (0/15), templates/, scripts/phase0/ for collectio
 
 ---
 
-## 17. C API & Embedding (planned reference/c-api.md; see aspirational in docs/README.md — current surface in AGENTS.md + instructions)
+## 17. C API & Embedding
 
-Stable surface (opaque handle, JSON config same as engine_config):
-- `tt_version()`, `tt_create_engine(config_json)`, `tt_run(handle)`, `tt_get_results()` (JSON, caller frees), `tt_last_error()`, `tt_free_string()`, `tt_destroy()`.
-- nlohmann/json only at API boundary (not hot path).
-- Same ENABLE_* and TT_TARGET gating (shared lib defaults backtest target; live only in engine_live binary).
-- **Limitations today**: Batch backtest only. Shell out for live/replay/streaming. Full provider embedding future.
-- Python ctypes example (context manager, TRUETEST_LIB discovery) in c-api.md.
+Current surface (opaque handle; `tt_create_engine` accepts a C-API-specific
+schema that maps selected fields into `engine_config`):
+
+- `tt_version()`, `tt_create_engine(config_json)`, `tt_run(handle)`,
+  `tt_get_results()` (JSON, caller frees), `tt_last_error()`,
+  `tt_free_string()`, `tt_destroy()`; declarations live in
+  [`src/api/truetest_api.h`](../../src/api/truetest_api.h).
+- Required JSON field: string `data_path`. Optional fields currently parsed:
+  `symbol`, `strategy`, `initial_balance`, `seed`, `rolling_window`,
+  `risk_free_rate`, `periods_per_year`, `market_aggression`, `fill_rng_seed`,
+  `event_log_path`, and numeric strategy `params`.
+- The root must be an object. Unknown fields, wrong field types, non-finite
+  numbers, duplicate object keys at any depth, an empty `data_path` or strategy
+  name, and nonnumeric strategy params are rejected at create time.
+  `initial_balance`, `rolling_window`, and `periods_per_year` must be positive;
+  `market_aggression` must be in `(1, 2)`. Seeds are unsigned integers.
+  `fill_rng_seed` controls the local fill RNG only when `seed` is omitted or
+  zero; supplying both a nonzero `seed` and `fill_rng_seed` is rejected rather
+  than silently ignoring one value.
+- `symbol` is an optional authoritative dataset identity, for example
+  `{"data_path":"bars.csv","strategy":"sma","symbol":"BTCUSDT"}`. It must
+  be nonempty and contain no ASCII whitespace/control bytes. Matching is exact;
+  the C API does not trim or canonicalize case.
+- If any loaded bar or tick has no symbol, `symbol` is required. When supplied,
+  every existing nonempty identity is checked first; only then are blank
+  records bound. A mismatch fails closed without relabeling the dataset.
+- C API batch loads are strict: if any input row is malformed or rejected by
+  domain validation, the complete loaded batch is rolled back and `tt_run`
+  returns code `3`; the diagnostic includes the rejected-row count.
+- Fully named input needs no synthetic identity; when `symbol` is omitted, the
+  identity policy preserves existing names. This ingestion rule does **not**
+  establish correctness of multi-symbol benchmark/return analytics (C-15 is
+  still open).
+- `tt_run` executes a handle at most once. Concurrent or later calls return the
+  first attempt's cached code/error without reloading data or running the engine
+  again. `tt_get_results()` is available only when that attempt succeeded;
+  inspect `tt_last_error()` after any nonzero result.
+- `tt_last_error()` is thread-local and its pointer remains valid only until the
+  next C API call on that same thread. Each non-null `tt_get_results()` buffer is
+  separately allocated and must be passed to `tt_free_string()`.
+- Handle lifetime is caller-owned: `tt_destroy()` is valid only after every
+  in-flight `tt_run()`/`tt_get_results()` call using that handle has returned
+  and been joined. Concurrent destroy/use is unsupported.
+
+| Code | Meaning |
+|------|---------|
+| `0` | Engine run completed successfully |
+| `1` | Null handle |
+| `2` | Unknown strategy |
+| `3` | Data load or dataset-symbol-policy failure |
+| `4` | Exception while preparing or running the engine |
+| `5` | Engine returned from `run()` halted or failed |
+
+- In the C API, nlohmann/json is used only at the API boundary, never on the
+  hot path.
+- **Limitations today**: local batch backtesting only. The C API does not expose
+  provider, streaming, replay, shadow, live-order, TUI, or QuestDB paths.
+  Custom `qty_scale` is rejected until quantity-to-atom conversion failures can
+  propagate transactionally through order submission; `spread_step_factor` is
+  rejected because it has no consumer on this local path.
 
 ---
 

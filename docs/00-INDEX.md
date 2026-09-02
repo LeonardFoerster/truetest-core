@@ -5,7 +5,7 @@
 **Topic navigation** (by task): [`docs/README.md`](README.md).  
 **Authoritative gates/tasks**: root `AGENTS.md`, `docs/governance/`, `docs/todos/`, `reports/phase0/`.
 
-**Last updated**: 2026-08-19 (engine-decomposition Phase 3: added `docs/architecture/05-engine-boundaries.md`)
+**Last updated**: 2026-09-01 (R6 deterministic manifests, hashing and replay)
 
 ## Recommended 01-N order
 
@@ -27,7 +27,7 @@
 16. `docs/operations/03-bitget-demo.md` — Bitget demo (not Phase 0 qualifying).
 17. `docs/platforms/README.md` (+ `bitget.md`, `bitunix.md`) — Multi-venue status.
 18. `docs/architecture/04-performance.md` — Capacities, threading, limits.
-19. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md`, `07-strategy-development.md` — Specialized reference (strategy authors: **must read 07 before implementation**).
+19. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md`, `07-strategy-development.md`, `08-reproducibility.md` — Specialized reference (strategy authors: **must read 07 before implementation**; deterministic-run operators: read 08).
 20. `docs/archive/` — Historical only (MERGE_PLAN, gaps snapshot, QuestDB logs, Edge1). Not current status.
 21. `docs/internal/engine-decomposition.md` + `engine-decomposition-design.md` — `engine.{h,cpp}` decomposition plan (+ skill `engine-decomposition`).
 22. `docs/internal/data-pipeline.md` — Market-data path redesign (`MarketSeries`, `DataWrapper`; mostly shipped).
@@ -37,6 +37,7 @@
 26. `docs/todos/10-BF-backtest-engine-bugfixes.md` — Backtest defect backlog and frozen-surface sequencing.
 27. `docs/internal/r3-authoritative-risk-accounting.md` — Authoritative order/position ledger and mark-to-market risk snapshot (risk register R3): removed proxies, data flow, VaR and funding decisions.
 28. `docs/internal/r1-inventory-aware-market-making.md` — Inventory-aware market-making strategy (risk register R1): model, safety semantics, verification, known gaps.
+29. `docs/improvements/00-overview.md` → `01`–`09` — Trust-improvement plans for the local `ema-rsi-atr-pullback` end-to-end backtest; execute in numeric order.
 
 ## Processing notes
 
@@ -45,7 +46,7 @@
 | **Phase 0 operator** | 01 → 03 → 07 → 13 → 08 |
 | **Safety PR reviewer** | 02 → 04 → 05 → run freeze script |
 | **Full technical picture** | 09 → 08 → 10–12 → 17 |
-| **MC / research** | 08 (MC section) + 09 + `todos/03-MC-simulation.md` |
+| **MC / reproducible research** | 08 (MC section) + `reference/08-reproducibility.md` + 09 |
 | **Strategy author** | 18 → `reference/07-strategy-development.md` (+ 08 flags) |
 | **Multi-venue** | 16 + 15 + CMake presets `linux-bitget` / `linux-bitunix` / `linux-venues` |
 | **Engine decomp implementer** | 20 + `internal/engine-decomposition-design.md` + skill |

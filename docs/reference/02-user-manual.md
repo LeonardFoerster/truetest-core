@@ -119,7 +119,8 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
 
 **Stochastic Backtesting (Monte Carlo)**:
 Full details + caveats + usage in [../governance/01-prod.md](../governance/01-prod.md) (MC disclaimer), [01-instructions.md](01-instructions.md) (MC flags), [../governance/03-todo.md](../governance/03-todo.md) (MC-* high-level) or docs/todos/03-MC-simulation.md (full status verbatim).
-- Use `--monte-carlo --mc-trials N --provider synthetic`
+- Use `--monte-carlo --mc-trials N --provider synthetic --seed <uint64>`;
+  the explicit master seed is mandatory.
 - Reuses engine/strategies/realism/ExitManager per trial; object reuse (`--mc-reuse-objects`), experimental `--mc-parallel` (inline preset only).
 - Reporter: per-trial + aggregate stats (text/JSON).
 - Caveats: stylized L2; research tool only — does not relax Phase 0/1 gates. See governance for current status (MC-01/MC-02 landed).
@@ -260,6 +261,7 @@ For operational details, golden queries, retention/TTL recommendations, soak tes
     --strategy sma \
     --sma-period 20 \
     --balance 10000 \
+    --seed 424242 \
     --fee tiered --maker-rate 0.0002 --taker-rate 0.0004
 ```
 
@@ -267,13 +269,23 @@ Expected output: ANSI dashboard showing equity curve, trade count, win rate, fin
 
 **2. Shadow (paper) trading session on real Binance mainnet**
 
+Before running, set `BINANCE_MAKER_RATE` and `BINANCE_TAKER_RATE` from the
+current venue fee schedule, and set `ANALYTICS_PERIODS_PER_YEAR` to the
+explicit sampling semantics used for this run. Do not substitute guessed
+defaults.
+
 ```bash
 ./build/engine_shadow \
+    --mode shadow \
     --provider binance-futures \
     --symbol btcusdt \
-    --stream kline_1m \
+    --stream trade \
     --depth-stream depth20@100ms \
     --strategy mean-reversion \
+    --fee tiered \
+    --maker-rate "$BINANCE_MAKER_RATE" \
+    --taker-rate "$BINANCE_TAKER_RATE" \
+    --periods-per-year "$ANALYTICS_PERIODS_PER_YEAR" \
     --persist --run-tag shadow_btc_$(date +%F) \
     --log-events logs/shadow_$(date +%F).bin \
     --record tapes/btc_$(date +%F).txt \

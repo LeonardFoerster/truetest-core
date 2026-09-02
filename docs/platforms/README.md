@@ -1,6 +1,6 @@
 # Platforms — Multi-Venue Provider Integration
 
-**Status (2026-08-02):** Product venues: **Binance** (golden), **Bitget** (landed), **Bitunix** (Phase 0–1 MD/shadow).  
+**Status (2026-08-27):** Product venues: **Binance** (golden provider/live-safety reference; candle backfill unsupported/fail-closed), **Bitget** (landed), **Bitunix** (Phase 0–1 MD/shadow).
 **Bybit / Gate.io** full trees are **not** on this branch — archived at git tag `archive/provider-2026-07-30`.
 
 **Audience:** Agents implementing new CEX providers for TrueTest `core/`.
@@ -11,7 +11,7 @@
 
 | Venue | Registry names | Focus | Tree |
 |-------|----------------|-------|------|
-| **Binance** | `binance`, `binance-futures` | Spot + USDT-M futures (golden path) | `src/providers/binance/` |
+| **Binance** | `binance`, `binance-futures` | Spot + USDT-M futures (golden provider/live-safety path; no candle backfill) | `src/providers/binance/` |
 | **Bitget** | `bitget`, `bitget-futures` | UTA USDT-M | `src/providers/bitget/` |
 | **Bitunix** | `bitunix`, `bitunix-futures` | USDT perps MD/shadow | `src/providers/bitunix/` |
 
@@ -47,7 +47,9 @@ Thin Phase-0 stubs that previously sat on `master` under `src/providers/bybit/` 
 | Hot path | No `nlohmann::json`; hand parsers; zero heap on hot path |
 | Layers | `./scripts/check-layer-deps.sh` green |
 
-Golden reference: `src/providers/binance/*` (especially `binance_futures_*`).
+Golden provider/live-safety reference: `src/providers/binance/*` (especially
+`binance_futures_*`). This does not include candle backfill, which remains
+explicitly unsupported/fail-closed.
 
 ---
 

@@ -14,6 +14,8 @@
 - 08-H-persistence-observability.md: Persistence, Observability & Hardening (H-01..H-07 + additional + QuestDB branch note). H-07 (2026-08-18): mainnet durable-log gate doesn't reject non-regular-file sinks — frozen (`main.inc`) track.
 - 09-other-future-gates.md: Other / Nice-to-Have / Future Venues + Go-Live Gate (9 rows) + invariants from AGENTS.md/ENGINE + AI coding rules summary.
 - 10-BF-backtest-engine-bugfixes.md: Backtest Engine Bug Fixes (BF-01..BF-17) from the 2026-08-14 entry/exit/PnL/risk/analytics audit; splits into a non-frozen fast track and a frozen-surface (`engine.cpp`) CCB track.
+- 11-F-forensic-lifecycle-audit.md: Forensic Trade-Lifecycle Audit Fixes (F-01..F-10b) from the 2026-08-22 runtime-trace audit of `ema-rsi-atr-pullback`. **All items RESOLVED 2026-08-22** in one CCB cycle: F-01 (phantom stop-outs), F-02 (silent strategy deadlock on rejected delayed orders — now one engine-owned terminal-transition emitter, the same seam BF-02/BF-09 want), F-03 (unarmed brackets under synchronous fills), F-04 (sizing blind to execution cost), F-05 (no bankruptcy stop, no spot cash rule), F-06..F-10b. Open questions 4 (live adapter fill-timing certification) and 6 (tick/L2/streaming/shadow/MC paths unaudited) remain.
+
 
 **How to Reference in PRs / Commits** (authoritative):
 - Cite the file and item ID, for example: "Addresses `docs/todos/01-P0-phase0.md` P0-01".
@@ -55,8 +57,10 @@ docs/todos/
 ├── 07-A-adaptive-hybrid.md
 ├── 08-H-persistence-observability.md
 ├── 09-other-future-gates.md
-└── 10-BF-backtest-engine-bugfixes.md
+├── 10-BF-backtest-engine-bugfixes.md
+└── 11-F-forensic-lifecycle-audit.md
 ```
+
 
 (No subdirectories; completed items remain in their owning file or the overview summary.)
 
@@ -72,6 +76,8 @@ Rationale for grouping + numbering (logical by existing todo.md sections; sequen
 - 08: Persistence/QuestDB/Hardening (H-*; note: all QuestDB work on `database` branch per todo)
 - 09: Other/Nice-to-Have + Go-Live Gate rows + future venues (unnumbered bullets + overarching gates)
 - 10: Backtest engine defects and their implementation/verification tracks (BF-*)
+- 11: Forensic trade-lifecycle audit defects and their verification evidence (F-*)
+
 
 Filenames chosen for readability (e.g. 01-P0-phase0.md not 01-P0.md) and to match examples in task ("01-P0-phase0.md").
 
@@ -136,6 +142,7 @@ The remaining sections preserve the original split rationale. References to a ro
 - Frozen files list in 02-P1-freeze.md verified identical to scripts/check-live-safety-freeze.sh + docs/governance/02-prerequisites.md + docs/governance/01-prod.md + AGENTS.md .
 - Also updated internal governance references post-reorg for accuracy where they intersected todo split (e.g. governance/03-todo.md thinned to point to docs/todos/).
 
-**Last updated**: 2026-08-18 (H-07 added — mainnet durable-log gate frozen-track item; see 08-H-persistence-observability.md).
+**Last updated**: 2026-08-22 (F-01..F-10b landed — forensic trade-lifecycle audit closed in one CCB cycle; see 11-F-forensic-lifecycle-audit.md).
+
 
 See thin `docs/governance/03-todo.md` for high-level canonical entry + individual `docs/todos/NN-*.md` for full verbatim task details.

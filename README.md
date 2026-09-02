@@ -32,7 +32,16 @@
 > **Primary platform** — **Linux** (best supported). Windows and macOS are secondary (presets exist for Windows; macOS builds via toolchain + Homebrew).  
 > **This tree** — C++ engine package **`core/`** inside the TrueTest workspace (sibling packages: `backend/`, `UI/`, …). This README documents **only** the engine.
 
-Three binaries share one codebase and differ only by compile-time `TT_TARGET`. Live-order paths are **physically eliminated** (DCE) in non-live targets via `src/core/tt_target.h` → `target_allows_live_orders()`.
+The default/live-capable graph builds three binaries from one codebase; they
+differ only by compile-time `TT_TARGET`. Live-order paths are **physically
+eliminated** (DCE) in non-live targets via `src/core/tt_target.h` →
+`target_allows_live_orders()`.
+
+For distributable research builds, `TRUETEST_RESEARCH_ONLY=ON` adds a stronger
+build-system boundary: CMake does not define, compile, install, or package the
+`engine_live` target or its exclusive entry-point translation unit. This is not
+a runtime mode. The existing `target_allows_live_orders()` gate remains intact
+as an independent second protection layer for the shared codebase.
 
 **Run profiles:** `--preset` selects a named bundle. Profile-owned values are applied after JSON configuration; explicit CLI flags take priority. There is **no** `TRUETEST_CONFIG` environment variable. Use `--dump-config` to inspect the resolved options.
 
@@ -49,7 +58,7 @@ Three binaries share one codebase and differ only by compile-time `TT_TARGET`. L
 What exists **in this tree today** (not aspirational):
 
 ### Engine & modes
-- Three compile-time targets: `engine_backtest` · `engine_shadow` · `engine_live`
+- Default/live-capable graph: `engine_backtest` · `engine_shadow` · `engine_live`; Research-only: Backtest + Shadow only
 - Headless / CI-friendly runs (`--no-tui`, `--status-format`, `--dry-run`, `--dump-config`)
 - Multi-strategy runs (`--strategy sma,mean-reversion`)
 - Platform protective exits: `--exit-policy` (`floor` default) · `--sl` · `--tp`
@@ -134,6 +143,54 @@ Primary development and CI target. Prefer **CMake presets** → binaries in `out
 ```bash
 ./scripts/clean-builds.sh                              # dry-run list
 ./scripts/clean-builds.sh --keep linux-tests --apply   # drop everything else
+```
+
+#### Research-only distribution
+
+The named preset sets `TRUETEST_RESEARCH_ONLY=ON` explicitly; its default is
+`OFF` to preserve the historical live-capable build graph. Always use its
+dedicated, clean build directory: a reused tree containing a stale
+`engine_live` is refused during configuration.
+
+```bash
+cmake --preset linux-research-only
+cmake --build --preset linux-research-only
+ctest --preset linux-research-only
+cmake --install out/build/linux-research-only \
+  --prefix out/build/linux-research-only-install
+cpack --config out/build/linux-research-only/CPackConfig.cmake
+```
+
+The Research Artifact Guard in CTest proves that `engine_backtest` and
+`engine_shadow` exist while `engine_live` is neither a target nor a build,
+install-manifest, staged-install, or TGZ member. It also rejects the exclusive
+`src/bin/engine_live/main.cpp`, any `TT_TARGET_LIVE` compile definition, and
+unexpected renamed wrappers. Negative self-tests inject each forbidden form.
+Research CPack is intentionally TGZ-only; command-line generator overrides and
+source archives fail closed because the retained source tree still contains the
+gated live implementation. The installable package—not a source archive—is the
+Research distribution boundary.
+
+`ENABLE_BINANCE` and `ENABLE_BITGET` are deliberately incompatible with this
+profile because their current shared provider registrations compile real order
+transports into `engine_core`. CMake rejects either combination with a clear
+error. Local/synthetic and the shadow-only Bitunix backend remain available.
+This preserves the physical Research distribution boundary without changing
+the existing venue-capable Shadow/Live graph when
+`TRUETEST_RESEARCH_ONLY=OFF`.
+
+The three `build-security` CTests are the CI gate for this profile. This Core
+tree has no checked-in CI workflow; any external CI must explicitly run
+`cmake --preset linux-research-only`, build it, and then run
+`ctest --preset linux-research-only`.
+
+An explicitly live-capable development configure remains available and still
+uses every pre-existing live-safety gate:
+
+```bash
+cmake --preset linux-tests -DTRUETEST_RESEARCH_ONLY=OFF
+cmake --build --preset linux-tests --target engine_live truetest_cli_tests
+ctest --preset linux-tests
 ```
 
 #### Arch Linux / Manjaro / EndeavourOS
@@ -257,6 +314,7 @@ cmake --preset linux-release-low-memory && cmake --build --preset linux-release-
 | Shadow/live link | **ncurses** (wide) |
 | `ENABLE_BINANCE` / `BITGET` / `BITUNIX` | **Boost** + **OpenSSL** |
 | `ENABLE_LIVE_DATA` | Deprecated no-op; use a concrete venue option |
+| `TRUETEST_RESEARCH_ONLY` | No extra dependency; physically omits `engine_live`; incompatible with current live-capable `ENABLE_BINANCE` / `ENABLE_BITGET` backends |
 | `ENABLE_QUESTDB` | none (raw sockets) |
 | `ENABLE_WEB` | FetchContent civetweb; **npm** only for SPA assets |
 | `ENABLE_IMGUI` | **OpenGL** + **GLFW**; FetchContent ImGui/ImPlot |
@@ -381,7 +439,8 @@ Optional hygiene: `scripts/check-credentials.sh`. Full flags: [`docs/reference/0
 ./build/engine_backtest \
   --provider local \
   --path market_data.csv \
-  --strategy sma
+  --strategy sma \
+  --seed 424242
 ```
 
 **2. Headless synthetic / CI-style**
@@ -400,6 +459,7 @@ Optional hygiene: `scripts/check-credentials.sh`. Full flags: [`docs/reference/0
   --provider synthetic \
   --strategy sma \
   --monte-carlo --mc-trials 50 \
+  --seed 424242 \
   --mc-reuse-objects \
   --thread-preset inline \
   --no-pin --status-format off --no-tui

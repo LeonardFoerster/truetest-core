@@ -2,7 +2,12 @@
 
 **TrueTest (hft-engine)** is a modular, high-performance C++23 trading engine that delivers reproducible backtesting, divergence-aware shadow trading, and gated live execution from a **single source tree**.
 
-Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) are produced from the identical codebase and differ only by the compile-time `TT_TARGET` define. Live-order paths are physically removed via dead-code elimination in non-live targets.
+The default/live-capable profile produces three binaries (`engine_backtest`,
+`engine_shadow`, `engine_live`) from the same codebase; they differ by the
+compile-time `TT_TARGET` define. The `linux-research-only` profile instead
+physically omits the Live target, entry point, installation, and package.
+Live-order paths remain removed via dead-code elimination in non-live targets,
+so the unchanged compile-time gate is an independent second layer.
 
 **Intended Use & Scope**: Full version in [01-prod.md](01-prod.md). Private personal research/retail tool only. Live experimental/tiny/attended. See 01-prod.md.
 
@@ -38,8 +43,8 @@ Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) are produced 
 ## Providers & Data Sources
 
 - **`local`** (always available): OHLCV bar CSV and tick-level CSV.
-- **`binance`** / **`binance-futures`**: Binance Spot + USDT-M Futures (trade, kline, depth20, combined streams). Full REST + WebSocket execution, backfill, recording/replay. Requires `ENABLE_BINANCE`.
-- **`bitget`** / **`bitget-futures`**: Bitget UTA USDT-M futures (trade, kline, books depth). Requires `ENABLE_BITGET`. Demo/paptrading via `--demo`/`--testnet`. See `docs/operations/03-bitget-demo.md`.
+- **`binance`** / **`binance-futures`**: Binance Spot + USDT-M Futures (trade and direct closed-kline streams). REST + WebSocket execution and recording/replay; candle backfill is currently explicitly unsupported/fail-closed, and direct Kline streams require `--backfill 0`. Partial-book `depth5/10/20` input is also fail-closed because it carries no exchange event time and the current parser contract cannot carry a typed receive time. The frozen provider capability still advertises that L2 surface and therefore remains an open CCB item; do not use Binance L2 for verified runs. Requires `ENABLE_BINANCE`.
+- **`bitget`** / **`bitget-futures`**: Bitget UTA USDT-M futures (trade and books depth). Candle backfill and candle streaming are currently explicitly unsupported/fail-closed; the streaming blocker is the frozen engine's missing separation of candle-open and causal known/decision time. Requires `ENABLE_BITGET`. Demo/paptrading via `--demo`/`--testnet`. See `docs/operations/03-bitget-demo.md`.
 - **`bitunix`** / **`bitunix-futures`**: Bitunix futures MD + paper/shadow (Phase 0–1; live order routing refused). Requires `ENABLE_BITUNIX`. See `docs/platforms/bitunix.md`.
 - **`synthetic`** / **`montecarlo`**: On-demand GBM path generation (standalone or Monte Carlo campaigns). Configurable `mu`, `sigma`, steps, initial price.
 - **Binary replay**: `--replay` from zstd-compressed event logs (deterministic, with time slicing).
