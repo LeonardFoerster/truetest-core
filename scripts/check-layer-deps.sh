@@ -30,25 +30,26 @@ ALLOWED[types]=""
 ALLOWED[indicator]=""
 ALLOWED[utils]=""
 ALLOWED[debug]=""
+ALLOWED[reproducibility]=""
 ALLOWED[orderbook]="core types"
 ALLOWED[threading]="core utils debug"
-ALLOWED[execution]="core types orderbook"
-ALLOWED[analytics]="core threading risk types"
-ALLOWED[market_maker]="core orderbook threading types"
+ALLOWED[execution]="core types orderbook reproducibility"
+ALLOWED[analytics]="core threading risk types utils"
+ALLOWED[market_maker]="core orderbook threading types reproducibility"
 ALLOWED[risk]="core execution analytics"
 ALLOWED[strategy]="core types indicator execution exits threading"
 ALLOWED[data]="core types utils debug execution"
 ALLOWED[exits]="core"
-ALLOWED[simulation]="analytics data engine execution exits providers strategy"
+ALLOWED[simulation]="analytics data engine execution exits providers strategy reproducibility"
 ALLOWED[ui]="analytics core providers"
 ALLOWED[presets]=""
 ALLOWED[providers]="core types utils data orderbook execution engine exits risk simulation threading ui"
-ALLOWED[engine]="core types indicator utils debug threading orderbook execution analytics market_maker risk strategy data providers exits ui"
-ALLOWED[api]="engine core data strategy execution"
-ALLOWED[web]="ui analytics"   # read-only serializers: dashboard_snapshot + AnalyticsReport
+ALLOWED[engine]="core types indicator utils debug threading orderbook execution analytics market_maker risk strategy data providers exits ui reproducibility"
+ALLOWED[api]="engine core data strategy execution reproducibility"
+ALLOWED[web]="ui analytics utils"   # read-only serializers + neutral JSON emitter
 # Executable composition root: it is allowed to wire every application layer,
 # but is still checked so a newly introduced src/ module cannot bypass review.
-ALLOWED[bin]="core data debug engine execution market_maker orderbook presets providers simulation strategy threading ui utils web"
+ALLOWED[bin]="core data debug engine execution market_maker orderbook presets providers simulation strategy threading ui utils web reproducibility"
 
 # Current cross-module contracts beyond the original lower-layer graph:
 #   * analytics/footprint (footprint.md §2.2) aggregates the leaf PublicTrade
@@ -80,6 +81,18 @@ for d in src/*/; do
 done
 
 violations=0
+
+# engine_core is linked into every binary and must not acquire an optional
+# presentation-layer translation unit. Include-only checks cannot see this
+# CMake edge, so enforce the source-list boundary explicitly.
+if awk '
+    /^set\(ENGINE_CORE_SOURCES/ { inside=1; next }
+    inside && /^\)/ { inside=0 }
+    inside { print }
+' cmake/Sources.cmake | grep -qE 'src/web/'; then
+    echo "FORBIDDEN: ENGINE_CORE_SOURCES contains src/web/ — core serializers belong in their owning domain layer" >&2
+    violations=$((violations + 1))
+fi
 
 # A new src-level module must receive an explicit graph rule. Silently skipping
 # an unknown module would let every include edge from that module bypass this
