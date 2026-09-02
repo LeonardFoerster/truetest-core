@@ -3,7 +3,6 @@
 #include "../imonte_carlo_generator.h"
 
 #include <cstdint>
-#include <random>
 #include <string>
 
 namespace truetest::simulation {

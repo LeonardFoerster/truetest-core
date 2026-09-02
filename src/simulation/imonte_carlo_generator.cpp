@@ -11,6 +11,7 @@ std::vector<SyntheticPath> IMonteCarloGenerator::generate_batch(
     uint64_t base_seed,
     const McGeneratorConfig& cfg) {
 
+    validate_mc_batch_capacity(n_paths, cfg);
     std::vector<SyntheticPath> paths;
     paths.reserve(n_paths);
     for (size_t i = 0; i < n_paths; ++i) {

@@ -2,6 +2,7 @@
 
 #include "monte_carlo_types.h"
 #include "imonte_carlo_generator.h"
+#include "simulation/monte_carlo_aggregate.h"
 
 #include "data/data_handler.h"
 #include "execution/portfolio.h"
@@ -16,10 +17,6 @@
 #include <vector>
 
 namespace truetest::simulation {
-
-// Pure serial reduction used by MonteCarloController and cheap metric tests.
-// Trial order is retained so callers can drill down by trial_id afterwards.
-void summarize_monte_carlo_trials(McAggregate& aggregate);
 
 /**
  * High-level orchestrator for running Monte Carlo campaigns.
@@ -53,6 +50,10 @@ public:
      */
     McAggregate run();
 
+    // Reproduce one stable trial without executing earlier indices. The seed
+    // and artifact name depend only on master seed + trial_index.
+    TrialResult run_trial(std::size_t trial_index);
+
     const McRunConfig& config() const { return config_; }
 
 private:
@@ -67,6 +68,8 @@ private:
 
     // Phase 5 optimization: version that accepts a pre-generated path from batch generation.
     TrialResult run_single_trial_with_path(std::size_t trial_index, SyntheticPath path);
+    void persist_failed_trial(std::size_t trial_index,
+                              const std::string& error) const noexcept;
 
 private:
     // Phase A (object reuse)
