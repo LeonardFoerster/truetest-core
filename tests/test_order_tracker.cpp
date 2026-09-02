@@ -6,14 +6,35 @@
 #include <thread>
 #include <vector>
 
+namespace {
+
+order_event make_registered_order(std::uint64_t id)
+{
+    order_event order(
+        std::chrono::system_clock::time_point{std::chrono::milliseconds{1}},
+        "BTCUSDT", order_type::limit, order_side::buy,
+        1.0, 100.0);
+    order.set_order_id(id);
+    return order;
+}
+
+void register_order(OrderTracker& tracker, std::uint64_t id)
+{
+    ASSERT_TRUE(tracker.register_order(make_registered_order(id)));
+}
+
+}
+
 TEST(OrderTracker, ActiveCountTracksLifecycleTransitionsExactly)
 {
     OrderTracker tracker;
 
     EXPECT_EQ(tracker.active_count(), 0u);
+    // Unknown lifecycle messages never mint phantom active orders.
     tracker.set_status(1, order_status::rejected);
     EXPECT_EQ(tracker.active_count(), 0u);
 
+    register_order(tracker, 2);
     tracker.set_status(2, order_status::pending);
     EXPECT_EQ(tracker.active_count(), 1u);
     tracker.set_status(2, order_status::open);
@@ -30,6 +51,9 @@ TEST(OrderTracker, ActiveCountTracksLifecycleTransitionsExactly)
 TEST(OrderTracker, ActiveCountSupportsIndependentOrdersAndReset)
 {
     OrderTracker tracker;
+    register_order(tracker, 1);
+    register_order(tracker, 2);
+    register_order(tracker, 3);
     tracker.set_status(1, order_status::pending);
     tracker.set_status(2, order_status::open);
     tracker.set_status(3, order_status::partially_filled);
@@ -49,6 +73,9 @@ TEST(OrderTracker, ActiveCountAtomicSupportsConcurrentReaders)
     std::atomic<bool> writer_done{false};
     std::atomic<bool> out_of_range{false};
     std::vector<std::thread> readers;
+
+    for (std::size_t id = 1; id <= order_count; ++id)
+        register_order(tracker, id);
 
     for (int i = 0; i < 4; ++i)
     {

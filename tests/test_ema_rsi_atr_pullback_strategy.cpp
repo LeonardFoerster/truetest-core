@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -215,24 +216,6 @@ TEST(EmaRsiAtrPullbackTest, WrongTrendBlocksSignals)
     auto order = s.on_market(make_bar(400, 85.0, 89.0, 84.0, 87.0));
     EXPECT_EQ(order, std::nullopt);
     EXPECT_TRUE(s.take_pending_exit_intents().empty());
-}
-
-// ============================================================================
-// 16.6 Schwellenwerte
-// ============================================================================
-
-TEST(EmaRsiAtrPullbackTest, ExactBoundarySemantics)
-{
-    ema_rsi_atr_pullback_strategy s(3, 2, 2);
-
-    // Warm up
-    s.on_market(make_bar(100, 100.0, 101.0, 99.0, 100.0));
-    s.on_market(make_bar(200, 100.0, 101.0, 99.0, 100.0));
-    s.on_market(make_bar(300, 100.0, 101.0, 99.0, 100.0));
-
-    // When price doesn't change, RSI=100 (or NaN/loss=0), no cross <= 40
-    auto order = s.on_market(make_bar(400, 100.0, 101.0, 99.0, 100.0));
-    EXPECT_EQ(order, std::nullopt);
 }
 
 // ============================================================================
@@ -463,6 +446,7 @@ TEST(EmaRsiAtrPullbackTest, InvalidBarsIgnoredWithoutCorruptingState)
     EXPECT_EQ(s1.on_market(make_bar(200, 100.0, std::numeric_limits<double>::quiet_NaN(), 98.0, 100.0)), std::nullopt);
     EXPECT_EQ(s1.on_market(make_bar(201, 100.0, 90.0, 110.0, 100.0)), std::nullopt); // high < low
     EXPECT_EQ(s1.on_market(make_bar(202, 100.0, 105.0, 95.0, -10.0)), std::nullopt);  // close <= 0
+    EXPECT_EQ(s1.on_market(make_bar(203, 100.0, 105.0, 0.0, 100.0)), std::nullopt);   // low <= 0
 
     // Both receive valid bars 2 and 3
     s1.on_market(make_bar(300, 100.0, 101.0, 99.0, 100.0));

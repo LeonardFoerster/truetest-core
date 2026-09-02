@@ -178,6 +178,125 @@ TEST(DataBridge, BatchSkipsMalformedLines)
 	// DR-REPLAY-02: unparseable frames must be accounted (not silently dropped).
 	EXPECT_EQ(stats.accepted, 2u);
 	EXPECT_EQ(stats.rejected, 2u);
+	const auto rejected = parser->rejections();
+	ASSERT_EQ(rejected.size(), 2u);
+	EXPECT_EQ(rejected[0].physical_row, 3u);
+	EXPECT_EQ(rejected[0].reason,
+	          tt::data_provenance::rejection_reason::malformed_numeric);
+	EXPECT_EQ(rejected[1].physical_row, 4u);
+	EXPECT_EQ(rejected[1].reason,
+	          tt::data_provenance::rejection_reason::empty_row);
+}
+
+TEST(CsvBarParser, ClassifiesPhysicalRowsAndAcceptedIndexes)
+{
+	CsvBarParser parser;
+	ASSERT_TRUE(parser.parse_header(
+		"date,symbol,open,high,low,close,volume,open_time"));
+
+	auto first = parser.parse_record(
+		"2024-01-01,AAPL,100,105,95,102,1000,1704067200000");
+	ASSERT_TRUE(first.has_value());
+	ASSERT_TRUE(first->source.has_value());
+	EXPECT_EQ(first->source->physical_row, 2u);
+	EXPECT_EQ(first->source->accepted_index, 0u);
+
+	EXPECT_FALSE(parser.parse_record(
+		"date,symbol,open,high,low,close,volume,open_time"));
+	EXPECT_FALSE(parser.parse_record(
+		"2024-01-02,AAPL,100junk,105,95,102,1000,1704153600000"));
+	EXPECT_FALSE(parser.parse_record(
+		"2024-01-03,AAPL,100,105,95,,1000,1704240000000"));
+
+	auto second = parser.parse_record(
+		"2024-01-04,AAPL,103,107,101,106,900,1704326400000");
+	ASSERT_TRUE(second.has_value());
+	ASSERT_TRUE(second->source.has_value());
+	EXPECT_EQ(second->source->physical_row, 6u);
+	EXPECT_EQ(second->source->accepted_index, 1u);
+
+	const auto rejected = parser.rejections();
+	ASSERT_EQ(rejected.size(), 3u);
+	EXPECT_EQ(rejected[0].physical_row, 3u);
+	EXPECT_EQ(rejected[0].reason,
+	          tt::data_provenance::rejection_reason::repeated_header);
+	EXPECT_EQ(rejected[1].physical_row, 4u);
+	EXPECT_EQ(rejected[1].reason,
+	          tt::data_provenance::rejection_reason::malformed_numeric);
+	EXPECT_EQ(rejected[1].field, tt::data_provenance::source_field::open);
+	EXPECT_EQ(rejected[2].physical_row, 5u);
+	EXPECT_EQ(rejected[2].reason,
+	          tt::data_provenance::rejection_reason::missing_required_field);
+	EXPECT_EQ(rejected[2].field, tt::data_provenance::source_field::close);
+}
+
+TEST(CsvBarParser, NewHeaderResetsSchemaAndRowState)
+{
+	CsvBarParser parser;
+	ASSERT_TRUE(parser.parse_header(
+		"date,symbol,open,high,low,close,volume"));
+	ASSERT_TRUE(parser.parse_record(
+		"2024-01-01,AAPL,100,105,95,102,1000"));
+
+	EXPECT_FALSE(parser.parse_header(
+		"date,symbol,open,low,close,volume"));
+	EXPECT_TRUE(parser.rejections().empty());
+	EXPECT_EQ(parser.physical_rows_seen(), 1u);
+}
+
+TEST(CsvBarParser, RejectsMalformedExplicitTimestamp)
+{
+	CsvBarParser parser;
+	ASSERT_TRUE(parser.parse_header(
+		"date,symbol,open,high,low,close,volume,open_time"));
+	EXPECT_FALSE(parser.parse_record(
+		"2024-01-01,AAPL,100,105,95,102,1000,not-a-timestamp"));
+
+	const auto rejected = parser.rejections();
+	ASSERT_EQ(rejected.size(), 1u);
+	EXPECT_EQ(rejected[0].physical_row, 2u);
+	EXPECT_EQ(rejected[0].reason,
+	          tt::data_provenance::rejection_reason::invalid_timestamp);
+	EXPECT_EQ(rejected[0].field,
+	          tt::data_provenance::source_field::open_time);
+}
+
+TEST(CsvBarParser, ClassifiesWhitespaceOnlyRowAsEmpty)
+{
+	CsvBarParser parser;
+	ASSERT_TRUE(parser.parse_header(
+		"date,symbol,open,high,low,close,volume"));
+	EXPECT_FALSE(parser.parse_record("  \t\r"));
+
+	const auto rejected = parser.rejections();
+	ASSERT_EQ(rejected.size(), 1u);
+	EXPECT_EQ(rejected[0].physical_row, 2u);
+	EXPECT_EQ(rejected[0].reason,
+	          tt::data_provenance::rejection_reason::empty_row);
+}
+
+TEST(DataBridge, BatchRejectsDomainInvalidBarBeforeSinkMutation)
+{
+	SilenceBridge quiet;
+	auto transport = std::make_shared<MockBatchTransport>(std::vector<std::string>{
+		"date,symbol,open,high,low,close,volume",
+		"2024-01-01,AAPL,100,105,95,102,1000",
+		"2024-01-02,AAPL,106,105,95,102,1000",
+	});
+	auto parser = std::make_shared<CsvBarParser>();
+	DataBridge<bar_record> bridge(transport, parser);
+	MarketSeries series;
+	LoadStats stats;
+
+	EXPECT_TRUE(bridge.load_into(series, &stats));
+	EXPECT_EQ(stats.accepted, 1u);
+	EXPECT_EQ(stats.rejected, 1u);
+	ASSERT_EQ(parser->rejections().size(), 1u);
+	EXPECT_EQ(parser->rejections()[0].reason,
+	          tt::data_provenance::rejection_reason::open_outside_range);
+	EXPECT_EQ(series.validation_errors(), 0u);
+	EXPECT_EQ(series.last_bar_rejection(),
+	          tt::data_provenance::rejection_reason::none);
 }
 
 TEST(DataBridge, BatchLoadsTickRecords)
@@ -278,14 +397,20 @@ TEST(DataBridge, BinanceFormingKlineDoesNotTerminateBeforeClosedKline)
 
 	const std::string forming =
 		R"({"stream":"btcusdt@kline_1m","data":)"
-		R"({"e":"kline","E":1,"s":"BTCUSDT","k":)"
-		R"({"t":1000,"s":"BTCUSDT","o":"100","h":"102",)"
+		R"({"e":"kline","E":1704067201000,"s":"BTCUSDT","k":)"
+		R"({"t":1704067200000,"T":1704067259999,"s":"BTCUSDT","i":"1m","o":"100","h":"102",)"
 		R"("l":"99","c":"101","v":"2","x":false}}})";
 	const std::string closed =
 		R"({"stream":"btcusdt@kline_1m","data":)"
-		R"({"e":"kline","E":2,"s":"BTCUSDT","k":)"
-		R"({"t":1000,"s":"BTCUSDT","o":"100","h":"103",)"
+		R"({"e":"kline","E":1704067260000,"s":"BTCUSDT","k":)"
+		R"({"t":1704067200000,"T":1704067259999,"s":"BTCUSDT","i":"1m","o":"100","h":"103",)"
 		R"("l":"99","c":"102","v":"3","x":true}}})";
+	{
+		BinanceCombinedParser probe;
+		EXPECT_EQ(probe.classify_empty_frame(forming),
+		          empty_parse_status::ignored);
+		EXPECT_TRUE(probe.parse_record(closed).has_value());
+	}
 
 	transport->enqueue(forming); // first streaming frame is also parsed
 	transport->enqueue(closed);
@@ -297,7 +422,10 @@ TEST(DataBridge, BinanceFormingKlineDoesNotTerminateBeforeClosedKline)
 	const auto result = bridge->run_streaming(dh);
 	stopper.join();
 
-	ASSERT_TRUE(result.success());
+	ASSERT_TRUE(result.success())
+		<< "termination=" << static_cast<int>(result.termination)
+		<< " accepted=" << result.accepted
+		<< " rejected=" << result.rejected;
 	EXPECT_EQ(result.rejected, 0u);
 	ASSERT_EQ(dh->bar_count(), 1u);
 	EXPECT_DOUBLE_EQ(dh->bar_at(0).close, 102.0);

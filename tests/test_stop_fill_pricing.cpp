@@ -112,7 +112,7 @@ TEST(StopFillPricing, BuyStopFillsAtStopNotClose)
     SilenceCout quiet;
     auto dh = make_bars({{100, 101, 99, 100},
                          {100, 101, 99, 100},
-                         {103, 115, 102, 114}});
+                         {104, 115, 104, 114}});
     auto strat = std::make_shared<StopPlacer>(
         order_type::stop, order_side::buy, 104.0);
 
@@ -123,6 +123,31 @@ TEST(StopFillPricing, BuyStopFillsAtStopNotClose)
     ASSERT_GT(px, 0.0) << "stop must trigger and fill";
     EXPECT_NEAR(px, 104.0 * 1.002, 1e-3)
         << "fill anchored at the stop price, not the bar close";
+}
+
+TEST(StopFillPricing, C10_StopActivationUsesTriggerReferenceNotFutureBarClose)
+{
+    SilenceCout quiet;
+    auto dh = make_bars({{100, 101, 99, 100},
+                         {100, 101, 99, 100},
+                         {103, 115, 102, 114}});
+    auto strat = std::make_shared<StopPlacer>(
+        order_type::stop, order_side::buy, 104.0);
+    auto cfg = make_cfg();
+    // qty=10: causal trigger valuation is 1,040 and must pass. Valuing the
+    // converted stop at the not-yet-observable close produces 1,140 and a
+    // false risk rejection.
+    cfg.risk.max_position_value = 1'100.0;
+
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.run();
+
+    ASSERT_TRUE(eng.run_succeeded());
+    const double px = first_fill_price(eng);
+    ASSERT_GT(px, 0.0)
+        << "a stop inside the cap at its causal trigger reference must not "
+           "be rejected using the future candle close";
+    EXPECT_NEAR(px, 104.0 * 1.002, 1e-3);
 }
 
 // Trigger bar gaps through the stop (opens at 108 > 104): the fill

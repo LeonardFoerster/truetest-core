@@ -680,6 +680,7 @@ TEST(BitgetFuturesKillSwitch, NullPostReturnsFalse)
 {
     SilenceStderr quiet;
     BitgetFuturesKillSwitch ks(nullptr, "USDT-FUTURES", "BTCUSDT");
+    EXPECT_FALSE(ks.is_operational());
     EXPECT_FALSE(ks.cancel_all_and_flatten(std::chrono::milliseconds(1000)));
 }
 
@@ -697,6 +698,7 @@ TEST(BitgetFuturesKillSwitch, PassesShrinkingAbsoluteDeadlineToCalls)
     post->sleep_on_call = std::chrono::milliseconds(10);
     BitgetFuturesKillSwitch ks(
         wrap(post), "USDT-FUTURES", "BTCUSDT", position_readback());
+    EXPECT_TRUE(ks.is_operational());
     EXPECT_TRUE(ks.cancel_all_and_flatten(std::chrono::milliseconds(4500)));
     ASSERT_EQ(post->deadlines.size(), 2u);
     EXPECT_GT(post->deadlines[0].count(), 0);

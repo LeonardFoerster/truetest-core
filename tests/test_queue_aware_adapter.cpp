@@ -56,6 +56,13 @@ TEST(QueueAwareBookAdapter, OptInJoinFrontWithoutL2)
     std::vector<fill_event> fills;
     ASSERT_TRUE(a.poll_fills(fills));
     EXPECT_NEAR(fills[0].get_filled_quantity(), 5.0, 1e-9);
+    EXPECT_NE(fills[0].get_fill_id(), 0u);
+    EXPECT_EQ(fills[0].get_source(), fill_source::simulated);
+    EXPECT_EQ(fills[0].get_provenance().model,
+              fill_execution_model::queue_aware_paper);
+    EXPECT_EQ(fills[0].get_provenance().reason,
+              fill_execution_reason::recorded_trade_print);
+    EXPECT_TRUE(fills[0].get_provenance().exploratory);
 }
 
 TEST(QueueAwareBookAdapter, SubmitAfterL2_JoinsBackOfQueue)
@@ -189,6 +196,10 @@ TEST(QueueAwareBookAdapter, SweepRestingRange_BuyLimitInBarLow)
     EXPECT_NEAR(fills[0].get_fill_price(), 99.5, 1e-9);  // maker at limit
     EXPECT_NEAR(fills[0].get_remaining_qty(), 0.0, 1e-9);
     EXPECT_EQ(a.live_order_count(), 0u);
+    EXPECT_EQ(fills[0].get_provenance().model,
+              fill_execution_model::queue_aware_paper);
+    EXPECT_EQ(fills[0].get_provenance().reason,
+              fill_execution_reason::bar_range_sweep);
 }
 
 TEST(QueueAwareBookAdapter, SweepRestingRange_MissesWhenNotTraversed)

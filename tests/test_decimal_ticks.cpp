@@ -111,26 +111,24 @@ TEST(DecimalTicks, ExactDivisionDifferentScales)
     EXPECT_EQ(*ticks, 2704510);
 }
 
-TEST(DecimalTicks, RoundsToNearestOnUnalignedPrice)
+TEST(DecimalTicks, RejectsUnalignedPriceAboveHalfTick)
 {
     // price=100.07, tick=0.1 -> 100.07/0.1 = 1000.7 -> rounds to 1001.
     auto price = parse_decimal("100.07");
     auto tick = parse_decimal("0.1");
     ASSERT_TRUE(price && tick);
     auto ticks = decimal_to_ticks(*price, *tick);
-    ASSERT_TRUE(ticks.has_value());
-    EXPECT_EQ(*ticks, 1001);
+    EXPECT_FALSE(ticks.has_value());
 }
 
-TEST(DecimalTicks, RoundsDownWhenBelowHalfway)
+TEST(DecimalTicks, RejectsUnalignedPriceBelowHalfTick)
 {
     // 100.04 / 0.1 = 1000.4 -> rounds to 1000.
     auto price = parse_decimal("100.04");
     auto tick = parse_decimal("0.1");
     ASSERT_TRUE(price && tick);
     auto ticks = decimal_to_ticks(*price, *tick);
-    ASSERT_TRUE(ticks.has_value());
-    EXPECT_EQ(*ticks, 1000);
+    EXPECT_FALSE(ticks.has_value());
 }
 
 TEST(DecimalTicks, RejectsZeroTickSize)
@@ -169,6 +167,16 @@ TEST(DecimalTicks, RejectsPathologicalScaleSpread)
     EXPECT_FALSE(decimal_to_ticks(price, tick).has_value());
 }
 
+TEST(DecimalTicks, ExtremeMantissasRejectWithoutSignedOverflow)
+{
+    EXPECT_FALSE(decimal_to_ticks(
+        DecimalValue{std::numeric_limits<std::int64_t>::max(), 0},
+        DecimalValue{2, 0}).has_value());
+    EXPECT_FALSE(decimal_to_ticks(
+        DecimalValue{std::numeric_limits<std::int64_t>::min(), 0},
+        DecimalValue{1, 0}).has_value());
+}
+
 // --- decimal_to_atoms ---
 
 TEST(DecimalTicks, AtomsExactWhenIncreasingPrecision)
@@ -190,23 +198,21 @@ TEST(DecimalTicks, AtomsExactWhenScaleMatches)
     EXPECT_EQ(*atoms, 1);
 }
 
-TEST(DecimalTicks, AtomsRoundWhenReducingPrecision)
+TEST(DecimalTicks, AtomsRejectWhenReducingPrecisionWouldRoundUp)
 {
     // qty="1.567" at atom_decimals=2 -> 156.7 -> rounds to 157.
     auto qty = parse_decimal("1.567");
     ASSERT_TRUE(qty.has_value());
     auto atoms = decimal_to_atoms(*qty, 2);
-    ASSERT_TRUE(atoms.has_value());
-    EXPECT_EQ(*atoms, 157);
+    EXPECT_FALSE(atoms.has_value());
 }
 
-TEST(DecimalTicks, AtomsRoundDownWhenBelowHalfway)
+TEST(DecimalTicks, AtomsRejectWhenReducingPrecisionWouldRoundDown)
 {
     auto qty = parse_decimal("1.564");
     ASSERT_TRUE(qty.has_value());
     auto atoms = decimal_to_atoms(*qty, 2);
-    ASSERT_TRUE(atoms.has_value());
-    EXPECT_EQ(*atoms, 156);
+    EXPECT_FALSE(atoms.has_value());
 }
 
 TEST(DecimalTicks, AtomsRejectsNegativeAtomDecimals)

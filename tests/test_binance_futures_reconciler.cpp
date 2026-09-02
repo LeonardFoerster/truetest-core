@@ -111,6 +111,7 @@ TEST(BinanceFuturesReconciler, MalformedSuccessPayloadRefuses)
     BinanceFuturesReconciler r(
         BinanceFuturesReconciler::injected_get, get, "BTCUSDT");
     portfolio p;
+    EXPECT_TRUE(r.is_operational());
     EXPECT_FALSE(r.reconcile(p, 10.0).empty());
 }
 
@@ -144,6 +145,7 @@ TEST(BinanceReconciler, LocalFlatVenueBaseHoldingRefuses)
         BinanceReconciler::injected_get, get,
         "BTCUSDT", "BTC", "USDT");
     portfolio p(1000.0);
+    EXPECT_TRUE(r.is_operational());
     EXPECT_NE(r.reconcile(p, 10.0).find("position drift"), std::string::npos);
 }
 
@@ -151,6 +153,7 @@ TEST(BinanceFuturesReconciler, NullRestClientReturnsError)
 {
     BinanceFuturesReconciler r(nullptr, "BTCUSDT");
     portfolio p;
+    EXPECT_FALSE(r.is_operational());
     auto note = r.reconcile(p, /*tolerance_bps=*/100.0);
     EXPECT_NE(note.find("no REST client"), std::string::npos);
 }

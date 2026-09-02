@@ -26,6 +26,7 @@ TEST(BinanceFuturesKillSwitch, NullRestReturnsFalseAndDoesNotCrash)
 {
     SilenceStderr quiet;
     BinanceFuturesKillSwitch ks(nullptr, "BTCUSDT", nullptr);
+    EXPECT_FALSE(ks.is_operational());
     EXPECT_FALSE(ks.cancel_all_and_flatten(std::chrono::milliseconds(1000)));
 }
 
@@ -63,6 +64,7 @@ TEST(BinanceFuturesKillSwitch, CancelFailureStillAttemptsReduceOnlyFlatten)
         BinanceFuturesKillSwitch::injected_requests,
         del, get, post, "BTCUSDT");
 
+    EXPECT_TRUE(ks.is_operational());
     EXPECT_FALSE(ks.cancel_all_and_flatten(std::chrono::seconds(1)));
     ASSERT_EQ(calls.size(), 5u);
     EXPECT_EQ(calls[0].first, "/fapi/v1/allOpenOrders");
@@ -160,6 +162,7 @@ TEST(BinanceKillSwitch, CancelFailureAndLockedInventoryStillSellFreeButFail)
     BinanceKillSwitch ks(
         BinanceKillSwitch::injected_requests,
         del, get, post, "BTCUSDT", "BTC");
+    EXPECT_TRUE(ks.is_operational());
     EXPECT_FALSE(ks.cancel_all_and_flatten(std::chrono::seconds(1)));
     EXPECT_EQ(posts, 1);
 }

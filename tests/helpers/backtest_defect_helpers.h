@@ -115,11 +115,22 @@ struct FeeProbeStrategy : IStrategy {
     }
     std::vector<param_def> get_param_schema() const override
     {
+        const auto effective = [this](double observed, double fallback) {
+            return state && observed >= 0.0 ? observed : fallback;
+        };
         return {
-            {"entry_fee_rate", 0.0, 0.0, 0.05, ""},
-            {"exit_fee_rate", 0.0, 0.0, 0.05, ""},
-            {"fixed_fee_per_leg", 0.0, 0.0, 1e6, ""},
-            {"risk_fraction", 0.02, 0.0, 1.0, ""},
+            {"entry_fee_rate",
+             effective(state ? state->last_entry_fee : -1.0, 0.0),
+             0.0, 0.05, ""},
+            {"exit_fee_rate",
+             effective(state ? state->last_exit_fee : -1.0, 0.0),
+             0.0, 0.05, ""},
+            {"fixed_fee_per_leg",
+             effective(state ? state->last_fixed_fee : -1.0, 0.0),
+             0.0, 1e6, ""},
+            {"risk_fraction",
+             effective(state ? state->last_risk_fraction : -1.0, 0.02),
+             0.0, 1.0, ""},
         };
     }
     void set_param(const std::string& key, double value) override

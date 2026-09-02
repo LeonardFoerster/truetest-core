@@ -53,6 +53,14 @@ TEST(HybridExecutor, NoLatency_FillsVisibleImmediately)
     std::vector<fill_event> fills;
     ASSERT_TRUE(hx->poll_fills(fills));
     EXPECT_EQ(fills.size(), 1u);
+    ASSERT_NE(fills[0].get_fill_id(), 0u);
+    EXPECT_EQ(fills[0].get_source(), fill_source::simulated);
+    const auto& provenance = fills[0].get_provenance();
+    EXPECT_EQ(provenance.model, fill_execution_model::synthetic_local_liquidity);
+    EXPECT_EQ(provenance.reason, fill_execution_reason::market_maker_requote);
+    EXPECT_TRUE(provenance.exploratory);
+    EXPECT_DOUBLE_EQ(provenance.intended_price, 100.0);
+    EXPECT_DOUBLE_EQ(provenance.reference_price, 100.0);
 }
 
 TEST(HybridExecutor, WireLatency_FillHeldUntilWindowElapses)
@@ -172,6 +180,34 @@ TEST(HybridExecutor, QueueModelDemuxesMarketableAndPassiveLimits)
     EXPECT_EQ(fills[0].get_order_id(), 1002u);
     EXPECT_NEAR(fills[0].get_commission(), 99.0 * 0.001, 1e-12)
         << "passive queue fill must retain maker fees";
+}
+
+TEST(HybridExecutor, BatchedAggressiveResidualKeepsCreationOrder)
+{
+    auto paper = std::make_shared<BinanceExecutor>();
+    paper->set_symbol("BTCUSDT");
+    paper->set_last_price(100.0);
+    auto book = std::make_shared<orderbook>();
+    auto hx = std::make_shared<HybridExecutor>(
+        paper, book, nullptr, std::make_shared<PerfectFillModel>(),
+        1e8, 0.0001, nullptr, std::make_shared<BackCancelModel>());
+    hx->on_mid_price(100.0);
+    hx->on_l2_snapshot("BTCUSDT", {{100.01, 0.0}}, {});
+
+    order_event crossing(tp{us(0)}, "BTCUSDT", order_type::limit,
+                         order_side::buy, 1.5, 100.01);
+    crossing.set_order_id(1010);
+    crossing.set_earliest_eligible_ts(tp{us(0)});
+    hx->submit_order(crossing);
+    hx->on_trade("BTCUSDT", 100.01, 1.0, tp{us(1)});
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(hx->poll_fills(fills));
+    ASSERT_EQ(fills.size(), 2u);
+    EXPECT_GT(fills[0].get_fill_id(), 0u);
+    EXPECT_GT(fills[1].get_fill_id(), fills[0].get_fill_id());
+    EXPECT_NEAR(fills[0].get_remaining_qty(), 0.5, 1e-9);
+    EXPECT_NEAR(fills[1].get_remaining_qty(), 0.0, 1e-9);
 }
 
 TEST(HybridExecutor, PartialFillRetainsLatencyUntilResidualCancel)
@@ -420,6 +456,14 @@ TEST(BitgetHybridExecutor, AdvanceTimeReleasesWireDelayedFill)
     ASSERT_TRUE(hx->poll_fills(fills));
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_EQ(fills[0].get_order_id(), 3001u);
+    EXPECT_NE(fills[0].get_fill_id(), 0u);
+    EXPECT_EQ(fills[0].get_source(), fill_source::simulated);
+    const auto& provenance = fills[0].get_provenance();
+    EXPECT_EQ(provenance.model, fill_execution_model::synthetic_local_liquidity);
+    EXPECT_EQ(provenance.reason, fill_execution_reason::market_maker_requote);
+    EXPECT_TRUE(provenance.exploratory);
+    EXPECT_DOUBLE_EQ(provenance.intended_price, 100.0);
+    EXPECT_DOUBLE_EQ(provenance.reference_price, 100.0);
     EXPECT_EQ(hx->pending_latency_order_count(), 0u);
 }
 
@@ -503,6 +547,38 @@ TEST(BitgetHybridExecutor, QueueModelDemuxesMarketableAndPassiveLimits)
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_EQ(fills[0].get_order_id(), 3004u);
     EXPECT_NEAR(fills[0].get_commission(), 99.0 * 0.001, 1e-12);
+}
+
+TEST(BitgetHybridExecutor, BatchedAggressiveResidualKeepsCreationOrder)
+{
+    using bitget_tp = std::chrono::system_clock::time_point;
+    using bitget_us = std::chrono::microseconds;
+
+    auto paper = std::make_shared<BitgetPaperExecutor>();
+    paper->set_symbol("BTCUSDT");
+    paper->set_last_price(100.0);
+    auto book = std::make_shared<orderbook>();
+    auto hx = std::make_shared<BitgetHybridExecutor>(
+        paper, book, nullptr, std::make_shared<PerfectFillModel>(),
+        1e8, 0.0001, nullptr, std::make_shared<BackCancelModel>());
+    hx->on_mid_price(100.0);
+    hx->on_l2_snapshot("BTCUSDT", {{100.01, 0.0}}, {});
+
+    order_event crossing(bitget_tp{bitget_us(0)}, "BTCUSDT",
+                         order_type::limit, order_side::buy, 1.5, 100.01);
+    crossing.set_order_id(3010);
+    crossing.set_earliest_eligible_ts(bitget_tp{bitget_us(0)});
+    hx->submit_order(crossing);
+    hx->on_trade("BTCUSDT", 100.01, 1.0,
+                 bitget_tp{bitget_us(1)});
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(hx->poll_fills(fills));
+    ASSERT_EQ(fills.size(), 2u);
+    EXPECT_GT(fills[0].get_fill_id(), 0u);
+    EXPECT_GT(fills[1].get_fill_id(), fills[0].get_fill_id());
+    EXPECT_NEAR(fills[0].get_remaining_qty(), 0.5, 1e-9);
+    EXPECT_NEAR(fills[1].get_remaining_qty(), 0.0, 1e-9);
 }
 
 TEST(BitgetHybridExecutor, CancelLatencyStateRetiresWhenCancelBecomesEffective)

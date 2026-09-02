@@ -15,6 +15,32 @@ namespace {
 
 static auto now() { return std::chrono::system_clock::now(); }
 
+class OperationalReconciler final : public IReconciler
+{
+public:
+    bool is_operational() const noexcept override { return true; }
+    std::string reconcile(const portfolio&, double) override { return {}; }
+};
+
+class OperationalKillSwitch final : public IKillSwitch
+{
+public:
+    bool is_operational() const noexcept override { return true; }
+    bool cancel_all_and_flatten(std::chrono::milliseconds) override
+    {
+        return true;
+    }
+};
+
+WriteSafetyReadiness validated_write_safety_readiness()
+{
+    OperationalReconciler reconciler;
+    OperationalKillSwitch kill_switch;
+    return validate_startup_safety(
+        true, true, true, private_execution_capability::exchange_writes,
+        &reconciler, &kill_switch).readiness;
+}
+
 class FakeOrderTransport : public IOrderTransport
 {
 public:
@@ -124,6 +150,8 @@ public:
     {
         state_ = lifecycle::open;
         if (status_cb_) status_cb_(state_, "opened");
+        if (!message_on_open_.empty() && message_cb_)
+            message_cb_(message_on_open_);
         return true;
     }
     void close() override { state_ = lifecycle::closed; }
@@ -142,6 +170,7 @@ public:
     lifecycle  state_ = lifecycle::closed;
     message_cb message_cb_;
     status_cb  status_cb_;
+    std::string message_on_open_;
 };
 
 class FakeEncoder : public IOrderEncoder
@@ -178,7 +207,8 @@ public:
     }
 };
 
-// Test wire format: "kind|client_id|exchange_id|symbol|side|qty|price"
+// Test wire format:
+// "kind|client_id|exchange_id|symbol|side|qty|price[|exec_id|cumulative]"
 // Kinds: ack, partial, full, cancel, reject, expire
 class FakeParser : public IFillParser
 {
@@ -210,9 +240,23 @@ public:
         out.side              = (parts[4] == "buy") ? order_side::buy : order_side::sell;
         out.last_fill_qty     = std::stod(parts[5]);
         out.last_fill_price   = std::stod(parts[6]);
-        out.ts                = std::chrono::system_clock::now();
+        out.venue_execution_id = parts.size() > 7 && !parts[7].empty()
+            ? parts[7]
+            : "fake-exec-" + std::to_string(
+                next_exec_id_.fetch_add(1, std::memory_order_relaxed) + 1U);
+        if (parts.size() > 8 && !parts[8].empty())
+        {
+            out.cumulative_qty = std::stod(parts[8]);
+            out.has_cumulative_qty = true;
+        }
+        out.commission_asset = "USD";
+        out.ts = std::chrono::system_clock::time_point(
+            std::chrono::milliseconds(123456));
         return true;
     }
+
+private:
+    std::atomic<std::uint64_t> next_exec_id_{0};
 };
 
 class FakeFundingParser : public IFillParser
@@ -262,6 +306,7 @@ struct bridge_harness
         d.fill_tx  = ft;
         d.encoder  = en;
         d.parser   = pa;
+        d.write_safety_readiness = validated_write_safety_readiness();
         d.start_transport_thread = false;
         bridge = std::make_unique<ExecutionBridge>(std::move(d));
     }
@@ -288,6 +333,96 @@ TEST(ExecutionBridge, OpensTransports)
     ASSERT_TRUE(h.bridge->open());
     EXPECT_TRUE(h.tx->opened_);
     EXPECT_EQ(h.ft->state(), IFillTransport::lifecycle::open);
+}
+
+TEST(ExecutionBridge, UnvalidatedWriteSafetyRejectsBeforeTransportOrMutation)
+{
+    auto tx = std::make_shared<FakeOrderTransport>();
+    auto ft = std::make_shared<FakeFillTransport>();
+    ExecutionBridge::deps d;
+    d.order_tx = tx;
+    d.fill_tx = ft;
+    d.encoder = std::make_shared<FakeEncoder>();
+    d.parser = std::make_shared<FakeParser>();
+    d.start_transport_thread = false;
+    ExecutionBridge bridge(std::move(d));
+
+    EXPECT_FALSE(bridge.open());
+    EXPECT_FALSE(tx->opened_);
+    EXPECT_EQ(ft->state(), IFillTransport::lifecycle::closed);
+    EXPECT_NE(bridge.last_error().find("write safety readiness"),
+              std::string::npos);
+
+    bridge.submit_order(make_order(9001));
+    EXPECT_FALSE(bridge.cancel_order(9001));
+    bridge.drain_outbound_for_test();
+    EXPECT_TRUE(tx->submissions_.empty());
+    EXPECT_TRUE(tx->cancels_.empty());
+    EXPECT_NE(bridge.last_error().find("write safety readiness"),
+              std::string::npos);
+}
+
+TEST(ExecutionBridge, C05_AuthoritativeLifecycleUsesBoundedEngineHandoff)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(41));
+
+    h.ft->deliver("ack|tt-41|EX-41|TEST|buy|0|0");
+    venue_lifecycle_event event;
+    ASSERT_TRUE(h.bridge->poll_lifecycle_event(event));
+    EXPECT_EQ(event.engine_order_id, 41u);
+    EXPECT_EQ(event.transition, venue_order_transition::acknowledged);
+    EXPECT_EQ(event.exchange_ts.time_since_epoch(),
+              std::chrono::milliseconds(123456));
+    EXPECT_FALSE(h.bridge->poll_lifecycle_event(event));
+
+    h.ft->deliver("cancel|tt-41|EX-41|TEST|buy|0|0");
+    ASSERT_TRUE(h.bridge->poll_lifecycle_event(event));
+    EXPECT_EQ(event.engine_order_id, 41u);
+    EXPECT_EQ(event.transition, venue_order_transition::canceled);
+    EXPECT_FALSE(h.bridge->poll_lifecycle_event(event));
+}
+
+TEST(ExecutionBridge, C05_LifecycleHandoffOverflowFailsClosedWithoutOverwrite)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(42));
+
+    for (std::size_t i = 0; i < 4097; ++i)
+        h.ft->deliver("ack|tt-42|EX-42|TEST|buy|0|0");
+
+    std::vector<ExecutionBridge::status_event> statuses;
+    ASSERT_TRUE(h.bridge->poll_status(statuses));
+    ASSERT_FALSE(statuses.empty());
+    EXPECT_EQ(statuses.back().state, IFillTransport::lifecycle::error);
+    EXPECT_NE(statuses.back().note.find("lifecycle ingress capacity"),
+              std::string::npos);
+
+    std::size_t delivered = 0;
+    venue_lifecycle_event event;
+    while (h.bridge->poll_lifecycle_event(event)) ++delivered;
+    EXPECT_EQ(delivered, 4096u)
+        << "overflow must preserve the complete admitted prefix";
+
+    const auto submitted_before = h.tx->submissions_.size();
+    h.bridge->submit_order(make_order(43));
+    h.bridge->drain_outbound_for_test();
+    EXPECT_EQ(h.tx->submissions_.size(), submitted_before)
+        << "lifecycle loss closes venue mutation admission terminally";
+}
+
+TEST(ExecutionBridge, FatalIngressDuringOpenCannotBeClearedByStartup)
+{
+    bridge_harness h;
+    h.ft->message_on_open_ =
+        "full|tt-3|EX-1|TEST|buy|nan|100";
+
+    EXPECT_FALSE(h.bridge->open());
+    h.bridge->submit_order(make_order(3, "TEST", 1.0, 100.0));
+    EXPECT_NE(h.bridge->last_error().find("quiesced"), std::string::npos);
+    EXPECT_TRUE(h.tx->submissions_.empty());
 }
 
 TEST(ExecutionBridge, SubmitEncodesAndSends)
@@ -340,7 +475,19 @@ TEST(ExecutionBridge, FullFillRoundtrip)
     EXPECT_EQ(f.get_side(), order_side::buy);
     EXPECT_DOUBLE_EQ(f.get_filled_quantity(), 1.5);
     EXPECT_DOUBLE_EQ(f.get_fill_price(), 60000.0);
+    EXPECT_EQ(f.get_venue_execution_id(), "fake-exec-1");
+    EXPECT_EQ(f.get_commission_currency(), "USD");
+    EXPECT_TRUE(f.has_cumulative_filled_qty());
+    EXPECT_DOUBLE_EQ(f.get_cumulative_filled_qty(), 1.5);
+    EXPECT_EQ(f.get_cumulative_source(),
+              fill_cumulative_source::engine_accumulated);
     EXPECT_EQ(f.get_source(), fill_source::exchange);
+    EXPECT_EQ(f.get_provenance().model, fill_execution_model::venue_reported);
+    EXPECT_EQ(f.get_provenance().reason,
+              fill_execution_reason::venue_execution_report);
+    EXPECT_FALSE(f.get_provenance().exploratory);
+    EXPECT_DOUBLE_EQ(f.get_provenance().intended_price, 60000.0);
+    EXPECT_DOUBLE_EQ(f.get_provenance().reference_price, 60000.0);
     EXPECT_FALSE(f.is_partial());
 }
 
@@ -365,6 +512,140 @@ TEST(ExecutionBridge, PartialThenFull)
     EXPECT_DOUBLE_EQ(fills[1].get_filled_quantity(), 6.0);
     EXPECT_FALSE(fills[1].is_partial());
     EXPECT_DOUBLE_EQ(fills[1].get_remaining_qty(), 0.0);
+}
+
+TEST(ExecutionBridge, TransactionalDeliveryRetainsHeadUntilMatchingAck)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(3, "TEST", 10.0, 100.0));
+
+    h.ft->deliver("partial|tt-3|EX-1|TEST|buy|4|100");
+    h.ft->deliver("full|tt-3|EX-1|TEST|buy|6|100");
+
+    ASSERT_TRUE(h.bridge->supports_transactional_fill_delivery());
+    fill_event first({}, "", 0, order_side::buy, 0.0, 0.0);
+    ASSERT_TRUE(h.bridge->peek_fill(first));
+    EXPECT_DOUBLE_EQ(first.get_filled_quantity(), 4.0);
+
+    fill_event repeated({}, "", 0, order_side::buy, 0.0, 0.0);
+    ASSERT_TRUE(h.bridge->peek_fill(repeated));
+    EXPECT_EQ(repeated.get_fill_id(), first.get_fill_id());
+    EXPECT_DOUBLE_EQ(repeated.get_filled_quantity(), 4.0);
+
+    EXPECT_FALSE(h.bridge->acknowledge_fill(first.get_fill_id() + 1));
+    fill_event still_first({}, "", 0, order_side::buy, 0.0, 0.0);
+    ASSERT_TRUE(h.bridge->peek_fill(still_first));
+    EXPECT_EQ(still_first.get_fill_id(), first.get_fill_id());
+
+    ASSERT_TRUE(h.bridge->acknowledge_fill(first.get_fill_id()));
+    fill_event second({}, "", 0, order_side::buy, 0.0, 0.0);
+    ASSERT_TRUE(h.bridge->peek_fill(second));
+    EXPECT_DOUBLE_EQ(second.get_filled_quantity(), 6.0);
+    EXPECT_NE(second.get_fill_id(), first.get_fill_id());
+    ASSERT_TRUE(h.bridge->acknowledge_fill(second.get_fill_id()));
+    EXPECT_FALSE(h.bridge->peek_fill(second));
+}
+
+TEST(ExecutionBridge, LargeOrderFirstUnitFillIsForwardProgress)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(
+        3, "TEST", 1'000'000'000.0, 1.0));
+
+    h.ft->deliver(
+        "partial|tt-3|EX-1|TEST|buy|1|1|native-first|1");
+    fill_event fill({}, "", 0, order_side::buy, 0.0, 0.0);
+    ASSERT_TRUE(h.bridge->peek_fill(fill));
+    EXPECT_DOUBLE_EQ(fill.get_filled_quantity(), 1.0);
+    EXPECT_DOUBLE_EQ(fill.get_cumulative_filled_qty(), 1.0);
+    EXPECT_DOUBLE_EQ(fill.get_remaining_qty(), 999'999'999.0);
+}
+
+TEST(ExecutionBridge, LargeOrderFractionalOverfillFailsBeforeEnqueue)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(
+        3, "TEST", 1'000'000'000.0, 1.0));
+
+    h.ft->deliver(
+        "full|tt-3|EX-1|TEST|buy|1000000000.5|1|native-over|1000000000.5");
+    fill_event fill({}, "", 0, order_side::buy, 0.0, 0.0);
+    EXPECT_FALSE(h.bridge->peek_fill(fill));
+    std::vector<ExecutionBridge::submit_result> results;
+    ASSERT_TRUE(h.bridge->poll_submit_results(results));
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_TRUE(results[0].fatal);
+    EXPECT_NE(results[0].error.find("cumulative quantity is inconsistent"),
+              std::string::npos);
+}
+
+TEST(ExecutionBridge, NativeExecutionReplayIsExactlyOnceBeyondLocalFillIds)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(3, "TEST", 10.0, 100.0));
+
+    constexpr std::string_view report =
+        "partial|tt-3|EX-1|TEST|buy|4|100|venue-exec-7|4";
+    h.ft->deliver(report);
+    h.ft->deliver(report);
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(h.bridge->poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].get_venue_execution_id(), "venue-exec-7");
+    EXPECT_EQ(fills[0].get_cumulative_source(),
+              fill_cumulative_source::venue_reported);
+    EXPECT_DOUBLE_EQ(fills[0].get_cumulative_filled_qty(), 4.0);
+
+    std::vector<ExecutionBridge::submit_result> results;
+    EXPECT_FALSE(h.bridge->poll_submit_results(results));
+}
+
+TEST(ExecutionBridge, NativeExecutionReplayWithChangedEconomicsFailsClosed)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(3, "TEST", 10.0, 100.0));
+
+    h.ft->deliver(
+        "partial|tt-3|EX-1|TEST|buy|4|100|venue-exec-7|4");
+    h.ft->deliver(
+        "partial|tt-3|EX-1|TEST|buy|4|101|venue-exec-7|4");
+
+    std::vector<ExecutionBridge::submit_result> results;
+    ASSERT_TRUE(h.bridge->poll_submit_results(results));
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_TRUE(results[0].fatal);
+    EXPECT_NE(results[0].error.find("changed economic fields"),
+              std::string::npos);
+}
+
+TEST(ExecutionBridge, NativeExecutionCannotMoveToAnotherEngineOrder)
+{
+    bridge_harness h;
+    ASSERT_TRUE(h.bridge->open());
+    h.bridge->submit_order(make_order(3, "TEST", 1.0, 100.0));
+    h.bridge->submit_order(make_order(4, "TEST", 1.0, 100.0));
+
+    h.ft->deliver("full|tt-3|EX-3|TEST|buy|1|100|native-X|1");
+    h.ft->deliver("full|tt-4|EX-4|TEST|buy|1|100|native-X|1");
+
+    std::vector<ExecutionBridge::submit_result> results;
+    ASSERT_TRUE(h.bridge->poll_submit_results(results));
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_TRUE(results[0].fatal);
+    EXPECT_NE(results[0].error.find("changed economic fields"),
+              std::string::npos);
+
+    fill_event first({}, "", 0, order_side::buy, 0.0, 0.0);
+    ASSERT_TRUE(h.bridge->peek_fill(first));
+    EXPECT_EQ(first.get_order_id(), 3u);
+    ASSERT_TRUE(h.bridge->acknowledge_fill(first.get_fill_id()));
+    EXPECT_FALSE(h.bridge->peek_fill(first));
 }
 
 TEST(ExecutionBridge, ShortTerminalFillFailsClosed)
@@ -520,21 +801,24 @@ TEST(ExecutionBridge, StatusTransitionsDrainable)
     EXPECT_TRUE(saw_reconnected);
 }
 
-TEST(ExecutionBridge, TerminalStatesClearMapping)
+TEST(ExecutionBridge, TerminalTombstoneStillAttributesALateFill)
 {
     bridge_harness h;
     ASSERT_TRUE(h.bridge->open());
 
     h.bridge->submit_order(make_order(22));
 
-    // Cancel comes in from the exchange; mapping must be cleared.
+    // Cancel is terminal for pending exposure, but its identity remains a
+    // tombstone because a fill may already be in flight.
     h.ft->deliver("cancel|tt-22|EX-1|TEST|buy|0|0");
 
-    // A subsequent fill for the same client id should now be dropped.
     h.ft->deliver("full|tt-22|EX-1|TEST|buy|10|100");
 
     std::vector<fill_event> fills;
-    EXPECT_FALSE(h.bridge->poll_fills(fills));
+    ASSERT_TRUE(h.bridge->poll_fills(fills));
+    ASSERT_EQ(fills.size(), 1u);
+    EXPECT_EQ(fills[0].get_order_id(), 22u);
+    EXPECT_FALSE(h.bridge->cancel_order(22));
 }
 
 TEST(ExecutionBridge, ConcurrentFillIngestAndPoll)
@@ -731,6 +1015,7 @@ TEST(ExecutionBridge, NonStdTransportExceptionClosesAdmissionBeforeNextMutation)
     d.fill_tx = ft;
     d.encoder = en;
     d.parser = pa;
+    d.write_safety_readiness = validated_write_safety_readiness();
     d.start_transport_thread = true;
     ExecutionBridge bridge(std::move(d));
     ASSERT_TRUE(bridge.open());
@@ -869,6 +1154,7 @@ TEST(ExecutionBridge, FundingFastPathEnqueuesOrLatchesFailure)
     d.order_tx = tx;
     d.fill_tx = ft;
     d.parser = std::make_shared<FakeFundingParser>();
+    d.write_safety_readiness = validated_write_safety_readiness();
     d.start_transport_thread = false;
     int accepted = 0;
     int failures = 0;
@@ -900,6 +1186,7 @@ TEST(ExecutionBridge, QuiesceWaitsForAdmittedCallAndRejectsQueuedAndLateMutation
     d.fill_tx = ft;
     d.encoder = en;
     d.parser = pa;
+    d.write_safety_readiness = validated_write_safety_readiness();
     d.start_transport_thread = true;
     ExecutionBridge bridge(std::move(d));
     ASSERT_TRUE(bridge.open());

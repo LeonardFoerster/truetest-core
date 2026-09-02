@@ -60,3 +60,44 @@ TEST(OrderIdGenerator, Reset)
     EXPECT_EQ(OrderIdGenerator::next(), 100u);
     EXPECT_EQ(OrderIdGenerator::next(), 101u);
 }
+
+TEST(OrderIdGenerator, DeterministicScopeIsThreadLocalAndRestoresGlobalSequence)
+{
+    OrderIdGenerator::reset(500);
+    EXPECT_EQ(OrderIdGenerator::next(), 500U);
+    {
+        OrderIdGenerator::deterministic_scope trial_scope;
+        EXPECT_EQ(OrderIdGenerator::next(), 1U);
+        EXPECT_EQ(OrderIdGenerator::next(), 2U);
+        {
+            OrderIdGenerator::deterministic_scope nested(100);
+            EXPECT_EQ(OrderIdGenerator::next(), 100U);
+        }
+        EXPECT_EQ(OrderIdGenerator::next(), 3U);
+    }
+    EXPECT_EQ(OrderIdGenerator::next(), 501U);
+}
+
+TEST(OrderIdGenerator, ParallelDeterministicScopesDoNotShareScheduleState)
+{
+    constexpr int thread_count = 4;
+    std::vector<std::vector<std::uint64_t>> results(thread_count);
+    std::vector<std::thread> workers;
+    for (int thread_index = 0; thread_index < thread_count; ++thread_index)
+    {
+        workers.emplace_back([&, thread_index] {
+            OrderIdGenerator::deterministic_scope trial_scope;
+            for (std::uint64_t expected = 1; expected <= 100; ++expected)
+                results[static_cast<std::size_t>(thread_index)].push_back(
+                    OrderIdGenerator::next());
+        });
+    }
+    for (auto& worker : workers)
+        worker.join();
+    for (const auto& ids : results)
+    {
+        ASSERT_EQ(ids.size(), 100U);
+        for (std::size_t i = 0; i < ids.size(); ++i)
+            EXPECT_EQ(ids[i], static_cast<std::uint64_t>(i + 1));
+    }
+}

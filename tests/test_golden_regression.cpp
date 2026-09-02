@@ -81,6 +81,8 @@ golden_run_result run_sma_basic()
     cfg.seed            = 424242;
     cfg.threading       = thread_preset::inline_mode;
     cfg.disable_pinning = true;
+    // This checked-in GOLD fixture is daily, not the 1-minute crypto default.
+    cfg.periods_per_year = 252;
     // Pin pure strategy metrics; platform DefaultExitPolicy is covered elsewhere.
     cfg.exit_defaults.mode = truetest::exits::exit_policy_mode::strategy_only;
 

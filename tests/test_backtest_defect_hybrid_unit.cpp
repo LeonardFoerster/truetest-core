@@ -1,5 +1,6 @@
 // Hybrid/queue/local adapter unit locks (backtest defect closure).
 #include "helpers/backtest_defect_helpers.h"
+#include "execution/order_tracker.h"
 
 #include <utility>
 
@@ -133,6 +134,10 @@ TEST(BacktestDefects, HybridPaper_MarketablePartialMigratesResidualToQueue)
                          order_side::buy, 2.0, 100.0);
     crossing.set_order_id(8);
     crossing.set_earliest_eligible_ts(t0());
+
+    OrderTracker ledger;
+    ASSERT_TRUE(ledger.register_order(crossing));
+    ledger.set_status(crossing.get_order_id(), order_status::open);
     hybrid.submit_order(crossing);
 
     EXPECT_EQ(qa->live_order_count(), 1u)
@@ -145,6 +150,8 @@ TEST(BacktestDefects, HybridPaper_MarketablePartialMigratesResidualToQueue)
     ASSERT_EQ(fills.size(), 1u);
     EXPECT_NEAR(fills[0].get_filled_quantity(), 1.0, 1e-12);
     EXPECT_NEAR(fills[0].get_remaining_qty(), 1.0, 1e-12);
+    const auto aggressive_fill_id = fills[0].get_fill_id();
+    ASSERT_TRUE(ledger.on_fill(fills[0]));
 
     fills.clear();
     hybrid.on_trade("X", 100.0, 2.0, t_at(1));
@@ -153,6 +160,90 @@ TEST(BacktestDefects, HybridPaper_MarketablePartialMigratesResidualToQueue)
     EXPECT_EQ(fills[0].get_order_id(), 8u);
     EXPECT_NEAR(fills[0].get_filled_quantity(), 1.0, 1e-12);
     EXPECT_NEAR(fills[0].get_remaining_qty(), 0.0, 1e-12);
+    EXPECT_GT(fills[0].get_fill_id(), aggressive_fill_id)
+        << "the composite adapter must own one canonical fill-ID namespace";
+    EXPECT_TRUE(ledger.on_fill(fills[0]))
+        << "a newly namespaced identity and forward cursor must both apply";
+    EXPECT_DOUBLE_EQ(ledger.filled_qty(8), 2.0);
+    EXPECT_EQ(ledger.get_order_status(8), order_status::filled);
+}
+
+TEST(BacktestDefects, HybridPaper_BatchedMigrationPreservesCausalFillOrder)
+{
+    auto ob = std::make_shared<orderbook>();
+    ob->add_external_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 9201,
+        side::buy, Price::from_double(99.0), 10));
+    ob->add_external_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 9202,
+        side::sell, Price::from_double(100.0), 1));
+
+    auto local = std::make_shared<LocalBookAdapter>(
+        ob, nullptr, nullptr, 42, 1.1, 1.0);
+    auto queue = std::make_shared<QueueAwareBookAdapter>(
+        std::make_shared<BackCancelModel>());
+    HybridPaperAdapter hybrid(local, queue, ob, make_hybrid_taker(ob));
+    hybrid.on_l2_snapshot("X", {{100.0, 0.0}}, {});
+
+    order_event crossing(t0(), "X", order_type::limit,
+                         order_side::buy, 2.0, 100.0);
+    crossing.set_order_id(18);
+    crossing.set_earliest_eligible_ts(t0());
+    OrderTracker ledger;
+    ASSERT_TRUE(ledger.register_order(crossing));
+    ledger.set_status(crossing.get_order_id(), order_status::open);
+
+    // Generate both child fills before a single poll. The final queue slice
+    // must never overtake the earlier aggressive partial merely because the
+    // children are drained in a fixed implementation order.
+    hybrid.submit_order(crossing);
+    hybrid.on_trade("X", 100.0, 2.0, t_at(1));
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(hybrid.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 2u);
+    EXPECT_GT(fills[0].get_fill_id(), 0u);
+    EXPECT_GT(fills[1].get_fill_id(), fills[0].get_fill_id());
+    EXPECT_DOUBLE_EQ(fills[0].get_remaining_qty(), 1.0);
+    EXPECT_DOUBLE_EQ(fills[1].get_remaining_qty(), 0.0);
+    ASSERT_TRUE(ledger.on_fill(fills[0]));
+    ASSERT_TRUE(ledger.on_fill(fills[1]));
+    EXPECT_DOUBLE_EQ(ledger.filled_qty(18), 2.0);
+    EXPECT_EQ(ledger.get_order_status(18), order_status::filled);
+}
+
+TEST(BacktestDefects, HybridPaper_PollCadenceCannotReverseCrossChildTime)
+{
+    auto ob = std::make_shared<orderbook>();
+    ob->add_external_order(std::make_shared<order>(
+        ob_order_type::good_till_cancel, 9301,
+        side::sell, Price::from_double(101.0), 10));
+    auto local = std::make_shared<LocalBookAdapter>(
+        ob, nullptr, nullptr, 42, 1.1, 1.0);
+    auto queue = std::make_shared<QueueAwareBookAdapter>(
+        std::make_shared<BackCancelModel>());
+    HybridPaperAdapter hybrid(local, queue, ob, make_hybrid_taker(ob));
+    hybrid.on_l2_snapshot("X", {{100.0, 0.0}}, {{101.0, 10.0}});
+
+    order_event passive(t0(), "X", order_type::limit,
+                        order_side::buy, 1.0, 100.0);
+    passive.set_order_id(31);
+    passive.set_earliest_eligible_ts(t0());
+    hybrid.submit_order(passive);
+    hybrid.on_trade("X", 100.0, 1.0, order_side::sell, t_at(1));
+
+    order_event market(t_at(2), "X", order_type::market,
+                       order_side::buy, 1.0, 101.0);
+    market.set_order_id(32);
+    market.set_earliest_eligible_ts(t_at(2));
+    hybrid.submit_order(market);
+
+    std::vector<fill_event> fills;
+    ASSERT_TRUE(hybrid.poll_fills(fills));
+    ASSERT_EQ(fills.size(), 2u);
+    EXPECT_EQ(fills[0].get_order_id(), 31u);
+    EXPECT_EQ(fills[1].get_order_id(), 32u);
+    EXPECT_LT(fills[0].get_fill_id(), fills[1].get_fill_id());
+    EXPECT_LT(fills[0].get_timestamp(), fills[1].get_timestamp());
 }
 
 TEST(BacktestDefects, HybridPaper_LocalOrderNeverDefinesVenueMarketability)

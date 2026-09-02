@@ -141,6 +141,129 @@ public:
     }
 };
 
+class IntrabarEntryWithProtectionStrategy : public IStrategy
+{
+    bool fired_ = false;
+    std::optional<truetest::exits::exit_intent> pending_exit_;
+    order_type entry_type_;
+    order_side entry_side_;
+    double entry_price_;
+    double trigger_price_;
+    double quantity_;
+    std::optional<double> stop_loss_;
+    std::optional<double> take_profit_;
+
+public:
+    IntrabarEntryWithProtectionStrategy(
+        order_type entry_type,
+        order_side entry_side,
+        double entry_price,
+        double trigger_price,
+        std::optional<double> stop_loss,
+        std::optional<double> take_profit,
+        double quantity = 1.0)
+        : entry_type_(entry_type),
+          entry_side_(entry_side),
+          entry_price_(entry_price),
+          trigger_price_(trigger_price),
+          quantity_(quantity),
+          stop_loss_(stop_loss),
+          take_profit_(take_profit)
+    {
+    }
+
+    std::optional<order_event> on_market(const market_event& mkt) override
+    {
+        if (fired_)
+            return std::nullopt;
+
+        fired_ = true;
+        truetest::exits::exit_intent intent;
+        intent.symbol = mkt.get_symbol();
+        intent.close_side = entry_side_ == order_side::buy
+            ? order_side::sell : order_side::buy;
+        intent.stop_loss = stop_loss_;
+        intent.take_profit = take_profit_;
+        intent.reference_entry = entry_type_ == order_type::limit
+            ? entry_price_ : trigger_price_;
+        intent.qty = quantity_;
+        pending_exit_ = intent;
+
+        return order_event(mkt.get_timestamp(), mkt.get_symbol(),
+                           entry_type_, entry_side_, quantity_, entry_price_,
+                           time_in_force::gtc, trigger_price_);
+    }
+
+    std::optional<truetest::exits::exit_intent>
+    take_pending_exit_intent() override
+    {
+        auto result = std::move(pending_exit_);
+        pending_exit_.reset();
+        return result;
+    }
+};
+
+std::shared_ptr<data_handler> make_pathless_intrabar_series(
+    double open, double high, double low, double close,
+    std::int64_t ambiguous_volume = 1000)
+{
+    auto dh = std::make_shared<data_handler>();
+    constexpr long long t0 = 1'704'067'200'000LL;
+    dh->load_into_queue(std::to_string(t0), "TEST",
+                        100.0, 101.0, 99.0, 100.0, 1000);
+    dh->load_into_queue(std::to_string(t0 + 60'000), "TEST",
+                        100.0, 101.0, 99.0, 100.0, 1000);
+    dh->load_into_queue(std::to_string(t0 + 120'000), "TEST",
+                        open, high, low, close, ambiguous_volume);
+    dh->load_into_queue(std::to_string(t0 + 180'000), "TEST",
+                        close, close + 1.0, close - 1.0, close, 1000);
+    return dh;
+}
+
+engine_config make_pathless_intrabar_config()
+{
+    engine_config cfg;
+    cfg.seed = 1;
+    cfg.show_progress = false;
+    cfg.initial_balance = 100'000.0;
+    cfg.execution_bar_delay = 1;
+    cfg.exit_defaults.mode =
+        truetest::exits::exit_policy_mode::strategy_only;
+    return cfg;
+}
+
+void expect_ambiguous_bar_rejected_without_economic_mutation(engine& eng)
+{
+    EXPECT_TRUE(eng.is_halted());
+    const auto report = eng.get_analytics().generate_report();
+    EXPECT_EQ(report.total_fills, 0u);
+    EXPECT_TRUE(report.trades.empty());
+    EXPECT_EQ(eng.get_portfolio().get_positions().count("TEST"), 0u);
+    EXPECT_TRUE(eng.get_portfolio().get_lots().empty());
+    EXPECT_DOUBLE_EQ(eng.get_portfolio().get_cash(), 100'000.0);
+    EXPECT_EQ(eng.get_exit_manager().armed_count(), 0u);
+    eng.get_order_tracker().for_each_order([](const order_ledger_entry& order) {
+        EXPECT_DOUBLE_EQ(order.filled_qty, 0.0);
+    });
+}
+
+void expect_unambiguous_round_trip(engine& eng,
+                                   double min_exit_price,
+                                   double max_exit_price)
+{
+    EXPECT_FALSE(eng.is_halted());
+    const auto report = eng.get_analytics().generate_report();
+    ASSERT_EQ(report.total_fills, 2u);
+    ASSERT_EQ(report.trades.size(), 2u);
+    EXPECT_GT(report.trades.back().fill_price, min_exit_price);
+    EXPECT_LT(report.trades.back().fill_price, max_exit_price);
+    const auto pos = eng.get_portfolio().get_positions().find("TEST");
+    ASSERT_NE(pos, eng.get_portfolio().get_positions().end());
+    EXPECT_DOUBLE_EQ(pos->second.qty, 0.0);
+    EXPECT_TRUE(eng.get_portfolio().get_lots().empty());
+    EXPECT_EQ(eng.get_exit_manager().armed_count(), 0u);
+}
+
 std::string delayed_strategy_name(std::size_t index)
 {
     return "delayed_" + std::to_string(index);
@@ -539,4 +662,191 @@ TEST(EngineLookahead, MaCrossover_DefaultMarketFillsNextOpen)
     EXPECT_EQ(t.side, order_side::buy);
     EXPECT_GT(t.fill_price, 150.0)
         << "default ma-crossover market must track next open (~200), not signal close (~120)";
+}
+
+TEST(EngineLookahead,
+     C01_PathlessBarDoesNotReusePreFillHighForNewTakeProfit)
+{
+    SilenceCout quiet;
+
+    // The order is decided on bar 0, rests through bar 1, and is traversed at
+    // 95 on bar 2.  A path O-H-L-C is compatible with bar 2:
+    // H=110 prints before the buy entry at L=90.  Pathless OHLC therefore
+    // cannot prove that the newly armed TP=105 was available after the fill.
+    auto strategy = std::make_shared<IntrabarEntryWithProtectionStrategy>(
+        order_type::limit, order_side::buy,
+        /*entry_price=*/95.0, /*trigger_price=*/0.0,
+        /*stop_loss=*/std::nullopt, /*take_profit=*/105.0);
+    engine eng(make_pathless_intrabar_series(100.0, 110.0, 90.0, 100.0),
+               nullptr, strategy, make_pathless_intrabar_config());
+    eng.run();
+
+    expect_ambiguous_bar_rejected_without_economic_mutation(eng);
+}
+
+TEST(EngineLookahead,
+     C01_PathlessBarDoesNotReusePreFillLowForNewStopLoss)
+{
+    SilenceCout quiet;
+
+    // O-L-H-C is compatible with this bar: L=90 prints before the buy-stop
+    // entry triggers at H=110.  The newly armed SL=95 must not reuse that low.
+    auto strategy = std::make_shared<IntrabarEntryWithProtectionStrategy>(
+        order_type::stop, order_side::buy,
+        /*entry_price=*/0.0, /*trigger_price=*/105.0,
+        /*stop_loss=*/95.0, /*take_profit=*/std::nullopt);
+    engine eng(make_pathless_intrabar_series(100.0, 110.0, 90.0, 107.0),
+               nullptr, strategy, make_pathless_intrabar_config());
+    eng.run();
+
+    expect_ambiguous_bar_rejected_without_economic_mutation(eng);
+}
+
+TEST(EngineLookahead,
+     C01_PathlessStopLimitDoesNotReusePreFillLowForNewStopLoss)
+{
+    SilenceCout quiet;
+
+    // The stop-limit triggers at 105 and its 106 limit is marketable against
+    // the trigger-anchored synthetic ask.  In a compatible O-L-H-C path the
+    // low occurred before both trigger and fill, so it cannot fire the new SL.
+    auto strategy = std::make_shared<IntrabarEntryWithProtectionStrategy>(
+        order_type::stop_limit, order_side::buy,
+        /*entry_price=*/106.0, /*trigger_price=*/105.0,
+        /*stop_loss=*/95.0, /*take_profit=*/std::nullopt);
+    engine eng(make_pathless_intrabar_series(100.0, 110.0, 90.0, 107.0),
+               nullptr, strategy, make_pathless_intrabar_config());
+    eng.run();
+
+    expect_ambiguous_bar_rejected_without_economic_mutation(eng);
+}
+
+TEST(EngineLookahead,
+     C01_PathlessShortDoesNotReusePreFillLowForNewTakeProfit)
+{
+    SilenceCout quiet;
+
+    // O-L-H-C is compatible with this bar: L=90 prints before the resting
+    // sell-limit entry at H=110.  The newly armed short TP=95 cannot reuse
+    // that earlier low.  This mirrors the long limit/TP causality failure.
+    auto strategy = std::make_shared<IntrabarEntryWithProtectionStrategy>(
+        order_type::limit, order_side::sell,
+        /*entry_price=*/105.0, /*trigger_price=*/0.0,
+        /*stop_loss=*/std::nullopt, /*take_profit=*/95.0);
+    engine eng(make_pathless_intrabar_series(100.0, 110.0, 90.0, 100.0),
+               nullptr, strategy, make_pathless_intrabar_config());
+    eng.run();
+
+    expect_ambiguous_bar_rejected_without_economic_mutation(eng);
+}
+
+TEST(EngineLookahead,
+     C01_PathlessNonMarketableBuyStopLimitRequiresPostTriggerRetrace)
+{
+    SilenceCout quiet;
+
+    // O-H-L-C triggers at 105 and later retraces through limit 103, whereas
+    // O-L-H-C reaches 103 only before the trigger. Identical pathless OHLC
+    // cannot establish whether an economic entry fill exists at all.
+    auto strategy = std::make_shared<IntrabarEntryWithProtectionStrategy>(
+        order_type::stop_limit, order_side::buy,
+        /*entry_price=*/103.0, /*trigger_price=*/105.0,
+        /*stop_loss=*/std::nullopt, /*take_profit=*/std::nullopt);
+    engine eng(make_pathless_intrabar_series(100.0, 110.0, 90.0, 108.0),
+               nullptr, strategy, make_pathless_intrabar_config());
+    eng.run();
+
+    expect_ambiguous_bar_rejected_without_economic_mutation(eng);
+}
+
+TEST(EngineLookahead,
+     C01_PathlessNonMarketableSellStopLimitRequiresPostTriggerRetrace)
+{
+    SilenceCout quiet;
+
+    // Mirror case: only O-L-H-C supplies a post-trigger retrace through 97.
+    auto strategy = std::make_shared<IntrabarEntryWithProtectionStrategy>(
+        order_type::stop_limit, order_side::sell,
+        /*entry_price=*/97.0, /*trigger_price=*/95.0,
+        /*stop_loss=*/std::nullopt, /*take_profit=*/std::nullopt);
+    engine eng(make_pathless_intrabar_series(100.0, 110.0, 90.0, 92.0),
+               nullptr, strategy, make_pathless_intrabar_config());
+    eng.run();
+
+    expect_ambiguous_bar_rejected_without_economic_mutation(eng);
+}
+
+TEST(EngineLookahead,
+     C01_PathlessPartialFillIsRejectedBeforeAnyEconomicMutation)
+{
+    SilenceCout quiet;
+
+    // Volume limits the resting buy to a partial fill. Atomic fail-closed
+    // handling must reject before that partial quantity reaches any ledger.
+    auto strategy = std::make_shared<IntrabarEntryWithProtectionStrategy>(
+        order_type::limit, order_side::buy,
+        /*entry_price=*/95.0, /*trigger_price=*/0.0,
+        /*stop_loss=*/std::nullopt, /*take_profit=*/105.0,
+        /*quantity=*/2.0);
+    engine eng(make_pathless_intrabar_series(
+                   100.0, 110.0, 90.0, 100.0, /*ambiguous_volume=*/1.0),
+               nullptr, strategy, make_pathless_intrabar_config());
+    eng.run();
+
+    expect_ambiguous_bar_rejected_without_economic_mutation(eng);
+}
+
+TEST(EngineLookahead,
+     C01_UnambiguousRestingBuyLimitThenStopLossRemainsSupported)
+{
+    SilenceCout quiet;
+
+    // Both canonical paths cross the resting entry before SL=90: O-L does so
+    // on the downward leg; O-H-L does so after the high. This must not halt.
+    auto strategy = std::make_shared<IntrabarEntryWithProtectionStrategy>(
+        order_type::limit, order_side::buy,
+        /*entry_price=*/95.0, /*trigger_price=*/0.0,
+        /*stop_loss=*/90.0, /*take_profit=*/std::nullopt);
+    engine eng(make_pathless_intrabar_series(100.0, 110.0, 85.0, 100.0),
+               nullptr, strategy, make_pathless_intrabar_config());
+    eng.run();
+
+    expect_unambiguous_round_trip(eng, 85.0, 95.0);
+}
+
+TEST(EngineLookahead,
+     C01_UnambiguousBuyStopThenTakeProfitRemainsSupported)
+{
+    SilenceCout quiet;
+
+    // Both canonical paths reach trigger 105 before TP=108. The unrelated
+    // low never creates a competing protected outcome.
+    auto strategy = std::make_shared<IntrabarEntryWithProtectionStrategy>(
+        order_type::stop, order_side::buy,
+        /*entry_price=*/0.0, /*trigger_price=*/105.0,
+        /*stop_loss=*/std::nullopt, /*take_profit=*/108.0);
+    engine eng(make_pathless_intrabar_series(100.0, 110.0, 99.0, 107.0),
+               nullptr, strategy, make_pathless_intrabar_config());
+    eng.run();
+
+    expect_unambiguous_round_trip(eng, 105.0, 111.0);
+}
+
+TEST(EngineLookahead,
+     C01_BothTouchedAfterBuyStopHasCausallyPriorTakeProfit)
+{
+    SilenceCout quiet;
+
+    // O-H-L reaches stop 105 then TP 108 before the low. O-L-H reaches the
+    // low before entry, then stop 105 and TP 108. Both paths therefore agree
+    // on TP; generic SL-first ordering is causally wrong for this new entry.
+    auto strategy = std::make_shared<IntrabarEntryWithProtectionStrategy>(
+        order_type::stop, order_side::buy,
+        /*entry_price=*/0.0, /*trigger_price=*/105.0,
+        /*stop_loss=*/95.0, /*take_profit=*/108.0);
+    engine eng(make_pathless_intrabar_series(100.0, 110.0, 90.0, 100.0),
+               nullptr, strategy, make_pathless_intrabar_config());
+    eng.run();
+
+    expect_unambiguous_round_trip(eng, 105.0, 111.0);
 }

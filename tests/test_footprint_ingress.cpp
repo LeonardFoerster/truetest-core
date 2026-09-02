@@ -42,6 +42,16 @@ provider::tick make_tick(double price, int64_t qty, uint8_t side,
     return t;
 }
 
+FootprintTapContext make_tap_context()
+{
+    FootprintTapContext ctx;
+    ctx.venue = venue_id::bitunix_futures;
+    ctx.symbol_id = 1;
+    ctx.symbol = "BTCUSDT";
+    ctx.session_id = 1;
+    return ctx;
+}
+
 // Minimal "price,qty,side" line parser so the DataBridge<provider::tick>
 // integration test below exercises the real streaming path without pulling
 // in a full venue parser. A malformed/header line (no commas) fails to
@@ -64,6 +74,7 @@ public:
         t.price = std::stod(price_s);
         t.quantity = std::stoll(qty_s);
         t.side = static_cast<uint8_t>(std::stoi(side_s));
+        t.native_trade_id = ++next_native_id_;
         return t;
     }
 
@@ -72,6 +83,9 @@ public:
         return line == "header" ? empty_parse_status::ignored
                                 : empty_parse_status::malformed;
     }
+
+private:
+    std::uint64_t next_native_id_ = 0;
 };
 
 } // namespace
@@ -165,7 +179,7 @@ TEST(FootprintTickSize, NonPositiveMetadataTreatedAsAbsent)
 
 TEST(FootprintTap, ExactDecimalTickUsedVerbatimNoFloatingPoint)
 {
-    FootprintTapContext ctx;
+    FootprintTapContext ctx = make_tap_context();
     ctx.venue = venue_id::binance_usdm;
     ctx.symbol_id = 7;
     ctx.session_id = 42;
@@ -177,7 +191,9 @@ TEST(FootprintTap, ExactDecimalTickUsedVerbatimNoFloatingPoint)
     t.base_qty_atoms = 900000000;
     t.has_exact_decimal = true;
 
-    PublicTrade pt = tick_to_public_trade(ctx, t);
+    auto converted = tick_to_public_trade(ctx, t);
+    ASSERT_TRUE(converted.has_value());
+    const PublicTrade& pt = *converted;
     EXPECT_EQ(pt.price_ticks, 1234500);
     EXPECT_EQ(pt.base_qty_atoms, 900000000);
     EXPECT_EQ(pt.native_trade_id, 555u);
@@ -191,12 +207,14 @@ TEST(FootprintTap, ExactDecimalTickUsedVerbatimNoFloatingPoint)
 
 TEST(FootprintTap, FallbackDerivesFromTickSizeWhenNoExactDecimal)
 {
-    FootprintTapContext ctx;
+    FootprintTapContext ctx = make_tap_context();
     ctx.tick_size = 0.5;
     ctx.qty_atom_scale = 100.0;
 
     provider::tick t = make_tick(100.0, 3, 1); // sell aggressor
-    PublicTrade pt = tick_to_public_trade(ctx, t);
+    auto converted = tick_to_public_trade(ctx, t);
+    ASSERT_TRUE(converted.has_value());
+    const PublicTrade& pt = *converted;
 
     EXPECT_EQ(pt.price_ticks, 200); // 100.0 / 0.5
     EXPECT_EQ(pt.base_qty_atoms, 300); // 3 * 100
@@ -207,24 +225,59 @@ TEST(FootprintTap, FallbackDerivesFromTickSizeWhenNoExactDecimal)
 
 TEST(FootprintTap, FallbackNormalizesFixedPointProviderQuantity)
 {
-    FootprintTapContext ctx;
+    FootprintTapContext ctx = make_tap_context();
     ctx.tick_size = 0.5;
     ctx.qty_atom_scale = 100'000'000.0;
 
     provider::tick t = make_tick(100.0, 25'000'000, 0);
     t.quantity_scale = 100'000'000ULL; // 0.25 base units
-    PublicTrade pt = tick_to_public_trade(ctx, t);
+    auto converted = tick_to_public_trade(ctx, t);
+    ASSERT_TRUE(converted.has_value());
+    const PublicTrade& pt = *converted;
 
     EXPECT_EQ(pt.base_qty_atoms, 25'000'000);
 }
 
+TEST(FootprintTap, RejectsTickFromDifferentSymbolWithoutMutation)
+{
+    FootprintTapContext ctx = make_tap_context();
+    ctx.tick_size = 0.5;
+    provider::tick tick = make_tick(100.0, 1, 0);
+    tick.symbol = "ETHUSDT";
+
+    EXPECT_FALSE(tick_to_public_trade(ctx, tick).has_value());
+    EXPECT_EQ(ctx.next_obs_seq, 0u);
+}
+
 TEST(FootprintTap, UnknownSideMapsToUnknown)
 {
-    FootprintTapContext ctx;
+    FootprintTapContext ctx = make_tap_context();
     ctx.tick_size = 1.0;
     provider::tick t = make_tick(10.0, 1, 2);
-    PublicTrade pt = tick_to_public_trade(ctx, t);
+    auto converted = tick_to_public_trade(ctx, t);
+    ASSERT_TRUE(converted.has_value());
+    const PublicTrade& pt = *converted;
     EXPECT_EQ(pt.side, aggressor_side::unknown);
+}
+
+TEST(FootprintTap, FallbackPreservesExtremeAtomsAndRejectsInexactScale)
+{
+    FootprintTapContext ctx = make_tap_context();
+    ctx.tick_size = 1.0;
+    ctx.qty_atom_scale = 100'000'000.0;
+
+    provider::tick exact = make_tick(
+        10.0, 7'552'396'886'326'119'822LL, 0);
+    exact.quantity_scale = 100'000'000ULL;
+    const auto converted = tick_to_public_trade(ctx, exact);
+    ASSERT_TRUE(converted.has_value());
+    EXPECT_EQ(converted->base_qty_atoms,
+              7'552'396'886'326'119'822LL);
+
+    provider::tick subatom = make_tick(10.0, 1, 0);
+    subatom.quantity_scale = 100'000'000ULL;
+    ctx.qty_atom_scale = 1'000'000.0;
+    EXPECT_FALSE(tick_to_public_trade(ctx, subatom).has_value());
 }
 
 // --- FootprintResearchRing: SPSC semantics + discontinuity marking ---
@@ -279,11 +332,28 @@ TEST(FootprintRing, AcknowledgeClearsDiscontinuousFlag)
     EXPECT_FALSE(ring.try_push(PublicTrade{}));
     ASSERT_TRUE(ring.discontinuous());
 
-    ring.acknowledge_discontinuity();
+    ring.acknowledge_discontinuity(ring.discontinuity_generation());
     EXPECT_FALSE(ring.discontinuous());
     // Count is a running total - acknowledging clears the sticky flag, not
     // the historical counter.
     EXPECT_EQ(ring.discontinuity_count(), 1u);
+}
+
+TEST(FootprintRing, AcknowledgeCannotEraseNewerOverflowGeneration)
+{
+    FootprintResearchRing<2> ring;
+    ASSERT_TRUE(ring.try_push(PublicTrade{}));
+    ASSERT_TRUE(ring.try_push(PublicTrade{}));
+    ASSERT_FALSE(ring.try_push(PublicTrade{}));
+    const auto observed = ring.discontinuity_generation();
+
+    // Model the producer racing after the consumer observed generation 1
+    // but before it acknowledges that exact generation.
+    ASSERT_FALSE(ring.try_push(PublicTrade{}));
+    ASSERT_GT(ring.discontinuity_generation(), observed);
+    ring.acknowledge_discontinuity(observed);
+
+    EXPECT_TRUE(ring.discontinuous());
 }
 
 // --- try_tap_push: end-to-end tap -> ring ---
@@ -291,7 +361,7 @@ TEST(FootprintRing, AcknowledgeClearsDiscontinuousFlag)
 TEST(FootprintTap, PushesConvertedTradeIntoRing)
 {
     FootprintResearchRing<8> ring;
-    FootprintTapContext ctx;
+    FootprintTapContext ctx = make_tap_context();
     ctx.venue = venue_id::bitunix_futures;
     ctx.symbol_id = 3;
     ctx.session_id = 11;
@@ -311,7 +381,7 @@ TEST(FootprintTap, PushesConvertedTradeIntoRing)
 TEST(FootprintTap, ObsSeqMonotonicPerContext)
 {
     FootprintResearchRing<8> ring;
-    FootprintTapContext ctx;
+    FootprintTapContext ctx = make_tap_context();
     ctx.tick_size = 1.0;
 
     for (int i = 0; i < 3; ++i)
@@ -328,7 +398,7 @@ TEST(FootprintTap, ObsSeqMonotonicPerContext)
 TEST(FootprintTap, RefusesWhenTickSizeUnresolvedAndNoExactDecimal)
 {
     FootprintResearchRing<8> ring;
-    FootprintTapContext ctx; // tick_size stays 0.0 - "unavailable"
+    FootprintTapContext ctx = make_tap_context(); // tick size unresolved
 
     provider::tick t = make_tick(50.0, 1, 0);
     EXPECT_FALSE(try_tap_push(ctx, t, ring));
@@ -339,7 +409,7 @@ TEST(FootprintTap, RefusesWhenTickSizeUnresolvedAndNoExactDecimal)
 TEST(FootprintTap, ExactDecimalTickDoesNotNeedResolvedTickSize)
 {
     FootprintResearchRing<8> ring;
-    FootprintTapContext ctx; // tick_size unresolved
+    FootprintTapContext ctx = make_tap_context(); // tick size unresolved
 
     provider::tick t = make_tick(50.0, 1, 0);
     t.has_exact_decimal = true;
@@ -431,9 +501,12 @@ TEST(FootprintHotpath, TapPushSteadyStateIsAllocationFree)
     FootprintTapContext ctx;
     ctx.venue = venue_id::binance_usdm;
     ctx.symbol_id = 1;
+    ctx.symbol = "BTCUSDT";
+    ctx.session_id = 1;
     ctx.tick_size = 0.01;
 
     provider::tick t = make_tick(100.0, 1, 0);
+    t.native_trade_id = 1;
 
     // Warm up (first-touch paging, etc.) before measuring.
     for (int i = 0; i < 16; ++i)
@@ -480,6 +553,7 @@ TEST(FootprintDataBridgeIntegration, ResearchTapDeliversEveryStreamedTickIntoRin
     FootprintTapContext ctx;
     ctx.venue = venue_id::binance_usdm;
     ctx.symbol_id = 5;
+    ctx.symbol = "BTCUSDT";
     ctx.session_id = 77;
     ctx.tick_size = 0.5;
 

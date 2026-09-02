@@ -48,6 +48,14 @@ TEST(TradeTapeShadowAdapter, BuyLimit_CrossingTradeFillsAtTradePrice)
     EXPECT_DOUBLE_EQ(fills[0].get_filled_quantity(), 1.0);
     EXPECT_DOUBLE_EQ(fills[0].get_fill_price(), 99.5);
     EXPECT_EQ(fills[0].get_source(), fill_source::exchange);
+    EXPECT_EQ(fills[0].get_provenance().model,
+              fill_execution_model::recorded_trade_tape);
+    EXPECT_EQ(fills[0].get_provenance().reason,
+              fill_execution_reason::recorded_trade_print);
+    EXPECT_TRUE(fills[0].get_provenance().exploratory);
+    EXPECT_DOUBLE_EQ(fills[0].get_provenance().intended_price, 100.0);
+    EXPECT_DOUBLE_EQ(fills[0].get_provenance().reference_price, 99.5);
+    EXPECT_EQ(fills[0].get_provenance().reference_timestamp, tp{ms(100)});
     EXPECT_EQ(a.open_order_count(), 0u);
 }
 

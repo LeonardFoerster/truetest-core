@@ -6,6 +6,7 @@
 #include "orderbook/orderbook.h"
 #include "market_maker/market_maker.h"
 #include "types/order_id.h"
+#include "helpers/alloc_counter.h"
 
 #include <array>
 #include <atomic>
@@ -113,6 +114,52 @@ TEST(EventLog, RoundTrip_MarketEvent)
     EXPECT_FALSE(replayer.has_next());
 }
 
+TEST(EventLog, ScalarEncodingHasCanonicalLittleEndianKnownAnswer)
+{
+    std::ostringstream output(std::ios::out | std::ios::binary);
+    event_serial::write_u16(output, 0x1234U);
+    event_serial::write_u32(output, 0x89abcdefU);
+    event_serial::write_u64(output, 0x0123456789abcdefULL);
+    event_serial::write_i64(output, -2);
+    event_serial::write_f64(output, 1.0);
+
+    const std::string bytes = output.str();
+    const std::array<std::uint8_t, 30> expected{
+        0x34, 0x12,
+        0xef, 0xcd, 0xab, 0x89,
+        0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
+        0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f,
+    };
+    ASSERT_EQ(bytes.size(), expected.size());
+    EXPECT_TRUE(std::equal(
+        expected.begin(), expected.end(),
+        reinterpret_cast<const std::uint8_t*>(bytes.data())));
+}
+
+TEST(EventLog, CompressedWriterReusesStartupBuffersWithoutHeapGrowth)
+{
+    TempFile tf("allocation_free_writer.bin");
+    EventLogger logger(tf.path, true);
+    market_event event(epoch_ms(1'000'000), "BTCUSDT", 100.0, 101.0,
+                       99.0, 100.5, 1'000, 100'000'000ULL);
+
+    // Construction prewarms serializer, zstd workspace, and sampled index.
+    // One unmeasured record also initializes any implementation-owned stream
+    // bookkeeping before the hot-path assertion.
+    logger.log(event);
+    truetest::test::alloc::snapshot allocations;
+    {
+        truetest::test::alloc::measure_window measured;
+        for (int i = 0; i < 128; ++i)
+            logger.log(event);
+        allocations = measured.total();
+    }
+    EXPECT_EQ(allocations.count, 0U);
+    EXPECT_EQ(allocations.bytes, 0U);
+    logger.finalize();
+}
+
 TEST(EventLog, RoundTrip_SignalEvent)
 {
     TempFile tf("signal.bin");
@@ -141,6 +188,8 @@ TEST(EventLog, RoundTrip_OrderEvent)
     TempFile tf("order.bin");
     auto ts = epoch_ms(3000000);
     auto elig_ts = epoch_ms(3000500);
+    auto decision_ts = epoch_ms(3000400);
+    auto submit_ts = epoch_ms(3000600);
 
     {
         EventLogger logger(tf.path);
@@ -150,6 +199,11 @@ TEST(EventLog, RoundTrip_OrderEvent)
         ord.set_earliest_eligible_ts(elig_ts);
         ord.set_opener_order_id(77);
         ord.set_strategy_name("breakout");
+        ord.set_signal_id(54321);
+        ord.set_protective_exit_ticket(42);
+        ord.set_exit_reason(order_exit_reason::stop_loss);
+        ord.set_decision_ts(decision_ts);
+        ord.set_submit_ts(submit_ts);
         logger.log(ord);
         logger.flush();
     }
@@ -170,6 +224,11 @@ TEST(EventLog, RoundTrip_OrderEvent)
     EXPECT_EQ(ord.get_earliest_eligible_ts(), elig_ts);
     EXPECT_EQ(ord.get_opener_order_id(), 77u);
     EXPECT_EQ(ord.get_strategy_name(), "breakout");
+    EXPECT_EQ(ord.get_signal_id(), 54321u);
+    EXPECT_EQ(ord.get_protective_exit_ticket(), 42u);
+    EXPECT_EQ(ord.get_exit_reason(), order_exit_reason::stop_loss);
+    EXPECT_EQ(ord.get_decision_ts(), decision_ts);
+    EXPECT_EQ(ord.get_submit_ts(), submit_ts);
 }
 
 TEST(EventLog, RoundTrip_FillEvent)
@@ -184,6 +243,10 @@ TEST(EventLog, RoundTrip_FillEvent)
                         /*strategy_name=*/"mean_reversion",
                         /*opener_order_id=*/42);
         fill.set_source(fill_source::exchange);
+        ASSERT_TRUE(fill.set_venue_execution_id("venue-trade-7"));
+        ASSERT_TRUE(fill.set_commission_currency("USD"));
+        fill.set_cumulative_filled_qty(
+            100.0, fill_cumulative_source::venue_reported);
         logger.log(fill);
         logger.flush();
     }
@@ -202,6 +265,11 @@ TEST(EventLog, RoundTrip_FillEvent)
     EXPECT_DOUBLE_EQ(fill.get_commission(), 1.25);
     EXPECT_EQ(fill.get_fill_id(), 7u);
     EXPECT_EQ(fill.get_source(), fill_source::exchange);
+    EXPECT_EQ(fill.get_venue_execution_id(), "venue-trade-7");
+    EXPECT_EQ(fill.get_commission_currency(), "USD");
+    EXPECT_EQ(fill.get_cumulative_source(),
+              fill_cumulative_source::venue_reported);
+    EXPECT_DOUBLE_EQ(fill.get_cumulative_filled_qty(), 100.0);
     EXPECT_EQ(fill.get_opener_order_id(), 42u);
     EXPECT_EQ(fill.get_strategy_name(), "mean_reversion");
 }
@@ -890,11 +958,38 @@ TEST(EventLog, FillExtensionAcceptsOnlyCompleteHistoricShapes)
     fill_event fill(epoch_ms(1), "TEST", 42, order_side::buy,
                     2.0, 100.0, 0.5, 3.0, 99, "alpha", 7);
     fill.set_source(fill_source::exchange);
+    fill_provenance provenance;
+    provenance.model = fill_execution_model::synthetic_local_liquidity;
+    provenance.reason = fill_execution_reason::aggressive_ladder_match;
+    provenance.exploratory = true;
+    provenance.intended_price = 99.0;
+    provenance.reference_price = 98.5;
+    provenance.reference_timestamp = epoch_ms(2);
+    provenance.modeled_spread_bps = 12.0;
+    provenance.modeled_impact_bps = 3.0;
+    provenance.fill_probability = 0.8;
+    provenance.modeled_latency = std::chrono::microseconds(7);
+    fill.set_provenance(provenance);
+    ASSERT_TRUE(fill.set_venue_execution_id("venue-exec-99"));
+    ASSERT_TRUE(fill.set_commission_currency("USDT"));
+    fill.set_cumulative_filled_qty(
+        2.0, fill_cumulative_source::venue_reported);
     const auto current = event_serial::serialise(fill);
     const std::size_t attribution_size = sizeof(uint64_t) + sizeof(uint16_t)
                                        + fill.get_strategy_name().size();
-    ASSERT_GE(current.size(), 17u + attribution_size);
-    const auto v1_complete_size = current.size() - attribution_size;
+    constexpr std::size_t provenance_size =
+        3U + 5U * sizeof(double) + 2U * sizeof(std::int64_t);
+    const std::size_t identity_size =
+        4U + sizeof(std::uint16_t) + fill.get_venue_execution_id().size()
+        + sizeof(std::uint16_t) + fill.get_commission_currency().size()
+        + sizeof(double) + sizeof(std::uint8_t);
+    ASSERT_GE(current.size(),
+              17u + attribution_size + provenance_size + identity_size);
+    const auto v1_complete_size =
+        current.size() - identity_size - attribution_size - provenance_size;
+    const auto v2_complete_size =
+        current.size() - identity_size - provenance_size;
+    const auto provenance_complete_size = current.size() - identity_size;
     const auto base_size = v1_complete_size - 17U;
 
     auto legacy = current;
@@ -938,6 +1033,24 @@ TEST(EventLog, FillExtensionAcceptsOnlyCompleteHistoricShapes)
     EXPECT_EQ(current_fill.get_source(), fill_source::exchange);
     EXPECT_EQ(current_fill.get_opener_order_id(), 7U);
     EXPECT_EQ(current_fill.get_strategy_name(), "alpha");
+    EXPECT_EQ(current_fill.get_provenance().model,
+              fill_execution_model::synthetic_local_liquidity);
+    EXPECT_EQ(current_fill.get_provenance().reason,
+              fill_execution_reason::aggressive_ladder_match);
+    EXPECT_TRUE(current_fill.get_provenance().exploratory);
+    EXPECT_DOUBLE_EQ(current_fill.get_provenance().intended_price, 99.0);
+    EXPECT_DOUBLE_EQ(current_fill.get_provenance().reference_price, 98.5);
+    EXPECT_EQ(current_fill.get_provenance().reference_timestamp, epoch_ms(2));
+    EXPECT_DOUBLE_EQ(current_fill.get_provenance().modeled_spread_bps, 12.0);
+    EXPECT_DOUBLE_EQ(current_fill.get_provenance().modeled_impact_bps, 3.0);
+    EXPECT_DOUBLE_EQ(current_fill.get_provenance().fill_probability, 0.8);
+    EXPECT_EQ(current_fill.get_provenance().modeled_latency,
+              std::chrono::microseconds(7));
+    EXPECT_EQ(current_fill.get_venue_execution_id(), "venue-exec-99");
+    EXPECT_EQ(current_fill.get_commission_currency(), "USDT");
+    EXPECT_EQ(current_fill.get_cumulative_source(),
+              fill_cumulative_source::venue_reported);
+    EXPECT_DOUBLE_EQ(current_fill.get_cumulative_filled_qty(), 2.0);
 
     for (std::size_t tail_size = 1; tail_size < 16; ++tail_size) {
         auto partial = current;
@@ -957,12 +1070,62 @@ TEST(EventLog, FillExtensionAcceptsOnlyCompleteHistoricShapes)
             std::runtime_error);
     }
 
+    for (std::size_t tail_size = 1; tail_size < provenance_size; ++tail_size) {
+        auto partial = current;
+        partial.resize(v2_complete_size + tail_size);
+        EXPECT_THROW(
+            (void)event_serial::deserialise(event_type::fill,
+                                            partial.data(), partial.size()),
+            std::runtime_error);
+    }
+
+    for (std::size_t tail_size = 1; tail_size < identity_size; ++tail_size) {
+        auto partial = current;
+        partial.resize(provenance_complete_size + tail_size);
+        EXPECT_THROW(
+            (void)event_serial::deserialise(event_type::fill,
+                                            partial.data(), partial.size()),
+            std::runtime_error);
+    }
+
     auto extra_extension = current;
     extra_extension.push_back(0x42);
     EXPECT_THROW(
         (void)event_serial::deserialise(event_type::fill,
                                         extra_extension.data(), extra_extension.size()),
         std::runtime_error);
+}
+
+TEST(EventLog, CurrentVersionReplayerRejectsHistoricFillPayloadShape)
+{
+    fill_event fill(epoch_ms(1), "TEST", 42, order_side::buy,
+                    2.0, 100.0, 0.5, 0.0, 99, "alpha", 7);
+    fill.set_source(fill_source::simulated);
+    fill.set_cumulative_filled_qty(
+        2.0, fill_cumulative_source::simulated);
+
+    auto historic_payload = event_serial::serialise(fill);
+    constexpr std::size_t identity_size =
+        4U + sizeof(std::uint16_t) + sizeof(std::uint16_t)
+        + sizeof(double) + sizeof(std::uint8_t);
+    ASSERT_GT(historic_payload.size(), identity_size);
+    historic_payload.resize(historic_payload.size() - identity_size);
+
+    TempFile tf("v3_header_with_historic_fill_payload.bin");
+    {
+        std::ofstream out(tf.path, std::ios::binary | std::ios::trunc);
+        write_event_log_preamble(out, /*compressed=*/false,
+                                 /*finalized=*/true);
+        write_raw_event_record(out, event_type::fill, historic_payload);
+        const auto index_offset = static_cast<std::uint64_t>(out.tellp());
+        event_serial::write_u64(out, index_offset);
+        event_serial::write_u32(out, 0U);
+        event_serial::write_u32(out, EVENT_LOG_INDEX_MAGIC);
+    }
+
+    EventReplayer replayer(tf.path);
+    ASSERT_EQ(replayer.file_version(), EVENT_LOG_FILE_VERSION);
+    EXPECT_THROW((void)replayer.next(), std::runtime_error);
 }
 
 TEST(EventLog, OrderAttributionExtensionRemainsBackwardCompatible)
@@ -975,10 +1138,12 @@ TEST(EventLog, OrderAttributionExtensionRemainsBackwardCompatible)
     auto current = event_serial::serialise(order);
     const std::size_t attribution_size = sizeof(uint64_t) + sizeof(uint16_t)
                                        + order.get_strategy_name().size();
-    ASSERT_GT(current.size(), attribution_size);
+    const std::size_t lifecycle_size = sizeof(uint64_t) * 2 + sizeof(uint8_t)
+                                     + sizeof(int64_t) * 2;
+    ASSERT_GT(current.size(), attribution_size + lifecycle_size);
 
     auto legacy = current;
-    legacy.resize(legacy.size() - attribution_size);
+    legacy.resize(legacy.size() - attribution_size - lifecycle_size);
     const auto legacy_event = event_serial::deserialise(
         event_type::order, legacy.data(), legacy.size());
     ASSERT_NE(legacy_event, nullptr);
@@ -1480,6 +1645,214 @@ TEST(EventLog, LedgerReplayAppliesNonzeroFundingExactlyOnce)
     EXPECT_DOUBLE_EQ(report.final_equity, 1'007.25);
     EXPECT_DOUBLE_EQ(report.final_equity - report.initial_equity,
                      report.realized_pnl + report.unrealized_pnl + 7.25);
+}
+
+TEST(EventLog, LedgerReplayCanonicalizesDecimalSlicesAcrossLedgers)
+{
+    SilenceCout quiet;
+    TempFile tf("replay-decimal-fill.bin");
+    {
+        EventLogger logger(tf.path, false);
+        order_event order(epoch_ms(1), "TEST", order_type::limit,
+                          order_side::buy, 0.3, 100.0);
+        order.set_order_id(1);
+        order.set_strategy_name("ledger");
+        logger.log(order);
+
+        fill_event first(epoch_ms(2), "TEST", 1, order_side::buy,
+                         0.1, 100.0, 0.0, 0.2, 1, "ledger", 1);
+        first.set_source(fill_source::exchange);
+        ASSERT_TRUE(first.set_venue_execution_id("decimal-1"));
+        ASSERT_TRUE(first.set_commission_currency("USD"));
+        first.set_cumulative_filled_qty(
+            0.1, fill_cumulative_source::venue_reported);
+        logger.log(first);
+
+        fill_event second(epoch_ms(3), "TEST", 1, order_side::buy,
+                          0.2, 100.0, 0.0, 0.0, 2, "ledger", 1);
+        second.set_source(fill_source::exchange);
+        ASSERT_TRUE(second.set_venue_execution_id("decimal-2"));
+        ASSERT_TRUE(second.set_commission_currency("USD"));
+        second.set_cumulative_filled_qty(
+            0.3, fill_cumulative_source::venue_reported);
+        // Threaded logging observes the post-gate shared event. Its economic
+        // view is normalized, while serialization must retain the raw venue
+        // identity used by reconnect dedupe.
+        second.set_economic_quantity(0.3 - 0.1);
+        logger.log(second);
+    }
+
+    engine_config cfg;
+    cfg.initial_balance = 1'000.0;
+    cfg.qty_scale = 1e8;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr,
+               std::move(cfg));
+    ASSERT_NO_THROW(eng.run_replay(tf.path));
+
+    const auto* tracked = eng.get_order_tracker().find(1);
+    ASSERT_NE(tracked, nullptr);
+    EXPECT_DOUBLE_EQ(tracked->filled_qty, 0.3);
+    const auto& positions = eng.get_portfolio().get_positions();
+    const auto position = positions.find("TEST");
+    ASSERT_NE(position, positions.end());
+    EXPECT_DOUBLE_EQ(position->second.qty, tracked->filled_qty)
+        << "portfolio and order cursor must book one canonical quantity";
+    EXPECT_EQ(eng.get_analytics().generate_report().total_fills, 2u);
+
+    // Durable identity remains the raw venue report, not the normalized
+    // accounting delta. A reconnect replay can therefore match it exactly.
+    EventReplayer replay(tf.path);
+    ASSERT_NE(replay.next(), nullptr); // order
+    ASSERT_NE(replay.next(), nullptr); // first fill
+    const auto raw_second = replay.next();
+    ASSERT_NE(raw_second, nullptr);
+    ASSERT_EQ(raw_second->get_type(), event_type::fill);
+    const auto& persisted = static_cast<const fill_event&>(*raw_second);
+    EXPECT_DOUBLE_EQ(persisted.get_reported_filled_quantity(), 0.2);
+}
+
+TEST(EventLog, LedgerReplayRejectsUnknownLifecycleWithoutGhostState)
+{
+    SilenceCout quiet;
+    for (const bool rejection_case : {false, true})
+    {
+        TempFile tf(rejection_case
+            ? "replay-unknown-rejection.bin"
+            : "replay-unknown-cancel.bin");
+        {
+            EventLogger logger(tf.path, false);
+            if (rejection_case)
+                logger.log(rejection_event(
+                    epoch_ms(2), "TEST", 999, "unknown"));
+            else
+                logger.log(cancel_event(
+                    epoch_ms(2), "TEST", 999, "unknown"));
+        }
+
+        engine_config cfg;
+        cfg.initial_balance = 1'000.0;
+        cfg.threading = thread_preset::inline_mode;
+        engine eng(std::make_shared<data_handler>(), nullptr, nullptr,
+                   std::move(cfg));
+        EXPECT_THROW(eng.run_replay(tf.path), std::runtime_error);
+        EXPECT_EQ(eng.get_order_tracker().orders_seen(), 0u);
+        EXPECT_DOUBLE_EQ(eng.get_portfolio().get_cash(), 1'000.0);
+    }
+}
+
+TEST(EventLog, LedgerReplayPreflightRejectsMismatchedLifecycleAtomically)
+{
+    SilenceCout quiet;
+    TempFile tf("replay-mismatched-cancel.bin");
+    {
+        EventLogger logger(tf.path, false);
+        order_event order(epoch_ms(1), "TEST", order_type::limit,
+                          order_side::buy, 1.0, 100.0);
+        order.set_order_id(1);
+        logger.log(order);
+        logger.log(cancel_event(epoch_ms(2), "OTHER", 1, "mismatch"));
+    }
+
+    engine_config cfg;
+    cfg.initial_balance = 1'000.0;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr,
+               std::move(cfg));
+    EXPECT_THROW(eng.run_replay(tf.path), std::runtime_error);
+    EXPECT_EQ(eng.get_order_tracker().orders_seen(), 0u)
+        << "complete preflight must reject before applying the valid prefix";
+    EXPECT_DOUBLE_EQ(eng.get_portfolio().get_cash(), 1'000.0);
+}
+
+TEST(EventLog, LedgerReplayRejectsInvalidFundingBeforeAnyCashMutation)
+{
+    SilenceCout quiet;
+    TempFile tf("replay-invalid-funding.bin");
+    {
+        EventLogger logger(tf.path, false);
+        logger.log(funding_event(
+            epoch_ms(1), "TEST", 0.0, 7.25, "FUNDING_FEE"));
+        logger.log(funding_event(
+            epoch_ms(2), "TEST", 0.0,
+            std::numeric_limits<double>::quiet_NaN(), "FUNDING_FEE"));
+    }
+
+    engine_config cfg;
+    cfg.initial_balance = 1'000.0;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr,
+               std::move(cfg));
+    EXPECT_THROW(eng.run_replay(tf.path), std::runtime_error);
+    EXPECT_DOUBLE_EQ(eng.get_portfolio().get_cash(), 1'000.0);
+    EXPECT_DOUBLE_EQ(eng.get_analytics().total_funding_pnl(), 0.0);
+    EXPECT_TRUE(std::isfinite(
+        eng.get_analytics().generate_report().final_equity));
+}
+
+TEST(EventLog, AuthoritativeReplayIsOneShotAndCannotDoubleFunding)
+{
+    SilenceCout quiet;
+    TempFile tf("replay-one-shot.bin");
+    {
+        EventLogger logger(tf.path, false);
+        logger.log(funding_event(
+            epoch_ms(1), "TEST", 0.0, 7.25, "FUNDING_FEE"));
+    }
+
+    engine_config cfg;
+    cfg.initial_balance = 1'000.0;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr,
+               std::move(cfg));
+    ASSERT_NO_THROW(eng.run_replay(tf.path));
+    EXPECT_DOUBLE_EQ(eng.get_portfolio().get_cash(), 1'007.25);
+    EXPECT_THROW(eng.run_replay(tf.path), std::runtime_error);
+    EXPECT_DOUBLE_EQ(eng.get_portfolio().get_cash(), 1'007.25);
+    EXPECT_DOUBLE_EQ(eng.get_analytics().total_funding_pnl(), 7.25);
+}
+
+TEST(EventLog, LedgerReplayAppliesCommittedAmendBeforeLaterFill)
+{
+    SilenceCout quiet;
+    TempFile tf("replay-amend-ledger.bin");
+    {
+        EventLogger logger(tf.path, false);
+        order_event order(epoch_ms(1), "TEST", order_type::limit,
+                          order_side::buy, 10.0, 100.0);
+        order.set_order_id(1);
+        order.set_strategy_name("ledger");
+        logger.log(order);
+
+        fill_event first(epoch_ms(2), "TEST", 1, order_side::buy,
+                         4.0, 100.0, 0.0, 6.0, 1, "ledger", 1);
+        first.set_cumulative_filled_qty(
+            4.0, fill_cumulative_source::simulated);
+        logger.log(first);
+
+        // Public amend quantity is the new total quantity.  Six total means
+        // two remain after the already committed four-unit slice.
+        logger.log(amend_event(epoch_ms(3), "TEST", 1, 101.0, 6.0));
+
+        fill_event second(epoch_ms(4), "TEST", 1, order_side::buy,
+                          2.0, 101.0, 0.0, 0.0, 2, "ledger", 1);
+        second.set_cumulative_filled_qty(
+            6.0, fill_cumulative_source::simulated);
+        logger.log(second);
+    }
+
+    engine_config cfg;
+    cfg.initial_balance = 10'000.0;
+    cfg.threading = thread_preset::inline_mode;
+    engine eng(std::make_shared<data_handler>(), nullptr, nullptr,
+               std::move(cfg));
+
+    ASSERT_NO_THROW(eng.run_replay(tf.path));
+    const auto& positions = eng.get_portfolio().get_positions();
+    const auto it = positions.find("TEST");
+    ASSERT_NE(it, positions.end());
+    EXPECT_DOUBLE_EQ(it->second.qty, 6.0);
+    EXPECT_EQ(eng.get_analytics().generate_report().total_fills, 2u);
 }
 
 TEST(EventLog, LedgerReplayReconstructsIncrementalL2Marks)

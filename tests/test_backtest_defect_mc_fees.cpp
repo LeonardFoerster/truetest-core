@@ -10,6 +10,7 @@ TEST(BacktestDefects, FR02_McTrialsApplyFees)
     base.generator_config.sigma = 0.8;
     base.strategy_name = "mean-reversion";
     base.base_seed = 99;
+    base.master_seed_explicitly_set = true;
     base.initial_balance = 10000.0;
 
     McRunConfig free = base;
@@ -59,6 +60,7 @@ TEST(BacktestDefects, FR02_McInjectsStrategyFeeRates)
         cfg.generator_config.n_steps = 20;
         cfg.strategy_name = probe_name;
         cfg.base_seed = 7;
+        cfg.master_seed_explicitly_set = true;
         cfg.fee_model = "tiered";
         cfg.maker_rate = 0.0004;
         cfg.taker_rate = 0.0012;
@@ -67,8 +69,8 @@ TEST(BacktestDefects, FR02_McInjectsStrategyFeeRates)
 
         EXPECT_DOUBLE_EQ(state->last_entry_fee, 0.0012);
         EXPECT_DOUBLE_EQ(state->last_exit_fee, 0.0012);
-        EXPECT_DOUBLE_EQ(state->last_fixed_fee, -1.0)
-            << "tiered must not set fixed_fee_per_leg";
+        EXPECT_DOUBLE_EQ(state->last_fixed_fee, 0.0)
+            << "the complete effective config must expose a zero fixed fee";
     }
 
     // Fixed: inject fixed_fee_per_leg when schema supports it.
@@ -81,14 +83,15 @@ TEST(BacktestDefects, FR02_McInjectsStrategyFeeRates)
         cfg.generator_config.n_steps = 20;
         cfg.strategy_name = probe_name;
         cfg.base_seed = 8;
+        cfg.master_seed_explicitly_set = true;
         cfg.fee_model = "fixed";
         cfg.fee_value = 1.25;
         MonteCarloController c(cfg);
         (void)c.run();
 
         EXPECT_DOUBLE_EQ(state->last_fixed_fee, 1.25);
-        EXPECT_DOUBLE_EQ(state->last_entry_fee, -1.0)
-            << "fixed model without rates must not invent proportional fees";
+        EXPECT_DOUBLE_EQ(state->last_entry_fee, 0.0)
+            << "the complete effective config must expose a zero proportional fee";
     }
 
     // Explicit --param must still win over injected costs (CLI parity).
@@ -101,6 +104,7 @@ TEST(BacktestDefects, FR02_McInjectsStrategyFeeRates)
         cfg.generator_config.n_steps = 20;
         cfg.strategy_name = probe_name;
         cfg.base_seed = 9;
+        cfg.master_seed_explicitly_set = true;
         cfg.fee_model = "tiered";
         cfg.taker_rate = 0.002;
         cfg.strategy_params = {{"entry_fee_rate", 0.0005}, {"exit_fee_rate", 0.0005}};
@@ -125,6 +129,7 @@ TEST(BacktestDefects, McPlatformRiskFractionReachesStrategyAndParamOverrides)
     cfg.generator_config.n_steps = 20;
     cfg.strategy_name = probe_name;
     cfg.base_seed = 17;
+    cfg.master_seed_explicitly_set = true;
     cfg.risk_fraction = 0.037;
     MonteCarloController platform_default(cfg);
     (void)platform_default.run();
@@ -146,8 +151,8 @@ TEST(BacktestDefects, FR02_McImpactWithoutAdvThrows)
     cfg.impact_adv = 0.0; // invalid
     cfg.strategy_name = "mean-reversion";
     cfg.base_seed = 1;
-    MonteCarloController c(cfg);
-    EXPECT_THROW(c.run(), std::runtime_error);
+    cfg.master_seed_explicitly_set = true;
+    EXPECT_THROW((void)MonteCarloController(cfg), std::invalid_argument);
 }
 
 // ── DR-01: synthetic timestamps strictly spaced ────────────────────────────
@@ -162,23 +167,27 @@ TEST(BacktestDefects, FR02_McFeeModelProducesCommissionDelta)
     free.generator_config.sigma = 1.2;
     free.strategy_name = "mean-reversion";
     free.base_seed = 7;
+    free.master_seed_explicitly_set = true;
     free.initial_balance = 10000.0;
 
     McRunConfig fee = free;
     fee.fee_model = "fixed";
     fee.fee_value = 5.0; // $5 per fill — large vs free
+    // Isolate engine fee charging from fee-aware strategy sizing. Otherwise
+    // the fixed-fee estimate can deliberately shrink/change orders, making a
+    // lower final equity an invalid expectation about two different paths.
+    fee.strategy_params = {{"fixed_fee_per_leg", 0.0}};
 
     auto agg_free = MonteCarloController(free).run();
     auto agg_fee  = MonteCarloController(fee).run();
     ASSERT_EQ(agg_free.trials.size(), 1u);
     ASSERT_EQ(agg_fee.trials.size(), 1u);
 
-    // Force a path that trades: if free has trades, fee equity must be lower
-    // by at least one commission (or equal only if both zero-trade — fail then).
-    ASSERT_GT(agg_free.trials[0].total_trades + agg_fee.trials[0].total_trades, 0u)
-        << "seed/path produced no trades; cannot validate fee wiring";
+    // total_trades counts completed round trips and can be zero with a filled,
+    // still-open position. Equal sizing makes the final-equity delta itself
+    // the stronger proof that at least one charged fill occurred.
     EXPECT_LT(agg_fee.trials[0].final_equity, agg_free.trials[0].final_equity)
-        << "fixed $5 fee must reduce equity vs zero-fee when trades exist";
+        << "fixed $5 engine fee must reduce equity on the identical execution path";
 }
 
 TEST(BacktestDefects, FR07_SmaSizingShrinksWithEntryFee)
@@ -345,6 +354,7 @@ TEST(BacktestDefects, McReuse_RefusesStrategyWithoutFullReset)
     McRunConfig cfg;
     cfg.n_trials = 1;
     cfg.base_seed = 1;
+    cfg.master_seed_explicitly_set = true;
     cfg.strategy_name = "breakout"; // no supports_mc_trial_reuse
     cfg.reuse_objects_between_trials = true;
     cfg.generator_config.n_steps = 20;
@@ -360,6 +370,7 @@ TEST(BacktestDefects, McReuse_SmaIsolationCompletes)
     McRunConfig cfg;
     cfg.n_trials = 3;
     cfg.base_seed = 99;
+    cfg.master_seed_explicitly_set = true;
     cfg.strategy_name = "sma";
     cfg.reuse_objects_between_trials = true;
     cfg.generator_config.n_steps = 40;
@@ -391,6 +402,7 @@ TEST(BacktestDefects, FR_McQueue_MakerQueueWiresIntoTrials)
     McRunConfig cfg;
     cfg.n_trials = 2;
     cfg.base_seed = 424242;
+    cfg.master_seed_explicitly_set = true;
     cfg.strategy_name = "sma";
     cfg.initial_balance = 10000;
     cfg.generator_name = "gbm";

@@ -162,7 +162,7 @@ TEST(BacktestDefects, DR_DataWrapperSortAllKeepsRowsAndTicksAligned)
                 bar.date = std::to_string(ms);
                 bar.symbol = "BAR" + std::to_string(ms);
                 bar.open = static_cast<double>(ms) + 0.1;
-                bar.high = static_cast<double>(ms) + 0.2;
+                bar.high = static_cast<double>(ms) + 0.5;
                 bar.low = static_cast<double>(ms) - 0.3;
                 bar.close = static_cast<double>(ms) + 0.4;
                 bar.volume = ms * 10;
@@ -197,7 +197,7 @@ TEST(BacktestDefects, DR_DataWrapperSortAllKeepsRowsAndTicksAligned)
         EXPECT_EQ(bar.date, std::to_string(ms));
         EXPECT_EQ(bar.symbol, "BAR" + std::to_string(ms));
         EXPECT_DOUBLE_EQ(bar.open, static_cast<double>(ms) + 0.1);
-        EXPECT_DOUBLE_EQ(bar.high, static_cast<double>(ms) + 0.2);
+        EXPECT_DOUBLE_EQ(bar.high, static_cast<double>(ms) + 0.5);
         EXPECT_DOUBLE_EQ(bar.low, static_cast<double>(ms) - 0.3);
         EXPECT_DOUBLE_EQ(bar.close, static_cast<double>(ms) + 0.4);
         EXPECT_EQ(bar.volume, ms * 10);

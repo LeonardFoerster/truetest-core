@@ -18,7 +18,8 @@ std::string update(const std::string& x, const std::string& X,
                    const std::string& i = "42",
                    const std::string& n = "0.0",
                    const std::string& N = "USDT",
-                   const std::string& r = "NONE")
+                   const std::string& r = "NONE",
+                   const std::string& t = "9001")
 {
     std::string j = R"({"e":"ORDER_TRADE_UPDATE",)";
     j += R"("E":1700000000000,)";
@@ -32,6 +33,7 @@ std::string update(const std::string& x, const std::string& X,
     j +=     R"("X":")" + X + R"(",)";
     j +=     R"("r":")" + r + R"(",)";
     j +=     R"("i":)" + i + ",";
+    j +=     R"("t":)" + t + ",";
     j +=     R"("l":")" + l + R"(",)";
     j +=     R"("L":")" + L + R"(",)";
     j +=     R"("z":")" + z + R"(",)";
@@ -199,6 +201,8 @@ TEST(BinanceFuturesUserDataParser, PartialTrade)
     EXPECT_DOUBLE_EQ(out.last_fill_qty, 0.4);
     EXPECT_DOUBLE_EQ(out.last_fill_price, 60000.0);
     EXPECT_DOUBLE_EQ(out.cumulative_qty, 0.4);
+    EXPECT_TRUE(out.has_cumulative_qty);
+    EXPECT_EQ(out.venue_execution_id, "9001");
 }
 
 TEST(BinanceFuturesUserDataParser, FullTrade)
@@ -220,6 +224,57 @@ TEST(BinanceFuturesUserDataParser, FullTrade)
     EXPECT_DOUBLE_EQ(out.cumulative_qty, 1.0);
     EXPECT_DOUBLE_EQ(out.commission, 0.06);
     EXPECT_EQ(out.commission_asset, "USDT");
+    EXPECT_TRUE(out.has_cumulative_qty);
+    EXPECT_EQ(out.venue_execution_id, "9001");
+}
+
+TEST(BinanceFuturesUserDataParser,
+     C12_ContradictoryExecutionStatusTuplesAreInvalid)
+{
+    struct tuple
+    {
+        const char* execution_type;
+        const char* order_status;
+    };
+    constexpr tuple invalid_tuples[] = {
+        {"TRADE", "NEW"},
+        {"TRADE", "CANCELED"},
+        {"TRADE", "REJECTED"},
+        {"TRADE", "EXPIRED"},
+        {"NEW", "FILLED"},
+        {"CANCELED", "NEW"},
+        {"REJECTED", "NEW"},
+        {"REJECTED", "REJECTED"},
+        {"NEW", "REJECTED"},
+        {"CALCULATED", "FILLED"},
+        {"AMENDMENT", "NEW"},
+        {"EXPIRED", "NEW"},
+        {"UNKNOWN", "CANCELED"},
+    };
+
+    BinanceFuturesUserDataParser p;
+    for (const auto& invalid : invalid_tuples)
+    {
+        SCOPED_TRACE(std::string(invalid.execution_type) + "/"
+                     + invalid.order_status);
+        parsed_exec out;
+        ASSERT_TRUE(p.parse(
+            update(invalid.execution_type, invalid.order_status,
+                   "0.5", "95", "0.5", "tt-bracket-1", "SELL",
+                   "77", "0.01", "USDT", "NONE", "9001"),
+            out));
+        EXPECT_EQ(out.k, parsed_exec::kind::invalid);
+    }
+}
+
+TEST(BinanceFuturesUserDataParser, FillWithoutNativeExecutionIdIsInvalid)
+{
+    BinanceFuturesUserDataParser p;
+    parsed_exec out;
+    auto j = update("TRADE", "FILLED", "1", "100", "1",
+                    "tt-1", "BUY", "42", "0", "USDT", "NONE", "");
+    ASSERT_TRUE(p.parse(j, out));
+    EXPECT_EQ(out.k, parsed_exec::kind::invalid);
 }
 
 TEST(BinanceFuturesUserDataParser, MalformedExecutionNumbersOrSideAreExplicit)
@@ -262,7 +317,7 @@ TEST(BinanceFuturesUserDataParser, Canceled)
     EXPECT_EQ(out.k, parsed_exec::kind::canceled);
 }
 
-TEST(BinanceFuturesUserDataParser, Rejected)
+TEST(BinanceFuturesUserDataParser, UndocumentedRejectedExecutionTypeIsInvalid)
 {
     BinanceFuturesUserDataParser p;
     parsed_exec out;
@@ -270,8 +325,7 @@ TEST(BinanceFuturesUserDataParser, Rejected)
                     "tt-2", "BUY", "0", "0", "USDT",
                     "INSUFFICIENT_MARGIN");
     ASSERT_TRUE(p.parse(j, out));
-    EXPECT_EQ(out.k, parsed_exec::kind::rejected);
-    EXPECT_EQ(out.error, "INSUFFICIENT_MARGIN");
+    EXPECT_EQ(out.k, parsed_exec::kind::invalid);
 }
 
 TEST(BinanceFuturesUserDataParser, Expired)

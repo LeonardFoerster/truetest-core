@@ -495,7 +495,8 @@ TEST(RiskEnforcement, FundingSettlementProducesTheRate)
     // rate of 0.0005 (5 bps per 8h), the venue identity
     // funding_fee = -notional * rate.
     analytics.on_event(std::make_shared<fill_event>(
-        epoch_ms(0), "BTCUSDT", 1, order_side::buy, 2.0, 1'000.0, 0.0));
+        epoch_ms(0), "BTCUSDT", 1, order_side::buy, 2.0, 1'000.0,
+        0.0, 0.0, 1));
     analytics.on_mark("BTCUSDT", 1'000.0);
     analytics.on_funding(funding_event(epoch_ms(1), "BTCUSDT", 0.0, -1.0));
 
@@ -507,7 +508,8 @@ TEST(RiskEnforcement, FundingSettlementProducesTheRate)
     // side is what the cap is written against).
     Analytics shorted(10'000.0);
     shorted.on_event(std::make_shared<fill_event>(
-        epoch_ms(0), "BTCUSDT", 1, order_side::sell, 2.0, 1'000.0, 0.0));
+        epoch_ms(0), "BTCUSDT", 1, order_side::sell, 2.0, 1'000.0,
+        0.0, 0.0, 1));
     shorted.on_mark("BTCUSDT", 1'000.0);
     shorted.on_funding(funding_event(epoch_ms(1), "BTCUSDT", 0.0, +1.0));
     EXPECT_NEAR(shorted.risk_view().current_funding_8h_rate, 0.0005, 1e-12);
@@ -517,7 +519,8 @@ TEST(RiskEnforcement, SpotInstrumentNeverAcquiresAFundingRate)
 {
     Analytics analytics(10'000.0);
     analytics.on_event(std::make_shared<fill_event>(
-        epoch_ms(0), "AAPL", 1, order_side::buy, 2.0, 100.0, 0.0));
+        epoch_ms(0), "AAPL", 1, order_side::buy, 2.0, 100.0,
+        0.0, 0.0, 1));
     analytics.on_mark("AAPL", 100.0);
     // No funding_event is ever emitted for a spot instrument.
     EXPECT_FALSE(analytics.risk_view().funding_rate_known);

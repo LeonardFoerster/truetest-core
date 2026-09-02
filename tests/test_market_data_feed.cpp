@@ -146,6 +146,76 @@ TEST(MarketDataFeed, ProviderBundlesOnlyACompleteExistingEventStream)
     EXPECT_FALSE(feed->capabilities.has_value());
 }
 
+TEST(MarketDataFeed, C07_UndeclaredOrInconsistentCapabilitiesFailClosed)
+{
+    MarketDataFeed feed;
+    feed.transport = std::make_shared<StubTransport>();
+    feed.parser = std::make_shared<StubEventParser>();
+
+    std::optional<MarketDataFeed> declared_feed{feed};
+    EXPECT_EQ(select_market_data_route(true, declared_feed, true),
+              market_data_route::invalid);
+
+    feed.request = market_data_request{
+        .symbol = "BTCUSDT",
+        .channels = {{market_data_channel_kind::trades}},
+    };
+    feed.capabilities = market_data_capabilities{
+        .trades = false,
+    };
+    declared_feed = feed;
+    EXPECT_EQ(select_market_data_route(true, declared_feed, true),
+              market_data_route::invalid);
+
+    feed.capabilities->trades = true;
+    declared_feed = feed;
+    EXPECT_EQ(select_market_data_route(true, declared_feed, true),
+              market_data_route::unified_event_stream);
+}
+
+TEST(MarketDataFeed, C07_InvalidCapabilityShapesFailClosed)
+{
+    MarketDataFeed feed;
+    feed.transport = std::make_shared<StubTransport>();
+    feed.parser = std::make_shared<StubEventParser>();
+    feed.request = market_data_request{
+        .symbol = "BTCUSDT",
+        .channels = {{market_data_channel_kind::trades}},
+    };
+    feed.capabilities = market_data_capabilities{.trades = true};
+
+    auto expect_invalid = [&feed]() {
+        const std::optional<MarketDataFeed> candidate{feed};
+        EXPECT_EQ(select_market_data_route(true, candidate, true),
+                  market_data_route::invalid);
+    };
+
+    feed.request->symbol.clear();
+    expect_invalid();
+
+    feed.request->symbol = "BTCUSDT";
+    feed.request->channels.push_back({market_data_channel_kind::trades});
+    expect_invalid();
+
+    feed.request->channels = {{market_data_channel_kind::l2_snapshot, 20}};
+    feed.capabilities = market_data_capabilities{
+        .l2_snapshots = true,
+        .max_l2_depth = 5,
+    };
+    expect_invalid();
+
+    feed.request->channels = {{market_data_channel_kind::candles}};
+    feed.capabilities = market_data_capabilities{.trades = true};
+    expect_invalid();
+
+    feed.request->channels = {{market_data_channel_kind::trades, 1}};
+    feed.capabilities = market_data_capabilities{.trades = true};
+    expect_invalid();
+
+    feed.request->channels = {{static_cast<market_data_channel_kind>(255)}};
+    expect_invalid();
+}
+
 TEST(MarketDataFeed, RecordingDecoratorPreservesBoundedReads)
 {
     auto inner = std::make_shared<BoundedStubTransport>();

@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -37,6 +38,27 @@ struct silence_cout
 
 static auto now_tp() { return std::chrono::system_clock::now(); }
 
+enum class injected_fill_fault
+{
+    none,
+    missing_fill_id,
+    missing_venue_execution_id,
+    missing_commission_currency,
+    missing_cumulative_quantity,
+    unknown_order,
+    mismatched_symbol,
+    mismatched_side,
+    zero_quantity,
+    nan_quantity,
+    infinite_price,
+    nan_commission,
+    oversized_quantity,
+    epoch_zero_timestamp,
+    simulated_fee_without_currency,
+    simulated_fee_with_currency,
+    simulated_rebate_with_currency,
+};
+
 // Async-style adapter: submit records the order without filling.
 // First poll_fills (inside process_order) returns empty; subsequent polls
 // (bar/tick provider drain → handle_engine_fill) release the fill.
@@ -45,11 +67,16 @@ class DeferredFillAdapter : public IExecutionAdapter
 public:
     int submit_count = 0;
     int poll_count = 0;
+    std::uint64_t last_order_id = 0;
+    double commission = 0.0;
+    std::string commission_currency = "USDT";
+    injected_fill_fault fill_fault = injected_fill_fault::none;
     std::optional<order_event> held;
 
     void submit_order(const order_event& o) override
     {
         ++submit_count;
+        last_order_id = o.get_order_id();
         held = o;
         // Reset so the process_order poll after this submit is skipped once.
         poll_count = 0;
@@ -63,12 +90,77 @@ public:
         if (poll_count < 2) return false;
 
         const order_event& o = *held;
-        fill_event f(o.get_earliest_eligible_ts(),
-                     o.get_symbol(),
-                     o.get_order_id(),
-                     o.get_side(),
-                     o.get_quantity(),
-                     o.get_price() > 0.0 ? o.get_price() : 100.0);
+        auto timestamp = o.get_earliest_eligible_ts();
+        std::string symbol = o.get_symbol();
+        auto order_id = o.get_order_id();
+        auto side = o.get_side();
+        double quantity = o.get_quantity();
+        double price = o.get_price() > 0.0 ? o.get_price() : 100.0;
+        double fill_commission = commission;
+        double remaining = 0.0;
+        auto fill_id = ++next_fill_id_;
+        double cumulative = o.get_quantity();
+        auto source = fill_source::exchange;
+        auto cumulative_source = fill_cumulative_source::venue_reported;
+        bool stamp_venue_execution_id = true;
+        bool stamp_commission_currency = true;
+        bool stamp_cumulative_quantity = true;
+
+        switch (fill_fault)
+        {
+        case injected_fill_fault::none: break;
+        case injected_fill_fault::missing_fill_id: fill_id = 0; break;
+        case injected_fill_fault::missing_venue_execution_id:
+            stamp_venue_execution_id = false;
+            break;
+        case injected_fill_fault::missing_commission_currency:
+            stamp_commission_currency = false;
+            break;
+        case injected_fill_fault::missing_cumulative_quantity:
+            stamp_cumulative_quantity = false;
+            break;
+        case injected_fill_fault::unknown_order: ++order_id; break;
+        case injected_fill_fault::mismatched_symbol: symbol = "OTHER"; break;
+        case injected_fill_fault::mismatched_side:
+            side = side == order_side::buy ? order_side::sell : order_side::buy;
+            break;
+        case injected_fill_fault::zero_quantity: quantity = 0.0; break;
+        case injected_fill_fault::nan_quantity:
+            quantity = std::numeric_limits<double>::quiet_NaN();
+            break;
+        case injected_fill_fault::infinite_price:
+            price = std::numeric_limits<double>::infinity();
+            break;
+        case injected_fill_fault::nan_commission:
+            fill_commission = std::numeric_limits<double>::quiet_NaN();
+            break;
+        case injected_fill_fault::oversized_quantity:
+            quantity = o.get_quantity() + 1.0;
+            cumulative = quantity;
+            break;
+        case injected_fill_fault::epoch_zero_timestamp:
+            timestamp = {};
+            break;
+        case injected_fill_fault::simulated_fee_without_currency:
+            source = fill_source::simulated;
+            cumulative_source = fill_cumulative_source::simulated;
+            fill_commission = 1.0;
+            stamp_commission_currency = false;
+            break;
+        case injected_fill_fault::simulated_fee_with_currency:
+            source = fill_source::simulated;
+            cumulative_source = fill_cumulative_source::simulated;
+            fill_commission = 1.0;
+            break;
+        case injected_fill_fault::simulated_rebate_with_currency:
+            source = fill_source::simulated;
+            cumulative_source = fill_cumulative_source::simulated;
+            fill_commission = -1.0;
+            break;
+        }
+
+        fill_event f(timestamp, symbol, order_id, side, quantity, price,
+                     fill_commission, remaining, fill_id);
         f.set_recv_ns(o.get_recv_ns());
         if (o.get_recv_ns() > 0)
         {
@@ -76,7 +168,19 @@ public:
                 std::chrono::steady_clock::now().time_since_epoch()).count();
             f.set_latency_ns(now_ns - o.get_recv_ns());
         }
-        f.set_source(fill_source::exchange);
+        f.set_source(source);
+        if (stamp_venue_execution_id)
+        {
+            EXPECT_TRUE(f.set_venue_execution_id(
+                "deferred-" + std::to_string(f.get_fill_id())));
+        }
+        if (stamp_commission_currency)
+        {
+            EXPECT_TRUE(f.set_commission_currency(commission_currency));
+        }
+        if (stamp_cumulative_quantity)
+            f.set_cumulative_filled_qty(
+                cumulative, cumulative_source);
         if (!o.get_strategy_name().empty())
             f.set_strategy_name(o.get_strategy_name());
         out.push_back(std::move(f));
@@ -85,6 +189,9 @@ public:
     }
 
     bool cancel_order(uint64_t) override { return false; }
+
+private:
+    std::uint64_t next_fill_id_ = 0;
 };
 
 class DeferredFillProvider : public IProvider
@@ -111,16 +218,36 @@ class OneShotBuyer : public IStrategy
     bool fired_ = false;
 public:
     int calls = 0;
+    int fill_calls = 0;
+    bool emit_exit_intent = false;
+    std::vector<truetest::exits::exit_intent> pending_exit_intents;
     std::optional<order_event> on_market(const market_event& mkt) override
     {
         ++calls;
         if (fired_) return std::nullopt;
         fired_ = true;
+        if (emit_exit_intent)
+        {
+            truetest::exits::exit_intent intent;
+            intent.symbol = mkt.get_symbol();
+            intent.close_side = order_side::sell;
+            intent.qty = 1.0;
+            intent.stop_loss = mkt.get_close() * 0.95;
+            pending_exit_intents.push_back(std::move(intent));
+        }
         return order_event(mkt.get_timestamp(), mkt.get_symbol(),
                            order_type::market, order_side::buy,
                            1.0, mkt.get_close());
     }
     void set_position_open(const std::string&, bool) override {}
+    void on_fill(const fill_event&, std::uint64_t) override { ++fill_calls; }
+    std::vector<truetest::exits::exit_intent>
+    take_pending_exit_intents() override
+    {
+        auto out = std::move(pending_exit_intents);
+        pending_exit_intents.clear();
+        return out;
+    }
 };
 
 // Optimistic gate: locks on emit (like mean-reversion). Engine must unlock
@@ -267,6 +394,271 @@ TEST(TickToTradeSafety, ProviderFill_RecordsInAnalytics)
     EXPECT_GE(report.total_fills, 1u)
         << "handle_engine_fill must always call analytics_.on_event on provider fills";
     EXPECT_FALSE(eng.get_halt_flag().load(std::memory_order_acquire));
+}
+
+TEST(TickToTradeSafety, C08_ThirdAssetFeeWithoutFxFailsBeforeEconomicMutation)
+{
+    silence_cout quiet;
+    auto dh = std::make_shared<data_handler>();
+    for (int i = 0; i < 5; ++i)
+    {
+        dh->load_into_queue("1704067200000", "BTCUSDT",
+                            100.0, 100.5, 99.5, 100.0, 1'000);
+    }
+    auto provider = std::make_shared<DeferredFillProvider>();
+    provider->adapter->commission = 1.0;
+    provider->adapter->commission_currency = "BNB";
+    auto strat = std::make_shared<OneShotBuyer>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.provider = provider;
+    cfg.initial_balance = 100'000.0;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.risk.max_trades_per_hour = 0;
+
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.set_primary_strategy_name("oneshot");
+    eng.run();
+
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+    EXPECT_FALSE(eng.get_portfolio().position_open("BTCUSDT"));
+    EXPECT_DOUBLE_EQ(eng.get_portfolio().get_cash(), 100'000.0);
+    const auto order_id = provider->adapter->last_order_id;
+    ASSERT_NE(order_id, 0u);
+    const auto* tracked = eng.get_order_tracker().find(order_id);
+    ASSERT_NE(tracked, nullptr);
+    EXPECT_DOUBLE_EQ(tracked->filled_qty, 0.0);
+    EXPECT_DOUBLE_EQ(eng.get_order_tracker().pending_qty(order_id), 1.0);
+    EXPECT_EQ(eng.get_exit_manager().armed_count(), 0u);
+    const auto report = eng.get_analytics().generate_report();
+    EXPECT_EQ(report.total_fills, 0u);
+    EXPECT_DOUBLE_EQ(report.total_commission, 0.0);
+}
+
+TEST(TickToTradeSafety, C03_InvalidVenueFillIsRejectedBeforeEveryEconomicMutation)
+{
+    constexpr injected_fill_fault faults[] = {
+        injected_fill_fault::missing_fill_id,
+        injected_fill_fault::missing_venue_execution_id,
+        injected_fill_fault::missing_commission_currency,
+        injected_fill_fault::missing_cumulative_quantity,
+        injected_fill_fault::unknown_order,
+        injected_fill_fault::mismatched_symbol,
+        injected_fill_fault::mismatched_side,
+        injected_fill_fault::zero_quantity,
+        injected_fill_fault::nan_quantity,
+        injected_fill_fault::infinite_price,
+        injected_fill_fault::nan_commission,
+        injected_fill_fault::oversized_quantity,
+        injected_fill_fault::epoch_zero_timestamp,
+    };
+
+    for (const auto fault : faults)
+    {
+        SCOPED_TRACE(static_cast<int>(fault));
+        silence_cout quiet;
+        auto dh = make_bars(5);
+        auto provider = std::make_shared<DeferredFillProvider>();
+        provider->adapter->fill_fault = fault;
+        auto strat = std::make_shared<OneShotBuyer>();
+        strat->emit_exit_intent = true;
+
+        engine_config cfg;
+        cfg.mode = engine_mode::backtest;
+        cfg.provider = provider;
+        cfg.initial_balance = 100'000.0;
+        cfg.threading = thread_preset::inline_mode;
+        cfg.disable_pinning = true;
+        cfg.risk.max_trades_per_hour = 0;
+
+        engine eng(dh, nullptr, strat, std::move(cfg));
+        eng.set_primary_strategy_name("oneshot");
+        eng.run();
+
+        EXPECT_TRUE(eng.is_halted());
+        EXPECT_FALSE(eng.run_succeeded());
+        EXPECT_FALSE(eng.get_portfolio().position_open("TEST"));
+        EXPECT_TRUE(eng.get_portfolio().get_positions().empty());
+        EXPECT_TRUE(eng.get_portfolio().get_lots().empty());
+        EXPECT_DOUBLE_EQ(eng.get_portfolio().get_cash(), 100'000.0);
+
+        const auto order_id = provider->adapter->last_order_id;
+        ASSERT_NE(order_id, 0U);
+        const auto* tracked = eng.get_order_tracker().find(order_id);
+        ASSERT_NE(tracked, nullptr);
+        EXPECT_DOUBLE_EQ(tracked->filled_qty, 0.0);
+        EXPECT_DOUBLE_EQ(eng.get_order_tracker().pending_qty(order_id), 1.0);
+        EXPECT_EQ(eng.get_exit_manager().pending_count(), 1U);
+        EXPECT_EQ(eng.get_exit_manager().armed_count(), 0U);
+        EXPECT_EQ(eng.get_exit_manager().counters().pending_registered, 1U);
+        EXPECT_EQ(eng.get_exit_manager().counters().armed, 0U);
+        EXPECT_EQ(strat->fill_calls, 0);
+
+        const auto report = eng.get_analytics().generate_report();
+        EXPECT_EQ(report.total_fills, 0U);
+        EXPECT_DOUBLE_EQ(report.total_commission, 0.0);
+        EXPECT_TRUE(report.trades.empty());
+    }
+}
+
+TEST(TickToTradeSafety, C03_SimulatedFeeWithoutCurrencyFailsClosed)
+{
+    silence_cout quiet;
+    auto dh = make_bars(5);
+    auto provider = std::make_shared<DeferredFillProvider>();
+    provider->adapter->fill_fault =
+        injected_fill_fault::simulated_fee_without_currency;
+    auto strat = std::make_shared<OneShotBuyer>();
+    strat->emit_exit_intent = true;
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.provider = provider;
+    cfg.initial_balance = 100'000.0;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.set_primary_strategy_name("oneshot");
+    eng.run();
+
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_FALSE(eng.run_succeeded());
+    EXPECT_FALSE(eng.get_portfolio().position_open("TEST"));
+    EXPECT_DOUBLE_EQ(eng.get_portfolio().get_cash(), 100'000.0);
+    const auto order_id = provider->adapter->last_order_id;
+    ASSERT_NE(order_id, 0U);
+    const auto* tracked = eng.get_order_tracker().find(order_id);
+    ASSERT_NE(tracked, nullptr);
+    EXPECT_DOUBLE_EQ(tracked->filled_qty, 0.0);
+    EXPECT_DOUBLE_EQ(eng.get_order_tracker().pending_qty(order_id), 1.0);
+    EXPECT_EQ(eng.get_exit_manager().pending_count(), 1U);
+    EXPECT_EQ(eng.get_exit_manager().armed_count(), 0U);
+    EXPECT_EQ(strat->fill_calls, 0);
+    const auto report = eng.get_analytics().generate_report();
+    EXPECT_EQ(report.total_fills, 0U);
+    EXPECT_DOUBLE_EQ(report.total_commission, 0.0);
+    EXPECT_TRUE(report.trades.empty());
+}
+
+TEST(TickToTradeSafety, C03_ValidSimulatedFeeWithCurrencyCommitsExactlyOnce)
+{
+    silence_cout quiet;
+    auto dh = make_bars(5);
+    auto provider = std::make_shared<DeferredFillProvider>();
+    provider->adapter->fill_fault =
+        injected_fill_fault::simulated_fee_with_currency;
+    auto strat = std::make_shared<OneShotBuyer>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.provider = provider;
+    cfg.initial_balance = 100'000.0;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.set_primary_strategy_name("oneshot");
+    eng.run();
+
+    EXPECT_FALSE(eng.is_halted());
+    EXPECT_TRUE(eng.run_succeeded());
+    EXPECT_TRUE(eng.get_portfolio().position_open("TEST"));
+    EXPECT_DOUBLE_EQ(eng.get_portfolio().get_cash(), 99'899.0);
+    const auto order_id = provider->adapter->last_order_id;
+    ASSERT_NE(order_id, 0U);
+    const auto* tracked = eng.get_order_tracker().find(order_id);
+    ASSERT_NE(tracked, nullptr);
+    EXPECT_DOUBLE_EQ(tracked->filled_qty, 1.0);
+    EXPECT_DOUBLE_EQ(eng.get_order_tracker().pending_qty(order_id), 0.0);
+    EXPECT_EQ(strat->fill_calls, 1);
+    const auto report = eng.get_analytics().generate_report();
+    EXPECT_EQ(report.total_fills, 1U);
+    EXPECT_DOUBLE_EQ(report.total_commission, 1.0);
+    ASSERT_EQ(report.trades.size(), 1U);
+}
+
+TEST(TickToTradeSafety,
+     C03_ValidSimulatedMakerRebateWithCurrencyCommitsExactlyOnce)
+{
+    silence_cout quiet;
+    auto dh = make_bars(5);
+    auto provider = std::make_shared<DeferredFillProvider>();
+    provider->adapter->fill_fault =
+        injected_fill_fault::simulated_rebate_with_currency;
+    auto strat = std::make_shared<OneShotBuyer>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.provider = provider;
+    cfg.initial_balance = 100'000.0;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.set_primary_strategy_name("oneshot");
+    eng.run();
+
+    EXPECT_FALSE(eng.is_halted());
+    EXPECT_TRUE(eng.run_succeeded());
+    EXPECT_TRUE(eng.get_portfolio().position_open("TEST"));
+    EXPECT_DOUBLE_EQ(eng.get_portfolio().get_cash(), 99'901.0);
+    const auto order_id = provider->adapter->last_order_id;
+    ASSERT_NE(order_id, 0U);
+    const auto* tracked = eng.get_order_tracker().find(order_id);
+    ASSERT_NE(tracked, nullptr);
+    EXPECT_DOUBLE_EQ(tracked->filled_qty, 1.0);
+    EXPECT_DOUBLE_EQ(eng.get_order_tracker().pending_qty(order_id), 0.0);
+    EXPECT_EQ(strat->fill_calls, 1);
+    const auto report = eng.get_analytics().generate_report();
+    EXPECT_EQ(report.total_fills, 1U);
+    EXPECT_DOUBLE_EQ(report.total_commission, -1.0);
+    ASSERT_EQ(report.trades.size(), 1U);
+    EXPECT_DOUBLE_EQ(report.trades.front().commission, -1.0);
+    EXPECT_EQ(report.trades.front().commission_currency, "USDT");
+    EXPECT_DOUBLE_EQ(report.unrealized_pnl, 1.0);
+    EXPECT_DOUBLE_EQ(report.final_equity, 100'001.0);
+    EXPECT_DOUBLE_EQ(report.reconciliation_residual, 0.0);
+    EXPECT_TRUE(report.accounting_reconciled);
+    EXPECT_TRUE(report.valuation_complete);
+}
+
+TEST(TickToTradeSafety, C03_ShadowExchangeFillCannotBypassCanonicalAdmission)
+{
+    silence_cout quiet;
+    auto dh = make_bars(5);
+    auto provider = std::make_shared<DeferredFillProvider>();
+    provider->adapter->fill_fault = injected_fill_fault::mismatched_symbol;
+    auto strat = std::make_shared<OneShotBuyer>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::shadow;
+    cfg.provider = provider;
+    cfg.initial_balance = 100'000.0;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.risk.max_trades_per_hour = 0;
+
+    engine eng(dh, nullptr, strat, std::move(cfg));
+    eng.set_primary_strategy_name("oneshot");
+    eng.run();
+
+    EXPECT_TRUE(eng.is_halted())
+        << "an invalid exchange-side shadow fill requires reconciliation";
+    EXPECT_FALSE(eng.run_succeeded());
+    const auto* exchange_portfolio = eng.get_exchange_portfolio();
+    ASSERT_NE(exchange_portfolio, nullptr);
+    EXPECT_TRUE(exchange_portfolio->get_positions().empty());
+    EXPECT_TRUE(exchange_portfolio->get_lots().empty());
+    EXPECT_DOUBLE_EQ(exchange_portfolio->get_cash(), 100'000.0);
+    const auto* exchange_analytics = eng.get_exchange_analytics();
+    ASSERT_NE(exchange_analytics, nullptr);
+    const auto report = exchange_analytics->generate_report();
+    EXPECT_EQ(report.total_fills, 0U);
+    EXPECT_TRUE(report.trades.empty());
 }
 
 // ---------------------------------------------------------------------------

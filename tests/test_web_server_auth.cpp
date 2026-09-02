@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <atomic>
 #include <csignal>
 #include <cstring>
 #include <memory>
@@ -156,7 +157,8 @@ protected:
         server_ = std::make_unique<truetest::web::WebServer>(
             std::move(cfg),
             [](truetest::ui::dashboard_snapshot&) { return false; },
-            [] { return std::string("{\"ok\":true}"); });
+            [] { return std::string("{\"ok\":true}"); },
+            [] { return true; });
 
         ASSERT_TRUE(server_->start());
     }
@@ -186,6 +188,54 @@ TEST_F(WebServerAuthTest, RestRejectsQueryTokenAndAcceptsBearer)
         << bearer;
     EXPECT_NE(bearer.find("{\"ok\":true}"), std::string::npos)
         << bearer;
+}
+
+TEST(WebServerResultsSafetyTest, ReportCallbackIsNeverCalledBeforeSafePublication)
+{
+    truetest::web::web_config cfg;
+    cfg.bind_addr = "127.0.0.1";
+    cfg.port = reserve_free_port();
+    cfg.poll_hz = 20;
+
+    std::atomic<int> report_calls{0};
+    truetest::web::WebServer server(
+        cfg,
+        [](truetest::ui::dashboard_snapshot&) { return false; },
+        [&report_calls] {
+            report_calls.fetch_add(1, std::memory_order_relaxed);
+            return std::string("{\"unsafe\":true}");
+        });
+    ASSERT_TRUE(server.start());
+
+    const std::string response = http_get(cfg.port, "/api/results");
+    EXPECT_NE(response.find("503 Service Unavailable"), std::string::npos)
+        << response;
+    EXPECT_NE(response.find("results_not_safely_published"),
+              std::string::npos) << response;
+    EXPECT_EQ(report_calls.load(std::memory_order_relaxed), 0);
+}
+
+TEST(WebServerResultsSafetyTest, ReportSerializationFailureIsFailClosed)
+{
+    truetest::web::web_config cfg;
+    cfg.bind_addr = "127.0.0.1";
+    cfg.port = reserve_free_port();
+    cfg.poll_hz = 20;
+
+    truetest::web::WebServer server(
+        cfg,
+        [](truetest::ui::dashboard_snapshot&) { return false; },
+        []() -> std::string { throw std::invalid_argument("invalid report UTF-8"); },
+        [] { return true; });
+    ASSERT_TRUE(server.start());
+
+    const std::string response = http_get(cfg.port, "/api/results");
+    EXPECT_NE(response.find("503 Service Unavailable"), std::string::npos)
+        << response;
+    EXPECT_NE(response.find("results_serialization_failed"), std::string::npos)
+        << response;
+    EXPECT_EQ(response.find("invalid report UTF-8"), std::string::npos)
+        << response;
 }
 
 TEST_F(WebServerAuthTest, WebSocketRejectsBadOrigin)

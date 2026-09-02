@@ -93,7 +93,13 @@ TEST(HotpathAllocMatrix, B_BarSma_1000)
 {
     // Baseline Phase 5 (post object_pool State ownership + Returner): count~59k bytes~11.03M
     // (slightly higher bytes due to larger per-acquire shared_ptr control block for safety token)
-    run_scenario({"B_BarSma_1000", 62000, 35000000},
+    // F-02: this fixture breaches the drawdown limit and then rejects every
+    // order. Before the terminal-transition fix the strategy was never told,
+    // deadlocked, and stopped emitting — see the long note on
+    // HotpathAllocs.SmaSynthetic_1000Bars_PostWarmupUpperBound. The idle
+    // scenarios in this matrix pin per-event steady state and are unchanged.
+    run_scenario({"B_BarSma_1000", 115000, 35000000},
+
                  make_bars(1000),
                  std::make_shared<sma_strategy>(5),
                  base_cfg(thread_preset::inline_mode));

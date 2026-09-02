@@ -57,7 +57,7 @@ namespace {
 constexpr const char* kTradeBuy = R"({
   "arg": {"instType":"usdt-futures","topic":"publicTrade","symbol":"BTCUSDT"},
   "data": [{
-    "i": "tradeId",
+    "i": "1260903622036942849",
     "p": "97000.5",
     "v": "0.01",
     "S": "buy",
@@ -99,11 +99,12 @@ TEST(BitgetParser, ParseTradeFixture_FieldsExact)
     EXPECT_EQ(result->quantity, static_cast<int64_t>(0.01 * 1e8));
     EXPECT_EQ(result->quantity_scale, 100'000'000ULL);
     EXPECT_EQ(result->side, 0); // buy → bid aggressor
+    EXPECT_EQ(result->native_trade_id, 1260903622036942849ULL);
 
     auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      result->timestamp.time_since_epoch())
                      .count();
-    EXPECT_EQ(ts_ms, 1710000000000LL);
+    EXPECT_EQ(ts_ms, 1710000000001LL);
 }
 
 TEST(BitgetParser, ParseTrade_BuyVsSellSideMapping)
@@ -122,6 +123,23 @@ TEST(BitgetParser, ParseTrade_BuyVsSellSideMapping)
     EXPECT_EQ(static_cast<data_tick_side>(sell->side), data_tick_side::ask);
 }
 
+TEST(BitgetParser, PublicTradeRequiresUsdtProductAndKnownAction)
+{
+    const char* coin_futures = R"({
+      "arg":{"instType":"coin-futures","topic":"publicTrade","symbol":"BTCUSD"},
+      "action":"snapshot","ts":2,
+      "data":[{"i":"1","p":"100","v":"250","S":"buy","T":"1"}]
+    })";
+    const char* garbage_action = R"({
+      "arg":{"instType":"usdt-futures","topic":"publicTrade","symbol":"BTCUSDT"},
+      "action":"garbage","ts":2,
+      "data":[{"i":"1","p":"100","v":"1","S":"buy","T":"1"}]
+    })";
+
+    EXPECT_TRUE(bitget::parse_all_trades(coin_futures).empty());
+    EXPECT_TRUE(bitget::parse_all_trades(garbage_action).empty());
+}
+
 TEST(BitgetParser, ParseAllTrades_MultiElementData)
 {
     auto all = bitget::parse_all_trades(kTradeMulti);
@@ -132,12 +150,43 @@ TEST(BitgetParser, ParseAllTrades_MultiElementData)
     EXPECT_EQ(all[1].side, 1);
 }
 
+TEST(BitgetParser, TradeRequiresStableUniqueNativeIdsAndKnownAtTime)
+{
+    for (const char* frame : {
+             R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"ts":2,"data":[{"p":"1","v":"1","S":"buy","T":"1"}]})",
+             R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"ts":2,"data":[{"i":"trade-1","p":"1","v":"1","S":"buy","T":"1"}]})",
+             R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"ts":2,"data":[{"i":"0","p":"1","v":"1","S":"buy","T":"1"}]})",
+             R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"data":[{"i":"1","p":"1","v":"1","S":"buy","T":"1"}]})",
+         })
+        EXPECT_FALSE(bitget::parse_trade(frame).has_value()) << frame;
+
+    EXPECT_TRUE(bitget::parse_all_trades(
+        R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"ts":3,"data":[{"i":"1","p":"1","v":"1","S":"buy","T":"1"},{"i":"1","p":"2","v":"1","S":"sell","T":"2"}]})")
+                    .empty());
+}
+
+TEST(BitgetParser, StatefulAdaptersRejectCrossFrameKnownAtRegression)
+{
+    const char* later =
+        R"({"arg":{"instType":"usdt-futures","topic":"publicTrade","symbol":"BTCUSDT"},"ts":2,"data":[{"i":"2","p":"100","v":"1","S":"buy","T":"1"}]})";
+    const char* earlier =
+        R"({"arg":{"instType":"usdt-futures","topic":"publicTrade","symbol":"BTCUSDT"},"ts":1,"data":[{"i":"1","p":"99","v":"1","S":"sell","T":"1"}]})";
+
+    BitgetTradeParser trades;
+    ASSERT_EQ(trades.parse_records(later).size(), 1u);
+    EXPECT_TRUE(trades.parse_records(earlier).empty());
+
+    BitgetCombinedParser combined;
+    ASSERT_EQ(combined.parse_records(later).size(), 1u);
+    EXPECT_TRUE(combined.parse_records(earlier).empty());
+}
+
 // Multi-trade data[]: parse_all_trades + production parse_records emit all N.
 // parse_trade / parse_record still return first only (compat).
 TEST(BitgetParser, ParseAllTrades_ReturnsAllN_ProductionPathEmitsAll)
 {
     constexpr const char* kThree = R"({
-      "arg": {"topic":"publicTrade","symbol":"BTCUSDT"},
+      "arg": {"instType":"usdt-futures","topic":"publicTrade","symbol":"BTCUSDT"},
       "data": [
         {"i":"1","p":"10.0","v":"0.1","S":"buy","T":"100"},
         {"i":"2","p":"20.0","v":"0.2","S":"sell","T":"200"},
@@ -207,6 +256,27 @@ TEST(BitgetParser, ParseTrade_MissingFields)
     EXPECT_FALSE(bitget::parse_trade(missing_symbol).has_value());
 }
 
+TEST(BitgetParser, C07_RejectsMissingOrInvalidTradeTimestamp)
+{
+    for (const char* timestamp : {
+             static_cast<const char*>(nullptr), "0", "-1", "1x",
+             "9223372036854775808"})
+    {
+        std::string json =
+            R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},)"
+            R"("data":[{"p":"1","v":"0.01","S":"buy")";
+        if (timestamp)
+        {
+            json += R"(,"T":")";
+            json += timestamp;
+            json += '"';
+        }
+        json += "}]}";
+        EXPECT_FALSE(bitget::parse_trade(json).has_value())
+            << (timestamp ? timestamp : "missing");
+    }
+}
+
 TEST(BitgetParser, ParseTrade_MalformedNoCrash)
 {
     EXPECT_FALSE(bitget::parse_trade("").has_value());
@@ -217,7 +287,9 @@ TEST(BitgetParser, ParseTrade_MalformedNoCrash)
 
 TEST(BitgetParser, RejectsUnsafeTradeQuantityBeforeIntegerConversion)
 {
-    for (const char* qty : {"-1", "1e100", "nan", "inf"})
+    for (const char* qty : {"0", "-0", "-1", "1e-8", "nan", "inf",
+                            "0.000000001", "0.123456789",
+                            "92233720368.54775808"})
     {
         const std::string json =
             std::string(R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},)"
@@ -225,6 +297,69 @@ TEST(BitgetParser, RejectsUnsafeTradeQuantityBeforeIntegerConversion)
             + qty + R"(","S":"buy","T":"1"}]})";
         EXPECT_FALSE(bitget::parse_trade(json).has_value()) << qty;
     }
+}
+
+TEST(BitgetParser, TradeQuantityPreservesOneAtomExactly)
+{
+    const auto trade = bitget::parse_trade(
+        R"({"arg":{"instType":"usdt-futures","topic":"publicTrade","symbol":"BTCUSDT"},"data":[{"i":"1","p":"100","v":"0.00000001","S":"buy","T":"1"}],"ts":2})");
+    ASSERT_TRUE(trade.has_value());
+    EXPECT_EQ(trade->quantity, 1);
+}
+
+TEST(BitgetParser, MultiTradeFrameRejectsAllOnOneInvalidEconomicElement)
+{
+    const char* frame = R"({
+      "arg":{"instType":"usdt-futures","topic":"publicTrade","symbol":"BTCUSDT"},
+      "data":[
+        {"p":"10","v":"1","S":"buy","T":"1"},
+        {"p":"11","v":"0.000000001","S":"sell","T":"2"},
+        {"p":"12","v":"1","S":"buy","T":"3"}
+      ]
+    })";
+    EXPECT_TRUE(bitget::parse_all_trades(frame).empty());
+    EXPECT_FALSE(bitget::parse_trade(frame).has_value());
+
+    BitgetTradeParser parser;
+    EXPECT_TRUE(parser.parse_records(frame).empty());
+}
+
+TEST(BitgetParser, TradeRejectsDuplicateEconomicOrEnvelopeIdentity)
+{
+    EXPECT_FALSE(bitget::parse_trade(
+        R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"data":[{"p":"100","v":"1","v":"2","S":"buy","T":"1"}]})")
+                     .has_value());
+    EXPECT_FALSE(bitget::parse_trade(
+        R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT","symbol":"ETHUSDT"},"data":[{"p":"100","v":"1","S":"buy","T":"1"}]})")
+                     .has_value());
+    EXPECT_FALSE(bitget::parse_trade(
+        R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"arg":{"topic":"publicTrade","symbol":"ETHUSDT"},"data":[{"p":"100","v":"1","S":"buy","T":"1"}]})")
+                     .has_value());
+    EXPECT_FALSE(bitget::parse_trade(
+        R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"data":[{"p":"100" "v":"1","S":"buy","T":"1"}]})")
+                     .has_value());
+    EXPECT_FALSE(bitget::parse_trade(
+        R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"data":[{"p":"100","v":"1","S":"buy","T":"1",}]})")
+                     .has_value());
+    EXPECT_FALSE(bitget::parse_trade(
+        R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"data":"wrong-type","p":"100","v":"1","S":"buy","T":"1"})")
+                     .has_value());
+}
+
+TEST(BitgetParser, TradeRejectsConflictingAliasesSymbolAndCausalOrder)
+{
+    EXPECT_FALSE(bitget::parse_trade(
+        R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"data":[{"p":"100","v":"1","S":"buy","side":"sell","T":"1000","ts":"999"}]})")
+                     .has_value());
+    EXPECT_FALSE(bitget::parse_trade(
+        R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"symbol":"ETHUSDT","data":[{"p":"100","v":"1","S":"buy","T":"1000"}]})")
+                     .has_value());
+    EXPECT_TRUE(bitget::parse_all_trades(
+        R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"ts":1002,"data":[{"p":"100","v":"1","S":"buy","T":"1001"},{"p":"101","v":"1","S":"sell","T":"1000"}]})")
+                    .empty());
+    EXPECT_TRUE(bitget::parse_all_trades(
+        R"({"arg":{"topic":"publicTrade","symbol":"BTCUSDT"},"ts":1002,"data":[{"p":"100","v":"1","S":"buy","T":"1003"}]})")
+                    .empty());
 }
 
 // --- books5 fixtures (plan §9.2) ---
@@ -268,7 +403,17 @@ TEST(BitgetParser, ParseBooks5_BidAskLevels)
     auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                      snap->timestamp.time_since_epoch())
                      .count();
-    EXPECT_EQ(ts_ms, 1710000000000LL);
+    EXPECT_EQ(ts_ms, 1710000000001LL);
+}
+
+TEST(BitgetParser, BooksRequireCausalEnvelopeAndDataTimes)
+{
+    EXPECT_FALSE(bitget::parse_books5(
+        R"({"arg":{"topic":"books5","symbol":"BTCUSDT"},"data":[{"a":[["2","1"]],"b":[["1","1"]],"ts":"2000"}],"ts":1000})")
+                     .has_value());
+    EXPECT_FALSE(bitget::parse_books5(
+        R"({"arg":{"topic":"books5","symbol":"BTCUSDT"},"data":[{"a":[["2","1"]],"b":[["1","1"]],"ts":"1000"}]})")
+                     .has_value());
 }
 
 TEST(BitgetParser, ParseBooks5_EmptyLevels)
@@ -276,6 +421,28 @@ TEST(BitgetParser, ParseBooks5_EmptyLevels)
     const char* empty =
         R"({"arg":{"topic":"books5","symbol":"BTCUSDT"},"data":[{"a":[],"b":[],"ts":"1"}]})";
     EXPECT_FALSE(bitget::parse_books5(empty).has_value());
+}
+
+TEST(BitgetParser, C07_RejectsMissingOrInvalidDepthTimestamp)
+{
+    for (const char* timestamp : {
+             static_cast<const char*>(nullptr), "0", "-1", "1x",
+             "9223372036854775808"})
+    {
+        std::string json =
+            R"({"arg":{"topic":"books5","symbol":"BTCUSDT"},)"
+            R"("action":"snapshot","data":[{"a":[["2","1"]],)"
+            R"("b":[["1","1"]])";
+        if (timestamp)
+        {
+            json += R"(,"ts":")";
+            json += timestamp;
+            json += '"';
+        }
+        json += "}]}";
+        EXPECT_FALSE(bitget::parse_books5(json).has_value())
+            << (timestamp ? timestamp : "missing");
+    }
 }
 
 TEST(BitgetParser, ParseBooks5_WrongTopic)
@@ -307,7 +474,8 @@ TEST(BitgetParser, ParseBooks5_MissingActionAccepted)
 {
     const char* no_action = R"({
       "arg": {"topic":"books5","symbol":"BTCUSDT"},
-      "data": [{"a":[["97001.0","1.0"]],"b":[["97000.0","1.0"]],"ts":"1"}]
+      "data": [{"a":[["97001.0","1.0"]],"b":[["97000.0","1.0"]],"ts":"1"}],
+      "ts": 2
     })";
     auto snap = bitget::parse_books5(no_action);
     ASSERT_TRUE(snap.has_value());
@@ -340,7 +508,8 @@ TEST(BitgetParser, ParseBooks_SnapshotAccepted)
     const char* snap = R"({
       "arg": {"topic":"books","symbol":"ETHUSDT"},
       "action": "snapshot",
-      "data": [{"a":[["2001","0.5"]],"b":[["2000","1.0"]],"ts":"9"}]
+      "data": [{"a":[["2001","0.5"]],"b":[["2000","1.0"]],"ts":"9"}],
+      "ts": 10
     })";
     auto out = bitget::parse_books5(snap);
     ASSERT_TRUE(out.has_value());
@@ -353,6 +522,36 @@ TEST(BitgetParser, ParseBooks5_MalformedNoCrash)
 {
     EXPECT_FALSE(bitget::parse_books5("").has_value());
     EXPECT_FALSE(bitget::parse_books5(R"({"arg":{"topic":"books5"},"data":[})").has_value());
+}
+
+TEST(BitgetParser, BooksSnapshotRejectsZeroSubatomAndRoundedQuantity)
+{
+    for (const char* qty : {"0", "0.000000001", "0.123456789", "1e-8",
+                            "92233720368.54775808"})
+    {
+        const std::string json =
+            std::string{R"({"arg":{"topic":"books5","symbol":"BTCUSDT"},"data":[{"a":[["101",")"}
+            + qty + R"("]],"b":[["100","1"]],"ts":"1"}]})";
+        EXPECT_FALSE(bitget::parse_books5(json).has_value()) << qty;
+    }
+}
+
+TEST(BitgetParser, BooksRejectMalformedLevelAndDataArrayGrammar)
+{
+    for (const char* levels : {
+             R"([["101" "1"]])",
+             R"([["101","1","ignored"]])",
+             R"([["101","1"],])",
+         }) {
+        const std::string json =
+            std::string{R"({"arg":{"topic":"books5","symbol":"BTCUSDT"},"data":[{"a":)"}
+            + levels + R"(,"b":[["100","1"]],"ts":"1"}]})";
+        EXPECT_FALSE(bitget::parse_books5(json).has_value()) << levels;
+    }
+
+    EXPECT_FALSE(bitget::parse_books5(
+        R"({"arg":{"topic":"books5","symbol":"BTCUSDT"},"data":[{"a":[["101","1"]],"b":[["100","1"]],"ts":"1"},]})")
+                     .has_value());
 }
 
 // --- kline fixtures (plan §9.3) ---
@@ -411,7 +610,9 @@ TEST(BitgetParser, ParseKline_ConfirmFalseStillParsesRaw)
 
 TEST(BitgetParser, RejectsUnsafeKlineVolume)
 {
-    for (const char* volume : {"-1", "1e100", "nan", "inf"})
+    for (const char* volume : {"0", "-0", "-1", "1e-8", "nan", "inf",
+                               "0.000000001", "0.123456789",
+                               "92233720368.54775808"})
     {
         const std::string json =
             std::string(R"({"arg":{"topic":"kline","symbol":"BTCUSDT"},)"
@@ -422,6 +623,72 @@ TEST(BitgetParser, RejectsUnsafeKlineVolume)
     }
 }
 
+TEST(BitgetParser, KlineVolumePreservesOneAtomExactly)
+{
+    const auto bar = bitget::parse_kline(
+        R"({"arg":{"topic":"kline","symbol":"BTCUSDT"},"data":[{"start":"1","open":"1","high":"2","low":"0.5","close":"1.5","volume":"0.00000001"}]})");
+    ASSERT_TRUE(bar.has_value());
+    EXPECT_EQ(bar->volume, 1);
+}
+
+TEST(BitgetParser, RejectsImpossibleKlineOhlcGeometry)
+{
+    for (const char* body : {
+             R"("start":"1","open":"10","high":"9","low":"8","close":"9")",
+             R"("start":"1","open":"10","high":"12","low":"11","close":"11")",
+             R"("start":"1","open":"10","high":"8","low":"9","close":"9.5")"})
+    {
+        const std::string json =
+            std::string{R"({"arg":{"topic":"kline","symbol":"BTCUSDT"},"data":[{)"}
+            + body + R"(,"volume":"1"}]})";
+        EXPECT_FALSE(bitget::parse_kline(json).has_value()) << body;
+    }
+}
+
+TEST(BitgetParser, RawKlineRejectsAliasesAndMultipleDataObjects)
+{
+    EXPECT_FALSE(bitget::parse_kline(
+        R"({"arg":{"topic":"kline","symbol":"BTCUSDT"},"data":[{"start":"1","t":"2","open":"10","o":"11","high":"12","low":"8","close":"11","volume":"1"}]})")
+                     .has_value());
+    EXPECT_FALSE(bitget::parse_kline(
+        R"({"arg":{"topic":"kline","symbol":"BTCUSDT"},"data":[{"start":"1","open":"10","high":"12","low":"8","close":"11","volume":"1"},{"start":"2","open":"11","high":"13","low":"10","close":"12","volume":"1"}]})")
+                     .has_value());
+    EXPECT_FALSE(bitget::parse_books5(
+        R"({"arg":{"topic":"books5","symbol":"BTCUSDT"},"data":[{"a":[["101","1"]],"b":[["100","1"]],"ts":"1"},{"a":[["102","1"]],"b":[["99","1"]],"ts":"2"}]})")
+                     .has_value());
+}
+
+TEST(BitgetParser, RejectsMissingOrInvalidKlineStartTime)
+{
+    for (const char* start : {
+             static_cast<const char*>(nullptr), "0", "-1", "1x",
+             "9223372036854775807", "9223372036854775808"})
+    {
+        std::string body;
+        if (start)
+        {
+            body = R"("start":")";
+            body += start;
+            body += R"(",)";
+        }
+        body += R"("open":"10","high":"12","low":"8","close":"11","volume":"1")";
+        const std::string json =
+            std::string{R"({"arg":{"topic":"kline","symbol":"BTCUSDT","interval":"1m"},"data":[{)"}
+            + body + "}]}";
+        EXPECT_FALSE(bitget::parse_kline(json).has_value())
+            << (start ? start : "missing");
+    }
+}
+
+TEST(BitgetParser, RejectsMissingKlineVolume)
+{
+    const char* json = R"({
+      "arg":{"topic":"kline","symbol":"BTCUSDT","interval":"1m"},
+      "data":[{"start":"1","open":"10","high":"12","low":"8","close":"11"}]
+    })";
+    EXPECT_FALSE(bitget::parse_kline(json).has_value());
+}
+
 TEST(BitgetParser, ParseKline_ConfirmTrueStillParsesRaw)
 {
     const char* closed = R"({
@@ -429,7 +696,8 @@ TEST(BitgetParser, ParseKline_ConfirmTrueStillParsesRaw)
       "data": [{
         "start":"2","open":"10","high":"12","low":"9","close":"11","volume":"3",
         "confirm":true
-      }]
+      }],
+      "ts":3
     })";
     auto bar = bitget::parse_kline(closed);
     ASSERT_TRUE(bar.has_value());
@@ -452,7 +720,7 @@ TEST(BitgetParser, KlineClosedGate_ConfirmFalseBuffersConfirmTrueEmits)
 
     provider::bar closed_b = open_b;
     closed_b.close = 1.8;
-    auto emitted = gate.on_bar(closed_b, /*confirm=*/true);
+    auto emitted = gate.on_bar(closed_b, /*confirm=*/true, 2);
     ASSERT_TRUE(emitted.has_value());
     EXPECT_DOUBLE_EQ(emitted->close, 1.8);
 }
@@ -485,12 +753,153 @@ TEST(BitgetParser, KlineClosedGate_UtaStartRolloverEmitsPrevious)
     b.close = 11.2;
     auto closed = gate.on_bar(b, std::nullopt);
     ASSERT_TRUE(closed.has_value());
-    EXPECT_EQ(closed->date, "1000");
+    EXPECT_EQ(closed->date, "2000");
     EXPECT_DOUBLE_EQ(closed->close, 11.0); // last update of period 1000
     EXPECT_DOUBLE_EQ(closed->high, 12.0);
 }
 
-TEST(BitgetParser, BitgetKlineParser_UtaHoldsOpenUntilRollover)
+TEST(BitgetParser, KlineClosedGateRejectsLateAndCrossSymbolMutation)
+{
+    bitget::kline_closed_gate gate;
+    provider::bar pending;
+    pending.symbol = "BTCUSDT";
+    pending.date = "2000";
+    pending.open = pending.high = pending.low = pending.close = 1.0;
+    ASSERT_FALSE(gate.on_bar(pending).has_value());
+
+    provider::bar late = pending;
+    late.date = "1000";
+    EXPECT_FALSE(gate.on_bar(late).has_value());
+
+    provider::bar foreign = pending;
+    foreign.symbol = "ETHUSDT";
+    foreign.date = "3000";
+    EXPECT_FALSE(gate.on_bar(foreign).has_value());
+
+    provider::bar next = pending;
+    next.date = "3000";
+    const auto emitted = gate.on_bar(next);
+    ASSERT_TRUE(emitted.has_value());
+    EXPECT_EQ(emitted->symbol, "BTCUSDT");
+    EXPECT_EQ(emitted->date, "3000");
+}
+
+TEST(BitgetParser, KlineClosedGateRejectsMismatchedExplicitFinal)
+{
+    bitget::kline_closed_gate gate;
+    provider::bar pending;
+    pending.symbol = "BTCUSDT";
+    pending.date = "1000";
+    pending.open = pending.high = pending.low = pending.close = 1.0;
+    ASSERT_FALSE(gate.on_bar(pending, false).has_value());
+
+    provider::bar wrong_start = pending;
+    wrong_start.date = "2000";
+    EXPECT_FALSE(gate.on_bar(wrong_start, true, 2500).has_value());
+
+    const auto finalized = gate.on_bar(pending, true, 1500);
+    ASSERT_TRUE(finalized.has_value());
+    EXPECT_EQ(finalized->date, "1500");
+}
+
+TEST(BitgetParser, PublicPayloadUsesOnlyTopLevelAuthority)
+{
+    const char* trade = R"({
+      "meta":{"arg":{"topic":"publicTrade","symbol":"EVIL"},
+              "data":[{"p":"999","v":"1","S":"Buy","T":"1"}]},
+      "arg":{"instType":"usdt-futures","topic":"publicTrade","symbol":"BTCUSDT"},
+      "data":[{"i":"2","p":"100","v":"2","S":"Buy","T":"2"}],
+      "ts":3
+    })";
+    const auto tick = bitget::parse_trade(trade);
+    ASSERT_TRUE(tick.has_value());
+    EXPECT_EQ(tick->symbol, "BTCUSDT");
+    EXPECT_DOUBLE_EQ(tick->price, 100.0);
+    EXPECT_EQ(tick->quantity, 200'000'000);
+
+    const char* books = R"({
+      "meta":{"data":[{"a":[["999","1"]],"b":[["998","1"]],"ts":"1"}]},
+      "arg":{"topic":"books5","symbol":"BTCUSDT"},
+      "data":[{"a":[["101","1"]],"b":[["100","1"]],"ts":"2"}],
+      "ts":3
+    })";
+    const auto snapshot = bitget::parse_books5(books);
+    ASSERT_TRUE(snapshot.has_value());
+    EXPECT_DOUBLE_EQ(snapshot->bids.front().price, 100.0);
+
+    const char* kline = R"({
+      "meta":{"data":[{"start":"1","open":"999","high":"999","low":"999","close":"999","volume":"1"}]},
+      "arg":{"topic":"kline","symbol":"BTCUSDT"},
+      "data":[{"start":"2","open":"100","high":"102","low":"99","close":"101","volume":"1"}]
+    })";
+    const auto bar = bitget::parse_kline(kline);
+    ASSERT_TRUE(bar.has_value());
+    EXPECT_DOUBLE_EQ(bar->open, 100.0);
+}
+
+TEST(BitgetParser, KlineClosedGateRejectsReplayAndLateRearm)
+{
+    bitget::kline_closed_gate gate;
+    provider::bar a;
+    a.symbol = "BTCUSDT";
+    a.date = "1000";
+    a.open = a.high = a.low = a.close = 1.0;
+
+    ASSERT_TRUE(gate.on_bar(a, true, 1500).has_value());
+    EXPECT_FALSE(gate.on_bar(a, true, 1500).has_value());
+    EXPECT_FALSE(gate.on_bar(a, false).has_value());
+
+    auto b = a;
+    b.date = "2000";
+    EXPECT_FALSE(gate.on_bar(b, false).has_value());
+    EXPECT_FALSE(gate.on_bar(a, false).has_value());
+}
+
+TEST(BitgetParser, StringConfirmIsMalformedAndDoesNotMutateGate)
+{
+    BitgetKlineParser parser;
+    const char* malformed = R"({
+      "arg":{"topic":"kline","symbol":"BTCUSDT"},
+      "data":[{"start":"1000","open":"1","high":"2","low":"0.5",
+               "close":"1.5","volume":"1","confirm":"true"}],
+      "ts":1500
+    })";
+    EXPECT_FALSE(parser.parse_record(std::string_view{malformed}).has_value());
+    EXPECT_EQ(parser.classify_empty_frame(malformed),
+              empty_parse_status::malformed);
+}
+
+TEST(BitgetParser, CombinedClassifiesEveryKlineAsUnsupportedMalformed)
+{
+    BitgetCombinedParser parser;
+    const char* current = R"({
+      "arg":{"topic":"kline","symbol":"BTCUSDT"},
+      "data":[{"start":"2000","open":"1","high":"2","low":"0.5","close":"1.5","volume":"1"}]
+    })";
+    const char* late = R"({
+      "arg":{"topic":"kline","symbol":"BTCUSDT"},
+      "data":[{"start":"1000","open":"1","high":"2","low":"0.5","close":"1.5","volume":"1"}]
+    })";
+    EXPECT_TRUE(parser.parse_records(current).empty());
+    EXPECT_EQ(parser.classify_empty_frame(current), empty_parse_status::malformed);
+    EXPECT_TRUE(parser.parse_records(late).empty());
+    EXPECT_EQ(parser.classify_empty_frame(late), empty_parse_status::malformed);
+}
+
+TEST(BitgetParser, CombinedRejectsConfirmedKlineWithoutKnownTime)
+{
+    BitgetCombinedParser parser;
+    const char* missing_time = R"({
+      "arg":{"topic":"kline","symbol":"BTCUSDT"},
+      "data":[{"start":"1000","open":"1","high":"2","low":"0.5",
+               "close":"1.5","volume":"1","confirm":true}]
+    })";
+    EXPECT_TRUE(parser.parse_records(missing_time).empty());
+    EXPECT_EQ(parser.classify_empty_frame(missing_time),
+              empty_parse_status::malformed);
+}
+
+TEST(BitgetParser, BitgetKlineParserFailsClosedUntilDualTimeContractExists)
 {
     BitgetKlineParser parser;
     const char* t1 = R"({
@@ -508,14 +917,10 @@ TEST(BitgetParser, BitgetKlineParser_UtaHoldsOpenUntilRollover)
 
     EXPECT_FALSE(parser.parse_record(std::string_view{t1}).has_value());
     EXPECT_FALSE(parser.parse_record(std::string_view{t1b}).has_value());
-    auto closed = parser.parse_record(std::string_view{t2});
-    ASSERT_TRUE(closed.has_value());
-    EXPECT_EQ(closed->date, "1000");
-    EXPECT_DOUBLE_EQ(closed->close, 11.0);
-    EXPECT_DOUBLE_EQ(closed->high, 12.0);
+    EXPECT_FALSE(parser.parse_record(std::string_view{t2}).has_value());
 }
 
-TEST(BitgetParser, BitgetKlineParser_ConfirmTrueEmitsImmediately)
+TEST(BitgetParser, BitgetKlineParserConfirmedBarAlsoFailsClosed)
 {
     BitgetKlineParser parser;
     const char* closed = R"({
@@ -523,12 +928,10 @@ TEST(BitgetParser, BitgetKlineParser_ConfirmTrueEmitsImmediately)
       "data": [{
         "start":"2","open":"10","high":"12","low":"9","close":"11","volume":"3",
         "confirm":true
-      }]
+      }],
+      "ts":3
     })";
-    auto bar = parser.parse_record(std::string_view{closed});
-    ASSERT_TRUE(bar.has_value());
-    EXPECT_EQ(bar->symbol, "ETHUSDT");
-    EXPECT_DOUBLE_EQ(bar->close, 11.0);
+    EXPECT_FALSE(parser.parse_record(std::string_view{closed}).has_value());
 }
 
 TEST(BitgetParser, ParseKline_MissingOHLC)
@@ -569,7 +972,8 @@ TEST(BitgetParser, Combined_DispatchesByTopic)
     ASSERT_TRUE(std::holds_alternative<provider::l2_snapshot>(*books_ev));
     EXPECT_EQ(std::get<provider::l2_snapshot>(*books_ev).bids.size(), 2u);
 
-    // UTA kline without confirm: first open candle is held until start rolls.
+    // Kline streaming is fail-closed until open/known/decision time are
+    // represented separately across the frozen engine boundary.
     EXPECT_FALSE(parser.parse_record(std::string_view{kKline}).has_value());
     const char* kKlineNext = R"({
       "arg": {"instType":"usdt-futures","topic":"kline","symbol":"BTCUSDT","interval":"1m"},
@@ -583,11 +987,7 @@ TEST(BitgetParser, Combined_DispatchesByTopic)
       }],
       "ts": 1710000060001
     })";
-    auto kline_ev = parser.parse_record(std::string_view{kKlineNext});
-    ASSERT_TRUE(kline_ev.has_value());
-    ASSERT_TRUE(std::holds_alternative<provider::bar>(*kline_ev));
-    EXPECT_DOUBLE_EQ(std::get<provider::bar>(*kline_ev).close, 97050.0);
-    EXPECT_EQ(std::get<provider::bar>(*kline_ev).date, "1710000000000");
+    EXPECT_FALSE(parser.parse_record(std::string_view{kKlineNext}).has_value());
 }
 
 TEST(BitgetParser, Combined_UnknownTopic)
@@ -641,11 +1041,7 @@ TEST(BitgetParser, KlineParserAdapter)
         "open": "97050","high":"97100","low":"97000","close":"97080","volume":"10"
       }]
     })";
-    auto rec = parser.parse_record(std::string_view{next});
-    ASSERT_TRUE(rec.has_value());
-    EXPECT_EQ(rec->symbol, "BTCUSDT");
-    EXPECT_DOUBLE_EQ(rec->close, 97050.0);
-    EXPECT_EQ(rec->date, "1710000000000");
+    EXPECT_FALSE(parser.parse_record(std::string_view{next}).has_value());
 }
 
 TEST(BitgetParser, BooksParserAdapter)

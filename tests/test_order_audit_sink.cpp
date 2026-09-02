@@ -3,8 +3,56 @@
 #include "core/event.h"
 
 #include <chrono>
+#include <string>
 
 static auto now() { return std::chrono::system_clock::now(); }
+
+namespace {
+class RecordingAuditSink final : public IOrderAuditSink {
+public:
+    void record_order_submitted(const order_event&, const char*) override {}
+    void record_status_transition(uint64_t, order_status, order_status, const char*) override {}
+    void record_fill(const fill_event&, uint64_t, const char*, const char*) override {}
+    void record_rejection(const order_event&, const char*, const char*) override {}
+    void record_cancellation(uint64_t, const char*, const char*, const char*) override {}
+    void record_amendment(uint64_t, const char*, double, double, double, double,
+                          std::chrono::system_clock::time_point) override {}
+    void record_funding(const funding_event&, const char*) override {}
+    void record_event(const char* event_type, const char*, const char*, uint64_t,
+                      const char* severity, const char*, const char* details) override
+    {
+        type = event_type ? event_type : "";
+        phase = severity ? severity : "";
+        json = details ? details : "";
+    }
+    void record_exit_lifecycle(const exit_lifecycle_record& record) override
+    {
+        ++exit_lifecycle_calls;
+        signal_id = record.signal_id;
+        order_id = record.order_id;
+        opener_order_id = record.opener_order_id;
+        fill_id = record.fill_id;
+        requested_qty = record.requested_qty;
+        filled_qty = record.filled_qty;
+        remaining_qty = record.remaining_qty;
+        risk_outcome = record.risk_outcome ? record.risk_outcome : "";
+        phase = record.phase ? record.phase : "";
+    }
+
+    std::string type;
+    std::string phase;
+    std::string json;
+    std::string risk_outcome;
+    std::size_t exit_lifecycle_calls = 0;
+    std::uint64_t signal_id = 0;
+    std::uint64_t order_id = 0;
+    std::uint64_t opener_order_id = 0;
+    std::uint64_t fill_id = 0;
+    double requested_qty = 0.0;
+    double filled_qty = 0.0;
+    double remaining_qty = 0.0;
+};
+}
 
 TEST(OrderAuditSink, NoopDoesNotCrash)
 {
@@ -45,6 +93,31 @@ TEST(OrderAuditSink, NoopDoesNotCrash)
     EXPECT_EQ(h.pending_lines, 0u);
     EXPECT_EQ(h.dropped_lines, 0u);
     EXPECT_EQ(h.fallback_lines, 0u);
+}
+
+TEST(OrderAuditSink, ExitLifecycleRecordExportsTheRequiredJoinFields)
+{
+    RecordingAuditSink sink;
+    const auto ts = now();
+    sink.record_exit_lifecycle(exit_lifecycle_record{
+        /*signal_id=*/11, /*order_id=*/12, /*opener_order_id=*/10, /*fill_id=*/99,
+        ts, ts + std::chrono::milliseconds(1), ts + std::chrono::milliseconds(2),
+        ts + std::chrono::milliseconds(3),
+        /*requested=*/5.0, /*filled=*/2.0, /*remaining=*/3.0,
+        order_exit_reason::stop_loss, order_status::partially_filled,
+        order_status::rejected, "BTCUSDT", "sma", "venue_filter", "terminal"});
+
+    EXPECT_EQ(sink.exit_lifecycle_calls, 1U);
+    EXPECT_EQ(sink.phase, "terminal");
+    EXPECT_EQ(sink.signal_id, 11U);
+    EXPECT_EQ(sink.order_id, 12U);
+    EXPECT_EQ(sink.opener_order_id, 10U);
+    EXPECT_EQ(sink.fill_id, 99U);
+    EXPECT_DOUBLE_EQ(sink.requested_qty, 5.0);
+    EXPECT_DOUBLE_EQ(sink.filled_qty, 2.0);
+    EXPECT_DOUBLE_EQ(sink.remaining_qty, 3.0);
+    EXPECT_EQ(sink.risk_outcome, "venue_filter");
+    EXPECT_TRUE(sink.type.empty());
 }
 
 #ifdef HAS_QUESTDB

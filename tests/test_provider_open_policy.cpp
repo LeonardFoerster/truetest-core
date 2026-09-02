@@ -34,6 +34,11 @@ public:
     std::string name() const override { return "capability-provider"; }
     bool has_data_feed() const override { return data_feed_; }
     bool has_execution() const override { return execution_; }
+    private_execution_capability
+    private_execution_capability_level() const noexcept override
+    {
+        return private_execution_capability::no_private_writes;
+    }
 
     bool open() override
     {
@@ -107,7 +112,8 @@ TEST(ProviderOpenPolicy, ExecutionOnlyProviderIsOpened)
 {
     truetest::bin::reset_shutdown_signal();
     auto provider = std::make_shared<CapabilityProvider>(false, true);
-    LiveSafetySession session(provider, false, std::chrono::milliseconds{50});
+    LiveSafetySession session(
+        provider, live_safety_requirements{}, std::chrono::milliseconds{50});
 
     EXPECT_TRUE(truetest::bin::open_provider_if_required(*provider, session));
     EXPECT_EQ(provider->open_calls, 1);
@@ -118,7 +124,8 @@ TEST(ProviderOpenPolicy, DataOnlyProviderIsOpened)
 {
     truetest::bin::reset_shutdown_signal();
     auto provider = std::make_shared<CapabilityProvider>(true, false);
-    LiveSafetySession session(provider, false, std::chrono::milliseconds{50});
+    LiveSafetySession session(
+        provider, live_safety_requirements{}, std::chrono::milliseconds{50});
 
     EXPECT_TRUE(truetest::bin::open_provider_if_required(*provider, session));
     EXPECT_EQ(provider->open_calls, 1);
@@ -129,7 +136,8 @@ TEST(ProviderOpenPolicy, CapabilityLessProviderRemainsClosed)
 {
     truetest::bin::reset_shutdown_signal();
     auto provider = std::make_shared<CapabilityProvider>(false, false);
-    LiveSafetySession session(provider, false, std::chrono::milliseconds{50});
+    LiveSafetySession session(
+        provider, live_safety_requirements{}, std::chrono::milliseconds{50});
 
     EXPECT_TRUE(truetest::bin::open_provider_if_required(*provider, session));
     EXPECT_EQ(provider->open_calls, 0);
@@ -140,7 +148,8 @@ TEST(ProviderOpenPolicy, ExecutionOnlyOpenFailureRefusesAndCloses)
 {
     truetest::bin::reset_shutdown_signal();
     auto provider = std::make_shared<CapabilityProvider>(false, true, false);
-    LiveSafetySession session(provider, false, std::chrono::milliseconds{50});
+    LiveSafetySession session(
+        provider, live_safety_requirements{}, std::chrono::milliseconds{50});
 
     EXPECT_FALSE(truetest::bin::open_provider_if_required(*provider, session));
     EXPECT_EQ(provider->open_calls, 1);
@@ -152,7 +161,8 @@ TEST(ProviderOpenPolicy, SignalDuringOpenPreventsEngineStartupAndClosesProvider)
 {
     truetest::bin::reset_shutdown_signal();
     auto provider = std::make_shared<SignalDuringOpenProvider>();
-    LiveSafetySession session(provider, false, std::chrono::milliseconds{50});
+    LiveSafetySession session(
+        provider, live_safety_requirements{}, std::chrono::milliseconds{50});
 
     EXPECT_FALSE(truetest::bin::open_provider_if_required(*provider, session));
     EXPECT_EQ(provider->open_calls, 1);
@@ -176,7 +186,8 @@ TEST(ProviderOpenPolicy, SignalHandlerOnlyNotifiesLifetimeOwnedBridgeMonitor)
 TEST(ProviderOpenPolicy, ExceptionDestroysBridgeMonitorBeforeFailClosedShutdown)
 {
     auto provider = std::make_shared<CapabilityProvider>(true, false);
-    LiveSafetySession session(provider, false, std::chrono::milliseconds{50});
+    LiveSafetySession session(
+        provider, live_safety_requirements{}, std::chrono::milliseconds{50});
     ASSERT_TRUE(session.open_provider());
 
     auto bridge = std::make_shared<StopSpy>();

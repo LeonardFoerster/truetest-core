@@ -62,6 +62,8 @@ TEST(FootprintDemoStateTest, ConstructsWithNonEmptyDeterministicBars)
     FootprintDemoState demo;
     ASSERT_FALSE(demo.aggregator.bars().empty());
     ASSERT_FALSE(demo.trades.empty());
+    EXPECT_NE(demo.trades.front().venue_id, 0u);
+    EXPECT_EQ(demo.trades.front().symbol_id, 0u);
 
     // Same settings -> reaggregating must reproduce identical bar count and
     // CVD (determinism of the demo trade generator + aggregator).

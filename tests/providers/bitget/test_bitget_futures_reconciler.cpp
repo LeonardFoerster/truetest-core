@@ -205,6 +205,7 @@ TEST(BitgetFuturesReconciler, NullGetReturnsError)
 {
     BitgetFuturesReconciler r(BitgetFuturesReconciler::get_fn{}, "BTCUSDT");
     portfolio p(100.0);
+    EXPECT_FALSE(r.is_operational());
     auto note = r.reconcile(p, /*tolerance_bps=*/100.0);
     EXPECT_NE(note.find("no REST client"), std::string::npos);
 }
@@ -220,6 +221,7 @@ TEST(BitgetFuturesReconciler, MatchPasses)
     };
 
     BitgetFuturesReconciler r(get, "BTCUSDT");
+    EXPECT_TRUE(r.is_operational());
     portfolio p;
     std::unordered_map<std::string, position> pos;
     pos["BTCUSDT"] = position{0.1, 0.0};

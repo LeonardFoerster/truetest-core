@@ -1,6 +1,6 @@
 // Pins the live-mode safety gates:
 //   1. Reconciler failure blocks engine construction.
-//   2. Noop default passes (engine constructs).
+//   2. No-op safety is never accepted for private-write startup.
 //   3. Kill-switch fires during stop_workers when mode == live.
 // None of these touch the network - they use in-memory mocks.
 
@@ -119,15 +119,24 @@ public:
 class FailingReconciler : public IReconciler
 {
 public:
+    bool is_operational() const noexcept override { return true; }
     std::string reconcile(const portfolio&, double) override
     {
         return "balance drift > tolerance: local=100, exchange=50";
     }
 };
 
+class PassReconciler : public IReconciler
+{
+public:
+    bool is_operational() const noexcept override { return true; }
+    std::string reconcile(const portfolio&, double) override { return {}; }
+};
+
 class SpyKillSwitch : public IKillSwitch
 {
 public:
+    bool is_operational() const noexcept override { return true; }
     std::atomic<int> invocations{0};
     std::atomic<long> last_deadline_ms{0};
     bool cancel_all_and_flatten(std::chrono::milliseconds d) override
@@ -136,6 +145,43 @@ public:
         last_deadline_ms.store(d.count());
         return true;
     }
+};
+
+live_safety_requirements write_requirements()
+{
+    live_safety_requirements requirements;
+    requirements.target_allows_private_exchange_writes = true;
+    requirements.private_exchange_execution_requested = true;
+    return requirements;
+}
+
+class ReadOnlySafetyProvider final : public IProvider
+{
+public:
+    std::string name() const override { return "read-only-safety"; }
+    bool has_data_feed() const override { return false; }
+    bool has_execution() const override { return true; }
+    private_execution_capability
+    private_execution_capability_level() const noexcept override
+    {
+        return private_execution_capability::no_private_writes;
+    }
+    bool open() override { state = lifecycle::open; return true; }
+    void close() override { state = lifecycle::closed; }
+    lifecycle lifecycle_state() const override { return state; }
+    std::shared_ptr<IDataTransport> get_transport() override { return {}; }
+    std::shared_ptr<IExecutionAdapter> get_execution_adapter() override
+    {
+        return {};
+    }
+    std::vector<liveness_source> get_liveness_sources() override
+    {
+        ++liveness_queries;
+        return {};
+    }
+
+    lifecycle state = lifecycle::closed;
+    int liveness_queries = 0;
 };
 
 class RecoveryBracketAdapter final
@@ -179,6 +225,19 @@ public:
     std::string name() const override { return "recovery-test"; }
     bool has_data_feed() const override { return false; }
     bool has_execution() const override { return true; }
+    private_execution_capability
+    private_execution_capability_level() const noexcept override
+    {
+        return private_execution_capability::exchange_writes;
+    }
+    bool prepare_write_safety() override { return true; }
+    bool install_write_safety_readiness(
+        WriteSafetyReadiness readiness) override
+    {
+        readiness_installed_ =
+            readiness.permits_private_exchange_writes();
+        return readiness_installed_;
+    }
     bool open() override { state_ = lifecycle::open; return true; }
     void close() override { state_ = lifecycle::closed; }
     lifecycle lifecycle_state() const override { return state_; }
@@ -195,6 +254,7 @@ private:
     lifecycle state_ = lifecycle::closed;
     std::shared_ptr<RecoveryBracketAdapter> bracket_;
     std::shared_ptr<SpyKillSwitch> kill_ = std::make_shared<SpyKillSwitch>();
+    bool readiness_installed_ = false;
 };
 
 // The engine deliberately passes a const portfolio to production
@@ -207,6 +267,8 @@ public:
     explicit PositionSeedingReconciler(
         std::unordered_map<std::string, position> positions)
         : positions_(std::move(positions)) {}
+
+    bool is_operational() const noexcept override { return true; }
 
     std::string reconcile(const portfolio& current, double) override
     {
@@ -243,8 +305,15 @@ std::unique_ptr<engine> construct_recovery_engine(
     auto adapter = std::make_shared<RecoveryBracketAdapter>(
         std::move(recovered));
     auto provider = std::make_shared<RecoveryProvider>(std::move(adapter));
+    auto reconciler = std::make_shared<PositionSeedingReconciler>(
+        std::move(positions));
+    live_safety_requirements requirements;
+    requirements.target_allows_private_exchange_writes = true;
+    requirements.private_exchange_execution_requested = true;
+    requirements.reconciler = reconciler;
+    requirements.kill_switch = provider->get_kill_switch();
     auto session = std::make_shared<LiveSafetySession>(
-        provider, true, std::chrono::milliseconds{50});
+        provider, std::move(requirements), std::chrono::milliseconds{50});
     if (!session->open_provider())
         throw std::runtime_error("test provider failed to open");
 
@@ -254,8 +323,7 @@ std::unique_ptr<engine> construct_recovery_engine(
     cfg.disable_pinning = true;
     cfg.provider = provider;
     cfg.live_safety_session = session;
-    cfg.reconciler = std::make_shared<PositionSeedingReconciler>(
-        std::move(positions));
+    cfg.reconciler = std::move(reconciler);
 
     return std::make_unique<engine>(
         std::make_shared<data_handler>(), std::make_shared<orderbook>(),
@@ -327,10 +395,24 @@ TEST(LiveSafety, ReconcilerFailure_BlocksConstruction)
     auto dh = std::make_shared<data_handler>();
     auto ob = std::make_shared<orderbook>();
     auto strat = std::make_shared<NullStrategy>();
+    auto provider = std::make_shared<RecoveryProvider>(
+        std::make_shared<RecoveryBracketAdapter>(
+            std::vector<truetest::exits::IBracketAdapter::recovered_bracket>{}));
+    auto reconciler = std::make_shared<FailingReconciler>();
+    live_safety_requirements requirements;
+    requirements.target_allows_private_exchange_writes = true;
+    requirements.private_exchange_execution_requested = true;
+    requirements.reconciler = reconciler;
+    requirements.kill_switch = provider->get_kill_switch();
+    auto session = std::make_shared<LiveSafetySession>(
+        provider, std::move(requirements), std::chrono::milliseconds{50});
+    ASSERT_TRUE(session->open_provider());
 
     engine_config cfg;
     cfg.mode = engine_mode::live;
-    cfg.reconciler = std::make_shared<FailingReconciler>();
+    cfg.provider = provider;
+    cfg.live_safety_session = session;
+    cfg.reconciler = reconciler;
 
     EXPECT_THROW(engine eng(dh, ob, strat, std::move(cfg)), std::runtime_error);
 }
@@ -345,6 +427,29 @@ TEST(LiveSafety, MissingReconciler_BlocksConstruction)
     cfg.mode = engine_mode::live;
     EXPECT_THROW(engine eng(dh, ob, strat, std::move(cfg)),
                  std::runtime_error);
+}
+
+TEST(LiveSafety, LiveReconfigurationRejectsValidatedReadOnlySessionBeforeWorkers)
+{
+    auto provider = std::make_shared<ReadOnlySafetyProvider>();
+    auto session = std::make_shared<LiveSafetySession>(
+        provider, live_safety_requirements{},
+        std::chrono::milliseconds{50});
+    ASSERT_TRUE(session->open_provider());
+    ASSERT_TRUE(session->startup_safety_validated());
+    ASSERT_FALSE(session->permits_private_exchange_writes());
+
+    engine_config cfg;
+    cfg.mode = engine_mode::live;
+    cfg.provider = provider;
+    cfg.live_safety_session = session;
+
+    EXPECT_THROW(
+        engine eng(std::make_shared<data_handler>(),
+                   std::make_shared<orderbook>(),
+                   std::make_shared<NullStrategy>(), std::move(cfg)),
+        std::runtime_error);
+    EXPECT_EQ(provider->liveness_queries, 0);
 }
 
 TEST(LiveSafety, BacktestMode_SkipsReconcileGate)
@@ -548,12 +653,28 @@ public:
     std::string name() const override { return "armed-spy"; }
     bool has_data_feed() const override { return false; }
     bool has_execution() const override { return true; }
+    private_execution_capability
+    private_execution_capability_level() const noexcept override
+    {
+        return private_execution_capability::exchange_writes;
+    }
+    bool prepare_write_safety() override { return true; }
+    bool install_write_safety_readiness(
+        WriteSafetyReadiness readiness) override
+    {
+        return readiness.permits_private_exchange_writes();
+    }
 
     bool open() override { return true; }
     void close() override {}
 
     std::shared_ptr<IDataTransport> get_transport() override { return nullptr; }
     std::shared_ptr<IExecutionAdapter> get_execution_adapter() override { return nullptr; }
+    std::shared_ptr<IReconciler> get_reconciler() override
+    {
+        return reconciler;
+    }
+    std::shared_ptr<IKillSwitch> get_kill_switch() override { return kill; }
 
     void set_halt_callback(std::function<void(std::string_view reason)> cb) override
     {
@@ -561,6 +682,11 @@ public:
         if (throw_after_storing_halt)
             throw std::runtime_error("halt callback registration failed");
     }
+
+    std::shared_ptr<PassReconciler> reconciler =
+        std::make_shared<PassReconciler>();
+    std::shared_ptr<SpyKillSwitch> kill =
+        std::make_shared<SpyKillSwitch>();
 };
 
 } // anonymous
@@ -572,6 +698,8 @@ class ShutdownOrderKillSwitch final : public IKillSwitch
 public:
     ShutdownOrderKillSwitch(std::vector<std::string>& events, std::mutex& mu)
         : events_(events), mu_(mu) {}
+
+    bool is_operational() const noexcept override { return true; }
 
     bool cancel_all_and_flatten(std::chrono::milliseconds) override
     {
@@ -597,11 +725,26 @@ public:
     std::string name() const override { return "shutdown-order-spy"; }
     bool has_data_feed() const override { return false; }
     bool has_execution() const override { return true; }
+    private_execution_capability
+    private_execution_capability_level() const noexcept override
+    {
+        return private_execution_capability::exchange_writes;
+    }
+    bool prepare_write_safety() override { return true; }
+    bool install_write_safety_readiness(
+        WriteSafetyReadiness readiness) override
+    {
+        return readiness.permits_private_exchange_writes();
+    }
     bool open() override { state = lifecycle::open; return true; }
     void close() override { record("legacy-close"); state = lifecycle::closed; }
     lifecycle lifecycle_state() const override { return state; }
     std::shared_ptr<IDataTransport> get_transport() override { return {}; }
     std::shared_ptr<IExecutionAdapter> get_execution_adapter() override { return {}; }
+    std::shared_ptr<IReconciler> get_reconciler() override
+    {
+        return reconciler;
+    }
     std::shared_ptr<IKillSwitch> get_kill_switch() override { return kill; }
     void set_halt_callback(std::function<void(std::string_view reason)> cb) override
     {
@@ -618,6 +761,8 @@ public:
     }
 
     std::shared_ptr<ShutdownOrderKillSwitch> kill;
+    std::shared_ptr<PassReconciler> reconciler =
+        std::make_shared<PassReconciler>();
     live_shutdown_disposition disposition =
         live_shutdown_disposition::preserve_dead_man_switch;
     std::vector<std::string> events;
@@ -676,7 +821,7 @@ TEST(LiveSafety, LiveEngineRefusesSessionThatNeverOwnedProviderOpen)
     cfg.mode = engine_mode::live;
     cfg.provider = spy;
     cfg.live_safety_session = std::make_shared<LiveSafetySession>(
-        spy, true, std::chrono::milliseconds{50});
+        spy, write_requirements(), std::chrono::milliseconds{50});
     EXPECT_THROW(engine eng(dh, ob, strat, std::move(cfg)),
                  std::runtime_error);
 }
@@ -688,7 +833,7 @@ TEST(LiveSafety, LiveEngineDestructorUsesSessionShutdownExactlyOnce)
     auto strat = std::make_shared<NullStrategy>();
     auto provider = std::make_shared<ShutdownOrderProvider>();
     auto session = std::make_shared<LiveSafetySession>(
-        provider, true, std::chrono::milliseconds{50});
+        provider, write_requirements(), std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
 
     {
@@ -698,7 +843,6 @@ TEST(LiveSafety, LiveEngineDestructorUsesSessionShutdownExactlyOnce)
         cfg.disable_pinning = true;
         cfg.provider = provider;
         cfg.live_safety_session = session;
-        cfg.reconciler = std::make_shared<NoopReconciler>();
         engine eng(dh, ob, strat, std::move(cfg));
     }
 
@@ -723,7 +867,7 @@ TEST(LiveSafety, ProviderFatalCallbackHaltsThenUsesSharedShutdownSession)
     auto strat = std::make_shared<NullStrategy>();
     auto provider = std::make_shared<ShutdownOrderProvider>();
     auto session = std::make_shared<LiveSafetySession>(
-        provider, true, std::chrono::milliseconds{50});
+        provider, write_requirements(), std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
 
     {
@@ -733,7 +877,6 @@ TEST(LiveSafety, ProviderFatalCallbackHaltsThenUsesSharedShutdownSession)
         cfg.disable_pinning = true;
         cfg.provider = provider;
         cfg.live_safety_session = session;
-        cfg.reconciler = std::make_shared<NoopReconciler>();
         engine eng(dh, ob, strat, std::move(cfg));
         ASSERT_TRUE(provider->halt_callback);
         provider->halt_callback("simulated DMS heartbeat failure");
@@ -755,7 +898,7 @@ TEST(LiveSafety, FinishFailureCannotReportSuccessfulLiveRun)
     auto strat = std::make_shared<NullStrategy>();
     auto provider = std::make_shared<ShutdownOrderProvider>();
     auto session = std::make_shared<LiveSafetySession>(
-        provider, true, std::chrono::milliseconds{50});
+        provider, write_requirements(), std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
 
     {
@@ -765,7 +908,6 @@ TEST(LiveSafety, FinishFailureCannotReportSuccessfulLiveRun)
         cfg.disable_pinning = true;
         cfg.provider = provider;
         cfg.live_safety_session = session;
-        cfg.reconciler = std::make_shared<NoopReconciler>();
         engine eng(dh, ob, strat, std::move(cfg));
 
         provider->throw_on_finish = true;
@@ -788,7 +930,7 @@ TEST(LiveSafety, OperatorKillReportsFailureWhenProviderCannotFinishClosing)
     auto strat = std::make_shared<NullStrategy>();
     auto provider = std::make_shared<ShutdownOrderProvider>();
     auto session = std::make_shared<LiveSafetySession>(
-        provider, true, std::chrono::milliseconds{50});
+        provider, write_requirements(), std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
 
     {
@@ -798,7 +940,6 @@ TEST(LiveSafety, OperatorKillReportsFailureWhenProviderCannotFinishClosing)
         cfg.disable_pinning = true;
         cfg.provider = provider;
         cfg.live_safety_session = session;
-        cfg.reconciler = std::make_shared<NoopReconciler>();
         engine eng(dh, ob, strat, std::move(cfg));
 
         provider->throw_on_finish = true;
@@ -820,15 +961,21 @@ TEST(LiveSafety, ThrowingConstructorLeavesCapturedCallbacksDisarmed)
     auto ob = std::make_shared<orderbook>();
     auto strat = std::make_shared<NullStrategy>();
     auto spy = std::make_shared<ArmedGuardSpyProvider>();
+    auto reconciler = std::make_shared<FailingReconciler>();
+    live_safety_requirements requirements;
+    requirements.target_allows_private_exchange_writes = true;
+    requirements.private_exchange_execution_requested = true;
+    requirements.reconciler = reconciler;
+    requirements.kill_switch = spy->kill;
     auto session = std::make_shared<LiveSafetySession>(
-        spy, true, std::chrono::milliseconds{50});
+        spy, std::move(requirements), std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
 
     engine_config cfg;
     cfg.mode = engine_mode::live;
     cfg.provider = spy;
     cfg.live_safety_session = session;
-    cfg.reconciler = std::make_shared<FailingReconciler>();
+    cfg.reconciler = std::move(reconciler);
     EXPECT_THROW(engine eng(dh, ob, strat, std::move(cfg)),
                  std::runtime_error);
 
@@ -842,7 +989,7 @@ TEST(LiveSafety, ThrowingHaltRegistrationDisarmsEveryCapturedCallback)
     auto strat = std::make_shared<NullStrategy>();
     auto spy = std::make_shared<ArmedGuardSpyProvider>();
     auto session = std::make_shared<LiveSafetySession>(
-        spy, true, std::chrono::milliseconds{50});
+        spy, write_requirements(), std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
     spy->throw_after_storing_halt = true;
 
@@ -850,7 +997,6 @@ TEST(LiveSafety, ThrowingHaltRegistrationDisarmsEveryCapturedCallback)
     cfg.mode = engine_mode::live;
     cfg.provider = spy;
     cfg.live_safety_session = session;
-    cfg.reconciler = std::make_shared<NoopReconciler>();
     EXPECT_THROW(engine eng(dh, ob, strat, std::move(cfg)),
                  std::runtime_error);
 

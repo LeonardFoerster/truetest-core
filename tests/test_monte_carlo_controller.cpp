@@ -6,9 +6,52 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <limits>
+#include <locale>
 #include <stdexcept>
 
 using namespace truetest::simulation;
+
+TEST(MonteCarloReporter, JsonEscapesNamesAndRejectsInvalidValues) {
+    McAggregate aggregate;
+    McRunConfig config;
+    config.generator_name = "bad\"name\n€";
+    config.strategy_name = "slash\\tab\t";
+    config.initial_balance = 1.5;
+
+    const auto parsed = nlohmann::json::parse(
+        MonteCarloReporter::render_json(aggregate, config));
+    EXPECT_EQ(parsed.at("generator"), config.generator_name);
+    EXPECT_EQ(parsed.at("strategy"), config.strategy_name);
+    EXPECT_DOUBLE_EQ(parsed.at("initial_balance").get<double>(), 1.5);
+
+    config.generator_name = std::string(1, static_cast<char>(0xff));
+    EXPECT_THROW((void)MonteCarloReporter::render_json(aggregate, config),
+                 std::invalid_argument);
+
+    config.generator_name = "gbm";
+    aggregate.mean_pnl = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW((void)MonteCarloReporter::render_json(aggregate, config),
+                 std::invalid_argument);
+}
+
+TEST(MonteCarloReporter, JsonNumbersAreLocaleIndependent) {
+    McAggregate aggregate;
+    McRunConfig config;
+    config.initial_balance = 1.5;
+    try {
+        const std::locale german("de_DE.utf8");
+        const std::locale previous = std::locale();
+        std::locale::global(german);
+        const std::string output =
+            MonteCarloReporter::render_json(aggregate, config);
+        std::locale::global(previous);
+        EXPECT_DOUBLE_EQ(nlohmann::json::parse(output)
+                             .at("initial_balance").get<double>(), 1.5);
+    } catch (const std::runtime_error&) {
+        GTEST_SKIP() << "de_DE.utf8 locale unavailable";
+    }
+}
 
 TEST(MonteCarloController, RunsMultipleTrials) {
     McRunConfig cfg;
@@ -17,6 +60,7 @@ TEST(MonteCarloController, RunsMultipleTrials) {
     cfg.generator_config.sigma = 0.6;
     cfg.strategy_name = "mean-reversion";
     cfg.base_seed = 42;
+    cfg.master_seed_explicitly_set = true;
 
     MonteCarloController controller(cfg);
     McAggregate agg = controller.run();
@@ -62,21 +106,37 @@ TEST(MonteCarloController, RunsMultipleTrials) {
         if (trial.total_loss > 0.0) {
             EXPECT_DOUBLE_EQ(trial.profit_factor,
                              trial.total_win / trial.total_loss);
+            EXPECT_TRUE(trial.profit_factor_valid);
+            EXPECT_FALSE(trial.profit_factor_unbounded);
+        } else if (trial.total_win > 0.0) {
+            EXPECT_DOUBLE_EQ(trial.profit_factor, 0.0);
+            EXPECT_FALSE(trial.profit_factor_valid);
+            EXPECT_TRUE(trial.profit_factor_unbounded);
         }
     }
 }
 
-TEST(BacktestDefects, BF05_McProfitFactorMetricsIsolateZeroLossSentinel) {
+TEST(BacktestDefects, BF05_McProfitFactorMetricsExcludeUnboundedTrials) {
     TrialResult zero_loss;
+    zero_loss.trial_id = 0;
+    zero_loss.initial_equity = 1'000.0;
+    zero_loss.final_equity = 1'100.0;
     zero_loss.total_pnl = 100.0;
+    zero_loss.accounting_reconciled = true;
     zero_loss.total_win = 100.0;
-    zero_loss.profit_factor = 1e9;
+    zero_loss.profit_factor = 0.0;
+    zero_loss.profit_factor_unbounded = true;
 
     TrialResult ordinary;
+    ordinary.trial_id = 1;
+    ordinary.initial_equity = 1'000.0;
+    ordinary.final_equity = 1'025.0;
     ordinary.total_pnl = 25.0;
+    ordinary.accounting_reconciled = true;
     ordinary.total_win = 50.0;
     ordinary.total_loss = 25.0;
     ordinary.profit_factor = 2.0;
+    ordinary.profit_factor_valid = true;
 
     McAggregate aggregate;
     aggregate.trials = {zero_loss, ordinary};
@@ -85,8 +145,8 @@ TEST(BacktestDefects, BF05_McProfitFactorMetricsIsolateZeroLossSentinel) {
     EXPECT_EQ(aggregate.n_trials, 2u);
     EXPECT_DOUBLE_EQ(aggregate.profit_factor_pooled, 6.0);
     EXPECT_FALSE(aggregate.profit_factor_pooled_unbounded);
-    EXPECT_DOUBLE_EQ(aggregate.profit_factor_mean, 500000001.0);
-    EXPECT_DOUBLE_EQ(aggregate.median_profit_factor, 1e9);
+    EXPECT_DOUBLE_EQ(aggregate.profit_factor_mean, 2.0);
+    EXPECT_DOUBLE_EQ(aggregate.median_profit_factor, 2.0);
     EXPECT_DOUBLE_EQ(aggregate.profit_factor_mean_valid, 2.0);
     EXPECT_DOUBLE_EQ(aggregate.median_profit_factor_valid, 2.0);
     EXPECT_EQ(aggregate.valid_profit_factor_trials, 1u);
@@ -97,9 +157,9 @@ TEST(BacktestDefects, BF05_McProfitFactorMetricsIsolateZeroLossSentinel) {
         MonteCarloReporter::render_json(aggregate, McRunConfig{}));
     EXPECT_DOUBLE_EQ(json.at("profit_factor_pooled").get<double>(), 6.0);
     EXPECT_FALSE(json.at("profit_factor_pooled_unbounded").get<bool>());
-    EXPECT_NEAR(json.at("profit_factor_mean").get<double>(),
-                aggregate.profit_factor_mean, 1.0);
-    EXPECT_DOUBLE_EQ(json.at("median_profit_factor").get<double>(), 1e9);
+    EXPECT_DOUBLE_EQ(json.at("profit_factor_mean").get<double>(), 2.0);
+    EXPECT_DOUBLE_EQ(json.at("median_profit_factor").get<double>(),
+                     2.0);
     EXPECT_DOUBLE_EQ(json.at("profit_factor_mean_valid").get<double>(), 2.0);
     EXPECT_DOUBLE_EQ(json.at("median_profit_factor_valid").get<double>(), 2.0);
     EXPECT_EQ(json.at("valid_profit_factor_trials").get<std::size_t>(), 1u);
@@ -109,21 +169,30 @@ TEST(BacktestDefects, BF05_McProfitFactorMetricsIsolateZeroLossSentinel) {
                      100.0);
     EXPECT_DOUBLE_EQ(json.at("trials").at(0).at("total_loss").get<double>(),
                      0.0);
+    EXPECT_TRUE(json.at("trials").at(0)
+                    .at("profit_factor_unbounded").get<bool>());
+    EXPECT_FALSE(json.at("trials").at(0)
+                     .at("profit_factor_valid").get<bool>());
 }
 
 TEST(BacktestDefects, BF05_PooledProfitFactorUnboundedPolicyIsExplicit) {
     TrialResult winner;
+    winner.trial_id = 0;
+    winner.initial_equity = 1'000.0;
+    winner.final_equity = 1'010.0;
     winner.total_pnl = 10.0;
+    winner.accounting_reconciled = true;
     winner.total_win = 10.0;
-    winner.profit_factor = 1e9;
+    winner.profit_factor = 0.0;
+    winner.profit_factor_unbounded = true;
 
     McAggregate winning_campaign;
     winning_campaign.trials = {winner};
     summarize_monte_carlo_trials(winning_campaign);
-    EXPECT_DOUBLE_EQ(winning_campaign.profit_factor_pooled, 1e9);
+    EXPECT_DOUBLE_EQ(winning_campaign.profit_factor_pooled, 0.0);
     EXPECT_TRUE(winning_campaign.profit_factor_pooled_unbounded);
-    EXPECT_DOUBLE_EQ(winning_campaign.profit_factor_mean, 1e9);
-    EXPECT_DOUBLE_EQ(winning_campaign.median_profit_factor, 1e9);
+    EXPECT_DOUBLE_EQ(winning_campaign.profit_factor_mean, 0.0);
+    EXPECT_DOUBLE_EQ(winning_campaign.median_profit_factor, 0.0);
     EXPECT_DOUBLE_EQ(winning_campaign.profit_factor_mean_valid, 0.0);
     EXPECT_DOUBLE_EQ(winning_campaign.median_profit_factor_valid, 0.0);
     EXPECT_EQ(winning_campaign.valid_profit_factor_trials, 0u);
@@ -156,7 +225,9 @@ TEST(MonteCarloController, DeterministicWithSameSeed) {
     McRunConfig cfg;
     cfg.n_trials = 4;
     cfg.generator_config.n_steps = 150;
+    cfg.strategy_name = "ma-crossover";
     cfg.base_seed = 12345;
+    cfg.master_seed_explicitly_set = true;
 
     MonteCarloController c1(cfg);
     auto agg1 = c1.run();
@@ -177,8 +248,9 @@ TEST(MonteCarloController, ReuseObjectsProducesPlausibleResults) {
     cfg.n_trials = 5;
     cfg.generator_config.n_steps = 150;
     cfg.generator_config.sigma = 0.55;
-    cfg.strategy_name = "mean-reversion";
+    cfg.strategy_name = "ma-crossover";
     cfg.base_seed = 123;
+    cfg.master_seed_explicitly_set = true;
 
     // Reference run without reuse
     McRunConfig cfg_fresh = cfg;
@@ -213,11 +285,8 @@ TEST(MonteCarloController, ReuseObjectsProducesPlausibleResults) {
     // Full bit-identical results are not yet guaranteed with reuse.
     // This test ensures the reuse path is functional ("good enough" policy).
     //
-    // Bound is scaled to fixed-risk sizing semantics (risk_fraction is stop
-    // budget, not notional fraction). Default mean-reversion uses 0.5% SL and
-    // 2% equity risk ⇒ notional can be several × equity, so absolute PnL
-    // swings are larger than the old notional-capped regime. Still catch
-    // NaN / catastrophic blow-ups / broken reset without over-constraining.
+    // Retain loose catastrophic bounds here; exact fresh-vs-reused equality is
+    // covered by the deterministic artifact suite.
     EXPECT_GT(agg_reuse.mean_pnl, -100000.0);
     EXPECT_LT(agg_reuse.worst_max_dd, 500.0);  // percent; loose catastrophic bound under fixed-risk sizing
     // Reuse and fresh must both be finite and same order of magnitude when
@@ -234,7 +303,8 @@ TEST(MonteCarloController, SeedUsedMatchesPathGenerator) {
     cfg.n_trials = 4;
     cfg.generator_config.n_steps = 40;
     cfg.base_seed = 42;
-    cfg.strategy_name = "mean-reversion";
+    cfg.master_seed_explicitly_set = true;
+    cfg.strategy_name = "ma-crossover";
 
     GBMGenerator gen;
     auto batch = gen.generate_batch(cfg.n_trials, cfg.base_seed, cfg.generator_config);
@@ -252,22 +322,28 @@ TEST(MonteCarloController, SeedUsedMatchesPathGenerator) {
     }
 }
 
-// base_seed==0 must use the fixed default for both path and seed_used.
-TEST(MonteCarloController, ZeroBaseSeedUsesFixedDefault) {
+TEST(MonteCarloController, ExplicitZeroMasterSeedIsAcceptedWithoutFallback) {
     McRunConfig cfg;
     cfg.n_trials = 2;
     cfg.generator_config.n_steps = 30;
     cfg.base_seed = 0;
-    cfg.strategy_name = "mean-reversion";
+    cfg.master_seed_explicitly_set = true;
+    cfg.strategy_name = "ma-crossover";
 
     MonteCarloController controller(cfg);
     McAggregate agg = controller.run();
 
     ASSERT_EQ(agg.trials.size(), 2u);
     EXPECT_EQ(agg.trials[0].seed_used, derive_mc_trial_seed(0, 0));
-    EXPECT_EQ(agg.trials[0].seed_used, kMcDefaultBaseSeed); // trial 0: base ^ 0
     EXPECT_EQ(agg.trials[1].seed_used, derive_mc_trial_seed(0, 1));
     EXPECT_NE(agg.trials[0].seed_used, agg.trials[1].seed_used);
+}
+
+TEST(MonteCarloController, MissingMasterSeedFailsClosedBeforeRun) {
+    McRunConfig cfg;
+    cfg.n_trials = 1;
+    cfg.generator_config.n_steps = 10;
+    EXPECT_THROW((void)MonteCarloController{cfg}, std::invalid_argument);
 }
 
 TEST(MonteCarloController, UnknownStrategyThrows) {
@@ -275,6 +351,7 @@ TEST(MonteCarloController, UnknownStrategyThrows) {
     cfg.n_trials = 1;
     cfg.generator_config.n_steps = 20;
     cfg.base_seed = 1;
+    cfg.master_seed_explicitly_set = true;
     cfg.strategy_name = "this-strategy-does-not-exist";
 
     MonteCarloController controller(cfg);
@@ -286,6 +363,7 @@ TEST(MonteCarloController, UnknownGeneratorThrows) {
     cfg.n_trials = 1;
     cfg.generator_name = "not-a-real-model";
     cfg.base_seed = 1;
+    cfg.master_seed_explicitly_set = true;
     EXPECT_THROW(MonteCarloController{cfg}, std::runtime_error);
 }
 
@@ -293,6 +371,7 @@ TEST(MonteCarloController, ParallelPlusReuseThrows) {
     McRunConfig cfg;
     cfg.n_trials = 2;
     cfg.base_seed = 1;
+    cfg.master_seed_explicitly_set = true;
     cfg.parallel_trials = true;
     cfg.reuse_objects_between_trials = true;
     EXPECT_THROW(MonteCarloController{cfg}, std::runtime_error);
@@ -303,7 +382,9 @@ TEST(MonteCarloController, StrategyParamsApplied) {
     McRunConfig cfg;
     cfg.n_trials = 1;
     cfg.generator_config.n_steps = 50;
+    cfg.generator_config.sigma = 0.0;
     cfg.base_seed = 7;
+    cfg.master_seed_explicitly_set = true;
     cfg.strategy_name = "mean-reversion";
     cfg.strategy_params = {{"risk_fraction", 0.01}};
 

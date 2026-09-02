@@ -3,7 +3,10 @@
 
 static auto epoch_ms(int64_t ms)
 {
-    return std::chrono::system_clock::time_point(std::chrono::milliseconds(ms));
+    // Keep ordinary fixtures away from the explicitly invalid epoch-zero
+    // sentinel while preserving every relative interval in the tests.
+    return std::chrono::system_clock::time_point(
+        std::chrono::milliseconds(ms + 1));
 }
 
 TEST(BarAggregator, SingleTick_DoesNotEmitPartial)
@@ -202,7 +205,10 @@ TEST(BarAggregator, SymbolCapacityFailsClosedWithoutMixing)
     BarAggregator agg(std::chrono::milliseconds(1000),
                       [&](const market_event&) { ++emitted; }, 1);
     EXPECT_TRUE(agg.on_tick("A", 1.0, 1, epoch_ms(0)));
-    EXPECT_FALSE(agg.on_tick("B", 2.0, 1, epoch_ms(1)));
+    EXPECT_FALSE(agg.on_tick("B", 2.0, 1, epoch_ms(2000)));
+    EXPECT_EQ(emitted, 0) << "a rejected tick must not publish due bars";
+    EXPECT_TRUE(agg.on_tick("A", 1.5, 1, epoch_ms(500)))
+        << "a rejected tick must not advance the global time watermark";
     agg.flush();
     EXPECT_EQ(emitted, 1);
 }
@@ -213,11 +219,59 @@ TEST(BarAggregator, InvalidTickFailsWithoutMutatingOpenBar)
     BarAggregator agg(std::chrono::milliseconds(1000),
                       [&](const market_event& bar) { bars.push_back(bar); });
     ASSERT_TRUE(agg.on_tick("A", 100.0, 5, epoch_ms(0)));
+    EXPECT_FALSE(agg.on_tick(
+        "A", 90.0, 1, std::chrono::system_clock::time_point{}));
+    EXPECT_FALSE(agg.on_tick("A", 90.0, 1, epoch_ms(-1)));
     EXPECT_FALSE(agg.on_tick("A", 200.0, -1, epoch_ms(1)));
+    EXPECT_FALSE(agg.on_tick("A", 200.0, 0, epoch_ms(1)));
     EXPECT_FALSE(agg.on_tick("A", std::numeric_limits<double>::infinity(),
                              1, epoch_ms(2)));
     agg.flush();
     ASSERT_EQ(bars.size(), 1u);
     EXPECT_DOUBLE_EQ(bars[0].get_close(), 100.0);
     EXPECT_EQ(bars[0].get_volume(), 5);
+}
+
+TEST(BarAggregator, RejectsGlobalAndPerSymbolTimeRegression)
+{
+    std::vector<market_event> bars;
+    BarAggregator agg(std::chrono::milliseconds(1000),
+                      [&](const market_event& bar) { bars.push_back(bar); });
+    ASSERT_TRUE(agg.on_tick("A", 100.0, 1, epoch_ms(2000)));
+    EXPECT_FALSE(agg.on_tick("A", 90.0, 1, epoch_ms(1000)));
+    EXPECT_FALSE(agg.on_tick("B", 90.0, 1, epoch_ms(1500)));
+    agg.flush();
+    ASSERT_EQ(bars.size(), 1u);
+    EXPECT_DOUBLE_EQ(bars[0].get_close(), 100.0);
+}
+
+TEST(BarAggregator, MixedQuantityScalesNeverRoundEconomicVolume)
+{
+    std::vector<market_event> bars;
+    BarAggregator agg(std::chrono::milliseconds(1000),
+                      [&](const market_event& bar) { bars.push_back(bar); });
+    ASSERT_TRUE(agg.on_tick("A", 100.0, 1, epoch_ms(0), 2));
+    EXPECT_FALSE(agg.on_tick("A", 200.0, 1, epoch_ms(1), 3));
+    EXPECT_TRUE(agg.on_tick("A", 110.0, 3, epoch_ms(2), 6));
+    agg.flush();
+
+    ASSERT_EQ(bars.size(), 1u);
+    EXPECT_DOUBLE_EQ(bars[0].get_close(), 110.0);
+    EXPECT_EQ(bars[0].get_volume(), 2);
+    EXPECT_EQ(bars[0].get_quantity_scale(), 2u);
+}
+
+TEST(BarAggregator, QuantityScaleAboveDoubleIntegerRangeRemainsExact)
+{
+    constexpr std::uint64_t large_scale = 9'007'199'254'740'993ULL;
+    std::vector<market_event> bars;
+    BarAggregator agg(std::chrono::milliseconds(1000),
+                      [&](const market_event& bar) { bars.push_back(bar); });
+    ASSERT_TRUE(agg.on_tick("A", 100.0, 1, epoch_ms(0), large_scale));
+    ASSERT_TRUE(agg.on_tick("A", 101.0, 1, epoch_ms(1), 1));
+    agg.flush();
+
+    ASSERT_EQ(bars.size(), 1u);
+    EXPECT_EQ(bars.front().get_quantity_scale(), large_scale);
+    EXPECT_EQ(bars.front().get_volume(), 9'007'199'254'740'994LL);
 }

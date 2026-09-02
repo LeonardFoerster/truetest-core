@@ -16,7 +16,8 @@ TEST(ThreadPreset, SelectPreset_CoreBuckets)
 
 TEST(ThreadPreset, StringRoundTrip)
 {
-    for (auto p : {thread_preset::inline_mode, thread_preset::light,
+    for (auto p : {thread_preset::inline_mode, thread_preset::logging_only,
+                   thread_preset::light,
                    thread_preset::standard, thread_preset::full,
                    thread_preset::extended})
     {
@@ -32,6 +33,7 @@ TEST(ThreadPreset, StringToPreset_Invalid)
 TEST(ThreadPreset, WorkerCount)
 {
     EXPECT_EQ(preset_worker_count(thread_preset::inline_mode), 0);
+    EXPECT_EQ(preset_worker_count(thread_preset::logging_only), 1);
     EXPECT_EQ(preset_worker_count(thread_preset::light), 1);
     EXPECT_EQ(preset_worker_count(thread_preset::standard), 2);
     EXPECT_EQ(preset_worker_count(thread_preset::full), 3);

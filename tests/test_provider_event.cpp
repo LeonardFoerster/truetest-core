@@ -146,6 +146,22 @@ TEST(ProviderEvent, SinkBarPopulatesHandler)
 	EXPECT_EQ(dh->bar_at(0).symbol, "AAPL");
 }
 
+TEST(ProviderEvent, SinkRejectsBarWithUnknownTime)
+{
+	auto dh = std::make_shared<data_handler>();
+	provider::bar b;
+	b.date = "not-a-time";
+	b.symbol = "AAPL";
+	b.open = 150.0;
+	b.high = 155.0;
+	b.low = 149.0;
+	b.close = 153.0;
+	b.volume = 1;
+
+	provider::event_sink(provider::event{b}, dh);
+	EXPECT_EQ(dh->bar_count(), 0u);
+}
+
 TEST(ProviderEvent, SinkTickPopulatesHandler)
 {
 	auto dh = std::make_shared<data_handler>();

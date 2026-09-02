@@ -5,6 +5,7 @@
   "initial_balance": 10000.0,
   "mm_initial_price": 100.0,
   "mm_initial_orders": 40,
+  "periods_per_year": 252,
   "threading": "inline",
-  "comment": "Fixture config for tests/test_golden_regression.cpp — do not edit without regenerating sma_basic_expected.json."
+  "comment": "Fixture config for tests/test_golden_regression.cpp \u2014 do not edit without regenerating sma_basic_expected.json. Expectations regenerated 2026-08-22 for docs/todos/11-F-forensic-lifecycle-audit.md F-01(a): every one of this fixture's 28 entries slipped further than its own 0.3% designed stop distance, so the pre-fix run stopped every trade out at a shifted level above the market it filled in (win rate 0.0%, final equity 8919.05). ExitManager now refuses to arm a bracket on a void risk premise and flattens the lot at the mark instead (win rate 35.71%, final equity 9226.97). Order and fill counts are unchanged."
 }

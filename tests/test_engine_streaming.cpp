@@ -63,6 +63,12 @@ public:
     void submit_order(const order_event&) override { ++submits; }
     bool cancel_order(std::uint64_t) override { ++cancels; return true; }
     bool poll_fills(std::vector<fill_event>&) override { return false; }
+    bool supports_transactional_fill_delivery() const noexcept override
+    {
+        return true;
+    }
+    bool peek_fill(fill_event&) override { return false; }
+    bool acknowledge_fill(std::uint64_t) override { return false; }
     int submits = 0;
     int cancels = 0;
 };
@@ -70,12 +76,14 @@ public:
 class PassReconciler final : public IReconciler
 {
 public:
+    bool is_operational() const noexcept override { return true; }
     std::string reconcile(const portfolio&, double) override { return {}; }
 };
 
 class PassKillSwitch final : public IKillSwitch
 {
 public:
+    bool is_operational() const noexcept override { return true; }
     bool cancel_all_and_flatten(std::chrono::milliseconds) override
     {
         ++calls;
@@ -84,12 +92,31 @@ public:
     int calls = 0;
 };
 
+live_safety_requirements write_requirements()
+{
+    live_safety_requirements requirements;
+    requirements.target_allows_private_exchange_writes = true;
+    requirements.private_exchange_execution_requested = true;
+    return requirements;
+}
+
 class StreamingLiveProvider final : public IProvider
 {
 public:
     std::string name() const override { return "streaming-live-spy"; }
     bool has_data_feed() const override { return false; }
     bool has_execution() const override { return true; }
+    private_execution_capability
+    private_execution_capability_level() const noexcept override
+    {
+        return private_execution_capability::exchange_writes;
+    }
+    bool prepare_write_safety() override { return true; }
+    bool install_write_safety_readiness(
+        WriteSafetyReadiness readiness) override
+    {
+        return readiness.permits_private_exchange_writes();
+    }
     bool open() override { opened = true; return true; }
     void close() override { opened = false; }
     std::shared_ptr<IDataTransport> get_transport() override { return {}; }
@@ -123,6 +150,11 @@ public:
     std::string name() const override { return "idle-funding"; }
     bool has_data_feed() const override { return false; }
     bool has_execution() const override { return false; }
+    private_execution_capability
+    private_execution_capability_level() const noexcept override
+    {
+        return private_execution_capability::no_private_writes;
+    }
     bool open() override { return true; }
     void close() override
     {
@@ -246,6 +278,44 @@ TEST(EngineStreaming, QuietStreamDrainsFundingBeforeFirstMarketFrame)
     truetest::ui::dashboard_snapshot snapshot;
     ASSERT_TRUE(eng.snapshot_dashboard(snapshot));
     EXPECT_DOUBLE_EQ(snapshot.cash, 1'007.5);
+}
+
+TEST(EngineStreaming, C06_FundingWithoutStableSettlementIdentityFailsClosed)
+{
+    SilenceOutput quiet;
+    auto provider = std::make_shared<IdleFundingProvider>();
+    auto dh = std::make_shared<data_handler>();
+    auto ob = std::make_shared<orderbook>();
+    auto strat = std::make_shared<StreamTestStrategy>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.initial_balance = 1'000.0;
+    cfg.provider = provider;
+    engine eng(dh, ob, strat, std::move(cfg));
+
+    const auto ts = std::chrono::system_clock::time_point{
+        std::chrono::milliseconds{1'700'000'000'000LL}};
+    ASSERT_TRUE(provider->ingress.try_publish(ts, "BTCUSDT", 7.5));
+
+    auto bridge = std::make_shared<DataBridge<bar_record>>(
+        std::make_shared<IdleBeforeHeaderTransport>(),
+        std::make_shared<CsvBarParser>(), bar_record_sink);
+    const auto result = eng.run_streaming(bridge);
+    // provider_funding_update currently has no native settlement id, asset,
+    // account or sequence. A delta-only record cannot distinguish a replay
+    // from a second legitimate settlement. Guessing by tuple is unsafe; this
+    // domain remains explicitly unsupported until durable identity exists.
+    EXPECT_FALSE(result.success());
+    EXPECT_TRUE(eng.is_halted());
+    EXPECT_TRUE(provider->ingress.empty());
+
+    truetest::ui::dashboard_snapshot snapshot;
+    ASSERT_TRUE(eng.snapshot_dashboard(snapshot));
+    EXPECT_DOUBLE_EQ(snapshot.cash, 1'000.0);
+    EXPECT_DOUBLE_EQ(eng.get_analytics().total_funding_pnl(), 0.0);
 }
 
 TEST(EngineStreaming, StartDrainsPrequeuedFundingBeforeMarketDispatch)
@@ -469,7 +539,8 @@ TEST(EngineStreaming, FinalDrainAppliesFundingAfterProviderProducerStops)
     provider->publish_on_close = true;
     provider->close_cash_delta = 3.25;
     auto session = std::make_shared<LiveSafetySession>(
-        provider, false, std::chrono::milliseconds{100});
+        provider, live_safety_requirements{},
+        std::chrono::milliseconds{100});
     ASSERT_TRUE(session->open_provider());
 
     engine_config cfg;
@@ -699,7 +770,7 @@ TEST(EngineStreaming, LiveOperatorStopDoesNotForcePendingVenueMutation)
         transport, std::make_shared<CsvBarParser>(), bar_record_sink);
     auto provider = std::make_shared<StreamingLiveProvider>();
     auto session = std::make_shared<LiveSafetySession>(
-        provider, true, std::chrono::milliseconds{50});
+        provider, write_requirements(), std::chrono::milliseconds{50});
     ASSERT_TRUE(session->open_provider());
 
     engine_config cfg;

@@ -5,8 +5,10 @@
 #include "providers/provider_registry.h"
 #include "providers/bitget/bitget_futures_order_encoder.h"
 #include "providers/bitget/bitget_futures_provider.h"
+#include "engine/live_safety_session.h"
 #include "helpers/alloc_counter.h"
 
+#include <chrono>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -169,7 +171,7 @@ TEST(BitgetFuturesRegister, DepthStreamEnablesEventStream)
     EXPECT_NE(p->get_event_parser(), nullptr);
 }
 
-TEST(BitgetFuturesRegister, TradeOnlyHasNoEventStream)
+TEST(BitgetFuturesRegister, C07_TradeOnlyDeclaresAndParsesEventStreamWithoutDepth)
 {
     provider_config cfg;
     cfg["symbol"] = "BTCUSDT";
@@ -177,8 +179,25 @@ TEST(BitgetFuturesRegister, TradeOnlyHasNoEventStream)
 
     auto p = create(cfg);
     ASSERT_NE(p, nullptr);
-    EXPECT_FALSE(p->supports_event_stream());
-    EXPECT_EQ(p->get_event_parser(), nullptr);
+    EXPECT_TRUE(p->supports_event_stream());
+    auto parser = p->get_event_parser();
+    ASSERT_NE(parser, nullptr);
+
+    const std::string frame = R"({
+      "arg":{"instType":"usdt-futures","topic":"publicTrade","symbol":"BTCUSDT"},
+      "data":[
+        {"i":"1","p":"42000.5","v":"0.01","S":"buy","T":"1704067200000"},
+        {"i":"2","p":"42001.0","v":"0.02","S":"sell","T":"1704067200001"}
+      ],
+      "ts":1704067200002
+    })";
+    const auto events = parser->parse_records(frame);
+    ASSERT_EQ(events.size(), 2U);
+    for (const auto& event : events)
+    {
+        ASSERT_TRUE(std::holds_alternative<provider::tick>(event));
+        EXPECT_EQ(std::get<provider::tick>(event).symbol, "BTCUSDT");
+    }
 }
 
 TEST(BitgetFuturesRegister, PassphraseStored)
@@ -296,6 +315,80 @@ TEST(BitgetFuturesRegister, DirectLiveOpenRefusesEveryIncompleteCredentialTuple)
         EXPECT_FALSE(p->open()) << "mask=" << mask;
         EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::error);
     }
+}
+
+TEST(BitgetFuturesRegister, DemoLiveSafetyPreparationIsOperationalWithoutOpen)
+{
+    BitgetFuturesProvider p(
+        "BTCUSDT", "trade", "test-key", "test-secret", "test-passphrase");
+    p.set_endpoints(bitget::uta_demo());
+    engine_config cfg;
+    cfg.mode = engine_mode::live;
+    p.configure(cfg);
+
+    EXPECT_TRUE(p.is_demo());
+    EXPECT_EQ(p.private_execution_capability_level(),
+              private_execution_capability::exchange_writes);
+    ASSERT_TRUE(p.prepare_write_safety());
+    ASSERT_NE(p.get_reconciler(), nullptr);
+    ASSERT_NE(p.get_kill_switch(), nullptr);
+    EXPECT_TRUE(p.get_reconciler()->is_operational());
+    EXPECT_TRUE(p.get_kill_switch()->is_operational());
+    EXPECT_EQ(p.lifecycle_state(), IProvider::lifecycle::closed);
+}
+
+TEST(BitgetFuturesRegister, DemoWriteStartupRejectsNoopReconcilerBeforeOpen)
+{
+    auto p = std::make_shared<BitgetFuturesProvider>(
+        "BTCUSDT", "trade", "test-key", "test-secret", "test-passphrase");
+    p->set_endpoints(bitget::uta_demo());
+    engine_config cfg;
+    cfg.mode = engine_mode::live;
+    p->configure(cfg);
+    live_safety_requirements requirements;
+    requirements.target_allows_private_exchange_writes = true;
+    requirements.private_exchange_execution_requested = true;
+    requirements.reconciler = std::make_shared<NoopReconciler>();
+    LiveSafetySession session(
+        p, std::move(requirements), std::chrono::milliseconds{50});
+
+    EXPECT_FALSE(session.open_provider());
+    EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::closed);
+    EXPECT_NE(session.startup_error().find("operational reconciler"),
+              std::string::npos);
+}
+
+TEST(BitgetFuturesRegister, DemoWriteStartupRejectsNoopKillSwitchBeforeOpen)
+{
+    auto p = std::make_shared<BitgetFuturesProvider>(
+        "BTCUSDT", "trade", "test-key", "test-secret", "test-passphrase");
+    p->set_endpoints(bitget::uta_demo());
+    engine_config cfg;
+    cfg.mode = engine_mode::live;
+    p->configure(cfg);
+    live_safety_requirements requirements;
+    requirements.target_allows_private_exchange_writes = true;
+    requirements.private_exchange_execution_requested = true;
+    requirements.kill_switch = std::make_shared<NoopKillSwitch>();
+    LiveSafetySession session(
+        p, std::move(requirements), std::chrono::milliseconds{50});
+
+    EXPECT_FALSE(session.open_provider());
+    EXPECT_EQ(p->lifecycle_state(), IProvider::lifecycle::closed);
+    EXPECT_NE(session.startup_error().find("operational kill switch"),
+              std::string::npos);
+}
+
+TEST(BitgetFuturesRegister, DirectLiveOpenCannotBypassSafetySession)
+{
+    BitgetFuturesProvider p(
+        "BTCUSDT", "trade", "test-key", "test-secret", "test-passphrase");
+    engine_config cfg;
+    cfg.mode = engine_mode::live;
+    p.configure(cfg);
+
+    EXPECT_FALSE(p.open());
+    EXPECT_EQ(p.lifecycle_state(), IProvider::lifecycle::error);
 }
 
 TEST(BitgetFuturesRegister, RejectsMalformedOrPercentageScaleLiquidationCap)

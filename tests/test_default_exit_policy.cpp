@@ -77,6 +77,21 @@ TEST(DefaultExitPolicy, FloorReducingSellNoArm)
     EXPECT_TRUE(out.empty());
 }
 
+TEST(DefaultExitPolicy, FloorOversizeImplicitOppositeOrderProtectsResidual)
+{
+    // A 15-unit sell against a 10-unit long first closes the long, then opens
+    // a 5-unit short. Treating the whole order as position-reducing leaves
+    // that residual exposure without the platform safety floor.
+    auto o = make_order(order_side::sell, 15, 100);
+    auto out = apply_default_exit_policy(floor_params(), o, /*net_qty=*/10.0, {});
+
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out.front().close_side, order_side::buy);
+    EXPECT_DOUBLE_EQ(out.front().qty, 15.0);
+    EXPECT_TRUE(out.front().stop_loss.has_value());
+    EXPECT_TRUE(out.front().take_profit.has_value());
+}
+
 TEST(DefaultExitPolicy, FloorReducingViaOpenerId)
 {
     auto o = make_order(order_side::sell, 10, 100, /*id=*/99, /*opener=*/42);
@@ -182,7 +197,7 @@ TEST(DefaultExitPolicy, EngineOnlyReplacesStrategy)
     EXPECT_DOUBLE_EQ(*out[0].take_profit, 102.0);
 }
 
-TEST(DefaultExitPolicy, UnionPreservesStrategyIntents)
+TEST(DefaultExitPolicy, UnionPreservesStrategyIntentsAndAppendsMissingLegs)
 {
     auto o = make_order(order_side::buy, 10, 100);
     exit_intent strat;
@@ -194,10 +209,14 @@ TEST(DefaultExitPolicy, UnionPreservesStrategyIntents)
     default_exit_params p = floor_params(0.01, 0.02);
     p.mode = exit_policy_mode::union_mode;
     auto out = apply_default_exit_policy(p, o, 0.0, {strat});
-    ASSERT_EQ(out.size(), 1u);
+    ASSERT_EQ(out.size(), 2u);
     EXPECT_FALSE(out[0].stop_loss.has_value());
     ASSERT_TRUE(out[0].take_profit.has_value());
     EXPECT_DOUBLE_EQ(*out[0].take_profit, 120.0);
+
+    ASSERT_TRUE(out[1].stop_loss.has_value());
+    EXPECT_DOUBLE_EQ(*out[1].stop_loss, 99.0);
+    EXPECT_FALSE(out[1].take_profit.has_value());
 }
 
 TEST(BacktestDefects, BF04_UnionModeEmptyStrategyKeepsFullPlatformPlan)
@@ -217,6 +236,109 @@ TEST(BacktestDefects, BF04_UnionModeEmptyStrategyKeepsFullPlatformPlan)
     EXPECT_DOUBLE_EQ(*out[0].stop_loss, 202.0);
     EXPECT_DOUBLE_EQ(*out[0].take_profit, 196.0);
     EXPECT_DOUBLE_EQ(*out[0].trailing_pct, 0.005);
+}
+
+TEST(BacktestDefects, BF04_UnionModeAppendsMissingStopLossWhenStrategyHasTakeProfitOnly)
+{
+    auto o = make_order(order_side::buy, 10, 100);
+    exit_intent strat;
+    strat.symbol = "TEST";
+    strat.close_side = order_side::sell;
+    strat.qty = 10;
+    strat.take_profit = 125.0;
+
+    default_exit_params p;
+    p.mode = exit_policy_mode::union_mode;
+    p.sl_pct = 0.03;
+    p.tp_pct = 0.05;
+
+    auto out = apply_default_exit_policy(p, o, 0.0, {strat});
+    ASSERT_EQ(out.size(), 2u);
+    EXPECT_FALSE(out[0].stop_loss.has_value());
+    ASSERT_TRUE(out[0].take_profit.has_value());
+    EXPECT_DOUBLE_EQ(*out[0].take_profit, 125.0);
+
+    ASSERT_TRUE(out[1].stop_loss.has_value());
+    EXPECT_DOUBLE_EQ(*out[1].stop_loss, 97.0);
+    EXPECT_FALSE(out[1].take_profit.has_value());
+}
+
+TEST(BacktestDefects, BF04_UnionModeAppendsMissingTakeProfitWhenStrategyHasStopLossOnly)
+{
+    auto o = make_order(order_side::buy, 10, 100);
+    exit_intent strat;
+    strat.symbol = "TEST";
+    strat.close_side = order_side::sell;
+    strat.qty = 10;
+    strat.stop_loss = 92.0;
+
+    default_exit_params p;
+    p.mode = exit_policy_mode::union_mode;
+    p.sl_pct = 0.03;
+    p.tp_pct = 0.05;
+
+    auto out = apply_default_exit_policy(p, o, 0.0, {strat});
+    ASSERT_EQ(out.size(), 2u);
+    ASSERT_TRUE(out[0].stop_loss.has_value());
+    EXPECT_DOUBLE_EQ(*out[0].stop_loss, 92.0);
+    EXPECT_FALSE(out[0].take_profit.has_value());
+
+    EXPECT_FALSE(out[1].stop_loss.has_value());
+    ASSERT_TRUE(out[1].take_profit.has_value());
+    EXPECT_DOUBLE_EQ(*out[1].take_profit, 105.0);
+}
+
+TEST(BacktestDefects, BF04_UnionModeAppendsMissingTrailingWhenStrategyHasSlTpOnly)
+{
+    auto o = make_order(order_side::buy, 10, 100);
+    exit_intent strat;
+    strat.symbol = "TEST";
+    strat.close_side = order_side::sell;
+    strat.qty = 10;
+    strat.stop_loss = 95.0;
+    strat.take_profit = 110.0;
+
+    default_exit_params p;
+    p.mode = exit_policy_mode::union_mode;
+    p.sl_pct = 0.02;
+    p.tp_pct = 0.04;
+    p.trail_pct = 0.01;
+
+    auto out = apply_default_exit_policy(p, o, 0.0, {strat});
+    ASSERT_EQ(out.size(), 2u);
+    ASSERT_TRUE(out[0].stop_loss.has_value());
+    EXPECT_DOUBLE_EQ(*out[0].stop_loss, 95.0);
+    ASSERT_TRUE(out[0].take_profit.has_value());
+    EXPECT_DOUBLE_EQ(*out[0].take_profit, 110.0);
+    EXPECT_FALSE(out[0].trailing_pct.has_value());
+
+    EXPECT_FALSE(out[1].stop_loss.has_value());
+    EXPECT_FALSE(out[1].take_profit.has_value());
+    ASSERT_TRUE(out[1].trailing_pct.has_value());
+    EXPECT_DOUBLE_EQ(*out[1].trailing_pct, 0.01);
+}
+
+TEST(BacktestDefects, BF04_UnionModeDoesNotAppendWhenStrategyHasAllConfiguredLegs)
+{
+    auto o = make_order(order_side::buy, 10, 100);
+    exit_intent strat;
+    strat.symbol = "TEST";
+    strat.close_side = order_side::sell;
+    strat.qty = 10;
+    strat.stop_loss = 95.0;
+    strat.take_profit = 110.0;
+
+    default_exit_params p;
+    p.mode = exit_policy_mode::union_mode;
+    p.sl_pct = 0.02;
+    p.tp_pct = 0.04;
+
+    auto out = apply_default_exit_policy(p, o, 0.0, {strat});
+    ASSERT_EQ(out.size(), 1u);
+    ASSERT_TRUE(out[0].stop_loss.has_value());
+    EXPECT_DOUBLE_EQ(*out[0].stop_loss, 95.0);
+    ASSERT_TRUE(out[0].take_profit.has_value());
+    EXPECT_DOUBLE_EQ(*out[0].take_profit, 110.0);
 }
 
 TEST(DefaultExitPolicy, MultiStrategyScopedReducing)

@@ -19,12 +19,14 @@ namespace {
 
 provider::tick make_tick(double price, int64_t qty, uint8_t side)
 {
+    static std::uint64_t native_id = 0;
     provider::tick t;
     t.timestamp = std::chrono::system_clock::now();
     t.symbol = "BTCUSDT";
     t.price = price;
     t.quantity = qty;
     t.side = side;
+    t.native_trade_id = ++native_id;
     return t;
 }
 
@@ -59,11 +61,30 @@ TEST(FootprintLiveSource, TapThenPollProducesLiveStateAndBackfillingStatus)
     auto view = src.poll();
     ASSERT_TRUE(view);
     ASSERT_FALSE(view->footprint.empty());
-    EXPECT_EQ(view->state, DeskDataState::live);
+    EXPECT_EQ(view->state, DeskDataState::stale);
     // No cache/reconciliation layer exists yet (Phase 2b) - honestly never
     // claims LIVE, always BACKFILLING once trades are flowing.
     EXPECT_EQ(view->footprint_status, data_status::backfilling);
     EXPECT_EQ(src.received_count(), 2u);
+}
+
+TEST(FootprintLiveSource, RejectedLateTradeIsVisibleAndNotCounted)
+{
+    FootprintLiveSource src(make_config());
+    auto later = make_tick(100.0, 1, 0);
+    later.timestamp = std::chrono::system_clock::time_point(
+        std::chrono::seconds(2));
+    auto earlier = make_tick(99.0, 1, 1);
+    earlier.timestamp = std::chrono::system_clock::time_point(
+        std::chrono::seconds(1));
+    src.tap_tick(later);
+    src.tap_tick(earlier);
+
+    const auto view = src.poll();
+    EXPECT_EQ(src.received_count(), 1u);
+    EXPECT_EQ(src.rejected_count(), 1u);
+    EXPECT_EQ(view->footprint_status, data_status::recovering);
+    EXPECT_EQ(view->state, DeskDataState::error);
 }
 
 TEST(FootprintLiveSource, TapViaProviderEventVariantRoutesTicksOnly)
@@ -126,7 +147,7 @@ TEST(FootprintLiveSource, EndToEndFromRawBinanceTradeFrame)
     FootprintLiveSource src(std::move(cfg));
 
     const std::string frame =
-        R"({"e":"trade","E":1704067200000,"s":"BTCUSDT","t":555,)"
+        R"({"e":"trade","E":1704067200002,"s":"BTCUSDT","t":555,)"
         R"("p":"68120.50","q":"0.01230000","T":1704067200001,"m":false})";
     auto ev = parser.parse_record(frame);
     ASSERT_TRUE(ev.has_value());

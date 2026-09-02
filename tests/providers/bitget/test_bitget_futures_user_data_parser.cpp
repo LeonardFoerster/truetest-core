@@ -39,12 +39,14 @@ std::string fill_push(const std::string& qty = "0.4",
                       const std::string& px = "60000",
                       const std::string& side = "buy",
                       const std::string& client = "tt-1",
-                      const std::string& order_id = "42")
+                      const std::string& order_id = "42",
+                      const std::string& exec_id = "exec-9001")
 {
     std::string j = R"({"action":"snapshot","arg":{"instType":"UTA","topic":"fill"},"data":[{)";
     j += R"("symbol":"BTCUSDT",)";
     j += R"("orderId":")" + order_id + R"(",)";
     j += R"("clientOid":")" + client + R"(",)";
+    j += R"("execId":")" + exec_id + R"(",)";
     j += R"("side":")" + side + R"(",)";
     j += R"("execQty":")" + qty + R"(",)";
     j += R"("execPrice":")" + px + R"(",)";
@@ -262,14 +264,14 @@ TEST(BitgetFuturesUserDataParser, OrderStatusNewIsAck)
     EXPECT_DOUBLE_EQ(out.last_fill_qty, 0.0);
 }
 
-TEST(BitgetFuturesUserDataParser, OrderStatusLiveAndInitAreAck)
+TEST(BitgetFuturesUserDataParser, UndocumentedLegacyStatusesAreInvalid)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
     ASSERT_TRUE(p.parse(order_push("live"), out));
-    EXPECT_EQ(out.k, parsed_exec::kind::ack);
+    EXPECT_EQ(out.k, parsed_exec::kind::invalid);
     ASSERT_TRUE(p.parse(order_push("init"), out));
-    EXPECT_EQ(out.k, parsed_exec::kind::ack);
+    EXPECT_EQ(out.k, parsed_exec::kind::invalid);
 }
 
 TEST(BitgetFuturesUserDataParser, OrderStatusPartiallyFilled)
@@ -304,10 +306,86 @@ TEST(BitgetFuturesUserDataParser, OrderStatusCancelled)
     EXPECT_EQ(out.k, parsed_exec::kind::canceled);
 
     ASSERT_TRUE(p.parse(order_push("canceled"), out));
-    EXPECT_EQ(out.k, parsed_exec::kind::canceled);
+    EXPECT_EQ(out.k, parsed_exec::kind::invalid);
 }
 
-TEST(BitgetFuturesUserDataParser, OrderStatusRejected)
+TEST(BitgetFuturesUserDataParser,
+     C12_TopiclessCanceledOrderWithExecQtyIsInvalid)
+{
+    const std::string payload =
+        R"({"action":"snapshot","arg":{"instType":"UTA"},"data":[{)"
+        R"("symbol":"BTCUSDT","orderId":"42","clientOid":"tt-bracket-1",)"
+        R"("side":"sell","orderStatus":"cancelled",)"
+        R"("execQty":"0.5","execPrice":"95","execId":"exec-9001",)"
+        R"("cumExecQty":"0.5","execTime":"1700000000002",)"
+        R"("feeDetail":[{"feeCoin":"USDT","fee":"0.01"}],)"
+        R"("updatedTime":"1700000000002"}],"ts":1700000000003})";
+
+    BitgetFuturesUserDataParser p;
+    parsed_exec out;
+    ASSERT_TRUE(p.parse(payload, out));
+    EXPECT_EQ(out.k, parsed_exec::kind::invalid)
+        << "without an explicit fill topic, a canceled order object must not "
+           "be promoted to a fill from execQty alone";
+}
+
+TEST(BitgetFuturesUserDataParser,
+     C07_TopiclessOrderOrFillPayloadIsExplicitlyInvalid)
+{
+    constexpr std::string_view payloads[] = {
+        R"({"action":"snapshot","arg":{"instType":"UTA"},"data":[{"symbol":"BTCUSDT","orderId":"42","clientOid":"tt-1","side":"buy","orderStatus":"new","cumExecQty":"0","updatedTime":"1700000000002"}],"ts":1700000000003})",
+        R"({"action":"snapshot","arg":{"instType":"UTA"},"data":[{"symbol":"BTCUSDT","orderId":"42","clientOid":"tt-1","side":"buy","execQty":"0.5","execPrice":"95","execId":"exec-9001","cumExecQty":"0.5","execTime":"1700000000002","feeDetail":[{"feeCoin":"USDT","fee":"0.01"}]}],"ts":1700000000003})",
+    };
+
+    BitgetFuturesUserDataParser p;
+    for (const auto payload : payloads)
+    {
+        parsed_exec out;
+        ASSERT_TRUE(p.parse(payload, out));
+        EXPECT_EQ(out.k, parsed_exec::kind::invalid)
+            << "UTA private order/fill routing requires the declared topic";
+    }
+}
+
+TEST(BitgetFuturesUserDataParser,
+     C07_AmbiguousOrUnsupportedUtaEnvelopeIsExplicitlyInvalid)
+{
+    constexpr std::string_view payloads[] = {
+        R"({"action":"snapshot","arg":{"instType":"USDT-FUTURES","topic":"order"},"data":[{"symbol":"BTCUSDT","orderId":"42","clientOid":"tt-1","side":"buy","orderStatus":"new","cumExecQty":"0","updatedTime":"1700000000002"}],"ts":1700000000003})",
+        R"({"action":"snapshot","arg":{"instType":"UTA","topic":"order","topic":"fill"},"data":[{"symbol":"BTCUSDT","orderId":"42","clientOid":"tt-1","side":"buy","orderStatus":"new","cumExecQty":"0","updatedTime":"1700000000002"}],"ts":1700000000003})",
+        R"({"action":"update","arg":{"instType":"UTA","topic":"order"},"data":[{"symbol":"BTCUSDT","orderId":"42","clientOid":"tt-1","side":"buy","orderStatus":"new","cumExecQty":"0","updatedTime":"1700000000002"}],"ts":1700000000003})",
+        R"({"action":"snapshot","arg":{"instType":"UTA","topic":"order"},"data":[{"symbol":"BTCUSDT","orderId":"42","clientOid":"tt-1","side":"buy","orderStatus":"new","cumExecQty":"0","updatedTime":"1700000000002"},{"symbol":"ETHUSDT","orderId":"43","clientOid":"tt-2","side":"sell","orderStatus":"new","cumExecQty":"0","updatedTime":"1700000000002"}],"ts":1700000000003})",
+        R"({"action":"snapshot","arg":{"instType":"UTA","topic":"order"},"data":[{"symbol":"BTCUSDT","orderId":"42","clientOid":"tt-1","side":"buy","orderStatus":"new","cumExecQty":"0","updatedTime":"1700000000002"}],"data":[{"symbol":"ETHUSDT","orderId":"43","clientOid":"tt-2","side":"sell","orderStatus":"new","cumExecQty":"0","updatedTime":"1700000000002"}],"ts":1700000000003})",
+    };
+
+    BitgetFuturesUserDataParser parser;
+    for (const auto payload : payloads)
+    {
+        parsed_exec out;
+        ASSERT_TRUE(parser.parse(payload, out));
+        EXPECT_EQ(out.k, parsed_exec::kind::invalid)
+            << "ambiguous or unsupported UTA envelopes must fail closed";
+    }
+}
+
+TEST(BitgetFuturesUserDataParser,
+     C05_ExplicitOrderOrFillWithoutAnyOrderIdentityIsInvalid)
+{
+    constexpr std::string_view payloads[] = {
+        R"({"action":"snapshot","arg":{"instType":"UTA","topic":"order"},"data":[{"symbol":"BTCUSDT","side":"buy","orderStatus":"new","cumExecQty":"0","updatedTime":"1700000000002"}],"ts":1700000000003})",
+        R"({"action":"snapshot","arg":{"instType":"UTA","topic":"fill"},"data":[{"symbol":"BTCUSDT","side":"buy","execQty":"0.5","execPrice":"95","execId":"exec-9001","execTime":"1700000000002","feeDetail":[{"feeCoin":"USDT","fee":"0.01"}]}],"ts":1700000000003})",
+    };
+
+    BitgetFuturesUserDataParser parser;
+    for (const auto payload : payloads)
+    {
+        parsed_exec out;
+        ASSERT_TRUE(parser.parse(payload, out));
+        EXPECT_EQ(out.k, parsed_exec::kind::invalid);
+    }
+}
+
+TEST(BitgetFuturesUserDataParser, UndocumentedOrderStatusRejectedIsInvalid)
 {
     BitgetFuturesUserDataParser p;
     parsed_exec out;
@@ -318,8 +396,7 @@ TEST(BitgetFuturesUserDataParser, OrderStatusRejected)
     j.replace(pos, std::string(R"("cancelReason":"")").size(),
               R"("cancelReason":"INSUFFICIENT_MARGIN")");
     ASSERT_TRUE(p.parse(j, out));
-    EXPECT_EQ(out.k, parsed_exec::kind::rejected);
-    EXPECT_EQ(out.error, "INSUFFICIENT_MARGIN");
+    EXPECT_EQ(out.k, parsed_exec::kind::invalid);
 }
 
 TEST(BitgetFuturesUserDataParser, OrderSellSide)
@@ -337,6 +414,9 @@ TEST(BitgetFuturesUserDataParser, OrderFeeDetail)
     ASSERT_TRUE(p.parse(order_push("filled", "1"), out));
     EXPECT_DOUBLE_EQ(out.commission, 0.01);
     EXPECT_EQ(out.commission_asset, "USDT");
+    EXPECT_TRUE(out.venue_execution_id.empty())
+        << "the order-channel fixture carries no execId; an execution "
+           "identity must never be invented from lifecycle data";
 }
 
 // --- fill channel ---
@@ -366,6 +446,42 @@ TEST(BitgetFuturesUserDataParser, FillChannelSell)
     parsed_exec out;
     ASSERT_TRUE(p.parse(fill_push("0.1", "1", "sell"), out));
     EXPECT_EQ(out.side, order_side::sell);
+}
+
+TEST(BitgetFuturesUserDataParser, FillUnknownSideIsInvalid)
+{
+    BitgetFuturesUserDataParser p;
+    parsed_exec out;
+    ASSERT_TRUE(p.parse(fill_push("0.4", "60000", "hold"), out));
+    EXPECT_EQ(out.k, parsed_exec::kind::invalid);
+}
+
+TEST(BitgetFuturesUserDataParser, MalformedFeeIsInvalidInsteadOfZero)
+{
+    auto payload = fill_push();
+    const auto pos = payload.find("0.024");
+    ASSERT_NE(pos, std::string::npos);
+    payload.replace(pos, 5, "junk");
+
+    BitgetFuturesUserDataParser p;
+    parsed_exec out;
+    ASSERT_TRUE(p.parse(payload, out));
+    EXPECT_EQ(out.k, parsed_exec::kind::invalid);
+}
+
+TEST(BitgetFuturesUserDataParser, MakerRebatePreservesNegativeSign)
+{
+    auto payload = fill_push();
+    const auto pos = payload.find("0.024");
+    ASSERT_NE(pos, std::string::npos);
+    payload.replace(pos, 5, "-0.024");
+
+    BitgetFuturesUserDataParser p;
+    parsed_exec out;
+    ASSERT_TRUE(p.parse(payload, out));
+    EXPECT_EQ(out.k, parsed_exec::kind::partial_fill);
+    EXPECT_DOUBLE_EQ(out.commission, -0.024);
+    EXPECT_EQ(out.commission_asset, "USDT");
 }
 
 // --- position channel (signed qty §9.5) ---
@@ -398,6 +514,15 @@ TEST(BitgetFuturesUserDataParser, FillChannelDoesNotInventCumulative)
     EXPECT_DOUBLE_EQ(out.last_fill_qty, 0.4);
     // No cumExecQty on fill channel → leave 0 (bridge sums last_fill).
     EXPECT_DOUBLE_EQ(out.cumulative_qty, 0.0);
+    EXPECT_FALSE(out.has_cumulative_qty);
+}
+
+TEST(BitgetFuturesUserDataParser, FillWithoutNativeExecutionIdIsInvalid)
+{
+    BitgetFuturesUserDataParser p;
+    parsed_exec out;
+    ASSERT_TRUE(p.parse(fill_push("0.4", "60000", "buy", "tt-1", "42", ""), out));
+    EXPECT_EQ(out.k, parsed_exec::kind::invalid);
 }
 
 TEST(BitgetFuturesUserDataParser, PositionShortNegative)
@@ -467,18 +592,17 @@ TEST(BitgetFuturesUserDataParser, ClassifyOrderStatusTable)
 {
     using K = parsed_exec::kind;
     EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("new"), K::ack);
-    EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("live"), K::ack);
-    EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("init"), K::ack);
+    EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("live"), K::other);
+    EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("init"), K::other);
     EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("partially_filled"),
               K::partial_fill);
     EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("filled"),
               K::full_fill);
     EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("cancelled"),
               K::canceled);
-    EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("canceled"),
-              K::canceled);
+    EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("canceled"), K::other);
     EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("rejected"),
-              K::rejected);
+              K::other);
     EXPECT_EQ(BitgetFuturesUserDataParser::classify_order_status("weird"),
               K::other);
 }

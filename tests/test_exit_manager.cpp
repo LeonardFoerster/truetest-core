@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include "exits/exit_manager.h"
 #include "core/event.h"
+#include "helpers/alloc_counter.h"
 
 #include <chrono>
 
@@ -38,10 +39,10 @@ exit_intent make_long_intent(const std::string& strat, const std::string& sym,
 
 fill_event make_opener_fill(std::uint64_t id, const std::string& sym,
                             order_side side, double qty, double price,
-                            tp ts = t0)
+                            tp ts = t0, std::uint64_t fill_id = 1)
 {
     return fill_event(ts, sym, id, side, qty, price, /*commission=*/0.0,
-                      /*remaining=*/0.0, /*fill_id=*/1);
+                      /*remaining=*/0.0, fill_id);
 }
 
 }
@@ -496,19 +497,22 @@ struct FakeAdapter : public IBracketAdapter
     bracket_caps caps_state{};
     int place_calls  = 0;
     int cancel_calls = 0;
+    int quantity_amend_calls = 0;
     std::vector<std::uint64_t> placed_openers;
     std::vector<std::uint64_t> cancelled_openers;
+    double venue_protected_qty = 0.0;
     bracket_handles next_handles;
     bool throw_cancel = false;
 
     bracket_caps capabilities() const override { return caps_state; }
 
     bracket_handles place(std::uint64_t opener,
-                          const exit_intent&,
+                          const exit_intent& intent,
                           double) override
     {
         ++place_calls;
         placed_openers.push_back(opener);
+        venue_protected_qty = intent.qty;
         return next_handles;
     }
 
@@ -544,6 +548,46 @@ TEST(ExitManagerAdapter, OpenerFillTriggersPlaceWithStableHandles)
     EXPECT_EQ(m.opener_for_exchange_order("sl-1"), 7u);
     EXPECT_EQ(m.opener_for_exchange_order("tp-1"), 7u);
     EXPECT_EQ(m.opener_for_exchange_order("nope"), 0u);
+    EXPECT_DOUBLE_EQ(m.intended_price_for_exchange_order("sl-1"), 95.0);
+    EXPECT_DOUBLE_EQ(m.intended_price_for_exchange_order("tp-1"), 110.0);
+    EXPECT_DOUBLE_EQ(m.intended_price_for_exchange_order("nope"), 0.0);
+
+    const auto sl = m.venue_fill_attribution_for_exchange_order("sl-1");
+    ASSERT_TRUE(sl.has_value());
+    EXPECT_EQ(sl->opener_order_id, 7u);
+    EXPECT_EQ(sl->strategy_name, "s");
+    EXPECT_DOUBLE_EQ(sl->intended_price, 95.0);
+}
+
+TEST(ExitManagerAdapter, C11_PartialOpenerFillKeepsVenueProtectionAtEconomicOpenQty)
+{
+    ExitManager m;
+    auto fake = std::make_shared<FakeAdapter>();
+    fake->next_handles.sl_exchange_id = "sl-partial";
+    fake->next_handles.tp_exchange_id = "tp-partial";
+    m.set_bracket_adapter(fake);
+
+    m.register_pending(make_long_intent(
+        "s", "X", 17, 95.0, 110.0, /*qty=*/0.0));
+
+    m.on_fill(make_opener_fill(17, "X", order_side::buy, 4.0, 100.0));
+    ASSERT_DOUBLE_EQ(fake->venue_protected_qty, 4.0);
+
+    m.on_fill(make_opener_fill(
+        17, "X", order_side::buy, 6.0, 101.0, t0, /*fill_id=*/2));
+    const auto armed = m.snapshot_armed();
+    ASSERT_EQ(armed.size(), 1u);
+    ASSERT_DOUBLE_EQ(armed.front().qty, 10.0);
+
+    // The venue-side protection is an economic invariant, not merely a
+    // local ExitManager detail. Every newly confirmed opener slice must be
+    // reflected and acknowledged by the resting protection before the
+    // engine can report the position as protected.
+    EXPECT_EQ(fake->place_calls, 1)
+        << "growing protection must not create a second venue bracket";
+    EXPECT_EQ(fake->quantity_amend_calls, 1)
+        << "the existing bracket requires one identity-preserving quantity amend";
+    EXPECT_DOUBLE_EQ(fake->venue_protected_qty, armed.front().qty);
 }
 
 TEST(ExitManagerAdapter, EmptyHandlesSkipsExchangeMap)
@@ -612,6 +656,8 @@ TEST(ExitManagerAdapter, FailedVenueCancelRestoresHandlesAndReverseIdentity)
     EXPECT_THROW(m.cancel(88u), std::runtime_error);
     EXPECT_EQ(m.opener_for_exchange_order("sl-88"), 88u);
     EXPECT_EQ(m.strategy_name_for_exchange_order("sl-88"), "s");
+    EXPECT_DOUBLE_EQ(m.intended_price_for_exchange_order("sl-88"), 95.0);
+    EXPECT_DOUBLE_EQ(m.intended_price_for_exchange_order("tp-88"), 110.0);
 
     fake->throw_cancel = false;
     EXPECT_NO_THROW(m.cancel(88u));
@@ -660,6 +706,8 @@ TEST(ExitManagerAdapter, RehydrateInstallsArmedAndVenueState)
     EXPECT_EQ(m.openers_for("mr", "X"), 1u);
     EXPECT_EQ(m.opener_for_exchange_order("sl-r"), 555u);
     EXPECT_EQ(m.opener_for_exchange_order("tp-r"), 555u);
+    EXPECT_DOUBLE_EQ(m.intended_price_for_exchange_order("sl-r"), 95.0);
+    EXPECT_DOUBLE_EQ(m.intended_price_for_exchange_order("tp-r"), 110.0);
 
     // Now a price tick crosses SL -> ExitManager fires AND cancels
     // venue-side via the adapter (defense in depth: even if Binance
@@ -753,4 +801,104 @@ TEST(ExitManager, PartialSignalCloserPreservesRemainingBracket)
     EXPECT_DOUBLE_EQ(triggered[0].get_quantity(), 7.0);
     EXPECT_EQ(triggered[0].get_opener_order_id(), 100u);
     EXPECT_EQ(m.openers_for("s", "X"), 0u);
+}
+
+TEST(ExitManager, FiredStopKeepsTicketedTerminalStateUntilCloseResolves)
+{
+    ExitManager m;
+    m.register_pending(make_long_intent("s", "X", 71, 95.0, 110.0));
+    m.on_fill(make_opener_fill(71, "X", order_side::buy, 2.0, 100.0));
+
+    auto fired = m.on_price("X", 94.0, t0);
+    ASSERT_EQ(fired.size(), 1u);
+    ASSERT_NE(fired[0].get_protective_exit_ticket(), 0u);
+    EXPECT_EQ(fired[0].get_exit_reason(), order_exit_reason::stop_loss);
+    ASSERT_TRUE(m.bind_protective_exit(fired[0].get_protective_exit_ticket(), 7001));
+
+    const bool terminal = m.on_protective_close_terminal(
+        7001, [](const ExitManager::protective_exit_view& protective) {
+            EXPECT_EQ(protective.opener_order_id, 71u);
+            EXPECT_DOUBLE_EQ(protective.requested_qty, 2.0);
+            EXPECT_DOUBLE_EQ(protective.filled_qty, 0.0);
+            EXPECT_DOUBLE_EQ(protective.remaining_qty, 2.0);
+            EXPECT_EQ(protective.reason, order_exit_reason::stop_loss);
+        });
+    ASSERT_TRUE(terminal);
+    EXPECT_FALSE(m.protective_exit_for_order(7001).has_value())
+        << "a terminal stop must never be silently re-armed/retried";
+}
+
+TEST(ExitManager, PartiallyFilledProtectiveCloseReportsOnlyUnfilledEmergencyQty)
+{
+    ExitManager m;
+    m.register_pending(make_long_intent("s", "X", 72, 95.0, 110.0));
+    m.on_fill(make_opener_fill(72, "X", order_side::buy, 10.0, 100.0));
+    auto fired = m.on_price("X", 94.0, t0);
+    ASSERT_EQ(fired.size(), 1u);
+    ASSERT_TRUE(m.bind_protective_exit(fired[0].get_protective_exit_ticket(), 7002));
+
+    fill_event partial(t0, "X", 7002, order_side::sell, 4.0, 94.0,
+                       /*commission=*/0.0, /*remaining=*/6.0, /*fill_id=*/9,
+                       "s", /*opener=*/72);
+    m.on_fill(partial, 72);
+    const bool terminal = m.on_protective_close_terminal(
+        7002, [](const ExitManager::protective_exit_view& protective) {
+            EXPECT_DOUBLE_EQ(protective.requested_qty, 10.0);
+            EXPECT_DOUBLE_EQ(protective.filled_qty, 4.0);
+            EXPECT_DOUBLE_EQ(protective.remaining_qty, 6.0);
+        });
+    ASSERT_TRUE(terminal);
+}
+
+TEST(ExitManager, ProtectiveMetadataLookupDoesNotAllocateForLongStrategyName)
+{
+    ExitManager m;
+    constexpr const char* strategy = "structure-continuation";
+    m.register_pending(make_long_intent(strategy, "BTCUSDT", 73, 95.0, 110.0));
+    m.on_fill(make_opener_fill(73, "BTCUSDT", order_side::buy, 2.0, 100.0));
+    auto fired = m.on_price("BTCUSDT", 94.0, t0);
+    ASSERT_EQ(fired.size(), 1u);
+    ASSERT_TRUE(m.bind_protective_exit(
+        fired[0].get_protective_exit_ticket(), 7003));
+
+    std::optional<ExitManager::protective_exit_view> protective;
+    truetest::test::alloc::snapshot allocations;
+    {
+        truetest::test::alloc::measure_window measured;
+        protective = m.protective_exit_for_order(7003);
+        allocations = measured.total();
+    }
+
+    ASSERT_TRUE(protective.has_value());
+    EXPECT_EQ(protective->strategy_name, strategy);
+    EXPECT_EQ(protective->symbol, "BTCUSDT");
+    EXPECT_EQ(allocations.count, 0U);
+    EXPECT_EQ(allocations.bytes, 0U);
+}
+
+TEST(ExitManager, SlippageFlattenRetainsItsOwnSymbolAndTriggerObservation)
+{
+    ExitManager m;
+    auto x = make_long_intent("s", "X", 81, 99.0, 103.0);
+    x.reference_entry = 100.0;  // designed stop distance = 1
+    auto y = make_long_intent("s", "Y", 82, 49.0, 53.0);
+    y.reference_entry = 50.0;
+    m.register_pending(x);
+    m.register_pending(y);
+    const auto tx = t0 + std::chrono::seconds(11);
+    const auto ty = t0 + std::chrono::seconds(12);
+    m.on_fill(make_opener_fill(81, "X", order_side::buy, 1.0, 101.5, tx));
+    m.on_fill(make_opener_fill(82, "Y", order_side::buy, 1.0, 51.5, ty));
+
+    auto only_x = m.take_flatten_requests_for("X");
+    ASSERT_EQ(only_x.size(), 1u);
+    EXPECT_EQ(only_x[0].symbol, "X");
+    EXPECT_DOUBLE_EQ(only_x[0].trigger_price, 101.5);
+    EXPECT_EQ(only_x[0].trigger_ts, tx);
+    EXPECT_NE(only_x[0].protective_exit_ticket, 0u);
+
+    auto only_y = m.take_flatten_requests_for("Y");
+    ASSERT_EQ(only_y.size(), 1u) << "a current-symbol drain must retain other symbols";
+    EXPECT_DOUBLE_EQ(only_y[0].trigger_price, 51.5);
+    EXPECT_EQ(only_y[0].trigger_ts, ty);
 }

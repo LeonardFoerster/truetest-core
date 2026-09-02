@@ -86,6 +86,7 @@ TEST(ThreadingCorrectness, AllPresetsProduceSameStrategyCallCount)
 {
     const int bars = 100;
     auto inline_result = run_preset(thread_preset::inline_mode, bars);
+    auto logging_result = run_preset(thread_preset::logging_only, bars);
     auto light_result = run_preset(thread_preset::light, bars);
     auto standard_result = run_preset(thread_preset::standard, bars);
     auto full_result = run_preset(thread_preset::full, bars);
@@ -93,6 +94,7 @@ TEST(ThreadingCorrectness, AllPresetsProduceSameStrategyCallCount)
 
     // All presets should process the same number of bars
     EXPECT_EQ(inline_result.strategy_calls, bars);
+    EXPECT_EQ(logging_result.strategy_calls, bars);
     EXPECT_EQ(light_result.strategy_calls, bars);
     EXPECT_EQ(standard_result.strategy_calls, bars);
     EXPECT_EQ(full_result.strategy_calls, bars);
@@ -102,7 +104,8 @@ TEST(ThreadingCorrectness, AllPresetsProduceSameStrategyCallCount)
 TEST(ThreadingCorrectness, AllPresetsComplete)
 {
     // Verify each preset can run a backtest to completion without errors
-    for (auto preset : {thread_preset::inline_mode, thread_preset::light,
+    for (auto preset : {thread_preset::inline_mode,
+                        thread_preset::logging_only, thread_preset::light,
                         thread_preset::standard, thread_preset::full,
                         thread_preset::extended})
     {
@@ -138,7 +141,8 @@ TEST(ThreadingCorrectness, ThreadedPresetsMatchInlineResults)
 
     const auto base = run_report(thread_preset::inline_mode);
 
-    for (auto preset : {thread_preset::light, thread_preset::standard,
+    for (auto preset : {thread_preset::logging_only, thread_preset::light,
+                        thread_preset::standard,
                         thread_preset::full, thread_preset::extended})
     {
         const auto r = run_report(preset);

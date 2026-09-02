@@ -1,7 +1,14 @@
 #include "analytics/ascii_widgets.h"
 #include "analytics/report_generator.h"
+#include "web/json_emit.h"
+#include "web/report_json.h"
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
+
+#include <charconv>
+#include <clocale>
+#include <limits>
 
 using tt::ascii::display_width;
 using tt::ascii::equal_width_bins;
@@ -78,6 +85,112 @@ TEST(AsciiWidgets, TableAlignsColumns)
     EXPECT_NE(t.find("----  -------"), std::string::npos);
 }
 
+TEST(ReportJsonNumber, FiniteDoublesRoundTripExactly)
+{
+    const std::array values{
+        0.1,
+        1'000'000'000'000'001.0,
+        -1'000'000'000'000'001.0,
+        std::numeric_limits<double>::denorm_min(),
+        std::numeric_limits<double>::min(),
+        std::numeric_limits<double>::max(),
+    };
+    for (const double value : values)
+    {
+        SCOPED_TRACE(value);
+        std::string json;
+        truetest::web::jx::Json(json).arr().num(value).endarr();
+        ASSERT_GE(json.size(), 3u);
+        double parsed = 0.0;
+        const auto [end, error] = std::from_chars(
+            json.data() + 1, json.data() + json.size() - 1, parsed,
+            std::chars_format::general);
+        ASSERT_EQ(error, std::errc{});
+        EXPECT_EQ(end, json.data() + json.size() - 1);
+        EXPECT_DOUBLE_EQ(parsed, value);
+    }
+}
+
+TEST(ReportJsonNumber, EncodingIsIndependentOfNumericLocale)
+{
+    const char* current = std::setlocale(LC_NUMERIC, nullptr);
+    const std::string original = current ? current : "C";
+    const char* changed = std::setlocale(LC_NUMERIC, "de_DE.utf8");
+    if (!changed)
+    {
+        std::setlocale(LC_NUMERIC, original.c_str());
+        GTEST_SKIP() << "de_DE.utf8 locale unavailable";
+    }
+
+    std::string json;
+    truetest::web::jx::Json(json).obj().kv("value", 1.5).endobj();
+    std::setlocale(LC_NUMERIC, original.c_str());
+    EXPECT_EQ(json, R"({"value":1.5})");
+}
+
+TEST(ReportJsonNumber, NonFiniteDoublesFailClosed)
+{
+    for (const double value : {
+             std::numeric_limits<double>::quiet_NaN(),
+             std::numeric_limits<double>::infinity(),
+             -std::numeric_limits<double>::infinity()})
+    {
+        std::string json;
+        EXPECT_THROW(truetest::web::jx::Json(json).arr().num(value),
+                     std::invalid_argument);
+    }
+}
+
+TEST(ReportJsonString, InvalidUtf8FailsClosed)
+{
+    for (const std::string& invalid : {
+             std::string(1, static_cast<char>(0xff)),
+             std::string("\xc0\x80", 2),
+             std::string("\xed\xa0\x80", 3),
+             std::string("\xf4\x90\x80\x80", 4),
+             std::string("\xe2\x82", 2),
+         })
+    {
+        std::string json;
+        EXPECT_THROW(truetest::web::jx::Json(json).str(invalid),
+                     std::invalid_argument);
+    }
+}
+
+TEST(ReportJsonString, ValidUtf8RoundTripsUnchanged)
+{
+    const std::string value = "BTC-€-日本";
+    std::string json;
+    truetest::web::jx::Json(json).str(value);
+    EXPECT_EQ(nlohmann::json::parse(json).get<std::string>(), value);
+}
+
+TEST(ReportJson, UnboundedProfitFactorUsesExplicitStatusWithoutSentinel)
+{
+    AnalyticsReport report;
+    report.initial_equity = 1'000.0;
+    report.final_equity = 1'010.0;
+    report.total_win = 10.0;
+    report.profit_factor = 0.0;
+    report.profit_factor_unbounded = true;
+    report.profit_factor_reason = "no_losses_unbounded";
+    sub_analytics symbol;
+    symbol.total_pnl = 10.0;
+    symbol.trade_count = 1;
+    symbol.win_count = 1;
+    symbol.total_win = 10.0;
+    report.per_symbol.emplace("X", symbol);
+
+    const auto parsed = nlohmann::json::parse(report.to_results_json());
+    EXPECT_DOUBLE_EQ(parsed.at("profit_factor").get<double>(), 0.0);
+    EXPECT_FALSE(parsed.at("profit_factor_valid").get<bool>());
+    EXPECT_TRUE(parsed.at("profit_factor_unbounded").get<bool>());
+    EXPECT_EQ(parsed.at("profit_factor_reason"), "no_losses_unbounded");
+    const auto& sub = parsed.at("per_symbol").at("X");
+    EXPECT_DOUBLE_EQ(sub.at("profit_factor").get<double>(), 0.0);
+    EXPECT_TRUE(sub.at("profit_factor_unbounded").get<bool>());
+}
+
 TEST(ReportGenerator, RendersBasicSections)
 {
     AnalyticsReport r;
@@ -88,9 +201,17 @@ TEST(ReportGenerator, RendersBasicSections)
     r.sharpe_ratio = 1.84;
     r.sortino_ratio = 2.41;
     r.max_drawdown = 12.3;
+    r.gross_realized_pnl = 20'000.0;
+    r.realized_pnl = 18'420.0;
+    r.total_commission = 1'580.0;
+    r.reconciliation_residual = 0.0;
     r.total_trades = 127;
     r.win_rate = 58.3;
+    r.total_win = 1'730.0;
+    r.total_loss = 1'000.0;
     r.profit_factor = 1.73;
+    r.profit_factor_valid = true;
+    r.profit_factor_reason = "computed_from_gross_win_and_loss";
     r.trade_returns = {-2.1, -1.0, -0.5, 0.0, 0.2, 0.5, 1.0, 1.2, 1.8, 2.4};
     r.equity_curve = {
         {std::chrono::system_clock::now(), 100000.0},
@@ -103,10 +224,22 @@ TEST(ReportGenerator, RendersBasicSections)
     EXPECT_NE(out.find("Analytics Report"),            std::string::npos);
     EXPECT_NE(out.find("Returns"),                     std::string::npos);
     EXPECT_NE(out.find("+18.42%"),                     std::string::npos);
+    EXPECT_NE(out.find("realized gross"),              std::string::npos);
+    EXPECT_NE(out.find("reconciliation residual"),     std::string::npos);
     EXPECT_NE(out.find("Risk"),                        std::string::npos);
     EXPECT_NE(out.find("Trades"),                      std::string::npos);
-    EXPECT_NE(out.find("Per-Trade PnL Distribution"),  std::string::npos);
+    EXPECT_NE(out.find("Closing-Fill PnL Distribution"), std::string::npos);
     EXPECT_NE(out.find("Equity Curve"),                std::string::npos);
+}
+
+TEST(ReportGenerator, LabelsSyntheticExecutionAsExploratory)
+{
+    AnalyticsReport r;
+    r.contains_exploratory_execution = true;
+
+    const std::string out = tt::render_execution_section(r, {});
+    EXPECT_NE(out.find("EXPLORATORY"), std::string::npos);
+    EXPECT_NE(out.find("not historical execution evidence"), std::string::npos);
 }
 
 TEST(ReportGenerator, HonoursSectionToggles)
@@ -137,9 +270,27 @@ TEST(ReportGenerator, WorstTradesSortedByPnlAscending)
 {
     AnalyticsReport r;
     auto now = std::chrono::system_clock::now();
-    trade_record a{1, order_side::buy,  1.0, 10.0, 0.0, 10.0, now, -50.0, "BTC", "sma"};
-    trade_record b{2, order_side::sell, 1.0, 12.0, 0.0, 12.0, now, +30.0, "BTC", "sma"};
-    trade_record c{3, order_side::sell, 1.0, 11.0, 0.0, 11.0, now, -10.0, "BTC", "sma"};
+    trade_record a{};
+    a.order_id = 1;
+    a.side = order_side::buy;
+    a.quantity = 1.0;
+    a.fill_price = 10.0;
+    a.intended_price = 10.0;
+    a.timestamp = now;
+    a.pnl = -50.0;
+    a.symbol = "BTC";
+    a.strategy_name = "sma";
+    auto b = a;
+    b.order_id = 2;
+    b.side = order_side::sell;
+    b.fill_price = 12.0;
+    b.intended_price = 12.0;
+    b.pnl = 30.0;
+    auto c = b;
+    c.order_id = 3;
+    c.fill_price = 11.0;
+    c.intended_price = 11.0;
+    c.pnl = -10.0;
     r.trades = {a, b, c};
 
     std::string out = tt::render_worst_trades_section(r, {});
@@ -148,4 +299,198 @@ TEST(ReportGenerator, WorstTradesSortedByPnlAscending)
     ASSERT_NE(p_minus50, std::string::npos);
     ASSERT_NE(p_minus10, std::string::npos);
     EXPECT_LT(p_minus50, p_minus10);
+}
+
+TEST(ReportGenerator, InvalidTimeExposureIsVisiblyUnsupported)
+{
+    AnalyticsReport report;
+    report.time_in_market_valid = false;
+    report.time_in_market_reason = "non_monotonic_economic_time";
+
+    const std::string out = tt::render_exposure_section(report, {});
+    EXPECT_NE(out.find("unsupported"), std::string::npos);
+    EXPECT_NE(out.find("non_monotonic_economic_time"), std::string::npos);
+}
+
+TEST(ReportGenerator, InvalidAnnualizationMakesCalmarVisiblyUnsupported)
+{
+    AnalyticsReport report;
+    report.calmar_ratio = 0.0;
+    report.calmar_ratio_valid = false;
+    report.calmar_ratio_reason = "annualized_return_unavailable";
+
+    const std::string out = tt::render_risk_section(report, {});
+    EXPECT_NE(out.find("calmar ratio"), std::string::npos);
+    EXPECT_NE(out.find("unsupported"), std::string::npos);
+    EXPECT_NE(out.find("annualized_return_unavailable"), std::string::npos);
+}
+
+TEST(ReportGenerator, ProvisionalValuationAndInvalidBenchmarkAreVisible)
+{
+    AnalyticsReport report;
+    report.valuation_complete = false;
+    report.valuation_reason = "open_position_without_market_mark";
+    report.benchmark_valid = false;
+    report.benchmark_reason = "explicit_benchmark_required";
+
+    const std::string out = tt::render_returns_section(report, {});
+    EXPECT_NE(out.find("VALUATION"), std::string::npos);
+    EXPECT_NE(out.find("open_position_without_market_mark"),
+              std::string::npos);
+    EXPECT_NE(out.find("buy & hold"), std::string::npos);
+    EXPECT_NE(out.find("unsupported: explicit_benchmark_required"),
+              std::string::npos);
+}
+
+TEST(ReportGenerator, AmbiguousPortfolioClockIsVisiblyUnsupported)
+{
+    AnalyticsReport report;
+    report.portfolio_time_series_valid = false;
+    report.portfolio_time_series_reason =
+        "ambiguous_cross_symbol_arrival_without_watermark";
+
+    const std::string out = tt::render_returns_section(report, {});
+    EXPECT_NE(out.find("PORTFOLIO TIME SERIES"), std::string::npos);
+    EXPECT_NE(out.find("ambiguous_cross_symbol_arrival_without_watermark"),
+              std::string::npos);
+}
+
+TEST(ReportJsonContract, ExposesTimeMetricValidityAdditively)
+{
+    AnalyticsReport report;
+    report.time_in_market_pct = 40.0;
+    report.time_in_market_valid = true;
+    report.time_in_market_reason = "computed_from_economic_time";
+    report.duplicate_fill_replays_ignored = 2;
+    report.conflicting_fill_replays_rejected = 3;
+    report.missing_fill_identities_rejected = 4;
+    report.invalid_fill_payloads_rejected = 5;
+    report.unreconciled_funding_events_rejected = 6;
+    report.duplicate_funding_replays_ignored = 7;
+    report.conflicting_funding_replays_rejected = 8;
+    report.late_fill_events_rejected = 9;
+    report.late_funding_events_rejected = 10;
+    report.late_market_events_rejected = 12;
+    report.duplicate_market_marks_ignored = 13;
+    report.conflicting_market_marks_rejected = 14;
+    report.portfolio_time_series_valid = false;
+    report.portfolio_time_series_reason =
+        "ambiguous_cross_symbol_arrival_without_watermark";
+    report.ambiguous_portfolio_mark_sequences_rejected = 11;
+    trade_record fill{};
+    fill.order_id = std::numeric_limits<std::uint64_t>::max();
+    fill.side = order_side::buy;
+    fill.quantity = 1.0;
+    fill.fill_price = 100.0;
+    fill.commission = -1.0;
+    fill.commission_currency = "BNB";
+    fill.intended_price = 100.0;
+    fill.timestamp = std::chrono::system_clock::time_point{
+        std::chrono::milliseconds{1234}};
+    fill.symbol = "BTCUSDT";
+    fill.strategy_name = "identity-test";
+    fill.fill_id = 77;
+    fill.venue_execution_id = "venue-exec-77";
+    report.trades.push_back(fill);
+
+    const std::string json = truetest::web::report_to_json(report);
+    EXPECT_NE(json.find(
+                  "\"order_id\":\"18446744073709551615\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"commission_currency\":\"BNB\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"schema_version\":1"), std::string::npos);
+    EXPECT_NE(json.find("\"time_in_market_pct\":40"), std::string::npos);
+    EXPECT_NE(json.find("\"time_in_market_valid\":true"),
+              std::string::npos);
+    EXPECT_NE(json.find(
+                  "\"time_in_market_reason\":\"computed_from_economic_time\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"annualized_return_valid\":false"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"sharpe_ratio_valid\":false"),
+              std::string::npos);
+    EXPECT_NE(json.find(
+                  "\"sharpe_ratio_reason\":\"insufficient_return_observations\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"sortino_ratio_valid\":false"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"calmar_ratio_valid\":false"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"calmar_ratio_reason\":\"annualized_return_unavailable\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"benchmark_valid\":false"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"benchmark_reason\":\"no_market_symbol\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"valuation_complete\":true"),
+              std::string::npos);
+    EXPECT_NE(json.find(
+                  "\"valuation_reason\":\"all_open_positions_market_marked\""),
+              std::string::npos);
+    EXPECT_NE(json.find(
+                  "\"annualized_return_basis\":\"causal_elapsed_time_365d\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"duplicate_fill_replays_ignored\":2"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"conflicting_fill_replays_rejected\":3"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"missing_fill_identities_rejected\":4"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"invalid_fill_payloads_rejected\":5"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"unreconciled_funding_events_rejected\":6"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"duplicate_funding_replays_ignored\":7"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"conflicting_funding_replays_rejected\":8"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"late_fill_events_rejected\":9"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"late_funding_events_rejected\":10"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"late_market_events_rejected\":12"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"duplicate_market_marks_ignored\":13"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"conflicting_market_marks_rejected\":14"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"portfolio_time_series_valid\":false"),
+              std::string::npos);
+    EXPECT_NE(json.find(
+                  "\"portfolio_time_series_reason\":\"ambiguous_cross_symbol_arrival_without_watermark\""),
+              std::string::npos);
+    EXPECT_NE(json.find(
+                  "\"ambiguous_portfolio_mark_sequences_rejected\":11"),
+              std::string::npos);
+    EXPECT_NE(json.find("\"closing_fill_legs\":0"), std::string::npos);
+    EXPECT_NE(json.find("\"bankrupt\":false"), std::string::npos);
+    EXPECT_NE(json.find("\"fee_model\":\"zero\""), std::string::npos);
+    EXPECT_NE(json.find("\"execution_claim_scope\":\"not_synthetic_execution_claim\""),
+              std::string::npos);
+    EXPECT_NE(json.find("\"open_positions\":[]"), std::string::npos);
+    EXPECT_NE(json.find("\"fill_id\":\"77\""), std::string::npos);
+    EXPECT_NE(json.find("\"venue_execution_id\":\"venue-exec-77\""),
+              std::string::npos);
+}
+
+TEST(ReportGenerator, RejectedEconomicEventsAreVisible)
+{
+    AnalyticsReport report;
+    report.invalid_fill_payloads_rejected = 1;
+    report.unreconciled_funding_events_rejected = 2;
+    report.late_fill_events_rejected = 3;
+    report.late_funding_events_rejected = 4;
+    report.late_market_events_rejected = 5;
+    report.duplicate_market_marks_ignored = 6;
+    report.conflicting_market_marks_rejected = 7;
+
+    const std::string out = tt::render_execution_section(report, {});
+    EXPECT_NE(out.find("INVALID FILL PAYLOADS"), std::string::npos);
+    EXPECT_NE(out.find("UNRECONCILED FUNDING EVENTS"), std::string::npos);
+    EXPECT_NE(out.find("LATE FILL EVENTS"), std::string::npos);
+    EXPECT_NE(out.find("LATE FUNDING EVENTS"), std::string::npos);
+    EXPECT_NE(out.find("LATE MARKET EVENTS"), std::string::npos);
+    EXPECT_NE(out.find("DUPLICATE MARKET MARKS"), std::string::npos);
+    EXPECT_NE(out.find("CONFLICTING MARKET MARKS"), std::string::npos);
 }

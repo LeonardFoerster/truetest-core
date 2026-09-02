@@ -520,15 +520,15 @@ TEST(FuturesRiskCheck, NoopRiskCheckAlwaysAllows)
 TEST(MaintenanceMarginTable, ParsesSymbolSpecificLeverageBracketPayload)
 {
     MaintenanceMarginTable table;
-    table.load_from_leverage_bracket_json(R"json(
+    ASSERT_TRUE(table.load_from_leverage_bracket_json(R"json(
         {
           "symbol": "BTCUSDT",
           "brackets": [
-            {"bracket": 2, "notionalCap": 50000, "maintMarginRatio": 0.005, "cum": 100},
-            {"bracket": 1, "notionalCap": 10000, "maintMarginRatio": 0.004, "cum": 0}
+            {"bracket": 2, "notionalFloor": 10000, "notionalCap": 50000, "maintMarginRatio": 0.005, "cum": 100},
+            {"bracket": 1, "notionalFloor": 0, "notionalCap": 10000, "maintMarginRatio": 0.004, "cum": 0}
           ]
         }
-    )json");
+    )json"));
 
     EXPECT_FALSE(table.empty());
     EXPECT_DOUBLE_EQ(table.maintenance_margin_rate_for_notional(9000.0), 0.004);
@@ -540,17 +540,17 @@ TEST(MaintenanceMarginTable, ParsesSymbolSpecificLeverageBracketPayload)
 TEST(MaintenanceMarginTable, ParsesArrayLeverageBracketPayloadAndNumericStrings)
 {
     MaintenanceMarginTable table;
-    table.load_from_leverage_bracket_json(R"json(
+    ASSERT_TRUE(table.load_from_leverage_bracket_json(R"json(
         [
           {
             "symbol": "ETHUSDT",
             "brackets": [
-              {"notionalCap": "10000", "maintMarginRatio": "0.0065", "cum": "0"},
-              {"notionalCap": "50000", "maintMarginRatio": "0.01", "cum": "35"}
+              {"notionalFloor": "0", "notionalCap": "10000", "maintMarginRatio": "0.0065", "cum": "0"},
+              {"notionalFloor": "10000", "notionalCap": "50000", "maintMarginRatio": "0.01", "cum": "35"}
             ]
           }
         ]
-    )json");
+    )json"));
 
     EXPECT_FALSE(table.empty());
     EXPECT_DOUBLE_EQ(table.maintenance_margin_rate_for_notional(10000.0), 0.0065);
@@ -561,9 +561,72 @@ TEST(MaintenanceMarginTable, ParsesArrayLeverageBracketPayloadAndNumericStrings)
 TEST(MaintenanceMarginTable, InvalidPayloadLeavesTableEmpty)
 {
     MaintenanceMarginTable table;
-    table.load_from_leverage_bracket_json(R"json({"symbol":"BTCUSDT","no_brackets":[]})json");
+    EXPECT_FALSE(table.load_from_leverage_bracket_json(
+        R"json({"symbol":"BTCUSDT","no_brackets":[]})json"));
 
     EXPECT_TRUE(table.empty());
-    EXPECT_DOUBLE_EQ(table.maintenance_margin_rate_for_notional(10000.0), 0.005);
-    EXPECT_DOUBLE_EQ(table.maint_amount_for_notional(10000.0), 0.0);
+    EXPECT_FALSE(table.valid());
+    EXPECT_DOUBLE_EQ(table.maintenance_margin_rate_for_notional(10000.0), 1.0);
+    EXPECT_TRUE(std::isinf(table.maint_amount_for_notional(10000.0)));
+}
+
+TEST(MaintenanceMarginTable, RejectsMalformedOrUnsafeTierAtomically)
+{
+    const std::vector<std::string> invalid_payloads = {
+        R"json({"symbol":"BTCUSDT","brackets":[{"notionalFloor":0,"notionalCap":10000,"cum":0}]})json",
+        R"json({"symbol":"BTCUSDT","brackets":[{"notionalFloor":0,"notionalCap":10000,"maintMarginRatio":"0.004junk","cum":0}]})json",
+        R"json({"symbol":"BTCUSDT","brackets":[{"notionalFloor":0,"notionalCap":10000,"maintMarginRatio":"NaN","cum":0}]})json",
+        R"json({"symbol":"BTCUSDT","brackets":[{"notionalFloor":0,"notionalCap":0,"maintMarginRatio":0.004,"cum":0}]})json",
+        R"json({"symbol":"BTCUSDT","brackets":[{"notionalFloor":0,"notionalCap":10000,"maintMarginRatio":-0.004,"cum":0}]})json",
+        R"json({"symbol":"BTCUSDT","brackets":[{"notionalFloor":0,"notionalCap":10000,"maintMarginRatio":0.004,"cum":-1}]})json",
+        R"json({"symbol":"BTCUSDT","brackets":[{"note":"x \"notionalFloor\":0, \"notionalCap\":10000, \"maintMarginRatio\":0.004, \"cum\":0"}]})json",
+        R"json({"symbol":"BTCUSDT","brackets":[{"notionalFloor":0,"notionalFloor":0,"notionalCap":10000,"maintMarginRatio":0.004,"cum":0}]})json",
+        R"json({"symbol":"BTCUSDT","brackets":[{"notionalFloor":0,"notionalCap":10000,"maintMarginRatio":{},"cum":0}]})json",
+        R"json({"symbol":"BTCUSDT","brackets":[{"notionalFloor":0,"notionalCap":10000,"maintMarginRatio":0.01,"cum":0},{"notionalFloor":10000,"notionalCap":20000,"maintMarginRatio":0.005,"cum":1}]})json",
+        R"json({"symbol":"BTCUSDT","brackets":[{"notionalFloor":0,"notionalCap":10000,"maintMarginRatio":0.004,"cum":0},{"notionalFloor":10000,"notionalCap":10000,"maintMarginRatio":0.005,"cum":1}]})json",
+        R"json({"symbol":"BTCUSDT","brackets":[{"notionalFloor":0,"notionalCap":10000,"maintMarginRatio":0.004,"cum":0},{"notionalFloor":9000,"notionalCap":20000,"maintMarginRatio":0.005,"cum":1}]})json"
+    };
+
+    for (const auto& payload : invalid_payloads) {
+        MaintenanceMarginTable table;
+        EXPECT_FALSE(table.load_from_leverage_bracket_json(payload)) << payload;
+        EXPECT_TRUE(table.empty()) << payload;
+        EXPECT_FALSE(table.valid()) << payload;
+    }
+}
+
+TEST(MaintenanceMarginTable, RejectsResponseForDifferentSymbol)
+{
+    MaintenanceMarginTable table;
+    EXPECT_FALSE(table.load_from_leverage_bracket_json(
+        R"json({"symbol":"ETHUSDT","brackets":[{"notionalFloor":0,"notionalCap":10000,"maintMarginRatio":0.004,"cum":0}]})json",
+        "BTCUSDT"));
+    EXPECT_FALSE(table.valid());
+}
+
+TEST(MaintenanceMarginTable, RejectsNonAuthoritativeJsonStructure)
+{
+    const std::string tier =
+        R"json({"notionalFloor":0,"notionalCap":10000,"maintMarginRatio":0.004,"cum":0})json";
+    const std::vector<std::string> invalid_payloads = {
+        std::string{"{\"nested\":{\"symbol\":\"BTCUSDT\",\"brackets\":["}
+            + tier + "]}}",
+        std::string{"{\"symbol\":\"BTCUSDT\",\"brackets\":["}
+            + tier + "]} trailing",
+        std::string{"{\"symbol\":\"BTCUSDT\",\v\"brackets\":["}
+            + tier + "]}",
+        std::string{"{\"symbol\":\"BTCUSDT\",\f\"brackets\":["}
+            + tier + "]}",
+        std::string{"{\"symbol\":\"BTCUSDT\",\"brackets\" junk :["}
+            + tier + "]}",
+        std::string{"{\"symbol\":\"BTCUSDT\",\"brackets\":["}
+            + tier + "}] }"
+    };
+
+    for (const auto& payload : invalid_payloads) {
+        MaintenanceMarginTable table;
+        EXPECT_FALSE(table.load_from_leverage_bracket_json(payload)) << payload;
+        EXPECT_FALSE(table.valid()) << payload;
+        EXPECT_TRUE(table.empty()) << payload;
+    }
 }

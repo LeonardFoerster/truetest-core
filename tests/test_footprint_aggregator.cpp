@@ -19,13 +19,15 @@ PublicTrade make_trade(std::int64_t price_ticks, std::int64_t qty_atoms,
                         std::uint64_t obs_seq = 0)
 {
     PublicTrade t;
-    t.event_ns = event_ns;
-    t.recv_ns = event_ns;
+    t.event_ns = event_ns + 1;
+    t.recv_ns = event_ns + 1;
     t.price_ticks = price_ticks;
     t.base_qty_atoms = qty_atoms;
     t.side = side;
     t.obs_seq = obs_seq;
+    t.venue_id = 1;
     t.symbol_id = 1;
+    t.session_id = 1;
     return t;
 }
 
@@ -403,6 +405,66 @@ TEST(FootprintAggregator, CvdDoesNotResetWithinSameUtcDay)
     EXPECT_EQ(agg.cvd(), 7);
 }
 
+TEST(FootprintAggregator, OverflowingEconomicVolumeFailsWithoutMutation)
+{
+    FootprintAggregator agg(time_cfg());
+    ASSERT_TRUE(agg.on_trade(make_trade(
+        100, std::numeric_limits<std::int64_t>::max(),
+        aggressor_side::buy, 0)));
+    const auto version = agg.version();
+    const auto snapshot = agg.bars().front();
+
+    EXPECT_FALSE(agg.on_trade(make_trade(100, 1, aggressor_side::buy,
+                                         kSecond)));
+    ASSERT_EQ(agg.bars().size(), 1u);
+    EXPECT_EQ(agg.version(), version);
+    EXPECT_EQ(agg.cvd(), std::numeric_limits<std::int64_t>::max());
+    EXPECT_EQ(agg.bars().front().buy_volume, snapshot.buy_volume);
+    EXPECT_EQ(agg.bars().front().cells.at(100).buy_base_qty,
+              snapshot.cells.at(100).buy_base_qty);
+}
+
+TEST(FootprintAggregator, RejectsOutOfOrderAndPostFlushTradesWithoutMutation)
+{
+    FootprintAggregator agg(time_cfg());
+    ASSERT_TRUE(agg.on_trade(make_trade(100, 1, aggressor_side::buy,
+                                        kSecond)));
+    const auto version = agg.version();
+    EXPECT_FALSE(agg.on_trade(make_trade(90, 1, aggressor_side::sell, 0)));
+    EXPECT_EQ(agg.version(), version);
+
+    agg.flush();
+    const auto sealed_version = agg.version();
+    EXPECT_FALSE(agg.on_trade(make_trade(110, 1, aggressor_side::buy,
+                                         2 * kSecond)));
+    EXPECT_EQ(agg.version(), sealed_version);
+    ASSERT_EQ(agg.bars().size(), 1u);
+    EXPECT_EQ(agg.bars().front().state, bar_state::complete);
+}
+
+TEST(FootprintAggregator, EpochZeroAndUnresolvedIdentityFailWithoutMutation)
+{
+    FootprintAggregator agg(time_cfg());
+    auto invalid = make_trade(100, 1, aggressor_side::buy, 0);
+    invalid.event_ns = 0;
+    invalid.recv_ns = 1;
+    EXPECT_FALSE(agg.on_trade(invalid));
+    invalid = make_trade(100, 1, aggressor_side::buy, 0);
+    invalid.symbol_id = kInvalidSymbolId;
+    EXPECT_FALSE(agg.on_trade(invalid));
+    EXPECT_TRUE(agg.bars().empty());
+    EXPECT_EQ(agg.version(), 0u);
+}
+
+TEST(FootprintAggregator, DenseSymbolIdZeroIsValid)
+{
+    FootprintAggregator agg(time_cfg());
+    auto trade = make_trade(100, 1, aggressor_side::buy, 0);
+    trade.symbol_id = 0;
+    EXPECT_TRUE(agg.on_trade(trade));
+    ASSERT_EQ(agg.bars().size(), 1u);
+}
+
 // --- Quote/base conversion ---
 
 TEST(FootprintAggregator, QuoteNotionalAccumulatesPriceTimesQty)
@@ -432,9 +494,11 @@ TEST(FootprintAggregator, FlushIsIdempotent)
     agg.on_trade(make_trade(100, 1, aggressor_side::buy, 0));
     agg.flush();
     const auto poc_after_first_flush = agg.bars().front().poc_level;
+    const auto version_after_first_flush = agg.version();
     agg.flush(); // second flush must not crash or change anything
     EXPECT_EQ(agg.bars().front().poc_level, poc_after_first_flush);
     EXPECT_EQ(agg.bars().front().state, bar_state::complete);
+    EXPECT_EQ(agg.version(), version_after_first_flush);
 }
 
 TEST(FootprintAggregator, VersionBumpsOnEveryTradeAndReset)
@@ -467,19 +531,19 @@ TEST(FootprintAggregator, MaxBarsEvictsOldestFromFront)
 
 // --- Config sanitization / anomalous-gap safety (verifier-found bugs) ---
 
-TEST(FootprintAggregator, NonPositiveIntervalIsSanitizedRatherThanCrashing)
+TEST(FootprintAggregator, InvalidConfigurationFailsClosedWithoutMutation)
 {
     FootprintAggregatorConfig zero = time_cfg();
     zero.bar_spec.interval_ns = 0;
     FootprintAggregator agg_zero(zero);
-    EXPECT_NO_THROW(agg_zero.on_trade(make_trade(100, 1, aggressor_side::buy, 0)));
-    EXPECT_GT(agg_zero.config().bar_spec.interval_ns, 0);
+    EXPECT_FALSE(agg_zero.on_trade(make_trade(100, 1, aggressor_side::buy, 0)));
+    EXPECT_TRUE(agg_zero.bars().empty());
 
     FootprintAggregatorConfig negative = time_cfg();
     negative.bar_spec.interval_ns = -kSecond;
     FootprintAggregator agg_neg(negative);
-    EXPECT_NO_THROW(agg_neg.on_trade(make_trade(100, 1, aggressor_side::buy, 0)));
-    EXPECT_GT(agg_neg.config().bar_spec.interval_ns, 0);
+    EXPECT_FALSE(agg_neg.on_trade(make_trade(100, 1, aggressor_side::buy, 0)));
+    EXPECT_TRUE(agg_neg.bars().empty());
 }
 
 TEST(FootprintAggregator, HugeTimestampGapDoesNotHangOrExceedMaxBars)
