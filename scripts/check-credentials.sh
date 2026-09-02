@@ -19,6 +19,11 @@
 #     store and HMAC signing. Per prerequisites.md §10 the deepdive moves this
 #     into src/bin/engine_live/ later; until that move lands (tracked in
 #     docs/architecture/01-target-architecture.md), the provider directory is allow-listed.
+#   * src/providers/bitget/      — Bitget futures constructor parameters named
+#     api_key / api_secret (identifiers, not embedded secrets). Same isolation
+#     rationale as Binance until the engine_live split lands.
+#   * src/providers/bitunix/     — Bitunix futures constructor parameters named
+#     api_key / api_secret. Same isolation rationale as Binance.
 #   * src/main.cpp               — the three binaries still share one main.cpp
 #     during the current transition. When src/bin/<target>/main.cpp lands
 #     (Step 10 src/bin/ split, currently in-flight), this entry should be
@@ -30,6 +35,8 @@ ALLOW=(
     'src/main\.cpp'
     '^src/bin/engine_live/'
     '^src/providers/binance/'
+    '^src/providers/bitget/'
+    '^src/providers/bitunix/'
 )
 
 pattern='api_key|api_secret'
