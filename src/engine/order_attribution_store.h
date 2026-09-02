@@ -26,18 +26,10 @@
 
 #include "core/event.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
-
-// Moved verbatim from execution_router.h, where it was defined but — after
-// this extraction — no longer referenced (ExecutionRouter's order_meta_ ref
-// was write-only-by-nobody dead state; see engine.cpp wiring + PR notes).
-struct order_meta
-{
-    uint64_t opener_order_id = 0;
-    std::string strategy_name;
-};
 
 class OrderAttributionStore final
 {
@@ -58,15 +50,21 @@ public:
     // semantics: 0 / empty-string sentinel on miss, no exceptions.
     uint64_t opener_for(uint64_t order_id) const;
     const std::string& strategy_for(uint64_t order_id) const;
-
-    // Direct map access for collaborators that already do their own
-    // std::unordered_map::find lookups (FillProcessor). Read-only.
-    const std::unordered_map<uint64_t, order_meta>& raw() const noexcept { return map_; }
+    std::size_t size() const noexcept { return map_.size(); }
 
     // Phase A (MC object reuse): clears all attribution for the next trial.
     // Former: `order_meta_.clear();` in engine::reset_for_next_trial.
     void clear();
 
 private:
+    // Moved from execution_router.h with the store extraction. Keep the
+    // representation private; collaborators use the two sentinel-returning
+    // lookup methods above.
+    struct order_meta
+    {
+        uint64_t opener_order_id = 0;
+        std::string strategy_name;
+    };
+
     std::unordered_map<uint64_t, order_meta> map_;
 };

@@ -1,6 +1,6 @@
 #pragma once
 
-// EngineHotPathSink — narrow interface onto engine's own centralized
+// IEngineHotPathSink — narrow interface onto engine's own centralized
 // hot-path primitives (single event-log writer, single ring-dispatch
 // policy, single halt entry point), per the "OrderIntentProcessor
 // Preparation Report" §9 ("Callback / interface recommendation").
@@ -9,8 +9,8 @@
 // log_event/publish_event/trigger_halt without holding a concrete engine&
 // (which would be a back-reference / service-locator anti-pattern — see
 // docs/architecture/05-engine-boundaries.md Check B). `engine` implements
-// this interface directly (adds `public EngineHotPathSink` + `override` to
-// its three existing methods); no new behavior, no new primitive.
+// this interface privately while keeping its own trigger_halt API public;
+// callers cannot upcast engine into this safety-capable surface.
 //
 // A plain vtable reference, not std::function: no per-callback heap capture,
 // no type erasure beyond ordinary virtual dispatch, and — unlike binding
@@ -27,10 +27,10 @@
 
 #include <string_view>
 
-class EngineHotPathSink
+class IEngineHotPathSink
 {
 public:
-    virtual ~EngineHotPathSink() = default;
+    virtual ~IEngineHotPathSink() = default;
 
     virtual void log_event(const event& ev) = 0;
     virtual void publish_event(const event_pointer& ev) = 0;

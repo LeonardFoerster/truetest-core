@@ -24,7 +24,7 @@ FillProcessor::FillProcessor(
     RiskManager& risk_manager,
     AdverseSelectionTracker& adverse_selection,
     Analytics& analytics,
-    IOrderAuditSink& audit_sink,
+    const std::shared_ptr<IOrderAuditSink>& audit_sink,
     ExecutionRouter& router,
     ObjectPool<fill_event>& fill_pool,
     const OrderAttributionStore& attribution,
@@ -37,9 +37,7 @@ FillProcessor::FillProcessor(
     ShadowTracker* shadow_tracker,
     ::portfolio* exchange_portfolio,
     Analytics* exchange_analytics,
-    std::function<void(const event&)> log_event,
-    std::function<void(const event_pointer&)> publish_event,
-    std::function<void(std::string_view)> trigger_halt,
+    IEngineHotPathSink& hotpath,
     IRiskUnwindSink& risk_unwind_sink
 #ifdef HAS_DEBUG
     , debug::StageTimer& stage_timer
@@ -54,8 +52,7 @@ FillProcessor::FillProcessor(
       dashboard_builder_(dashboard_builder), shadow_tracker_(shadow_tracker),
       exchange_portfolio_(exchange_portfolio),
       exchange_analytics_(exchange_analytics),
-      log_event_(std::move(log_event)), publish_event_(std::move(publish_event)),
-      trigger_halt_(std::move(trigger_halt)), risk_unwind_sink_(risk_unwind_sink)
+      hotpath_(hotpath), risk_unwind_sink_(risk_unwind_sink)
 #ifdef HAS_DEBUG
       , stage_timer_(stage_timer)
 #endif
@@ -67,13 +64,13 @@ bool FillProcessor::register_shadow_order(const order_event& order)
     if (config_.mode != engine_mode::shadow
         || !exchange_portfolio_ || !exchange_analytics_)
     {
-        trigger_halt_(
+        hotpath_.trigger_halt(
             "shadow exchange order registration lacks independent ledgers");
         return false;
     }
     if (!shadow_exchange_order_tracker_.register_order(order))
     {
-        trigger_halt_(
+        hotpath_.trigger_halt(
             "shadow exchange order registration failed before submission");
         return false;
     }
@@ -135,7 +132,7 @@ bool FillProcessor::ingest_shadow_exchange_fill(
         if (delivery_adapter
             && !delivery_adapter->acknowledge_fill(fill.get_fill_id()))
         {
-            trigger_halt_(
+            hotpath_.trigger_halt(
                 "shadow exchange fill acknowledgement failed");
             halt_requested = true;
             return false;
@@ -148,7 +145,7 @@ bool FillProcessor::ingest_shadow_exchange_fill(
     if (config_.mode != engine_mode::shadow
         || !exchange_portfolio_ || !exchange_analytics_ || !shadow_tracker_)
     {
-        trigger_halt_("shadow exchange fill lacks independent ledgers");
+        hotpath_.trigger_halt("shadow exchange fill lacks independent ledgers");
         halt_requested = true;
         return false;
     }
@@ -160,11 +157,11 @@ bool FillProcessor::ingest_shadow_exchange_fill(
         return consume_delivery();
     if (validation.rejected())
     {
-        audit_sink_.record_event(
+        audit_sink_->record_event(
             "shadow_order_lifecycle", fill.get_symbol().c_str(), "",
             fill.get_order_id(), to_string(validation.code),
             "shadow exchange fill failed canonical admission", "{}");
-        trigger_halt_(
+        hotpath_.trigger_halt(
             "shadow exchange fill failed canonical admission - reconciliation required");
         halt_requested = true;
         return false;
@@ -174,7 +171,7 @@ bool FillProcessor::ingest_shadow_exchange_fill(
     auto fill_ptr = acquire_pooled_fill(fill);
     if (!shadow_exchange_order_tracker_.commit_fill(fill, validation))
     {
-        trigger_halt_(
+        hotpath_.trigger_halt(
             "validated shadow exchange fill commit failed - reconciliation required");
         halt_requested = true;
         return false;
@@ -208,7 +205,7 @@ bool FillProcessor::process_shadow_exchange_fills(
                 return false;
             if (!consumed)
             {
-                trigger_halt_(
+                hotpath_.trigger_halt(
                     "shadow fill pipeline returned without consuming delivery");
                 halt_requested = true;
                 return false;
@@ -246,7 +243,7 @@ std::shared_ptr<fill_event> FillProcessor::acquire_pooled_fill(const fill_event&
     }
     catch (const pool_exhausted& e)
     {
-        trigger_halt_(e.what());
+        hotpath_.trigger_halt(e.what());
         throw;
     }
 }
@@ -288,7 +285,7 @@ bool FillProcessor::process_adapter_fills(const std::shared_ptr<IExecutionAdapte
                 return false;
             if (!delivery_consumed)
             {
-                trigger_halt_(
+                hotpath_.trigger_halt(
                     "fill pipeline returned without consuming or rejecting delivery");
                 halt_requested = true;
                 return false;
@@ -299,7 +296,7 @@ bool FillProcessor::process_adapter_fills(const std::shared_ptr<IExecutionAdapte
 
     if (config_.mode == engine_mode::live)
     {
-        trigger_halt_(
+        hotpath_.trigger_halt(
             "live execution adapter lacks transactional fill delivery");
         halt_requested = true;
         return false;
@@ -381,7 +378,7 @@ bool FillProcessor::ingest(fill_event& f,
         if (delivery_adapter
             && !delivery_adapter->acknowledge_fill(f.get_fill_id()))
         {
-            trigger_halt_(
+            hotpath_.trigger_halt(
                 "transactional fill delivery acknowledgement failed");
             halt_requested = true;
             return false;
@@ -407,7 +404,7 @@ bool FillProcessor::ingest(fill_event& f,
         /*require_fill_identity=*/true);
     if (fill_validation.idempotent_noop())
     {
-        audit_sink_.record_event(
+        audit_sink_->record_event(
             "order_lifecycle", f.get_symbol().c_str(), "",
             f.get_order_id(), to_string(fill_validation.code),
             "economic fill already represented by the cumulative ledger cursor - ignored",
@@ -416,12 +413,12 @@ bool FillProcessor::ingest(fill_event& f,
     }
     if (fill_validation.rejected())
     {
-        audit_sink_.record_event(
+        audit_sink_->record_event(
             "order_lifecycle", f.get_symbol().c_str(), "",
             f.get_order_id(), to_string(fill_validation.code),
             "economic fill failed canonical admission; reconciliation required",
             "{}");
-        trigger_halt_("economic fill failed canonical admission - reconciliation required");
+        hotpath_.trigger_halt("economic fill failed canonical admission - reconciliation required");
         halt_requested = true;
         return false;
     }
@@ -479,11 +476,11 @@ bool FillProcessor::ingest(fill_event& f,
         }
         if (opposing_lots > 1)
         {
-            audit_sink_.record_event(
+            audit_sink_->record_event(
                 "order_lifecycle", f.get_symbol().c_str(), strat.c_str(),
                 f.get_order_id(), "ambiguous_implicit_close",
                 "implicit opposite-side fill has multiple eligible lots", "{}");
-            trigger_halt_("implicit opposite-side fill has ambiguous multi-lot attribution");
+            hotpath_.trigger_halt("implicit opposite-side fill has ambiguous multi-lot attribution");
             halt_requested = true;
             return false;
         }
@@ -507,11 +504,11 @@ bool FillProcessor::ingest(fill_event& f,
                 <= lot->second.qty_open + 1e-12;
         if (!admissible_explicit_close)
         {
-            audit_sink_.record_event(
+            audit_sink_->record_event(
                 "order_lifecycle", f.get_symbol().c_str(), strat.c_str(),
                 f.get_order_id(), "explicit_close_oversize",
                 "explicit attributed close is stale or exceeds its referenced lot", "{}");
-            trigger_halt_("explicit attributed close is stale or exceeds its referenced lot");
+            hotpath_.trigger_halt("explicit attributed close is stale or exceeds its referenced lot");
             halt_requested = true;
             return false;
         }
@@ -544,17 +541,17 @@ bool FillProcessor::ingest(fill_event& f,
                 (void)exit_manager_.on_protective_close_terminal(
                     f.get_order_id());
                 order_tracker_.set_status(f.get_order_id(), order_status::cancelled);
-                audit_sink_.record_event(
+                audit_sink_->record_event(
                     "exit_lifecycle", f.get_symbol().c_str(), strat.c_str(),
                     f.get_order_id(), "stale_suppressed",
                     "simulated stale protective close suppressed before reversal", "{}");
                 return consume_delivery();
             }
-            audit_sink_.record_event(
+            audit_sink_->record_event(
                 "exit_lifecycle", f.get_symbol().c_str(), strat.c_str(),
                 f.get_order_id(), "terminal_emergency",
                 "late or over-sized attributed close would reverse a flat lot", "{}");
-            trigger_halt_("late or over-sized attributed close would reverse a flat lot");
+            hotpath_.trigger_halt("late or over-sized attributed close would reverse a flat lot");
             halt_requested = true;
             return false;
         }
@@ -570,12 +567,12 @@ bool FillProcessor::ingest(fill_event& f,
     // A failed commit here is an internal invariant violation, not a duplicate.
     if (!order_tracker_.commit_fill(f, fill_validation))
     {
-        audit_sink_.record_event(
+        audit_sink_->record_event(
             "order_lifecycle", f.get_symbol().c_str(), "",
             f.get_order_id(), "fill_commit_fault",
             "validated economic fill could not be committed; reconciliation required",
             "{}");
-        trigger_halt_("validated economic fill commit failed - reconciliation required");
+        hotpath_.trigger_halt("validated economic fill commit failed - reconciliation required");
         halt_requested = true;
         return false;
     }
@@ -585,7 +582,7 @@ bool FillProcessor::ingest(fill_event& f,
     // the same canonical cursor delta again; a later reconnect replay of the
     // original venue payload therefore remains an exact native-ID duplicate.
     if (!authoritative_replay)
-        log_event_(f);
+        hotpath_.log_event(f);
 
     // All downstream ledgers must book the exact same economic quantity as
     // OrderTracker. Raw venue slices such as 0.2 can differ by one ULP from
@@ -649,8 +646,8 @@ bool FillProcessor::ingest(fill_event& f,
       : (f.get_source() == fill_source::simulated) ? "simulated"
       :                                              "local";
     if (!authoritative_replay)
-        audit_sink_.record_fill(f, opener, strat.c_str(), src);
-    publish_event_(fill_ptr);
+        audit_sink_->record_fill(f, opener, strat.c_str(), src);
+    hotpath_.publish_event(fill_ptr);
     analytics_.on_event(fill_ptr);
 
     if (mark_shadow_sim && config_.mode == engine_mode::shadow && shadow_tracker_)
@@ -658,13 +655,13 @@ bool FillProcessor::ingest(fill_event& f,
 
     if (!authoritative_replay)
     {
-        audit_sink_.record_status_transition(f.get_order_id(),
+        audit_sink_->record_status_transition(f.get_order_id(),
             fill_validation.before, new_status, status_reason);
         if (protective_before)
         {
             const double filled = std::min(protective_before->requested_qty,
                 protective_before->filled_qty + f.get_filled_quantity());
-            audit_sink_.record_exit_lifecycle(exit_lifecycle_record{
+            audit_sink_->record_exit_lifecycle(exit_lifecycle_record{
                 f.get_order_id(), f.get_order_id(), protective_before->opener_order_id,
                 f.get_fill_id(), {}, {}, {}, f.get_timestamp(),
                 protective_before->requested_qty, filled,
@@ -703,7 +700,7 @@ bool FillProcessor::ingest(fill_event& f,
                 // a no-op unless QuestDB persistence is active (see
                 // QuestdbOrderAuditSink::record_event) — the allocation only
                 // happens when a compliance reviewer would want the record.
-                audit_sink_.record_event(
+                audit_sink_->record_event(
                     "risk_decision",
                     f.get_symbol().c_str(),
                     "",
@@ -719,7 +716,7 @@ bool FillProcessor::ingest(fill_event& f,
                 // trigger_halt: unwind_positions still needs the router.
                 if (config_.risk_unwind)
                     risk_unwind_sink_.request_unwind(event_count);
-                trigger_halt_(
+                hotpath_.trigger_halt(
                     "risk post-fill limit breached - engine halted");
                 halt_requested = true;
                 return false;
@@ -744,7 +741,7 @@ bool FillProcessor::ingest(fill_event& f,
         }
         catch (...)
         {
-            trigger_halt_(
+            hotpath_.trigger_halt(
                 "post-commit fill observer failed - execution remains committed");
             halt_requested = true;
             return false;

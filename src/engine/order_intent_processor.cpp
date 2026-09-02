@@ -40,7 +40,7 @@ OrderIntentProcessor::OrderIntentProcessor(
     RiskManager& risk_manager,
     IRiskCheck* risk_check,
     Analytics& analytics,
-    IOrderAuditSink& audit_sink,
+    const std::shared_ptr<IOrderAuditSink>& audit_sink,
     ExecutionRouter& router,
     FillProcessor& fills,
     OrderAttributionStore& attribution,
@@ -66,9 +66,9 @@ OrderIntentProcessor::OrderIntentProcessor(
     const bool& mm_threaded,
     DashboardSnapshotBuilder* dashboard_builder,
     ShadowTracker* shadow_tracker,
-    portfolio* exchange_portfolio,
+    std::optional<portfolio>& exchange_portfolio,
     const engine_config& config,
-    EngineHotPathSink& hotpath
+    IEngineHotPathSink& hotpath
     )
     : portfolio_(port), order_tracker_(order_tracker), risk_manager_(risk_manager),
       risk_check_(risk_check), analytics_(analytics), audit_sink_(audit_sink),
@@ -145,7 +145,7 @@ bool OrderIntentProcessor::emit_terminal_transition(
         exit_manager_.on_protective_close_terminal(
             order_id, [&](const truetest::exits::ExitManager::protective_exit_view& protective)
             {
-                audit_sink_.record_exit_lifecycle(exit_lifecycle_record{
+                audit_sink_->record_exit_lifecycle(exit_lifecycle_record{
                     order_id, order_id, protective.opener_order_id, 0,
                     {}, {}, {}, {}, protective.requested_qty,
                     protective.filled_qty, protective.remaining_qty,
@@ -339,11 +339,11 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
                 hotpath_.log_event(*rej);
                 hotpath_.publish_event(rej);
                 // Migrated to sink (PR-04)
-                audit_sink_.record_order_submitted(*o, "rejected");
+                audit_sink_->record_order_submitted(*o, "rejected");
                 // Use stack buffer for audit detail to avoid string temp on this path (pooled still needs string)
                 char venue_reason[128];
                 std::snprintf(venue_reason, sizeof(venue_reason), "venue risk check refused: %s", vd.reason.c_str());
-                audit_sink_.record_rejection(*o, "venue_risk_reject", venue_reason);
+                audit_sink_->record_rejection(*o, "venue_risk_reject", venue_reason);
                 emit_terminal_transition(o->get_order_id(), o->get_symbol(),
                                          o->get_quantity(), order_status::rejected);
 
@@ -402,9 +402,9 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
             hotpath_.publish_event(rej);
 
             // Migrated to sink (PR-04)
-            audit_sink_.record_order_submitted(*o, "rejected");
-            audit_sink_.record_rejection(*o, rule_code, reason);
-            audit_sink_.record_event(
+            audit_sink_->record_order_submitted(*o, "rejected");
+            audit_sink_->record_rejection(*o, rule_code, reason);
+            audit_sink_->record_event(
                 "risk_decision",
                 o->get_symbol().c_str(),
                 o->get_strategy_name().c_str(),
@@ -467,13 +467,13 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
     analytics_.on_event(o);
 
     // Migrated to sink (PR-04)
-    audit_sink_.record_order_submitted(*o, "pending");
+    audit_sink_->record_order_submitted(*o, "pending");
     if (!async_submit)
     {
-        audit_sink_.record_status_transition(o->get_order_id(),
+        audit_sink_->record_status_transition(o->get_order_id(),
             order_status::pending, order_status::open);
     }
-    audit_sink_.record_event(
+    audit_sink_->record_event(
         "order_intent",
         o->get_symbol().c_str(),
         o->get_strategy_name().c_str(),
@@ -595,8 +595,8 @@ void OrderIntentProcessor::unwind_positions(std::size_t& event_count)
         analytics_.on_event(close_order);
 
         // Unconditional via audit_sink (replaces questdb guard + #ifdef).
-        audit_sink_.record_order_submitted(*close_order, "pending");
-        audit_sink_.record_status_transition(close_order->get_order_id(),
+        audit_sink_->record_order_submitted(*close_order, "pending");
+        audit_sink_->record_status_transition(close_order->get_order_id(),
             order_status::pending, order_status::open, "risk_unwind");
 
         auto adapter = router_.resolve_adapter(target.symbol);
@@ -630,7 +630,7 @@ void OrderIntentProcessor::drain_async_submit_results(IExecutionAdapter* adapter
             if (sr.uncertain)
             {
                 hotpath_.trigger_halt("venue order outcome is ambiguous after request write");
-                audit_sink_.record_status_transition(
+                audit_sink_->record_status_transition(
                     sr.engine_id, order_status::pending, order_status::pending,
                     "ambiguous post-write submit; terminal halt and reconcile required");
                 continue;
@@ -682,10 +682,10 @@ void OrderIntentProcessor::drain_async_submit_results(IExecutionAdapter* adapter
 
             char transport_msg[128];
             std::snprintf(transport_msg, sizeof(transport_msg), "transport_error: %s", sr.error.c_str());
-            audit_sink_.record_status_transition(sr.engine_id,
+            audit_sink_->record_status_transition(sr.engine_id,
                 order_status::pending, order_status::rejected,
                 transport_msg);
-            audit_sink_.record_rejection(ghost, "transport_error", sr.error.c_str());
+            audit_sink_->record_rejection(ghost, "transport_error", sr.error.c_str());
             continue;
         }
 
@@ -755,7 +755,7 @@ void OrderIntentProcessor::drain_async_submit_results(IExecutionAdapter* adapter
             if (dashboard_builder_)
                 dashboard_builder_->update_open_order_status(
                     lifecycle.engine_order_id, "open");
-            audit_sink_.record_status_transition(
+            audit_sink_->record_status_transition(
                 lifecycle.engine_order_id, before, order_status::open,
                 "authoritative user-data ACK");
             continue;
@@ -804,7 +804,7 @@ void OrderIntentProcessor::drain_async_submit_results(IExecutionAdapter* adapter
             hotpath_.publish_event(cancel_ev);
             if (!config_.has_async_analytics()) analytics_.on_event(cancel_ev);
             if (meta_it != pending_cancels_.end())
-                audit_sink_.record_cancellation(
+                audit_sink_->record_cancellation(
                     lifecycle.engine_order_id, symbol.c_str(),
                     attribution_.strategy_for(
                         lifecycle.engine_order_id).c_str(),
@@ -812,7 +812,7 @@ void OrderIntentProcessor::drain_async_submit_results(IExecutionAdapter* adapter
             if (meta_it != pending_cancels_.end())
                 pending_cancels_.erase(meta_it);
         }
-        audit_sink_.record_status_transition(
+        audit_sink_->record_status_transition(
             lifecycle.engine_order_id, before, terminal,
             "authoritative user-data lifecycle");
     }
@@ -920,7 +920,7 @@ bool OrderIntentProcessor::route(order_event& order,
         // flat re-entrantly (for example, another fill drained during book
         // recentering). The ticket is then intentionally gone; suppress this
         // stale command rather than submitting an unowned close through zero.
-        audit_sink_.record_event("exit_lifecycle", order.get_symbol().c_str(),
+        audit_sink_->record_event("exit_lifecycle", order.get_symbol().c_str(),
             order.get_strategy_name().c_str(), order.get_order_id(),
             "stale_suppressed", "protective exit ticket already resolved", "{}");
         return true;
@@ -931,7 +931,7 @@ bool OrderIntentProcessor::route(order_event& order,
         if (const auto protective =
                 exit_manager_.protective_exit_for_order(order.get_order_id()))
         {
-            audit_sink_.record_exit_lifecycle(exit_lifecycle_record{
+            audit_sink_->record_exit_lifecycle(exit_lifecycle_record{
                 order.get_signal_id(), order.get_order_id(),
                 protective->opener_order_id, 0, order.get_decision_ts(),
                 order.get_submit_ts(), order.get_earliest_eligible_ts(), {},
@@ -953,8 +953,8 @@ bool OrderIntentProcessor::route(order_event& order,
             hotpath_.log_event(*rej);
             hotpath_.publish_event(rej);
             // Unconditional via audit_sink (replaces questdb guard + #ifdef + dead total_rejections_).
-            audit_sink_.record_order_submitted(order, "rejected");
-            audit_sink_.record_rejection(order, "venue_filter", reason);
+            audit_sink_->record_order_submitted(order, "rejected");
+            audit_sink_->record_rejection(order, "venue_filter", reason);
             emit_terminal_transition(order.get_order_id(), order.get_symbol(),
                                      order.get_quantity(), order_status::rejected);
             (void)event_count;
@@ -989,8 +989,8 @@ bool OrderIntentProcessor::route(order_event& order,
                 order.get_symbol(), order.get_order_id(), reason);
             hotpath_.log_event(*rej);
             hotpath_.publish_event(rej);
-            audit_sink_.record_order_submitted(order, "rejected");
-            audit_sink_.record_rejection(order, "close_reservation", reason);
+            audit_sink_->record_order_submitted(order, "rejected");
+            audit_sink_->record_rejection(order, "close_reservation", reason);
             emit_terminal_transition(order.get_order_id(), order.get_symbol(),
                                      order.get_quantity(), order_status::rejected);
             return true;
@@ -1023,8 +1023,8 @@ bool OrderIntentProcessor::route(order_event& order,
             order.get_symbol(), order.get_order_id(), reason);
         hotpath_.log_event(*rej);
         hotpath_.publish_event(rej);
-        audit_sink_.record_order_submitted(order, "rejected");
-        audit_sink_.record_rejection(order,
+        audit_sink_->record_order_submitted(order, "rejected");
+        audit_sink_->record_rejection(order,
             to_string(risk_rule::max_open_orders), reason);
         emit_terminal_transition(order.get_order_id(), order.get_symbol(),
                                  order.get_quantity(), order_status::rejected);
@@ -1105,7 +1105,7 @@ bool OrderIntentProcessor::route(order_event& order,
             hotpath_.log_event(*rej);
             hotpath_.publish_event(rej);
             if (!config_.has_async_analytics()) analytics_.on_event(rej);
-            audit_sink_.record_rejection(order, "capacity_reject", reason);
+            audit_sink_->record_rejection(order, "capacity_reject", reason);
             emit_terminal_transition(order.get_order_id(), order.get_symbol(),
                                      order.get_quantity(), order_status::rejected);
             return true;
@@ -1619,10 +1619,10 @@ bool OrderIntentProcessor::cancel(const std::string& symbol, uint64_t order_id,
         // documented residual risk this move does not alter, fix, or
         // paper over. See the repository's trading-logic audit for the
         // full caveat; do not "fix" it here.
-        audit_sink_.record_cancellation(order_id, symbol.c_str(),
+        audit_sink_->record_cancellation(order_id, symbol.c_str(),
             attribution_.strategy_for(order_id).c_str(),
             reason.empty() ? "manual" : reason.c_str());
-        audit_sink_.record_status_transition(order_id,
+        audit_sink_->record_status_transition(order_id,
             order_status::open, order_status::cancelled, reason.empty() ? nullptr : reason.c_str());
     }
 
@@ -1757,7 +1757,7 @@ bool OrderIntentProcessor::modify(const std::string& symbol, uint64_t order_id,
         amend_risk_action = risk_action::reject;
     if (amend_risk_action == risk_action::halt)
     {
-        audit_sink_.record_event(
+        audit_sink_->record_event(
             "risk_decision", symbol.c_str(),
             projected.get_strategy_name().c_str(), order_id, "halt",
             "amend rejected by risk manager; engine halted", to_string(rule));
@@ -1766,7 +1766,7 @@ bool OrderIntentProcessor::modify(const std::string& symbol, uint64_t order_id,
     }
     if (amend_risk_action == risk_action::reject)
     {
-        audit_sink_.record_event(
+        audit_sink_->record_event(
             "risk_decision", symbol.c_str(),
             projected.get_strategy_name().c_str(), order_id, "reject",
             "amend rejected by risk manager", to_string(rule));
@@ -1791,7 +1791,7 @@ bool OrderIntentProcessor::modify(const std::string& symbol, uint64_t order_id,
         // so this is terminal reconciliation, never a recoverable false.
         if (!order_tracker_.commit_amend(amend_validation))
         {
-            audit_sink_.record_event(
+            audit_sink_->record_event(
                 "order_lifecycle", symbol.c_str(),
                 projected.get_strategy_name().c_str(), order_id,
                 "amend_commit_fault",
@@ -1805,7 +1805,7 @@ bool OrderIntentProcessor::modify(const std::string& symbol, uint64_t order_id,
         hotpath_.publish_event(amend_ev);
         if (!config_.has_async_analytics())
             analytics_.on_event(amend_ev);
-        audit_sink_.record_amendment(order_id, symbol.c_str(),
+        audit_sink_->record_amendment(order_id, symbol.c_str(),
             amend_validation.old_price, amend_validation.new_price,
             amend_validation.old_total_qty,
             amend_validation.new_total_qty, now);
@@ -1848,7 +1848,7 @@ void OrderIntentProcessor::finalize_end_of_stream(std::size_t& event_count, bool
         hotpath_.publish_event(cancel_ev);
         if (!config_.has_async_analytics())
             analytics_.on_event(cancel_ev);
-        audit_sink_.record_status_transition(order_id,
+        audit_sink_->record_status_transition(order_id,
             order_status::pending, order_status::expired, reason);
         ++event_count;
     };

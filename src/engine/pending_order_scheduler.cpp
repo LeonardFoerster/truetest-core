@@ -1,5 +1,7 @@
 #include "pending_order_scheduler.h"
 
+#include <utility>
+
 // LIVE-SAFETY SURFACE: see pending_order_scheduler.h + scripts/check-live-safety-freeze.sh.
 
 void PendingOrderScheduler::clear()
@@ -32,9 +34,11 @@ bool PendingOrderScheduler::latency_due(std::chrono::system_clock::time_point si
 
 std::shared_ptr<order_event> PendingOrderScheduler::pop_due_latency()
 {
+    if (pending_orders_.empty())
+        return {};
     auto entry = pending_orders_.top();
     pending_orders_.pop();
-    return entry.order;
+    return std::move(entry.order);
 }
 
 void PendingOrderScheduler::schedule_bar_delay(std::shared_ptr<order_event> order, uint64_t seq,
@@ -77,11 +81,15 @@ bool PendingOrderScheduler::compact_bar_delay_due(std::string_view event_symbol)
 
 std::shared_ptr<order_event> PendingOrderScheduler::take_ready_order(std::size_t i)
 {
+    if (i >= bar_delayed_ready_.size())
+        return {};
     return std::move(bar_delayed_ready_[i].order);
 }
 
 void PendingOrderScheduler::retain_ready_suffix(std::size_t first_unsubmitted)
 {
+    if (first_unsubmitted > bar_delayed_ready_.size())
+        return;
     const std::size_t remaining = bar_delayed_ready_.size() - first_unsubmitted;
     if (remaining == 0)
     {

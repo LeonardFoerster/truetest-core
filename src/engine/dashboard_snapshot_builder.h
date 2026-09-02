@@ -42,6 +42,8 @@ class AdverseSelectionTracker;
 namespace truetest { namespace exits { class ExitManager; } }
 class OrderbookRegistry;
 class IOrderAuditSink;
+class PendingOrderScheduler;
+class OrderAttributionStore;
 struct engine_config;
 class IExecutionAdapter;
 
@@ -55,10 +57,12 @@ public:
     // mutation. All non-owning refs. Builder is cold-path only.
     //
     // Lifetime contract: every injected reference (pools, rings, portfolio,
-    // analytics, exit_manager, config, registry, audit_sink, last_* refs,
-    // execution_adapters map, debug samplers, control block pool) MUST outlive
-    // this builder. The engine guarantees this by owning all of them for the
-    // lifetime of the builder (which is a unique_ptr member of engine).
+    // analytics, exit_manager, config, registry, the audit-sink owner slot,
+    // pending scheduler, attribution store, last_* refs, execution_adapters
+    // map, debug samplers, control block pool) MUST outlive this builder. The
+    // engine guarantees this by owning all of them for the lifetime of the
+    // builder (which is a unique_ptr member of engine). Reference the owning
+    // audit-sink slot, not its replaceable pointee.
     // Rings are empty at ctor time and populated in start_workers(); because
     // we hold references to the engine's shared_ptr< EventRing > members, later
     // assignments become visible (post-ctor "mutation" of the ring targets).
@@ -92,7 +96,9 @@ public:
         std::mutex& last_mark_prices_mu,
         OrderbookRegistry& orderbook_registry,
         const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters,
-        IOrderAuditSink& audit_sink,
+        const std::shared_ptr<IOrderAuditSink>& audit_sink,
+        const PendingOrderScheduler& pending_scheduler,
+        const OrderAttributionStore& attribution,
         const std::unordered_set<std::string>& l2_seeded_symbols,
         // Pools for memory/debug stats (cold)
         const ObjectPool<market_event>& market_pool,
@@ -176,7 +182,9 @@ private:
     std::mutex& last_mark_prices_mu_;
     OrderbookRegistry& orderbook_registry_;
     const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters_;
-    IOrderAuditSink& audit_sink_;
+    const std::shared_ptr<IOrderAuditSink>& audit_sink_;
+    const PendingOrderScheduler& pending_scheduler_;
+    const OrderAttributionStore& attribution_;
     const std::unordered_set<std::string>& l2_seeded_symbols_;
 
     // Pools (for memory/debug stats)

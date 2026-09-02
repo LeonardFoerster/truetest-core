@@ -30,7 +30,7 @@
 // Depends only on named domain-subsystem references/pointers — no engine&,
 // no EngineContext, no service locator (Check B in
 // docs/architecture/05-engine-boundaries.md). Halt/log/publish reach engine
-// exclusively through EngineHotPathSink& (engine_hotpath_sink.h). This class
+// exclusively through IEngineHotPathSink& (engine_hotpath_sink.h). This class
 // is itself referenced by nothing outside engine (no reverse dependency).
 //
 // LIVE-SAFETY SURFACE: this file is part of the frozen surface (see
@@ -64,6 +64,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -84,7 +85,7 @@ public:
         RiskManager& risk_manager,
         IRiskCheck* risk_check,                        // nullable — provider may supply none
         Analytics& analytics,
-        IOrderAuditSink& audit_sink,
+        const std::shared_ptr<IOrderAuditSink>& audit_sink,
         ExecutionRouter& router,
         FillProcessor& fills,
         OrderAttributionStore& attribution,
@@ -110,9 +111,9 @@ public:
         const bool& mm_threaded,                        // true while MarketMakerWorker owns the book
         DashboardSnapshotBuilder* dashboard_builder,     // nullable
         ShadowTracker* shadow_tracker,                   // nullable — non-null only in shadow mode
-        portfolio* exchange_portfolio,                   // nullable — non-null only in shadow mode
+        std::optional<portfolio>& exchange_portfolio,    // engaged only in shadow mode; re-tested at use
         const engine_config& config,
-        EngineHotPathSink& hotpath
+        IEngineHotPathSink& hotpath
     );
 
     // ---- Phase 1: canonical normal order-submission path -----------------
@@ -305,7 +306,7 @@ private:
     RiskManager& risk_manager_;
     IRiskCheck* risk_check_;
     Analytics& analytics_;
-    IOrderAuditSink& audit_sink_;
+    const std::shared_ptr<IOrderAuditSink>& audit_sink_;
     ExecutionRouter& router_;
     FillProcessor& fills_;
     OrderAttributionStore& attribution_;
@@ -335,9 +336,9 @@ private:
     const bool& mm_threaded_;
     DashboardSnapshotBuilder* dashboard_builder_;
     ShadowTracker* shadow_tracker_;
-    portfolio* exchange_portfolio_;
+    std::optional<portfolio>& exchange_portfolio_;
     const engine_config& config_;
-    EngineHotPathSink& hotpath_;
+    IEngineHotPathSink& hotpath_;
 
     // Owned outright as of Phase 3 (canonical single owner — see the Phase 3
     // deliverable's state-ownership matrix): both readers and both writers

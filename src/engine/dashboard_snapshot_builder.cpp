@@ -6,6 +6,9 @@
 #include "exits/exit_manager.h"
 #include "orderbook/orderbook_registry.h"
 #include "order_audit_sink.h"
+#include "pending_order_scheduler.h"
+#include "order_attribution_store.h"
+#include "types/order_id.h"
 #include "engine_config.h"
 #include "execution/execution_adapter.h"
 #include "providers/provider.h"
@@ -44,7 +47,9 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     std::mutex& last_mark_prices_mu,
     OrderbookRegistry& orderbook_registry,
     const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters,
-    IOrderAuditSink& audit_sink,
+    const std::shared_ptr<IOrderAuditSink>& audit_sink,
+    const PendingOrderScheduler& pending_scheduler,
+    const OrderAttributionStore& attribution,
     const std::unordered_set<std::string>& l2_seeded_symbols,
     const ObjectPool<market_event>& market_pool,
     const ObjectPool<order_event>& order_pool,
@@ -80,6 +85,8 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     , orderbook_registry_(orderbook_registry)
     , execution_adapters_(execution_adapters)
     , audit_sink_(audit_sink)
+    , pending_scheduler_(pending_scheduler)
+    , attribution_(attribution)
     , l2_seeded_symbols_(l2_seeded_symbols)
     , market_pool_(market_pool)
     , order_pool_(order_pool)
@@ -731,20 +738,12 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
         add_pool("control_block_pool", control_block_pool_.block_count(),
                  control_block_pool_.in_use(), control_block_pool_.grow_count());
 
-        // Engine state.
-        d.next_order_id = 0; // OrderIdGenerator not in scope here
-        // Decrement back so we don't perturb the live id sequence — the
-        // call above only reads + increments atomically, so the value
-        // we surface is "what the next allocation WOULD have been".
-        // (We can't decrement an atomic safely if other threads bump it
-        //  in between; subtract logically: the value we want is `next-1`
-        //  treating it as the most-recently-allocated id, which is fine
-        //  for an introspection display.)
-        d.next_order_id = 0; // TODO: OrderIdGenerator not visible; was d.next_order_id = OrderIdGenerator::next(); --d...
-        d.pending_orders    = 0;  // TODO: expose from builder or pending state (not injected yet)
+        // Engine state. peek() does not consume the generator.
+        d.next_order_id     = OrderIdGenerator::peek();
+        d.pending_orders    = pending_scheduler_.pending_count();
         d.pending_stops     = 0;
         d.open_orders_cache = open_orders_cache_.size();
-        d.order_meta_size   = 0;  // TODO
+        d.order_meta_size   = attribution_.size();
         d.armed_brackets    = exit_manager_.armed_count();
         d.handles_size      = exit_manager_.armed_count();   // proxy
 
@@ -813,7 +812,7 @@ void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snap
 
         // Unconditional audit_sink health (replaces remaining questdb guard + #ifdef).
         // strict_mode and last_flush default (0/-1) as sink seam does not yet surface full QuestdbStore::Health.
-        auto qh = audit_sink_.health();
+        auto qh = audit_sink_->health();
         out.health.questdb.active = qh.connected || qh.pending_lines > 0 || qh.dropped_lines > 0 || qh.fallback_lines > 0;
         out.health.questdb.connected = qh.connected;
         out.health.questdb.pending_lines = qh.pending_lines;

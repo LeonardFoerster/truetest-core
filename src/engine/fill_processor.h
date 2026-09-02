@@ -40,13 +40,13 @@
 #include "analytics/analytics.h"
 #include "order_audit_sink.h"
 #include "execution_router.h"         // ExecutionRouter
-#include "order_attribution_store.h"  // OrderAttributionStore + shared order_meta struct
+#include "order_attribution_store.h"  // OrderAttributionStore
+#include "engine_hotpath_sink.h"       // IEngineHotPathSink
 #include "risk_unwind_sink.h"         // IRiskUnwindSink
 #include "types/object_pool.h"
 #include "strategy/strategy_interface.h"
 #include "core/event.h"
 
-#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -82,7 +82,7 @@ public:
         RiskManager& risk_manager,
         AdverseSelectionTracker& adverse_selection,
         Analytics& analytics,
-        IOrderAuditSink& audit_sink,
+        const std::shared_ptr<IOrderAuditSink>& audit_sink,
         ExecutionRouter& router,
         ObjectPool<fill_event>& fill_pool,
         const OrderAttributionStore& attribution,
@@ -95,9 +95,7 @@ public:
         ShadowTracker* shadow_tracker,
         ::portfolio* exchange_portfolio,
         Analytics* exchange_analytics,
-        std::function<void(const event&)> log_event,
-        std::function<void(const event_pointer&)> publish_event,
-        std::function<void(std::string_view)> trigger_halt,
+        IEngineHotPathSink& hotpath,
         IRiskUnwindSink& risk_unwind_sink
 #ifdef HAS_DEBUG
         , debug::StageTimer& stage_timer
@@ -187,7 +185,7 @@ private:
     RiskManager& risk_manager_;
     AdverseSelectionTracker& adverse_selection_;
     Analytics& analytics_;
-    IOrderAuditSink& audit_sink_;
+    const std::shared_ptr<IOrderAuditSink>& audit_sink_;
     ExecutionRouter& router_;
     ObjectPool<fill_event>& fill_pool_;
     const OrderAttributionStore& attribution_;
@@ -202,13 +200,10 @@ private:
     Analytics* exchange_analytics_;
     OrderTracker shadow_exchange_order_tracker_;
 
-    // Narrow callbacks into engine's own hot-path/safety primitives (single event-log
-    // writer, single ring-dispatch policy, single halt entry point) — see class-header
-    // rationale in engine-decomposition.md for why these stay callbacks instead of
-    // moving here.
-    std::function<void(const event&)> log_event_;
-    std::function<void(const event_pointer&)> publish_event_;
-    std::function<void(std::string_view)> trigger_halt_;
+    // Shared narrow contract onto engine's event-log writer, ring-dispatch
+    // policy, and terminal halt entry point. This mirrors OrderIntentProcessor
+    // instead of maintaining three separate type-erased callbacks.
+    IEngineHotPathSink& hotpath_;
 
     // Emergency-liquidation request (Phase 2 OrderIntentProcessor extraction):
     // narrow interface reference, not a std::function — see risk_unwind_sink.h

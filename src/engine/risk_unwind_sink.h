@@ -12,7 +12,7 @@
 // FillProcessor's construction time, so *some* deferred-dereference channel
 // is structurally required — the same construction-order proof already
 // applied to OrderAttributionStore in the preparatory extraction. `engine`
-// implements this interface (alongside EngineHotPathSink) and its own
+// implements this interface (alongside IEngineHotPathSink) and its own
 // request_unwind() forwards to orders_->unwind_positions(...), dereferencing
 // orders_ only when the interface method is actually *invoked* — deep in
 // FillProcessor::handle_fill's post-fill-risk branch, long after every

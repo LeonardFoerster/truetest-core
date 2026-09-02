@@ -403,7 +403,9 @@ engine::engine(std::shared_ptr<data_handler> dh,
         last_mark_prices_mu_,
         orderbook_registry_,
         execution_adapters_,
-        *audit_sink_,
+        audit_sink_,
+        *pending_scheduler_,
+        *attribution_,
         l2_seeded_symbols_,
         market_pool_,
         order_pool_,
@@ -438,23 +440,21 @@ engine::engine(std::shared_ptr<data_handler> dh,
     // Processors" for the full dependency list + callback rationale.
     fills_ = std::make_unique<FillProcessor>(
         portfolio_, order_tracker_, exit_manager_, risk_manager_, adverse_selection_,
-        analytics_, *audit_sink_, *router_, fill_pool_, *attribution_,
+        analytics_, audit_sink_, *router_, fill_pool_, *attribution_,
         strategy_, additional_strategies_, additional_strategy_names_,
         primary_strategy_name_, config_,
         dashboard_builder_.get(), shadow_tracker_.get(),
         exchange_portfolio_.has_value() ? &*exchange_portfolio_ : nullptr,
         exchange_analytics_.has_value() ? &*exchange_analytics_ : nullptr,
-        [this](const event& e) { log_event(e); },
-        [this](const event_pointer& e) { publish_event(e); },
-        [this](std::string_view r) { trigger_halt(r); },
+        static_cast<IEngineHotPathSink&>(*this),
         // unwind_positions moved to OrderIntentProcessor (Phase 1); the
         // IRiskUnwindSink interface replaced the former std::function
         // callback in Phase 2 (see risk_unwind_sink.h). `*this` (engine)
-        // implements IRiskUnwindSink; its request_unwind() dereferences
-        // orders_ only when actually invoked — deep in the event loop, long
-        // after orders_ (constructed below) exists. See risk_unwind_sink.h
-        // for the full construction-order proof.
-        *this
+        // implements IRiskUnwindSink privately; its request_unwind()
+        // dereferences orders_ only when actually invoked — deep in the
+        // event loop, long after orders_ (constructed below) exists. See
+        // risk_unwind_sink.h for the full construction-order proof.
+        static_cast<IRiskUnwindSink&>(*this)
 #ifdef HAS_DEBUG
         , stage_timer_
 #endif
@@ -475,7 +475,7 @@ engine::engine(std::shared_ptr<data_handler> dh,
     // construction-order rationale.
     orders_ = std::make_unique<OrderIntentProcessor>(
         portfolio_, order_tracker_, risk_manager_, risk_check_.get(),
-        analytics_, *audit_sink_, *router_, *fills_, *attribution_,
+        analytics_, audit_sink_, *router_, *fills_, *attribution_,
         *pending_scheduler_, exit_manager_, *instrument_spec_cache_,
         market_maker_, orderbook_registry_,
         execution_adapters_,
@@ -485,8 +485,8 @@ engine::engine(std::shared_ptr<data_handler> dh,
         l2_seeded_symbols_, mm_threaded_,
 
         dashboard_builder_.get(), shadow_tracker_.get(),
-        exchange_portfolio_.has_value() ? &*exchange_portfolio_ : nullptr,
-        config_, *this
+        exchange_portfolio_, config_,
+        static_cast<IEngineHotPathSink&>(*this)
     );
 
     prewarm_object_pools();
@@ -717,6 +717,14 @@ void engine::publish_event(const event_pointer& ev)
 
 void engine::request_unwind(std::size_t& event_count)
 {
+    if (!orders_)
+    {
+        // FillProcessor normally calls this only after construction. If that
+        // invariant is ever broken, latch the same terminal reason its caller
+        // uses instead of silently skipping the emergency unwind.
+        trigger_halt("risk post-fill limit breached - engine halted");
+        return;
+    }
     orders_->unwind_positions(event_count);
 }
 
@@ -1025,7 +1033,7 @@ void engine::run()
         {
             DEBUG_STAGE(stage_timer_, mm_replenish);
             auto ob = orderbook_registry_.get_or_create(symbol);
-            if (!mm_worker_ &&
+            if (!mm_threaded_ &&
                 !l2_seeded_symbols_.count(symbol))
             {
                 auto mm_trades = market_maker_.replenish(
