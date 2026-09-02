@@ -85,6 +85,7 @@ What exists **in this tree today** (not aspirational):
 - zstd binary logs + rotating text logs
 - Optional QuestDB ILP (`ENABLE_QUESTDB`, `--persist`, `--persist-strict`)
 - Rich ncurses TUI (shadow/live)
+- Optional fixed ImGui trading command center (`ENABLE_IMGUI`, `--desk`)
 - Optional read-only web UI (`ENABLE_WEB`, `--web` + token on shadow/live)
 - 1000+ GoogleTest cases, golden regression, hot-path / layer / freeze gate scripts
 
@@ -99,7 +100,7 @@ Tracked in [`docs/todos/`](docs/todos/) and governance — **do not treat as ava
 | **Phase 0** | Tiny-size mainnet futures validation — **0/15** qualifying sessions ([`reports/phase0/`](reports/phase0/)) |
 | **Risk / DMS** | Further R-*/S-* items (funding analytics, external watchdog hardening, etc.) |
 | **Venues** | Bitunix live path · Bybit/Gate **archived** (not on master) · COIN-M inverse · hedge mode |
-| **Engine** | `engine.cpp` decomposition waves ([`docs/internal/engine-decomposition.md`](docs/internal/engine-decomposition.md)) |
+| **Engine** | Remaining `engine.cpp` decomposition waves after the landed dashboard-projection extraction ([`docs/internal/engine-decomposition.md`](docs/internal/engine-decomposition.md)) |
 | **Data** | Parquet / external API sources deferred ([`docs/internal/data-pipeline.md`](docs/internal/data-pipeline.md)) |
 | **Ops / Go-Live** | 9-row capital gate, Prometheus drills, formal CCB size increases |
 | **Other** | Multi-symbol / cross-margin risk, richer language bindings, Solana/Drift keeper (research only) |
@@ -241,12 +242,25 @@ cmake --preset linux-venues   && cmake --build --preset linux-venues
 cmake --preset linux-web && cmake --build --preset linux-web
 cmake --build --preset linux-web --target web_assets   # if npm is available
 
-# Sanitizers / release-native
-cmake --preset linux-asan && cmake --build --preset linux-asan
+# Sanitizers (on-demand trees; configure, build, then run the matching preset)
+cmake --preset linux-asan
+cmake --build --preset linux-asan
+ctest --preset linux-asan
+cmake --preset linux-tsan
+cmake --build --preset linux-tsan
+ctest --preset linux-tsan
+
+# Release-native
 cmake --preset linux-release-native && cmake --build --preset linux-release-native
 # Portable Release + tests when link-time optimization would exceed RAM
 cmake --preset linux-release-low-memory && cmake --build --preset linux-release-low-memory
 ```
+
+`linux-asan` enables ASAN + non-recovering UBSAN, Binance, ImGui, and tests;
+its test preset enables leak detection, halt-on-error, and UBSAN stack traces.
+`linux-tsan` enables TSAN, ImGui, and tests and halts on the first report. The
+sanitizer families are mutually exclusive and both test presets run serially.
+These commands do not assert that either suite passed the current worktree.
 
 | CMake option | Needs extra system deps |
 |:-------------|:------------------------|
@@ -256,7 +270,7 @@ cmake --preset linux-release-low-memory && cmake --build --preset linux-release-
 | `ENABLE_LIVE_DATA` | Deprecated no-op; use a concrete venue option |
 | `ENABLE_QUESTDB` | none (raw sockets) |
 | `ENABLE_WEB` | FetchContent civetweb; **npm** only for SPA assets |
-| `ENABLE_IMGUI` | **OpenGL** + **GLFW**; FetchContent ImGui/ImPlot |
+| `ENABLE_IMGUI` | **OpenGL** + **GLFW**; FetchContent Dear ImGui |
 | `ENABLE_LTO` | none; disable to reduce Release link memory |
 | `BUILD_TESTS` / `ENABLE_BENCHMARKS` / `ENABLE_DEBUG` | FetchContent (GTest / Benchmark / Abseil) |
 

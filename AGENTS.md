@@ -321,7 +321,7 @@ Register new sources in **`cmake/Sources.cmake`** (no directory globs).
 | `cmake/` / `Sources.cmake` | Configure + build affected targets |
 | `dashboard_snapshot` (new/changed field) | Render it (or explicitly, visibly omit it) in **both** the ncurses TUI (`src/ui/panels/*`, `tabbed_dashboard.cpp`, `console_dashboard.cpp`) and the ImGui desk (`src/ui/desk/panels/*`) before merging — see note below |
 
-**Two UI stacks, one snapshot.** The ncurses rich TUI and the ImGui desk are both first-class, actively maintained surfaces over the same `dashboard_snapshot`/`operator_actions` seam (no plan to freeze or retire either currently) — see `docs/internal/imgui-desk-design.md`. The desk’s live positions renderer is `src/ui/desk/panels/activity_panel.cpp`; with both stacks staying in parity long-term, a field added to one renderer and forgotten in the other will not fail a build, only silently miss an operator's screen. Check both renderers whenever `dashboard_snapshot` changes.
+**Two UI stacks, one snapshot.** The ncurses rich TUI and the ImGui desk are both first-class, actively maintained surfaces over the same `dashboard_snapshot`/`operator_actions` seam (no plan to freeze or retire either currently) — see `docs/internal/imgui-desk-design.md`. The desk’s live positions renderer is `src/ui/desk/panels/positions_table.cpp`; orders, protection, and fills use their corresponding table panels. With both stacks staying in parity long-term, a field added to one renderer and forgotten in the other will not fail a build, only silently miss an operator's screen. Check both renderers whenever `dashboard_snapshot` changes.
 
 ---
 

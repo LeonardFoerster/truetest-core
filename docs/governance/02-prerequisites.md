@@ -16,6 +16,12 @@ See also:
 
 These files carry the live-safety surface. Any modification requires the `LIVE_SAFETY_CCB_APPROVED` token in the commit message + clean shadow validation. `scripts/check-live-safety-freeze.sh` is the executable source of truth.
 
+**Current-worktree note (2026-09-01)**: The literal token was supplied for the
+current edit request, but there is no commit/body-token evidence, human
+two-person CCB approval, or clean continuous ≥4-hour mainnet `engine_shadow`
+evidence. The current worktree is not merge-ready or live-ready; Phase 0 remains
+0/15.
+
 ```
 src/core/tt_target.h
 src/engine/engine.cpp
@@ -103,6 +109,14 @@ Before opening or merging any PR that edits a frozen file (or significantly desc
    - No second producer on any SPSC ring
    - No `HAS_*` or venue-specific logic in core/engine/threading/risk
    - Reconciler stays default-refuse (except the one documented soft-warn for spot testnet monthly resets)
+   - No reserved-mainnet normal or generic `risk_unwind` order path may bypass
+     the exact pre-submit durability ACK and post-publication halt recheck
+   - Durable-ledger compromise remains sticky; no destructor or incomplete
+     shutdown may implicitly mark a reserved ledger finalized
+   - Do not describe the current event log as a full command WAL, exactly-once
+     execution, or crash recovery; cancel/amend/native-bracket and
+     kill-switch/DMS/native safety command coverage plus state reconstruction
+     remain follow-up work
    - For safety-description changes in docs: review the corresponding code comment blocks for consistency
 
 5. **Governance hygiene**:

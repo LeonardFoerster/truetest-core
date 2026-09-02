@@ -42,7 +42,9 @@ Three binaries (`engine_backtest`, `engine_shadow`, `engine_live`) are produced 
 - **`bitget`** / **`bitget-futures`**: Bitget UTA USDT-M futures (trade, kline, books depth). Requires `ENABLE_BITGET`. Demo/paptrading via `--demo`/`--testnet`. See `docs/operations/03-bitget-demo.md`.
 - **`bitunix`** / **`bitunix-futures`**: Bitunix futures MD + paper/shadow (Phase 0–1; live order routing refused). Requires `ENABLE_BITUNIX`. See `docs/platforms/bitunix.md`.
 - **`synthetic`** / **`montecarlo`**: On-demand GBM path generation (standalone or Monte Carlo campaigns). Configurable `mu`, `sigma`, steps, initial price.
-- **Binary replay**: `--replay` from zstd-compressed event logs (deterministic, with time slicing).
+- **Binary replay**: `--replay` from cleanly sealed, current-v3,
+  non-segmented event logs. Replay bounds/time slicing are refused until prefix
+  state and append-order contracts exist.
 - Generic `WebSocketDataSource` was removed as unwired; live market data is owned by the concrete venue providers.
 
 All data flows through the pluggable `IProvider` / `IDataTransport` / `IDataParser` / `IExecutionAdapter` architecture. New venues are sibling providers; core engine stays unchanged.
@@ -114,7 +116,16 @@ Strategies can emit both `order_event`s and `exit_intent` vectors (for per-lot b
 
 ## Persistence & Audit
 
-- **Binary event log** (`--record`, zstd compressed): Authoritative, replayable, tamper-evident audit trail of every market/order/fill event.
+- **Binary event log** (`--log-events`, zstd compressed): only a cleanly
+  sealed, current-v3, non-segmented log is eligible for authoritative replay.
+  Reserved-mainnet normal and generic `risk_unwind` order intents must receive
+  their exact post-fsync ACK before adapter submission; compromise is sticky and
+  reserved logger destruction never seals implicitly. The engine attempts an
+  explicit seal only after its shutdown completeness gate passes. An unsealed
+  prefix is diagnostic. This is neither a full command WAL/crash-recovery
+  protocol nor cryptographic tamper evidence. See `docs/governance/01-prod.md`
+  for the canonical durability contract. (`--record` captures raw transport
+  frames.)
 - **QuestDB ILP** (opt-in via `ENABLE_QUESTDB=ON` + `--persist --run-tag`):
   - High-resolution per-run tables: orders, fills, order_status, rejections, position_snapshots, funding_events.
   - Shared `runs_meta` with campaign analytics.

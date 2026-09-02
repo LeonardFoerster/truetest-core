@@ -8,7 +8,16 @@ Only two thin convenience wrappers are supported. They do not load `.env`, infer
 ./launch-desk.sh [engine_shadow arguments]
 ```
 
-The script configures/builds the `linux-dev` preset and executes `engine_shadow --mode shadow --desk`. It rejects all `--mode` overrides, `--live`, credential flags, and `TT_MODE=live`. Use `--print-command` to inspect without executing and `--skip-build` to reuse the configured tree.
+The script configures/builds the `linux-dev` preset and executes the shadow
+command center. With no provider/path arguments it supplies a deterministic
+synthetic SMA session (`mu=0.0,sigma=0.1,n_steps=500`, seed `424242`) so the
+launch never falls into the interactive provider menu. It also supplies
+`--thread-preset inline`, `--no-pin`, and `--status-format off` unless each is
+overridden explicitly. A path without a provider selects `local`; explicit
+provider/path arguments otherwise override the synthetic defaults independently
+without duplicate flags. It rejects every `--mode` override, `--live`,
+credential flags, and `TT_MODE=live`. Use `--print-command` to inspect without
+executing and `--skip-build` to reuse the configured tree.
 
 ## Tests
 

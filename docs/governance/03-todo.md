@@ -6,7 +6,7 @@
 
 **Completed (Phase 8)**: Monte Carlo to master merge — all phases completed successfully. Master is the new baseline. Private retail character clearly stated. All technical safety docs remain intact. See `docs/archive/MERGE_PLAN.md` for the full historical execution record.
 
-**Last update**: 2026-08-18 (H-07 added in docs/todos/08-H-persistence-observability.md — mainnet durable-log gate does not yet reject non-regular-file `--log-events` sinks; frozen-surface `main.inc` track, open).
+**Last update**: 2026-09-01 (H-07 durable-ledger hardening exists in the current worktree; no commit/body-token evidence, human CCB, or ≥4-hour mainnet shadow evidence yet; Phase 0 remains 0/15).
 **How to reference**: use the item ID in prose, e.g. "Addresses P0-03 (Phase 0 evidence scaffolding)"; for precision cite both file and ID: "Closes `docs/todos/01-P0-phase0.md` P0-01" or "Addresses `docs/todos/02-P1-freeze.md` P1-02".
 
 Items are grouped by theme (details in numbered docs/todos/ files). Completed items moved/stuck per-file or summarized here after phase declared done in `prod.md`.
@@ -23,6 +23,8 @@ Items are grouped by theme (details in numbered docs/todos/ files). Completed it
 - MC: Integrated; MC-01/MC-02 landed (details + standing: docs/todos/03-MC-simulation.md)
 - See docs/todos/ for R-*/S-*/D-*/A-*/H-* + Other/Go-Live (04- through 09-).
 - Backtest engine bug fixes (BF-01..BF-17, 2026-08-14 audit): docs/todos/10-BF-backtest-engine-bugfixes.md
+- H-07 durable mainnet ledger hardening: implemented in the current worktree,
+  but not merge-ready/live-ready; see docs/todos/08-H-persistence-observability.md.
 
 (See also: `01-prod.md`, `02-prerequisites.md`, root `AGENTS.md`, `docs/README.md`, `docs/governance/04-summary.md`.)
 

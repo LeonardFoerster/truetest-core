@@ -61,9 +61,16 @@ Data source → parser (market/tick/l2) → Engine dispatch → Strategy(ies)
 ## Realism, MC, Persistence
 - Realism models (latency/impact/queue/fill/fee) active in backtest/shadow only; bypassed in live.
 - MC: synthetic provider + full reuse of engine/strategy/realism/analytics surfaces; deterministic seeding; `--monte-carlo --mc-trials N` (see instructions + todo MC-*).
-- Persistence: binary zstd event log (mandatory durable), optional QuestDB
-  (soft-fail by default; terminal/nonzero with `--persist-strict`), and
-  diagnostic-only v1 checkpoints that cannot be resumed.
+- Persistence: a cleanly sealed, current-v3, non-segmented binary zstd event
+  log is the authoritative replay ledger; in-run/unsealed prefixes and v1/v2
+  checkpoints are diagnostic only. Reserved-mainnet normal and generic
+  `risk_unwind` order intents cross an exact-ID, two-second pre-submit durability
+  barrier; the engine refuses to invoke finalization for ledgers already known
+  incomplete or compromised. This is not a full command WAL, exactly-once
+  execution, or crash recovery; native safety commands remain outside this
+  order-intent ACK. QuestDB is optional (soft-fail by default; terminal/nonzero
+  with `--persist-strict`). See the canonical durability contract in
+  `docs/governance/01-prod.md`.
 
 ## Safety Surface (Phase 1 Freeze)
 The mechanically frozen surface covers the compile-time live gate, engine/session lifecycle, execution admission, Binance and Bitget provider/REST safety paths, risk, and worker halt propagation. See `scripts/check-live-safety-freeze.sh` for the exact list.

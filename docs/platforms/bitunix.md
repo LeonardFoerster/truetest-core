@@ -3,7 +3,7 @@
 **Registry names:** `bitunix-futures` (canonical), `bitunix` (alias)  
 **Code path:** `src/providers/bitunix/`  
 **CMake:** `-DENABLE_BITUNIX=ON`, preset `linux-bitunix`  
-**Status (2026-08-02):** **Phase 0–1 landed** — MD + paper/shadow; **live refused**
+**Status (2026-09-01):** **Phase 0–1 landed** — MD + paper/shadow; **live refused**
 
 ---
 
@@ -16,6 +16,10 @@
 | P2 (deferred) | Live orders, private WS, reconciler, kill, DMS, brackets |
 
 **v1 success:** `--provider bitunix-futures --symbol BTCUSDT --stream trade` works in `engine_shadow` / backtest-with-stream paths. Live open prints a clear refuse message.
+
+Bitunix has no implemented demo/testnet endpoint. The CLI refuses `--demo` and
+`--testnet` with a Bitunix provider in **every engine mode** (backtest, shadow,
+and live) instead of silently routing those labels to mainnet endpoints.
 
 ---
 
@@ -44,6 +48,7 @@ Docs: https://www.bitunix.com/api-docs/futures/
 | S3 | Hand parsers; no `nlohmann` on hot path |
 | S4 | Halt terminal; no safety retry |
 | S5 | Layer deps green |
+| S6 | `--demo` / `--testnet` refused in every engine mode; never relabel mainnet as sandbox |
 
 ---
 
@@ -106,11 +111,11 @@ Credentials reserved (unused until live):
 
 | Risk | Note |
 |------|------|
-| No confirmed public demo/testnet | Treat mainnet MD carefully; live deferred |
+| No implemented demo/testnet | CLI refuses both sandbox flags in every engine mode; treat mainnet MD carefully; live deferred |
 | Trade timestamp ISO parse | Falls back to frame `ts` / wall clock |
 | Depth/kline | Channel map stubs only; trade is the production path |
 | DMS | Unknown / not wired — document before live |
 
 ---
 
-*Last updated: 2026-08-02*
+*Last updated: 2026-09-01 — sandbox flags are refused in all engine modes.*

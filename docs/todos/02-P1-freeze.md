@@ -24,6 +24,13 @@ the full automated gates, independent safety review, and a clean feature-enabled
 shadow run of at least four continuous hours are recorded. This repair does not
 close the separate P1-03 eight-hour Phase 1 exit gate.
 
+**2026-09-01 current-worktree status:** The literal
+`LIVE_SAFETY_CCB_APPROVED` token was supplied for the current edit request, but
+there is no commit/body-token evidence, human two-person CCB approval, or clean
+continuous ≥4-hour mainnet `engine_shadow` evidence for these changes. They are
+not merge-ready or live-ready and do not close P1-03, P1-04, or P1-05. Phase 0
+remains 0/15.
+
 **Frozen Files (single source of truth – also in `scripts/check-live-safety-freeze.sh`; keep lists in sync across prereq/prod/script/AGENTS.md)**:
 ```
 src/bin/main.inc

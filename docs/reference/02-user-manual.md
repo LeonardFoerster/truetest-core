@@ -90,7 +90,7 @@ File/QuestDB   Halt logic  Metrics   TUI/Dash   Quote mgmt
   their native units; fractional columns are converted to fixed-point atoms).
   There is no blanket unit conversion — the scale travels with the bar/tick so
   execution/analytics always consume correctly-scaled base-unit quantities.
-- Deterministic authoritative-ledger replay from current-v2 event logs (`--replay`; bounded ledger replay is currently refused)
+- Deterministic authoritative-ledger replay from current-v3 event logs (`--replay`; bounded ledger replay is currently refused)
 - Configurable realism models (latency, impact, queue position, fees, fill simulation)
 - Golden regression tests + full event logging for audit
 - Walked-book impact using real L2 depth when available
@@ -183,6 +183,7 @@ cmake --preset linux-venues
 cmake --preset linux-providers-questdb   # all venues + QuestDB
 cmake --preset linux-web
 cmake --preset linux-asan
+cmake --preset linux-tsan
 cmake --preset linux-release-native
 # cmake --list-presets
 ```
@@ -205,7 +206,24 @@ ctest --test-dir build --output-on-failure
 - `./build/engine_shadow`
 - `./build/engine_live`
 
-**Sanitizers**: `ENABLE_TSAN` is mutually exclusive with ASAN/UBSAN; ASAN+UBSAN together is allowed (`linux-asan` preset).
+**Sanitizers**: `ENABLE_TSAN` is mutually exclusive with ASAN/UBSAN. The
+`linux-asan` preset enables ASAN, non-recovering UBSAN, Binance, ImGui, and
+tests; its test preset enables leak detection, halt-on-error, and UBSAN stack
+traces. `linux-tsan` enables TSAN, ImGui, and tests and halts on the first
+report. Both test presets execute serially. Run on demand:
+
+```bash
+cmake --preset linux-asan
+cmake --build --preset linux-asan
+ctest --preset linux-asan
+
+cmake --preset linux-tsan
+cmake --build --preset linux-tsan
+ctest --preset linux-tsan
+```
+
+These commands describe the configured workflow; they do not claim sanitizer
+success for the current worktree.
 
 # Configuration & Setup
 
@@ -245,7 +263,15 @@ lines, fallback lines, and age since the last successful flush.
 
 Per-run tables (e.g. `{run_tag}_orders`, `{run_tag}_fills`, `{run_tag}_events`, `{run_tag}_rejections`) are created automatically with `PARTITION BY DAY` and a designated timestamp column. A shared `runs_meta` table (now using WEEK partitioning) records campaign summaries, including rich analytics fields such as max drawdown, Sharpe, Sortino, profit factor, and win rate written on shutdown. A generic `_events` table (Phase 3) enables capture of strategy decisions, risk actions, and other logic beyond pure order lifecycle.
 
-QuestDB is explicitly a secondary, queryable analytics and observability store. The binary zstd-compressed event log (`--log-events`) is the authoritative, durable audit trail; `--record` captures raw transport frames instead. In non-strict mode, QuestDB unavailability at startup causes graceful degradation (persistence is disabled for the session with a warning). In strict mode, startup or persistent write failures cause a hard exit.
+QuestDB is explicitly a secondary, queryable analytics and observability store.
+Only a cleanly sealed, current-v3, non-segmented binary event log
+(`--log-events`) is eligible as the authoritative replay ledger; an in-run,
+unsealed, or crash-truncated prefix is diagnostic only. Mainnet reservation, checkpoint, and
+finalization semantics are defined canonically in
+`docs/governance/01-prod.md`. `--record` captures raw transport frames instead.
+In non-strict mode, QuestDB unavailability at startup causes graceful
+degradation (persistence is disabled for the session with a warning). In strict
+mode, startup or persistent write failures cause a hard exit.
 
 For operational details, golden queries, retention/TTL recommendations, soak testing with failure injection, and post-run reconciliation, see [03-db.md](03-db.md) and `docs/archive/questdb-multi-week-hardening-guide.md` (historical).
 
@@ -292,16 +318,30 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
     --depth-stream depth20@100ms \
     --strategy ma-crossover \
     --mode live \
+    --live \
     --api-key $BINANCE_API_KEY \
     --api-secret $BINANCE_API_SECRET \
-    --dead-man-countdown-ms 15000 \
+    --thread-preset standard \
+    --log-events ./event_log_p0_unique.bin \
+    --log-max-size 0 \
+    --dead-man-countdown-ms 30000 \
+    --dead-man-heartbeat-ms 8000 \
+    --reconcile-tolerance-bps 3 \
     --max-notional 5000 \
-    --min-liq-distance-pct 0.015 \
+    --max-leverage 2.0 \
+    --min-liq-distance-pct 0.07 \
+    --max-daily-loss 80 \
     --balance 5000 \
     --risk-unwind
 ```
 
-**Critical**: Only `engine_live` binary can submit real orders. Operator must correctly solve a random math problem after seeing a prominent red "LIVE TRADING - REAL MONEY" warning. All other binaries hard-reject live order paths at compile time.
+**Critical**: Only `engine_live` can submit real orders. The event-log parent
+must already exist and be operator-controlled and symlink-free; the target file
+must be a unique name that does not already exist. The operator must correctly
+solve a random math problem after seeing a prominent red "LIVE TRADING - REAL
+MONEY" warning. This example is not authorization or readiness evidence; follow
+the full attended ritual in `docs/governance/01-prod.md` and the Phase-0 SOP.
+All other binaries hard-reject live order paths at compile time.
 
 # Performance & Benchmarks
 
@@ -312,7 +352,9 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - LTO + `-O3` in Release; optional `-march=native` on the shared engine core
   and all three engine entry points.
 - StageTimer (ENABLE_DEBUG) provides per-stage microsecond breakdown for profiling.
-- Binary event logging with zstd compression adds minimal overhead when enabled.
+- Binary event logging is isolated behind a worker when a dedicated preset is
+  selected. Mainnet durable checkpoints perform real file/directory fsync work;
+  overhead and tail latency must be measured rather than described as minimal.
 
 **Typical throughput**: Capable of handling full-depth Binance streams (trade + 20-level depth @ 100ms) plus strategy + risk + analytics on a modern 8-16 core CPU with <1 ms median event-to-worker latency (subject to measurement).
 
@@ -335,7 +377,8 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - Live-money gate: interactive math confirmation + red banner; only present in `engine_live`.
 - Ring drop policy: `halt_on_drop` on safety-critical rings in shadow/live.
 - Rate limiting, time sync, and HMAC-signed REST requests.
-- Full audit trail via binary event logs and QuestDB.
+- Cleanly sealed authoritative ledger replay via binary event logs, with
+  QuestDB as a secondary query/observability view.
 
 **Notable missing or partial mechanisms**:
 - No exchange-side position limits or max drawdown auto-liquidation beyond what the venue provides.
@@ -388,7 +431,11 @@ Records raw tape while running live shadow fills via trade tape. Compares simula
 - **Institutional safety without the price tag**: Dead-man's switch, kill switch, position reconciler, and user-data WS source-of-truth are production features rarely found in retail tools.
 - **C++23 performance edge**: Lock-free rings, object pools, zero hot-path allocations, and optional native tuning deliver microsecond-class event handling that Python/JavaScript engines cannot match.
 - **Realistic microstructure modeling**: Queue position, walked-book impact, latency stacking, and trade-tape shadow fills let you see realistic slippage before risking capital.
-- **Audit-grade observability**: Binary zstd event logs + optional QuestDB give you a complete, queryable, tamper-evident record of every decision and fill.
+- **Replayable observability**: A cleanly sealed current-v3 binary event log
+  can be used for authoritative ledger replay; optional QuestDB supplies a
+  queryable secondary view. Unsealed prefixes are diagnostic; CRC32C detects
+  accidental corruption, while neither it, path-identity hardening, nor QuestDB
+  provides cryptographic tamper evidence.
 - **Futures-first design**: First-class USDT-M support with `reduceOnly` brackets, one-way mode enforcement, liquidation distance checks, and funding awareness (partial).
 - **Extensible but safe architecture**: New providers and strategies register via macros; live order paths are physically impossible to enable in backtest/shadow builds.
 

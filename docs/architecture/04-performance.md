@@ -17,7 +17,10 @@ The engine is built for **deterministic, low-jitter, allocation-free** processin
 - **CPU affinity + isolated hot path** (Core 0 / dedicated event thread by default).
 - **Pre-warmed bounded resources** before the first market event.
 
-Non-critical work (logging, analytics snapshots, QuestDB ILP, TUI, market-maker replenishment) is always offloaded.
+Non-critical rich snapshot materialization, JSON serialization, logging-worker
+I/O, QuestDB ILP, and UI rendering are offloaded. The producer still performs a
+bounded, allocation-free dashboard projection capture after normally completed
+event boundaries, plus explicit initial and final captures.
 
 ---
 
@@ -175,9 +178,57 @@ Live mode uses real exchange timestamps + user-data stream as truth; latency mod
 ## 7. Persistence & I/O Impact
 
 ### Binary Event Log (`--log-events`, zstd)
-- Written synchronously from the event loop (or via logging worker).
-- Low overhead; index every 1000 events for fast seeking.
-- Authoritative replay source (`--replay`).
+- Mainnet live requires a dedicated logging worker; `inline` and `light` are
+  refused. For normal and generic `risk_unwind` orders, publication is followed
+  by an exact-ID durability barrier before adapter submission: the logging worker
+  ACKs only after the reserved logger has flushed, file/directory-fsynced, and
+  revalidated the order record. Both ACK production and consumption must precede
+  the deadline. A lock-free terminal gate covers post-ACK audit/setup and the
+  adapter call: its CAS is the linearization point, so a command admitted before
+  `close()` is in flight and no command can be admitted after `close()`.
+- The order-admission deadline is a fixed two seconds. It does not interrupt or
+  bound a blocked kernel `fsync`, an earlier blocking publish to another worker
+  ring, provider shutdown, or the later logging-worker join. This safety barrier
+  adds real mainnet order-path tail latency; measure it rather than treating
+  asynchronous handoff as the cost boundary.
+- Fills, funding, rejections, and emitted cancel/amend records are flushed and
+  file/directory-fsynced when consumed by the logger. Observational records
+  checkpoint after 256 logger-consumed records or when a later record observes
+  at least 100 ms since completion of the previous sync.
+- A logging drop/failure, ACK mismatch/timeout, or incomplete shutdown makes the
+  mainnet ledger sticky-compromised. Only a quiesced, drained, healthy worker is
+  allowed to attempt an explicit seal; reserved logger destruction never seals
+  implicitly. The index/trailer prefix and append-only v3 terminal integrity seal
+  are persisted in two separate fsync phases, both of which must return
+  successfully for operational evidence. A complete valid seal remains the
+  recovery authority if the writer observed an uncertain final fsync result.
+- The reverse ACK ring has compile-time SPSC roles: the logger owns the sole
+  move-only producer endpoint and the engine owns the sole move-only consumer
+  endpoint. Endpoint creation allocates shared state once during cold worker
+  setup; ACK push/pop performs no ownership allocation or reference-count
+  mutation.
+- Shutdown completeness includes successful provider quiesce/kill/close and a
+  final stable drain of tracked funding, synthetic metadata, submit outcomes,
+  and fills. Teardown-only fill retention suppresses strategy, ExitManager, and
+  position callbacks, preventing post-close bracket mutation. One fixed channel
+  inventory checks exact worker/ring topology, every inbound backlog/drop, and
+  MM outbound emptiness. Failed shutdown, ambiguous outcomes, queue-processing
+  failure, funding loss, any worker failure/backlog/drop, or remaining MM output
+  refuses sealing. Unknown venue-native bracket/kill outcomes
+  remain under H-03 rather than the narrower H-07 completeness claim.
+- Only a cleanly sealed, current-v3, non-segmented log is eligible for
+  authoritative replay. An abrupt-stop prefix is diagnostic only. This is not a
+  full command WAL, exactly-once execution, or crash recovery; cancel/amend and
+  venue-native bracket plus kill-switch/DMS/native safety command intent/outcome
+  coverage remains H-03/follow-up work. CRC32C is accidental-corruption
+  detection, not cryptographic authentication. Writer/shared-reader advisory
+  locks and pinned metadata stability checks are cold replay/open/finalization
+  work; rotation holds the old segment lock until its successor is locked, and
+  a source changed during replay loses authority.
+- Worker join is not latency-bounded: synchronous filesystem I/O can block
+  inside a callback and cannot be safely detached or portably cancelled. Such a
+  logger cannot seal, but process-availability bounds require H-08's supervised
+  helper or cooperative-cancellation architecture.
 
 ### QuestDB ILP (opt-in, `ENABLE_QUESTDB`)
 - Direct TCP ILP (port 9009) via `IlpWriter` background thread.
@@ -198,7 +249,11 @@ Key CMake flags:
 - `-DENABLE_DEBUG=ON` → StageTimer, ring stats, memory/copy trackers, thread utilization (Abseil-based).
 - `-DENABLE_BENCHMARKS=ON` → Google Benchmark.
 - Release build (`-DCMAKE_BUILD_TYPE=Release`) + LTO where supported.
-- Sanitizers mutually exclusive with peak perf.
+- Sanitizer trees are on-demand, not performance baselines: `linux-asan`
+  enables ASAN + non-recovering UBSAN, Binance, ImGui, and tests;
+  `linux-tsan` enables TSAN, ImGui, and tests. TSan is mutually exclusive with
+  ASAN/UBSAN; use each matching serial `ctest --preset` and do not infer a
+  performance result from sanitizer execution.
 
 Runtime:
 - `--thread-preset`, `--spin-policy`, `--no-pin`
@@ -222,6 +277,10 @@ Runtime:
 | DMS heartbeat / countdown       | 8–10 s / 30 s (typical)                  | Configurable per run |
 | Kill-switch deadline            | 5 000 ms default                         | Hard deadline for orderly flatten |
 | Reconcile tolerance             | 10 bps default                           | Refusal > tolerance |
+| Dashboard projection symbols / positions / strategies / adapters | 256 each | Fixed producer-side capacities; completeness/truncation is explicit. |
+| Dashboard lots / open orders / brackets | 4096 each | Fixed producer-side capacities; no runtime growth. |
+| Dashboard recent fills / trend points / L2 depth | 64 / 60 / 10 per side | Reader must honor availability and truncation. |
+| Dashboard fixed text            | 128 bytes                                | Producer projection strings are bounded. |
 
 **Recommendations**:
 - Always run with `forbid_runtime_grow=true` + sufficient pre-warm for production/shadow/live.

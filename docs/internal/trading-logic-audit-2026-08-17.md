@@ -90,6 +90,28 @@ greenwashed by the passing backtest/unit tests:
 - the mainnet durable-log gate does not yet require a regular recoverable file
   and therefore accepts sinks such as `/dev/null`.
 
+**Current-worktree resolution note (2026-09-01)**: The final bullet is retained
+as the historical finding. H-07 now has a technical implementation in the
+current worktree: atomic unique-file reservation, symlink-free parent traversal,
+descriptor/path identity checks, pre-provider synchronization, dedicated
+mainnet logging-worker enforcement, a fixed two-second exact-order ACK before
+normal and generic `risk_unwind` submission, sticky compromise, and explicit
+completeness-gated two-phase finalization. Reservation is claimed once before
+logger truncation. Post-publication/ACK halt loads refuse submission when they
+observe a terminal failure, but do not atomically close the later adapter-
+mutation window. The ACK deadline does not interrupt a blocked kernel `fsync`.
+Fills/funding/rejections still checkpoint when consumed,
+and cancel/amend/native-bracket plus kill-switch/DMS/native safety-command
+durable intent/outcome coverage is still absent. The ACK deadline also does not
+bound an earlier blocking ring publication, provider shutdown, or worker join.
+This is not a full command WAL, exactly-once execution, cryptographic tamper
+evidence, or crash recovery.
+The literal `LIVE_SAFETY_CCB_APPROVED` token was supplied for the worktree edit,
+but there is no commit/body-token evidence, human CCB approval, or clean
+continuous ≥4-hour mainnet `engine_shadow` evidence. It is not merge-ready or
+live-ready, Phase 0 remains 0/15, and H-03 plus the applicable Phase-1 gates
+remain open. See `docs/todos/08-H-persistence-observability.md` H-07.
+
 Bounded replay is refused until prefix/checkpoint reconstruction and an
 append-sequence contract exist; exchange timestamps need not be monotonic in the
 record stream. Authoritative replay accepts only finalized, non-segmented current

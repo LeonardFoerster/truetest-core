@@ -28,9 +28,9 @@
 17. `docs/architecture/04-performance.md` — Capacities, threading, limits.
 18. `docs/reference/03-db.md`, `04-flags.md`, `05-web-ui.md`, `06-adaptive-hybrid-strategy.md`, `07-strategy-development.md` — Specialized reference (strategy authors → 07).
 19. `docs/archive/` — Historical only (MERGE_PLAN, gaps snapshot, QuestDB logs, Edge1). Not current status.
-20. `docs/internal/engine-decomposition.md` + `engine-decomposition-design.md` — `engine.{h,cpp}` decomposition plan (+ skill `engine-decomposition`).
+20. `docs/internal/engine-decomposition.md` + `engine-decomposition-design.md` — historical decomposition plan plus current Wave-1 as-built delta; Waves 2–5 remain planned.
 21. `docs/internal/data-pipeline.md` — Market-data path redesign (`MarketSeries`, `DataWrapper`; mostly shipped).
-22. `docs/internal/imgui-desk-design.md` — ImGui desk status and remaining research-panel wiring.
+22. `docs/internal/imgui-desk-design.md` — Fixed ImGui trading command-center design, data boundary, and lifecycle.
 23. `docs/skills/00-OVERVIEW.md` — Proposed agent skills and retained execution records.
 24. `docs/decisions/2026-08-14-live-safety-repair.md` — Approved live-safety repair decision and acceptance criteria.
 25. `docs/todos/10-BF-backtest-engine-bugfixes.md` — Backtest defect backlog and frozen-surface sequencing.

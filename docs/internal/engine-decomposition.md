@@ -2,7 +2,11 @@
 
 **File**: `core/docs/internal/engine-decomposition.md`  
 **Purpose**: Detailed, phased execution plan for significantly reducing the size of `src/engine/engine.{h,cpp}` (the engine "god class") while **guaranteeing identical functionality and behavior**.  
-**Status**: Phase 0 COMPLETE (2026-07-17). Phase 1 Design COMPLETE (2026-07-17) — design document + executable PR/Wave DAG produced and reviewed to 0 issues. See Phase 1 section below + core/docs/internal/engine-decomposition-design.md.  
+**Status**: Historical Phase 0/1 design and execution record. Wave 1's dashboard
+extraction is implemented in the current worktree with the as-built projection
+design documented below; Waves 2–5 remain unimplemented. This status does not
+claim commit evidence, human CCB approval, shadow-soak completion, merge
+readiness, or live readiness.
 **Target**: `engine.cpp` < 1800 LOC (ideally 1200–1500), `engine.h` significantly leaner.  
 **Governance**: This plan is governed by the `engine-decomposition` skill. All work on frozen files follows `docs/governance/02-prerequisites.md`, `01-prod.md`, and the LIVE-SAFETY SURFACE rules.
 
@@ -39,7 +43,9 @@
   partial seam and retains documented engine bypasses.
 - Remaining major sources of bloat:
   - Four similar large `run*()` methods with duplicated event-loop skeletons.
-  - `build_dashboard_view()` + related caches, refresh logic, memory sampling (cold but enormous).
+  - Dashboard rich materialization and producer projection now live behind
+    `DashboardSnapshotBuilder`; remaining engine responsibilities still need the
+    later decomposition waves.
   - Pending order scheduling (`pending_orders_`, `pending_stops_`, `check_pending_stops`, priority queue).
   - Worker/ring creation, pinning, start/stop orchestration.
   - Scattered helpers for attribution, dispatch, extras, L2, exits integration.
@@ -158,9 +164,12 @@ Use the following reference style in commits/PRs:
 
 ---
 
-### Wave 1: Extract Dashboard Snapshot Builder (Cold Path — Highest Leverage First Extraction)
+### Wave 1: Extract Dashboard Snapshot Builder (historical plan; implemented with an as-built delta)
 
-**Objective**: Remove the largest cold-path god method and its supporting state. Expected reduction: 350–500+ LOC.
+**Historical objective**: Remove the largest dashboard blob and its supporting
+state. The implementation subsequently changed the concurrency/data design; see
+“Current State After Wave 1” below rather than treating the original task list
+as an as-built description.
 
 **Target Abstraction**:
 - New files: `src/engine/dashboard_snapshot_builder.h` + `.cpp`
@@ -195,6 +204,13 @@ ctest -R 'Hotpath|Engine|snapshot|dashboard|Golden' --output-on-failure
 ### Wave 2: Refactor Run Methods — Introduce Event Loop / Ingestion Coordinator
 
 **Objective**: Eliminate duplication across the four `run*()` methods. Introduce a thin coordinator or common skeleton.
+
+**Current hardening already present in this worktree**: all five worker-starting
+bar/tick/stream paths use one stack-only lifecycle guard for canonical complete
+versus fail-closed teardown. `DataBridge::runtime_failure` is explicitly an
+abort, null dependencies are refused before startup, and the engine halt pointer
+is a call-scoped argument rather than bridge-retained state. The event pumps
+below remain duplicated and Wave 2 is still open.
 
 **Target**:
 - Extract common pump logic into a private `run_event_loop()` or a small `EventLoopCoordinator` / `IngestionDriver`.
@@ -243,6 +259,13 @@ ctest -R 'Hotpath|Engine|snapshot|dashboard|Golden' --output-on-failure
 ### Wave 4: Extract Worker Orchestrator
 
 **Objective**: Centralize ring + worker lifecycle.
+
+**Current hardening already present in this worktree**: `stop_workers()` builds
+one fixed descriptor inventory for the six worker/inbound/drop channels and
+uses it for stop, join proof, diagnostics, drain, totals, and high-water marks.
+Reserved finalization also proves exact expected topology, empty MM outbound
+state, and healthy/empty role-separated durability ACK state. This removes the
+former divergent boolean lists but does not complete the ownership extraction.
 
 **Target**:
 - `src/engine/worker_orchestrator.h` + `.cpp`
@@ -525,7 +548,9 @@ This is the parseable, incremental, reviewable, mergeable plan. Numbered. Depend
 
 **Phase 1 Exit Criteria met**: Polished design exists; this file has concrete numbered wave plan + DAG; reviewer subagent cross-checked (0 issues after iterations).
 
-**Signed off for Phase 1**: Grok (2026-07-17). Design approved per skill rules. No implementation performed. Ready for next steps.
+**Signed off for Phase 1 at that historical point**: Grok (2026-07-17). Design
+approved per the then-current skill rules; no implementation had been performed
+at that date.
 
 ---
 
@@ -562,19 +587,16 @@ This is the parseable, incremental, reviewable, mergeable plan. Numbered. Depend
 - **Full Final Phase / decomposition not complete**: Waves required for net reduction, new classes, behavior verification, long engine_shadow on *decomp changes*, etc.
 - See "Current State After Phase 2" section above. Plan DAG remains the path forward.
 
-**Signed (AI + subagent evidence)**: Grok (2026-07-17). Ritual executed per spec. Ready for Waves when directed. No implementation of extractions performed.
+**Signed (historical AI + subagent evidence)**: Grok (2026-07-17). At that
+point the ritual covered prep only and no extraction had been performed.
 
 ---
 
 **Last updated**: 2026-07-17 (Final Phase ritual executed on Phase 2 prep state; Waves pending)
 
-**Wave 1 (DashboardSnapshotBuilder) update during verification pass**:
-- Files landed + wired: `src/engine/dashboard_snapshot_builder.{h,cpp}` + delegation in engine.
-- Full debug/memory/trend/health/strategies port completed (unblocks HotpathPoolPrewarm + TUI consumers).
-- `clear_for_mc_reset()` added + wired in `reset_for_next_trial`.
-- Build + relevant tests (Engine*, Hotpath*, Golden*, snapshot users) + gates green.
-- Snapshot fidelity for exercised paths (incl. `debug.pools`) now matches pre-extraction.
-- See verification subagent runs for remaining plan/docs polish (Issue 3 in report).
+The later current-worktree implementation is described in “Current State After
+Wave 1” below. Historical verification claims in this section apply only to the
+dated revisions they name, not to the current uncommitted worktree.
 
 ---
 
@@ -593,7 +615,9 @@ This is the parseable, incremental, reviewable, mergeable plan. Numbered. Depend
 - `src/engine/engine.cpp`: 4404 (baseline was 4383; +comments only, as expected for Phase 2)
 - `src/engine/engine.h`: 506
 
-**Waves status**: 0 executed. No new classes (`DashboardSnapshotBuilder` etc.), no moves, no deduplication. Only prep comments.
+**Waves status at this dated Phase-2-prep baseline**: 0 executed. No new classes
+or moves existed in that revision. This historical baseline is superseded for
+Wave 1 by the current-status section below.
 
 **Seams correction (2026-08-14)**: `IOrderAuditSink` is the persistence seam. `ExecutionRouter` is only partial: engine still owns async submit-result draining, exchange-shadow dual submission, and several provider-fill paths. Characterization tests pin that boundary; this document must not claim router completeness until those bypasses are extracted.
 
@@ -604,6 +628,40 @@ This is the parseable, incremental, reviewable, mergeable plan. Numbered. Depend
 - Binary exercise (prebuilt engine_shadow): performed for baseline.
 - No full ctest/build matrix (per initial "Dont build now"; prebuilts used where possible).
 
-**Next**: Waves 1-5 required before Final Phase ritual can declare decomposition complete. Current state = Phase 2 prep only. No net reduction yet. Plan docs (engine-decomposition.md, design doc) partially untracked.
+**Next at that dated baseline**: Waves 1–5 were still required. See the current
+status below for the subsequently implemented Wave 1.
 
 **Signed**: Grok (2026-07-17). Phase 2 prep complete per plan. Ready for Wave 1 when directed.
+
+---
+
+## Current State After Wave 1 (current worktree, 2026-09-01)
+
+Wave 1 is implemented, but not under the original mutex-copy/cache design:
+
+- `DashboardSnapshotBuilder` owns a fixed-capacity `DashboardProjection`.
+  Producer capture is bounded, allocation-free, lock-free, and `noexcept` after
+  construction.
+- The sole engine producer captures only after normally completed outer event
+  boundaries, with explicit initial and final captures and an approximately
+  100 ms observational cadence.
+- Three slots use a combined atomic reader/writer state plus a published
+  generation-and-slot token. Readers pin and validate an immutable projection;
+  the producer may skip an observational refresh when both inactive slots are
+  pinned.
+- `snapshot_dashboard()` requests freshness, pins the current projection, and
+  performs allocating rich materialization on the reader thread. Provider
+  virtual diagnostics, exit-manager venue snapshots, QuestDB health, and
+  process-memory sampling are reader-side work.
+- `generated_at` is projection-capture time, not market-data freshness. During
+  threaded in-run capture, analytics that cannot be observed safely are
+  explicitly unavailable until a terminal/quiescent projection.
+- Projection capacities and truncation/completeness are explicit: 256 symbols,
+  positions, strategies, and adapters; 4096 lots, open orders, and brackets; 64
+  recent fills; 10 depth levels per side; 60 trend samples; 128-byte fixed text.
+
+Waves 2–5 remain future work; full engine decomposition is not complete. The
+literal `LIVE_SAFETY_CCB_APPROVED` token was supplied for this current worktree
+edit, but there is no commit/body-token evidence, human two-person CCB approval,
+or clean continuous ≥4-hour mainnet `engine_shadow` evidence. This worktree is
+not merge-ready or live-ready, and Phase 0 remains 0/15.

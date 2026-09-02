@@ -52,6 +52,7 @@ RUN_TAG="p0_$(date -u +%Y%m%d_%H%M)"
   --provider binance-futures \
   --symbol BTCUSDT \
   --stream trade --depth-stream depth20@100ms \
+  --thread-preset standard \
   --live \
   --api-key "${BINANCE_FUTURES_KEY}" --api-secret "${BINANCE_FUTURES_SECRET}" \
   --log-events "./event_log_${RUN_TAG}.bin" \
@@ -64,10 +65,101 @@ RUN_TAG="p0_$(date -u +%Y%m%d_%H%M)"
 
 **Why each element is mandatory**:
 - `--depth-stream depth20@100ms`: enables realistic queue/impact/L2 models in shadow.
-- `--log-events`: writes the binary zstd event log, the mandatory durable truth. Keep `--log-max-size 0` (the default) for a single authoritative ledger; rotated segments are inspection-only until manifest stitching exists.
+- `--log-events`: reserves a unique new mainnet session ledger. Keep `--log-max-size 0` (the default) and a dedicated logging worker (`standard`, `full`, or `extended`).
 - `--persist`: writes the secondary, queryable QuestDB observability stream (see questdb-multi-week-hardening-guide.md).
 - DMS + reconciler + three futures risk caps + daily-loss/unwind: layered safety nets.
 - Tiny notional + low leverage + conservative liq distance: "prove the system, not the P&L".
+
+**Event-log authority and durability contract**: Only a cleanly sealed,
+current-v3, non-segmented event log is eligible for authoritative ledger replay.
+Mainnet live atomically creates a unique new regular file beneath existing,
+symlink-free, trusted directory ancestry (owned by root/the namespace root/the
+operator; group/world-writable ancestors must be sticky). The reservation is
+claimed once, before any logger can
+truncate the file; a failed logger construction burns that session path rather
+than allowing another writer to reuse it. Mainnet pins and verifies the file and
+parent identities, synchronizes the preamble before provider startup, refuses
+rotation and non-dedicated logging presets, and revalidates the same file during
+checkpoints and finalization. Every logger acquires an exclusive advisory lock
+before truncation; rotation retains the sealed segment lock until the successor
+base pathname is also locked. A sealed replayer pins the opened inode, holds a
+shared lock, and rechecks pathname identity, size, link count, owner/mode, and modification
+metadata before and after record delivery; a changed source loses authority.
+The writable `EventLogger` is a move-only capability held outside the copyable
+`engine_config`: startup transfers it exactly once into the engine and then the
+logging worker. The copyable reservation contains no writer authority and a
+second logger claim is permanently refused. The reverse durability channel is
+also role-separated: a move-only producer endpoint exists only in the logging
+worker and a move-only consumer endpoint exists only in the engine, so producer
+code cannot pop and consumer code cannot push.
+
+Before a normal order or the engine's generic `risk_unwind` order can reach an
+execution adapter, the engine publishes that exact order intent and waits up to
+the fixed two-second admission deadline for the logging worker's matching
+`(order, order_id)` acknowledgement. The worker emits that acknowledgement only
+after the reserved logger has flushed and file/directory-fsynced the order and
+rechecked path identity. Both durable completion and engine consumption of the
+ACK must occur before the deadline. The engine then covers audit/setup and the
+adapter call with a lock-free terminal admission gate; its CAS is the
+linearization point. A command admitted before a concurrent halt is already in
+flight, while the halt closes admission for every later command. Mismatch,
+timeout, logging/setup failure, post-ACK admission refusal, or a halt observed
+before admission makes the ledger compromise sticky, halts, and refuses
+submission. The two-second deadline bounds the engine's ACK wait, not a kernel
+`fsync` call. It also does not bound any earlier blocking publication to another
+worker ring, provider shutdown, or the later worker join.
+
+Fills, funding, and rejections (as well as cancel/amend records once emitted)
+still receive immediate durable checkpoints only when the logging worker
+consumes them. This implementation is therefore **not** a complete command WAL,
+an exactly-once execution protocol, or crash recovery. Durable-before-command
+intent/outcome coverage for cancel, amend, venue-native bracket operations, and
+kill-switch/DMS/native safety cancel-or-flatten commands, plus state
+reconstruction, remains H-03/follow-up work.
+
+Finalization is explicit and completeness-gated after provider
+quiesce/kill/close succeeds. The engine drains stable final tracked funding,
+synthetic metadata, submit results, and fills before joining workers. Late fills
+use teardown-only accounting/logging that cannot invoke strategies, ExitManager,
+or position callbacks and therefore cannot place or cancel venue brackets after
+close. Failed/ambiguous provider shutdown, final-outcome processing failure,
+uncertain mutation outcomes, funding-ingress loss, any expected worker/ring
+topology mismatch, any worker failure/backlog/drop, a missing or non-empty
+market-maker outbound ring, a missing/compromised/non-empty ACK channel, or an
+earlier sticky compromise abandons the ledger without invoking finalization.
+Never-submitted latency/bar-delay/stop scheduler entries are retired locally
+during teardown without calling an adapter; failure to retire them also blocks
+a reserved seal.
+Streaming callback/transport exceptions converted by `DataBridge` to
+`runtime_failure` enter the same terminal rollback; the halt reference is
+scoped to the active call and is never retained by a reusable bridge. Unknown
+venue-native bracket/kill
+outcomes remain in the explicit H-03 non-goal above. A reserved logger
+destructor never seals the file implicitly. Each v3 record carries CRC32C;
+finalization first writes and flushes
+the index/trailer and fsyncs file plus parent while no seal exists, then appends
+a fixed terminal seal committing the covered byte length, record count, index
+offset, and CRC32C of all covered bytes, followed by a second flush/fsync and
+identity check. A complete, internally valid terminal seal is the crash-recovery
+commit authority even if the writer reported an uncertain final `fsync`; a
+qualifying operational run must additionally record both phases as successful.
+Observational records checkpoint after 256 logger-consumed records or when a
+later record observes at least 100 ms since completion of the prior sync. Worker
+backlog, an idle final observational record, or abrupt termination can leave an
+unsealed prefix, which is diagnostic only. CRC32C detects accidental corruption;
+it is not authentication or cryptographic tamper evidence. Advisory locks are a
+cooperation contract, not mandatory kernel write prevention: malicious same-UID
+code can ignore them and can still alter the path or file. Such an actor is
+outside this integrity boundary, and non-mainnet logs do not use the mainnet
+reservation policy.
+
+Worker shutdown itself is not deadline-bounded today. A callback blocked in a
+kernel filesystem operation can prevent `join()` from returning; C++ offers no
+safe timed join or portable cancellation for that case. Unsafe detach would
+outlive engine-owned state, so bounded termination requires H-08's cooperative
+cancellation or supervised-helper redesign. This is fail-closed for ledger
+authority—a blocked logger never reaches the explicit seal—but remains an
+availability and operational-supervision gap.
 
 **Exit criteria for Phase 0 → Phase 1**:
 - 15+ fully documented qualifying sessions across ≥3 volatility regimes (High/Med/Low, classified via `scripts/phase0/volatility-classifier.sh` on 7/14d BTC realized vol).
@@ -79,7 +171,12 @@ RUN_TAG="p0_$(date -u +%Y%m%d_%H%M)"
 **Ritual** (see the printable SOP in `../operations/01-futures-phase0-operator-sop.md`; this file remains authoritative for gates and exit criteria):
 Print/sign the SOP, use `new-session.sh`, keep math-captcha visible the entire session, stay at the terminal, confirm one-way mode, watch DMS counter, run mandatory post-halt grep, run `post-session.sh` + classifier, commit artifacts + note, update PROGRESS.md.
 
-**Current status (2026-05)**: 0/15 qualifying. Scripts and templates exist and are ready. First real tiny-size mainnet validation runs are the immediate focus on the active branch.
+**Current status (2026-09-01)**: 0/15 qualifying. The literal
+`LIVE_SAFETY_CCB_APPROVED` token was supplied for the current worktree edit, but
+there is no commit/body-token evidence, human two-person CCB approval, or clean
+continuous ≥4-hour mainnet `engine_shadow` evidence for it. The worktree is not
+merge-ready or live-ready, and this technical implementation does not advance
+Phase 0 or close the Phase-1 exit gates.
 
 ### Phase 1 — Deepdive Stabilization & Live-Safety Freeze (Required before meaningful size)
 

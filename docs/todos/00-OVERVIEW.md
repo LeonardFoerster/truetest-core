@@ -11,7 +11,7 @@
 - 05-S-dms-kill-brackets.md: DMS / Kill-Switch / Bracket Hardening (S-01..S-06 + additional).
 - 06-D-documentation-structure.md: Documentation & Structure (D-01..D-06 + ongoing rules + aspirational dirs).
 - 07-A-adaptive-hybrid.md: Adaptive Hybrid Strategy (A-01..A-07 + note on lower-pri + MC context).
-- 08-H-persistence-observability.md: Persistence, Observability & Hardening (H-01..H-07 + additional + QuestDB branch note). H-07 (2026-08-18): mainnet durable-log gate doesn't reject non-regular-file sinks — frozen (`main.inc`) track.
+- 08-H-persistence-observability.md: Persistence, Observability & Hardening (H-01..H-07 + additional + QuestDB branch note). H-07: durable mainnet ledger hardening is implemented in the current worktree, but commit-body token evidence, human CCB, and ≥4-hour shadow evidence remain open.
 - 09-other-future-gates.md: Other / Nice-to-Have / Future Venues + Go-Live Gate (9 rows) + invariants from AGENTS.md/ENGINE + AI coding rules summary.
 - 10-BF-backtest-engine-bugfixes.md: Backtest Engine Bug Fixes (BF-01..BF-17) from the 2026-08-14 entry/exit/PnL/risk/analytics audit; splits into a non-frozen fast track and a frozen-surface (`engine.cpp`) CCB track.
 
@@ -136,6 +136,6 @@ The remaining sections preserve the original split rationale. References to a ro
 - Frozen files list in 02-P1-freeze.md verified identical to scripts/check-live-safety-freeze.sh + docs/governance/02-prerequisites.md + docs/governance/01-prod.md + AGENTS.md .
 - Also updated internal governance references post-reorg for accuracy where they intersected todo split (e.g. governance/03-todo.md thinned to point to docs/todos/).
 
-**Last updated**: 2026-08-18 (H-07 added — mainnet durable-log gate frozen-track item; see 08-H-persistence-observability.md).
+**Last updated**: 2026-09-01 (H-07 implementation documented as current-worktree only; governance/evidence open, Phase 0 remains 0/15).
 
 See thin `docs/governance/03-todo.md` for high-level canonical entry + individual `docs/todos/NN-*.md` for full verbatim task details.

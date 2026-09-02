@@ -9,7 +9,7 @@
 ### Core / Replay / Logging
 | Flag                          | What it does |
 |-------------------------------|--------------|
-| `--replay <path>`             | Authoritative ledger replay from a finalized, current-v2, non-rotated binary event log; recorded orders, fills and funding are applied once and strategies are not rerun. Use the same initial balance as the recorded run. |
+| `--replay <path>`             | Authoritative ledger replay from a sealed, current-v3, non-rotated binary event log; recorded orders, fills and funding are applied once and strategies are not rerun. Use the same initial balance as the recorded run. |
 | `--replay-from / --replay-to` | Both bounds are currently refused for ledger replay: prefix state is unavailable and append order need not be monotonic in exchange-event time. |
 | `--log-events <path>`         | Write binary event log (market + order + fill events) for this run. |
 | `--log-file <path>`           | Write operational text log (L1) instead of stderr. |
@@ -29,10 +29,35 @@ When `--log-events` is set, a dropped or failed logging-worker write is
 **terminal** (triggers halt) regardless of `--drop-policy`/mode — a silently
 incomplete durable ledger is never treated as authoritative. The logging
 worker's error budget is also tightened to 1 consecutive error instead of the
-usual default in this mode. Known limitation: the durable-log path does not
-yet require the target to be a regular, recoverable file, so non-file sinks
-are not rejected — treat `--log-events` output review as part of your own
-Phase 0 checklist until that gap closes.
+usual default in this mode.
+
+Only a cleanly sealed, current-v3, non-segmented event log is eligible for
+authoritative ledger replay. Mainnet live atomically reserves a unique new
+regular file beneath existing symlink-free trusted directory ancestry, verifies
+and pins its identity, synchronizes its preamble before provider startup,
+refuses rotation and non-dedicated logging presets, and claims the reservation
+once before any logger truncation. Normal and generic `risk_unwind` order intents
+wait up to two seconds for their exact post-flush/fsync ACK before adapter
+submission; both ACK production and engine consumption must beat the deadline.
+A lock-free terminal admission CAS then spans setup and the adapter call: a
+command that wins before concurrent close is in flight, and none can enter after
+close. The deadline does not bound an earlier blocking
+ring publication, a blocked `fsync`, provider shutdown, or worker join. Other
+economic records checkpoint when the logger consumes them; observational
+records checkpoint after 256 consumed records or when a later record observes
+at least 100 ms since completion of the prior sync. Compromise is sticky; the
+engine attempts the two-phase index/trailer-prefix plus append-only v3 integrity
+seal only after a quiesced/drained/healthy shutdown gate, and both phases must
+return successfully for operational evidence.
+Reserved logger destruction never seals implicitly. Worker backlog, an idle
+final observational record, or abrupt termination can leave an unsealed
+diagnostic prefix. Per-record and covered-prefix CRC32C detect accidental
+corruption; they are not authentication. This is not a full command WAL,
+exactly-once execution, or complete crash recovery. Backtest, shadow, and
+sandbox logs do not use the mainnet reservation policy. See
+`docs/todos/08-H-persistence-observability.md` H-03 for remaining
+cancel/amend/native-bracket and kill-switch/DMS/native safety command
+intent/outcome and reconstruction work.
 
 ### Threading / CPU
 | Flag                    | What it does |
@@ -78,6 +103,14 @@ Phase 0 checklist until that gap closes.
 | `--live`                | Required safety flag for real-money orders (mainnet triggers math captcha; sandbox skips it). Only works on `engine_live` binary. |
 | `--testnet`             | Sandbox routing: Binance → spot/futures testnet hosts; Bitget → demo/paptrading (same as `--demo`). |
 | `--demo`                | Bitget demo/paptrading endpoints (also set by `--testnet` when provider is `bitget*`). |
+
+For mainnet live, spot and futures both require a positive daily-loss limit, a
+unique durable event-ledger path, rotation disabled, and a dedicated logging
+worker (`standard`, `full`, or `extended`). Futures additionally require all
+three positive venue caps, an armed DMS, `--risk-unwind`, and
+`--reconcile-tolerance-bps` in `(0,3]`. Sandbox recognition is provider-aware:
+Binance uses `--testnet`, Bitget uses `--demo` or `--testnet`, and Bitunix
+refuses both in every engine mode because it has no sandbox endpoint.
 
 ### Futures risk / DMS (venue futures providers)
 | Flag                              | What it does |
@@ -172,13 +205,10 @@ Strategies do **not** need to implement SL/TP. Rich strategy intents (ATR/fib/sc
 | `--no-tui`              | Shortcut for `--status-format=plain`. |
 | `--simple-tui`          | On shadow/live, use the ANSI-box console dashboard instead of the rich ncurses TUI; has no effect on backtest or non-TUI status formats. |
 
-### ImGui strategy desk (only when built with `ENABLE_IMGUI=ON` / `HAS_IMGUI_DESK`)
+### ImGui trading command center (only when built with `ENABLE_IMGUI=ON` / `HAS_IMGUI_DESK`)
 | Flag | What it does |
 |------|----------------|
-| `--desk` | Open the personal ImGui desk (MARKET/RESEARCH/OPERATIONS/DIAGNOSTICS workspaces + operator pause/flatten/kill). Prefer over rich TUI when set. Batch runs keep the window open on the final snapshot until closed. See `docs/internal/imgui-desk-design.md`. |
-| `--desk-demo-data` | Start the desk with deterministic DEMO DATA research panels already enabled (same as the menu toggle) - headless visual QA / manual smoke without a mouse click. |
-| `--no-footprint` | Disable footprint public-trade collection, which otherwise auto-activates with `--desk`. Never affects trading behavior either way; it is purely observational. See `docs/internal/imgui-desk-design.md`. |
-| `--footprint-tick-size` | Exact decimal tick-size override for the footprint panel (e.g. `0.01`), used only when official instrument metadata disagrees or is unavailable; conflicting values make the footprint unavailable rather than guessing. |
+| `--desk` | Open the fixed ImGui trading command center with attended pause/flatten/kill controls. GLFW/ImGui/OpenGL startup and rendering stay on the application-main thread while engine work runs in a `std::jthread`. Batch runs keep the final snapshot visible until the operator closes the window. See `docs/internal/imgui-desk-design.md`. |
 
 ### Web UI (only when built with `ENABLE_WEB=ON` / `HAS_WEB`)
 | Flag | What it does |

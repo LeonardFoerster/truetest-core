@@ -73,6 +73,7 @@ RUN_TAG="p0_$(date -u +%Y%m%d_%H%M)"
   --provider binance-futures \
   --symbol BTCUSDT \
   --stream trade --depth-stream depth20@100ms \
+  --thread-preset standard \
   --live \
   --api-key "${BINANCE_FUTURES_KEY}" --api-secret "${BINANCE_FUTURES_SECRET}" \
   --log-events "./event_log_${RUN_TAG}.bin" \
@@ -82,7 +83,11 @@ RUN_TAG="p0_$(date -u +%Y%m%d_%H%M)"
   --max-notional 15000 --max-leverage 2.5 --min-liq-distance-pct 0.07 \
   --max-daily-loss 80 --risk-unwind
 ```
-Status: 0/15 qualifying (see reports/phase0/PROGRESS.md + docs/governance/03-todo.md).
+Status: 0/15 qualifying (see reports/phase0/PROGRESS.md +
+docs/governance/03-todo.md). The literal `LIVE_SAFETY_CCB_APPROVED` token was
+supplied for the current worktree edit, but there is no commit/body-token
+evidence, human two-person CCB approval, or clean continuous ≥4-hour mainnet
+`engine_shadow` evidence. The worktree is not merge-ready or live-ready.
 
 **Phase 1 Live-Safety Freeze**: the expanded engine/provider/execution safety surface requires the `LIVE_SAFETY_CCB_APPROVED` token + CCB + clean shadow run (see `docs/governance/01-prod.md`, `02-prerequisites.md`, and the exact list in `scripts/check-live-safety-freeze.sh`).
 
@@ -160,8 +165,8 @@ cmake --preset linux-bitunix           # Bitunix MD/shadow
 cmake --preset linux-venues            # Binance + Bitget + Bitunix
 cmake --preset linux-providers-questdb # all venues + QuestDB
 cmake --preset linux-web
-cmake --preset linux-asan             # ASAN+UBSAN (+ Binance)
-cmake --preset linux-tsan
+cmake --preset linux-asan             # ASAN+UBSAN + Binance + ImGui + tests
+cmake --preset linux-tsan             # TSAN + ImGui + tests
 cmake --preset linux-benchmarks       # DEBUG + Google Benchmark
 cmake --preset linux-release-native    # Release + NATIVE_OPT (all engines)
 cmake --preset linux-release-low-memory # portable Release + tests, LTO off
@@ -172,8 +177,29 @@ cmake --preset linux-release-low-memory # portable Release + tests, LTO off
 - Feature: `ENABLE_QUESTDB`, `ENABLE_DEBUG` (Abseil), `ENABLE_BENCHMARKS`, `ENABLE_WEB` (civetweb — see [05-web-ui.md](05-web-ui.md)), `ENABLE_IMGUI` (GLFW/OpenGL desk).
 - Compatibility only: `ENABLE_LIVE_DATA` is a deprecated no-op. Live market data is provided by the concrete venue options above.
 - Build: `CMAKE_BUILD_TYPE=Release`, `ENABLE_LTO` (first-party Release targets; disable for lower peak memory), `ENABLE_NATIVE_OPT` (all three engines when ON), `BUILD_TESTS`, `BUILD_SHARED_LIB`.
-- Sanitizers (Debug): `ENABLE_TSAN` is mutually exclusive with ASAN/UBSAN; ASAN+UBSAN together is allowed (`linux-asan` preset).
+- Sanitizers (Debug): `ENABLE_TSAN` is mutually exclusive with ASAN/UBSAN;
+  ASAN+UBSAN together is allowed. `linux-asan` enables ASAN, non-recovering
+  UBSAN, Binance, ImGui, and tests. `linux-tsan` enables TSAN, ImGui, and tests.
+  Both test presets run serially and halt on the first sanitizer report.
 - Perf reference build: Release + ENABLE_DEBUG + NATIVE_OPT + BENCHMARKS.
+
+Sanitizer trees are on-demand; configure, build, and execute their matching
+test presets explicitly:
+
+```bash
+cmake --preset linux-asan
+cmake --build --preset linux-asan
+ctest --preset linux-asan
+
+cmake --preset linux-tsan
+cmake --build --preset linux-tsan
+ctest --preset linux-tsan
+```
+
+The ASAN test preset enables leak detection, halt-on-error, and UBSAN stack
+traces. The TSAN test preset halts on the first report. These commands describe
+the configured workflow; they are not a claim that either suite passed the
+current worktree.
 
 **Build audit header**: Every binary prints `AUDIT: git=... timestamp=... pins=...` (truetest_version.h generated).
 
@@ -211,7 +237,7 @@ cmake --preset linux-release-low-memory # portable Release + tests, LTO off
 
 **TUI**: Rich ncurses tabbed dashboard on shadow/live (positions, orders, L2, risk, brackets, debug StageTimer/ring, health/DMS counter). Hotkeys, setup menu on backtest. `--no-tui` for headless/CI.
 
-**Web UI** (opt-in, `-DENABLE_WEB=ON` + `--web`): browser cockpit + backtest review, same data the TUI shows. Embedded civetweb server on its own thread, reading the engine through `snapshot_dashboard()` (off the hot path, outside the frozen live-safety surface). WS `/stream` (live SnapshotFrame), REST `/api/snapshot` + `/api/results`. See [web-ui.md](05-web-ui.md).
+**Web UI** (opt-in, `-DENABLE_WEB=ON` + `--web`): browser cockpit + backtest review, same data the TUI shows. The engine producer performs a bounded, allocation-free projection capture after completed event boundaries; `snapshot_dashboard()` pins that immutable projection and materializes the rich snapshot on the reader thread. WS `/stream` emits schema-v3 `SnapshotFrame`; REST provides `/api/snapshot` + `/api/results`. The routes are read-only, but the projection/startup implementation touches the frozen engine/main surface, so frozen-surface governance still applies. See [05-web-ui.md](05-web-ui.md).
 
 **JSON config**: Supported snake_case subset of CLI options, not a complete `engine_config` serialization. Use `--dump-config` to inspect the resolved output; consult `src/bin/main.inc` for the accepted keys.
 
@@ -310,7 +336,9 @@ Lock-free SPSC RingBuffer (64k slots) per worker preset. Presets: inline (single
 **Observability**:
 - StageTimer + ring_stats + memory/copy trackers (TUI debug tab + shutdown report).
 - Structured logging (L1), rotation (L3), ndjson.
-- Binary zstd event log (mandatory for replay/determinism).
+- Binary zstd event log; only cleanly sealed, current-v3, non-segmented logs
+  are eligible for authoritative replay. See the durability contract in
+  `docs/governance/01-prod.md`.
 - QuestDB (opt-in).
 - Rich TUI panels (positions, L2, risk, brackets, DMS counter, health, debug).
 - Analytics (Welford online, Sharpe/Sortino, adverse selection, report_generator).
@@ -346,7 +374,7 @@ Full `provider::event` variant + market/tick/l2/order/fill/funding. OrderTracker
 
 **Checkpoints**: Portfolio snapshots are diagnostic-only. `--resume` and direct `resume_checkpoint_path` are refused because v1 does not contain enough state for safe recovery. A future v2 must cover orders, lots, strategy, risk, and execution state. `--seed` remains the RNG/fixed-epoch determinism control.
 
-**Replay**: `--replay events.bin` applies a current-v2 recorded economic ledger exactly once; it does not rerun a strategy or regenerate fills. Supply the same `--balance` as the recorded run. `--replay-from` and non-default `--replay-to` are refused: checkpoint prefix state is unavailable and record append order need not be monotonic in exchange-event time. Legacy/headerless logs remain available to `EventReplayer` for inspection but are not accepted as authoritative engine ledgers. `--replay-data` is the separate market-data path. Regression tests compare orders, fills, trades and PnL against the source run.
+**Replay**: `--replay events.bin` applies a current-v3 recorded economic ledger once; it does not rerun a strategy or regenerate fills, and this replay behavior is not an exactly-once venue-execution protocol. Supply the same `--balance` as the recorded run. `--replay-from` and non-default `--replay-to` are refused: checkpoint prefix state is unavailable and record append order need not be monotonic in exchange-event time. V1/v2/headerless logs remain available to `EventReplayer` for inspection but are not accepted as authoritative engine ledgers. `--replay-data` is the separate market-data path. Regression tests compare orders, fills, trades and PnL against the source run.
 
 **Analytics**: Cumulative + rolling, per-symbol/strategy, alpha/beta vs benchmark, adverse selection, report export JSON/CSV.
 
@@ -357,7 +385,8 @@ Full `provider::event` variant + market/tick/l2/order/fill/funding. OrderTracker
 **[../architecture/01-target-architecture.md](../architecture/01-target-architecture.md)** (north star, Phase 1 artifact):
 - 6 guiding principles (compile-time safety, terminal halt, provider + 4 hooks, hot-path discipline, observability by default, small capital first).
 - Steady-state components: event/execution model, layered risk/safety, persistence (binary mandatory, QuestDB opt-in), providers (local/binance + future drift/), observability (TUI/ndjson/Prometheus future).
-- Deferred: hedge, COIN-M, generic cross-margin, web UI (removed).
+- Deferred: hedge, COIN-M, and generic cross-margin. The optional read-only web
+  UI is implemented; see [05-web-ui.md](05-web-ui.md).
 
 **Change history**: use version control plus the dated records under `docs/decisions/`; there is no separate migration ledger.
 

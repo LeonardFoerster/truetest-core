@@ -3,7 +3,10 @@
 **Title**: Phase 1 Design: Engine Decomposition (Waves 1-5 per core/docs/internal/engine-decomposition.md)
 **Author**: Grok (systems architect, delegated build subagent)
 **Date**: 2026-07-17
-**Status**: Draft (Phase 1 output; awaiting approval before any implementation)
+**Status**: Historical Phase-1 design record. Wave 1 is implemented in the
+current worktree with a materially different projection/publication design;
+Waves 2–5 remain future work. Historical implementation prescriptions below are
+not current architecture.
 **Inputs**: core/docs/internal/engine-decomposition.md (Current State After Phase 0 section, responsibility matrix, Phased Execution Plan Waves 1-5), ~/.grok/skills/engine-decomposition/SKILL.md (all non-negotiables), src/engine/engine.{h,cpp}, core/docs/governance/01-prod.md, 02-prerequisites.md, core/docs/todos/02-P1-freeze.md, core/docs/architecture/04-performance.md, extracted seams (order_audit_sink.{h,cpp}, execution_router.{h,cpp}, instrument_spec_cache.{h,cpp}, checkpoint.{h,cpp}).
 
 **Related**: Addresses core/docs/internal/engine-decomposition.md#E-10 to E-14 (Phase 1: Design First + Executable PR Plan). Will be referenced to update engine-decomposition.md with DAG.
@@ -15,6 +18,35 @@
 The `engine` class (`src/engine/engine.h:82`, `src/engine/engine.cpp:4383` LOC / `engine.h:492` LOC as of Phase 0 baseline) is a god class owning hot event-loop dispatch (`publish_event`, `process_order` canonical 8-step sequence), object pools, four duplicated `run*()` skeletons, cold dashboard snapshot construction with caches, pending order scheduling (priority_queue + vector stops), worker/ring lifecycle, QuestDB activation, safety flags, attribution, exits integration, and MC reuse via `reset_for_next_trial`.
 
 Phase 1 of the Engine Decomposition Plan (following the exact Waves 1-5 in core/docs/internal/engine-decomposition.md) proposes extracting **cold paths first** into focused collaborators while **preserving identical bit-for-bit behavior** for backtest/shadow/live (all `TT_TARGET` / `ENABLE_*` combos), MC object reuse, golden regressions, hot-path alloc tests, and engine integration tests. Hot path remains zero-alloc, no virtuals, lock-free SPSC rings, `acquire_pooled` + `publish_event` + `forbid_runtime_grow` discipline unchanged forever.
+
+## As-built Wave 1 delta (current worktree, 2026-09-01)
+
+The Wave-1 implementation supersedes this document's proposed
+`unordered_map`/`deque` dashboard cache, mutex-protected whole-snapshot copy,
+and refresh-from-`publish_event` design. `DashboardSnapshotBuilder` instead
+captures a fixed-capacity, allocation-free `DashboardProjection` on the sole
+engine producer after normally completed outer event boundaries, plus explicit
+initial and final captures. It publishes through three slots with combined
+atomic reader/writer state and a generation-plus-slot token. Readers pin an
+immutable projection and `snapshot_dashboard()` performs rich allocating
+materialization, provider/venue diagnostics, QuestDB health, and process-memory
+sampling on the reader thread. If both inactive slots are pinned, an
+observational capture can be skipped. `generated_at` means projection-capture
+time, and unavailable threaded analytics remain unavailable rather than
+becoming authoritative zeroes.
+
+Projection limits are explicit: 256 symbols/positions/strategies/adapters,
+4096 lots/open orders/brackets, 64 recent fills, 10 depth levels per side, 60
+trend points, and 128-byte fixed text. Completeness/truncation travels with each
+bounded collection. Refer to the current implementation and
+`engine-decomposition.md`'s current-status section for as-built behavior; the
+remaining text below is retained to explain the original design and later
+design divergence.
+
+The literal `LIVE_SAFETY_CCB_APPROVED` token was supplied for the current
+worktree edit, but there is no commit/body-token evidence, human two-person CCB
+approval, or clean continuous ≥4-hour mainnet `engine_shadow` evidence. This is
+not a merge-readiness/live-readiness claim; Phase 0 remains 0/15.
 
 **Proposed target after all waves**:
 - `engine.cpp` <1800 LOC (stretch 1200-1500).
@@ -67,7 +99,8 @@ Net complexity reduction via deletion of duplicated run skeletons, scattered cac
 - No new public API surface or behavioral changes to MC reuse, TUI snapshot data, or run outputs.
 - Do not touch object pools, `publish_event` ring handoff, worker ring wiring in hot paths, or safety primitives.
 - Not a full lifecycle coordinator in Phase 1 (future post-Wave 5).
-- No implementation until this design approved (per Phase 1 exit criteria).
+- At the historical Phase-1 point, no implementation was permitted until this
+  design was approved. That statement is not current Wave-1 status.
 - No broad filesystem searches or out-of-scope refactors.
 
 ---

@@ -87,11 +87,11 @@ Evidence for Phase 0 sessions lives outside this tree: **`reports/phase0/`**.
 - [`platforms/bitget.md`](platforms/bitget.md), [`platforms/bitunix.md`](platforms/bitunix.md)
 
 ### Internal design plans (engineering)
-- [`internal/engine-decomposition.md`](internal/engine-decomposition.md) — `engine.{h,cpp}` decomp plan (+ skill `engine-decomposition`)
-- [`internal/engine-decomposition-design.md`](internal/engine-decomposition-design.md) — Phase 1 design + PR DAG
+- [`internal/engine-decomposition.md`](internal/engine-decomposition.md) — historical `engine.{h,cpp}` plan plus current Wave-1 status
+- [`internal/engine-decomposition-design.md`](internal/engine-decomposition-design.md) — historical Phase-1 design/PR DAG with the as-built Wave-1 delta
 - [`internal/data-pipeline.md`](internal/data-pipeline.md) — market-data path redesign (`MarketSeries` / `DataWrapper`; mostly shipped)
 - [`internal/2026-07-cmake-modernization-design.md`](internal/2026-07-cmake-modernization-design.md)
-- [`internal/imgui-desk-design.md`](internal/imgui-desk-design.md) — ImGui desk status and planned research wiring
+- [`internal/imgui-desk-design.md`](internal/imgui-desk-design.md) — fixed ImGui trading command-center design and lifecycle
 
 ### Decisions
 - [`decisions/2026-08-14-live-safety-repair.md`](decisions/2026-08-14-live-safety-repair.md) — approved live-safety repair scope and acceptance criteria

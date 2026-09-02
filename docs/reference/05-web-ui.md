@@ -1,9 +1,11 @@
 # Web UI
 
 A browser dashboard for TrueTest — a live trading cockpit and a backtest-review
-report, rendering the same data as the ncurses TUI. Opt-in, off the hot path,
-and **read-only**: nothing in this surface can place, cancel, or flatten an
-order. Operator controls remain in the ncurses and ImGui surfaces.
+report, rendering the same data as the ncurses TUI. It is opt-in and
+**read-only**: nothing in this surface can place, cancel, or flatten an order.
+The engine producer performs only bounded, allocation-free projection capture;
+allocating snapshot materialization and JSON serialization happen on the reader
+side. Operator controls remain in the ncurses and ImGui surfaces.
 
 Implemented as the optional `ENABLE_WEB` read-only surface. The ImGui desk is the primary in-process human cockpit; this browser surface remains available for snapshot/report viewing.
 
@@ -61,11 +63,16 @@ shows a **Demo data** badge — useful for design work without a backend.
 | `GET /api/results` | `ResultsReport` — `engine.get_analytics().generate_report()` |
 | `WS /stream` | Live `SnapshotFrame` JSON: one frame on connect, then at the poll rate (~10 Hz) |
 
-**SnapshotFrame schema:** `schema_version` **2** (additive over v1). New blocks for
-engine telemetry (Trading desk / operator board):
+**SnapshotFrame schema:** `schema_version` **3**. The frontend validates this
+contract at runtime and rejects malformed frames, older schema versions, and
+source timestamps more than five seconds in the future.
 
 | Key | Contents |
 |-----|----------|
+| `generated_at_ms`, `generated_at_available` | Nullable producer-capture timestamp plus explicit availability. This is snapshot/update age, not market-data age. |
+| account / position / risk / trend / queue metrics | Unavailable values are JSON `null` with explicit availability, never fabricated numeric zeroes. |
+| open-order `trigger_price`, `trigger_price_available` | Trigger value and explicit availability. |
+| fill `source` | Closed enum: `exchange`, `simulated`, or `unknown`. |
 | `memory` | `/proc` RSS/heap when available; pool/ring byte footprints |
 | `debug` | `target`/`mode`/`preset`, `worker_count`, ring size/HWM/drops, pool in-use, subsystem errors; optional `stages` on `HAS_DEBUG` builds |
 
@@ -79,20 +86,32 @@ SL↔TP brackets, L2 ladder, fills tape, per-strategy cards, risk gauges, system
 health) and **Backtest Review** (metric board, benchmark, equity-vs-benchmark
 with brush + trade markers, sortable/filterable blotter, P&L histogram,
 per-symbol / per-strategy breakdowns). Connection states: Connected · HALTED
-(from `risk.halted`) · Reconnecting · Demo data (offline fixture).
+(from `risk.halted`) · Reconnecting/disconnected · Stale/degraded · Demo data
+(offline fixture).
+
+Feed freshness is conservative. The stale threshold is two seconds and age is
+the maximum of source-frame age and receipt silence, so replaying an old frame
+cannot turn the display green. A missing source timestamp, malformed frame,
+future timestamp, open connection with no frame, or receipt silence degrades
+the feed explicitly.
 
 ---
 
 ## Architecture
 
-The web layer is a third consumer of the engine's existing read-only seam. It
-polls the existing snapshot seam off the per-event path.
+The web layer is a third consumer of the engine's existing read-only seam. The
+engine producer captures a fixed-capacity projection after normally completed
+event boundaries, plus explicit initial and final captures. A three-slot
+publication protocol lets a reader pin an immutable projection; if both
+inactive slots are pinned, an observational refresh may be skipped. The web
+poller calls `snapshot_dashboard()`, which materializes the rich allocating
+snapshot from the pinned projection on the reader thread.
 
 ```
-engine event loop ──(100ms)── dashboard_snapshot  ──snapshot_dashboard()──┐
+engine producer ── bounded/noexcept projection capture ── three slots ────┐
                                                                           │
   src/web/ (ENABLE_WEB, own thread)                                       │
-   • SnapshotPoller: snapshot_dashboard() → snapshot_to_json() ─ WS /stream
+   • SnapshotPoller: pin → materialize → snapshot_to_json() ── WS /stream
    • report_to_json(generate_report())           ────────────── REST /api/results
    • civetweb HTTP+WS server                                              │
                                                                           ▼
@@ -116,6 +135,12 @@ engine event loop ──(100ms)── dashboard_snapshot  ──snapshot_dashboa
   fixture module applies the adapters, doubling as a compile-time contract check
   (`tsc` fails if the serializer shape and the adapters drift apart).
 
+`generated_at` records producer projection-capture time, not exchange or
+market-data freshness. During threaded runs, ordinary event-boundary
+projections may report analytics unavailable until the terminal/quiescent
+projection; consumers must preserve that distinction instead of rendering
+zeroes.
+
 ### Scale conventions worth knowing
 
 The serializers emit engine-native conventions; the adapters reconcile them:
@@ -135,10 +160,11 @@ sides are single chars (`'L'`/`'S'`, `'B'`/`'S'`).
   a reverse proxy (TLS terminates there — civetweb is built without SSL).
 - **Bounded subscribers.** `/stream` caps concurrent clients (`max_ws_clients`)
   so a connection flood can't stall the broadcast cadence.
-- **No frozen-surface contact.** No edits to `engine.cpp`'s loop, `tt_target.h`,
-  `*kill_switch*`/`*dead_mans_switch*`/`*reconciler*`, `src/threading/`, or
-  `src/risk/`; no `LIVE_SAFETY_CCB_APPROVED` token required. Verified against
-  `check-hotpath-json.sh` and `check-live-safety-freeze.sh`.
+- **Frozen-surface governance still applies.** The web routes remain read-only,
+  but the projection and startup implementation touches the mechanically frozen
+  engine/main surface. Such changes require the `LIVE_SAFETY_CCB_APPROVED`
+  commit-body token, full T3 review, human CCB, and clean shadow evidence before
+  merge; read-only UI semantics do not waive those gates.
 
 ---
 

@@ -114,7 +114,12 @@ Expect `BitgetFuturesProvider: ws=ws.bitget.com:443/v3/ws/public` and eventual `
 
 Use `engine_live` only when intentionally testing signed demo order paths. Tiny notional, attended, demo keys only.
 
-**Phase-0 CLI gates (parity with Binance futures):** mainnet Bitget live **refuses** without at least one of `--max-notional` / `--max-leverage` / `--min-liq-distance-pct` **and** a positive `--max-daily-loss`. `--demo` / `--testnet` (paptrading) may warn only.
+**Phase-0 CLI gates (parity with Binance futures):** mainnet Bitget live
+**refuses** unless all three of `--max-notional`, `--max-leverage`, and
+`--min-liq-distance-pct` are positive, together with a positive
+`--max-daily-loss`, armed DMS, `--risk-unwind`, reconciliation tolerance in
+`(0,3]`, a unique durable ledger, and a dedicated logging worker. `--demo` /
+`--testnet` (paptrading) may warn only.
 
 ```bash
 export TRUETEST_BITGET_API_KEY=...
