@@ -9,15 +9,6 @@
 
 namespace truetest::exits {
 
-enum class exit_reason : std::uint8_t
-{
-    stop_loss,
-    take_profit,
-    trailing_stop,
-    time_stop,
-    manual
-};
-
 // Declarative exit plan emitted by a strategy at entry. The engine owns
 // enforcement and binds triggers to the actual opener fill price, so a
 // strategy never executes its own stops.

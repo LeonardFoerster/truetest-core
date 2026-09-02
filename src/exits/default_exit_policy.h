@@ -39,6 +39,9 @@ bool intents_have_stop_loss(const std::vector<exit_intent>& intents);
 // True when any intent already carries a take_profit.
 bool intents_have_take_profit(const std::vector<exit_intent>& intents);
 
+// True when any intent already carries a trailing_pct.
+bool intents_have_trail(const std::vector<exit_intent>& intents);
+
 // Build a single platform intent for an entry order (long or short).
 // Empty optional fields when the corresponding pct is <= 0.
 // Returns nullopt if both SL and TP disabled and trail off, or qty/price invalid.

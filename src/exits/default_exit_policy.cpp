@@ -29,10 +29,14 @@ bool is_position_reducing(const order_event& order, double net_qty)
     if (opener != 0 && (oid == 0 || opener != oid))
         return true;
 
+    // An un-attributed opposite-side order can cross through flat. Only its
+    // closing portion is position-reducing; the residual opens exposure and
+    // must receive the configured platform safety floor.
+    const double qty = order.get_quantity();
     if (net_qty > kQtyEps && order.get_side() == order_side::sell)
-        return true;
+        return qty <= net_qty + kQtyEps;
     if (net_qty < -kQtyEps && order.get_side() == order_side::buy)
-        return true;
+        return qty <= -net_qty + kQtyEps;
     return false;
 }
 
@@ -48,6 +52,14 @@ bool intents_have_take_profit(const std::vector<exit_intent>& intents)
 {
     for (const auto& ei : intents)
         if (ei.take_profit.has_value())
+            return true;
+    return false;
+}
+
+bool intents_have_trail(const std::vector<exit_intent>& intents)
+{
+    for (const auto& ei : intents)
+        if (ei.trailing_pct.has_value())
             return true;
     return false;
 }
@@ -120,6 +132,19 @@ std::vector<exit_intent> apply_default_exit_policy(
             if (platform)
                 return {*platform};
             return {};
+        }
+        if (p.mode == exit_policy_mode::union_mode)
+        {
+            default_exit_params missing_p;
+            missing_p.mode = exit_policy_mode::union_mode;
+            missing_p.sl_pct = (p.sl_pct > 0.0 && !intents_have_stop_loss(strategy_intents)) ? p.sl_pct : 0.0;
+            missing_p.tp_pct = (p.tp_pct > 0.0 && !intents_have_take_profit(strategy_intents)) ? p.tp_pct : 0.0;
+            missing_p.trail_pct = (p.trail_pct > 0.0 && !intents_have_trail(strategy_intents)) ? p.trail_pct : 0.0;
+
+            if (auto platform_missing = make_platform_exit_intent(order, missing_p))
+            {
+                strategy_intents.push_back(std::move(*platform_missing));
+            }
         }
         return strategy_intents;
     }
