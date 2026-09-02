@@ -73,8 +73,10 @@ namespace truetest::ui { struct streaming_stats; }
 #include <optional>
 #include <queue>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 static constexpr std::size_t DEFAULT_RING_SIZE = 65536;
 
@@ -85,7 +87,88 @@ enum class live_shutdown_reason;
 class engine
 {
 private:
+    // Lock-free one-command admission gate for venue mutations. The CAS is
+    // the linearization point: a command that wins before close() is already
+    // in flight; once close() wins, no later submit/amend/cancel can enter.
+    // Unlike a mutex held across an adapter call, close() cannot deadlock when
+    // an adapter synchronously reports a terminal failure back into the
+    // engine.
+    class order_mutation_admission_gate final
+    {
+    public:
+        class token final
+        {
+        public:
+            token() noexcept = default;
+            token(const token&) = delete;
+            token& operator=(const token&) = delete;
+            token(token&& other) noexcept
+                : owner_(std::exchange(other.owner_, nullptr)) {}
+            token& operator=(token&& other) noexcept
+            {
+                if (this == &other) return *this;
+                reset();
+                owner_ = std::exchange(other.owner_, nullptr);
+                return *this;
+            }
+            ~token() noexcept { reset(); }
+
+            explicit operator bool() const noexcept
+            {
+                return owner_ != nullptr;
+            }
+
+        private:
+            friend class order_mutation_admission_gate;
+            explicit token(order_mutation_admission_gate* owner) noexcept
+                : owner_(owner) {}
+            void reset() noexcept
+            {
+                if (owner_)
+                {
+                    owner_->release();
+                    owner_ = nullptr;
+                }
+            }
+            order_mutation_admission_gate* owner_ = nullptr;
+        };
+
+        [[nodiscard]] token try_acquire() noexcept
+        {
+            std::uint8_t expected = open_state;
+            if (state_.compare_exchange_strong(
+                    expected, active_bit,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+                return token{this};
+            return {};
+        }
+
+        void close() noexcept
+        {
+            (void)state_.fetch_or(closed_bit, std::memory_order_acq_rel);
+        }
+
+    private:
+        static constexpr std::uint8_t open_state = 0;
+        static constexpr std::uint8_t closed_bit = 1U << 0;
+        static constexpr std::uint8_t active_bit = 1U << 1;
+
+        void release() noexcept
+        {
+            constexpr auto keep_closed = static_cast<std::uint8_t>(
+                ~active_bit);
+            (void)state_.fetch_and(keep_closed, std::memory_order_release);
+        }
+
+        alignas(64) std::atomic<std::uint8_t> state_{open_state};
+    };
+
+    friend class DashboardProjectionTestPeer;
     engine_config config_;
+    // Mainnet startup verifies this exact writer before provider open, then
+    // transfers it once into either inline logging or LoggingWorker.
+    std::unique_ptr<EventLogger> preopened_event_logger_;
     std::shared_ptr<data_handler> data_handler_;
     OrderbookRegistry orderbook_registry_;
     std::shared_ptr<IStrategy> strategy_;
@@ -182,8 +265,16 @@ private:
     std::shared_ptr<EventRing> risk_stats_ring_;
     std::shared_ptr<EventRing> mm_ring_;
     std::shared_ptr<MMRing> mm_order_ring_;
+    std::optional<DurableLogProtocol::ConsumerEndpoint>
+        durable_log_consumer_;
 
     void publish_event(const event_pointer& ev);
+    bool await_durable_order_ack(std::uint64_t order_id) noexcept;
+    bool admitted_mutation_prerequisites_hold(
+        std::string_view operation) noexcept;
+    void compromise_durable_log(std::string_view reason) noexcept;
+    static constexpr auto durable_order_ack_deadline_ =
+        std::chrono::seconds{2};
 
 #ifdef HAS_QUESTDB
     std::shared_ptr<truetest::questdb::QuestdbStore> questdb_store_;
@@ -243,7 +334,7 @@ private:
     // installed on the provider's ExecutionBridge. Safe to call when
     // there is no bridge - it just no-ops.
     void drain_venue_bracket_meta();
-    void drain_async_submit_results(IExecutionAdapter* adapter);
+    void drain_async_submit_results(IExecutionAdapter* adapter) noexcept;
     // Sole consumer for provider funding ingress. Only this engine-thread path
     // may acquire funding_pool_, mutate portfolio/audit, or publish the event.
     bool drain_provider_funding_updates() noexcept;
@@ -262,12 +353,15 @@ private:
     // run_post_fill_risk: false for risk_unwind fills (already halting).
     // mark_shadow_sim: true for paper/sim fills in shadow dual-track mode.
     // status_reason: optional audit reason (e.g. "risk_unwind").
+    // allow_follow_up_actions: false only during post-provider-shutdown drain;
+    // suppresses strategy/ExitManager callbacks that can mutate the venue.
     bool handle_engine_fill(fill_event& f,
                             std::size_t& event_count,
                             bool& halt_requested,
                             bool run_post_fill_risk = true,
                             bool mark_shadow_sim = false,
-                            const char* status_reason = nullptr);
+                            const char* status_reason = nullptr,
+                            bool allow_follow_up_actions = true);
 
     // After strategy on_* + route_order: arm exit intents only when the
     // order was accepted; drain intents + resync position gates on
@@ -366,16 +460,23 @@ private:
     struct pending_entry
     {
         std::shared_ptr<order_event> order;
+        std::chrono::system_clock::time_point eligible;
         uint64_t seq;
     };
-    static bool pending_cmp(const pending_entry& a, const pending_entry& b)
+    static_assert(std::is_nothrow_move_constructible_v<pending_entry>);
+    static bool pending_cmp(const pending_entry& a,
+                            const pending_entry& b) noexcept
     {
-        if (a.order->get_earliest_eligible_ts() != b.order->get_earliest_eligible_ts())
-            return a.order->get_earliest_eligible_ts() > b.order->get_earliest_eligible_ts();
+        if (a.eligible != b.eligible)
+            return a.eligible > b.eligible;
         return a.seq > b.seq;
     }
     std::priority_queue<pending_entry, std::vector<pending_entry>,
                         decltype(&engine::pending_cmp)> pending_orders_{&engine::pending_cmp};
+    // The priority_queue does not expose its backing vector capacity. This
+    // records the cold-path reservation used to prove that a checked push on
+    // the event thread cannot grow the heap.
+    std::size_t pending_orders_capacity_ = 0;
     struct bar_delayed_entry
     {
         std::shared_ptr<order_event> order;
@@ -411,6 +512,7 @@ private:
     void dispatch_fill_to_strategy(const fill_event& f);
 
     std::atomic<bool> halt_flag_{false};
+    order_mutation_admission_gate order_mutation_admission_;
 
     // Heap-allocated armed flag for provider callbacks.
     // Callbacks (which may fire after engine destruction) capture a
@@ -430,6 +532,10 @@ private:
 
     std::atomic<bool> worker_failed_{false};
     std::atomic<bool> run_failed_{false};
+    // Sticky once a worker-starting run unwinds through an exception.  It
+    // prevents a partially observed ledger from being sealed and, together
+    // with halt_flag_, makes retry on the same engine instance fail closed.
+    std::atomic<bool> event_loop_teardown_compromised_{false};
     std::atomic<bool> live_shutdown_failure_reported_{false};
     std::atomic<bool> pause_all_{false};
     std::atomic<bool> flatten_request_{false};
@@ -473,6 +579,8 @@ private:
     void start_workers();
     void stop_workers();
 
+    class event_loop_infra_guard;
+
     // Centralize revocation of all [this]-capturing callbacks we installed on
     // the provider / async adapter. Called from stop paths to reduce the
     // window where in-flight callbacks can observe partially destroyed state.
@@ -490,6 +598,8 @@ private:
     void finalize_inline_event_log() noexcept;
     void setup_event_loop_infra();
     void teardown_event_loop_infra();
+    void fail_event_loop_infra(std::string_view reason) noexcept;
+    bool discard_unsubmitted_scheduled_orders() noexcept;
     void drain_final_pending(std::size_t& event_count, bool& halt_requested);
     void cancel_day_orders();
     // Per-symbol mark for multi-symbol pending fills (EL-MULTISYM-MID).
@@ -518,7 +628,13 @@ public:
            std::shared_ptr<IStrategy> strategy,
            engine_config config = {});
 
-    ~engine();
+    engine(std::shared_ptr<data_handler> dh,
+           std::shared_ptr<orderbook> ob,
+           std::shared_ptr<IStrategy> strategy,
+           engine_config config,
+           std::unique_ptr<EventLogger> preopened_event_logger);
+
+    ~engine() noexcept;
 
     OrderbookRegistry& get_orderbook_registry() { return orderbook_registry_; }
     void run();
@@ -613,9 +729,9 @@ public:
     const portfolio* get_exchange_portfolio() const;
     const Analytics* get_exchange_analytics() const;
 
-    // Fill `out` with a coherent dashboard snapshot. Returns false when no
-    // snapshot exists yet (engine just constructed; first refresh hasn't
-    // run). Mutex-protected; safe to call from any thread.
+    // Materialize `out` from the latest immutable fixed projection. The
+    // projection is generation-pinned while copied; this never reads mutable
+    // engine containers and is safe for concurrent UI/web readers.
     bool snapshot_dashboard(truetest::ui::dashboard_snapshot& out) const;
 
     // Hint from the TUI (or operator actions) that the dashboard view should
@@ -623,11 +739,11 @@ public:
     // Safe to call from any thread. (Fix #3)
     void request_dashboard_refresh();
 
-    std::shared_ptr<EventRing> get_logging_ring() const { return logging_ring_; }
-    std::shared_ptr<EventRing> get_risk_ring() const { return risk_ring_; }
-    std::shared_ptr<EventRing> get_stats_ring() const { return stats_ring_; }
-    std::shared_ptr<EventRing> get_observer_ring() const { return observer_ring_; }
-    std::shared_ptr<EventRing> get_risk_stats_ring() const { return risk_stats_ring_; }
+    std::shared_ptr<const EventRing> get_logging_ring() const { return logging_ring_; }
+    std::shared_ptr<const EventRing> get_risk_ring() const { return risk_ring_; }
+    std::shared_ptr<const EventRing> get_stats_ring() const { return stats_ring_; }
+    std::shared_ptr<const EventRing> get_observer_ring() const { return observer_ring_; }
+    std::shared_ptr<const EventRing> get_risk_stats_ring() const { return risk_stats_ring_; }
 
     LoggingWorker* get_logging_worker() const { return logging_worker_.get(); }
     RiskWorker* get_risk_worker() const { return risk_worker_.get(); }

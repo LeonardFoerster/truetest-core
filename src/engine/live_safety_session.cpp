@@ -98,6 +98,7 @@ live_shutdown_report LiveSafetySession::shutdown_once(
     while (open_state_ == state::in_progress) cv_.wait(lock);
     while (shutdown_state_ == state::in_progress) cv_.wait(lock);
     if (shutdown_state_ == state::complete) return report_;
+    report_.shutdown_required = opened_;
     if (!opened_)
     {
         shutdown_state_ = state::complete;

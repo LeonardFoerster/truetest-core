@@ -50,7 +50,7 @@ public:
 
     std::shared_ptr<IExecutionAdapter> resolve_adapter(const std::string& symbol) noexcept;
     bool is_async_submit(IExecutionAdapter* a) const noexcept;
-    void submit(const order_event& o, IExecutionAdapter* a) noexcept;
+    void submit(const order_event& o, IExecutionAdapter* a);
     void drain_submit_results(IExecutionAdapter* a) noexcept;
     bool poll_fills(IExecutionAdapter* a, std::vector<fill_event>& out) noexcept;
     void submit_to_exchange_shadow(const order_event& o) noexcept;

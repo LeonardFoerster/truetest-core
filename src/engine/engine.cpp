@@ -30,6 +30,7 @@
 #include <vector>
 #include <queue>
 #include <chrono>
+#include <exception>
 #include <iomanip>
 
 // ============================================================
@@ -41,12 +42,14 @@
 // Authoritative path list: scripts/check-live-safety-freeze.sh
 //
 // Engine decomposition (see core/docs/internal/engine-decomposition.md + ~/.grok/skills/engine-decomposition/SKILL.md):
-// Phase 2 prep in progress. Cold-path extractions (dashboard, scheduler, workers, run skeleton)
-// planned in subsequent waves. All changes must preserve zero-alloc hot path,
+// The dashboard projection and pending-order helpers are extracted; remaining
+// decomposition follows the documented waves. All changes must preserve the zero-alloc hot path,
 // identical behavior for MC reuse / backtest / shadow / live, and single
 // IOrderAuditSink + ExecutionRouter seams. No direct questdb recording or
 // ad-hoc adapter bypasses allowed.
-// ENGINE_LOC_WAIVER: (historical; Wave 1 extraction complete, engine.cpp now well under limit)
+// ENGINE_LOC_WAIVER: engine.cpp still exceeds the normal size guard.  The
+// remaining staged extraction is tracked in docs/internal/engine-decomposition.md;
+// frozen hot/safety paths must not be moved casually just to reduce LOC.
 // ============================================================
 
 namespace
@@ -58,13 +61,123 @@ engine_config refuse_legacy_resume(engine_config config)
             "checkpoint resume v1 is disabled; no engine state was created");
     return config;
 }
+
+class dashboard_refresh_on_exit
+{
+public:
+    explicit dashboard_refresh_on_exit(DashboardSnapshotBuilder* builder)
+        : builder_(builder), uncaught_(std::uncaught_exceptions())
+    {
+        if (builder_) builder_->begin_event_boundary();
+    }
+    ~dashboard_refresh_on_exit()
+    {
+        if (builder_)
+            builder_->end_event_boundary(
+                std::uncaught_exceptions() == uncaught_);
+    }
+    dashboard_refresh_on_exit(const dashboard_refresh_on_exit&) = delete;
+    dashboard_refresh_on_exit& operator=(
+        const dashboard_refresh_on_exit&) = delete;
+
+private:
+    DashboardSnapshotBuilder* builder_;
+    int uncaught_ = 0;
+};
+
+std::unique_ptr<EventLogger> validate_preopened_event_logger(
+    const engine_config& config,
+    std::unique_ptr<EventLogger> logger)
+{
+    if (!config.event_log_reservation)
+    {
+        if (!logger) return {};
+        logger->abandon();
+        throw std::runtime_error(
+            "preopened event logger requires the matching durable reservation");
+    }
+    if (!logger)
+        throw std::runtime_error(
+            "durable event-log reservation requires a preopened logger");
+    const bool has_dedicated_logging_worker =
+        config.threading == thread_preset::standard ||
+        config.threading == thread_preset::full ||
+        config.threading == thread_preset::extended;
+    if (!has_dedicated_logging_worker)
+    {
+        logger->abandon();
+        throw std::runtime_error(
+            "durable event-log reservation requires a dedicated logging "
+            "worker preset");
+    }
+    if (config.event_log_path.empty() ||
+        logger->logical_path() != config.event_log_path ||
+        !logger->uses_durable_reservation(config.event_log_reservation))
+    {
+        logger->abandon();
+        throw std::runtime_error(
+            "preopened event logger does not match the reserved ledger");
+    }
+    return logger;
 }
+
+[[nodiscard]] constexpr bool stream_requires_abort(
+    stream_termination termination) noexcept
+{
+    return termination != stream_termination::clean_eof &&
+        termination != stream_termination::operator_stop &&
+        termination != stream_termination::engine_halt;
+}
+}
+
+class engine::event_loop_infra_guard final
+{
+public:
+    event_loop_infra_guard(engine& owner, const char* failure_reason) noexcept
+        : owner_(owner), failure_reason_(failure_reason) {}
+
+    ~event_loop_infra_guard() noexcept { abort(); }
+
+    event_loop_infra_guard(const event_loop_infra_guard&) = delete;
+    event_loop_infra_guard& operator=(const event_loop_infra_guard&) = delete;
+
+    void complete()
+    {
+        if (!armed_) return;
+        owner_.teardown_event_loop_infra();
+        armed_ = false;
+    }
+
+    void abort() noexcept
+    {
+        if (!std::exchange(armed_, false)) return;
+        owner_.fail_event_loop_infra(failure_reason_);
+    }
+
+private:
+    engine& owner_;
+    const char* failure_reason_;
+    bool armed_ = true;
+};
 
 engine::engine(std::shared_ptr<data_handler> dh,
                std::shared_ptr<orderbook> ob,
                std::shared_ptr<IStrategy> strategy,
                engine_config config)
-    : config_(refuse_legacy_resume(std::move(config))), data_handler_(std::move(dh)), strategy_(std::move(strategy)),
+    : engine(std::move(dh), std::move(ob), std::move(strategy),
+             std::move(config), {})
+{
+}
+
+engine::engine(std::shared_ptr<data_handler> dh,
+               std::shared_ptr<orderbook> ob,
+               std::shared_ptr<IStrategy> strategy,
+               engine_config config,
+               std::unique_ptr<EventLogger> preopened_event_logger)
+    : config_(refuse_legacy_resume(std::move(config))),
+      preopened_event_logger_(validate_preopened_event_logger(
+          config_, std::move(preopened_event_logger))),
+      data_handler_(std::move(dh)), strategy_(std::move(strategy)),
       portfolio_(config_.initial_balance),
       analytics_(config_.initial_balance, config_.rolling_window, config_.risk_free_rate,
                  config_.periods_per_year, config_.max_equity_points),
@@ -334,14 +447,13 @@ engine::engine(std::shared_ptr<data_handler> dh,
         adverse_selection_,
         exit_manager_,
         halt_flag_,
+        order_tracker_.active_count_atomic(),
         config_,
         last_mid_price_,
         last_mark_symbol_,
         last_mark_prices_,
-        last_mark_prices_mu_,
         orderbook_registry_,
         execution_adapters_,
-        *audit_sink_,
         l2_seeded_symbols_,
         market_pool_,
         order_pool_,
@@ -360,6 +472,17 @@ engine::engine(std::shared_ptr<data_handler> dh,
         observer_ring_,
         risk_stats_ring_,
         mm_ring_,
+        DashboardEngineDebugSampler{
+            this,
+            [](const void* context) noexcept {
+                const auto& self = *static_cast<const engine*>(context);
+                return DashboardEngineDebugCounts{
+                    self.pending_orders_.size() +
+                        self.bar_delayed_orders_.size() +
+                        self.bar_delayed_ready_.size(),
+                    self.pending_stops_.size(),
+                    self.order_meta_.size()};
+            }},
 #ifdef HAS_DEBUG
         DebugSamplers{&stage_timer_, &memory_sampler_}
 #else
@@ -414,6 +537,12 @@ engine::engine(std::shared_ptr<data_handler> dh,
         callbacks_armed_flag_->store(false, std::memory_order_release);
         throw;
     }
+
+    // Establish the first published frame before the engine becomes visible
+    // to any UI/web reader. Readers materialize only from an immutable fixed
+    // projection and never capture engine-owned state themselves.
+    if (dashboard_builder_)
+        (void)dashboard_builder_->publish_initial_snapshot();
 }
 
 void engine::prewarm_object_pools()
@@ -544,6 +673,123 @@ void engine::log_event(const event& ev)
     }
 }
 
+void engine::compromise_durable_log(std::string_view reason) noexcept
+{
+    if (durable_log_consumer_)
+        durable_log_consumer_->compromise();
+    // Reserved inline mode is prohibited by the mainnet CLI, but direct
+    // engine users still receive the same fail-closed semantics.  There is no
+    // worker protocol in that mode, so explicitly abandon the retained logger
+    // instead of allowing shutdown to seal an incomplete mutation history.
+    if (config_.event_log_reservation && !config_.is_threaded() &&
+        event_logger_)
+        event_logger_->abandon();
+    trigger_halt(reason);
+}
+
+bool engine::await_durable_order_ack(std::uint64_t order_id) noexcept
+{
+    // The retained reservation is created only by the mainnet startup gate.
+    // Sandbox/backtest/shadow logs keep their existing asynchronous behavior.
+    if (!config_.event_log_reservation)
+        return true;
+
+    // Inline mode writes and checkpoints the exact order synchronously in
+    // log_event().  Mainnet CLI policy nevertheless requires a dedicated
+    // logging worker; this branch is a fail-safe for direct engine users.
+    if (!config_.is_threaded())
+        return !halt_flag_.load(std::memory_order_acquire);
+
+    if (!durable_log_consumer_)
+    {
+        compromise_durable_log(
+            "reserved event log has no durable ACK protocol");
+        return false;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now()
+        + durable_order_ack_deadline_;
+    const auto deadline_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            deadline.time_since_epoch()).count());
+    for (;;)
+    {
+        if (durable_log_consumer_->compromised() ||
+            worker_failed_.load(std::memory_order_acquire))
+        {
+            compromise_durable_log(
+                "durable order-intent logging failed before acknowledgement");
+            return false;
+        }
+        if (halt_flag_.load(std::memory_order_acquire))
+        {
+            compromise_durable_log(
+                "terminal halt interrupted durable order acknowledgement");
+            return false;
+        }
+
+        durable_log_ack ack;
+        if (durable_log_consumer_->try_take_ack(ack))
+        {
+            if (ack.type != event_type::order || ack.entity_id != order_id)
+            {
+                compromise_durable_log(
+                    "durable order acknowledgement identity mismatch");
+                return false;
+            }
+            if (ack.completed_steady_ns == 0 ||
+                ack.completed_steady_ns > deadline_ns ||
+                std::chrono::steady_clock::now() >= deadline)
+            {
+                compromise_durable_log(
+                    "durable order acknowledgement completed after deadline");
+                return false;
+            }
+            // Close the race where another safety worker halted immediately
+            // after the first checks but before this exact ACK was consumed.
+            if (durable_log_consumer_->compromised() ||
+                worker_failed_.load(std::memory_order_acquire) ||
+                halt_flag_.load(std::memory_order_acquire))
+            {
+                compromise_durable_log(
+                    "durable order acknowledgement completed after terminal failure");
+                return false;
+            }
+            return true;
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            compromise_durable_log(
+                "durable order acknowledgement deadline exceeded");
+            return false;
+        }
+        std::this_thread::yield();
+    }
+}
+
+bool engine::admitted_mutation_prerequisites_hold(
+    std::string_view failure_reason) noexcept
+{
+    if (halt_flag_.load(std::memory_order_acquire))
+        return false;
+    if (!config_.event_log_reservation)
+        return true;
+
+    if ((durable_log_consumer_ && durable_log_consumer_->compromised()) ||
+        worker_failed_.load(std::memory_order_acquire) ||
+        !config_.event_log_reservation->ready_for_venue_mutation())
+    {
+        compromise_durable_log(failure_reason);
+        return false;
+    }
+
+    // A concurrent trigger_halt() closes the admission gate before it makes
+    // the halt visible. If this token was acquired first, this command is
+    // already classified as in flight; otherwise try_acquire() failed.
+    return !halt_flag_.load(std::memory_order_acquire);
+}
+
 void engine::publish_event(const event_pointer& ev)
 {
     // Opportunistic drain of worker-thread deferred pool returns.
@@ -577,10 +823,6 @@ void engine::publish_event(const event_pointer& ev)
 #endif
         }
     }
-
-    // Refresh after event-specific state mutation so a funding settlement is
-    // visible in the same snapshot rather than one event late.
-    if (dashboard_builder_) dashboard_builder_->refresh_if_due();
 
     if (config_.threading == thread_preset::inline_mode) {
         return;
@@ -639,6 +881,8 @@ void engine::publish_event(const event_pointer& ev)
             }
             const bool durable_log_drop = durable_log_required
                 && std::string_view(name) == "logging";
+            if (durable_log_drop && durable_log_consumer_)
+                durable_log_consumer_->compromise();
             if (safety
                 && (config_.drop_policy == ring_drop_policy::halt_on_drop
                     || durable_log_drop))
@@ -695,6 +939,7 @@ void engine::publish_event(const event_pointer& ev)
 
 void engine::trigger_halt(std::string_view reason) noexcept
 {
+    order_mutation_admission_.close();
     if (halt_flag_.exchange(true, std::memory_order_acq_rel))
         return;
 
@@ -745,31 +990,31 @@ bool engine::finalize_live_shutdown(live_shutdown_reason reason)
     if (!config_.live_safety_session) return true;
 
     const auto report = config_.live_safety_session->shutdown_once(reason);
-    if (config_.mode != engine_mode::live)
-        return true;
-
-    if (report.quiesce_succeeded
-        && report.kill_succeeded && report.provider_closed)
+    const bool provider_shutdown_complete = !report.shutdown_required
+        || (report.quiesce_succeeded && report.provider_closed);
+    const bool kill_complete = config_.mode != engine_mode::live
+        || !report.shutdown_required || report.kill_succeeded;
+    if (provider_shutdown_complete && kill_complete)
         return true;
 
     if (!live_shutdown_failure_reported_.exchange(
             true, std::memory_order_acq_rel))
     {
-        trigger_halt(!report.quiesce_succeeded
-            ? "live provider quiesce failed or remained ambiguous"
-            : (report.kill_succeeded
-                ? "live provider shutdown did not finish"
-                : "live kill failed or remained ambiguous"));
-        std::cerr << "  WARNING: live shutdown was incomplete; process remains "
-                     "halted and venue safety must be verified manually.\n";
+        trigger_halt(report.shutdown_required && !report.quiesce_succeeded
+            ? "provider quiesce failed or remained ambiguous"
+            : (!kill_complete
+                ? "live kill failed or remained ambiguous"
+                : "provider shutdown did not finish"));
+        std::cerr << "  WARNING: provider shutdown was incomplete; process "
+                     "remains halted and venue safety must be verified "
+                     "manually.\n";
     }
     return false;
 }
 
 bool engine::snapshot_dashboard(truetest::ui::dashboard_snapshot& out) const
 {
-    if (dashboard_builder_) return dashboard_builder_->snapshot_dashboard(out);
-    return false;
+    return dashboard_builder_ && dashboard_builder_->snapshot_dashboard(out);
 }
 
 void engine::request_dashboard_refresh()
@@ -790,9 +1035,22 @@ std::unique_ptr<LoggingWorker> engine::make_logging_worker()
     else if (!config_.text_log_path.empty())
         text_sink = LoggingWorker::log_sink::file_sink;
 
+    std::optional<DurableLogProtocol::ProducerEndpoint> producer;
+    if (config_.event_log_reservation)
+    {
+        if (durable_log_consumer_)
+            throw std::logic_error(
+                "reserved durable ACK endpoints are single-use");
+        auto endpoints = DurableLogProtocol::make_endpoints();
+        durable_log_consumer_.emplace(std::move(endpoints.consumer));
+        producer.emplace(std::move(endpoints.producer));
+    }
+
     return std::make_unique<LoggingWorker>(
         config_.event_log_path, text_sink, config_.text_log_path, config_.compress_log,
-        config_.log_max_bytes, config_.log_max_files);
+        config_.log_max_bytes, config_.log_max_files,
+        config_.event_log_reservation, std::move(preopened_event_logger_),
+        std::move(producer));
 }
 
 // Wave 2 skeleton helpers (setup/teardown, pending drain, paper tape, marks)
@@ -829,16 +1087,30 @@ void engine::start_workers()
     if (callbacks_armed_flag_)
         callbacks_armed_flag_->store(true, std::memory_order_release);
     worker_failed_.store(false, std::memory_order_release);
+    // stop_workers() joins the watchdog after every run.  Worker instances
+    // are recreated below, so the provider liveness monitor must follow the
+    // same lifecycle on a clean engine re-run instead of silently remaining
+    // stopped after its constructor-started first generation.
+    if (worker_watchdog_)
+        worker_watchdog_->start();
 
     auto wire_failure = [this](Worker& w) {
         w.set_failure_flag(worker_failed_);
-        w.set_failure_callback(
-            [this](std::string_view reason) { trigger_halt(reason); });
-        w.set_spin_policy(config_.worker_spin_policy);
         const bool durable_logging = !config_.event_log_path.empty()
             && std::string_view(w.worker_name()) == "logging";
+        const bool strict_durable_session =
+            static_cast<bool>(config_.event_log_reservation);
+        w.set_failure_callback(
+            [this, strict_durable_session](std::string_view reason) {
+                if (strict_durable_session && durable_log_consumer_)
+                    durable_log_consumer_->compromise();
+                trigger_halt(reason);
+            });
+        w.set_spin_policy(config_.worker_spin_policy);
         w.set_max_consecutive_errors(
-            durable_logging ? 1U : config_.max_consecutive_worker_errors);
+            (durable_logging || strict_durable_session)
+                ? 1U
+                : config_.max_consecutive_worker_errors);
     };
 
     if (!config_.is_threaded())
@@ -1022,23 +1294,35 @@ void engine::start_workers()
 
 }
 
-engine::~engine()
+engine::~engine() noexcept
 {
     // Ensure workers are joined and provider resources (incl. any
     // lingering transport threads and callbacks) are torn down before
     // our members (pools, rings, exit_manager, etc.) are destroyed.
-    stop_workers();
-    // Inline persistence has no logging worker to finalize it.  Provider
-    // shutdown above may have published a last funding settlement, so the
-    // ledger trailer must be written only after that final drain.
-    finalize_inline_event_log();
+    try
+    {
+        stop_workers();
+        // Inline persistence has no logging worker to finalize it.  Provider
+        // shutdown above may have published a last funding settlement, so the
+        // ledger trailer must be written only after that final drain.
+        finalize_inline_event_log();
+    }
+    catch (...)
+    {
+        // Destruction is a fail-closed boundary.  Reuse the canonical
+        // no-throw rollback so a provider callback or thread-join exception
+        // cannot escape a noexcept destructor or leave a reserved writer
+        // eligible for implicit success.
+        fail_event_loop_infra("engine destruction cleanup failed");
+    }
 
     // Additional explicit clear of provider callbacks in case a code
     // path constructed the engine but never ran a full stop (e.g. early
     // exception after wiring but before run()).
     provider_callbacks_armed_.store(false, std::memory_order_release);
     if (callbacks_armed_flag_) callbacks_armed_flag_->store(false, std::memory_order_release);
-    revoke_provider_callbacks();
+    try { revoke_provider_callbacks(); }
+    catch (...) {}
 
 #ifdef NDEBUG
     // In release, keep silent. In debug we want the checks below.
@@ -1105,12 +1389,90 @@ void engine::stop_workers()
     const auto reason = halt_flag_.load(std::memory_order_acquire)
         ? live_shutdown_reason::engine_halt
         : live_shutdown_reason::normal_end;
-    (void)finalize_live_shutdown(reason);
+    const bool provider_shutdown_complete = finalize_live_shutdown(reason);
+    if (!provider_shutdown_complete && config_.event_log_reservation)
+    {
+        // A terminal seal is authoritative only after every provider-side
+        // producer has been proven quiescent.  A failed/ambiguous live
+        // shutdown can still publish outcomes after this function returns,
+        // so a mere halt flag is insufficient: make the ledger permanently
+        // unsealable before the logging worker is allowed to finalize it.
+        compromise_durable_log(
+            "live provider shutdown was incomplete; durable log abandoned");
+    }
 
-    // Provider shutdown above joins the private account-stream producer.  The
-    // ring is now stable, so record every admitted settlement before flushing
-    // persistence or stopping worker consumers.
-    (void)drain_provider_funding_updates();
+    bool final_provider_outcomes_complete = provider_shutdown_complete;
+    if (provider_shutdown_complete)
+    {
+        // Provider shutdown above joins the private account-stream producer.
+        // Its queues are now stable, so retain every tracked outcome exposed
+        // by the provider queues before flushing persistence or stopping
+        // worker consumers. Unknown venue-native bracket/kill outcomes remain
+        // outside this boundary under H-03.
+        (void)drain_provider_funding_updates();
+
+        try
+        {
+            auto adapter = config_.provider
+                ? config_.provider->get_execution_adapter()
+                : std::shared_ptr<IExecutionAdapter>{};
+            if (adapter)
+            {
+                // Synthetic bracket metadata must precede fills so opener and
+                // strategy attribution are complete in the durable record.
+                drain_venue_bracket_meta();
+                drain_async_submit_results(adapter.get());
+
+                std::vector<fill_event> final_fills;
+                if (adapter->poll_fills(final_fills))
+                {
+                    std::size_t final_event_count = 0;
+                    bool final_halt = false;
+                    for (auto& fill : final_fills)
+                    {
+                        if (config_.mode == engine_mode::shadow)
+                        {
+                            if (shadow_tracker_)
+                                shadow_tracker_->on_exchange_fill(fill);
+                            if (exchange_portfolio_.has_value())
+                            {
+                                stamp_fill_attribution(fill);
+                                exchange_portfolio_->on_fill(
+                                    fill, fill.get_opener_order_id(),
+                                    fill.get_strategy_name());
+                            }
+                            if (exchange_analytics_.has_value())
+                            {
+                                auto fill_ptr = acquire_pooled(fill_pool_, fill);
+                                exchange_analytics_->on_event(fill_ptr);
+                            }
+                            continue;
+                        }
+
+                        // Risk-driven venue mutations are intentionally
+                        // disabled after provider close.  The already-known
+                        // fill itself still traverses the canonical accounting,
+                        // audit, event-log, and publication path.
+                        (void)handle_engine_fill(
+                            fill, final_event_count, final_halt,
+                            /*run_post_fill_risk=*/false,
+                            /*mark_shadow_sim=*/false,
+                            "venue fill observed during provider shutdown",
+                            /*allow_follow_up_actions=*/false);
+                    }
+                }
+            }
+        }
+        catch (...)
+        {
+            final_provider_outcomes_complete = false;
+            // A producer has stopped and an outcome may already have been
+            // removed from its queue.  Partial teardown processing cannot be
+            // represented by an authoritative replay, so refuse the seal.
+            compromise_durable_log(
+                "final provider outcomes could not be durably retained");
+        }
+    }
 
     // QuestDB: give the final funding drain and all earlier audit enqueues a
     // last flush opportunity before worker/ring teardown. Best-effort; strict
@@ -1126,12 +1488,53 @@ void engine::stop_workers()
     // their std::function targets are replaced, avoiding callback races/UAF.
     revoke_provider_callbacks();
 
-    if (observer_worker_) observer_worker_->stop();
-    if (logging_worker_) logging_worker_->stop();
-    if (risk_worker_) risk_worker_->stop();
-    if (stats_worker_) stats_worker_->stop();
-    if (risk_stats_worker_) risk_stats_worker_->stop();
-    if (mm_worker_) mm_worker_->stop();
+    const bool local_scheduler_cleanup_complete =
+        discard_unsubmitted_scheduled_orders();
+    if (!local_scheduler_cleanup_complete && config_.event_log_reservation)
+        compromise_durable_log(
+            "unsubmitted scheduler state could not be retired safely");
+
+    struct worker_channel final
+    {
+        std::string_view name;
+        Worker* worker;
+        EventRing* inbound;
+        const std::size_t* drops;
+        bool expected;
+    };
+
+    const bool expects_logging =
+        config_.threading == thread_preset::standard ||
+        config_.threading == thread_preset::full ||
+        config_.threading == thread_preset::extended;
+    const bool expects_risk =
+        config_.threading == thread_preset::full ||
+        config_.threading == thread_preset::extended;
+    const bool expects_stats = expects_risk;
+    const bool expects_observer = config_.threading == thread_preset::light;
+    const bool expects_risk_stats =
+        config_.threading == thread_preset::standard;
+    const bool expects_mm =
+        config_.threading == thread_preset::extended &&
+        config_.mode != engine_mode::backtest;
+
+    const std::array<worker_channel, 6> channels{{
+        {"logging", logging_worker_.get(), logging_ring_.get(),
+         &logging_drops_, expects_logging},
+        {"risk", risk_worker_.get(), risk_ring_.get(),
+         &risk_drops_, expects_risk},
+        {"stats", stats_worker_.get(), stats_ring_.get(),
+         &stats_drops_, expects_stats},
+        {"observer", observer_worker_.get(), observer_ring_.get(),
+         &observer_drops_, expects_observer},
+        {"risk_stats", risk_stats_worker_.get(), risk_stats_ring_.get(),
+         &risk_stats_drops_, expects_risk_stats},
+        {"mm", mm_worker_.get(), mm_ring_.get(),
+         &mm_drops_, expects_mm},
+    }};
+
+    for (const auto& channel : channels)
+        if (channel.worker) channel.worker->stop();
 
     for (auto& t : worker_threads_)
     {
@@ -1140,9 +1543,107 @@ void engine::stop_workers()
     }
     worker_threads_.clear();
 
+    struct shutdown_completeness_report final
+    {
+        bool topology_complete = true;
+        bool worker_errors_clear = true;
+        bool inbound_rings_empty = true;
+        bool ring_drops_clear = true;
+        bool mm_output_complete = true;
+        bool provider_shutdown_complete = false;
+        bool final_provider_outcomes_complete = false;
+        bool event_loop_complete = false;
+        bool shared_worker_failure_clear = false;
+        bool pending_cancels_empty = false;
+        bool local_scheduler_cleanup_complete = false;
+        bool local_schedulers_empty = false;
+        bool durable_protocol_present = false;
+        bool durable_protocol_healthy = false;
+        bool durable_ack_empty = false;
+        bool binary_logger_present = false;
+        bool reserved_logger_present = false;
+
+        [[nodiscard]] bool reserved_ledger_complete() const noexcept
+        {
+            return topology_complete && worker_errors_clear &&
+                inbound_rings_empty && ring_drops_clear &&
+                mm_output_complete && provider_shutdown_complete &&
+                final_provider_outcomes_complete && event_loop_complete &&
+                shared_worker_failure_clear && pending_cancels_empty &&
+                local_scheduler_cleanup_complete && local_schedulers_empty &&
+                durable_protocol_present && durable_protocol_healthy &&
+                durable_ack_empty && binary_logger_present &&
+                reserved_logger_present;
+        }
+    } report;
+
+    for (const auto& channel : channels)
+    {
+        const bool worker_present = channel.worker != nullptr;
+        const bool ring_present = channel.inbound != nullptr;
+        if (worker_present != channel.expected ||
+            ring_present != channel.expected)
+            report.topology_complete = false;
+        if (!channel.expected) continue;
+        if (!worker_present || channel.worker->has_failed() ||
+            channel.worker->error_count() != 0)
+            report.worker_errors_clear = false;
+        if (!ring_present || !channel.inbound->empty())
+            report.inbound_rings_empty = false;
+        if (!channel.drops || *channel.drops != 0)
+            report.ring_drops_clear = false;
+    }
+
+    report.mm_output_complete = !expects_mm ||
+        (mm_order_ring_ && mm_order_ring_->empty());
+    report.provider_shutdown_complete = provider_shutdown_complete;
+    report.final_provider_outcomes_complete =
+        final_provider_outcomes_complete;
+    report.event_loop_complete = !event_loop_teardown_compromised_.load(
+        std::memory_order_acquire);
+    report.shared_worker_failure_clear = !worker_failed_.load(
+        std::memory_order_acquire);
+    report.pending_cancels_empty = pending_cancels_.empty();
+    report.local_scheduler_cleanup_complete =
+        local_scheduler_cleanup_complete;
+    report.local_schedulers_empty = pending_orders_.empty() &&
+        bar_delayed_orders_.empty() && bar_delayed_ready_.empty() &&
+        pending_stops_.empty();
+    report.durable_protocol_present = durable_log_consumer_.has_value();
+    report.durable_protocol_healthy = durable_log_consumer_ &&
+        !durable_log_consumer_->compromised();
+    report.durable_ack_empty = durable_log_consumer_ &&
+        durable_log_consumer_->acknowledgements_empty();
+    report.binary_logger_present = logging_worker_ &&
+        logging_worker_->has_binary_logger();
+    report.reserved_logger_present = logging_worker_ &&
+        logging_worker_->has_reserved_logger();
+
     if (logging_worker_)
     {
-        try
+        const bool binary_log = !config_.event_log_path.empty();
+        const auto& logging_channel = channels.front();
+        const bool logging_stream_incomplete = binary_log &&
+            (!logging_channel.inbound ||
+             !logging_channel.inbound->empty() ||
+             !logging_channel.drops || *logging_channel.drops != 0 ||
+             logging_worker_->has_failed() ||
+             !logging_worker_->has_binary_logger());
+        const bool incomplete = binary_log &&
+            (event_loop_teardown_compromised_.load(
+                 std::memory_order_acquire) ||
+             logging_stream_incomplete ||
+             (config_.event_log_reservation &&
+                !report.reserved_ledger_complete()));
+
+        if (incomplete)
+        {
+            logging_worker_->abandon();
+            worker_failed_.store(true, std::memory_order_release);
+            trigger_halt(
+                "incomplete durable event log refused finalization");
+        }
+        else try
         {
             logging_worker_->finalize();
         }
@@ -1157,6 +1658,12 @@ void engine::stop_workers()
             trigger_halt("durable event-log finalization failed");
         }
     }
+    else if (!config_.event_log_path.empty() && config_.is_threaded())
+    {
+        if (preopened_event_logger_) preopened_event_logger_->abandon();
+        worker_failed_.store(true, std::memory_order_release);
+        trigger_halt("configured event log has no logging worker");
+    }
 
     // Workers joined — safe to stamp research counters onto export analytics.
     fold_research_counters_into_export_analytics();
@@ -1165,30 +1672,24 @@ void engine::stop_workers()
     // references held by external ring shared_ptr copies (tests, UI, etc.)
     // may still drop later; their deleters are now protected by the
     // pool alive_ guards + armed callback guards.
-    auto drain_ring = [](const std::shared_ptr<EventRing>& r) {
+    auto drain_ring = [](EventRing* r) {
         if (!r) return;
         event_pointer ev;
         while (r->try_pop(ev)) {}
     };
-    drain_ring(logging_ring_);
-    drain_ring(risk_ring_);
-    drain_ring(stats_ring_);
-    drain_ring(observer_ring_);
-    drain_ring(risk_stats_ring_);
-    drain_ring(mm_ring_);
+    for (const auto& channel : channels)
+        drain_ring(channel.inbound);
+    drain_ring(mm_order_ring_.get());
 
-    if (mm_order_ring_)
+    if (durable_log_consumer_)
     {
-        event_pointer ev; // different ring type, keep original loop
-        while (mm_order_ring_->try_pop(ev)) {}
+        durable_log_ack ack;
+        while (durable_log_consumer_->try_take_ack(ack)) {}
     }
 
-    Worker* all_workers[] = {
-        logging_worker_.get(), risk_worker_.get(), stats_worker_.get(),
-        observer_worker_.get(), risk_stats_worker_.get(), mm_worker_.get(),
-    };
-    for (auto* w : all_workers)
+    for (const auto& channel : channels)
     {
+        auto* w = channel.worker;
         if (w && w->has_failed())
         {
             try { std::rethrow_exception(w->get_exception()); }
@@ -1201,8 +1702,9 @@ void engine::stop_workers()
         }
     }
 
-    std::size_t total_drops = logging_drops_ + risk_drops_ + stats_drops_
-                            + observer_drops_ + risk_stats_drops_ + mm_drops_;
+    std::size_t total_drops = 0;
+    for (const auto& channel : channels)
+        if (channel.drops) total_drops += *channel.drops;
     if (total_drops > 0)
     {
         std::cerr << "  WARNING: " << total_drops << " events dropped from ring buffers.\n";
@@ -1215,7 +1717,7 @@ void engine::stop_workers()
                   << "\n";
     }
 
-    auto report_hwm = [](const char* name, const std::shared_ptr<EventRing>& ring) {
+    auto report_hwm = [](std::string_view name, const EventRing* ring) {
         if (!ring) return;
         auto hwm = ring->high_watermark();
         if (hwm > 0)
@@ -1225,12 +1727,16 @@ void engine::stop_workers()
                       << "/" << ring->capacity() << " (" << static_cast<int>(pct) << "%)\n";
         }
     };
-    report_hwm("logging", logging_ring_);
-    report_hwm("risk", risk_ring_);
-    report_hwm("stats", stats_ring_);
-    report_hwm("observer", observer_ring_);
-    report_hwm("risk_stats", risk_stats_ring_);
-    report_hwm("mm", mm_ring_);
+    for (const auto& channel : channels)
+        report_hwm(channel.name, channel.inbound);
+    report_hwm("mm_output", mm_order_ring_.get());
+
+    // All canonical state mutations and worker folds are complete. Publish a
+    // final coherent frame even when the run ended inside the 100 ms cadence;
+    // batch desks can now retain the actual terminal state without a fake
+    // sleep or one-more-event dependency.
+    if (dashboard_builder_)
+        (void)dashboard_builder_->publish_final_snapshot();
 }
 
 #ifdef HAS_QUESTDB
@@ -1358,7 +1864,7 @@ void engine::questdb_end()
                                   report.winning_trades);
     }
     check_strict_persistence();
-    // Note: legacy direct questdb_store_ finalize path removed in Phase 2 prep
+    // Note: legacy direct questdb_store_ finalize path was removed in Phase 2
     // (core/docs/internal/engine-decomposition.md#E-21) to enforce single IOrderAuditSink seam.
     // Activation in questdb_begin always sets a real sink when store is active.
     questdb_active_ = false;
@@ -1713,6 +2219,8 @@ void engine::reset_for_next_trial(uint64_t new_seed)
     // Full ring/worker reset is complex and usually unnecessary for MC reuse of
     // the engine instance (Phase B). Core objects (portfolio, analytics, exit_manager,
     // etc.) are now fully reset to enable broader reuse.
+    if (dashboard_builder_)
+        (void)dashboard_builder_->publish_initial_snapshot();
 }
 
 bool engine::process_order(const std::shared_ptr<order_event>& o,
@@ -1897,39 +2405,111 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         if (async_submit)
             dashboard_builder_->update_open_order_status(o->get_order_id(), "submit_pending");
     }
+    const auto reject_post_ack_intent = [&](std::string_view reason) noexcept {
+        compromise_durable_log(reason);
+        try
+        {
+            order_tracker_.set_status(
+                o->get_order_id(), order_status::rejected);
+        }
+        catch (...) {}
+        if (dashboard_builder_)
+        {
+            try { dashboard_builder_->erase_open_order(o->get_order_id()); }
+            catch (...) {}
+        }
+        halt_requested = true;
+    };
     log_event(*o);
     if (halt_flag_.load(std::memory_order_acquire))
     {
-        order_tracker_.set_status(o->get_order_id(), order_status::rejected);
-        if (dashboard_builder_)
-            dashboard_builder_->erase_open_order(o->get_order_id());
-        halt_requested = true;
+        // Threaded mode has not published the intent yet. Inline reserved mode
+        // has already checkpointed it and must prevent later clean sealing.
+        if (config_.event_log_reservation && !config_.is_threaded())
+            reject_post_ack_intent(
+                "terminal halt prevented submit after durable inline intent");
+        else
+        {
+            try
+            {
+                order_tracker_.set_status(
+                    o->get_order_id(), order_status::rejected);
+            }
+            catch (...) {}
+            if (dashboard_builder_)
+            {
+                try { dashboard_builder_->erase_open_order(o->get_order_id()); }
+                catch (...) {}
+            }
+            halt_requested = true;
+        }
         return false;
     }
     publish_event(o);
-    analytics_.on_event(o);
-
-    // Migrated to sink (PR-04)
-    audit_sink_->record_order_submitted(*o, "pending");
-    if (!async_submit)
+    if (!await_durable_order_ack(o->get_order_id()) ||
+        halt_flag_.load(std::memory_order_acquire))
     {
-        audit_sink_->record_status_transition(o->get_order_id(),
-            order_status::pending, order_status::open);
+        // Every exit after a durable order ACK either needs a durable rejection
+        // record or an unsealable ledger.  This branch cannot safely enqueue a
+        // second record while halt/failure is racing, so choose the latter.
+        reject_post_ack_intent(
+            "durable order intent was not admitted for venue submit");
+        return false;
     }
-    audit_sink_->record_event(
-        "order_intent",
-        o->get_symbol().c_str(),
-        o->get_strategy_name().c_str(),
-        o->get_order_id(),
-        "info",
-        "order generated by strategy",
-        "{}"
-    );
 
-    adapter->set_mid_price(last_mid_price_.load(std::memory_order_relaxed));
-    adapter->set_l2_seeded(l2_seeded_symbols_.count(o->get_symbol()) > 0);
+    try
+    {
+        // From the exact durable ACK through the admission CAS, every
+        // potentially throwing analytics/audit/adapter setup operation is one
+        // fail-closed region.  Otherwise a setup exception could leave a clean
+        // sealed order intent even though no venue mutation was attempted.
+        analytics_.on_event(o);
 
-    router_->submit(*o, adapter.get());
+        // Migrated to sink (PR-04)
+        audit_sink_->record_order_submitted(*o, "pending");
+        if (!async_submit)
+        {
+            audit_sink_->record_status_transition(o->get_order_id(),
+                order_status::pending, order_status::open);
+        }
+        audit_sink_->record_event(
+            "order_intent",
+            o->get_symbol().c_str(),
+            o->get_strategy_name().c_str(),
+            o->get_order_id(),
+            "info",
+            "order generated by strategy",
+            "{}"
+        );
+
+        adapter->set_mid_price(last_mid_price_.load(std::memory_order_relaxed));
+        adapter->set_l2_seeded(l2_seeded_symbols_.count(o->get_symbol()) > 0);
+
+        auto admission = order_mutation_admission_.try_acquire();
+        if (!admission || !admitted_mutation_prerequisites_hold(
+                "venue submit refused at terminal durability admission gate"))
+        {
+            reject_post_ack_intent(
+                "post-ACK venue-submit admission was refused");
+            return false;
+        }
+        try
+        {
+            router_->submit(*o, adapter.get());
+        }
+        catch (...)
+        {
+            reject_post_ack_intent(
+                "venue submit threw with an unknown mutation outcome");
+            return false;
+        }
+    }
+    catch (...)
+    {
+        reject_post_ack_intent(
+            "post-ACK venue-submit setup failed before mutation admission");
+        return false;
+    }
 
     drain_async_submit_results(adapter.get());
 
@@ -1938,7 +2518,24 @@ bool engine::process_order(const std::shared_ptr<order_event>& o,
         auto exchange_adapter = config_.provider->get_execution_adapter();
         if (exchange_adapter)
         {
-            exchange_adapter->submit_order(*o);
+            auto admission = order_mutation_admission_.try_acquire();
+            if (!admission || !admitted_mutation_prerequisites_hold(
+                    "shadow exchange observation refused at terminal "
+                    "admission gate"))
+            {
+                halt_requested = true;
+                return false;
+            }
+            try
+            {
+                exchange_adapter->submit_order(*o);
+            }
+            catch (...)
+            {
+                trigger_halt("shadow exchange adapter submit threw");
+                halt_requested = true;
+                return false;
+            }
             drain_async_submit_results(exchange_adapter.get());
         }
     }
@@ -2020,19 +2617,48 @@ void engine::deliver_mm_book_trades(const std::string& symbol, const trades& trs
 bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
                           const std::string& reason)
 {
+    dashboard_refresh_on_exit refresh{dashboard_builder_.get()};
     auto adapter = router_->resolve_adapter(symbol);
 
     drain_async_submit_results(adapter.get());
     if (halt_flag_.load(std::memory_order_acquire))
         return false;
 
-    bool cancelled = adapter->cancel_order(order_id);
+    bool cancelled = false;
+    {
+        auto admission = order_mutation_admission_.try_acquire();
+        if (!admission || !admitted_mutation_prerequisites_hold(
+                "venue cancel refused at terminal durability admission gate"))
+            return false;
+        try
+        {
+            cancelled = adapter->cancel_order(order_id);
+        }
+        catch (...)
+        {
+            compromise_durable_log(
+                "venue cancel threw with an unknown mutation outcome");
+            return false;
+        }
+    }
 
     if (cancelled && adapter->supports_async_submit())
     {
-        pending_cancels_[order_id] = pending_cancel_meta{symbol, reason};
-        if (dashboard_builder_) dashboard_builder_->update_open_order_status(order_id, "cancel_pending");
-        return true;
+        try
+        {
+            pending_cancels_[order_id] = pending_cancel_meta{symbol, reason};
+            if (dashboard_builder_)
+                dashboard_builder_->update_open_order_status(
+                    order_id, "cancel_pending");
+            return true;
+        }
+        catch (...)
+        {
+            compromise_durable_log(
+                "accepted venue cancel could not be retained for durable "
+                "completion");
+            return false;
+        }
     }
 
     if (!cancelled)
@@ -2050,24 +2676,37 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
 
     if (cancelled)
     {
-        order_tracker_.set_status(order_id, order_status::cancelled);
-        if (dashboard_builder_) dashboard_builder_->erase_open_order(order_id);
-        // Prefer last sim time (EL-CANCEL-WALLCLOCK); wall clock only if no event yet.
-        const auto cancel_ts = (last_sim_time_.time_since_epoch().count() != 0)
-            ? last_sim_time_
-            : std::chrono::system_clock::now();
-        auto cancel_ev = acquire_pooled(cancel_pool_,
-            cancel_ts, symbol, order_id, reason);
-        log_event(*cancel_ev);
-        publish_event(cancel_ev);
-        if (!config_.is_threaded())
-            analytics_.on_event(cancel_ev);
-        // Unconditional via audit_sink (replaces questdb guard + #ifdef).
-        audit_sink_->record_cancellation(order_id, symbol.c_str(),
-            lookup_strategy_name(order_id).c_str(),
-            reason.empty() ? "manual" : reason.c_str());
-        audit_sink_->record_status_transition(order_id,
-            order_status::open, order_status::cancelled, reason.empty() ? nullptr : reason.c_str());
+        try
+        {
+            order_tracker_.set_status(order_id, order_status::cancelled);
+            if (dashboard_builder_)
+                dashboard_builder_->erase_open_order(order_id);
+            // Prefer last sim time (EL-CANCEL-WALLCLOCK); wall clock only if
+            // no event has been observed yet.
+            const auto cancel_ts =
+                (last_sim_time_.time_since_epoch().count() != 0)
+                    ? last_sim_time_
+                    : std::chrono::system_clock::now();
+            auto cancel_ev = acquire_pooled(
+                cancel_pool_, cancel_ts, symbol, order_id, reason);
+            log_event(*cancel_ev);
+            publish_event(cancel_ev);
+            if (!config_.is_threaded())
+                analytics_.on_event(cancel_ev);
+            audit_sink_->record_cancellation(
+                order_id, symbol.c_str(),
+                lookup_strategy_name(order_id).c_str(),
+                reason.empty() ? "manual" : reason.c_str());
+            audit_sink_->record_status_transition(
+                order_id, order_status::open, order_status::cancelled,
+                reason.empty() ? nullptr : reason.c_str());
+        }
+        catch (...)
+        {
+            compromise_durable_log(
+                "accepted cancellation could not be recorded durably");
+            return false;
+        }
     }
 
     return cancelled;
@@ -2076,6 +2715,7 @@ bool engine::cancel_order(const std::string& symbol, uint64_t order_id,
 bool engine::modify_order(const std::string& symbol, uint64_t order_id,
                           double new_price, double new_qty)
 {
+    dashboard_refresh_on_exit refresh{dashboard_builder_.get()};
     // S3: no amend of resting live orders after process-wide terminal halt
     // or operator pause (new risk / size changes must not sneak through).
     if (halt_flag_.load(std::memory_order_acquire) ||
@@ -2083,25 +2723,51 @@ bool engine::modify_order(const std::string& symbol, uint64_t order_id,
         return false;
 
     auto adapter = router_->resolve_adapter(symbol);
-    bool modified = adapter->modify_order(order_id, new_price, new_qty);
+    bool modified = false;
+    {
+        auto admission = order_mutation_admission_.try_acquire();
+        if (!admission || pause_all_.load(std::memory_order_acquire) ||
+            !admitted_mutation_prerequisites_hold(
+                "venue amend refused at terminal durability admission gate"))
+            return false;
+        try
+        {
+            modified = adapter->modify_order(order_id, new_price, new_qty);
+        }
+        catch (...)
+        {
+            compromise_durable_log(
+                "venue amend threw with an unknown mutation outcome");
+            return false;
+        }
+    }
 
     if (modified)
     {
-        const auto now = (last_sim_time_.time_since_epoch().count() != 0)
-            ? last_sim_time_
-            : std::chrono::system_clock::now();
-        auto amend_ev = acquire_pooled(amend_pool_,
-            now, symbol, order_id, new_price, new_qty);
-        log_event(*amend_ev);
-        publish_event(amend_ev);
-        if (!config_.is_threaded())
-            analytics_.on_event(amend_ev);
-        // Unconditional via audit_sink (replaces questdb guard + #ifdef).
-        // Engine doesn't preserve old price/qty cleanly here; log zeros
-        // and rely on the orders/order_status tables for history.
-        audit_sink_->record_amendment(order_id, symbol.c_str(),
-            /*old_price=*/0.0, new_price,
-            /*old_qty=*/0.0, new_qty, now);
+        try
+        {
+            const auto now = (last_sim_time_.time_since_epoch().count() != 0)
+                ? last_sim_time_
+                : std::chrono::system_clock::now();
+            auto amend_ev = acquire_pooled(
+                amend_pool_, now, symbol, order_id, new_price, new_qty);
+            log_event(*amend_ev);
+            publish_event(amend_ev);
+            if (!config_.is_threaded())
+                analytics_.on_event(amend_ev);
+            // Engine doesn't preserve old price/qty cleanly here; log zeros
+            // and rely on the orders/order_status tables for history.
+            audit_sink_->record_amendment(
+                order_id, symbol.c_str(),
+                /*old_price=*/0.0, new_price,
+                /*old_qty=*/0.0, new_qty, now);
+        }
+        catch (...)
+        {
+            compromise_durable_log(
+                "accepted venue amend could not be recorded durably");
+            return false;
+        }
     }
 
     return modified;
@@ -2132,37 +2798,103 @@ void engine::unwind_positions(std::size_t& event_count)
         close_order->set_order_id(OrderIdGenerator::next());
         close_order->set_strategy_name("risk_unwind");
 
+        const auto reject_unsubmitted_unwind =
+            [&](std::string_view reason) noexcept {
+                compromise_durable_log(reason);
+                try
+                {
+                    order_tracker_.set_status(
+                        close_order->get_order_id(), order_status::rejected);
+                }
+                catch (...) {}
+                if (dashboard_builder_)
+                {
+                    try
+                    {
+                        dashboard_builder_->erase_open_order(
+                            close_order->get_order_id());
+                    }
+                    catch (...) {}
+                }
+            };
+
         order_tracker_.set_status(close_order->get_order_id(), order_status::open);
         if (dashboard_builder_) dashboard_builder_->cache_open_order(*close_order);
         log_event(*close_order);
         publish_event(close_order);
-        analytics_.on_event(close_order);
-
-        // Unconditional via audit_sink (replaces questdb guard + #ifdef).
-        audit_sink_->record_order_submitted(*close_order, "pending");
-        audit_sink_->record_status_transition(close_order->get_order_id(),
-            order_status::pending, order_status::open, "risk_unwind");
-
-        auto adapter = router_->resolve_adapter(symbol);
-        adapter->set_mid_price(last_mid_price_.load(std::memory_order_relaxed));
-        adapter->set_l2_seeded(l2_seeded_symbols_.count(symbol) > 0);
-
-        router_->submit(*close_order, adapter.get());
-
-        drain_async_submit_results(adapter.get());
-
-        std::vector<fill_event> fills;
-        if (router_->poll_fills(adapter.get(), fills))
+        if (!await_durable_order_ack(close_order->get_order_id()) ||
+            halt_flag_.load(std::memory_order_acquire))
         {
-            bool unwind_halt = false;
-            for (auto& f : fills)
+            reject_unsubmitted_unwind(
+                "durable risk-unwind intent was not admitted for venue submit");
+            break;
+        }
+        std::shared_ptr<IExecutionAdapter> adapter;
+        try
+        {
+            analytics_.on_event(close_order);
+
+            // Unconditional via audit_sink (replaces questdb guard + #ifdef).
+            audit_sink_->record_order_submitted(*close_order, "pending");
+            audit_sink_->record_status_transition(close_order->get_order_id(),
+                order_status::pending, order_status::open, "risk_unwind");
+
+            adapter = router_->resolve_adapter(symbol);
+            adapter->set_mid_price(
+                last_mid_price_.load(std::memory_order_relaxed));
+            adapter->set_l2_seeded(l2_seeded_symbols_.count(symbol) > 0);
+
+            auto admission = order_mutation_admission_.try_acquire();
+            if (!admission || !admitted_mutation_prerequisites_hold(
+                    "risk-unwind submit refused at terminal durability "
+                    "admission gate"))
             {
-                // Already in halt/unwind — skip post-fill re-halt.
-                (void)handle_engine_fill(f, event_count, unwind_halt,
-                                         /*run_post_fill_risk=*/false,
-                                         /*mark_shadow_sim=*/false,
-                                         "risk_unwind");
+                reject_unsubmitted_unwind(
+                    "post-ACK risk-unwind admission was refused");
+                break;
             }
+            try
+            {
+                router_->submit(*close_order, adapter.get());
+            }
+            catch (...)
+            {
+                reject_unsubmitted_unwind(
+                    "risk-unwind submit threw with an unknown mutation "
+                    "outcome");
+                break;
+            }
+        }
+        catch (...)
+        {
+            reject_unsubmitted_unwind(
+                "post-ACK risk-unwind setup failed before mutation admission");
+            break;
+        }
+
+        try
+        {
+            drain_async_submit_results(adapter.get());
+
+            std::vector<fill_event> fills;
+            if (router_->poll_fills(adapter.get(), fills))
+            {
+                bool unwind_halt = false;
+                for (auto& f : fills)
+                {
+                    // Already in halt/unwind — skip post-fill re-halt.
+                    (void)handle_engine_fill(f, event_count, unwind_halt,
+                                             /*run_post_fill_risk=*/false,
+                                             /*mark_shadow_sim=*/false,
+                                             "risk_unwind");
+                }
+            }
+        }
+        catch (...)
+        {
+            compromise_durable_log(
+                "risk-unwind post-submit outcome processing failed");
+            break;
         }
     }
 }
@@ -2173,6 +2905,7 @@ void engine::apply_l2_snapshot(const std::string& symbol,
                                std::chrono::system_clock::time_point timestamp,
                                std::uint64_t quantity_scale)
 {
+    dashboard_refresh_on_exit refresh{dashboard_builder_.get()};
     drain_object_pool_returns();
 
     if (symbol.empty())
@@ -2239,9 +2972,15 @@ void engine::apply_l2_snapshot(const std::string& symbol,
     // Validate the complete snapshot before mutating either the seeded-symbol
     // set or the book. A single corrupt quantity must not clear/partially
     // replace previously valid depth.
-    l2_seeded_symbols_.insert(symbol);
     auto ob = orderbook_registry_.get_or_create(symbol);
-    ob->apply_l2_snapshot(ob_bids.data(), n_bids, ob_asks.data(), n_asks);
+    if (ob->apply_l2_snapshot(
+            ob_bids.data(), n_bids, ob_asks.data(), n_asks) !=
+        l2_apply_status::applied)
+    {
+        trigger_halt("L2 snapshot aggregate quantity overflow");
+        return;
+    }
+    l2_seeded_symbols_.insert(symbol);
     const double best_bid = ob->best_external_bid_price();
     const double best_ask = ob->best_external_ask_price();
     const double l2_mark = (best_bid > 0.0 && best_ask > 0.0)
@@ -2315,6 +3054,7 @@ void engine::apply_l2_update(const std::string& symbol,
                              std::chrono::system_clock::time_point timestamp,
                              std::uint64_t quantity_scale)
 {
+    dashboard_refresh_on_exit refresh{dashboard_builder_.get()};
     drain_object_pool_returns();
 
     Price book_price;
@@ -2335,8 +3075,13 @@ void engine::apply_l2_update(const std::string& symbol,
         return;
     }
     auto ob = orderbook_registry_.get_or_create(symbol);
-    ob->apply_l2_update(ob_side, book_price,
-                        static_cast<quantity>(book_qty));
+    if (ob->apply_l2_update(
+            ob_side, book_price, static_cast<quantity>(book_qty)) !=
+        l2_apply_status::applied)
+    {
+        trigger_halt("L2 update aggregate quantity overflow");
+        return;
+    }
     const double best_bid = ob->best_external_bid_price();
     const double best_ask = ob->best_external_ask_price();
     const double l2_mark = (best_bid > 0.0 && best_ask > 0.0)
@@ -2493,6 +3238,17 @@ bool engine::route_order(order_event& order,
     // This populates opener/strategy so stamp_fill_attribution and rich
     // on_fill paths have the data (critical for per-lot and multi-lot).
     register_order_meta(order);
+    struct order_meta_precommit_guard
+    {
+        std::unordered_map<std::uint64_t, order_meta>& rows;
+        std::uint64_t order_id;
+        bool committed = false;
+
+        ~order_meta_precommit_guard()
+        {
+            if (!committed) rows.erase(order_id);
+        }
+    } meta_guard{order_meta_, order.get_order_id()};
 
     if (auto* spec = resolve_instrument_spec(order.get_symbol()))
     {
@@ -2508,6 +3264,7 @@ bool engine::route_order(order_event& order,
             audit_sink_->record_order_submitted(order, "rejected");
             audit_sink_->record_rejection(order, "venue_filter", reason);
             order_tracker_.set_status(order.get_order_id(), order_status::rejected);
+            meta_guard.committed = true;
             (void)event_count;
             (void)halt_requested;
             return true;
@@ -2529,18 +3286,53 @@ bool engine::route_order(order_event& order,
         audit_sink_->record_order_submitted(order, "rejected");
         audit_sink_->record_rejection(order, "risk_reject", reason);
         order_tracker_.set_status(order.get_order_id(), order_status::rejected);
+        meta_guard.committed = true;
         return true;
     }
     order.set_pretrade_open_order_count(existing_active_orders);
-    order_tracker_.set_status(order.get_order_id(), order_status::pending);
+
+    const auto reject_scheduler_capacity = [&](const char* reason) {
+        order_tracker_.set_status(order.get_order_id(), order_status::rejected);
+        meta_guard.committed = true;
+        auto rej = acquire_pooled(rejection_pool_, order.get_timestamp(),
+            order.get_symbol(), order.get_order_id(), reason);
+        log_event(*rej);
+        publish_event(rej);
+        if (!config_.is_threaded()) analytics_.on_event(rej);
+        audit_sink_->record_rejection(order, "capacity_reject", reason);
+        return true;
+    };
 
     if (order.get_order_type() == order_type::stop ||
         order.get_order_type() == order_type::stop_limit)
     {
         // A staged stop occupies capacity while it can still execute. Its
         // later conversion keeps the same id and therefore the same slot.
+        if (pending_stops_.size() >= pending_stops_.capacity())
+            return reject_scheduler_capacity(
+                "order rejected: stop scheduler capacity exhausted");
+        auto staged = acquire_pooled(order_pool_, order);
         order_tracker_.set_status(order.get_order_id(), order_status::pending);
-        pending_stops_.push_back(acquire_pooled(order_pool_,order));
+        // Capacity is reserved in clear_pending_state(). shared_ptr move is
+        // noexcept, so this checked insertion is the authoritative scheduler
+        // commit and cannot grow on the event thread.
+        try
+        {
+            pending_stops_.push_back(std::move(staged));
+        }
+        catch (...)
+        {
+            order_tracker_.set_status(
+                order.get_order_id(), order_status::rejected);
+            throw;
+        }
+        meta_guard.committed = true;
+        if (dashboard_builder_)
+        {
+            dashboard_builder_->cache_open_order(order);
+            dashboard_builder_->update_open_order_status(
+                order.get_order_id(), "stop_pending");
+        }
         return true;
     }
 
@@ -2552,6 +3344,10 @@ bool engine::route_order(order_event& order,
         // execution_bar_delay would discard the fire price and fill at
         // wherever the next bar happens to open. Same convention as the
         // native stop path in check_pending_stops.
+        order.set_earliest_eligible_ts(sim_time);
+        // Acquire before re-centering the book/mark. Pool exhaustion is a
+        // precommit failure and must not leave a modified market reference.
+        auto order_ptr = acquire_pooled(order_pool_, order);
         const double ref = order.get_price();
         const double bar_mid = last_mid_price_;
         if (ref > 0.0 && ref != bar_mid)
@@ -2567,8 +3363,8 @@ bool engine::route_order(order_event& order,
             }
             last_mid_price_ = ref;
         }
-        order.set_earliest_eligible_ts(sim_time);
-        auto order_ptr = acquire_pooled(order_pool_,order);
+        order_tracker_.set_status(order.get_order_id(), order_status::pending);
+        meta_guard.committed = true;
         if (order.get_tif() == time_in_force::day)
             day_order_ids_.push_back({order.get_symbol(), order.get_order_id()});
         const bool ok = process_order(order_ptr, event_count, halt_requested);
@@ -2580,7 +3376,34 @@ bool engine::route_order(order_event& order,
     {
         auto latency = config_.latency_model->get_order_latency();
         order.set_earliest_eligible_ts(sim_time + latency);
-        pending_orders_.push({acquire_pooled(order_pool_,order), order_seq_++});
+        if (pending_orders_.size() >= pending_orders_capacity_)
+            return reject_scheduler_capacity(
+                "order rejected: latency scheduler capacity exhausted");
+        auto scheduled = acquire_pooled(order_pool_, order);
+        order_tracker_.set_status(order.get_order_id(), order_status::pending);
+        const auto sequence = order_seq_++;
+        // The backing vector was reserved to pending_orders_capacity_ on the
+        // cold path. With a checked bound and noexcept pending_entry moves,
+        // priority_queue::push performs no allocation here.
+        try
+        {
+            pending_orders_.push({std::move(scheduled),
+                                  order.get_earliest_eligible_ts(),
+                                  sequence});
+        }
+        catch (...)
+        {
+            order_tracker_.set_status(
+                order.get_order_id(), order_status::rejected);
+            throw;
+        }
+        meta_guard.committed = true;
+        if (dashboard_builder_)
+        {
+            dashboard_builder_->cache_open_order(order);
+            dashboard_builder_->update_open_order_status(
+                order.get_order_id(), "latency_pending");
+        }
         return true;
     }
 
@@ -2589,27 +3412,38 @@ bool engine::route_order(order_event& order,
         // The symbol-event scheduler is authoritative. The release boundary
         // stamps the actual future observation time before venue submission.
         order.set_earliest_eligible_ts(sim_time);
-        if (bar_delayed_orders_.size() == bar_delayed_orders_.capacity())
+        if (bar_delayed_orders_.size() >= bar_delayed_orders_.capacity())
+            return reject_scheduler_capacity(
+                "order rejected: delayed-order capacity exhausted");
+        auto scheduled = acquire_pooled(order_pool_, order);
+        order_tracker_.set_status(order.get_order_id(), order_status::pending);
+        const auto sequence = order_seq_++;
+        try
         {
-            constexpr const char* reason =
-                "order rejected: delayed-order capacity exhausted";
-            order_tracker_.set_status(order.get_order_id(), order_status::rejected);
-            auto rej = acquire_pooled(rejection_pool_, order.get_timestamp(),
-                order.get_symbol(), order.get_order_id(), reason);
-            log_event(*rej);
-            publish_event(rej);
-            if (!config_.is_threaded()) analytics_.on_event(rej);
-            audit_sink_->record_rejection(order, "capacity_reject", reason);
-            return true;
+            bar_delayed_orders_.push_back({
+                std::move(scheduled), sequence,
+                config_.execution_bar_delay});
         }
-        bar_delayed_orders_.push_back({acquire_pooled(order_pool_,order),
-                                       order_seq_++,
-                                       config_.execution_bar_delay});
+        catch (...)
+        {
+            order_tracker_.set_status(
+                order.get_order_id(), order_status::rejected);
+            throw;
+        }
+        meta_guard.committed = true;
+        if (dashboard_builder_)
+        {
+            dashboard_builder_->cache_open_order(order);
+            dashboard_builder_->update_open_order_status(
+                order.get_order_id(), "bar_delay_pending");
+        }
         return true;
     }
 
     order.set_earliest_eligible_ts(sim_time);
     auto order_ptr = acquire_pooled(order_pool_,order);
+    order_tracker_.set_status(order.get_order_id(), order_status::pending);
+    meta_guard.committed = true;
     if (order.get_tif() == time_in_force::day)
         day_order_ids_.push_back({order.get_symbol(), order.get_order_id()});
     return process_order(order_ptr, event_count, halt_requested);
@@ -2824,40 +3658,61 @@ bool engine::handle_engine_fill(fill_event& f,
                                 bool& halt_requested,
                                 bool run_post_fill_risk,
                                 bool mark_shadow_sim,
-                                const char* status_reason)
+                                const char* status_reason,
+                                bool allow_follow_up_actions)
 {
-    stamp_fill_attribution(f);
+    try
+    {
+        stamp_fill_attribution(f);
 
-    const uint64_t opener = f.get_opener_order_id();
-    const std::string& strat = f.get_strategy_name();
+        const uint64_t opener = f.get_opener_order_id();
+        const std::string& strat = f.get_strategy_name();
 
-    const auto new_status = f.is_partial()
-        ? order_status::partially_filled : order_status::filled;
-    order_tracker_.set_status(f.get_order_id(), new_status);
-    if (dashboard_builder_) {
-        dashboard_builder_->cache_fill(f);
-        if (f.is_partial())
-            dashboard_builder_->update_open_order_status(f.get_order_id(), "partial");
-        else
-            dashboard_builder_->erase_open_order(f.get_order_id());
+        const auto new_status = f.is_partial()
+            ? order_status::partially_filled : order_status::filled;
+        order_tracker_.set_status(f.get_order_id(), new_status);
+        if (dashboard_builder_) {
+            dashboard_builder_->cache_fill(f);
+            if (f.is_partial())
+                dashboard_builder_->update_open_order_status(
+                    f.get_order_id(), "partial");
+            else
+                dashboard_builder_->erase_open_order(f.get_order_id());
+        }
+        auto fill_ptr = acquire_pooled(fill_pool_, f);
+        log_event(f);
+        portfolio_.on_fill(f, opener, strat);
+        adverse_selection_.on_fill(f);
+        risk_manager_.on_fill(f);
+        if (allow_follow_up_actions)
+        {
+            dispatch_fill_to_strategy(f);
+            exit_manager_.on_fill(f, opener);
+        }
+        const char* src = "unknown";
+        switch (f.get_source())
+        {
+            case fill_source::exchange:  src = "exchange"; break;
+            case fill_source::simulated: src = "simulated"; break;
+            case fill_source::unknown:   break;
+        }
+        audit_sink_->record_fill(f, opener, strat.c_str(), src);
+        audit_sink_->record_status_transition(
+            f.get_order_id(), order_status::open, new_status, status_reason);
+        if (allow_follow_up_actions)
+        {
+            notify_position_change_all(
+                f.get_symbol(), portfolio_.position_open(f.get_symbol()));
+        }
+        publish_event(fill_ptr);
+        analytics_.on_event(fill_ptr);
     }
-    auto fill_ptr = acquire_pooled(fill_pool_, f);
-    log_event(f);
-    portfolio_.on_fill(f, opener, strat);
-    dispatch_fill_to_strategy(f);
-    adverse_selection_.on_fill(f);
-    exit_manager_.on_fill(f, opener);
-    risk_manager_.on_fill(f);
-    const char* src =
-        (f.get_source() == fill_source::exchange)  ? "exchange"
-      : (f.get_source() == fill_source::simulated) ? "simulated"
-      :                                              "local";
-    audit_sink_->record_fill(f, opener, strat.c_str(), src);
-    audit_sink_->record_status_transition(f.get_order_id(),
-        order_status::open, new_status, status_reason);
-    notify_position_change_all(f.get_symbol(), portfolio_.position_open(f.get_symbol()));
-    publish_event(fill_ptr);
-    analytics_.on_event(fill_ptr);
+    catch (...)
+    {
+        compromise_durable_log(
+            "fill could not be retained as a complete durable event");
+        throw;
+    }
 
     if (mark_shadow_sim && config_.mode == engine_mode::shadow && shadow_tracker_)
         shadow_tracker_->on_simulated_fill(f);
@@ -2983,6 +3838,7 @@ void engine::drain_venue_bracket_meta()
 
 bool engine::drain_provider_funding_updates() noexcept
 {
+    dashboard_refresh_on_exit refresh{dashboard_builder_.get()};
     if (!provider_funding_ingress_)
         return true;
 
@@ -2997,7 +3853,8 @@ bool engine::drain_provider_funding_updates() noexcept
             || update.symbol_size > provider_funding_update::symbol_capacity
             || update.why != provider_funding_update::reason::funding_fee)
         {
-            trigger_halt("provider funding ingress produced an invalid update");
+            compromise_durable_log(
+                "provider funding ingress produced an invalid update");
             return false;
         }
 
@@ -3025,159 +3882,164 @@ bool engine::drain_provider_funding_updates() noexcept
             // acquire_pooled already latches pool exhaustion. Cover every
             // other construction/audit/ring exception without allowing it to
             // escape a provider callback or teardown path.
-            trigger_halt("provider funding update could not be applied");
+            compromise_durable_log(
+                "provider funding update could not be applied");
             return false;
         }
     }
 
     if (applied_any && dashboard_builder_)
-    {
-        try
-        {
-            dashboard_builder_->request_dashboard_refresh();
-            dashboard_builder_->refresh_if_due();
-        }
-        catch (...)
-        {
-            trigger_halt("provider funding dashboard refresh failed");
-            return false;
-        }
-    }
+        dashboard_builder_->request_dashboard_refresh();
 
     // Close the producer/consumer race: an enqueue that observed a full ring
     // while we were draining must still be terminal even if all retained
     // records were consumed successfully.
     if (provider_funding_ingress_->failed())
     {
-        trigger_halt("provider funding ingress overflow or malformed update");
+        compromise_durable_log(
+            "provider funding ingress overflow or malformed update");
         return false;
     }
     return true;
 }
 
-void engine::drain_async_submit_results(IExecutionAdapter* adapter)
+void engine::drain_async_submit_results(IExecutionAdapter* adapter) noexcept
 {
-    auto* cap = adapter ? adapter->get_async_support() : nullptr;
-    if (!cap) return;
-
-    std::vector<submit_result> results;
-    if (!cap->poll_submit_results(results)) return;
-
-    for (const auto& sr : results)
+    try
     {
-        if (sr.op == submit_result::operation::submit)
+        auto* cap = adapter ? adapter->get_async_support() : nullptr;
+        if (!cap) return;
+
+        std::vector<submit_result> results;
+        if (!cap->poll_submit_results(results)) return;
+
+        for (const auto& sr : results)
         {
+            if (sr.op == submit_result::operation::submit)
+            {
+                if (sr.uncertain)
+                {
+                    compromise_durable_log(
+                        "venue order outcome is ambiguous after request write");
+                    audit_sink_->record_status_transition(sr.engine_id,
+                        order_status::pending, order_status::pending,
+                        "ambiguous post-write submit; terminal halt and reconcile required");
+                    continue;
+                }
+                if (sr.fatal)
+                {
+                    compromise_durable_log(
+                        "order mutation refused because safety prerequisites failed");
+                    continue;
+                }
+                if (sr.ok)
+                {
+                    if (order_tracker_.get_order_status(sr.engine_id) == order_status::pending)
+                    {
+                        order_tracker_.set_status(sr.engine_id, order_status::open);
+                        if (dashboard_builder_) dashboard_builder_->update_open_order_status(sr.engine_id, "open");
+                        // Unconditional via audit_sink (replaces questdb guard + #ifdef).
+                        audit_sink_->record_status_transition(sr.engine_id,
+                            order_status::pending, order_status::open,
+                            "venue submit acknowledged");
+                    }
+                    continue;
+                }
+                if (!order_tracker_.is_active(sr.engine_id)) continue;
+
+                auto rej = acquire_pooled(rejection_pool_,
+                    std::chrono::system_clock::now(), sr.symbol, sr.engine_id,
+                    "submit failed: " + sr.error);
+                log_event(*rej);
+                publish_event(rej);
+                order_tracker_.set_status(sr.engine_id, order_status::rejected);
+                if (dashboard_builder_) dashboard_builder_->erase_open_order(sr.engine_id);
+                // Unconditional via audit_sink using the single record_rejection shape
+                // (the rich order_event overload). For async submit transport errors
+                // we synthesize a minimal stack order_event carrying the identity we have
+                // (id + symbol + looked-up strategy). qty/price/side are best-effort zeros
+                // (the sink path will record zeros for qty/price as before).
+                // Strategy lookup mirrors the pattern used for cancellations in the same drain.
+                const std::string& strat = lookup_strategy_name(sr.engine_id);
+                order_event ghost{
+                    std::chrono::system_clock::now(),
+                    sr.symbol,
+                    order_type::market,
+                    order_side::buy,
+                    0.0,
+                    0.0
+                };
+                ghost.set_order_id(sr.engine_id);
+                if (!strat.empty())
+                    ghost.set_strategy_name(strat);
+
+                char transport_msg[128];
+                std::snprintf(transport_msg, sizeof(transport_msg), "transport_error: %s", sr.error.c_str());
+                audit_sink_->record_status_transition(sr.engine_id,
+                    order_status::pending, order_status::rejected,
+                    transport_msg);
+                audit_sink_->record_rejection(ghost, "transport_error", sr.error.c_str());
+                continue;
+            }
+
+            auto meta_it = pending_cancels_.find(sr.engine_id);
+            const std::string symbol =
+                !sr.symbol.empty() ? sr.symbol :
+                (meta_it != pending_cancels_.end() ? meta_it->second.symbol : "");
+            const std::string reason =
+                (meta_it != pending_cancels_.end() && !meta_it->second.reason.empty())
+                    ? meta_it->second.reason
+                    : (sr.ok ? "venue cancel acknowledged" : "venue cancel failed");
+
             if (sr.uncertain)
             {
-                trigger_halt("venue order outcome is ambiguous after request write");
-                audit_sink_->record_status_transition(
-                    sr.engine_id, order_status::pending, order_status::pending,
-                    "ambiguous post-write submit; terminal halt and reconcile required");
-                continue;
+                compromise_durable_log(
+                    "venue cancel outcome is ambiguous after request write");
+                if (dashboard_builder_)
+                    dashboard_builder_->update_open_order_status(sr.engine_id, "cancel_unknown");
             }
-            if (sr.fatal)
+            else if (sr.fatal)
             {
-                trigger_halt("order mutation refused because safety prerequisites failed");
-                continue;
+                trigger_halt("cancel refused because safety prerequisites failed");
+                if (dashboard_builder_)
+                    dashboard_builder_->update_open_order_status(sr.engine_id, "cancel_refused");
             }
-            if (sr.ok)
+            else if (sr.ok)
             {
-                if (order_tracker_.get_order_status(sr.engine_id) == order_status::pending)
+                if (order_tracker_.is_active(sr.engine_id))
                 {
-                    order_tracker_.set_status(sr.engine_id, order_status::open);
-                    if (dashboard_builder_) dashboard_builder_->update_open_order_status(sr.engine_id, "open");
+                    order_tracker_.set_status(sr.engine_id, order_status::cancelled);
+                    if (dashboard_builder_) dashboard_builder_->erase_open_order(sr.engine_id);
+                    auto cancel_ev = acquire_pooled(cancel_pool_,
+                        std::chrono::system_clock::now(), symbol, sr.engine_id, reason);
+                    log_event(*cancel_ev);
+                    publish_event(cancel_ev);
+                    if (!config_.is_threaded())
+                        analytics_.on_event(cancel_ev);
                     // Unconditional via audit_sink (replaces questdb guard + #ifdef).
+                    audit_sink_->record_cancellation(sr.engine_id, symbol.c_str(),
+                        lookup_strategy_name(sr.engine_id).c_str(),
+                        reason.empty() ? "manual" : reason.c_str());
                     audit_sink_->record_status_transition(sr.engine_id,
-                        order_status::pending, order_status::open,
-                        "venue submit acknowledged");
+                        order_status::open, order_status::cancelled, reason.empty() ? nullptr : reason.c_str());
                 }
-                continue;
             }
-            if (!order_tracker_.is_active(sr.engine_id)) continue;
-
-            auto rej = acquire_pooled(rejection_pool_,
-                std::chrono::system_clock::now(), sr.symbol, sr.engine_id,
-                "submit failed: " + sr.error);
-            log_event(*rej);
-            publish_event(rej);
-            order_tracker_.set_status(sr.engine_id, order_status::rejected);
-            if (dashboard_builder_) dashboard_builder_->erase_open_order(sr.engine_id);
-            // Unconditional via audit_sink using the single record_rejection shape
-            // (the rich order_event overload). For async submit transport errors
-            // we synthesize a minimal stack order_event carrying the identity we have
-            // (id + symbol + looked-up strategy). qty/price/side are best-effort zeros
-            // (the sink path will record zeros for qty/price as before).
-            // Strategy lookup mirrors the pattern used for cancellations in the same drain.
-            const std::string& strat = lookup_strategy_name(sr.engine_id);
-            order_event ghost{
-                std::chrono::system_clock::now(),
-                sr.symbol,
-                order_type::market,
-                order_side::buy,
-                0.0,
-                0.0
-            };
-            ghost.set_order_id(sr.engine_id);
-            if (!strat.empty())
-                ghost.set_strategy_name(strat);
-
-            char transport_msg[128];
-            std::snprintf(transport_msg, sizeof(transport_msg), "transport_error: %s", sr.error.c_str());
-            audit_sink_->record_status_transition(sr.engine_id,
-                order_status::pending, order_status::rejected,
-                transport_msg);
-            audit_sink_->record_rejection(ghost, "transport_error", sr.error.c_str());
-            continue;
-        }
-
-        auto meta_it = pending_cancels_.find(sr.engine_id);
-        const std::string symbol =
-            !sr.symbol.empty() ? sr.symbol :
-            (meta_it != pending_cancels_.end() ? meta_it->second.symbol : "");
-        const std::string reason =
-            (meta_it != pending_cancels_.end() && !meta_it->second.reason.empty())
-                ? meta_it->second.reason
-                : (sr.ok ? "venue cancel acknowledged" : "venue cancel failed");
-
-        if (sr.uncertain)
-        {
-            trigger_halt("venue cancel outcome is ambiguous after request write");
-            if (dashboard_builder_)
-                dashboard_builder_->update_open_order_status(sr.engine_id, "cancel_unknown");
-        }
-        else if (sr.fatal)
-        {
-            trigger_halt("cancel refused because safety prerequisites failed");
-            if (dashboard_builder_)
-                dashboard_builder_->update_open_order_status(sr.engine_id, "cancel_refused");
-        }
-        else if (sr.ok)
-        {
-            if (order_tracker_.is_active(sr.engine_id))
+            else
             {
-                order_tracker_.set_status(sr.engine_id, order_status::cancelled);
-                if (dashboard_builder_) dashboard_builder_->erase_open_order(sr.engine_id);
-                auto cancel_ev = acquire_pooled(cancel_pool_,
-                    std::chrono::system_clock::now(), symbol, sr.engine_id, reason);
-                log_event(*cancel_ev);
-                publish_event(cancel_ev);
-                if (!config_.is_threaded())
-                    analytics_.on_event(cancel_ev);
-                // Unconditional via audit_sink (replaces questdb guard + #ifdef).
-                audit_sink_->record_cancellation(sr.engine_id, symbol.c_str(),
-                    lookup_strategy_name(sr.engine_id).c_str(),
-                    reason.empty() ? "manual" : reason.c_str());
-                audit_sink_->record_status_transition(sr.engine_id,
-                    order_status::open, order_status::cancelled, reason.empty() ? nullptr : reason.c_str());
+                if (dashboard_builder_) dashboard_builder_->update_open_order_status(sr.engine_id, "cancel_failed");
             }
-        }
-        else
-        {
-            if (dashboard_builder_) dashboard_builder_->update_open_order_status(sr.engine_id, "cancel_failed");
-        }
 
-        if (meta_it != pending_cancels_.end())
-            pending_cancels_.erase(meta_it);
+            if (meta_it != pending_cancels_.end())
+                pending_cancels_.erase(meta_it);
+        }
+    }
+    catch (...)
+    {
+        // A result has potentially been removed from the adapter queue after a
+        // venue mutation.  Losing any part of its lifecycle/audit processing
+        // must make the binary ledger unsealable rather than replay the intent
+        // as if it remained open.
+        compromise_durable_log("async venue outcome processing failed");
     }
 }
 
@@ -3400,6 +4262,7 @@ void engine::write_adapter_diagnostics(truetest::ui::streaming_stats& st)
 void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
                                 const std::chrono::system_clock::time_point& timestamp)
 {
+    dashboard_refresh_on_exit refresh{dashboard_builder_.get()};
     drain_object_pool_returns();
 
     // Apply private-stream cash settlements before any adapter, risk, or
@@ -3415,7 +4278,11 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     // Operator-requested flatten: drain on the next event so the timestamp
     // we close at is from the live stream rather than wall-clock-now.
     if (flatten_request_.exchange(false, std::memory_order_acq_rel))
+    {
         unwind_positions(event_count);
+        if (halt_flag_.load(std::memory_order_acquire))
+            return;
+    }
 
     // Advance adapter clocks first so cancels whose in-flight window has
     // elapsed are drained before this event's matching runs.
@@ -3577,6 +4444,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
 void engine::process_single_tick(const tick_record& rec, std::size_t& event_count)
 {
+    dashboard_refresh_on_exit refresh{dashboard_builder_.get()};
     drain_object_pool_returns();
 
     if (!drain_provider_funding_updates())
@@ -3586,7 +4454,11 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         return;
 
     if (flatten_request_.exchange(false, std::memory_order_acq_rel))
+    {
         unwind_positions(event_count);
+        if (halt_flag_.load(std::memory_order_acquire))
+            return;
+    }
 
     if (router_) router_->advance_all(rec.timestamp);
 
@@ -3730,7 +4602,11 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
 
 StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridge)
 {
-    if (!data_handler_) throw std::runtime_error("missing dependencies");
+    if (!data_handler_ || !bridge)
+        throw std::runtime_error("missing data handler or bar stream bridge");
+
+    event_loop_infra_guard event_loop(
+        *this, "bar stream aborted by exception or infrastructure failure");
 
     prepare_event_logging();
     clear_pending_state();
@@ -3741,8 +4617,6 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridg
     prepare_mark_prices_for_run(/*symbol_hint=*/16);
     start_workers();
     pin_event_loop_thread();
-
-    bridge->set_halt_flag(&halt_flag_);
 
     const auto start = std::chrono::high_resolution_clock::now();
     std::size_t event_count = 0;
@@ -3855,7 +4729,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridg
                 last_report_time = now_report;
             }
         }
-    }, funding_idle);
+    }, funding_idle, &halt_flag_);
 
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -3871,11 +4745,10 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridg
         cancel_day_orders();
     }
 
-    stop_workers();
-    finalize_inline_event_log();
-#ifdef HAS_QUESTDB
-    questdb_end();
-#endif
+    if (stream_requires_abort(stream_result.termination))
+        event_loop.abort();
+    else
+        event_loop.complete();
     if (!stream_result.success())
         run_failed_.store(true, std::memory_order_release);
     if (stream_result.success() && !run_succeeded())
@@ -3895,7 +4768,11 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridg
 
 StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> bridge)
 {
-    if (!data_handler_) throw std::runtime_error("missing dependencies");
+    if (!data_handler_ || !bridge)
+        throw std::runtime_error("missing data handler or tick stream bridge");
+
+    event_loop_infra_guard event_loop(
+        *this, "tick stream aborted by exception or infrastructure failure");
 
     prepare_event_logging();
     clear_pending_state();
@@ -3906,8 +4783,6 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> brid
     prepare_mark_prices_for_run(/*symbol_hint=*/16);
     start_workers();
     pin_event_loop_thread();
-
-    bridge->set_halt_flag(&halt_flag_);
 
     const auto start = std::chrono::high_resolution_clock::now();
     std::size_t event_count = 0;
@@ -4014,7 +4889,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> brid
                 last_report_time = now_report;
             }
         }
-    }, funding_idle);
+    }, funding_idle, &halt_flag_);
 
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -4027,11 +4902,10 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> brid
         cancel_day_orders();
     }
 
-    stop_workers();
-    finalize_inline_event_log();
-#ifdef HAS_QUESTDB
-    questdb_end();
-#endif
+    if (stream_requires_abort(stream_result.termination))
+        event_loop.abort();
+    else
+        event_loop.complete();
     if (!stream_result.success())
         run_failed_.store(true, std::memory_order_release);
     if (stream_result.success() && !run_succeeded())
@@ -4051,7 +4925,13 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> brid
 
 StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> bridge)
 {
-    if (!data_handler_) throw std::runtime_error("missing dependencies");
+    if (!data_handler_ || !bridge)
+        throw std::runtime_error(
+            "missing data handler or provider event stream bridge");
+
+    event_loop_infra_guard event_loop(
+        *this,
+        "provider event stream aborted by exception or infrastructure failure");
 
     prepare_event_logging();
     clear_pending_state();
@@ -4062,8 +4942,6 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
     prepare_mark_prices_for_run(/*symbol_hint=*/16);
     start_workers();
     pin_event_loop_thread();
-
-    bridge->set_halt_flag(&halt_flag_);
 
     const auto start = std::chrono::high_resolution_clock::now();
     std::size_t event_count = 0;
@@ -4211,7 +5089,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
                 last_report_time = now_report;
             }
         }
-    }, funding_idle);
+    }, funding_idle, &halt_flag_);
 
     const auto end = std::chrono::high_resolution_clock::now();
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -4224,11 +5102,10 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
         cancel_day_orders();
     }
 
-    stop_workers();
-    finalize_inline_event_log();
-#ifdef HAS_QUESTDB
-    questdb_end();
-#endif
+    if (stream_requires_abort(stream_result.termination))
+        event_loop.abort();
+    else
+        event_loop.complete();
     if (!stream_result.success())
         run_failed_.store(true, std::memory_order_release);
     if (stream_result.success() && !run_succeeded())
@@ -4263,6 +5140,9 @@ void engine::run()
     if (!data_handler_->has_bar_data()) {
         throw std::runtime_error("no data loaded — call IMarketSource::load_into() / DataWrapper::load() before run()");
     }
+
+    event_loop_infra_guard event_loop(
+        *this, "bar event loop aborted by exception");
 
     prepare_event_logging();
 
@@ -4321,6 +5201,7 @@ void engine::run()
              && !halt_flag_.load(std::memory_order_acquire)
              && !worker_failed_.load(std::memory_order_acquire); ++i)
     {
+        dashboard_refresh_on_exit refresh{dashboard_builder_.get()};
         DEBUG_STAGE(stage_timer_, market_create);
         const auto bar = data_handler_->bar_at(i);
         auto this_bar_ts = resolve_bar_ts(i, prev_bar_ts, bar);
@@ -4529,7 +5410,7 @@ void engine::run()
         }
     }
 
-    teardown_event_loop_infra();
+    event_loop.complete();
 
 #ifdef HAS_DEBUG
     memory_sampler_.set_end(debug::memory_snapshot::capture());
@@ -4555,6 +5436,12 @@ void engine::run()
 
 void engine::run_tick_data()
 {
+    if (!data_handler_)
+        throw std::runtime_error("missing data handler for tick event loop");
+
+    event_loop_infra_guard event_loop(
+        *this, "tick event loop aborted by exception");
+
     prepare_event_logging();
 
     clear_pending_state();
@@ -4603,6 +5490,7 @@ void engine::run_tick_data()
              && !halt_flag_.load(std::memory_order_acquire)
              && !worker_failed_.load(std::memory_order_acquire); ++i)
     {
+        dashboard_refresh_on_exit refresh{dashboard_builder_.get()};
         const auto& tick = data_handler_->tick_at(i);
 
         last_sim_time_ = tick.timestamp;
@@ -4735,7 +5623,7 @@ void engine::run_tick_data()
 
     report_run_summary(event_count, start);
 
-    teardown_event_loop_infra();
+    event_loop.complete();
 
 #ifdef HAS_DEBUG
     memory_sampler_.set_end(debug::memory_snapshot::capture());
@@ -4779,12 +5667,13 @@ void engine::run_replay(const std::string& log_path,
     EventReplayer replayer(log_path, /*from_us=*/0, replay_to_us);
     if (replayer.file_version() != EVENT_LOG_FILE_VERSION)
         throw std::runtime_error(
-            "authoritative ledger replay requires a current v2 event log; "
-            "legacy logs remain inspection-only");
+            "authoritative ledger replay requires a current v3 event log; "
+            "v1/v2/headerless logs remain inspection-only");
     if (!replayer.file_finalized())
         throw std::runtime_error(
-            "authoritative ledger replay requires a finalized event log; "
-            "an in-progress or crash-truncated prefix is inspection-only");
+            "authoritative ledger replay requires a valid terminal seal; "
+            "an in-progress, unsealed, or crash-truncated prefix is "
+            "inspection-only");
     if (replayer.file_segmented())
         throw std::runtime_error(
             "authoritative ledger replay refuses rotated log segments; "
@@ -4799,6 +5688,7 @@ void engine::run_replay(const std::string& log_path,
 
     while (replayer.has_next())
     {
+        dashboard_refresh_on_exit refresh{dashboard_builder_.get()};
         auto ev = replayer.next();
         if (!ev)
             break;
@@ -4919,8 +5809,12 @@ void engine::run_replay(const std::string& log_path,
                 convert_level(snapshot.ask(i), asks[i]);
 
             auto ob = orderbook_registry_.get_or_create(snapshot.get_symbol());
-            ob->apply_l2_snapshot(bids.data(), snapshot.bid_count(),
-                                  asks.data(), snapshot.ask_count());
+            if (ob->apply_l2_snapshot(
+                    bids.data(), snapshot.bid_count(),
+                    asks.data(), snapshot.ask_count()) !=
+                l2_apply_status::applied)
+                throw std::runtime_error(
+                    "authoritative ledger L2 snapshot quantity overflow");
             const double bid = ob->best_external_bid_price();
             const double ask = ob->best_external_ask_price();
             const double mark = bid > 0.0 && ask > 0.0
@@ -4956,9 +5850,13 @@ void engine::run_replay(const std::string& log_path,
                     "authoritative ledger contains invalid L2 update");
 
             auto ob = orderbook_registry_.get_or_create(update.get_symbol());
-            ob->apply_l2_update(
-                update.get_side() == tick_side::bid ? side::buy : side::sell,
-                px, static_cast<quantity>(qty));
+            if (ob->apply_l2_update(
+                    update.get_side() == tick_side::bid
+                        ? side::buy : side::sell,
+                    px, static_cast<quantity>(qty)) !=
+                l2_apply_status::applied)
+                throw std::runtime_error(
+                    "authoritative ledger L2 update quantity overflow");
             const double bid = ob->best_external_bid_price();
             const double ask = ob->best_external_ask_price();
             const double mark = bid > 0.0 && ask > 0.0

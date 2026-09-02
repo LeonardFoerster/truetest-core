@@ -1,6 +1,7 @@
 // Pending-order drain / paper-tape helpers extracted from engine.cpp
 // (engine-decomposition: keep freeze surface lean; behavior unchanged).
 #include "engine.h"
+#include "live_safety_session.h"
 
 #include <cmath>
 #include <iostream>
@@ -14,13 +15,22 @@ void engine::clear_pending_state()
     while (!pending_orders_.empty()) pending_orders_.pop();
     bar_delayed_orders_.clear();
     bar_delayed_ready_.clear();
-    if (bar_delayed_orders_.capacity() == 0)
+    const auto configured = config_.risk.max_open_orders > 0
+        ? static_cast<std::size_t>(config_.risk.max_open_orders)
+        : DEFAULT_RING_SIZE;
+
+    if (pending_stops_.capacity() < configured)
+        pending_stops_.reserve(configured);
+    if (pending_orders_capacity_ < configured)
     {
-        const auto configured = config_.risk.max_open_orders > 0
-            ? static_cast<std::size_t>(config_.risk.max_open_orders)
-            : DEFAULT_RING_SIZE;
-        bar_delayed_orders_.reserve(configured);
+        std::vector<pending_entry> storage;
+        storage.reserve(configured);
+        pending_orders_ = decltype(pending_orders_){
+            &engine::pending_cmp, std::move(storage)};
+        pending_orders_capacity_ = configured;
     }
+    if (bar_delayed_orders_.capacity() < configured)
+        bar_delayed_orders_.reserve(configured);
     if (bar_delayed_ready_.capacity() < bar_delayed_orders_.capacity())
         bar_delayed_ready_.reserve(bar_delayed_orders_.capacity());
     l2_bid_scratch_.clear();
@@ -31,6 +41,8 @@ void engine::clear_pending_state()
         l2_ask_scratch_.reserve(kL2SnapshotMaxLevels);
     order_seq_ = 0;
     day_order_ids_.clear();
+    if (day_order_ids_.capacity() < configured)
+        day_order_ids_.reserve(configured);
 }
 
 void engine::prepare_event_logging()
@@ -41,15 +53,32 @@ void engine::prepare_event_logging()
         throw std::runtime_error(
             "event logging requires inline, standard, full, or extended threading");
     if (config_.threading == thread_preset::inline_mode && !event_logger_)
-        event_logger_ = std::make_unique<EventLogger>(
-            config_.event_log_path, config_.compress_log,
-            config_.log_max_bytes, config_.log_max_files);
+    {
+        if (preopened_event_logger_)
+            event_logger_ = std::move(preopened_event_logger_);
+        else
+            event_logger_ = std::make_unique<EventLogger>(
+                config_.event_log_path, config_.compress_log,
+                config_.log_max_bytes, config_.log_max_files,
+                config_.event_log_reservation);
+    }
 }
 
 void engine::finalize_inline_event_log() noexcept
 {
     if (!event_logger_ || config_.is_threaded())
         return;
+    if (event_loop_teardown_compromised_.load(std::memory_order_acquire) ||
+        (config_.event_log_reservation &&
+         ((!pending_cancels_.empty()) ||
+          (durable_log_consumer_ && durable_log_consumer_->compromised()))))
+    {
+        event_logger_->abandon();
+        run_failed_.store(true, std::memory_order_release);
+        trigger_halt(
+            "incomplete durable inline event log refused finalization");
+        return;
+    }
     try
     {
         event_logger_->finalize();
@@ -126,7 +155,7 @@ void engine::drain_pending_orders(
     };
 
     while (!pending_orders_.empty() &&
-           pending_orders_.top().order->get_earliest_eligible_ts() <= sim_time &&
+           pending_orders_.top().eligible <= sim_time &&
            !halt_requested &&
            !halt_flag_.load(std::memory_order_acquire))
     {
@@ -299,6 +328,51 @@ void engine::drain_final_pending(std::size_t& event_count, bool& halt_requested)
     for (const auto& entry : bar_delayed_ready_)
         expire(entry.order);
     bar_delayed_ready_.clear();
+    for (const auto& stop : pending_stops_)
+        expire(stop);
+    pending_stops_.clear();
+}
+
+bool engine::discard_unsubmitted_scheduled_orders() noexcept
+{
+    // Operator stop, terminal failure, and destruction must never force a
+    // locally delayed order into the venue. These entries have not reached
+    // process_order(), the event log, or an adapter, so teardown only releases
+    // their local lifecycle slots and metadata. Any bookkeeping failure makes
+    // a reserved shutdown incomplete.
+    bool complete = true;
+    const auto discard = [&](const std::shared_ptr<order_event>& order) {
+        if (!order) return;
+        const auto order_id = order->get_order_id();
+        try
+        {
+            order_tracker_.set_status(order_id, order_status::cancelled);
+            if (dashboard_builder_)
+                dashboard_builder_->erase_open_order(order_id);
+            order_meta_.erase(order_id);
+        }
+        catch (...)
+        {
+            complete = false;
+        }
+    };
+
+    while (!pending_orders_.empty())
+    {
+        auto entry = pending_orders_.top();
+        pending_orders_.pop();
+        discard(entry.order);
+    }
+    for (const auto& entry : bar_delayed_orders_)
+        discard(entry.order);
+    bar_delayed_orders_.clear();
+    for (const auto& entry : bar_delayed_ready_)
+        discard(entry.order);
+    bar_delayed_ready_.clear();
+    for (const auto& order : pending_stops_)
+        discard(order);
+    pending_stops_.clear();
+    return complete;
 }
 
 void engine::cancel_day_orders()
@@ -382,6 +456,74 @@ void engine::teardown_event_loop_infra()
 #ifdef HAS_QUESTDB
     questdb_end();
 #endif
+}
+
+void engine::fail_event_loop_infra(std::string_view reason) noexcept
+{
+    // This path runs during exception unwinding or after DataBridge has
+    // converted a callback/transport exception into runtime_failure. Latch
+    // every failure authority before cleanup so neither a clean-looking
+    // worker drain nor a later retry can turn a partial run into an
+    // authoritative ledger or re-arm venue callbacks.
+    event_loop_teardown_compromised_.store(true, std::memory_order_release);
+    worker_failed_.store(true, std::memory_order_release);
+    if (durable_log_consumer_)
+        durable_log_consumer_->compromise();
+    trigger_halt(reason);
+
+    try
+    {
+        teardown_event_loop_infra();
+    }
+    catch (...)
+    {
+        // stop_workers() normally owns this sequence.  Its provider-facing
+        // virtual calls can throw, so retain a no-throw last resort that still
+        // disarms callbacks and joins every worker that was successfully
+        // launched before startup failed.
+        provider_callbacks_armed_.store(false, std::memory_order_release);
+        if (callbacks_armed_flag_)
+            callbacks_armed_flag_->store(false, std::memory_order_release);
+
+        try
+        {
+            if (worker_watchdog_) worker_watchdog_->stop();
+        }
+        catch (...) {}
+
+        Worker* workers[] = {
+            observer_worker_.get(), logging_worker_.get(), risk_worker_.get(),
+            stats_worker_.get(), risk_stats_worker_.get(), mm_worker_.get()};
+        for (auto* worker : workers)
+            if (worker) worker->stop();
+
+        for (auto& thread : worker_threads_)
+        {
+            if (!thread.joinable()) continue;
+            try { thread.join(); }
+            catch (...) { std::terminate(); }
+        }
+        worker_threads_.clear();
+
+        try
+        {
+            (void)finalize_live_shutdown(live_shutdown_reason::engine_halt);
+        }
+        catch (...) {}
+        try { revoke_provider_callbacks(); }
+        catch (...) {}
+
+#ifdef HAS_QUESTDB
+        try { questdb_end(); }
+        catch (...) {}
+#endif
+    }
+
+    // Covers inline logging and a preopened reserved logger not yet moved into
+    // LoggingWorker (for example, failure before worker construction).
+    if (logging_worker_) logging_worker_->abandon();
+    if (event_logger_) event_logger_->abandon();
+    if (preopened_event_logger_) preopened_event_logger_->abandon();
 }
 
 void engine::report_run_summary(std::size_t event_count,

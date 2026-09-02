@@ -64,10 +64,12 @@ public:
 
     // Health: provide minimal struct for non-QuestDB builds; real one from QuestdbStore when enabled.
     struct Health {
+        bool active = false;
         bool connected = false;
         std::size_t pending_lines = 0;
         std::size_t dropped_lines = 0;
         std::size_t fallback_lines = 0;
+        bool strict_mode = false;
     };
     virtual Health health() const { return {}; }
 

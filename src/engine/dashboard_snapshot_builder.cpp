@@ -1,33 +1,26 @@
 #include "dashboard_snapshot_builder.h"
 
-#include "execution/portfolio.h"
-#include "analytics/analytics.h"
 #include "analytics/adverse_selection_tracker.h"
-#include "exits/exit_manager.h"
-#include "orderbook/orderbook_registry.h"
-#include "order_audit_sink.h"
+#include "analytics/analytics.h"
 #include "engine_config.h"
 #include "execution/execution_adapter.h"
+#include "execution/portfolio.h"
+#include "exits/exit_manager.h"
+#include "orderbook/orderbook_registry.h"
 #include "providers/provider.h"
-#include "types/object_pool.h"
-#include "threading/ring_buffer.h"
-#include "core/event.h"
-
-using EventRing = RingBuffer<event_pointer, 65536>;
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
-#include <iostream>
-#include <sstream>
-#include <chrono>
-#include <vector>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
 
 #ifdef HAS_DEBUG
 #include "debug/stage_timer.h"
-#include "debug/memory_info.h"
-#include "debug/ring_stats.h"
 #endif
+
+namespace dash = truetest::dashboard;
 
 DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     const portfolio& port,
@@ -35,14 +28,13 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     const AdverseSelectionTracker& adverse,
     const truetest::exits::ExitManager& exits,
     const std::atomic<bool>& halt_flag,
+    const std::atomic<std::size_t>& active_order_count,
     const engine_config& config,
     const std::atomic<double>& last_mid_price,
     const std::string& last_mark_symbol,
     const std::unordered_map<std::string, double>& last_mark_prices,
-    std::mutex& last_mark_prices_mu,
     OrderbookRegistry& orderbook_registry,
     const std::unordered_map<std::string, std::shared_ptr<IExecutionAdapter>>& execution_adapters,
-    IOrderAuditSink& audit_sink,
     const std::unordered_set<std::string>& l2_seeded_symbols,
     const ObjectPool<market_event>& market_pool,
     const ObjectPool<order_event>& order_pool,
@@ -61,21 +53,20 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     const std::shared_ptr<EventRing>& observer_ring,
     const std::shared_ptr<EventRing>& risk_stats_ring,
     const std::shared_ptr<EventRing>& mm_ring,
-    DebugSamplers debug_samplers
-)
+    DashboardEngineDebugSampler engine_debug_counts,
+    DebugSamplers debug_samplers)
     : portfolio_(port)
     , analytics_(analytics)
     , adverse_selection_(adverse)
     , exit_manager_(exits)
     , halt_flag_(halt_flag)
+    , active_order_count_(active_order_count)
     , config_(config)
     , last_mid_price_(last_mid_price)
     , last_mark_symbol_(last_mark_symbol)
     , last_mark_prices_(last_mark_prices)
-    , last_mark_prices_mu_(last_mark_prices_mu)
     , orderbook_registry_(orderbook_registry)
     , execution_adapters_(execution_adapters)
-    , audit_sink_(audit_sink)
     , l2_seeded_symbols_(l2_seeded_symbols)
     , market_pool_(market_pool)
     , order_pool_(order_pool)
@@ -94,788 +85,861 @@ DashboardSnapshotBuilder::DashboardSnapshotBuilder(
     , observer_ring_(observer_ring)
     , risk_stats_ring_(risk_stats_ring)
     , mm_ring_(mm_ring)
+    , engine_debug_counts_(engine_debug_counts)
     , debug_samplers_(debug_samplers)
 {
+    constexpr std::size_t kTextReserve = dash::kTextCapacity;
+    const auto configured_orders = config_.risk.max_open_orders > 0
+        ? static_cast<std::size_t>(config_.risk.max_open_orders)
+        : dash::kMaxOpenOrders;
+    const auto bounded_orders = std::min(configured_orders,
+                                         dash::kMaxOpenOrders);
+    const auto required_slots = std::max<std::size_t>(8, bounded_orders * 2U);
+    std::size_t table_size = 8;
+    while (table_size < required_slots) table_size *= 2U;
+    open_orders_cache_.resize(table_size);
+    for (auto& entry : open_orders_cache_)
+    {
+        entry.row.symbol.reserve(kTextReserve);
+        entry.row.strategy_name.reserve(kTextReserve);
+    }
+    for (auto& fill : recent_fills_cache_)
+        fill.symbol.reserve(kTextReserve);
+    if (config_.provider)
+    {
+        try { provider_name_static_ = config_.provider->name(); }
+        catch (...) { provider_name_static_.clear(); }
+    }
 }
 
 DashboardSnapshotBuilder::~DashboardSnapshotBuilder() = default;
 
-bool DashboardSnapshotBuilder::snapshot_dashboard(truetest::ui::dashboard_snapshot& out) const
+bool DashboardSnapshotBuilder::capture_projection(
+    dash::DashboardProjection& out,
+    std::uint64_t request_epoch,
+    bool analytics_quiescent) noexcept
 {
-    std::lock_guard<std::mutex> lk(dashboard_view_mu_);
-    if (!dashboard_view_initialised_) return false;
-    out = dashboard_view_;
+    out.generation = snapshot_generation_ + 1U;
+    out.fulfilled_request_epoch = request_epoch;
+    out.generated_at = std::chrono::steady_clock::now();
+    out.captured_wall_time = std::chrono::system_clock::now();
+    out.complete = true;
+
+    out.marks_state = {};
+    out.positions_state = {};
+    out.lots_state = {};
+    out.open_orders_state = {};
+    out.recent_fills_state = {};
+    out.brackets_state = {};
+    out.strategies_state = {};
+    out.books_state = {};
+    out.market_symbols_state = {};
+    out.stages_state = {};
+
+    const auto assign_text = [&out](dash::text& target,
+                                    std::string_view source) noexcept {
+        if (!target.assign(source)) out.complete = false;
+    };
+    const auto add_market_symbol = [&out, &assign_text](
+                                       std::string_view source) noexcept {
+        if (source.empty()) return;
+        for (std::size_t i = 0; i < out.market_symbols_state.count; ++i)
+            if (out.market_symbols[i].view() == source) return;
+        if (!out.market_symbols_state.appendable(out.market_symbols.size()))
+            return;
+        assign_text(out.market_symbols[out.market_symbols_state.count++],
+                    source);
+    };
+
+    assign_text(out.active_symbol, last_mark_symbol_);
+    add_market_symbol(last_mark_symbol_);
+    out.last_mid = last_mid_price_.load(std::memory_order_relaxed);
+    out.cash = portfolio_.get_cash();
+    out.initial_balance = portfolio_.get_initial_balance();
+    out.total_fills = portfolio_.get_total_fills();
+    out.total_trades = portfolio_.get_total_trades();
+
+    // Only the event producer mutates this map. Cross-thread consumers no
+    // longer read it; therefore no mutex is needed (or permitted) here.
+    for (const auto& [symbol, mark] : last_mark_prices_)
+    {
+        if (!out.marks_state.appendable(out.marks.size())) continue;
+        auto& row = out.marks[out.marks_state.count++];
+        assign_text(row.symbol, symbol);
+        add_market_symbol(symbol);
+        row.value = mark;
+    }
+
+    for (const auto& [symbol, position] : portfolio_.get_positions())
+    {
+        if (std::abs(position.qty) < 1e-12) continue;
+        if (!out.positions_state.appendable(out.positions.size())) continue;
+        auto& row = out.positions[out.positions_state.count++];
+        assign_text(row.symbol, symbol);
+        add_market_symbol(symbol);
+        row.qty = position.qty;
+        row.cost_basis = position.cost_basis;
+    }
+
+    for (const auto& [opener, lot] : portfolio_.get_lots())
+    {
+        if (!out.lots_state.appendable(out.lots.size())) continue;
+        auto& row = out.lots[out.lots_state.count++];
+        row.opener_order_id = opener;
+        assign_text(row.symbol, lot.symbol);
+        add_market_symbol(lot.symbol);
+        assign_text(row.strategy_name, lot.strategy_name);
+        row.side = lot.side;
+        row.qty_open = lot.qty_open;
+        row.entry_price = lot.entry_price;
+        row.ts_open = lot.ts_open;
+    }
+
+    for (const auto& entry : open_orders_cache_)
+    {
+        if (entry.state != open_order_cache_entry::slot_state::occupied)
+            continue;
+        if (!out.open_orders_state.appendable(out.open_orders.size()))
+            continue;
+        auto& row = out.open_orders[out.open_orders_state.count++];
+        row.order_id = entry.row.order_id;
+        assign_text(row.symbol, entry.row.symbol);
+        add_market_symbol(entry.row.symbol);
+        assign_text(row.strategy_name, entry.row.strategy_name);
+        row.side = entry.row.side;
+        row.type = entry.row.type;
+        row.qty = entry.row.qty;
+        row.price = entry.row.price;
+        row.trigger_price = entry.row.trigger_price;
+        row.trigger_price_available = entry.row.trigger_price_available;
+        row.timestamp = entry.ts;
+        row.status = entry.row.status;
+    }
+    out.open_orders_state.total_count += open_orders_cache_overflow_count_;
+    if (open_orders_cache_overflow_count_ != 0U)
+        out.open_orders_state.complete = false;
+
+    out.recent_fills_state.total_count = recent_fills_count_;
+    out.recent_fills_state.count = recent_fills_count_;
+    for (std::size_t i = 0; i < recent_fills_count_; ++i)
+    {
+        const auto index =
+            (recent_fills_head_ + kRecentFillsCap - 1U - i) %
+            kRecentFillsCap;
+        const auto& source = recent_fills_cache_[index];
+        auto& row = out.recent_fills[i];
+        row.timestamp = source.ts;
+        assign_text(row.symbol, source.symbol);
+        row.side = source.side;
+        row.qty = source.qty;
+        row.price = source.price;
+        row.fee = source.fee;
+        row.source = source.source;
+    }
+
+    exit_manager_.for_each_armed_event_thread(
+        [&out, &assign_text](std::uint64_t opener,
+                            const truetest::exits::exit_intent& intent,
+                            double entry_price,
+                            std::chrono::system_clock::time_point ts) noexcept {
+            if (!out.brackets_state.appendable(out.brackets.size())) return;
+            auto& row = out.brackets[out.brackets_state.count++];
+            row.opener_order_id = opener;
+            assign_text(row.strategy_name, intent.strategy_name);
+            assign_text(row.symbol, intent.symbol);
+            row.close_side = intent.close_side;
+            row.qty = intent.qty;
+            row.entry_price = entry_price;
+            row.stop_loss = intent.stop_loss;
+            row.take_profit = intent.take_profit;
+            row.ts_armed = ts;
+        });
+
+    const double qty_scale = config_.qty_scale > 0.0 ? config_.qty_scale : 1.0;
+    orderbook_registry_.for_each_book(
+        [&out, &assign_text, &add_market_symbol, this, qty_scale](
+            const std::string& symbol, const orderbook& book) noexcept {
+            if (!out.books_state.appendable(out.books.size())) return;
+            auto& row = out.books[out.books_state.count++];
+            assign_text(row.symbol, symbol);
+            add_market_symbol(symbol);
+            row.venue_seeded = l2_seeded_symbols_.count(symbol) != 0U;
+            std::array<lvl_info, dash::kDepthLevels> bids{};
+            std::array<lvl_info, dash::kDepthLevels> asks{};
+            const auto depth = book.copy_external_depth(bids, asks);
+            row.quantity_valid = !depth.quantity_overflow;
+            row.total_bid_levels = depth.total_bid_levels;
+            row.total_ask_levels = depth.total_ask_levels;
+            row.bid_count = depth.bid_count;
+            row.ask_count = depth.ask_count;
+            for (std::size_t i = 0; i < row.bid_count; ++i)
+            {
+                row.bids[i].price = bids[i].price_.to_double();
+                row.bids[i].size = static_cast<double>(bids[i].quantity_) /
+                                   qty_scale;
+            }
+            for (std::size_t i = 0; i < row.ask_count; ++i)
+            {
+                row.asks[i].price = asks[i].price_.to_double();
+                row.asks[i].size = static_cast<double>(asks[i].quantity_) /
+                                   qty_scale;
+            }
+        });
+
+    out.queue_diagnostics_available = false;
+    out.queue_available = false;
+    out.queue_diagnostics_complete = true;
+    out.queue_avg_bps = 0;
+    out.queue_submitted_with_queue = 0;
+    out.queue_filled_after_drain = 0;
+    out.queue_blocked_at_eos = 0;
+    out.provider_present = static_cast<bool>(config_.provider);
+    out.provider_state_available = false;
+    out.provider_state = -1;
+    assign_text(out.provider_name, provider_name_static_);
+
+    // Adapter/provider diagnostics are virtual and several implementations
+    // expose event-thread-owned containers. Invoke them only for explicitly
+    // quiescent initial/terminal captures; runtime projections mark the data
+    // unavailable and never retain a raw adapter pointer for UI threads.
+    if (analytics_quiescent)
+    {
+        try
+        {
+            std::array<IExecutionAdapter*, dash::kMaxSymbols + 1U> adapters{};
+            std::size_t adapter_count = 0;
+            const auto add_adapter = [&](IExecutionAdapter* adapter) noexcept {
+                if (!adapter) return;
+                for (std::size_t i = 0; i < adapter_count; ++i)
+                    if (adapters[i] == adapter) return;
+                if (adapter_count == adapters.size())
+                {
+                    out.queue_diagnostics_complete = false;
+                    return;
+                }
+                adapters[adapter_count++] = adapter;
+            };
+            for (const auto& [_, adapter] : execution_adapters_)
+                add_adapter(adapter.get());
+            std::shared_ptr<IExecutionAdapter> provider_adapter;
+            if (config_.provider)
+            {
+                out.provider_state = static_cast<int>(
+                    config_.provider->lifecycle_state());
+                out.provider_state_available = true;
+                provider_adapter = config_.provider->get_execution_adapter();
+                add_adapter(provider_adapter.get());
+            }
+
+            std::uint64_t queue_sum = 0;
+            std::uint32_t queue_sources = 0;
+            for (std::size_t i = 0; i < adapter_count; ++i)
+            {
+                auto* adapter = adapters[i];
+                if (adapter->live_quote_count() == 0U) continue;
+                queue_sum += adapter->avg_queue_position_bps();
+                ++queue_sources;
+                out.queue_submitted_with_queue +=
+                    adapter->queue_submitted_with_queue();
+                out.queue_filled_after_drain +=
+                    adapter->queue_filled_after_drain();
+                out.queue_blocked_at_eos +=
+                    adapter->queue_blocked_at_eos();
+            }
+            out.queue_available = queue_sources != 0U;
+            out.queue_diagnostics_available = true;
+            out.queue_avg_bps = queue_sources != 0U
+                ? static_cast<std::uint32_t>(queue_sum / queue_sources) : 0U;
+        }
+        catch (...)
+        {
+            out.queue_available = false;
+            out.queue_diagnostics_available = false;
+            out.queue_diagnostics_complete = false;
+            out.provider_state_available = false;
+            out.provider_state = -1;
+        }
+    }
+
+#ifdef HAS_DEBUG
+    if (auto* timer = debug_samplers_.stage_timer)
+    {
+        for (std::size_t i = 0;
+             i < static_cast<std::size_t>(debug::stage::COUNT); ++i)
+        {
+            const auto stage = static_cast<debug::stage>(i);
+            const auto stats = timer->snapshot(stage);
+            if (stats.call_count == 0U) continue;
+            if (!out.stages_state.appendable(out.stages.size())) continue;
+            auto& row = out.stages[out.stages_state.count++];
+            row.index = static_cast<std::uint8_t>(i);
+            row.calls = stats.call_count;
+            row.total_ns = stats.total_ns;
+            row.min_ns = stats.min_ns;
+            row.max_ns = stats.max_ns;
+        }
+    }
+#endif
+
+    out.analytics_available = analytics_quiescent || !config_.is_threaded();
+    out.strategies_state = {};
+    out.equity_tail_count = 0;
+    out.drawdown_tail_count = 0;
+    out.avg_markout_bps = 0.0;
+    out.markout_samples = 0;
+    out.total_orders = 0;
+    out.win_rate = 0.0;
+    out.sharpe = 0.0;
+    out.sortino = 0.0;
+    out.profit_factor = 0.0;
+    out.max_drawdown_pct = 0.0;
+    out.latency = {};
+    if (out.analytics_available)
+    {
+        out.avg_markout_bps = adverse_selection_.mean_bps();
+        out.markout_samples = adverse_selection_.sample_count();
+        out.total_orders = analytics_.total_orders();
+        out.win_rate = analytics_.win_rate_pct();
+        out.sharpe = analytics_.rolling_sharpe();
+        out.sortino = analytics_.sortino_now();
+        out.profit_factor = analytics_.profit_factor_now();
+        out.max_drawdown_pct = analytics_.max_drawdown_pct();
+        const auto latency = analytics_.latency_view_now();
+        out.latency = {latency.avg_ns, latency.min_ns,
+                       latency.max_ns, latency.samples};
+        out.equity_tail_count = analytics_.copy_equity_tail(
+            std::span<double>{out.equity_tail});
+        out.drawdown_tail_count = analytics_.copy_drawdown_tail(
+            std::span<double>{out.drawdown_tail});
+
+        for (const auto& [name, stats] : analytics_.per_strategy_view_ref())
+        {
+            if (!out.strategies_state.appendable(out.strategies.size()))
+                continue;
+            auto& row = out.strategies[out.strategies_state.count++];
+            assign_text(row.name, name);
+            row.pnl = stats.total_pnl;
+            row.trade_count = stats.trade_count;
+            row.win_count = stats.win_count;
+            row.total_win = stats.total_win;
+            row.total_loss = stats.total_loss;
+        }
+    }
+
+    out.halted = halt_flag_.load(std::memory_order_acquire);
+    out.active_order_count =
+        active_order_count_.load(std::memory_order_acquire);
+    out.engine_counts_available = static_cast<bool>(engine_debug_counts_);
+    out.engine_counts = engine_debug_counts_();
+    out.open_orders_cache_size = open_orders_cache_size_;
+    out.exit_pending = exit_manager_.pending_count();
+    out.exit_armed = exit_manager_.armed_count();
+    out.cache_complete = dashboard_cache_complete_;
+
+    const auto collection_complete =
+        out.marks_state.complete && out.positions_state.complete &&
+        out.lots_state.complete && out.open_orders_state.complete &&
+        out.recent_fills_state.complete && out.brackets_state.complete &&
+        out.strategies_state.complete && out.books_state.complete &&
+        out.market_symbols_state.complete && out.stages_state.complete;
+    out.complete = out.complete && collection_complete &&
+                   dashboard_cache_complete_;
     return true;
 }
 
-void DashboardSnapshotBuilder::request_dashboard_refresh()
+void DashboardSnapshotBuilder::materialize_dashboard_view(
+    const dash::DashboardProjection& projection,
+    truetest::ui::dashboard_snapshot& out) const
 {
-    dashboard_view_force_ = true;
-    dashboard_view_last_ = std::chrono::steady_clock::time_point{};
-}
+    using snapshot_t = truetest::ui::dashboard_snapshot;
+    out = snapshot_t{};
 
-void DashboardSnapshotBuilder::refresh_if_due()
-{
-    auto now = std::chrono::steady_clock::now();
+    const auto mark_for = [&projection](std::string_view symbol) noexcept {
+        for (std::size_t i = 0; i < projection.marks_state.count; ++i)
+            if (projection.marks[i].symbol.view() == symbol &&
+                std::isfinite(projection.marks[i].value) &&
+                projection.marks[i].value > 0.0)
+                return projection.marks[i].value;
+        return projection.active_symbol.view() == symbol &&
+               projection.last_mid > 0.0
+            ? projection.last_mid : 0.0;
+    };
 
-    if (!dashboard_view_force_
-        && dashboard_view_initialised_
-        && now - dashboard_view_last_ < dashboard_view_interval_)
+    out.cash = projection.cash;
+    out.initial_balance = projection.initial_balance;
+    out.equity_available = true;
+    out.realized_pnl_available = true;
+    out.unrealized_pnl_available = true;
+    double marked_position_value = 0.0;
+    double settled_pnl = out.cash - out.initial_balance;
+    out.positions.reserve(projection.positions_state.count);
+    for (std::size_t i = 0; i < projection.positions_state.count; ++i)
     {
-        return;
-    }
-
-    truetest::ui::dashboard_snapshot snap;
-    build_dashboard_view(snap);
-
-    {
-        std::lock_guard<std::mutex> lk(dashboard_view_mu_);
-        dashboard_view_              = std::move(snap);
-        dashboard_view_initialised_  = true;
-    }
-    dashboard_view_last_ = now;
-    dashboard_view_force_ = false;
-}
-
-void DashboardSnapshotBuilder::cache_open_order(const order_event& o)
-{
-    open_order_cache_entry e;
-    e.row.order_id      = o.get_order_id();
-    e.row.symbol        = o.get_symbol();
-    e.row.strategy_name = o.get_strategy_name();
-    e.row.side          = (o.get_side() == order_side::buy) ? 'B' : 'S';
-    switch (o.get_order_type())
-    {
-        case order_type::market:     e.row.type = 'M'; break;
-        case order_type::limit:      e.row.type = 'L'; break;
-        case order_type::stop:       e.row.type = 'S'; break;
-        case order_type::stop_limit: e.row.type = 's'; break;
-    }
-    e.row.qty    = o.get_quantity();
-    e.row.price  = o.get_price();
-    e.row.status = "open";
-    e.ts         = o.get_timestamp();
-    open_orders_cache_[o.get_order_id()] = std::move(e);
-}
-
-void DashboardSnapshotBuilder::update_open_order_status(std::uint64_t id, const char* status)
-{
-    auto it = open_orders_cache_.find(id);
-    if (it != open_orders_cache_.end())
-        it->second.row.status = status;
-}
-
-void DashboardSnapshotBuilder::erase_open_order(std::uint64_t id)
-{
-    open_orders_cache_.erase(id);
-}
-
-void DashboardSnapshotBuilder::cache_fill(const fill_event& f)
-{
-    truetest::ui::dashboard_snapshot::fill_row r;
-    r.ts     = f.get_timestamp();
-    r.symbol = f.get_symbol();
-    r.side   = (f.get_side() == order_side::buy) ? 'B' : 'S';
-    r.qty    = f.get_filled_quantity();
-    r.price  = f.get_fill_price();
-    r.fee    = f.get_commission();
-    r.source = (f.get_source() == fill_source::exchange)  ? "exchange"
-             : (f.get_source() == fill_source::simulated) ? "simulated"
-             :                                              "local";
-    recent_fills_cache_.push_front(std::move(r));
-    while (recent_fills_cache_.size() > kRecentFillsCap)
-        recent_fills_cache_.pop_back();
-}
-
-// The large build_dashboard_view implementation is moved here, adapted to use
-// the injected refs instead of direct engine members. Logic is identical.
-void DashboardSnapshotBuilder::build_dashboard_view(truetest::ui::dashboard_snapshot& out) const
-{
-    using snap_t = truetest::ui::dashboard_snapshot;
-
-    // Account — multi-symbol marks (FR-06), same path as engine final/shadow equity.
-    const double last_mid = last_mid_price_.load(std::memory_order_relaxed);
-    out.cash             = portfolio_.get_cash();
-    out.initial_balance  = portfolio_.get_initial_balance();
-    {
-        std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-        out.equity = portfolio_.get_equity(last_mark_prices_, last_mid);
-    }
-    out.realized_pnl     = out.equity - out.initial_balance;
-    out.unrealized_pnl   = 0.0;
-
-    // Positions
-    out.positions.clear();
-    out.positions.reserve(portfolio_.get_positions().size());
-    for (const auto& [sym, pos] : portfolio_.get_positions())
-    {
-        if (std::abs(pos.qty) < 1e-12) continue;
-        snap_t::position_row row;
-        row.symbol     = sym;
-        row.qty        = pos.qty;
-        row.avg_entry  = (std::abs(pos.qty) > 0.0) ? pos.cost_basis / pos.qty : 0.0;
-        // Prefer per-symbol mark; fall back to last_mid only for the primary symbol.
-        row.mark = 0.0;
+        const auto& source = projection.positions[i];
+        snapshot_t::position_row row;
+        row.symbol = source.symbol.view();
+        row.qty = source.qty;
+        row.avg_entry = std::abs(source.qty) > 0.0
+            ? source.cost_basis / source.qty : 0.0;
+        row.mark = mark_for(source.symbol.view());
+        row.mark_available = row.mark > 0.0;
+        row.unrealized_available = row.mark_available;
+        if (row.mark_available)
         {
-            std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-            if (auto it = last_mark_prices_.find(sym); it != last_mark_prices_.end() && it->second > 0.0)
-                row.mark = it->second;
+            row.unrealized = row.mark * row.qty - source.cost_basis;
+            out.unrealized_pnl += row.unrealized;
+            marked_position_value += row.mark * row.qty;
         }
-        if (row.mark <= 0.0 && sym == last_mark_symbol_)
-            row.mark = last_mid;
-        row.unrealized = (row.mark > 0.0) ? (row.mark - row.avg_entry) * pos.qty : 0.0;
-        out.unrealized_pnl += row.unrealized;
+        else
+        {
+            out.equity_available = false;
+            out.unrealized_pnl_available = false;
+        }
+        settled_pnl += source.cost_basis;
         out.positions.push_back(std::move(row));
     }
-
-    // Lots
-    out.lots.clear();
-    out.lots.reserve(portfolio_.get_lots().size());
-    auto now_sys = std::chrono::system_clock::now();
-    for (const auto& [opener_id, l] : portfolio_.get_lots())
+    if (out.equity_available)
     {
-        snap_t::lot_row row;
-        row.opener_order_id = opener_id;
-        row.symbol          = l.symbol;
-        row.strategy_name   = l.strategy_name;
-        row.side            = (l.side == order_side::buy) ? 'L' : 'S';
-        row.qty_open        = l.qty_open;
-        row.entry_price     = l.entry_price;
-        row.age_seconds     = std::chrono::duration_cast<std::chrono::seconds>(now_sys - l.ts_open).count();
+        out.equity = out.cash + marked_position_value;
+        out.total_pnl = out.equity - out.initial_balance;
+        out.total_pnl_available = true;
+    }
+    else
+        out.unrealized_pnl = 0.0;
+    out.realized_pnl = settled_pnl;
+
+    const auto capture_time = projection.captured_wall_time;
+    out.lots.reserve(projection.lots_state.count);
+    for (std::size_t i = 0; i < projection.lots_state.count; ++i)
+    {
+        const auto& source = projection.lots[i];
+        snapshot_t::lot_row row;
+        row.opener_order_id = source.opener_order_id;
+        row.symbol = source.symbol.view();
+        row.strategy_name = source.strategy_name.view();
+        row.side = source.side == order_side::buy ? 'L' : 'S';
+        row.qty_open = source.qty_open;
+        row.entry_price = source.entry_price;
+        row.age_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+            capture_time - source.ts_open).count();
         out.lots.push_back(std::move(row));
     }
 
-    // Open orders from cache
-    out.open_orders.clear();
-    out.open_orders.reserve(open_orders_cache_.size());
-    auto now_steady_sys = std::chrono::system_clock::now();
-    for (const auto& [id, e] : open_orders_cache_)
+    out.open_orders.reserve(projection.open_orders_state.count);
+    for (std::size_t i = 0; i < projection.open_orders_state.count; ++i)
     {
-        auto row = e.row;
-        row.age_seconds = std::chrono::duration_cast<std::chrono::seconds>(now_steady_sys - e.ts).count();
+        const auto& source = projection.open_orders[i];
+        snapshot_t::open_order_row row;
+        row.order_id = source.order_id;
+        row.symbol = source.symbol.view();
+        row.strategy_name = source.strategy_name.view();
+        row.side = source.side;
+        row.type = source.type;
+        row.qty = source.qty;
+        row.price = source.price;
+        row.trigger_price = source.trigger_price;
+        row.trigger_price_available = source.trigger_price_available;
+        row.age_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+            capture_time - source.timestamp).count();
+        row.status = source.status;
         out.open_orders.push_back(std::move(row));
     }
+    std::sort(out.open_orders.begin(), out.open_orders.end(),
+              [](const auto& lhs, const auto& rhs) {
+                  return lhs.order_id < rhs.order_id;
+              });
 
-    out.recent_fills.assign(recent_fills_cache_.begin(), recent_fills_cache_.end());
-
-    // Markout, perf
-    out.perf.avg_markout_bps = adverse_selection_.mean_bps();
-    out.perf.markout_samples = adverse_selection_.sample_count();
-    out.perf.total_fills     = portfolio_.get_total_fills();
-    out.perf.total_trades    = portfolio_.get_total_trades();
-    out.perf.total_orders    = open_orders_cache_.size() + portfolio_.get_total_fills();
-    out.perf.win_rate        = analytics_.win_rate_pct();
-    out.perf.sharpe          = analytics_.rolling_sharpe();
-    out.perf.sortino         = 0.0;
-    out.perf.profit_factor   = 0.0;
-
-    // Risk
-    out.risk.halted             = halt_flag_.load(std::memory_order_acquire);
-    out.risk.daily_loss         = 0.0;
-    out.risk.daily_loss_limit   = config_.risk.max_daily_loss;
-    out.risk.max_drawdown_pct   = analytics_.max_drawdown_pct();
-    out.risk.max_drawdown_limit = config_.risk.max_drawdown * 100.0;
-    out.risk.open_orders        = open_orders_cache_.size();
-    out.risk.open_orders_limit  = (config_.risk.max_open_orders > 0) ? static_cast<std::size_t>(config_.risk.max_open_orders) : 0;
-
-    double exposure = 0.0;
-    for (const auto& [sym, pos] : portfolio_.get_positions())
+    out.recent_fills.reserve(projection.recent_fills_state.count);
+    for (std::size_t i = 0; i < projection.recent_fills_state.count; ++i)
     {
-        if (std::abs(pos.qty) < 1e-12) continue;
-        double mark = 0.0;
-        {
-            std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-            if (auto it = last_mark_prices_.find(sym); it != last_mark_prices_.end() && it->second > 0.0)
-                mark = it->second;
-        }
-        if (mark <= 0.0 && sym == last_mark_symbol_)
-            mark = last_mid;
-        if (mark > 0.0) exposure += std::abs(pos.qty) * mark;
+        const auto& source = projection.recent_fills[i];
+        snapshot_t::fill_row row;
+        row.ts = source.timestamp;
+        row.symbol = source.symbol.view();
+        row.side = source.side;
+        row.qty = source.qty;
+        row.price = source.price;
+        row.fee = source.fee;
+        row.source = source.source;
+        out.recent_fills.push_back(std::move(row));
     }
-    out.risk.exposure       = exposure;
+
+    out.perf.avg_markout_bps = projection.avg_markout_bps;
+    out.perf.markout_samples = projection.markout_samples;
+    out.perf.total_fills = projection.total_fills;
+    out.perf.total_trades = projection.total_trades;
+    out.perf.total_orders = projection.total_orders;
+    out.perf.win_rate = projection.win_rate;
+    out.perf.sharpe = projection.sharpe;
+    out.perf.sortino = projection.sortino;
+    out.perf.profit_factor = projection.profit_factor;
+
+    out.risk.halted = projection.halted;
+    out.risk.daily_loss_limit = config_.risk.max_daily_loss;
+    out.risk.max_drawdown_pct = projection.max_drawdown_pct;
+    out.risk.max_drawdown_limit = config_.risk.max_drawdown * 100.0;
+    out.risk.max_drawdown_available = projection.analytics_available &&
+        projection.drawdown_tail_count != 0U;
+    out.risk.open_orders = projection.active_order_count;
+    out.risk.open_orders_limit = config_.risk.max_open_orders > 0
+        ? static_cast<std::size_t>(config_.risk.max_open_orders) : 0U;
+    bool exposure_available = true;
+    double exposure = 0.0;
+    for (std::size_t i = 0; i < projection.positions_state.count; ++i)
+    {
+        const auto& position = projection.positions[i];
+        const auto mark = mark_for(position.symbol.view());
+        if (mark > 0.0) exposure += std::abs(position.qty) * mark;
+        else exposure_available = false;
+    }
+    out.risk.exposure_available = exposure_available;
+    out.risk.exposure = exposure_available ? exposure : 0.0;
     out.risk.exposure_limit = config_.risk.max_portfolio_exposure;
 
-    // Queue
-    {
-        std::uint64_t qsum = 0;
-        std::uint32_t qn = 0;
-        std::size_t submitted = 0, filled = 0, blocked = 0;
-        auto collect = [&](IExecutionAdapter* a) {
-            if (!a) return;
-            const auto c = a->live_quote_count();
-            if (c == 0) return;
-            qsum += a->avg_queue_position_bps();
-            ++qn;
-            submitted += a->queue_submitted_with_queue();
-            filled    += a->queue_filled_after_drain();
-            blocked   += a->queue_blocked_at_eos();
-        };
-        for (auto& [_, ad] : execution_adapters_)
-            collect(ad.get());
-        if (config_.provider)
-            collect(config_.provider->get_execution_adapter().get());
-        out.queue.avg_bps = (qn > 0) ? static_cast<std::uint32_t>(qsum / qn) : 0u;
-        out.queue.submitted_with_queue = submitted;
-        out.queue.filled_after_drain   = filled;
-        out.queue.blocked_at_eos       = blocked;
-    }
+    out.queue.available = projection.queue_available;
+    out.queue.avg_bps = projection.queue_avg_bps;
+    out.queue.submitted_with_queue =
+        projection.queue_submitted_with_queue;
+    out.queue.filled_after_drain = projection.queue_filled_after_drain;
+    out.queue.blocked_at_eos = projection.queue_blocked_at_eos;
 
-    // Brackets
-    out.brackets.clear();
-    auto armed = exit_manager_.snapshot_armed();
-    out.brackets.reserve(armed.size());
-    for (const auto& a : armed)
+    std::vector<truetest::exits::ExitManager::fixed_venue_handle_view>
+        venue_rows(projection.brackets_state.count);
+    const auto venue_result = exit_manager_.snapshot_venue_handles_into(
+        std::span{venue_rows});
+    out.brackets.reserve(projection.brackets_state.count);
+    for (std::size_t i = 0; i < projection.brackets_state.count; ++i)
     {
-        snap_t::bracket_row row;
-        row.opener_order_id = a.opener_order_id;
-        row.strategy_name   = a.strategy_name;
-        row.symbol          = a.symbol;
-        row.side            = (a.close_side == order_side::sell) ? 'L' : 'S';
-        row.qty             = a.qty;
-        row.entry_price     = a.entry_price;
-        row.stop_loss       = a.stop_loss;
-        row.take_profit     = a.take_profit;
-        row.venue_managed   = a.venue_managed;
-        row.venue_list_id   = a.venue_list_id;
-        row.age_seconds     = std::chrono::duration_cast<std::chrono::seconds>(now_sys - a.ts_armed).count();
-        for (const auto& p : out.positions)
+        const auto& source = projection.brackets[i];
+        snapshot_t::bracket_row row;
+        row.opener_order_id = source.opener_order_id;
+        row.strategy_name = source.strategy_name.view();
+        row.symbol = source.symbol.view();
+        row.side = source.close_side == order_side::sell ? 'L' : 'S';
+        row.qty = source.qty;
+        row.entry_price = source.entry_price;
+        row.stop_loss = source.stop_loss;
+        row.take_profit = source.take_profit;
+        row.mark = mark_for(source.symbol.view());
+        row.age_seconds = std::chrono::duration_cast<std::chrono::seconds>(
+            capture_time - source.ts_armed).count();
+        for (std::size_t j = 0; j < venue_result.count; ++j)
         {
-            if (p.symbol == a.symbol) { row.mark = p.mark; break; }
-        }
-        if (row.mark == 0.0)
-        {
-            {
-                std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
-                if (auto it = last_mark_prices_.find(a.symbol); it != last_mark_prices_.end() && it->second > 0.0)
-                    row.mark = it->second;
-            }
-            if (row.mark == 0.0 && a.symbol == last_mark_symbol_)
-                row.mark = last_mid;
+            if (venue_rows[j].opener_order_id != row.opener_order_id) continue;
+            row.venue_managed = venue_rows[j].venue_managed;
+            row.venue_list_id.assign(venue_rows[j].list_id.data(),
+                                     venue_rows[j].list_id_size);
+            break;
         }
         out.brackets.push_back(std::move(row));
     }
 
-    // L2
+    std::vector<std::string> symbols;
+    symbols.reserve(projection.market_symbols_state.count);
+    for (std::size_t i = 0;
+         i < projection.market_symbols_state.count; ++i)
+        symbols.emplace_back(projection.market_symbols[i].view());
+    std::sort(symbols.begin(), symbols.end());
+
+    out.l2.symbol = projection.active_symbol.view();
+    out.market_rows.reserve(symbols.size());
+    for (const auto& symbol : symbols)
     {
-        using snap_t = truetest::ui::dashboard_snapshot;
-        auto& v = out.l2;
-        v = snap_t::l2_view{};
-
-        constexpr std::size_t kDepthRows = 10;
-        const std::string& sym = last_mark_symbol_;
-        v.symbol = sym;
-
-        if (!sym.empty())
+        snapshot_t::market_row row;
+        row.symbol = symbol;
+        row.mark = mark_for(symbol);
+        row.mark_available = row.mark > 0.0;
+        for (std::size_t i = 0; i < projection.positions_state.count; ++i)
+            if (projection.positions[i].symbol.view() == symbol)
+                row.position_qty = projection.positions[i].qty;
+        for (std::size_t i = 0; i < projection.open_orders_state.count; ++i)
         {
-            auto ob = orderbook_registry_.get(sym);
-            if (ob)
+            const auto& order = projection.open_orders[i];
+            if (order.symbol.view() != symbol) continue;
+            if (order.side == 'B') ++row.working_buy_orders;
+            else if (order.side == 'S') ++row.working_sell_orders;
+        }
+
+        const dash::book_row* book = nullptr;
+        for (std::size_t i = 0; i < projection.books_state.count; ++i)
+            if (projection.books[i].symbol.view() == symbol)
             {
-                auto infos = ob->get_order_infos();
-                const auto& bids = infos.get_bids();
-                const auto& asks = infos.get_asks();
-                v.total_bid_levels = bids.size();
-                v.total_ask_levels = asks.size();
-
-                double cb = 0.0;
-                v.bids.reserve(std::min(kDepthRows, bids.size()));
-                for (std::size_t i = 0; i < std::min(kDepthRows, bids.size()); ++i)
+                book = &projection.books[i];
+                break;
+            }
+        if (book && book->quantity_valid)
+        {
+            if (book->bid_count != 0U)
+            {
+                row.best_bid = book->bids[0].price;
+                row.best_bid_available = row.best_bid > 0.0;
+            }
+            if (book->ask_count != 0U)
+            {
+                row.best_ask = book->asks[0].price;
+                row.best_ask_available = row.best_ask > 0.0;
+            }
+            double bid_depth = 0.0;
+            double ask_depth = 0.0;
+            for (std::size_t i = 0; i < book->bid_count; ++i)
+                bid_depth += book->bids[i].size;
+            for (std::size_t i = 0; i < book->ask_count; ++i)
+                ask_depth += book->asks[i].size;
+            if (row.best_bid_available && row.best_ask_available)
+            {
+                row.bbo_available = true;
+                row.mid = (row.best_bid + row.best_ask) * 0.5;
+                row.spread = row.best_ask - row.best_bid;
+                row.spread_bps = row.mid > 0.0
+                    ? row.spread / row.mid * 1e4 : 0.0;
+                const auto top_size = book->bids[0].size + book->asks[0].size;
+                if (top_size > 0.0)
                 {
-                    snap_t::l2_level l;
-                    l.price = bids[i].price_.to_double();
-                    l.size  = static_cast<double>(bids[i].quantity_) / config_.qty_scale;
-                    cb += l.size;
-                    l.cum   = cb;
-                    v.bids.push_back(l);
+                    row.microprice =
+                        (book->bids[0].size * row.best_ask +
+                         book->asks[0].size * row.best_bid) / top_size;
+                    row.microprice_available = true;
                 }
-                v.cum_bid_size = cb;
+            }
+            if (bid_depth + ask_depth > 0.0)
+            {
+                row.imbalance = (bid_depth - ask_depth) /
+                                (bid_depth + ask_depth);
+                row.imbalance_available = true;
+            }
 
-                double ca = 0.0;
-                v.asks.reserve(std::min(kDepthRows, asks.size()));
-                for (std::size_t i = 0; i < std::min(kDepthRows, asks.size()); ++i)
+            if (symbol == out.l2.symbol)
+            {
+                out.l2.total_bid_levels = book->total_bid_levels;
+                out.l2.total_ask_levels = book->total_ask_levels;
+                double cumulative = 0.0;
+                for (std::size_t i = 0; i < book->bid_count; ++i)
                 {
-                    snap_t::l2_level l;
-                    l.price = asks[i].price_.to_double();
-                    l.size  = static_cast<double>(asks[i].quantity_) / config_.qty_scale;
-                    ca += l.size;
-                    l.cum   = ca;
-                    v.asks.push_back(l);
+                    cumulative += book->bids[i].size;
+                    out.l2.bids.push_back(
+                        {book->bids[i].price, book->bids[i].size, cumulative});
                 }
-                v.cum_ask_size = ca;
-
-                if (!v.bids.empty()) v.best_bid = v.bids.front().price;
-                if (!v.asks.empty()) v.best_ask = v.asks.front().price;
-                if (v.best_bid > 0.0 && v.best_ask > 0.0)
+                out.l2.cum_bid_size = cumulative;
+                cumulative = 0.0;
+                for (std::size_t i = 0; i < book->ask_count; ++i)
                 {
-                    v.mid = (v.best_bid + v.best_ask) * 0.5;
-                    v.spread_bps = (v.best_ask - v.best_bid) / v.mid * 1e4;
-                    const double bsz = v.bids.front().size;
-                    const double asz = v.asks.front().size;
-                    const double tot = bsz + asz;
-                    v.microprice = (tot > 0.0) ? (bsz * v.best_ask + asz * v.best_bid) / tot : v.mid;
+                    cumulative += book->asks[i].size;
+                    out.l2.asks.push_back(
+                        {book->asks[i].price, book->asks[i].size, cumulative});
                 }
-                if (v.cum_bid_size + v.cum_ask_size > 0.0)
-                    v.imbalance = (v.cum_bid_size - v.cum_ask_size) / (v.cum_bid_size + v.cum_ask_size);
-
-                if (l2_seeded_symbols_.count(sym))  // note: l2_seeded is not directly here, we need to inject it too
-                    v.source = snap_t::l2_source::venue;
-                else if (!v.bids.empty() || !v.asks.empty())
-                    v.source = snap_t::l2_source::synthetic;
-                else
-                    v.source = snap_t::l2_source::none;
+                out.l2.cum_ask_size = cumulative;
+                out.l2.best_bid = row.best_bid;
+                out.l2.best_ask = row.best_ask;
+                out.l2.mid = row.mid;
+                out.l2.spread_bps = row.spread_bps;
+                out.l2.microprice = row.microprice;
+                out.l2.imbalance = row.imbalance;
+                out.l2.source = book->venue_seeded
+                    ? snapshot_t::l2_source::venue
+                    : ((book->bid_count != 0U || book->ask_count != 0U)
+                        ? snapshot_t::l2_source::synthetic
+                        : snapshot_t::l2_source::none);
             }
         }
+        out.market_rows.push_back(std::move(row));
     }
 
-
-// Memory view — RSS/heap from /proc (Linux only) + computed pool /
-    // ring footprints. Cached at ~1 Hz: memory doesn't move in 100 ms
-    // and /proc parsing was the dominant cost of the whole snapshot
-    // path. The cache is mutable so this const method can update it.
+    auto& debug_view = out.debug;
+    debug_view.target = "(engine_core)";
+    switch (config_.mode)
     {
-        const auto now_steady = std::chrono::steady_clock::now();
-        const bool stale = !memory_cache_initialised_
-            || (now_steady - memory_cache_last_) >= std::chrono::seconds(1);
-
-        if (stale)
-        {
-            auto& m = memory_cache_;
-            m = truetest::ui::dashboard_snapshot::memory_view{};
-
-            // Single-pass /proc/self/status parse. Earlier code opened
-            // the file three times (once per key); now one read scans
-            // for all three. Saves ~10 KB of redundant I/O per refresh.
-            std::ifstream sf("/proc/self/status");
-            if (sf.is_open())
-            {
-                std::string line;
-                int hits = 0;
-                while (hits < 3 && std::getline(sf, line))
-                {
-                    auto extract_kib = [&](const char* key) -> std::uint64_t {
-                        const std::size_t klen = std::strlen(key);
-                        if (line.compare(0, klen, key) != 0) return 0;
-                        std::istringstream ss(line);
-                        std::string k;
-                        std::uint64_t v = 0;
-                        ss >> k >> v;
-                        return v * 1024;
-                    };
-                    if (auto v = extract_kib("VmRSS:"))  { m.rss_bytes      = v; ++hits; continue; }
-                    if (auto v = extract_kib("VmSize:")) { m.vm_bytes       = v; ++hits; continue; }
-                    if (auto v = extract_kib("VmHWM:"))  { m.peak_rss_bytes = v; ++hits; continue; }
-                }
-            }
-
-            // /proc/self/statm — column 6 is "data" (heap+BSS+stack) in pages.
-            {
-                std::ifstream f("/proc/self/statm");
-                if (f.is_open())
-                {
-                    std::uint64_t size, resident, shared, text, lib, data, dt;
-                    if (f >> size >> resident >> shared >> text >> lib >> data >> dt)
-                        m.heap_bytes = data * 4096;
-                }
-            }
-            m.available = (m.rss_bytes > 0);
-
-            // /proc/self/maps — categorise mapped regions so the panel
-            // can break down the "other" segment into heap / stacks /
-            // shared-lib code / anonymous mmap. Each line:
-            //   <start>-<end> <perms> <off> <dev> <ino> <path>
-            // sizes are summed in BYTES, not pages, since the address
-            // range itself is the size.
-            {
-                std::ifstream f("/proc/self/maps");
-                std::uint64_t b_heap = 0, b_stacks = 0, b_so = 0,
-                              b_anon = 0, b_file = 0;
-                if (f.is_open())
-                {
-                    std::string line;
-                    while (std::getline(f, line))
-                    {
-                        // Parse the address range up to the dash.
-                        const auto dash = line.find('-');
-                        if (dash == std::string::npos) continue;
-                        const auto sp1  = line.find(' ', dash + 1);
-                        if (sp1 == std::string::npos) continue;
-                        std::uint64_t a = 0, b = 0;
-                        try {
-                            a = std::stoull(line.substr(0, dash), nullptr, 16);
-                            b = std::stoull(line.substr(dash + 1, sp1 - dash - 1),
-                                            nullptr, 16);
-                        } catch (...) { continue; }
-                        if (b <= a) continue;
-                        const std::uint64_t bytes = b - a;
-
-                        // Path is everything after the last whitespace
-                        // run (or empty for anonymous mappings).
-                        const auto path_pos = line.find_last_of(' ');
-                        std::string path = (path_pos != std::string::npos)
-                            ? line.substr(path_pos + 1) : std::string{};
-
-                        if (path == "[heap]")              b_heap   += bytes;
-                        else if (path.rfind("[stack", 0) == 0)
-                                                            b_stacks += bytes;
-                        else if (path.size() >= 3 &&
-                                 path.find(".so") != std::string::npos)
-                                                            b_so     += bytes;
-                        else if (path.empty() || path[0] == '[')
-                                                            b_anon   += bytes;
-                        else                                b_file   += bytes;
-                    }
-                }
-                if (b_heap   > 0) m.other_breakdown.push_back({"heap",      b_heap});
-                if (b_stacks > 0) m.other_breakdown.push_back({"stacks",    b_stacks});
-                if (b_so     > 0) m.other_breakdown.push_back({".so libs",  b_so});
-                if (b_file   > 0) m.other_breakdown.push_back({"file-mmap", b_file});
-                if (b_anon   > 0) m.other_breakdown.push_back({"anon-mmap", b_anon});
-            }
-
-            // Pools: ObjectPool::block_count() is now lock-free atomic
-            // (see #3 in this commit), so this is just an atomic load
-            // per pool. Cached anyway since stale-check already gates us.
-            constexpr std::size_t kPoolBlock = 4096;
-            auto add_pool = [&](const char* name, std::size_t blocks,
-                                std::size_t slot, std::size_t in_use,
-                                std::size_t grows) {
-                using snap_t = truetest::ui::dashboard_snapshot;
-                snap_t::mem_pool_row r;
-                r.name           = name;
-                r.blocks         = blocks;
-                r.slot_size      = slot;
-                r.bytes          = static_cast<std::uint64_t>(blocks) * kPoolBlock * slot;
-                r.in_use         = in_use;
-                r.capacity_slots = blocks * kPoolBlock;
-                r.grow_count     = grows;
-                m.pool_bytes_total += r.bytes;
-                m.pools.push_back(r);
-            };
-            add_pool("market_pool",      market_pool_.block_count(),
-                     sizeof(market_event), market_pool_.in_use(), market_pool_.grow_count());
-            add_pool("order_pool",       order_pool_.block_count(),
-                     sizeof(order_event),  order_pool_.in_use(),  order_pool_.grow_count());
-            add_pool("fill_pool",        fill_pool_.block_count(),
-                     sizeof(fill_event),   fill_pool_.in_use(),   fill_pool_.grow_count());
-            add_pool("tick_pool",        tick_pool_.block_count(),
-                     sizeof(tick_event),   tick_pool_.in_use(),   tick_pool_.grow_count());
-            add_pool("l2_update_pool",   l2_update_pool_.block_count(),
-                     sizeof(l2_update_event), l2_update_pool_.in_use(), l2_update_pool_.grow_count());
-            add_pool("l2_snapshot_pool", l2_snapshot_pool_.block_count(),
-                     sizeof(l2_snapshot_event), l2_snapshot_pool_.in_use(), l2_snapshot_pool_.grow_count());
-            add_pool("rejection_pool",   rejection_pool_.block_count(),
-                     sizeof(rejection_event), rejection_pool_.in_use(), rejection_pool_.grow_count());
-            add_pool("cancel_pool",      cancel_pool_.block_count(),
-                     sizeof(cancel_event), cancel_pool_.in_use(), cancel_pool_.grow_count());
-            add_pool("amend_pool",       amend_pool_.block_count(),
-                     sizeof(amend_event), amend_pool_.in_use(), amend_pool_.grow_count());
-            add_pool("funding_pool",     funding_pool_.block_count(),
-                     sizeof(funding_event), funding_pool_.in_use(), funding_pool_.grow_count());
-            add_pool("control_block_pool", control_block_pool_.block_count(),
-                     ControlBlockPool::slot_size(), control_block_pool_.in_use(),
-                     control_block_pool_.grow_count());
-
-            // Rings: capacity is constexpr; this is essentially free.
-            auto add_ring = [&](const char* name, const auto& ring) {
-                using snap_t = truetest::ui::dashboard_snapshot;
-                snap_t::mem_ring_row r;
-                r.name = name;
-                if (ring) {
-                    r.capacity      = ring->capacity();
-                    r.element_bytes = sizeof(event_pointer);
-                    r.bytes = static_cast<std::uint64_t>(r.capacity) * r.element_bytes;
-                    m.ring_bytes_total += r.bytes;
-                }
-                m.rings.push_back(r);
-            };
-            add_ring("logging",    logging_ring_);
-            add_ring("risk",       risk_ring_);
-            add_ring("stats",      stats_ring_);
-            add_ring("observer",   observer_ring_);
-            add_ring("risk_stats", risk_stats_ring_);
-            add_ring("mm_event",   mm_ring_);
-            // mm_order_ring_ not injected; skip or pass empty shared
-            // add_ring("mm_order", ...);
-
-            memory_cache_last_ = now_steady;
-            memory_cache_initialised_ = true;
-        }
-        out.memory = memory_cache_;
-
-        // In-use counts refresh every snapshot — atomic loads are free,
-        // and the panel's pool fill-bars look frozen if they lag the
-        // cached interval. Order matches the add_pool() calls above.
-        // Refresh in_use for memory pools (now >4 pools post-extraction; always update known ones)
-        for (auto& p : out.memory.pools) {
-            const std::string_view name = p.name ? p.name : "";
-            if (name == "market_pool") p.in_use = market_pool_.in_use();
-            else if (name == "order_pool") p.in_use = order_pool_.in_use();
-            else if (name == "fill_pool") p.in_use = fill_pool_.in_use();
-            else if (name == "tick_pool") p.in_use = tick_pool_.in_use();
-            // extend for other pools if the memory UI cares
-        }
+        case engine_mode::backtest: debug_view.mode = "backtest"; break;
+        case engine_mode::shadow: debug_view.mode = "shadow"; break;
+        case engine_mode::live: debug_view.mode = "live"; break;
     }
-
-    // Debug view — engine introspection for the Debug tab. All sourced
-    // from existing accessors / atomics; no new hot-path tracking. Built
-    // once per snapshot under the same lock as everything else.
-    {
-        auto& d = out.debug;
-        // engine_core is built without TT_TARGET (per-binary define), so
-        // we surface the runtime mode here instead of the binary name.
-        // The status bar already shows which binary you're in via the
-        // window chrome / process name.
-        d.target = "(engine_core)";
-        switch (config_.mode) {
-            case engine_mode::backtest: d.mode = "backtest"; break;
-            case engine_mode::shadow:   d.mode = "shadow";   break;
-            case engine_mode::live:     d.mode = "live";     break;
-        }
 #ifdef HAS_BINANCE
-        d.has_binance = true;
+    debug_view.has_binance = true;
 #endif
 #ifdef HAS_QUESTDB
-        d.has_questdb = true;
+    debug_view.has_questdb = true;
 #endif
 #ifdef HAS_DEBUG
-        d.has_debug = true;
+    debug_view.has_debug = true;
 #endif
 #ifdef TRUETEST_VENUE_DATA_COMPILED
-        d.has_live_data = true;
+    debug_view.has_live_data = true;
 #endif
+    debug_view.preset = preset_to_string(config_.threading);
+    debug_view.spin_policy = spin_policy_to_string(config_.worker_spin_policy);
+    debug_view.cpu_pin = !config_.disable_pinning;
 
-        d.preset = preset_to_string(config_.threading);
-        d.spin_policy = spin_policy_to_string(config_.worker_spin_policy);
-        d.cpu_pin    = !config_.disable_pinning;
-
-        // Worker count: derived from which ring members are non-null.
-        std::size_t workers = 0;
-        if (logging_ring_)    ++workers;
-        if (risk_ring_)       ++workers;
-        if (stats_ring_)      ++workers;
-        if (observer_ring_)   ++workers;
-        if (risk_stats_ring_) ++workers;
-        if (mm_ring_) ++workers; // mm_order_ring_ not injected
-        d.worker_count = workers;
-
-        // Ring stats — capacity 0 indicates the ring isn't running at
-        // this preset (engine returns nullptr from the get_*_ring()).
-        auto add_ring = [&](const char* name, const auto& ring) {
-            using snap_t = truetest::ui::dashboard_snapshot;
-            snap_t::ring_stat r;
-            r.name = name;
-            if (ring) {
-                r.size = ring->size();
-                r.hwm  = ring->high_watermark();
-                r.capacity = ring->capacity();
-                r.drops = ring->drop_count();
-            }
-            d.rings.push_back(r);
-        };
-        add_ring("logging",    logging_ring_);
-        add_ring("risk",       risk_ring_);
-        add_ring("stats",      stats_ring_);
-        add_ring("observer",   observer_ring_);
-        add_ring("risk_stats", risk_stats_ring_);
-        add_ring("mm_event",   mm_ring_);
-        // nullptr /* mm_order_ring_ not injected */ uses MMRing (different element type) — track separately.
+    const auto add_ring = [&debug_view](const char* name, const auto& ring) {
+        snapshot_t::ring_stat row;
+        row.name = name;
+        if (ring)
         {
-            using snap_t = truetest::ui::dashboard_snapshot;
-            snap_t::ring_stat r;
-            r.name = "mm_order";
-            // mm_order_ring_ not injected into builder; debug view omits it for now
-            // if (mm_order_ring_) { r.size = ... }
-            d.rings.push_back(r);
+            row.size = ring->size();
+            row.hwm = ring->high_watermark();
+            row.capacity = ring->capacity();
+            row.drops = ring->drop_count();
+            ++debug_view.worker_count;
         }
+        debug_view.rings.push_back(row);
+    };
+    add_ring("logging", logging_ring_);
+    add_ring("risk", risk_ring_);
+    add_ring("stats", stats_ring_);
+    add_ring("observer", observer_ring_);
+    add_ring("risk_stats", risk_stats_ring_);
+    add_ring("mm_event", mm_ring_);
+    debug_view.rings.push_back(snapshot_t::ring_stat{"mm_order"});
 
-        constexpr std::size_t kPoolBlock = 4096;
-        auto add_pool = [&](const char* name, std::size_t blocks,
-                            std::size_t in_use, std::size_t grows) {
-            using snap_t = truetest::ui::dashboard_snapshot;
-            snap_t::pool_stat p;
-            p.name = name;
-            p.blocks = blocks;
-            p.block_size = kPoolBlock;
-            p.capacity = blocks * kPoolBlock;
-            p.in_use = in_use;
-            p.grow_count = grows;
-            d.pools.push_back(p);
-        };
-        add_pool("market_pool",      market_pool_.block_count(),
-                 market_pool_.in_use(), market_pool_.grow_count());
-        add_pool("order_pool",       order_pool_.block_count(),
-                 order_pool_.in_use(), order_pool_.grow_count());
-        add_pool("fill_pool",        fill_pool_.block_count(),
-                 fill_pool_.in_use(), fill_pool_.grow_count());
-        add_pool("tick_pool",        tick_pool_.block_count(),
-                 tick_pool_.in_use(), tick_pool_.grow_count());
-        add_pool("l2_update_pool",   l2_update_pool_.block_count(),
-                 l2_update_pool_.in_use(), l2_update_pool_.grow_count());
-        add_pool("l2_snapshot_pool", l2_snapshot_pool_.block_count(),
-                 l2_snapshot_pool_.in_use(), l2_snapshot_pool_.grow_count());
-        add_pool("rejection_pool",   rejection_pool_.block_count(),
-                 rejection_pool_.in_use(), rejection_pool_.grow_count());
-        add_pool("cancel_pool",      cancel_pool_.block_count(),
-                 cancel_pool_.in_use(), cancel_pool_.grow_count());
-        add_pool("amend_pool",       amend_pool_.block_count(),
-                 amend_pool_.in_use(), amend_pool_.grow_count());
-        add_pool("funding_pool",     funding_pool_.block_count(),
-                 funding_pool_.in_use(), funding_pool_.grow_count());
-        add_pool("control_block_pool", control_block_pool_.block_count(),
-                 control_block_pool_.in_use(), control_block_pool_.grow_count());
+    constexpr std::size_t kPoolBlock = 4096;
+    const auto add_pool = [&debug_view](const char* name, const auto& pool) {
+        debug_view.pools.push_back(snapshot_t::pool_stat{
+            name, pool.block_count(), kPoolBlock,
+            pool.block_count() * kPoolBlock, pool.in_use(),
+            pool.grow_count()});
+    };
+    add_pool("market_pool", market_pool_);
+    add_pool("order_pool", order_pool_);
+    add_pool("fill_pool", fill_pool_);
+    add_pool("tick_pool", tick_pool_);
+    add_pool("l2_update_pool", l2_update_pool_);
+    add_pool("l2_snapshot_pool", l2_snapshot_pool_);
+    add_pool("rejection_pool", rejection_pool_);
+    add_pool("cancel_pool", cancel_pool_);
+    add_pool("amend_pool", amend_pool_);
+    add_pool("funding_pool", funding_pool_);
+    add_pool("control_block_pool", control_block_pool_);
 
-        // Engine state.
-        d.next_order_id = 0; // OrderIdGenerator not in scope here
-        // Decrement back so we don't perturb the live id sequence — the
-        // call above only reads + increments atomically, so the value
-        // we surface is "what the next allocation WOULD have been".
-        // (We can't decrement an atomic safely if other threads bump it
-        //  in between; subtract logically: the value we want is `next-1`
-        //  treating it as the most-recently-allocated id, which is fine
-        //  for an introspection display.)
-        d.next_order_id = 0; // TODO: OrderIdGenerator not visible; was d.next_order_id = OrderIdGenerator::next(); --d...
-        d.pending_orders    = 0;  // TODO: expose from builder or pending state (not injected yet)
-        d.pending_stops     = 0;
-        d.open_orders_cache = open_orders_cache_.size();
-        d.order_meta_size   = 0;  // TODO
-        d.armed_brackets    = exit_manager_.armed_count();
-        d.handles_size      = exit_manager_.armed_count();   // proxy
-
-        d.exit_pending = exit_manager_.pending_count();
-        d.exit_armed   = exit_manager_.armed_count();
-        d.exit_exchange_to_leg = 0;  // not exposed; left as 0
+    if (projection.engine_counts_available)
+    {
+        debug_view.pending_orders = projection.engine_counts.pending_orders;
+        debug_view.pending_orders_available = true;
+        debug_view.pending_stops = projection.engine_counts.pending_stops;
+        debug_view.pending_stops_available = true;
+        debug_view.order_meta_size = projection.engine_counts.order_meta_size;
+        debug_view.order_meta_size_available = true;
+    }
+    debug_view.open_orders_cache = projection.open_orders_cache_size;
+    debug_view.armed_brackets = projection.exit_armed;
+    debug_view.exit_pending = projection.exit_pending;
+    debug_view.exit_armed = projection.exit_armed;
+    debug_view.handles_size = venue_result.total_count;
+    debug_view.exit_exchange_to_leg = exit_manager_.exchange_leg_count();
 
 #ifdef HAS_DEBUG
-        // Stage timings — only present on HAS_DEBUG builds.
-        if (auto* stimer = debug_samplers_.stage_timer) {
-            for (std::size_t i = 0; i < static_cast<std::size_t>(debug::stage::COUNT); ++i)
-            {
-                const auto st = static_cast<debug::stage>(i);
-                const auto s  = stimer->snapshot(st);
-                if (s.call_count == 0) continue;
-                using snap_t = truetest::ui::dashboard_snapshot;
-                snap_t::debug_view::stage_row r;
-                r.name   = debug::StageTimer::stage_name(st);
-                r.calls  = s.call_count;
-                r.avg_ns = s.total_ns / s.call_count;
-                r.min_ns = s.min_ns;
-                r.max_ns = s.max_ns;
-                d.stages.push_back(r);
-            }
-        }
+    debug_view.stages.reserve(projection.stages_state.count);
+    for (std::size_t i = 0; i < projection.stages_state.count; ++i)
+    {
+        const auto& row = projection.stages[i];
+        const auto stage = static_cast<debug::stage>(row.index);
+        debug_view.stages.push_back({
+            debug::StageTimer::stage_name(stage), row.calls,
+            row.calls != 0U ? row.total_ns / row.calls : 0U,
+            row.min_ns, row.max_ns});
+    }
 #endif
 
-        // Last errors — pull what's exposed; subsystems without a public
-        // accessor get an empty string. Bridge has last_error() when the
-        // provider supplies an ExecutionBridge adapter.
-        using snap_t = truetest::ui::dashboard_snapshot;
-        d.errors.push_back(snap_t::subsys_error{"engine",  ""});
-        if (config_.provider)
-        {
-            auto adapter = config_.provider->get_execution_adapter();
-            std::string bridge_err = adapter ? adapter->last_error() : "";
-            d.errors.push_back(snap_t::subsys_error{"bridge", std::move(bridge_err)});
-        }
-        else d.errors.push_back(snap_t::subsys_error{"bridge", ""});
-        d.errors.push_back(snap_t::subsys_error{"provider", ""});
-        d.errors.push_back(snap_t::subsys_error{"adapter",  ""});
-        d.errors.push_back(snap_t::subsys_error{"questdb",  ""});
-    }
+    debug_view.errors.push_back({"engine", ""});
+    debug_view.errors.push_back({
+        "bridge",
+        "unavailable: no synchronized immutable adapter error source"});
+    debug_view.errors.push_back({
+        "provider",
+        projection.provider_present && !projection.provider_state_available
+            ? "unavailable: provider lifecycle is not safe to read concurrently"
+            : ""});
+    debug_view.errors.push_back({
+        "adapter",
+        projection.queue_diagnostics_available
+            ? ""
+            : "unavailable: adapter diagnostics require a quiescent projection"});
+#ifdef HAS_QUESTDB
+    debug_view.errors.push_back({
+        "questdb",
+        config_.persist_enabled
+            ? "unavailable: no synchronized immutable persistence health source"
+            : ""});
+#else
+    debug_view.errors.push_back({"questdb", ""});
+#endif
+    debug_view.errors.push_back({
+        "dashboard_projection",
+        projection.complete && venue_result.complete
+            ? ""
+            : "bounded dashboard projection truncated; collection counts are incomplete"});
+    debug_view.errors.push_back({
+        "dashboard_analytics",
+        projection.analytics_available
+            ? ""
+            : "threaded analytics not quiescent; metrics await terminal projection"});
 
-    // Health view — latency from analytics + provider state. Ring drops,
-    // event totals, and ages are read by the Health panel directly from
-    // ConsoleDashboard's atomics (the engine does not own that ring).
+    out.health.tick_to_trade_samples = projection.latency.samples;
+    out.health.avg_tick_to_trade_us = projection.latency.avg_ns / 1000.0;
+    out.health.min_tick_to_trade_us =
+        static_cast<double>(projection.latency.min_ns) / 1000.0;
+    out.health.max_tick_to_trade_us =
+        static_cast<double>(projection.latency.max_ns) / 1000.0;
+    out.health.orders_total = projection.total_orders;
+    out.health.fills_total = projection.total_fills;
+    out.health.trades_total = projection.total_trades;
+    out.health.provider_present = projection.provider_present;
+    out.health.provider_name = projection.provider_name.view();
+    out.health.provider_state = projection.provider_state_available
+        ? projection.provider_state : -1;
+
+    // The current audit sink's active bit is not synchronized with UI/web
+    // readers.  Do not read or fabricate live counters here; the debug row
+    // above makes unavailability explicit when persistence was requested.
+    out.health.questdb.active = false;
+    out.health.questdb.connected = false;
+    out.health.questdb.pending_lines = 0;
+    out.health.questdb.dropped_lines = 0;
+    out.health.questdb.fallback_lines = 0;
+#ifdef HAS_QUESTDB
+    out.health.questdb.strict_mode = config_.questdb_strict;
+#else
+    out.health.questdb.strict_mode = false;
+#endif
+    out.health.questdb.last_flush_age_ms = -1;
+
+    out.strategies.reserve(projection.strategies_state.count);
+    for (std::size_t i = 0; i < projection.strategies_state.count; ++i)
     {
-        auto lv = analytics_.latency_view_now();
-        out.health.tick_to_trade_samples = lv.samples;
-        out.health.avg_tick_to_trade_us  = lv.avg_ns / 1000.0;
-        out.health.min_tick_to_trade_us  = static_cast<double>(lv.min_ns) / 1000.0;
-        out.health.max_tick_to_trade_us  = static_cast<double>(lv.max_ns) / 1000.0;
-
-        out.health.orders_total = open_orders_cache_.size()
-                                + portfolio_.get_total_fills();
-        out.health.fills_total  = portfolio_.get_total_fills();
-        out.health.trades_total = portfolio_.get_total_trades();
-
-        if (config_.provider)
-        {
-            out.health.provider_present = true;
-            out.health.provider_name    = config_.provider->name();
-            out.health.provider_state   = static_cast<int>(
-                config_.provider->lifecycle_state());
-        }
-
-        // Unconditional audit_sink health (replaces remaining questdb guard + #ifdef).
-        // strict_mode and last_flush default (0/-1) as sink seam does not yet surface full QuestdbStore::Health.
-        auto qh = audit_sink_.health();
-        out.health.questdb.active = qh.connected || qh.pending_lines > 0 || qh.dropped_lines > 0 || qh.fallback_lines > 0;
-        out.health.questdb.connected = qh.connected;
-        out.health.questdb.pending_lines = qh.pending_lines;
-        out.health.questdb.dropped_lines = qh.dropped_lines;
-        out.health.questdb.fallback_lines = qh.fallback_lines;
-        out.health.questdb.strict_mode = false;
-        out.health.questdb.last_flush_age_ms = -1;
+        const auto& source = projection.strategies[i];
+        snapshot_t::strategy_row row;
+        row.name = source.name.view();
+        row.pnl = source.pnl;
+        row.trade_count = source.trade_count;
+        row.win_count = source.win_count;
+        row.win_rate = source.trade_count != 0U
+            ? static_cast<double>(source.win_count) /
+              static_cast<double>(source.trade_count) * 100.0 : 0.0;
+        row.profit_factor = source.total_loss > 0.0
+            ? source.total_win / source.total_loss
+            : (source.total_win > 0.0 ? 1e9 : 0.0);
+        row.total_win = source.total_win;
+        row.total_loss = source.total_loss;
+        for (const auto& lot : out.lots)
+            if (lot.strategy_name == row.name) ++row.open_lots;
+        for (const auto& bracket : out.brackets)
+            if (bracket.strategy_name == row.name) ++row.armed_brackets;
+        out.strategies.push_back(std::move(row));
     }
 
-    // Per-strategy attribution. analytics_.per_strategy_view() copies
-    // the per-strategy map cheaply (O(K) for K strategies). Counts of
-    // open lots and armed brackets are derived from the same passes
-    // we already did over portfolio_/exit_manager_ above.
-    out.strategies.clear();
-    {
-        // Tally lots and armed brackets per strategy in single passes.
-        std::unordered_map<std::string, std::size_t> lots_by_strat;
-        for (const auto& [_, l] : portfolio_.get_lots())
-            ++lots_by_strat[l.strategy_name];
-        std::unordered_map<std::string, std::size_t> brackets_by_strat;
-        for (const auto& a : armed)
-            ++brackets_by_strat[a.strategy_name];
-
-        auto per_strat = analytics_.per_strategy_view();
-        out.strategies.reserve(per_strat.size());
-        for (const auto& [name, sa] : per_strat)
-        {
-            snap_t::strategy_row row;
-            row.name           = name;
-            row.pnl            = sa.total_pnl;
-            row.trade_count    = sa.trade_count;
-            row.win_count      = sa.win_count;
-            row.win_rate       = sa.win_rate();
-            row.profit_factor  = sa.profit_factor();
-            row.total_win      = sa.total_win;
-            row.total_loss     = sa.total_loss;
-            auto lit = lots_by_strat.find(name);
-            row.open_lots      = (lit != lots_by_strat.end()) ? lit->second : 0;
-            auto bit = brackets_by_strat.find(name);
-            row.armed_brackets = (bit != brackets_by_strat.end()) ? bit->second : 0;
-            out.strategies.push_back(std::move(row));
-        }
-    }
-
-    // Trend strip — equity + drawdown tails the Overview panel renders
-    // as sparklines. 60 cells matches the panel width budget; longer
-    // tails are sub-sampled by ascii::sparkline anyway. The rate tail
-    // is sourced by the panel directly from ConsoleDashboard (it owns
-    // the rolling rate_ema_ samples), so the engine doesn't reach into
-    // the dashboard from here.
-    constexpr std::size_t kTailWidth = 60;
-    out.trend.equity_tail   = analytics_.equity_tail(kTailWidth);
-    out.trend.drawdown_tail = analytics_.drawdown_tail(kTailWidth);
-
+    out.trend.equity_tail.assign(
+        projection.equity_tail.begin(),
+        projection.equity_tail.begin() +
+            static_cast<std::ptrdiff_t>(projection.equity_tail_count));
+    out.trend.drawdown_tail.assign(
+        projection.drawdown_tail.begin(),
+        projection.drawdown_tail.begin() +
+            static_cast<std::ptrdiff_t>(projection.drawdown_tail_count));
     out.trend.equity_now = out.equity;
-    out.trend.equity_change_pct = (out.initial_balance > 0.0)
-        ? (out.equity / out.initial_balance - 1.0) * 100.0
-        : 0.0;
+    out.trend.equity_available = out.equity_available;
+    out.trend.equity_change_pct =
+        out.equity_available && out.initial_balance > 0.0
+        ? (out.equity / out.initial_balance - 1.0) * 100.0 : 0.0;
     out.trend.drawdown_now_pct = out.trend.drawdown_tail.empty()
         ? 0.0 : out.trend.drawdown_tail.back();
-}
-
-// (memory/debug/trend fully ported for snapshot fidelity)
-
-void DashboardSnapshotBuilder::clear_for_mc_reset()
-{
-    open_orders_cache_.clear();
-    recent_fills_cache_.clear();
-    dashboard_view_initialised_ = false;
-    memory_cache_initialised_ = false;
-    // view and memory will be re-populated on next refresh/snapshot
+    out.trend.drawdown_now_available = !out.trend.drawdown_tail.empty();
+    out.generated_at = projection.generated_at;
+    out.generated_at_available = true;
 }

@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 
 static constexpr std::size_t MM_RING_SIZE = 65536;
 using MMRing = RingBuffer<event_pointer, MM_RING_SIZE>;
@@ -46,7 +47,9 @@ public:
                 time_in_force::gtc);
             order_ptr->set_order_id(OrderIdGenerator::next());
             order_ptr->set_earliest_eligible_ts(ts);
-            order_ring_.try_push(order_ptr);
+            if (!order_ring_.try_push(order_ptr))
+                throw std::runtime_error(
+                    "market-maker output ring capacity exhausted");
             orders_generated_.fetch_add(1, std::memory_order_relaxed);
         }
     }

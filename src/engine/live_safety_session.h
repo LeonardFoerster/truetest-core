@@ -18,6 +18,9 @@ enum class live_shutdown_reason
 
 struct live_shutdown_report
 {
+    // Distinguishes a session that never owned an open provider (a valid
+    // no-op) from an attempted shutdown whose individual steps failed.
+    bool shutdown_required = false;
     bool quiesce_succeeded = false;
     bool kill_attempted = false;
     bool kill_succeeded = false;

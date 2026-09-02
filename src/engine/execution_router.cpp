@@ -92,7 +92,7 @@ bool ExecutionRouter::is_async_submit(IExecutionAdapter* a) const noexcept
     return a && a->supports_async_submit();
 }
 
-void ExecutionRouter::submit(const order_event& o, IExecutionAdapter* a) noexcept
+void ExecutionRouter::submit(const order_event& o, IExecutionAdapter* a)
 {
     if (a)
         a->submit_order(o);

@@ -23,6 +23,7 @@ class IProvider;
 class LiveSafetySession;
 class IQueuePositionModel;
 class IQueueModel;
+class DurableEventLogReservation;
 
 namespace truetest::ui { class ConsoleDashboard; }
 
@@ -44,7 +45,8 @@ inline bool resolve_risk_soft_portfolio_limits(bool live_flag,
 // spins until the worker drains the ring, so no event is ever lost and
 // threaded-preset results are deterministic and identical to inline.
 // halt_on_drop: a drop from risk/observer/risk_stats (rings that feed
-// halt+shadow) sets halt_flag_. Non-safety rings still drop silently.
+// halt+shadow) sets halt_flag_. Other rings remain counted diagnostics during
+// the run; every registered drop still blocks a reserved-ledger seal.
 // main.inc forces halt_on_drop when mode ∈ {shadow, live} (blocking the
 // hot path against a live feed is worse than halting).
 // allow: legacy lossy behavior — drops are counted but otherwise ignored.
@@ -129,6 +131,9 @@ struct engine_config
     uint64_t seed = 0;
 
     std::string event_log_path;
+    // Mainnet live startup may retain a kernel-verified regular-file inode
+    // across provider open, closing the validation-to-open pathname race.
+    std::shared_ptr<DurableEventLogReservation> event_log_reservation;
     bool compress_log = true;
 
     std::string text_log_path;

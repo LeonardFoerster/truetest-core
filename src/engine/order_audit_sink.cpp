@@ -129,7 +129,8 @@ IOrderAuditSink::Health QuestdbOrderAuditSink::health() const
     if (store_ && active_flag_ && *active_flag_)
     {
         auto sh = store_->health();
-        return { sh.connected, sh.pending_lines, sh.dropped_lines, sh.fallback_lines };
+        return { true, sh.connected, sh.pending_lines, sh.dropped_lines,
+                 sh.fallback_lines, sh.strict_mode };
     }
     return {};
 }
