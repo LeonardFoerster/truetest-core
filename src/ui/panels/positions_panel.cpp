@@ -4,10 +4,12 @@
 
 #include "../console_dashboard.h"
 #include "../dashboard_snapshot.h"
+#include "../snapshot_metrics.h"
 #include "../tui_style.h"
 
 #include <ncurses.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -67,17 +69,27 @@ void PositionsPanel::draw(int body_y0, int width, int height,
     }
     label(y, 26, "Equity");
     {
-        char b[32];
-        std::snprintf(b, sizeof(b), "%12.2f", snap->equity);
-        mvaddstr(y, 34, b);
+        if (const auto equity = available_metric(
+                snap->equity_available, snap->equity))
+        {
+            char b[32];
+            std::snprintf(b, sizeof(b), "%12.2f", *equity);
+            mvaddstr(y, 34, b);
+        }
+        else mvaddstr(y, 34, "         N/A");
     }
     label(y, 52, "uPnL");
     {
-        char b[32];
-        std::snprintf(b, sizeof(b), "%+10.2f", snap->unrealized_pnl);
-        attron(COLOR_PAIR(signed_pair(snap->unrealized_pnl)));
-        mvaddstr(y, 58, b);
-        attroff(COLOR_PAIR(signed_pair(snap->unrealized_pnl)));
+        if (const auto unrealized = available_metric(
+                snap->unrealized_pnl_available, snap->unrealized_pnl))
+        {
+            char b[32];
+            std::snprintf(b, sizeof(b), "%+10.2f", *unrealized);
+            attron(COLOR_PAIR(signed_pair(*unrealized)));
+            mvaddstr(y, 58, b);
+            attroff(COLOR_PAIR(signed_pair(*unrealized)));
+        }
+        else mvaddstr(y, 58, "       N/A");
     }
     ++y;
 
@@ -157,11 +169,13 @@ void PositionsPanel::draw(int body_y0, int width, int height,
             mvprintw(y, 12, "%+12.6f", p.qty);
             attroff(COLOR_PAIR(qpair));
             mvprintw(y, 25, "%10.4f", p.avg_entry);
-            if (p.mark > 0.0) mvprintw(y, 36, "%10.4f", p.mark);
-            else              mvprintw(y, 36, "%10s", "-");
+            if (p.mark_available && std::isfinite(p.mark) && p.mark > 0.0)
+                mvprintw(y, 36, "%10.4f", p.mark);
+            else mvprintw(y, 36, "%10s", "N/A");
 
             // Δ% - price drift from entry.
-            if (p.mark > 0.0 && p.avg_entry > 0.0)
+            if (p.mark_available && std::isfinite(p.mark) &&
+                p.mark > 0.0 && p.avg_entry > 0.0)
             {
                 const double drift = (p.mark - p.avg_entry) / p.avg_entry * 100.0;
                 int dp = signed_pair(drift);
@@ -171,19 +185,22 @@ void PositionsPanel::draw(int body_y0, int width, int height,
             }
             else mvprintw(y, 47, "%8s", "-");
 
-            int upair = signed_pair(p.unrealized);
-            attron(COLOR_PAIR(upair));
-            mvprintw(y, 56, "%+12.4f", p.unrealized);
-            attroff(COLOR_PAIR(upair));
+            if (const auto unrealized = available_metric(
+                    p.unrealized_available, p.unrealized))
+            {
+                int upair = signed_pair(*unrealized);
+                attron(COLOR_PAIR(upair));
+                mvprintw(y, 56, "%+12.4f", *unrealized);
+                attroff(COLOR_PAIR(upair));
+            }
+            else mvprintw(y, 56, "%12s", "N/A");
 
             // uPnL% - unrealized as fraction of cost basis.
-            if (std::abs(p.qty) > 0.0 && p.avg_entry > 0.0)
+            if (const auto upct = position_unrealized_pct(p))
             {
-                const double basis = std::abs(p.qty) * p.avg_entry;
-                const double upct  = (basis > 0.0) ? p.unrealized / basis * 100.0 : 0.0;
-                int up = signed_pair(upct);
+                int up = signed_pair(*upct);
                 attron(COLOR_PAIR(up));
-                mvprintw(y, 69, "%+7.2f%%", upct);
+                mvprintw(y, 69, "%+7.2f%%", *upct);
                 attroff(COLOR_PAIR(up));
             }
             else mvprintw(y, 69, "%8s", "-");

@@ -4,6 +4,7 @@
 
 #include "../console_dashboard.h"
 #include "../dashboard_snapshot.h"
+#include "../snapshot_metrics.h"
 #include "../tui_style.h"
 #include "analytics/ascii_widgets.h"
 
@@ -14,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -107,10 +109,7 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     const std::uint64_t fills  = s.fills_total.load(std::memory_order_relaxed);
     const std::uint64_t trades = s.trades_total.load(std::memory_order_relaxed);
     const std::uint32_t open_ord = s.open_orders.load(std::memory_order_relaxed);
-    const std::int64_t  pnl_fp4    = s.realized_pnl_fp4.load(std::memory_order_relaxed);
-    const std::int64_t  unreal_fp4 = s.unrealized_pnl_fp4.load(std::memory_order_relaxed);
     const std::int64_t  pos_fp8    = s.position_qty_fp8.load(std::memory_order_relaxed);
-    const std::int64_t  dd_fp4     = s.drawdown_fp4.load(std::memory_order_relaxed);
     const std::uint32_t wr_bps     = s.win_rate_bps.load(std::memory_order_relaxed);
     const std::int32_t  tox_fp2    = s.toxicity_bps_fp2.load(std::memory_order_relaxed);
     const std::uint32_t tox_n      = s.toxicity_samples.load(std::memory_order_relaxed);
@@ -125,10 +124,7 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     const std::uint32_t bf_done  = s.backfill_done.load(std::memory_order_relaxed);
     const std::uint32_t bf_total = s.backfill_total.load(std::memory_order_relaxed);
 
-    const double pnl   = static_cast<double>(pnl_fp4)    / 1e4;
-    const double unrl  = static_cast<double>(unreal_fp4) / 1e4;
     const double pos   = static_cast<double>(pos_fp8)    / 1e8;
-    const double dd    = static_cast<double>(dd_fp4)     / 1e2;
     const double tox   = static_cast<double>(tox_fp2)    / 1e2;
 
     int y = body_y0;
@@ -139,32 +135,61 @@ void OverviewPanel::draw(int body_y0, int width, int height,
 
     // Equity
     draw_label(y, x_label, "Equity");
-    set_color_bold(Color::Neutral);
-    double equity_val = snap ? snap->equity : 0.0;
-    mvaddstr(y, x_value, fmt_money(equity_val).c_str());
-    unset_color_bold(Color::Neutral);
+    if (snap)
+    {
+        if (const auto equity = available_metric(
+                snap->equity_available, snap->equity))
+        {
+            set_color_bold(Color::Neutral);
+            mvaddstr(y, x_value, fmt_money(*equity).c_str());
+            unset_color_bold(Color::Neutral);
+        }
+        else mvaddstr(y, x_value, "       N/A");
+    }
+    else mvaddstr(y, x_value, "       N/A");
     ++y;
 
     // Realized PnL
     draw_label(y, x_label, "Realized");
-    set_color_bold(pnl_color(pnl));
-    mvaddstr(y, x_value, fmt_money(pnl).c_str());
-    unset_color_bold(pnl_color(pnl));
+    const auto realized = snap
+        ? available_metric(snap->realized_pnl_available, snap->realized_pnl)
+        : std::nullopt;
+    if (realized)
+    {
+        set_color_bold(pnl_color(*realized));
+        mvaddstr(y, x_value, fmt_money(*realized).c_str());
+        unset_color_bold(pnl_color(*realized));
+    }
+    else mvaddstr(y, x_value, "       N/A");
     ++y;
 
     // Unrealized PnL
     draw_label(y, x_label, "Unrealized");
-    set_color_bold(pnl_color(unrl));
-    mvaddstr(y, x_value, fmt_money(unrl).c_str());
-    unset_color_bold(pnl_color(unrl));
+    const auto unrealized = snap
+        ? available_metric(snap->unrealized_pnl_available,
+                           snap->unrealized_pnl)
+        : std::nullopt;
+    if (unrealized)
+    {
+        set_color_bold(pnl_color(*unrealized));
+        mvaddstr(y, x_value, fmt_money(*unrealized).c_str());
+        unset_color_bold(pnl_color(*unrealized));
+    }
+    else mvaddstr(y, x_value, "       N/A");
     ++y;
 
     // TOTAL PnL - the single most important number (make it stand out)
-    double total_pnl = pnl + unrl;
     draw_label(y, x_label, "TOTAL PnL");
-    set_color_bold(pnl_color(total_pnl));
-    mvaddstr(y, x_value, fmt_money(total_pnl).c_str());
-    unset_color_bold(pnl_color(total_pnl));
+    const auto total_pnl = snap
+        ? available_metric(snap->total_pnl_available, snap->total_pnl)
+        : std::nullopt;
+    if (total_pnl)
+    {
+        set_color_bold(pnl_color(*total_pnl));
+        mvaddstr(y, x_value, fmt_money(*total_pnl).c_str());
+        unset_color_bold(pnl_color(*total_pnl));
+    }
+    else mvaddstr(y, x_value, "       N/A");
     ++y;
 
     // Current Position
@@ -234,12 +259,22 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     ++y;
 
     label(y, x_label, "Drawdown");
-    Color dd_col = (dd <= -5.0) ? Color::Danger : (dd <= -1.0 ? Color::Warning : Color::Neutral);
-    set_color(dd_col);
-    char dd_buf[16];
-    std::snprintf(dd_buf, sizeof(dd_buf), "%+6.2f%%", dd);
-    mvaddstr(y, x_value, dd_buf);
-    unset_color(dd_col);
+    const auto drawdown = snap
+        ? available_metric(snap->trend.drawdown_now_available,
+                           snap->trend.drawdown_now_pct)
+        : std::nullopt;
+    if (drawdown)
+    {
+        const Color dd_col = (*drawdown >= 5.0) ? Color::Danger
+                           : (*drawdown >= 1.0) ? Color::Warning
+                           : Color::Neutral;
+        set_color(dd_col);
+        char dd_buf[16];
+        std::snprintf(dd_buf, sizeof(dd_buf), "-%5.2f%%", *drawdown);
+        mvaddstr(y, x_value, dd_buf);
+        unset_color(dd_col);
+    }
+    else mvaddstr(y, x_value, "   N/A");
     ++y;
 
     // Row: inventory bar (current exposure vs limit) + cash
@@ -247,9 +282,17 @@ void OverviewPanel::draw(int body_y0, int width, int height,
     {
         label(y, x_label, "Inventory");
         const double exp_lim = snap->risk.exposure_limit;
-        if (exp_lim > 0.0)
+        const auto exposure = available_metric(
+            snap->risk.exposure_available, snap->risk.exposure);
+        if (!exposure)
         {
-            const double frac = std::min(1.0, snap->risk.exposure / exp_lim);
+            set_color_bold(Color::Warning);
+            mvaddstr(y, x_value, "N/A");
+            unset_color_bold(Color::Warning);
+        }
+        else if (exp_lim > 0.0)
+        {
+            const double frac = std::clamp(*exposure / exp_lim, 0.0, 1.0);
             const int bar_w = 24;
             const int filled = static_cast<int>(std::lround(frac * bar_w));
             int p = (frac >= 0.85) ? kPairRed
@@ -336,25 +379,37 @@ void OverviewPanel::draw(int body_y0, int width, int height,
         };
 
         char eq_lbl[32];
-        std::snprintf(eq_lbl, sizeof(eq_lbl), "%+6.2f%%",
-                      snap ? snap->trend.equity_change_pct : 0.0);
-        const int eq_pair =
-            !snap ? kPairWhite
+        const bool equity_trend_available = snap &&
+            snap->trend.equity_available &&
+            std::isfinite(snap->trend.equity_change_pct);
+        if (equity_trend_available)
+            std::snprintf(eq_lbl, sizeof(eq_lbl), "%+6.2f%%",
+                          snap->trend.equity_change_pct);
+        else std::snprintf(eq_lbl, sizeof(eq_lbl), "   N/A");
+        const int eq_pair = !equity_trend_available ? kPairWhite
             : snap->trend.equity_change_pct > 0 ? kPairGreen
-            : snap->trend.equity_change_pct < 0 ? kPairRed
-            : kPairWhite;
+            : snap->trend.equity_change_pct < 0 ? kPairRed : kPairWhite;
+        static const std::vector<double> empty_series;
         draw_spark_row("Equity",
-                       snap ? snap->trend.equity_tail : std::vector<double>{},
+                       equity_trend_available
+                           ? snap->trend.equity_tail : empty_series,
                        eq_lbl, eq_pair);
 
         char dd_lbl[32];
-        const double dd_now = snap ? snap->trend.drawdown_now_pct : 0.0;
-        std::snprintf(dd_lbl, sizeof(dd_lbl), "-%5.2f%%", dd_now);
-        const int dd_pair = (dd_now >= 5.0) ? kPairRed
-                          : (dd_now >= 1.0) ? kPairYellow
-                          : kPairWhite;
+        const bool drawdown_trend_available = snap &&
+            snap->trend.drawdown_now_available &&
+            std::isfinite(snap->trend.drawdown_now_pct);
+        const double dd_now = drawdown_trend_available
+            ? snap->trend.drawdown_now_pct : 0.0;
+        if (drawdown_trend_available)
+            std::snprintf(dd_lbl, sizeof(dd_lbl), "-%5.2f%%", dd_now);
+        else std::snprintf(dd_lbl, sizeof(dd_lbl), "   N/A");
+        const int dd_pair = !drawdown_trend_available ? kPairWhite
+                          : (dd_now >= 5.0) ? kPairRed
+                          : (dd_now >= 1.0) ? kPairYellow : kPairWhite;
         draw_spark_row("Drawdown",
-                       snap ? snap->trend.drawdown_tail : std::vector<double>{},
+                       drawdown_trend_available
+                           ? snap->trend.drawdown_tail : empty_series,
                        dd_lbl, dd_pair);
 
         auto rate_series = data.rate_tail(60);

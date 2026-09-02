@@ -2,13 +2,11 @@
 
 #include "ui/console_dashboard.h"
 #include "ui/dashboard_snapshot.h"
-#include "ui/desk/format_scale.h"
 
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
-#include <vector>
 
 namespace truetest::ui::desk {
 
@@ -20,12 +18,9 @@ class MonitorTelemetry
 public:
     using clock = std::chrono::steady_clock;
 
-    bool merge(dashboard_snapshot& snap,
-               const ConsoleDashboard* console,
-               clock::time_point now)
+    bool merge(dashboard_snapshot& snap, const ConsoleDashboard* console, clock::time_point now)
     {
-        if (!console)
-        {
+        if (!console) {
             available_ = false;
             have_rate_sample_ = false;
             rate_available_ = false;
@@ -41,18 +36,12 @@ public:
         snap.health.events_total = static_cast<std::size_t>(events);
         snap.health.fills_total = static_cast<std::size_t>(fills);
         snap.health.trades_total = static_cast<std::size_t>(trades);
-        const auto drops_logging =
-            stats.ring_drops_logging.load(std::memory_order_relaxed);
-        const auto drops_risk =
-            stats.ring_drops_risk.load(std::memory_order_relaxed);
-        const auto drops_stats =
-            stats.ring_drops_stats.load(std::memory_order_relaxed);
-        const auto drops_observer =
-            stats.ring_drops_observer.load(std::memory_order_relaxed);
-        const auto drops_risk_stats =
-            stats.ring_drops_risk_stats.load(std::memory_order_relaxed);
-        const auto drops_mm =
-            stats.ring_drops_mm.load(std::memory_order_relaxed);
+        const auto drops_logging = stats.ring_drops_logging.load(std::memory_order_relaxed);
+        const auto drops_risk = stats.ring_drops_risk.load(std::memory_order_relaxed);
+        const auto drops_stats = stats.ring_drops_stats.load(std::memory_order_relaxed);
+        const auto drops_observer = stats.ring_drops_observer.load(std::memory_order_relaxed);
+        const auto drops_risk_stats = stats.ring_drops_risk_stats.load(std::memory_order_relaxed);
+        const auto drops_mm = stats.ring_drops_mm.load(std::memory_order_relaxed);
         snap.health.ring_drops_logging = drops_logging;
         snap.health.ring_drops_risk = drops_risk;
         snap.health.ring_drops_stats = drops_stats;
@@ -63,36 +52,35 @@ public:
         // The engine's try_push overflow counters are authoritative; the
         // RingBuffer drop_count shown by the builder tracks a different
         // DropOldest policy. Overlay by the existing ring names for the desk.
-        for (auto& ring : snap.debug.rings)
-        {
+        for (auto& ring : snap.debug.rings) {
             const std::string_view name = ring.name ? ring.name : "";
-            if (name == "logging") ring.drops = drops_logging;
-            else if (name == "risk") ring.drops = drops_risk;
-            else if (name == "stats") ring.drops = drops_stats;
-            else if (name == "observer") ring.drops = drops_observer;
-            else if (name == "risk_stats") ring.drops = drops_risk_stats;
-            else if (name == "mm_event") ring.drops = drops_mm;
+            if (name == "logging")
+                ring.drops = drops_logging;
+            else if (name == "risk")
+                ring.drops = drops_risk;
+            else if (name == "stats")
+                ring.drops = drops_stats;
+            else if (name == "observer")
+                ring.drops = drops_observer;
+            else if (name == "risk_stats")
+                ring.drops = drops_risk_stats;
+            else if (name == "mm_event")
+                ring.drops = drops_mm;
         }
 
-        stream_state_ = static_cast<connection_state>(
-            stats.state.load(std::memory_order_acquire));
-        snap.risk.halted = snap.risk.halted
-            || stats.halt_flag.load(std::memory_order_acquire);
+        stream_state_ = static_cast<connection_state>(stats.state.load(std::memory_order_acquire));
+        snap.risk.halted = snap.risk.halted || stats.halt_flag.load(std::memory_order_acquire);
 
-        if (!have_rate_sample_ || events < last_events_ || now <= last_rate_sample_)
-        {
+        if (!have_rate_sample_ || events < last_events_ || now <= last_rate_sample_) {
             rate_ema_ = 0.0;
             have_rate_sample_ = true;
             rate_available_ = false;
-        }
-        else
-        {
+        } else {
             const double seconds = std::chrono::duration<double>(now - last_rate_sample_).count();
             const double instantaneous = static_cast<double>(events - last_events_) / seconds;
             constexpr double alpha = 0.25;
-            rate_ema_ = (rate_ema_ == 0.0)
-                ? instantaneous
-                : alpha * instantaneous + (1.0 - alpha) * rate_ema_;
+            rate_ema_ = (rate_ema_ == 0.0) ? instantaneous
+                                           : alpha * instantaneous + (1.0 - alpha) * rate_ema_;
             rate_available_ = true;
         }
 
@@ -117,19 +105,4 @@ private:
     connection_state stream_state_ = connection_state::idle;
 };
 
-inline void build_visible_fill_rows(const dashboard_snapshot& snap,
-                                    int filter,
-                                    std::vector<std::size_t>& out)
-{
-    out.clear();
-    out.reserve(snap.recent_fills.size());
-    for (std::size_t i = 0; i < snap.recent_fills.size(); ++i)
-    {
-        const bool is_buy = side_is_buy_or_long(snap.recent_fills[i].side);
-        if ((filter == 1 && !is_buy) || (filter == 2 && is_buy))
-            continue;
-        out.push_back(i);
-    }
-}
-
-} // namespace truetest::ui::desk
+}  // namespace truetest::ui::desk

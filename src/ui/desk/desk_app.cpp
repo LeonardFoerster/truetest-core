@@ -1,114 +1,70 @@
 #ifdef HAS_IMGUI_DESK
 
 #include "ui/desk/desk_app.h"
-#include "ui/desk/desk_capabilities.h"
-#include "ui/desk/desk_layout.h"
-#include "ui/desk/desk_theme.h"
-#include "ui/desk/desk_command_model.h"
-#include "ui/desk/panels/about_dialog.h"
-#include "ui/desk/panels/activity_panel.h"
-#include "ui/desk/panels/debug_panel.h"
-#include "ui/desk/panels/market_panels.h"
-#include "ui/desk/panels/research_panels.h"
-#include "ui/desk/panels/research_workspace_panel.h"
-#include "ui/desk/panels/status_panels.h"
-#include "ui/desk/footprint_presentation_bridge.h"
+
 #include "ui/console_dashboard.h"
+#include "ui/desk/desk_theme.h"
+#include "ui/desk/desk_view_model.h"
+#include "ui/desk/panels/account_risk_panel.h"
+#include "ui/desk/panels/account_strip.h"
+#include "ui/desk/panels/fills_table.h"
+#include "ui/desk/panels/health_strip.h"
+#include "ui/desk/panels/instrument_panel.h"
+#include "ui/desk/panels/market_watch.h"
+#include "ui/desk/panels/orders_table.h"
+#include "ui/desk/panels/positions_table.h"
+#include "ui/desk/panels/protection_table.h"
+#include "ui/desk/panels/top_bar.h"
+#include "ui/desk/widgets/confirm_modal.h"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
-#include "imgui_internal.h"
-#include "implot.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <GL/gl.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
-#include <string_view>
+#include <utility>
 
 namespace truetest::ui::desk {
-
 namespace {
 
-void glfw_error_callback(int code, const char* desc)
+void glfw_error_callback(int code, const char* description)
 {
-    std::fprintf(stderr, "[desk] GLFW error %d: %s\n", code, desc ? desc : "");
+    std::fprintf(stderr, "[desk] GLFW error %d: %s\n", code, description ? description : "");
 }
 
-const char* glfw_platform_name(int platform)
-{
-    switch (platform)
-    {
-    case GLFW_PLATFORM_WAYLAND:
-        return "wayland";
-    case GLFW_PLATFORM_X11:
-        return "x11";
-    case GLFW_PLATFORM_WIN32:
-        return "win32";
-    case GLFW_PLATFORM_COCOA:
-        return "cocoa";
-    case GLFW_PLATFORM_NULL:
-        return "null";
-    default:
-        return "unknown";
-    }
-}
-
-// Desk render_loop runs on a worker thread (engine owns main). GLFW's Wayland
-// path loads libdecor for CSD; libdecor-gtk fails to init off the main thread
-// ("Failed to load plugin 'libdecor-gtk.so': failed to init") and KWin often
-// never maps a usable toplevel — window "launches" but nothing is visible.
-// Prefer X11 (XWayland) when available; override with TRUETEST_DESK_PLATFORM=
-// x11|wayland|any.
+// Prefer X11 under Wayland desktops where libdecor support can be incomplete.
+// Every call in this function is made synchronously by DeskApp::start() on the
+// application-main thread.
 bool glfw_init_for_desk()
 {
-    const char* pref = std::getenv("TRUETEST_DESK_PLATFORM");
-    if (!pref)
-        pref = "x11";
-
-    auto try_platform = [](int platform) -> bool {
+    const char* preference = std::getenv("TRUETEST_DESK_PLATFORM");
+    if (!preference) preference = "x11";
+    const auto try_platform = [](int platform) {
         glfwInitHint(GLFW_PLATFORM, platform);
-        if (glfwInit())
-            return true;
-        // GLFW requires terminate before a second init attempt.
+        if (glfwInit()) return true;
         glfwTerminate();
         return false;
     };
-
-    if (std::strcmp(pref, "wayland") == 0)
-    {
-        if (try_platform(GLFW_PLATFORM_WAYLAND))
-            return true;
-        std::fprintf(stderr,
-                     "[desk] Wayland init failed (TRUETEST_DESK_PLATFORM=wayland); "
-                     "trying default\n");
-        return glfwInit();
-    }
-    if (std::strcmp(pref, "any") == 0)
-        return glfwInit();
-
-    // Default and explicit "x11": prefer X11 to dodge libdecor-gtk.
-    if (try_platform(GLFW_PLATFORM_X11))
-        return true;
-    std::fprintf(stderr,
-                 "[desk] X11/XWayland init failed; falling back to GLFW default "
-                 "(Wayland may show libdecor-gtk warnings and a blank window)\n");
-    return glfwInit();
-}
-
-bool danger_btn(const char* label)
-{
-    theme::danger_button_style(true);
-    const bool hit = ImGui::Button(label);
-    theme::danger_button_style_pop(true);
-    return hit;
+    const auto try_any_platform = [] {
+        // Init hints persist across attempts. Explicitly undo the failed
+        // platform preference before falling back to GLFW auto-selection.
+        glfwInitHint(GLFW_PLATFORM, GLFW_ANY_PLATFORM);
+        return glfwInit() == GLFW_TRUE;
+    };
+    if (std::strcmp(preference, "wayland") == 0)
+        return try_platform(GLFW_PLATFORM_WAYLAND) || try_any_platform();
+    if (std::strcmp(preference, "any") == 0) return try_any_platform();
+    return try_platform(GLFW_PLATFORM_X11) || try_any_platform();
 }
 
 std::filesystem::path executable_asset_path(const char* filename)
@@ -116,1257 +72,485 @@ std::filesystem::path executable_asset_path(const char* filename)
 #if defined(__linux__)
     std::error_code error;
     const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
-    if (!error)
-        return executable.parent_path() / "desk_assets" / "fonts" / filename;
+    if (!error) return executable.parent_path() / "desk_assets" / "fonts" / filename;
 #endif
     return std::filesystem::path{"desk_assets"} / "fonts" / filename;
 }
 
-void draw_waiting_window(DeskPanel panel, const char* title)
+void draw_help_overlay(bool& open)
 {
-    if (ImGui::Begin(desk_window_name(panel)))
-    {
-        theme::panel_meta(title, nullptr, DeskDataState::unavailable, 0);
-        ImGui::TextColored(theme::tx_mid(), "Waiting for a coherent engine snapshot.");
-        ImGui::TextColored(theme::tx_faint(),
-                           "Unknown values are never interpreted as a safe or zero state.");
+    if (!open) return;
+    ImGui::OpenPopup("Command Center help");
+    if (ImGui::BeginPopupModal("Command Center help", &open, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("TrueTest Trading Command Center");
+        ImGui::Separator();
+        ImGui::BulletText(
+            "Select a Market Watch, position, or order row to set the global instrument.");
+        ImGui::BulletText("P toggles Pause when the existing operator hook is available.");
+        ImGui::BulletText("F requests confirmed Flatten; K requests confirmed Kill.");
+        ImGui::BulletText(
+            "Per-position and per-order controls are visible but intentionally not wired.");
+        ImGui::BulletText("Snapshot update age is not labelled as venue market-data age.");
+        if (ImGui::Button("Close")) {
+            open = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
-    ImGui::End();
 }
 
-} // namespace
+}  // namespace
 
-DeskApp::DeskApp(snapshot_fn snap_fn,
-                 std::shared_ptr<truetest::ui::ConsoleDashboard> data,
-                 std::chrono::milliseconds tick)
-    : snap_fn_(std::move(snap_fn))
-    , data_(std::move(data))
-    , tick_(tick)
+DeskApp::DeskApp(DeskAppConfig config)
+    : snapshot_fn_(std::move(config.snapshot))
+    , console_(std::move(config.console))
+    , tick_(config.tick > std::chrono::milliseconds::zero()
+                ? config.tick
+                : std::chrono::milliseconds{1})
+    , actions_(std::move(config.actions))
+    , trade_actions_(std::move(config.trade_actions))
+    , title_(config.title.empty() ? "TrueTest Trading Command Center"
+                                  : std::move(config.title))
+{}
+
+DeskApp::~DeskApp() noexcept
 {
+    request_stop();
+    const bool owns_platform_resources =
+        glfw_initialized_ || window_ || context_created_ || glfw_backend_initialized_ ||
+        opengl_backend_initialized_;
+    if (owns_platform_resources && owner_thread_ != std::this_thread::get_id()) {
+        std::fprintf(stderr,
+                     "[desk] fatal: DeskApp destroyed outside its platform owner thread\n");
+        std::terminate();
+    }
+    shutdown();
 }
 
-DeskApp::~DeskApp() { stop(); }
-
-void DeskApp::set_actions(operator_actions a) { actions_ = std::move(a); }
-
-void DeskApp::set_research_source(research_snapshot_fn source)
+void DeskApp::show_toast(std::string message, std::chrono::milliseconds ttl)
 {
-    research_fn_ = std::move(source);
-}
-
-void DeskApp::set_title(std::string title)
-{
-    if (!title.empty())
-        title_ = std::move(title);
-}
-
-void DeskApp::show_toast(std::string msg, std::chrono::milliseconds ttl)
-{
-    toast_ = std::move(msg);
+    toast_ = std::move(message);
     toast_until_ = std::chrono::steady_clock::now() + ttl;
 }
 
-bool DeskApp::guarded_call(const char* label, const std::function<void()>& body)
+void DeskApp::draw_toast()
 {
-    try
-    {
-        body();
-        return true;
-    }
-    catch (const std::exception& e)
-    {
-        std::fprintf(stderr, "[desk] %s threw: %s\n", label, e.what());
-        return false;
-    }
-    catch (...)
-    {
-        std::fprintf(stderr, "[desk] %s threw a non-std exception\n", label);
-        return false;
-    }
+    if (toast_.empty() || std::chrono::steady_clock::now() >= toast_until_) return;
+    ImGui::SameLine();
+    ImGui::TextColored(theme::warning(), "%s", toast_.c_str());
 }
 
 bool DeskApp::start()
 {
-    bool expected = false;
-    if (!running_.compare_exchange_strong(expected, true))
-        return start_ok_.load(std::memory_order_acquire);
+    if (running_.load(std::memory_order_acquire) || window_ || context_created_)
+        return false;
 
-    // Prior run may have exited cleanly (window close / frame-error budget)
-    // with running_ already false but thread_ still joinable. Join before
-    // reassign — assigning over a joinable std::thread is std::terminate.
-    if (thread_.joinable())
-        thread_.join();
-
-    start_ok_.store(false, std::memory_order_release);
-    thread_ = std::thread([this] { render_loop(); });
-
-    // Wait until post-init research setup finishes (or the desk thread
-    // aborts). Success is start_ok_ only — a still-running thread is not
-    // enough (that previously let start() return true before post-init).
-    for (int i = 0; i < 150 && running_.load(std::memory_order_acquire); ++i)
-    {
-        if (start_ok_.load(std::memory_order_acquire))
-            return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    owner_thread_ = std::this_thread::get_id();
+    glfwSetErrorCallback(glfw_error_callback);
+    if (!glfw_init_for_desk()) {
+        std::fprintf(stderr, "[desk] GLFW initialization failed; desk disabled\n");
+        owner_thread_ = {};
+        return false;
     }
+    glfw_initialized_ = true;
 
-    if (start_ok_.load(std::memory_order_acquire))
+    try {
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+        window_ = glfwCreateWindow(1760, 1020, title_.c_str(), nullptr, nullptr);
+        if (!window_) {
+            std::fprintf(stderr, "[desk] GLFW window creation failed; desk disabled\n");
+            shutdown();
+            return false;
+        }
+        glfwMakeContextCurrent(window_);
+        glfwSwapInterval(1);
+
+        IMGUI_CHECKVERSION();
+        if (!ImGui::CreateContext()) {
+            std::fprintf(stderr, "[desk] ImGui context creation failed; desk disabled\n");
+            shutdown();
+            return false;
+        }
+        context_created_ = true;
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.IniFilename = nullptr;
+        float scale_x = 1.0f;
+        float scale_y = 1.0f;
+        glfwGetWindowContentScale(window_, &scale_x, &scale_y);
+        apply_fonts(std::max(scale_x, scale_y));
+        theme::apply();
+
+        if (!ImGui_ImplGlfw_InitForOpenGL(window_, true)) {
+            std::fprintf(stderr, "[desk] ImGui GLFW backend initialization failed\n");
+            shutdown();
+            return false;
+        }
+        glfw_backend_initialized_ = true;
+        if (!ImGui_ImplOpenGL3_Init("#version 130")) {
+            std::fprintf(stderr, "[desk] ImGui OpenGL backend initialization failed\n");
+            shutdown();
+            return false;
+        }
+        opengl_backend_initialized_ = true;
+        running_.store(true, std::memory_order_release);
         return true;
-
-    // Fail-closed: join the worker so a later start() cannot assign over a
-    // still-joinable std::thread (which would std::terminate). stop() is
-    // safe if the worker already cleared running_.
-    running_.store(false, std::memory_order_release);
-    if (thread_.joinable())
-        thread_.join();
+    } catch (const std::exception& exception) {
+        std::fprintf(stderr, "[desk] initialization failed: %s\n", exception.what());
+    } catch (...) {
+        std::fprintf(stderr, "[desk] initialization failed with an unknown exception\n");
+    }
+    shutdown();
     return false;
 }
 
-void DeskApp::stop()
+void DeskApp::shutdown() noexcept
 {
-    bool expected = true;
-    if (!running_.compare_exchange_strong(expected, false))
-    {
-        if (thread_.joinable())
-            thread_.join();
-        return;
+    running_.store(false, std::memory_order_release);
+    if (opengl_backend_initialized_) {
+        ImGui_ImplOpenGL3_Shutdown();
+        opengl_backend_initialized_ = false;
     }
-    if (thread_.joinable())
-        thread_.join();
+    if (glfw_backend_initialized_) {
+        ImGui_ImplGlfw_Shutdown();
+        glfw_backend_initialized_ = false;
+    }
+    if (context_created_) {
+        ImGui::DestroyContext();
+        context_created_ = false;
+    }
+    if (window_) {
+        glfwDestroyWindow(window_);
+        window_ = nullptr;
+    }
+    if (glfw_initialized_) {
+        glfwTerminate();
+        glfw_initialized_ = false;
+    }
+    owner_thread_ = {};
 }
 
 void DeskApp::apply_fonts(float content_scale)
 {
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->Clear();
-    static ImVector<ImWchar> glyph_ranges;
-    glyph_ranges.clear();
-    ImFontGlyphRangesBuilder glyph_builder;
-    glyph_builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
-    glyph_builder.AddText("—–…→←·×ρμ−≥≤│");
-    glyph_builder.BuildRanges(&glyph_ranges);
-    ImFontConfig cfg;
-    cfg.OversampleH = 2;
-    cfg.OversampleV = 1;
-    cfg.PixelSnapH  = true;
-    cfg.GlyphRanges = glyph_ranges.Data;
-    const float body_px = 13.5f * std::max(content_scale, 1.0f);
-    const float mono_px = 12.5f * std::max(content_scale, 1.0f);
-    // Bundled IBM Plex is deterministic across workstations. System faces are
-    // retained only as a recovery path for incomplete installations.
-    ImFont* ui_font = io.Fonts->AddFontDefault(&cfg);
-    const std::array<std::string, 5> ui_candidates = {
+    ImFontConfig config;
+    config.OversampleH = 2;
+    config.OversampleV = 1;
+    const float body_size = 13.5f * std::max(content_scale, 1.0f);
+    const float mono_size = 12.5f * std::max(content_scale, 1.0f);
+    ImFont* body = io.Fonts->AddFontDefault(&config);
+
+    const std::array<std::string, 4> body_paths = {
         executable_asset_path("IBMPlexSans-Regular.ttf").string(),
         "src/ui/desk/assets/fonts/IBMPlexSans-Regular.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
     };
-    for (const auto& path : ui_candidates)
-    {
-        if (FILE* f = std::fopen(path.c_str(), "rb"))
-        {
-            std::fclose(f);
-            if (ImFont* loaded = io.Fonts->AddFontFromFileTTF(path.c_str(), body_px, &cfg))
-                ui_font = loaded;
+    for (const auto& path : body_paths) {
+        if (FILE* file = std::fopen(path.c_str(), "rb")) {
+            std::fclose(file);
+            if (ImFont* loaded = io.Fonts->AddFontFromFileTTF(path.c_str(), body_size, &config))
+                body = loaded;
             break;
         }
     }
 
-    ImFont* mono_font = nullptr;
-    ImFontConfig mono_cfg = cfg;
-    const std::array<std::string, 5> mono_candidates = {
+    ImFont* mono = nullptr;
+    const std::array<std::string, 4> mono_paths = {
         executable_asset_path("IBMPlexMono-Regular.ttf").string(),
         "src/ui/desk/assets/fonts/IBMPlexMono-Regular.ttf",
-        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     };
-    for (const auto& path : mono_candidates)
-    {
-        if (FILE* f = std::fopen(path.c_str(), "rb"))
-        {
-            std::fclose(f);
-            mono_font = io.Fonts->AddFontFromFileTTF(path.c_str(), mono_px, &mono_cfg);
+    for (const auto& path : mono_paths) {
+        if (FILE* file = std::fopen(path.c_str(), "rb")) {
+            std::fclose(file);
+            mono = io.Fonts->AddFontFromFileTTF(path.c_str(), mono_size, &config);
             break;
         }
     }
-    io.FontDefault = ui_font;
-    theme::set_mono_font(mono_font);
+    io.FontDefault = body;
+    theme::set_mono_font(mono);
     io.Fonts->Build();
 }
 
-void DeskApp::render_loop()
+void DeskApp::invoke_pause()
 {
-    consecutive_frame_errors_ = 0;
-    glfwSetErrorCallback(glfw_error_callback);
-    if (!glfw_init_for_desk())
-    {
-        std::fprintf(stderr, "[desk] glfwInit failed — desk disabled\n");
-        running_.store(false, std::memory_order_release);
+    if (!actions_.pause_toggle) {
+        show_toast("Pause unavailable");
         return;
     }
-
-    const int platform = glfwGetPlatform();
-    std::fprintf(stderr, "[desk] GLFW platform: %s\n", glfw_platform_name(platform));
-    if (platform == GLFW_PLATFORM_WAYLAND)
-    {
-        std::fprintf(stderr,
-                     "[desk] note: native Wayland may print libdecor-gtk warnings "
-                     "and hide the window when the UI runs off-main-thread. "
-                     "Unset TRUETEST_DESK_PLATFORM or set it to x11 if the desk "
-                     "is blank.\n");
-    }
-
-    const char* glsl_version = "#version 130";
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
-    // Maximize after first map — GLFW_MAXIMIZED at create is flaky on some
-    // Wayland compositors (zero-size configure / never shown).
-    glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
-#if defined(GLFW_X11_CLASS_NAME)
-    glfwWindowHintString(GLFW_X11_CLASS_NAME, "truetest_desk");
-    glfwWindowHintString(GLFW_X11_INSTANCE_NAME, "truetest_desk");
-#endif
-#if defined(GLFW_WAYLAND_APP_ID)
-    glfwWindowHintString(GLFW_WAYLAND_APP_ID, "truetest.desk");
-#endif
-
-    GLFWwindow* window = glfwCreateWindow(1760, 1020, title_.c_str(), nullptr, nullptr);
-    if (!window)
-    {
-        std::fprintf(stderr, "[desk] glfwCreateWindow failed — desk disabled\n");
-        glfwTerminate();
-        running_.store(false, std::memory_order_release);
+    try {
+        actions_.pause_toggle();
+    } catch (const std::exception& exception) {
+        std::fprintf(stderr, "[desk] pause callback failed: %s\n", exception.what());
+        show_toast("Pause request failed");
+        return;
+    } catch (...) {
+        std::fprintf(stderr, "[desk] pause callback failed with an unknown exception\n");
+        show_toast("Pause request failed");
         return;
     }
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
-    glfwShowWindow(window);
-    glfwFocusWindow(window);
-    glfwMaximizeWindow(window);
+    const auto paused = read_pause_state();
+    if (!paused) {
+        show_toast("Pause toggled; state unavailable");
+        return;
+    }
+    show_toast(*paused ? "Paused" : "Resumed");
+}
 
-    {
-        int fb_w = 0, fb_h = 0;
-        glfwGetFramebufferSize(window, &fb_w, &fb_h);
-        const char* vendor = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
-        const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
-        std::fprintf(stderr,
-                     "[desk] OpenGL %s / %s  framebuffer %dx%d  (close window to exit)\n",
-                     vendor ? vendor : "?",
-                     renderer ? renderer : "?",
-                     fb_w,
-                     fb_h);
-        if (fb_w <= 0 || fb_h <= 0)
-        {
+void DeskApp::invoke_flatten()
+{
+    if (!actions_.flatten) {
+        show_toast("Flatten unavailable");
+        return;
+    }
+    try {
+        actions_.flatten();
+        show_toast("Flatten requested");
+    } catch (const std::exception& exception) {
+        std::fprintf(stderr, "[desk] flatten callback failed: %s\n", exception.what());
+        show_toast("Flatten request failed");
+    } catch (...) {
+        std::fprintf(stderr, "[desk] flatten callback failed with an unknown exception\n");
+        show_toast("Flatten request failed");
+    }
+}
+
+void DeskApp::invoke_kill()
+{
+    if (!actions_.kill) {
+        show_toast("Kill unavailable");
+        return;
+    }
+    try {
+        const bool acknowledged = actions_.kill(std::chrono::seconds(5));
+        show_toast(acknowledged ? "Kill acknowledged"
+                                : "Kill did not acknowledge before deadline");
+    } catch (const std::exception& exception) {
+        std::fprintf(stderr, "[desk] kill callback failed: %s\n", exception.what());
+        show_toast("Kill request failed");
+    } catch (...) {
+        std::fprintf(stderr, "[desk] kill callback failed with an unknown exception\n");
+        show_toast("Kill request failed");
+    }
+}
+
+std::optional<bool> DeskApp::read_pause_state() noexcept
+{
+    if (!actions_.pause_state) return std::nullopt;
+    try {
+        const bool paused = actions_.pause_state();
+        pause_state_failure_reported_ = false;
+        return paused;
+    } catch (const std::exception& exception) {
+        if (!pause_state_failure_reported_)
+            std::fprintf(stderr, "[desk] pause-state callback failed: %s\n", exception.what());
+    } catch (...) {
+        if (!pause_state_failure_reported_)
             std::fprintf(stderr,
-                         "[desk] warning: zero framebuffer — compositor did not "
-                         "map the window; try TRUETEST_DESK_PLATFORM=x11\n");
-        }
+                         "[desk] pause-state callback failed with an unknown exception\n");
     }
-
-    // Outer try covers ImGui setup (apply_fonts can allocate/throw) through
-    // the frame loop so an uncaught exception cannot unwind this std::thread
-    // into process std::terminate. Cleanup is staged: never call backend
-    // Shutdown without Init (ImGui asserts / UB), and destroy contexts only
-    // if CreateContext ran.
-    bool imgui_ctx = false;
-    bool implot_ctx = false;
-    bool imgui_backends = false;
-    try
-    {
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        imgui_ctx = true;
-        ImPlot::CreateContext();
-        implot_ctx = true;
-
-        ImGuiIO& io = ImGui::GetIO();
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-        io.ConfigWindowsMoveFromTitleBarOnly = true;
-        // Keep ErrorRecovery stack rebalance; disable its IM_ASSERT abort so
-        // mid-frame faults cost one dropped frame rather than process death.
-        io.ConfigErrorRecovery = true;
-        io.ConfigErrorRecoveryEnableAssert = false;
-        io.IniFilename = desk_layout_ini_filename;
-
-        theme::apply();
-        float content_scale_x = 1.0f;
-        float content_scale_y = 1.0f;
-        glfwGetWindowContentScale(window, &content_scale_x, &content_scale_y);
-        const float content_scale = std::clamp(std::max(content_scale_x, content_scale_y),
-                                               1.0f, 2.5f);
-        theme::set_ui_scale(content_scale);
-        if (content_scale > 1.0f)
-            ImGui::GetStyle().ScaleAllSizes(content_scale);
-        apply_fonts(content_scale);
-
-        ImGui_ImplGlfw_InitForOpenGL(window, true);
-        ImGui_ImplOpenGL3_Init(glsl_version);
-        imgui_backends = true;
-
-        dashboard_snapshot snap{};
-        // Post-init allocates demo research + optional live footprint.
-        // start_ok_ only after this succeeds.
-        if (!guarded_call("post-init research", [&] {
-                demo_research_ = make_demo_research_presentation();
-                refresh_demo_footprint();
-                refresh_live_footprint();
-            }))
-        {
-            std::fprintf(stderr,
-                         "[desk] post-init research failed — desk disabled "
-                         "(engine keeps running headless)\n");
-            running_.store(false, std::memory_order_release);
-        }
-        else
-        {
-            start_ok_.store(true, std::memory_order_release);
-
-            bool has_snap = false;
-            auto next_poll = std::chrono::steady_clock::now();
-
-            while (running_.load(std::memory_order_acquire)
-                   && !glfwWindowShouldClose(window))
-            {
-                glfwPollEvents();
-
-                const auto now = std::chrono::steady_clock::now();
-                if (now >= next_poll)
-                {
-                    // Engine-adjacent / allocating sites outside ImGui frame
-                    // scope — recoverable via guarded_call + toast.
-                    if (!guarded_call("snapshot callback", [&] {
-                            if (snap_fn_)
-                            {
-                                has_snap = snap_fn_(snap);
-                                if (has_snap)
-                                    monitor_telemetry_.merge(snap, data_.get(), now);
-                            }
-                        }))
-                    {
-                        has_snap = false;
-                        show_toast("Snapshot callback error — see stderr");
-                    }
-
-                    if (!guarded_call("research callback", [&] {
-                            external_research_ = research_fn_
-                                ? research_fn_()
-                                : research_view_handle{};
-                        }))
-                    {
-                        external_research_ = research_view_handle{};
-                        show_toast("Research callback error — see stderr");
-                    }
-
-                    // Before draw_frame() captures research this iteration.
-                    if (!guarded_call("live footprint poll",
-                                     [&] { refresh_live_footprint(); }))
-                    {
-                        show_toast("Live footprint poll error — see stderr");
-                    }
-                    next_poll = now + tick_;
-                }
-
-                ImGui_ImplOpenGL3_NewFrame();
-                ImGui_ImplGlfw_NewFrame();
-                ImGui::NewFrame();
-
-                // Mid-frame throws: skip present; EndFrame rebalances stacks
-                // (ConfigErrorRecovery). Repeated faults shut desk thread only.
-                const bool frame_ok = guarded_call("frame draw", [&] {
-                    handle_hotkeys();
-                    draw_frame(has_snap ? &snap : nullptr, has_snap);
-                    draw_command_palette();
-                });
-
-                if (!frame_ok)
-                {
-                    ++consecutive_frame_errors_;
-                    show_toast("Frame draw error — see stderr");
-                    try { ImGui::EndFrame(); } catch (...) {}
-
-                    static constexpr int kMaxConsecutiveFrameErrors = 5;
-                    if (consecutive_frame_errors_ >= kMaxConsecutiveFrameErrors)
-                    {
-                        std::fprintf(stderr,
-                                     "[desk] %d consecutive frame errors — shutting "
-                                     "down desk thread (engine keeps running "
-                                     "headless)\n",
-                                     consecutive_frame_errors_);
-                        running_.store(false, std::memory_order_release);
-                        break;
-                    }
-                    continue;
-                }
-                consecutive_frame_errors_ = 0;
-
-                ImGui::Render();
-                int dw = 0, dh = 0;
-                glfwGetFramebufferSize(window, &dw, &dh);
-                glViewport(0, 0, dw, dh);
-                const ImVec4 clear = theme::bg0();
-                glClearColor(clear.x, clear.y, clear.z, 1.0f);
-                glClear(GL_COLOR_BUFFER_BIT);
-                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-                glfwSwapBuffers(window);
-            }
-        }
-    }
-    catch (const std::exception& e)
-    {
-        std::fprintf(stderr,
-                     "[desk] render_loop uncaught: %s — shutting down desk "
-                     "thread (engine keeps running headless)\n",
-                     e.what());
-        running_.store(false, std::memory_order_release);
-    }
-    catch (...)
-    {
-        std::fprintf(stderr,
-                     "[desk] render_loop uncaught non-std exception — shutting "
-                     "down desk thread (engine keeps running headless)\n");
-        running_.store(false, std::memory_order_release);
-    }
-
-    if (imgui_backends)
-    {
-        ImGui_ImplOpenGL3_Shutdown();
-        ImGui_ImplGlfw_Shutdown();
-    }
-    if (implot_ctx)
-        ImPlot::DestroyContext();
-    if (imgui_ctx)
-        ImGui::DestroyContext();
-    glfwDestroyWindow(window);
-    glfwTerminate();
-    start_ok_.store(false, std::memory_order_release);
-    running_.store(false, std::memory_order_release);
+    pause_state_failure_reported_ = true;
+    return std::nullopt;
 }
 
 void DeskApp::handle_hotkeys()
 {
-    if (ImGui::IsKeyPressed(ImGuiKey_F1, false))
-        show_help_ = !show_help_;
-
+    if (ImGui::IsKeyPressed(ImGuiKey_F1, false)) show_help_ = !show_help_;
     ImGuiIO& io = ImGui::GetIO();
-    if (io.KeyCtrl && !io.KeyAlt && !io.KeySuper
-        && ImGui::IsKeyPressed(ImGuiKey_K, false))
-    {
-        show_command_palette_ = true;
-        command_query_.fill('\0');
-        command_selection_ = 0;
-        return;
-    }
-    if (ImGui::IsKeyPressed(ImGuiKey_F11, false))
-        toggle_focus_mode();
-
-    // Don't steal keys while typing in a field.
-    if (io.WantTextInput || show_command_palette_ || confirm_ != ConfirmKind::none)
-        return;
-
-    const bool bare_key = operator_shortcut_allowed(
-        io.KeyCtrl, io.KeyAlt, io.KeySuper, io.KeyShift, io.WantTextInput,
-        show_command_palette_, confirm_ != ConfirmKind::none);
-
-    if (bare_key && ImGui::IsKeyPressed(ImGuiKey_P, false) && actions_.pause_toggle)
-    {
-        actions_.pause_toggle();
-        show_toast(actions_.pause_state && actions_.pause_state() ? "Paused" : "Resumed");
-    }
-    if (bare_key && ImGui::IsKeyPressed(ImGuiKey_F, false))
-    {
-        if (actions_.flatten)
-            confirm_ = ConfirmKind::flatten;
-        else
-            show_toast("Flatten unavailable");
-    }
-    if (bare_key && ImGui::IsKeyPressed(ImGuiKey_K, false))
-    {
-        if (actions_.kill)
-            confirm_ = ConfirmKind::kill;
-        else
-            show_toast("Kill switch unavailable");
-    }
-    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
-    {
-        if (confirm_ != ConfirmKind::none)
-            confirm_ = ConfirmKind::none;
-        else if (show_help_)
-            show_help_ = false;
-    }
+    if (io.WantTextInput || confirm_ != widgets::ConfirmKind::none) return;
+    if (ImGui::IsKeyPressed(ImGuiKey_P, false)) invoke_pause();
+    if (ImGui::IsKeyPressed(ImGuiKey_F, false) && actions_.flatten)
+        confirm_ = widgets::ConfirmKind::flatten;
+    if (ImGui::IsKeyPressed(ImGuiKey_K, false) && actions_.kill)
+        confirm_ = widgets::ConfirmKind::kill;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) show_help_ = false;
 }
 
-void DeskApp::toggle_focus_mode()
+void DeskApp::draw_frame(const dashboard_snapshot* snapshot, bool has_snapshot)
 {
-    if (!focus_mode_)
-    {
-        std::size_t ini_size = 0;
-        const char* ini = ImGui::SaveIniSettingsToMemory(&ini_size);
-        pre_focus_ini_.assign(ini, ini_size);
-        focus_mode_ = true;
-        page_controller_.request_layout_reset();
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImGui::SetNextWindowSize(viewport->WorkSize);
+    ImGui::SetNextWindowViewport(viewport->ID);
+    constexpr ImGuiWindowFlags root_flags =
+        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoBringToFrontOnFocus;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::Begin("TrueTest Trading Command Center", nullptr, root_flags);
+
+    CommandCenterViewModel* view_ptr = has_snapshot && snapshot ? &view_cache_ : nullptr;
+    const auto paused_state = read_pause_state();
+    const auto action =
+        panels::draw_top_bar(snapshot, view_ptr, paused_state.value_or(false),
+                             static_cast<bool>(actions_.pause_toggle), paused_state.has_value(),
+                             static_cast<bool>(actions_.flatten), static_cast<bool>(actions_.kill));
+    if (action == panels::TopBarAction::pause_toggle) invoke_pause();
+    if (action == panels::TopBarAction::flatten) confirm_ = widgets::ConfirmKind::flatten;
+    if (action == panels::TopBarAction::kill) confirm_ = widgets::ConfirmKind::kill;
+    draw_toast();
+
+    if (!snapshot || !view_ptr) {
+        ImGui::Spacing();
+        ImGui::TextColored(theme::text(), "WAITING FOR COHERENT ENGINE SNAPSHOT");
+        ImGui::TextColored(theme::text_faint(),
+                           "Unknown values are not presented as zero or safe.");
+        panels::draw_health_strip(nullptr, nullptr, false, false);
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+        draw_help_overlay(show_help_);
         return;
     }
 
-    const auto page = page_controller_.active_page();
-    ImGui::DockBuilderRemoveNode(ImGui::GetID(desk_focus_dockspace_name(page)));
-    if (!pre_focus_ini_.empty())
-        ImGui::LoadIniSettingsFromMemory(pre_focus_ini_.data(), pre_focus_ini_.size());
-    focus_mode_ = false;
-    focus_layout_resolved_[static_cast<std::size_t>(page)] = false;
-    pre_focus_ini_.clear();
-}
+    CommandCenterViewModel& view = *view_ptr;
+    panels::draw_account_strip(*snapshot, view.account);
+    const float health_height = 33.0f;
+    const float available = ImGui::GetContentRegionAvail().y;
+    const float blotter_height = std::clamp(available * 0.36f, 185.0f, 330.0f);
+    const float main_height = std::max(180.0f, available - blotter_height - health_height - 9.0f);
 
-const ResearchPresentation* DeskApp::active_research_view() const
-{
-    if (external_research_)
-        return external_research_.get();
-    if (demo_enabled_ && demo_research_)
-        return demo_research_.get();
-    return nullptr;
-}
-
-void DeskApp::refresh_demo_footprint()
-{
-    if (!demo_research_)
-        return;
-    // demo_research_ is an immutable published snapshot (research_view_handle
-    // = shared_ptr<const ResearchPresentation>) - copy, mutate the copy,
-    // then swap the pointer, same "cold worker builds, atomic swap publishes"
-    // pattern footprint.md §2.2 describes for the real service.
-    auto view = std::make_shared<ResearchPresentation>(*demo_research_);
-    FootprintPresentationOptions opts;
-    opts.quote_units = footprint_demo_.settings.quote_units;
-    view->footprint = to_footprint_bar_views(footprint_demo_.aggregator, opts);
-    // footprint.md §2.2's own definition of raw-frame replay - "use the same
-    // parser and aggregator ... perform no REST requests" - is exactly what
-    // the demo fixture does, so REPLAY is the honest status here (not LIVE).
-    view->footprint_status = truetest::footprint::data_status::replay;
-    auto& surface = view->surfaces[static_cast<std::size_t>(ResearchSurface::footprint)];
-    surface.state = DeskDataState::demo;
-    surface.source = "demo aggregator replay";
-    ++surface.version;
-    demo_research_ = view;
-}
-
-void DeskApp::set_live_footprint_source(std::shared_ptr<FootprintLiveSource> source)
-{
-    live_footprint_ = std::move(source);
-}
-
-void DeskApp::refresh_live_footprint()
-{
-    if (!live_footprint_ || !demo_research_)
-        return;
-    // Overwrite only the footprint field/status/surface entry - every
-    // other surface keeps whatever make_demo_research_presentation()
-    // published, so DOM/watchlist/etc. stay honestly labeled DEMO DATA
-    // rather than going dark just because footprint went live.
-    auto view = std::make_shared<ResearchPresentation>(*demo_research_);
-    auto live_view = live_footprint_->poll();
-    view->footprint = live_view->footprint;
-    view->footprint_status = live_view->footprint_status;
-    view->surfaces[static_cast<std::size_t>(ResearchSurface::footprint)] =
-        live_view->surfaces[static_cast<std::size_t>(ResearchSurface::footprint)];
-    demo_research_ = view;
-}
-
-void DeskApp::execute_command(std::size_t command_index)
-{
-    if (command_index >= desk_commands.size())
-        return;
-    const auto& command = desk_commands[command_index];
-    switch (command.kind)
-    {
-    case DeskCommandKind::select_page:
-        page_controller_.select(command.page);
-        break;
-    case DeskCommandKind::reset_layout:
-        page_controller_.request_layout_reset();
-        break;
-    case DeskCommandKind::toggle_demo:
-        demo_enabled_ = !demo_enabled_;
-        show_toast(demo_enabled_ ? "Deterministic DEMO DATA enabled" : "Demo data disabled");
-        break;
-    case DeskCommandKind::toggle_focus:
-        toggle_focus_mode();
-        break;
-    case DeskCommandKind::toggle_layout_lock:
-        layout_locked_ = !layout_locked_;
-        show_toast(layout_locked_ ? "Layout locked" : "Layout unlocked");
-        break;
-    case DeskCommandKind::toggle_density:
-        density_ = density_ == DeskDensity::compact
-            ? DeskDensity::comfortable : DeskDensity::compact;
-        show_toast(density_ == DeskDensity::compact
-            ? "Compact density" : "Comfortable density");
-        break;
-    }
-}
-
-void DeskApp::draw_command_palette()
-{
-    if (!show_command_palette_)
-        return;
-    ImGui::OpenPopup("Desk command palette");
-    ImGui::SetNextWindowSize(ImVec2(theme::dp(620), theme::dp(360)), ImGuiCond_Appearing);
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
-                            ImVec2(0.5f, 0.35f));
-    if (ImGui::BeginPopupModal("Desk command palette", &show_command_palette_,
-                               ImGuiWindowFlags_NoResize))
-    {
-        ImGui::SetKeyboardFocusHere();
-        ImGui::InputTextWithHint("##desk_command", "Type a workspace or command…",
-                                 command_query_.data(), command_query_.size());
-        std::array<std::size_t, desk_commands.size()> matches{};
-        std::size_t match_count = 0;
-        const std::string_view query{command_query_.data()};
-        for (std::size_t i = 0; i < desk_commands.size(); ++i)
-            if (desk_command_matches(desk_commands[i], query))
-                matches[match_count++] = i;
-        if (match_count == 0)
-            command_selection_ = 0;
-        else
-        {
-            if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, false))
-                command_selection_ = (command_selection_ + 1) % static_cast<int>(match_count);
-            if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, false))
-                command_selection_ = (command_selection_ + static_cast<int>(match_count) - 1)
-                    % static_cast<int>(match_count);
-            command_selection_ = std::clamp(command_selection_, 0,
-                                             static_cast<int>(match_count) - 1);
-        }
-        ImGui::Separator();
-        for (std::size_t row = 0; row < match_count; ++row)
-        {
-            const auto& command = desk_commands[matches[row]];
-            ImGui::PushID(static_cast<int>(matches[row]));
-            const bool selected = static_cast<int>(row) == command_selection_;
-            if (ImGui::Selectable(command.label, selected, ImGuiSelectableFlags_AllowDoubleClick,
-                                  ImVec2(0, theme::dp(32))))
-            {
-                execute_command(matches[row]);
-                show_command_palette_ = false;
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::SameLine(theme::dp(255.0f));
-            ImGui::TextColored(theme::tx_lo(), "%s", command.hint);
-            ImGui::PopID();
-        }
-        if (match_count > 0 && ImGui::IsKeyPressed(ImGuiKey_Enter, false))
-        {
-            execute_command(matches[static_cast<std::size_t>(command_selection_)]);
-            show_command_palette_ = false;
-            ImGui::CloseCurrentPopup();
-        }
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
-        {
-            show_command_palette_ = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-}
-
-void DeskApp::draw_menu_bar(const dashboard_snapshot* snap, bool has_snap)
-{
-    if (!ImGui::BeginMenuBar())
-        return;
-
-    if (ImGui::BeginMenu("Desk"))
-    {
-        if (ImGui::MenuItem("Help", "F1", show_help_))
-            show_help_ = !show_help_;
-        if (ImGui::MenuItem("About TrueTest", nullptr, show_about_))
-            show_about_ = !show_about_;
-        ImGui::EndMenu();
-    }
-    if (ImGui::BeginMenu("Layout"))
-    {
-        if (ImGui::MenuItem("Reset current page"))
-            page_controller_.request_layout_reset();
-        if (ImGui::MenuItem("Focus primary", "F11", focus_mode_))
-            toggle_focus_mode();
-        ImGui::MenuItem("Lock layout", nullptr, &layout_locked_);
-        ImGui::EndMenu();
-    }
-    if (ImGui::BeginMenu("View"))
-    {
-        if (ImGui::MenuItem("Deterministic demo data", nullptr, demo_enabled_))
-            demo_enabled_ = !demo_enabled_;
-        const bool comfortable = density_ == DeskDensity::comfortable;
-        if (ImGui::MenuItem("Comfortable density", nullptr, comfortable))
-            density_ = comfortable ? DeskDensity::compact : DeskDensity::comfortable;
-        ImGui::MenuItem("ImGui metrics", nullptr, &show_imgui_metrics_);
-        ImGui::EndMenu();
-    }
-    if (ImGui::BeginMenu("Ops"))
-    {
-        const bool can_pause = static_cast<bool>(actions_.pause_toggle);
-        const bool paused = actions_.pause_state ? actions_.pause_state() : false;
-        if (ImGui::MenuItem(paused ? "Resume" : "Pause", "P", false, can_pause) && can_pause)
-            actions_.pause_toggle();
-        if (ImGui::MenuItem("Flatten…", "F", false, static_cast<bool>(actions_.flatten)))
-            confirm_ = ConfirmKind::flatten;
-        if (ImGui::MenuItem("Kill switch…", "K", false, static_cast<bool>(actions_.kill)))
-            confirm_ = ConfirmKind::kill;
-        ImGui::EndMenu();
-    }
-
-    char menu_status[96];
-    if (has_snap && monitor_telemetry_.available()
-        && monitor_telemetry_.rate_available())
-        std::snprintf(menu_status, sizeof(menu_status), "%.0f FPS  ·  %.1f ev/s",
-                      ImGui::GetIO().Framerate, snap->health.rate_ev_per_sec);
-    else if (has_snap)
-        std::snprintf(menu_status, sizeof(menu_status), "%.0f FPS  ·  rate N/A",
-                      ImGui::GetIO().Framerate);
-    else
-        std::snprintf(menu_status, sizeof(menu_status), "%.0f FPS  ·  waiting",
-                      ImGui::GetIO().Framerate);
-    const float status_x = ImGui::GetWindowWidth()
-        - ImGui::CalcTextSize(menu_status).x - ImGui::GetStyle().WindowPadding.x;
-    if (status_x > ImGui::GetCursorPosX() + 24.0f)
-    {
-        ImGui::SameLine(status_x);
-        ImGui::TextColored(theme::tx_lo(), "%s", menu_status);
-    }
-
-    ImGui::EndMenuBar();
-}
-
-void DeskApp::draw_workspace_switcher()
-{
-    const DeskPage active_page = page_controller_.active_page();
-    const DeskWorkspace active_workspace = desk_workspace_of(active_page);
-    if (active_workspace == DeskWorkspace::market)
-        last_market_view_ = active_page;
-
-    const bool narrow = ImGui::GetContentRegionAvail().x < theme::dp(700.0f);
-
-    static constexpr std::array<DeskWorkspace, 4> kWorkspaceOrder = {
-        DeskWorkspace::market, DeskWorkspace::research,
-        DeskWorkspace::operations, DeskWorkspace::diagnostics,
-    };
-
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::bg1());
-    ImGui::BeginChild("workspace_switcher", ImVec2(0, theme::dp(theme::kStripHeight)), true,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    if (!narrow)
-    {
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(theme::tx_faint(), "WORKSPACE");
-        ImGui::SameLine(0, 16);
-    }
-    for (std::size_t i = 0; i < kWorkspaceOrder.size(); ++i)
-    {
-        const DeskWorkspace workspace = kWorkspaceOrder[i];
-        const bool active = active_workspace == workspace;
-        ImGui::PushStyleColor(ImGuiCol_Button, active ? theme::accent_dim() : theme::bg2());
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? theme::accent_dim() : theme::bg3());
-        ImGui::PushStyleColor(ImGuiCol_Text, active ? theme::accent() : theme::tx_mid());
-        if (ImGui::Button(desk_workspace_label(workspace), ImVec2(theme::dp(128.0f), 0)))
-        {
-            const DeskPage target = workspace == DeskWorkspace::market
-                ? last_market_view_ : desk_workspace_default_page(workspace);
-            page_controller_.select(target);
-        }
-        ImGui::PopStyleColor(3);
-        if (i + 1 < kWorkspaceOrder.size())
-            ImGui::SameLine(0, 6);
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-
-    // Market subview strip: only meaningful while MARKET is the active
-    // workspace. Switching workspaces never changes which Market subview
-    // last_market_view_ remembers.
-    if (active_workspace != DeskWorkspace::market)
-        return;
-
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::bg1());
-    ImGui::BeginChild("market_view_switcher", ImVec2(0, theme::dp(theme::kStripHeight)), true,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    if (!narrow)
-    {
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(theme::tx_faint(), "MARKET VIEW");
-        ImGui::SameLine(0, 16);
-    }
-    for (std::size_t i = 0; i < desk_market_views.size(); ++i)
-    {
-        const DeskPage page = desk_market_views[i];
-        const bool active = active_page == page;
-        ImGui::PushStyleColor(ImGuiCol_Button, active ? theme::accent_dim() : theme::bg2());
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? theme::accent_dim() : theme::bg3());
-        ImGui::PushStyleColor(ImGuiCol_Text, active ? theme::accent() : theme::tx_mid());
-        if (ImGui::Button(desk_market_view_label(page), ImVec2(theme::dp(120.0f), 0)))
-            page_controller_.select(page);
-        ImGui::PopStyleColor(3);
-        if (i + 1 < desk_market_views.size())
-            ImGui::SameLine(0, 6);
-    }
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-}
-
-void DeskApp::draw_top_chrome(const dashboard_snapshot* snap, bool has_snap, bool mixed_sources)
-{
-    const char* target = (has_snap && snap && !snap->debug.target.empty())
-                             ? snap->debug.target.c_str()
-                             : "—";
-    const char* mode = (has_snap && snap && !snap->debug.mode.empty())
-                           ? snap->debug.mode.c_str()
-                           : "—";
-    const bool halted = has_snap && snap && snap->risk.halted;
-    const bool paused = actions_.pause_state ? actions_.pause_state() : false;
-
-    const bool narrow = ImGui::GetContentRegionAvail().x < theme::dp(760.0f);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::bg0());
-    ImGui::BeginChild("operator_chrome", ImVec2(0, theme::dp(narrow ? 70.0f : 38.0f)), false,
-                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-
-    const auto draw_state = [&] {
-        const bool live = std::strcmp(target, "engine_live") == 0
-            || std::strcmp(target, "live") == 0;
-        const bool shadow = std::strcmp(target, "engine_shadow") == 0
-            || std::strcmp(target, "shadow") == 0;
-        theme::badge(target, theme::mode_color(target),
-                     live ? theme::danger_dim()
-                          : (shadow ? theme::info_dim() : theme::accent_dim()));
-        ImGui::SameLine();
-        theme::status_badge(mode, theme::StatusTone::neutral);
-        if (halted)
-        {
-            ImGui::SameLine();
-            theme::status_badge("HALTED", theme::StatusTone::halted);
-        }
-        if (paused)
-        {
-            ImGui::SameLine();
-            theme::status_badge("PAUSED", theme::StatusTone::warning);
-        }
-        ImGui::SameLine();
-        theme::badge(context_.symbol.c_str(), theme::data_link(), theme::info_dim());
-        if (demo_enabled_ && !external_research_)
-        {
-            ImGui::SameLine();
-            theme::status_badge("DEMO DATA", theme::StatusTone::warning);
-        }
-        // §8.1: a live footprint alongside still-demo siblings (or any other
-        // simultaneous demo/real mix) must never let one live surface make
-        // the others look live — surfaced globally, on top of each panel's
-        // own per-surface provenance header.
-        if (mixed_sources)
-        {
-            ImGui::SameLine();
-            theme::status_badge("MIXED SOURCES", theme::StatusTone::warning);
-        }
-        draw_toast();
-    };
-
-    const auto draw_controls = [&] {
-        if (ImGui::Button("Command  Ctrl+K"))
-        {
-            show_command_palette_ = true;
-            command_query_.fill('\0');
-        }
-        ImGui::SameLine();
-        const bool paused_now = actions_.pause_state ? actions_.pause_state() : false;
-        if (ImGui::Button(paused_now ? "Resume  P" : "Pause  P"))
-        {
-            if (actions_.pause_toggle)
-                actions_.pause_toggle();
-            else
-                show_toast("Pause unavailable");
-        }
-        ImGui::SameLine();
-        ImGui::TextColored(theme::tx_faint(), "|");
-        ImGui::SameLine();
-        if (danger_btn("Flatten  F"))
-        {
-            if (actions_.flatten)
-                confirm_ = ConfirmKind::flatten;
-            else
-                show_toast("Flatten unavailable");
-        }
-        ImGui::SameLine();
-        if (danger_btn("Kill  K"))
-        {
-            if (actions_.kill)
-                confirm_ = ConfirmKind::kill;
-            else
-                show_toast("Kill switch unavailable");
-        }
-    };
-
-    if (narrow)
-    {
-        draw_state();
-        draw_controls();
-    }
-    else if (ImGui::BeginTable("operator_chrome_columns", 2,
-                               ImGuiTableFlags_SizingFixedFit
-                                   | ImGuiTableFlags_NoSavedSettings))
-    {
-        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, theme::dp(430.0f));
+    ImGui::BeginChild("command_center_main", {0.0f, main_height}, false,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    constexpr ImGuiTableFlags layout_flags =
+        ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit;
+    if (ImGui::BeginTable("command_center_columns", 3, layout_flags, {0.0f, main_height})) {
+        ImGui::TableSetupColumn("watch", ImGuiTableColumnFlags_WidthFixed, 325.0f);
+        ImGui::TableSetupColumn("instrument", ImGuiTableColumnFlags_WidthStretch, 570.0f);
+        ImGui::TableSetupColumn("risk", ImGuiTableColumnFlags_WidthFixed, 325.0f);
         ImGui::TableNextRow();
-        ImGui::TableNextColumn();
-        draw_state();
-        ImGui::TableNextColumn();
-        draw_controls();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::BeginChild("market_watch_region", {-1.0f, main_height - 6.0f}, false);
+        panels::draw_market_watch(view, state_);
+        ImGui::EndChild();
+        ImGui::TableSetColumnIndex(1);
+        ImGui::BeginChild("instrument_region", {-1.0f, main_height - 6.0f}, false);
+        panels::draw_instrument_panel(view, *snapshot, state_,
+                                      derive_trade_action_capabilities(trade_actions_));
+        ImGui::EndChild();
+        ImGui::TableSetColumnIndex(2);
+        ImGui::BeginChild("account_risk_region", {-1.0f, main_height - 6.0f}, false);
+        panels::draw_account_risk_panel(*snapshot, view.account);
+        ImGui::EndChild();
         ImGui::EndTable();
     }
     ImGui::EndChild();
-    ImGui::PopStyleColor();
-}
 
-void DeskApp::draw_toast()
-{
-    if (toast_.empty())
-        return;
-    if (std::chrono::steady_clock::now() >= toast_until_)
-    {
-        toast_.clear();
-        return;
+    ImGui::BeginChild("command_center_blotter", {0.0f, blotter_height}, true);
+    if (ImGui::BeginTabBar("operation_blotter_tabs")) {
+        if (ImGui::BeginTabItem("Positions")) {
+            state_.active_blotter = DeskBlotterTab::positions;
+            panels::draw_positions_table(view, state_);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Open Orders")) {
+            state_.active_blotter = DeskBlotterTab::orders;
+            panels::draw_orders_table(view, state_,
+                                      derive_trade_action_capabilities(trade_actions_));
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Protection / TP-SL")) {
+            state_.active_blotter = DeskBlotterTab::protection;
+            panels::draw_protection_table(view);
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Recent Fills")) {
+            state_.active_blotter = DeskBlotterTab::fills;
+            panels::draw_fills_table(view);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
     }
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::warn());
-    ImGui::Text("  │  %s", toast_.c_str());
-    ImGui::PopStyleColor();
-}
-
-void DeskApp::draw_halt_banner(const dashboard_snapshot& snap)
-{
-    if (!snap.risk.halted)
-        return;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::danger_dim());
-    ImGui::BeginChild("halt_banner", ImVec2(0, theme::dp(40)), true);
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::danger());
-    ImGui::TextUnformatted("  RISK HALT  ·  new orders blocked  ·  halt is terminal — process restart required");
-    ImGui::PopStyleColor();
     ImGui::EndChild();
-    ImGui::PopStyleColor();
-}
-
-void DeskApp::draw_help_overlay()
-{
-    if (!show_help_)
-        return;
-    ImGui::SetNextWindowSize(ImVec2(theme::dp(420), 0), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always,
-                            ImVec2(0.5f, 0.5f));
-    if (ImGui::Begin("Keyboard shortcuts", &show_help_,
-                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
-    {
-        ImGui::TextUnformatted("Operator");
-        ImGui::BulletText("P — pause / resume strategies");
-        ImGui::BulletText("F — flatten (confirm)");
-        ImGui::BulletText("K — kill switch (confirm)");
-        ImGui::BulletText("Esc — cancel confirm / close help");
-        ImGui::Separator();
-        ImGui::TextUnformatted("Desk");
-        ImGui::BulletText("F1 — this help");
-        ImGui::BulletText("Ctrl+K — command palette");
-        ImGui::BulletText("F11 — focus/restore primary surface");
-        ImGui::BulletText("MARKET / RESEARCH / OPERATIONS / DIAGNOSTICS — top workspace switch");
-        ImGui::BulletText("MARKET shows a second row: Footprint / Liquidity / Structure / Cross-market");
-        ImGui::BulletText("Unlock Layout > Lock layout, then drag titles to re-dock");
-        ImGui::BulletText("Layout saved to %s", desk_layout_ini_filename);
-        ImGui::Separator();
-        ImGui::TextColored(theme::tx_lo(),
-                           "Halt is terminal. Flatten/kill never auto-retry.");
-        if (ImGui::Button("Close", ImVec2(theme::dp(120), 0)))
-            show_help_ = false;
-    }
-    ImGui::End();
-}
-
-void DeskApp::draw_confirm_modal()
-{
-    if (confirm_ == ConfirmKind::none)
-        return;
-
-    ImGui::OpenPopup("Confirm destructive action");
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-
-    if (ImGui::BeginPopupModal("Confirm destructive action", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize))
-    {
-        if (confirm_ == ConfirmKind::flatten)
-        {
-            ImGui::TextColored(theme::warn(), "FLATTEN");
-            ImGui::TextWrapped(
-                "Request flatten on all open positions. Confirm only if you intend "
-                "to reduce risk now.");
-        }
-        else if (confirm_ == ConfirmKind::kill)
-        {
-            ImGui::TextColored(theme::down(), "KILL SWITCH");
-            ImGui::TextWrapped(
-                "Cancel-all + flatten with a 5s deadline via the provider kill switch. "
-                "Loud, non-retrying, fail-closed.");
-        }
-
-        ImGui::Spacing();
-        if (danger_btn("Yes — execute") || ImGui::IsKeyPressed(ImGuiKey_Y, false))
-        {
-            if (confirm_ == ConfirmKind::flatten && actions_.flatten)
-            {
-                actions_.flatten();
-                show_toast("Flatten requested");
-            }
-            else if (confirm_ == ConfirmKind::kill && actions_.kill)
-            {
-                const bool ok = actions_.kill(std::chrono::milliseconds{5000});
-                show_toast(ok ? "Kill switch completed" : "Kill switch failed / timed out");
-            }
-            confirm_ = ConfirmKind::none;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
-        {
-            confirm_ = ConfirmKind::none;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-}
-
-void DeskApp::draw_frame(const dashboard_snapshot* snap, bool has_snap)
-{
-    // Safe point to republish demo_research_: nothing from a prior frame
-    // still holds the old raw research pointer (draw_frame doesn't persist
-    // it across calls), and this frame hasn't captured `research` yet.
-    if (footprint_needs_reaggregate_)
-    {
-        footprint_demo_.reaggregate();
-        refresh_demo_footprint();
-        footprint_needs_reaggregate_ = false;
-    }
-
-    const ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(vp->WorkPos);
-    ImGui::SetNextWindowSize(vp->WorkSize);
-    ImGuiWindowFlags root =
-        ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove
-        | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus
-        | ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_MenuBar
-        | ImGuiWindowFlags_NoDocking;
-
-    const ResearchPresentation* research = active_research_view();
-    const bool mixed_sources = research != nullptr
-        && research_presentation_has_mixed_sources(*research);
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
-                        ImVec2(theme::dp(8.0f), theme::dp(6.0f)));
-    ImGui::Begin("##TrueTestDeskRoot", nullptr, root);
-    draw_menu_bar(snap, has_snap);
-    draw_workspace_switcher();
-    draw_top_chrome(snap, has_snap, mixed_sources);
-
-    if (has_snap && snap)
-        draw_halt_banner(*snap);
-
-    const DeskPage active_page = page_controller_.active_page();
-    const DeskWorkspace active_workspace = desk_workspace_of(active_page);
-    static const dashboard_snapshot empty_snapshot{};
-    const dashboard_snapshot& current = snap ? *snap : empty_snapshot;
-
-    // Always-visible workspace-level strips — deliberately rendered outside
-    // the dockspace (not a dockable ImGui::Begin window) so they can never
-    // be dragged away, closed, or buried under another tab. Only drawn once
-    // a coherent snapshot exists (§22: never render account/market metrics
-    // from a default-constructed placeholder while genuinely waiting).
-    if (snap)
-    {
-        if (active_workspace == DeskWorkspace::operations)
-        {
-            panels::draw_account_strip(current, monitor_telemetry_);
-            panels::draw_safety_strip(current, actions_, monitor_telemetry_);
-        }
-        else if (active_workspace == DeskWorkspace::market)
-        {
-            panels::draw_market_metric_band(current, monitor_telemetry_, context_);
-        }
-    }
-    const ImGuiID normal_dock_id = ImGui::GetID(desk_page_dockspace_name(active_page));
-    const ImGuiID focus_dock_id = ImGui::GetID(desk_focus_dockspace_name(active_page));
-    const ImGuiID dock_id = focus_mode_ ? focus_dock_id : normal_dock_id;
-    const auto page_index = static_cast<std::size_t>(active_page);
-    const bool layout_existed_before_submission =
-        ImGui::DockBuilderGetNode(dock_id) != nullptr;
-    const ImVec2 dock_size = ImGui::GetContentRegionAvail();
-    if (!focus_mode_)
-    {
-        // A process can close while focus mode owns the primary window. That
-        // transient dockspace is never a valid startup layout; recover the
-        // normal page deterministically instead of restoring an empty shell.
-        if (ImGuiDockNode* focus_node = ImGui::DockBuilderGetNode(focus_dock_id);
-            focus_node && focus_node->Windows.Size > 0)
-        {
-            ImGui::DockBuilderRemoveNode(focus_dock_id);
-            apply_desk_page_layout(normal_dock_id, dock_size.x, dock_size.y,
-                                   active_page, false);
-            page_layout_resolved_[page_index] = true;
-        }
-    }
-    const auto reset_request = page_controller_.consume_layout_request();
-    const bool reset_active_page = reset_request && *reset_request == active_page;
-    bool& active_layout_resolved = focus_mode_
-        ? focus_layout_resolved_[page_index] : page_layout_resolved_[page_index];
-    if (!active_layout_resolved)
-    {
-        active_layout_resolved = true;
-        if (should_seed_default_layout(layout_existed_before_submission,
-                                       reset_active_page))
-            apply_desk_page_layout(dock_id, dock_size.x, dock_size.y,
-                                   active_page, focus_mode_);
-    }
-    if (reset_request)
-    {
-        const auto reset_index = static_cast<std::size_t>(*reset_request);
-        const ImGuiID reset_dock_id = ImGui::GetID(
-            focus_mode_ ? desk_focus_dockspace_name(*reset_request)
-                        : desk_page_dockspace_name(*reset_request));
-        (focus_mode_ ? focus_layout_resolved_[reset_index]
-                     : page_layout_resolved_[reset_index]) = true;
-        apply_desk_page_layout(reset_dock_id, dock_size.x, dock_size.y,
-                               *reset_request, focus_mode_);
-        show_toast(focus_mode_ ? "Primary surface focused"
-                               : std::string{desk_page_label(*reset_request)} + " layout reset");
-    }
-    // Preserve already-created inactive layouts without constructing or
-    // rendering their panels. Expensive research surfaces only draw when active.
-    for (const auto page : desk_pages)
-    {
-        if (page == active_page)
-            continue;
-        const ImGuiID inactive_id = ImGui::GetID(desk_page_dockspace_name(page));
-        if (should_keep_inactive_dockspace(ImGui::DockBuilderGetNode(inactive_id) != nullptr))
-            ImGui::DockSpace(inactive_id, ImVec2(0, 0), ImGuiDockNodeFlags_KeepAliveOnly);
-        const ImGuiID inactive_focus_id = ImGui::GetID(desk_focus_dockspace_name(page));
-        if (should_keep_inactive_dockspace(
-                ImGui::DockBuilderGetNode(inactive_focus_id) != nullptr))
-            ImGui::DockSpace(inactive_focus_id, ImVec2(0, 0),
-                             ImGuiDockNodeFlags_KeepAliveOnly);
-    }
-    if (focus_mode_
-        && should_keep_inactive_dockspace(ImGui::DockBuilderGetNode(normal_dock_id) != nullptr))
-        ImGui::DockSpace(normal_dock_id, ImVec2(0, 0), ImGuiDockNodeFlags_KeepAliveOnly);
-    ImGui::DockSpace(dock_id, ImVec2(0, 0), ImGuiDockNodeFlags_PassthruCentralNode);
-    set_desk_layout_locked(dock_id, layout_locked_);
-
-    switch (active_page)
-    {
-    case DeskPage::orderflow:
-        // Do NOT reaggregate/republish synchronously here: `research` above
-        // is a raw pointer into the CURRENT demo_research_ object, still
-        // used by the sibling panel calls below within this same frame.
-        // Reassigning demo_research_ now would dangle it mid-frame. Defer
-        // to the top of the next draw_frame() instead (see there).
-        if (panels::draw_orderflow_canvas_panel(research, context_,
-                                                footprint_demo_.camera, footprint_demo_.settings,
-                                                footprint_demo_.bounds_cache,
-                                                footprint_demo_.viewport_cache))
-        {
-            footprint_needs_reaggregate_ = true;
-        }
-        if (!focus_mode_)
-        {
-            panels::draw_watchlist_panel(snap, research, context_, density_);
-            panels::draw_dom_panel(DeskPanel::orderflow_dom, snap, research, context_, density_);
-            panels::draw_selected_context_panel(snap, research, context_);
-            panels::draw_activity_panel(DeskPanel::activity_blotter, snap, density_,
-                                        context_.symbol.c_str());
-        }
-        break;
-    case DeskPage::liquidity:
-        panels::draw_liquidity_panel(research, context_);
-        if (!focus_mode_)
-        {
-            panels::draw_dom_panel(DeskPanel::liquidity_dom, snap, research, context_, density_);
-            panels::draw_liquidations_panel(research, context_);
-            panels::draw_liquidity_tape_panel(research, context_, density_);
-        }
-        break;
-    case DeskPage::structure:
-        panels::draw_tpo_panel(research, context_);
-        if (!focus_mode_)
-        {
-            panels::draw_volume_profile_panel(research, context_);
-            panels::draw_session_context_panel(research, context_);
-        }
-        break;
-    case DeskPage::markets:
-        panels::draw_correlation_panel(research, context_);
-        if (!focus_mode_)
-            panels::draw_funding_panel(research, context_, density_);
-        break;
-    case DeskPage::operations:
-        if (!snap)
-        {
-            draw_waiting_window(DeskPanel::equity, "ACCOUNT / EQUITY");
-            if (!focus_mode_)
-            {
-                draw_waiting_window(DeskPanel::operations_activity, "OPERATIONS ACTIVITY");
-                draw_waiting_window(DeskPanel::strategies, "STRATEGIES");
-                draw_waiting_window(DeskPanel::risk, "RISK");
-                draw_waiting_window(DeskPanel::health, "SYSTEM HEALTH");
-            }
-        }
-        else
-        {
-            panels::draw_equity_panel(current);
-            if (!focus_mode_)
-            {
-                panels::draw_activity_panel(DeskPanel::operations_activity, snap, density_);
-                panels::draw_strategies_panel(current);
-                panels::draw_risk_panel(current);
-                panels::draw_health_panel(current, monitor_telemetry_);
-            }
-        }
-        break;
-    case DeskPage::diagnostics:
-        if (!snap)
-            draw_waiting_window(DeskPanel::debug, "DIAGNOSTICS");
-        else
-            draw_debug_panel(current);
-        break;
-    case DeskPage::research:
-    {
-        // No snapshot dependency: Research's content is CLI/config
-        // reference material and honest capability state, not engine
-        // telemetry, so it renders unconditionally rather than waiting.
-        const auto caps = derive_desk_capabilities(
-            has_snap, snap,
-            static_cast<bool>(actions_.pause_toggle),
-            static_cast<bool>(actions_.flatten),
-            static_cast<bool>(actions_.kill),
-            research != nullptr);
-        panels::draw_research_workspace_panel(caps);
-        break;
-    }
-    case DeskPage::count:
-        break;
-    }
-
-    if (show_imgui_metrics_)
-        ImGui::ShowMetricsWindow(&show_imgui_metrics_);
+    panels::draw_health_strip(snapshot, &view, monitor_telemetry_.available(),
+                              monitor_telemetry_.rate_available());
 
     ImGui::End();
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(2);
 
-    draw_confirm_modal();
-    draw_help_overlay();
-    draw_about_dialog(show_about_);
+    const auto confirmation = widgets::draw_confirm_modal(confirm_);
+    if (confirmation == widgets::ConfirmResult::confirmed) {
+        if (confirm_ == widgets::ConfirmKind::flatten)
+            invoke_flatten();
+        else if (confirm_ == widgets::ConfirmKind::kill)
+            invoke_kill();
+        confirm_ = widgets::ConfirmKind::none;
+    } else if (confirmation == widgets::ConfirmResult::cancelled)
+        confirm_ = widgets::ConfirmKind::none;
+    draw_help_overlay(show_help_);
 }
 
-} // namespace truetest::ui::desk
+void DeskApp::run() noexcept
+{
+    if (!window_ || !opengl_backend_initialized_) return;
+    if (owner_thread_ != std::this_thread::get_id()) {
+        std::fprintf(stderr, "[desk] run() refused outside its platform owner thread\n");
+        request_stop();
+        return;
+    }
+    if (!running_.load(std::memory_order_acquire)) {
+        shutdown();
+        return;
+    }
 
-#endif // HAS_IMGUI_DESK
+    try {
+        dashboard_snapshot snapshot;
+        bool has_snapshot = false;
+        auto next_snapshot = std::chrono::steady_clock::now();
+        while (running_.load(std::memory_order_acquire) && !glfwWindowShouldClose(window_)) {
+            glfwPollEvents();
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= next_snapshot) {
+                dashboard_snapshot candidate;
+                try {
+                    if (snapshot_fn_ && snapshot_fn_(candidate)) {
+                        monitor_telemetry_.merge(candidate, console_.get(), now);
+                        auto candidate_view = build_command_center_view_model(candidate, state_);
+                        if (state_.selected_symbol.empty() &&
+                            !candidate_view.market_watch.empty()) {
+                            state_.selected_symbol = candidate_view.market_watch.front().symbol;
+                            candidate_view.selected_symbol = state_.selected_symbol;
+                        }
+                        snapshot = std::move(candidate);
+                        view_cache_ = std::move(candidate_view);
+                        has_snapshot = true;
+                    }
+                } catch (const std::exception& exception) {
+                    std::fprintf(stderr, "[desk] snapshot callback threw: %s\n", exception.what());
+                    show_toast("Snapshot callback failed");
+                } catch (...) {
+                    std::fprintf(stderr, "[desk] snapshot callback threw\n");
+                    show_toast("Snapshot callback failed");
+                }
+                next_snapshot = now + tick_;
+            }
+
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+            handle_hotkeys();
+            draw_frame(has_snapshot ? &snapshot : nullptr, has_snapshot);
+            ImGui::Render();
+            int width = 0, height = 0;
+            glfwGetFramebufferSize(window_, &width, &height);
+            glViewport(0, 0, width, height);
+            const ImVec4 clear = theme::background();
+            glClearColor(clear.x, clear.y, clear.z, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            glfwSwapBuffers(window_);
+        }
+    } catch (const std::exception& exception) {
+        std::fprintf(stderr, "[desk] render loop failed: %s\n", exception.what());
+    } catch (...) {
+        std::fprintf(stderr, "[desk] render loop failed with an unknown exception\n");
+    }
+    shutdown();
+}
+
+}  // namespace truetest::ui::desk
+
+#endif  // HAS_IMGUI_DESK

@@ -8,18 +8,21 @@
 
 namespace truetest::ui {
 
-// Engine-side snapshot consumed by the rich TUI panels. Filled under
-// engine lock by engine::snapshot_dashboard() so the render thread can
-// read a coherent view at the 100 ms tick.
+// Rich cold-reader view consumed by the operator surfaces. It is materialized
+// from a generation-pinned immutable engine projection, so UI/web threads do
+// not inspect mutable engine containers.
 struct dashboard_snapshot
 {
     struct position_row
     {
         std::string symbol;
         double      qty           = 0.0;
+        // Fee-adjusted break-even price from portfolio cost_basis, not raw fill VWAP.
         double      avg_entry     = 0.0;
         double      mark          = 0.0;
         double      unrealized    = 0.0;
+        bool        mark_available = false;
+        bool        unrealized_available = false;
     };
 
     struct lot_row
@@ -42,6 +45,12 @@ struct dashboard_snapshot
         char          type          = '?';   // 'M' / 'L' / 'S' / 's'
         double        qty           = 0.0;
         double        price         = 0.0;
+        // Stop and stop-limit orders have two distinct prices: `price` is
+        // the executable limit (or zero for a stop-market), while this is
+        // the activation threshold. Availability is explicit so zero never
+        // masquerades as a valid trigger.
+        double        trigger_price = 0.0;
+        bool          trigger_price_available = false;
         std::int64_t  age_seconds   = 0;
         const char*   status        = "";
     };
@@ -181,12 +190,18 @@ struct dashboard_snapshot
 
         // Engine state.
         std::uint64_t event_count        = 0;
+        bool          event_count_available = false;
         std::uint64_t next_order_id      = 0;
+        bool          next_order_id_available = false;
         std::uint64_t next_fill_id       = 0;
+        bool          next_fill_id_available = false;
         std::size_t   pending_orders     = 0;
+        bool          pending_orders_available = false;
         std::size_t   pending_stops      = 0;
+        bool          pending_stops_available = false;
         std::size_t   open_orders_cache  = 0;
         std::size_t   order_meta_size    = 0;
+        bool          order_meta_size_available = false;
         std::size_t   armed_brackets     = 0;
         std::size_t   handles_size       = 0;
 
@@ -291,6 +306,32 @@ struct dashboard_snapshot
     };
     l2_view l2;
 
+    // Bounded, cold-path multi-instrument projection for operational market watch.
+    // It contains only data already known by the engine; ImGui never polls a
+    // venue or engine directly.
+    struct market_row
+    {
+        std::string symbol;
+        double      mark = 0.0;
+        bool        mark_available = false;
+        double      best_bid = 0.0;
+        double      best_ask = 0.0;
+        bool        best_bid_available = false;
+        bool        best_ask_available = false;
+        double      mid = 0.0;
+        double      spread = 0.0;
+        double      spread_bps = 0.0;
+        double      microprice = 0.0;
+        double      imbalance = 0.0;
+        bool        bbo_available = false;
+        bool        microprice_available = false;
+        bool        imbalance_available = false;
+        double      position_qty = 0.0;
+        std::size_t working_buy_orders = 0;
+        std::size_t working_sell_orders = 0;
+    };
+    std::vector<market_row> market_rows;
+
     // Queue position observability (populated during deepdive refactor from
     // adapter avg_queue_position_bps() for paper (QueueAware) and shadow
     // (TradeTape + L2 model)). 0 = all at front, 10000 = all at back.
@@ -298,6 +339,8 @@ struct dashboard_snapshot
     // when --queue-model l2-snapshot is active in shadow mode.
     struct queue_view
     {
+        // avg_bps == 0 is valid front-of-queue data, so availability is explicit.
+        bool          available = false;
         std::uint32_t avg_bps = 0;
         std::size_t submitted_with_queue = 0; // orders that saw initial queue > 0
         std::size_t filled_after_drain   = 0; // queue drained and fill was emitted
@@ -310,10 +353,13 @@ struct dashboard_snapshot
         bool   halted               = false;
         double daily_loss           = 0.0;
         double daily_loss_limit     = 0.0;
+        bool   daily_loss_available = false;
         double max_drawdown_pct     = 0.0;
         double max_drawdown_limit   = 0.0;
+        bool   max_drawdown_available = false;
         double exposure             = 0.0;
         double exposure_limit       = 0.0;
+        bool   exposure_available   = false;
         std::size_t open_orders     = 0;
         std::size_t open_orders_limit = 0;
     };
@@ -334,8 +380,17 @@ struct dashboard_snapshot
     double cash             = 0.0;
     double equity           = 0.0;
     double initial_balance  = 0.0;
+    double total_pnl        = 0.0;
     double realized_pnl     = 0.0;
     double unrealized_pnl   = 0.0;
+    bool   equity_available = false;
+    bool   total_pnl_available = false;
+    bool   realized_pnl_available = false;
+    bool   unrealized_pnl_available = false;
+
+    // Coherent snapshot generation time, not market-data freshness.
+    std::chrono::steady_clock::time_point generated_at{};
+    bool generated_at_available = false;
 
     std::vector<position_row>    positions;
     std::vector<lot_row>         lots;
@@ -349,8 +404,8 @@ struct dashboard_snapshot
 
     // Compact time-series tails the Overview panel renders as sparklines
     // to fill the lower half. Sized to fit the panel width (~60 cells)
-    // and refreshed under the same engine snapshot lock as everything
-    // else, so values stay coherent with positions/risk/perf above.
+    // and copied from the same immutable projection generation as the
+    // positions/risk/perf values above.
     struct trend_view
     {
         std::vector<double> equity_tail;     // last N equity points
@@ -360,6 +415,8 @@ struct dashboard_snapshot
         double equity_change_pct = 0.0;      // vs initial_balance
         double drawdown_now_pct  = 0.0;      // most recent dd
         double rate_now          = 0.0;      // most recent rate
+        bool   equity_available = false;
+        bool   drawdown_now_available = false;
     };
     trend_view trend;
 };

@@ -15,6 +15,7 @@
 #include "panels/health_panel.h"
 #include "panels/debug_panel.h"
 #include "panels/l2_panel.h"
+#include "snapshot_metrics.h"
 #include "toast.h"
 #include "tui_prefs.h"
 #include "tui_style.h"
@@ -27,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <optional>
 
 namespace truetest::ui {
 
@@ -145,22 +147,14 @@ void TabbedDashboard::start()
 
 void TabbedDashboard::stop()
 {
-    if (!running_.exchange(false)) return;
+    if (!running_.exchange(false, std::memory_order_acq_rel)) return;
 
-    // Give the render thread a chance to exit cleanly
-    if (thread_.joinable())
-    {
-        // Wait up to 1 second; if it's blocked in the filter prompt or sleep,
-        // we still want to restore the terminal.
-        auto start = std::chrono::steady_clock::now();
-        while (thread_.joinable() &&
-               (std::chrono::steady_clock::now() - start) < std::chrono::seconds(1))
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-        if (thread_.joinable())
-            thread_.detach();   // last resort - don't hang the caller
-    }
+    // The render thread captures `this` and owns every ncurses call. It must
+    // finish before terminal teardown or member destruction; detaching here
+    // is a use-after-free/endwin race, not a viable timeout policy. Both the
+    // main loop and filter prompt poll running_, so this join is bounded by
+    // the configured render tick plus scheduler delay.
+    if (thread_.joinable()) thread_.join();
 
     // Fix #4: Always attempt to restore the terminal, even in bad cases
     endwin();
@@ -519,9 +513,6 @@ void TabbedDashboard::draw_status_bar(int width,
     const std::int64_t  bid_fp8  = s.best_bid_fp8.load(std::memory_order_relaxed);
     const std::int64_t  ask_fp8  = s.best_ask_fp8.load(std::memory_order_relaxed);
     const std::int64_t  pos_fp8  = s.position_qty_fp8.load(std::memory_order_relaxed);
-    const std::int64_t  pnl_fp4  = s.realized_pnl_fp4.load(std::memory_order_relaxed);
-    const std::int64_t  unrl_fp4 = s.unrealized_pnl_fp4.load(std::memory_order_relaxed);
-    const std::int64_t  dd_fp4   = s.drawdown_fp4.load(std::memory_order_relaxed);
     const bool halted = s.halt_flag.load(std::memory_order_acquire);
     const std::uint64_t drops_total = total_ring_drops(s);
 
@@ -529,10 +520,6 @@ void TabbedDashboard::draw_status_bar(int width,
     const double bid  = (bid_fp8  < 0) ? 0.0 : static_cast<double>(bid_fp8)  / 1e8;
     const double ask  = (ask_fp8  < 0) ? 0.0 : static_cast<double>(ask_fp8)  / 1e8;
     const double pos  = static_cast<double>(pos_fp8)  / 1e8;
-    const double pnl  = static_cast<double>(pnl_fp4)  / 1e4;
-    const double unrl = static_cast<double>(unrl_fp4) / 1e4;
-    const double dd   = static_cast<double>(dd_fp4)   / 1e2;
-    const double eq   = snap ? snap->equity : 0.0;
 
     // Using new semantic style system (Phase 2)
     using Color = truetest::ui::Color;
@@ -617,28 +604,49 @@ void TabbedDashboard::draw_status_bar(int width,
     put_field("pos:", buf, pos > 0 ? Color::Positive : (pos < 0 ? Color::Negative : Color::Neutral));
 
     // Equity
-    std::snprintf(buf, sizeof(buf), "%.2f", eq);
-    put_field("eq:", buf, Color::Neutral);
+    const auto equity = snap
+        ? available_metric(snap->equity_available, snap->equity)
+        : std::nullopt;
+    if (equity)
+    {
+        std::snprintf(buf, sizeof(buf), "%.2f", *equity);
+        put_field("eq:", buf, Color::Neutral);
+    }
+    else put_field("eq:", "N/A", Color::Muted, false);
 
     // Total PnL - one of the most important numbers on screen
-    std::snprintf(buf, sizeof(buf), "%+.2f", pnl + unrl);
-    Color pnl_col = (pnl + unrl) > 0 ? Color::Positive : ((pnl + unrl) < 0 ? Color::Negative : Color::Neutral);
-    put_field("pnl:", buf, pnl_col, true);
+    const auto total_pnl = snap
+        ? available_metric(snap->total_pnl_available, snap->total_pnl)
+        : std::nullopt;
+    if (total_pnl)
+    {
+        std::snprintf(buf, sizeof(buf), "%+.2f", *total_pnl);
+        const Color pnl_col = *total_pnl > 0 ? Color::Positive
+            : (*total_pnl < 0 ? Color::Negative : Color::Neutral);
+        put_field("pnl:", buf, pnl_col, true);
+    }
+    else put_field("pnl:", "N/A", Color::Muted, false);
 
     // Drawdown - critical risk metric
-    std::snprintf(buf, sizeof(buf), "%.2f%%", dd);
-    Color dd_col = (dd <= -5.0) ? Color::Danger : (dd <= -1.0 ? Color::Warning : Color::Muted);
-    put_field("dd:", buf, dd_col, true);
+    const auto drawdown = snap
+        ? available_metric(snap->trend.drawdown_now_available,
+                           snap->trend.drawdown_now_pct)
+        : std::nullopt;
+    if (drawdown)
+    {
+        std::snprintf(buf, sizeof(buf), "-%.2f%%", *drawdown);
+        const Color dd_col = *drawdown >= 5.0 ? Color::Danger
+            : (*drawdown >= 1.0 ? Color::Warning : Color::Muted);
+        put_field("dd:", buf, dd_col, true);
+    }
+    else put_field("dd:", "N/A", Color::Muted, false);
 
-    // Fix #3: proper staleness tracking + indicator
-    static auto last_good_snapshot = std::chrono::steady_clock::now();
-    if (snap)
-        last_good_snapshot = std::chrono::steady_clock::now();
-
-    auto snap_age = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - last_good_snapshot).count();
-
-    if (snap_age > 1500)
+    // A successful callback may repeatedly return the same frozen snapshot.
+    // Age the producer timestamp itself so polling cannot make stale state
+    // look fresh. Missing/future timestamps fail closed as stale.
+    if (snapshot_is_stale(snap,
+                          std::chrono::steady_clock::now(),
+                          std::chrono::milliseconds{1500}))
     {
         set_color_bold(Color::Warning);
         mvaddstr(y, x, " stale");

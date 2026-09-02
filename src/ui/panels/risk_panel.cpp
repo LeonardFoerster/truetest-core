@@ -4,6 +4,7 @@
 
 #include "../console_dashboard.h"
 #include "../dashboard_snapshot.h"
+#include "../snapshot_metrics.h"
 #include "../tui_style.h"
 
 #include <ncurses.h>
@@ -78,32 +79,36 @@ void RiskPanel::draw(int body_y0, int width, int height,
     if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
 
     // ── Overall Risk Level (new in Phase 2) ──
-    RiskLevel overall_risk = RiskLevel::Safe;
-
-    if (snap->risk.daily_loss_limit > 0.0)
-    {
-        double daily_frac = snap->risk.daily_loss / snap->risk.daily_loss_limit;
-        if (daily_frac >= 0.9)      overall_risk = RiskLevel::Critical;
-        else if (daily_frac >= 0.7) overall_risk = RiskLevel::Danger;
-        else if (daily_frac >= 0.5) overall_risk = RiskLevel::Warning;
-        else if (daily_frac >= 0.3) overall_risk = RiskLevel::Caution;
-    }
-
-    if (snap->risk.max_drawdown_limit > 0.0)
-    {
-        double dd_frac = std::abs(snap->risk.max_drawdown_pct) / snap->risk.max_drawdown_limit;
-        if (dd_frac >= 0.9 && overall_risk < RiskLevel::Critical) overall_risk = RiskLevel::Critical;
-        else if (dd_frac >= 0.7 && overall_risk < RiskLevel::Danger) overall_risk = RiskLevel::Danger;
-        else if (dd_frac >= 0.5 && overall_risk < RiskLevel::Warning) overall_risk = RiskLevel::Warning;
-        else if (dd_frac >= 0.3 && overall_risk < RiskLevel::Caution) overall_risk = RiskLevel::Caution;
-    }
+    const auto assessment = assess_snapshot_risk(snap->risk);
 
     // Overall Risk Level - very prominent (critical for futures)
     draw_label(y, 2, "Overall Risk");
-    Color risk_col = risk_level_to_color(overall_risk);
-    set_color_bold(risk_col);
-    mvaddstr(y, 16, risk_level_to_string(overall_risk));
-    unset_color_bold(risk_col);
+    if (assessment.level == snapshot_risk_level::unknown)
+    {
+        set_color_bold(Color::Warning);
+        mvaddstr(y, 16, "UNKNOWN");
+        unset_color_bold(Color::Warning);
+    }
+    else
+    {
+        const auto overall_risk = [&] {
+            switch (assessment.level)
+            {
+                case snapshot_risk_level::safe: return RiskLevel::Safe;
+                case snapshot_risk_level::caution: return RiskLevel::Caution;
+                case snapshot_risk_level::warning: return RiskLevel::Warning;
+                case snapshot_risk_level::danger: return RiskLevel::Danger;
+                case snapshot_risk_level::critical: return RiskLevel::Critical;
+                case snapshot_risk_level::unknown: break;
+            }
+            return RiskLevel::Warning;
+        }();
+        Color risk_col = risk_level_to_color(overall_risk);
+        set_color_bold(risk_col);
+        mvaddstr(y, 16, risk_level_to_string(overall_risk));
+        if (!assessment.complete) mvaddstr(y, 25, " (partial data)");
+        unset_color_bold(risk_col);
+    }
     ++y;
 
     if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
@@ -113,12 +118,20 @@ void RiskPanel::draw(int body_y0, int width, int height,
     if (y >= y_end) return;
 
     // Helper for risk limits - gives stronger treatment to the really dangerous ones
-    auto risk_limit_row = [&](const char* lbl, double cur, double limit, const char* unit, bool is_critical = false) {
+    auto risk_limit_row = [&](const char* lbl, double cur, double limit,
+                              bool available, const char* unit,
+                              bool is_critical = false) {
         if (y >= y_end) return;
 
         draw_label(y, 2, lbl);
 
-        if (limit > 0.0)
+        if (!available || !std::isfinite(cur))
+        {
+            set_color_bold(Color::Warning);
+            mvaddstr(y, 26, "N/A");
+            unset_color_bold(Color::Warning);
+        }
+        else if (limit > 0.0)
         {
             double frac = cur / limit;
             Color bar_c = (frac >= 0.9) ? Color::Danger :
@@ -146,11 +159,17 @@ void RiskPanel::draw(int body_y0, int width, int height,
         ++y;
     };
 
-    risk_limit_row("Drawdown",   std::abs(snap->risk.max_drawdown_pct), snap->risk.max_drawdown_limit, "%", true);
-    risk_limit_row("Daily Loss", snap->risk.daily_loss,                  snap->risk.daily_loss_limit,    "",  true);
-    risk_limit_row("Exposure",   snap->risk.exposure,                    snap->risk.exposure_limit,      "");
+    risk_limit_row("Drawdown", std::abs(snap->risk.max_drawdown_pct),
+                   snap->risk.max_drawdown_limit,
+                   snap->risk.max_drawdown_available, "%", true);
+    risk_limit_row("Daily Loss", snap->risk.daily_loss,
+                   snap->risk.daily_loss_limit,
+                   snap->risk.daily_loss_available, "", true);
+    risk_limit_row("Exposure", snap->risk.exposure,
+                   snap->risk.exposure_limit,
+                   snap->risk.exposure_available, "");
     risk_limit_row("Open Orders", static_cast<double>(snap->risk.open_orders), 
-                   static_cast<double>(snap->risk.open_orders_limit), "");
+                   static_cast<double>(snap->risk.open_orders_limit), true, "");
 
     if (y < y_end) mvhline(y++, 1, ACS_HLINE, width - 2);
 
@@ -198,7 +217,8 @@ void RiskPanel::draw(int body_y0, int width, int height,
             attroff(A_DIM);
             ++y;
         }
-        const double total_exp = snap->risk.exposure;
+        const auto total_exp = available_metric(
+            snap->risk.exposure_available, snap->risk.exposure);
         std::size_t shown = 0;
         for (const auto& p : snap->positions)
         {
@@ -211,20 +231,30 @@ void RiskPanel::draw(int body_y0, int width, int height,
                 break;
             }
             if (y >= y_end) break;
-            const double notional = (p.mark > 0.0)
-                ? std::abs(p.qty) * p.mark
-                : std::abs(p.qty) * p.avg_entry;
-            const double frac = (snap->risk.exposure_limit > 0.0)
-                ? notional / snap->risk.exposure_limit : 0.0;
             draw_label(y, 2, p.symbol.c_str());
+
+            const auto notional = position_notional(p);
+            if (!notional || !total_exp)
+            {
+                set_color_bold(Color::Warning);
+                mvaddstr(y, 14, "N/A - mark/exposure unavailable");
+                unset_color_bold(Color::Warning);
+                mvprintw(y, 50, "%14s", "N/A");
+                mvprintw(y, 66, "%8s", "N/A");
+                ++y; ++shown;
+                continue;
+            }
+            const double frac = (snap->risk.exposure_limit > 0.0)
+                ? *notional / snap->risk.exposure_limit : 0.0;
 
             // Tiny inline gauge
             const int bw = 20;
             Color bar_c = (frac >= 0.85) ? Color::Danger : (frac >= 0.5 ? Color::Warning : Color::Positive);
             draw_bar(y, 14, bw, frac, bar_c);
 
-            mvprintw(y, 50, "%14.2f", notional);
-            const double pct_port = (total_exp > 0.0) ? notional / total_exp * 100.0 : 0.0;
+            mvprintw(y, 50, "%14.2f", *notional);
+            const double pct_port = (*total_exp > 0.0)
+                ? *notional / *total_exp * 100.0 : 0.0;
             mvprintw(y, 66, "%7.1f%%", pct_port);
             ++y; ++shown;
         }

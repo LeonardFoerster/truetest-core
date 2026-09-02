@@ -153,18 +153,31 @@ void DebugPanel::draw(int body_y0, int width, int height,
     // ── Engine state ──
     if (y < y_end - 1) section(y++, 0, width, "Engine state");
     if (y >= y_end) return;
-    auto kv = [&](int yy, int xl, int xv, const char* k, std::size_t v) {
+    auto kv = [&](int yy, int xl, int xv, const char* k, std::size_t v,
+                  bool available = true) {
         label(yy, xl, k);
-        mvprintw(yy, xv, "%zu", v);
+        if (available) mvprintw(yy, xv, "%zu", v);
+        else
+        {
+            attron(A_DIM);
+            mvaddstr(yy, xv, "N/A");
+            attroff(A_DIM);
+        }
     };
-    kv(y, x_l_label,        x_l_value,        "event_count",   static_cast<std::size_t>(d.event_count));
-    kv(y, x_l_label + 22,   x_l_value + 22,   "next_order_id", static_cast<std::size_t>(d.next_order_id));
-    kv(y, x_r_label,        x_r_value,        "pending_orders",d.pending_orders);
-    kv(y, x_r_label + 18,   x_r_value + 16,   "pending_stops", d.pending_stops);
+    kv(y, x_l_label, x_l_value, "event_count",
+       static_cast<std::size_t>(d.event_count), d.event_count_available);
+    kv(y, x_l_label + 22, x_l_value + 22, "next_order_id",
+       static_cast<std::size_t>(d.next_order_id),
+       d.next_order_id_available);
+    kv(y, x_r_label, x_r_value, "pending_orders", d.pending_orders,
+       d.pending_orders_available);
+    kv(y, x_r_label + 18, x_r_value + 16, "pending_stops",
+       d.pending_stops, d.pending_stops_available);
     ++y;
     if (y >= y_end) return;
     kv(y, x_l_label,        x_l_value,        "open_orders",   d.open_orders_cache);
-    kv(y, x_l_label + 22,   x_l_value + 22,   "order_meta",    d.order_meta_size);
+    kv(y, x_l_label + 22, x_l_value + 22, "order_meta",
+       d.order_meta_size, d.order_meta_size_available);
     kv(y, x_r_label,        x_r_value,        "armed_brackets",d.armed_brackets);
     kv(y, x_r_label + 18,   x_r_value + 16,   "exit_pending",  d.exit_pending);
     ++y;
@@ -172,14 +185,20 @@ void DebugPanel::draw(int body_y0, int width, int height,
     // ── Queue modeling (Phase 2 deepdive) ──
     if (y < y_end - 1) {
         section(y++, 0, width, "Queue modeling");
-        if (y < y_end) {
+        if (!snap->queue.available && y < y_end)
+        {
+            set_color_bold(Color::Warning);
+            mvaddstr(y++, x_l_label, "N/A - queue model telemetry unavailable");
+            unset_color_bold(Color::Warning);
+        }
+        else if (y < y_end) {
             label(y, x_l_label, "avg_pos_bps");
             mvprintw(y, x_l_value, "%u (%u%%)", snap->queue.avg_bps, snap->queue.avg_bps / 100);
             label(y, x_r_label, "submitted");
             mvprintw(y, x_r_value, "%zu", snap->queue.submitted_with_queue);
             ++y;
         }
-        if (y < y_end) {
+        if (snap->queue.available && y < y_end) {
             label(y, x_l_label, "filled_after");
             mvprintw(y, x_l_value, "%zu", snap->queue.filled_after_drain);
             label(y, x_r_label, "blocked_eos");

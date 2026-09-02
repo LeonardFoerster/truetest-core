@@ -197,13 +197,7 @@ inline const ResearchSurfaceStatus& research_surface_status(
     return presentation.surfaces[static_cast<std::size_t>(surface)];
 }
 
-// MARKET workspace §8.1: the desk can simultaneously show a real/live
-// footprint (via set_live_footprint_source) alongside sibling surfaces still
-// published from the demo fixture. Classify each surface's DeskDataState
-// into a coarse provenance bucket so a mix of "demo" and "real" surfaces can
-// be flagged as MIXED SOURCES without ever inferring an aggregate LIVE from
-// one live sibling. `unavailable`/`error` are not a competing source class —
-// they carry no data to conflict with anything.
+// Classify a research surface's state into a coarse provenance bucket.
 enum class ResearchProvenanceClass : std::uint8_t { none, demo, real };
 
 constexpr ResearchProvenanceClass research_provenance_class(DeskDataState state) noexcept
@@ -242,7 +236,5 @@ inline bool research_presentation_has_mixed_sources(
 
 using research_view_handle = std::shared_ptr<const ResearchPresentation>;
 using research_snapshot_fn = std::function<research_view_handle()>;
-
-research_view_handle make_demo_research_presentation();
 
 } // namespace truetest::ui::desk
