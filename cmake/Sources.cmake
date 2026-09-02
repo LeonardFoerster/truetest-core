@@ -191,6 +191,7 @@ set(TEST_SOURCES
     tests/test_events.cpp
     tests/test_event_log.cpp
     tests/test_engine.cpp
+    tests/test_engine_refactor_contracts.cpp
     tests/test_engine_async_support.cpp
     tests/test_execution_router_characterization.cpp
     tests/test_engine_streaming.cpp
