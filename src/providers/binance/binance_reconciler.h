@@ -51,6 +51,12 @@ public:
         , is_testnet_(is_testnet)
     {}
 
+    bool is_operational() const noexcept override
+    {
+        return (rest_ || get_) && !symbol_.empty()
+            && !base_asset_.empty() && !quote_asset_.empty();
+    }
+
     std::string reconcile(const portfolio& local, double tolerance_bps) override
     {
         if (!rest_ && !get_) return "BinanceReconciler: no REST client";

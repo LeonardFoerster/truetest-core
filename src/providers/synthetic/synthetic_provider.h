@@ -31,6 +31,11 @@ public:
 
     bool has_data_feed() const override { return true; }
     bool has_execution() const override { return false; }
+    private_execution_capability
+    private_execution_capability_level() const noexcept override
+    {
+        return private_execution_capability::no_private_writes;
+    }
 
     bool open() override;
     void close() override;
@@ -47,9 +52,9 @@ private:
     provider_config config_;
     McGeneratorConfig gen_config_;
     std::unique_ptr<IMonteCarloGenerator> generator_;
-    SyntheticPath generated_path_;
     std::shared_ptr<SyntheticTransport> transport_;
     bool opened_ = false;
+    bool deterministic_seed_configured_ = false;
 
     void parse_config();
     void ensure_generator();

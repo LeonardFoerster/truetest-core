@@ -3,8 +3,12 @@
 #include "providers/parser.h"
 #include "providers/local/csv_parser.h"
 #include "providers/provider_event.h"
+#include "providers/recovery_payload.h"
+#include "providers/binance/binance_kline_interval.h"
+#include "data/date_parse.h"
 #include "data/quantity_scale.h"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -265,150 +269,128 @@ inline std::optional<tick_record> parse_trade(std::string_view json)
     std::string_view qty_sv;
     std::string_view symbol_sv;
     std::string_view time_sv;
-    bool buyer_is_maker = false;
-    bool saw_m = false;
-
-    detail::for_each_flat_field(json, 0, json.size(),
-        [&](std::string_view key, std::string_view value) {
-            switch (detail::key_tag(key))
-            {
-            case detail::key_tag("e"): event_type = value; break;
-            case detail::key_tag("p"): price_sv   = value; break;
-            case detail::key_tag("q"): qty_sv     = value; break;
-            case detail::key_tag("s"): symbol_sv  = value; break;
-            case detail::key_tag("T"): time_sv    = value; break;
-            case detail::key_tag("m"):
-                buyer_is_maker = (value == "true");
-                saw_m = true;
-                break;
-            default: break;
-            }
-        });
-
-    (void)saw_m;
-    if (event_type != "trade") return std::nullopt;
-    if (price_sv.empty() || qty_sv.empty() || symbol_sv.empty())
+    std::string_view event_time_sv;
+    std::string_view trade_id_sv;
+    std::string_view maker_raw;
+    if (!provider_recovery::is_authoritative_object(json)
+        || !provider_recovery::top_level_plain_string(
+            json, "e", event_type)
+        || event_type != "trade"
+        || !provider_recovery::top_level_plain_string(json, "p", price_sv)
+        || !provider_recovery::top_level_plain_string(json, "q", qty_sv)
+        || !provider_recovery::top_level_plain_string(json, "s", symbol_sv)
+        || symbol_sv.empty()
+        || !provider_recovery::top_level_scalar_text(json, "E", event_time_sv)
+        || !provider_recovery::top_level_scalar_text(json, "t", trade_id_sv)
+        || !provider_recovery::top_level_scalar_text(json, "T", time_sv)
+        || !provider_recovery::top_level_member(json, "m", maker_raw))
         return std::nullopt;
+    maker_raw = provider_recovery::trim_json_ws(maker_raw);
+    if (maker_raw != "true" && maker_raw != "false")
+        return std::nullopt;
+    const bool buyer_is_maker = maker_raw == "true";
 
     tick_record rec;
-    double price = 0.0, qty = 0.0;
+    double price = 0.0;
     if (!parse_double_sv(price_sv, price) || !(price > 0.0))
         return std::nullopt;
-    if (!parse_double_sv(qty_sv, qty)) return std::nullopt;
-
-    std::int64_t qty_atoms = 0;
-    if (!tt::quantity_scale::from_base_nonnegative(
-            qty, tt::quantity_scale::canonical_atoms, qty_atoms)
-        || qty_atoms <= 0)
+    const auto qty_atoms =
+        tt::quantity_scale::parse_decimal_canonical_atoms(qty_sv);
+    if (!qty_atoms || *qty_atoms <= 0)
         return std::nullopt;
 
     rec.price = price;
-    rec.quantity = qty_atoms;
+    rec.quantity = *qty_atoms;
     rec.quantity_scale = tt::quantity_scale::canonical_atoms;
     rec.symbol.assign(symbol_sv.data(), symbol_sv.size());
     rec.side = buyer_is_maker ? data_tick_side::ask : data_tick_side::bid;
 
     int64_t ts_ms = 0;
-    if (parse_int64_sv(time_sv, ts_ms))
-    {
-        rec.timestamp = std::chrono::system_clock::time_point(
-            std::chrono::milliseconds(ts_ms));
-    }
-    else
-    {
-        rec.timestamp = std::chrono::system_clock::now();
-    }
+    int64_t event_ms = 0;
+    std::uint64_t trade_id = 0;
+    const auto [trade_id_end, trade_id_error] = std::from_chars(
+        trade_id_sv.data(), trade_id_sv.data() + trade_id_sv.size(), trade_id);
+    if (!parse_int64_sv(time_sv, ts_ms)
+        || !parse_int64_sv(event_time_sv, event_ms)
+        || ts_ms <= 0
+        || ts_ms > event_ms
+        || trade_id_error != std::errc{}
+        || trade_id_end != trade_id_sv.data() + trade_id_sv.size()
+        || trade_id == 0)
+        return std::nullopt;
+    if (!tt::date_parse::from_epoch_milliseconds(ts_ms))
+        return std::nullopt;
+    const auto timestamp = tt::date_parse::from_epoch_milliseconds(event_ms);
+    if (!timestamp)
+        return std::nullopt;
+    // The engine record has one timestamp. Use authoritative publication
+    // time E (known-at/decision time), not occurrence time T, so a strategy
+    // cannot observe the trade before its containing frame existed.
+    rec.timestamp = *timestamp;
 
     return rec;
 }
 
-// Hot path: locate k-object once, then single-pass its fields.
-inline std::optional<bar_record> parse_kline(std::string_view json)
+// Completed venue bars cross an economic boundary, so both the envelope and
+// nested kline object must be authoritative and decision fields unique.
+inline std::optional<bar_record> parse_kline_state(
+    std::string_view json, bool expected_closed)
 {
-    // Quick reject without full scan when e is present and not kline.
-    // (Single-pass still needed for k fields; this avoids work on wrong types.)
-    {
-        auto e_colon = detail::find_key(json, "e");
-        if (e_colon != std::string_view::npos)
-        {
-            auto e = detail::value_at_colon(json, e_colon);
-            if (e != "kline") return std::nullopt;
-        }
-        else
-        {
-            return std::nullopt;
-        }
-    }
-
-    // Locate the k-object. Prefer the tight form `"k":{` (wire format);
-    // fall back to `"k":` + skip_ws + `{` for pretty-printed fixtures.
-    std::size_t brace = std::string_view::npos;
-    {
-        auto tight = json.find("\"k\":{");
-        if (tight != std::string_view::npos)
-        {
-            brace = tight + 4; // index of '{'
-        }
-        else
-        {
-            auto k_colon = detail::find_key(json, "k");
-            if (k_colon == std::string_view::npos) return std::nullopt;
-            std::size_t pos = k_colon + 1;
-            detail::skip_ws(json, pos);
-            if (pos >= json.size() || json[pos] != '{') return std::nullopt;
-            brace = pos;
-        }
-    }
-
-    // Find matching close for k object
-    std::size_t k_end = brace;
-    {
-        int depth = 0;
-        for (std::size_t i = brace; i < json.size(); ++i)
-        {
-            const char c = json[i];
-            if (c == '"')
-            {
-                ++i;
-                while (i < json.size() && json[i] != '"')
-                {
-                    if (json[i] == '\\' && i + 1 < json.size()) ++i;
-                    ++i;
-                }
-                continue;
-            }
-            if (c == '{') ++depth;
-            else if (c == '}')
-            {
-                --depth;
-                if (depth == 0) { k_end = i; break; }
-            }
-        }
-    }
-
+    std::string_view event_type;
+    std::string_view outer_sym_sv;
+    std::string_view kline;
     std::string_view open_sv, close_sv, high_sv, low_sv, vol_sv, sym_sv,
-        time_sv, closed_sv;
+        open_time_sv, close_time_sv, event_time_sv, interval_sv, closed_raw;
 
-    detail::for_each_flat_field(json, brace + 1, k_end,
-        [&](std::string_view key, std::string_view value) {
-            switch (detail::key_tag(key))
-            {
-            case detail::key_tag("o"): open_sv  = value; break;
-            case detail::key_tag("c"): close_sv = value; break;
-            case detail::key_tag("h"): high_sv  = value; break;
-            case detail::key_tag("l"): low_sv   = value; break;
-            case detail::key_tag("v"): vol_sv   = value; break;
-            case detail::key_tag("s"): sym_sv   = value; break;
-            case detail::key_tag("t"): time_sv  = value; break;
-            case detail::key_tag("x"): closed_sv = value; break;
-            default: break;
-            }
-        });
+    if (!provider_recovery::is_authoritative_object(json)
+        || !provider_recovery::top_level_plain_string(
+            json, "e", event_type)
+        || event_type != "kline"
+        || !provider_recovery::top_level_plain_string(
+            json, "s", outer_sym_sv)
+        || outer_sym_sv.empty()
+        || !provider_recovery::top_level_scalar_text(
+            json, "E", event_time_sv)
+        || !provider_recovery::top_level_member(json, "k", kline)
+        || !provider_recovery::is_authoritative_object(kline)
+        || !provider_recovery::top_level_plain_string(kline, "o", open_sv)
+        || !provider_recovery::top_level_plain_string(kline, "c", close_sv)
+        || !provider_recovery::top_level_plain_string(kline, "h", high_sv)
+        || !provider_recovery::top_level_plain_string(kline, "l", low_sv)
+        || !provider_recovery::top_level_plain_string(kline, "v", vol_sv)
+        || !provider_recovery::top_level_plain_string(kline, "s", sym_sv)
+        || !provider_recovery::top_level_plain_string(kline, "i", interval_sv)
+        || !provider_recovery::top_level_scalar_text(
+            kline, "t", open_time_sv)
+        || !provider_recovery::top_level_scalar_text(
+            kline, "T", close_time_sv)
+        || !provider_recovery::top_level_member(kline, "x", closed_raw))
+        return std::nullopt;
+    closed_raw = provider_recovery::trim_json_ws(closed_raw);
 
     // Binance emits many updates for the currently forming candle. Only x=true
     // is a completed observation suitable for strategy/indicator advancement.
-    if (closed_sv != "true"
-        || open_sv.empty() || close_sv.empty() || high_sv.empty() || low_sv.empty())
+    if (closed_raw != (expected_closed ? "true" : "false")
+        || sym_sv.empty() || sym_sv != outer_sym_sv
+        || interval_sv.empty())
+        return std::nullopt;
+
+    std::int64_t open_time_ms = 0;
+    std::int64_t close_time_ms = 0;
+    std::int64_t event_time_ms = 0;
+    if (!parse_int64_sv(open_time_sv, open_time_ms) || open_time_ms <= 0
+        || !parse_int64_sv(close_time_sv, close_time_ms)
+        || close_time_ms <= 0 || close_time_ms < open_time_ms
+        || !kline_times_match_fixed_interval(
+            open_time_ms, close_time_ms, interval_sv)
+        || !parse_int64_sv(event_time_sv, event_time_ms)
+        || (expected_closed
+                ? event_time_ms < close_time_ms
+                : (event_time_ms < open_time_ms
+                   || event_time_ms > close_time_ms))
+        || !tt::date_parse::from_epoch_milliseconds(open_time_ms)
+        || !tt::date_parse::from_epoch_milliseconds(close_time_ms)
+        || !tt::date_parse::from_epoch_milliseconds(event_time_ms))
         return std::nullopt;
 
     bar_record rec;
@@ -424,15 +406,33 @@ inline std::optional<bar_record> parse_kline(std::string_view json)
     rec.low = v;
     if (!parse_double_sv(close_sv, v) || !(v > 0.0)) return std::nullopt;
     rec.close = v;
-    if (vol_sv.empty())
-        rec.volume = 0;
-    else if (!parse_double_sv(vol_sv, v)
-             || !tt::quantity_scale::from_base_nonnegative(
-                 v, tt::quantity_scale::canonical_atoms, rec.volume))
+    if (rec.high < std::max(rec.open, rec.close)
+        || rec.low > std::min(rec.open, rec.close)
+        || rec.high < rec.low)
         return std::nullopt;
+    const auto volume_atoms =
+        tt::quantity_scale::parse_decimal_canonical_atoms(vol_sv);
+    // A missing/zero volume is not safe in the current bar simulator: zero is
+    // its explicit unlimited-liquidity sentinel. Venue bars therefore require
+    // a positive, exactly representable economic volume at this boundary.
+    if (!volume_atoms
+        || (expected_closed ? *volume_atoms <= 0 : *volume_atoms < 0))
+        return std::nullopt;
+    rec.volume = *volume_atoms;
 
-    rec.date.assign(time_sv.data(), time_sv.size());
+    rec.open_time_ms = open_time_ms;
+    rec.date.assign(event_time_sv.data(), event_time_sv.size());
     return rec;
+}
+
+inline std::optional<bar_record> parse_kline(std::string_view json)
+{
+    return parse_kline_state(json, true);
+}
+
+inline bool is_well_formed_forming_kline(std::string_view json)
+{
+    return parse_kline_state(json, false).has_value();
 }
 
 } // namespace binance
@@ -447,13 +447,21 @@ public:
 
     std::optional<tick_record> parse_record(const std::string& line) override
     {
-        return binance::parse_trade(std::string_view{line});
+        return parse_record(std::string_view{line});
     }
 
     std::optional<tick_record> parse_record(std::string_view line) override
     {
-        return binance::parse_trade(line);
+        auto parsed = binance::parse_trade(line);
+        if (!parsed || (last_timestamp_
+                        && parsed->timestamp < *last_timestamp_))
+            return std::nullopt;
+        last_timestamp_ = parsed->timestamp;
+        return parsed;
     }
+
+private:
+    std::optional<std::chrono::system_clock::time_point> last_timestamp_;
 };
 
 class BinanceKlineParser : public IDataParser<bar_record>
@@ -466,11 +474,21 @@ public:
 
     std::optional<bar_record> parse_record(const std::string& line) override
     {
-        return binance::parse_kline(std::string_view{line});
+        return parse_record(std::string_view{line});
     }
 
     std::optional<bar_record> parse_record(std::string_view line) override
     {
-        return binance::parse_kline(line);
+        auto parsed = binance::parse_kline(line);
+        if (!parsed) return std::nullopt;
+        std::int64_t known_ms = 0;
+        if (!binance::parse_int64_sv(parsed->date, known_ms)
+            || (last_known_ms_ && known_ms < *last_known_ms_))
+            return std::nullopt;
+        last_known_ms_ = known_ms;
+        return parsed;
     }
+
+private:
+    std::optional<std::int64_t> last_known_ms_;
 };

@@ -61,6 +61,11 @@ public:
         , is_testnet_(is_testnet)
     {}
 
+    bool is_operational() const noexcept override
+    {
+        return (rest_ || get_) && !symbol_.empty();
+    }
+
     std::string reconcile(const portfolio& local, double tolerance_bps) override
     {
         if (!rest_ && !get_)

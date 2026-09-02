@@ -21,7 +21,10 @@
 // Threading: drain_once() must be called from exactly one thread (the
 // consumer side of the SPSC ring - typically a dedicated cold worker, never
 // the engine event loop). Read-only accessors may be called from any
-// thread; they only read atomics or values only drain_once() mutates.
+// thread). received_count() and discontinuity_events() are atomic diagnostic
+// counters and may be read from any thread. status(), set_status(), and all
+// working-set accessors are consumer-thread-only; returning references to a
+// concurrently-mutated working set would otherwise be a data race.
 namespace truetest::footprint {
 
 template <std::size_t RingN, std::size_t WorkingSetN = 4096>
@@ -57,10 +60,12 @@ public:
         if (drained > 0)
             received_count_.fetch_add(drained, std::memory_order_relaxed);
 
+        const std::size_t discontinuity_generation =
+            ring_.discontinuity_generation();
         if (ring_.discontinuous())
         {
             status_ = data_status::recovering;
-            ring_.acknowledge_discontinuity();
+            ring_.acknowledge_discontinuity(discontinuity_generation);
             discontinuity_events_.fetch_add(1, std::memory_order_relaxed);
         }
         return drained;

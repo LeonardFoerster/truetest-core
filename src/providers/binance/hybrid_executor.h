@@ -104,6 +104,16 @@ public:
                 book_, effective_fee, effective_fill,
                 42u, 1.1, qty_scale_, inner_latency_model_);
         }
+        bind_fill_id_sequence(fill_ids_);
+    }
+
+    void set_fill_id_sequence(
+        std::shared_ptr<FillIdSequence> sequence) override
+    {
+        if (!sequence)
+            return;
+        fill_ids_ = std::move(sequence);
+        bind_fill_id_sequence(fill_ids_);
     }
 
     void submit_order(const order_event& o) override
@@ -159,6 +169,15 @@ public:
         // left alone - it records when the book matched; release_ts
         // records when the engine can see it.
         append_inner_to_delayed();
+
+        std::sort(delayed_fills_.begin(), delayed_fills_.end(),
+                  [](const delayed_fill& lhs, const delayed_fill& rhs)
+                  {
+                      if (lhs.release_ts != rhs.release_ts)
+                          return lhs.release_ts < rhs.release_ts;
+                      return lhs.fill.get_fill_id()
+                          < rhs.fill.get_fill_id();
+                  });
 
         bool released = false;
         auto new_end = std::remove_if(delayed_fills_.begin(), delayed_fills_.end(),
@@ -444,10 +463,21 @@ private:
     void poll_inner_fills()
     {
         inner_fills_.clear();
-        paper_->poll_fills(inner_fills_);
-        book_adapter_->poll_fills(inner_fills_);
+        const auto drain = [&](IExecutionAdapter* child)
+        {
+            if (!child)
+                return;
+            (void)child->poll_fills(inner_fills_);
+        };
+        drain(paper_.get());
         if (aggressive_limit_adapter_)
-            aggressive_limit_adapter_->poll_fills(inner_fills_);
+            drain(aggressive_limit_adapter_.get());
+        drain(book_adapter_.get());
+        std::sort(inner_fills_.begin(), inner_fills_.end(),
+                  [](const fill_event& lhs, const fill_event& rhs)
+                  {
+                      return lhs.get_fill_id() < rhs.get_fill_id();
+                  });
     }
 
     void buffer_inner_fills()
@@ -495,6 +525,17 @@ private:
         return bid > 0.0 && ask > 0.0 ? (bid + ask) * 0.5 : contra;
     }
 
+    void bind_fill_id_sequence(
+        const std::shared_ptr<FillIdSequence>& sequence)
+    {
+        if (paper_)
+            paper_->set_fill_id_sequence(sequence);
+        if (book_adapter_)
+            book_adapter_->set_fill_id_sequence(sequence);
+        if (aggressive_limit_adapter_)
+            aggressive_limit_adapter_->set_fill_id_sequence(sequence);
+    }
+
     struct delayed_fill {
         fill_event fill;
         std::chrono::system_clock::time_point release_ts;
@@ -523,6 +564,8 @@ private:
     std::unordered_map<uint64_t, order_latency_state> order_latencies_;
     std::vector<fill_event> inner_fills_;
     std::vector<delayed_fill> delayed_fills_;
+    std::shared_ptr<FillIdSequence> fill_ids_ =
+        std::make_shared<FillIdSequence>();
     std::chrono::system_clock::time_point now_proxy_{};
     std::chrono::system_clock::time_point next_cancel_cleanup_{
         std::chrono::system_clock::time_point::max()};

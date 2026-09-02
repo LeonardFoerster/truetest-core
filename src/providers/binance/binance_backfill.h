@@ -1,19 +1,102 @@
 #pragma once
 #ifdef HAS_BINANCE
 
+// REST candle backfill parsing/encoding scaffold for Binance spot/futures.
+// Production fetch remains explicitly unsupported until provider startup has
+// a non-trading warmup barrier, a causal close watermark, and atomic REST/WS
+// overlap reconciliation. Treating REST rows as closed prepend frames can
+// otherwise create lookahead, duplicates, or gaps before live streaming.
+
 #include "binance_rest_client.h"
+#include "binance_kline_interval.h"
 #include "../../data/data_handler.h"
 
 #include <string>
+#include <string_view>
 #include <vector>
 #include <cstdint>
 #include <chrono>
+#include <algorithm>
+#include <charconv>
+#include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <optional>
+#include <stdexcept>
 
 struct backfill_bar {
     int64_t open_time;
+    int64_t close_time;
     double open, high, low, close;
     double volume;
 };
+
+namespace binance
+{
+inline bool backfill_bar_is_valid(const backfill_bar& b) noexcept
+{
+    return b.open_time > 0 && b.close_time >= b.open_time
+        && std::isfinite(b.open) && b.open > 0.0
+        && std::isfinite(b.high) && b.high > 0.0
+        && std::isfinite(b.low) && b.low > 0.0
+        && std::isfinite(b.close) && b.close > 0.0
+        && std::isfinite(b.volume) && b.volume >= 0.0
+        && b.high >= std::max(b.open, b.close)
+        && b.low <= std::min(b.open, b.close)
+        && b.high >= b.low;
+}
+
+inline bool is_kline_wire_token(std::string_view value) noexcept
+{
+    // Both values are written into a fixed 1 KiB frame below. This bound also
+    // keeps the later size_t-to-printf-precision conversion representable.
+    constexpr std::size_t max_token_size = 128;
+    if (value.empty() || value.size() > max_token_size) return false;
+    for (const unsigned char c : value) {
+        const bool ascii_alnum =
+            (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+        if (!ascii_alnum && c != '_' && c != '-') return false;
+    }
+    return true;
+}
+
+inline std::optional<std::string> encode_backfill_kline_json(const backfill_bar& b,
+                                                             std::string_view symbol,
+                                                             std::string_view interval)
+{
+    if (!is_kline_wire_token(symbol) || !is_kline_wire_token(interval)
+        || !backfill_bar_is_valid(b) || !(b.volume > 0.0)
+        || !kline_times_match_fixed_interval(
+            b.open_time, b.close_time, interval))
+        return std::nullopt;
+
+    // Binance's live payloads carry the venue-canonical upper-case symbol.
+    // Backfill must use the same identity even when operator configuration
+    // used the documented lower-case spelling, otherwise warmup and live
+    // observations populate different per-symbol strategy/indicator states.
+    std::string canonical_symbol(symbol);
+    std::transform(canonical_symbol.begin(), canonical_symbol.end(), canonical_symbol.begin(),
+                   [](const unsigned char c) {
+                       return c >= 'a' && c <= 'z' ? static_cast<char>(c - ('a' - 'A'))
+                                                   : static_cast<char>(c);
+                   });
+
+    char buf[1024];
+    const int written = std::snprintf(
+        buf, sizeof(buf),
+        "{\"e\":\"kline\",\"E\":%lld,\"s\":\"%.*s\",\"k\":{"
+        "\"t\":%lld,\"T\":%lld,\"s\":\"%.*s\",\"i\":\"%.*s\","
+        "\"o\":\"%.8f\",\"c\":\"%.8f\",\"h\":\"%.8f\",\"l\":\"%.8f\","
+        "\"v\":\"%.8f\",\"x\":true}}",
+        static_cast<long long>(b.close_time), static_cast<int>(canonical_symbol.size()),
+        canonical_symbol.data(), static_cast<long long>(b.open_time),
+        static_cast<long long>(b.close_time), static_cast<int>(canonical_symbol.size()),
+        canonical_symbol.data(), static_cast<int>(interval.size()), interval.data(), b.open,
+        b.close, b.high, b.low, b.volume);
+    if (written < 0 || static_cast<std::size_t>(written) >= sizeof(buf)) return std::nullopt;
+    return std::string(buf, static_cast<std::size_t>(written));
+}
+} // namespace binance
 
 class BinanceBackfill {
 public:
@@ -29,28 +112,13 @@ public:
         int count = 500,
         int64_t end_time_ms = 0) const
     {
-        std::vector<backfill_bar> result;
-
-        int remaining = count;
-        int64_t end_ms = end_time_ms > 0
-            ? end_time_ms
-            : std::chrono::duration_cast<std::chrono::milliseconds>(
-                  std::chrono::system_clock::now().time_since_epoch()).count();
-
-        while (remaining > 0) {
-            int batch = std::min(remaining, 1000);
-            auto bars = fetch_batch(symbol, interval, batch, end_ms);
-            if (bars.empty()) break;
-
-            result.insert(result.begin(), bars.begin(), bars.end());
-            remaining -= static_cast<int>(bars.size());
-
-            end_ms = bars.front().open_time - 1;
-
-            if (static_cast<int>(bars.size()) < batch) break;
-        }
-
-        return result;
+        (void)symbol;
+        (void)interval;
+        (void)end_time_ms;
+        if (count <= 0) return {};
+        throw std::logic_error(
+            "Binance candle backfill is unsupported until a non-trading "
+            "warmup barrier and atomic REST/WS reconciliation are available");
     }
 
 private:
@@ -155,19 +223,30 @@ private:
             }
         }
 
-        if (fields.size() < 6) return false;
+        if (fields.size() < 7) return false;
 
-        try {
-            bar.open_time = std::stoll(fields[0]);
-            bar.open      = std::stod(fields[1]);
-            bar.high      = std::stod(fields[2]);
-            bar.low       = std::stod(fields[3]);
-            bar.close     = std::stod(fields[4]);
-            bar.volume    = std::stod(fields[5]);
-            return true;
-        } catch (...) {
+        const auto parse_i64 = [](const std::string& value,
+                                  std::int64_t& out) noexcept {
+            const auto [end, ec] = std::from_chars(
+                value.data(), value.data() + value.size(), out);
+            return ec == std::errc{} && end == value.data() + value.size();
+        };
+        const auto parse_double = [](const std::string& value,
+                                     double& out) noexcept {
+            const auto [end, ec] = std::from_chars(
+                value.data(), value.data() + value.size(), out);
+            return ec == std::errc{} && end == value.data() + value.size()
+                && std::isfinite(out);
+        };
+        if (!parse_i64(fields[0], bar.open_time)
+            || !parse_double(fields[1], bar.open)
+            || !parse_double(fields[2], bar.high)
+            || !parse_double(fields[3], bar.low)
+            || !parse_double(fields[4], bar.close)
+            || !parse_double(fields[5], bar.volume)
+            || !parse_i64(fields[6], bar.close_time))
             return false;
-        }
+        return binance::backfill_bar_is_valid(bar);
     }
 
     static std::string to_upper(std::string s)

@@ -52,6 +52,11 @@ public:
         , is_demo_(is_demo)
     {}
 
+    bool is_operational() const noexcept override
+    {
+        return (rest_ || get_) && !symbol_.empty() && !category_.empty();
+    }
+
     std::string reconcile(const portfolio& local, double tolerance_bps) override
     {
         if (!rest_ && !get_)

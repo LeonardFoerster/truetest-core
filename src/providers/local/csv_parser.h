@@ -2,18 +2,18 @@
 
 #include "providers/parser.h"
 #include "data/data_handler.h"
-#include "data/quantity_scale.h"
+#include "data/market_provenance.h"
+#include "data/strict_market_csv.h"
 
-#include <sstream>
-#include <unordered_map>
-#include <vector>
+#include <charconv>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <stdexcept>
-#include <charconv>
+#include <vector>
 
 #ifdef HAS_DEBUG
 #include "debug/copy_tracker.h"
@@ -28,10 +28,7 @@ namespace tt::csv {
 
 // Base-asset volume scale for fractional exchange quantities (matches Binance kline path).
 // Integer-only volume fields (legacy equity CSVs) are stored as-is without scaling.
-inline constexpr double kVolumeScale = 1e8;
-
-inline constexpr std::uint64_t kIntegerQuantityScale = 1;
-inline constexpr std::uint64_t kFractionalQuantityScale = 100'000'000ULL;
+inline constexpr std::uint64_t kIntegerQuantityScale = tt::strict_market_csv::kIntegerQuantityScale;
 
 inline std::int64_t fast_stoll(std::string_view sv)
 {
@@ -42,37 +39,17 @@ inline std::int64_t fast_stoll(std::string_view sv)
     return v;
 }
 
-inline bool parse_nonnegative_quantity(std::string_view sv,
-                                       std::int64_t& out,
+inline bool parse_nonnegative_quantity(std::string_view sv, std::int64_t& out,
                                        std::uint64_t& quantity_scale)
 {
     out = 0;
     quantity_scale = kIntegerQuantityScale;
     if (sv.empty()) return true;
-
-    try {
-        out = fast_stoll(sv);
-        return out >= 0;
-    } catch (...) {
-        try {
-            const std::string token(sv);
-            std::size_t parsed = 0;
-            const double value = std::stod(token, &parsed);
-            if (parsed != token.size()
-                || !tt::quantity_scale::from_base_nonnegative(
-                    value, kFractionalQuantityScale, out))
-                return false;
-            quantity_scale = kFractionalQuantityScale;
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
+    return tt::strict_market_csv::parse_decimal_atoms(sv, true, out, quantity_scale);
 }
 
 // Integer volumes pass through; fractional (e.g. "246.092") use 1e8 atoms.
-inline std::int64_t parse_bar_volume(std::string_view sv,
-                                     std::uint64_t* quantity_scale = nullptr)
+inline std::int64_t parse_bar_volume(std::string_view sv, std::uint64_t* quantity_scale = nullptr)
 {
     std::int64_t out = 0;
     std::uint64_t scale = kIntegerQuantityScale;
@@ -81,7 +58,7 @@ inline std::int64_t parse_bar_volume(std::string_view sv,
     return out;
 }
 
-} // namespace tt::csv
+}  // namespace tt::csv
 
 
 struct bar_record
@@ -89,203 +66,175 @@ struct bar_record
     : public debug::CopyTracker<bar_record>
 #endif
 {
-	std::string date;
-	std::string symbol;
-	double open = 0;
-	double high = 0;
-	double low = 0;
-	double close = 0;
-	int64_t volume = 0;
-	// Epoch milliseconds from open_time (Binance kline CSV). 0 = unset → use date.
-	int64_t open_time_ms = 0;
-	uint64_t quantity_scale = 1;
+    std::string date;
+    std::string symbol;
+    double open = 0;
+    double high = 0;
+    double low = 0;
+    double close = 0;
+    int64_t volume = 0;
+    // Epoch milliseconds from open_time (Binance kline CSV). 0 = unset → use date.
+    int64_t open_time_ms = 0;
+    uint64_t quantity_scale = 1;
+    std::optional<tt::data_provenance::accepted_row> source;
 };
 
 class CsvBarParser : public IDataParser<bar_record>
 {
 public:
-	bool header_frame_contains_records() const override { return false; }
-	bool parse_header(const std::string& line) override
-	{
-		std::stringstream ss(line);
-		std::string col;
-		int idx = 0;
+    bool header_frame_contains_records() const override { return false; }
+    bool parse_header(const std::string& line) override
+    {
+        rejections_.clear();
+        physical_rows_seen_ = 1;
+        accepted_count_ = 0;
+        return static_cast<bool>(schema_.parse_header(line));
+    }
 
-		while (std::getline(ss, col, ','))
-		{
-			auto start = col.find_first_not_of(" \t\r\n");
-			auto end   = col.find_last_not_of(" \t\r\n");
-			std::string trimmed = (start == std::string::npos)
-				? ""
-				: col.substr(start, end - start + 1);
-			col_index_[trimmed] = idx++;
-		}
+    std::span<const tt::data_provenance::rejected_row> rejections() const noexcept
+    {
+        return rejections_;
+    }
 
-		for (const auto& name : {"open", "high", "low", "close"})
-		{
-			if (!col_index_.count(name))
-			{
-				std::cerr << "CsvBarParser: missing required column: " << name << "\n";
-				return false;
-			}
-		}
-		return true;
-	}
+    std::size_t physical_rows_seen() const noexcept { return physical_rows_seen_; }
+    std::size_t accepted_count() const noexcept { return accepted_count_; }
 
-	std::optional<bar_record> parse_record(const std::string& line) override
-	{
-		if (line.empty()) return std::nullopt;
+    std::optional<bar_record> parse_record(const std::string& line) override
+    {
+        const std::size_t physical_row = ++physical_rows_seen_;
+        tt::strict_market_csv::parsed_bar parsed;
+        const auto result = schema_.parse_row(line, parsed);
+        if (!result) {
+            reject(physical_row, map_reason(result.reason), map_field(result.source));
+            return std::nullopt;
+        }
 
-		// Performance: avoid per-line vector<string> + stringstream churn for
-		// every row (this was one of the biggest costs at 1.7M+ rows).
-		// We walk the line once with find and only materialise the fields we need.
-		try
-		{
-			bar_record rec;
-			std::string_view sv(line);
-
-			// Very lightweight field walker – enough for typical OHLCV CSVs.
-			// Keeps the existing column-index logic for flexibility.
-			std::vector<std::string_view> fields;
-			fields.reserve(8);
-			size_t pos = 0;
-			while (pos <= sv.size())
-			{
-				size_t next = sv.find(',', pos);
-				if (next == std::string_view::npos) next = sv.size();
-				fields.emplace_back(sv.substr(pos, next - pos));
-				if (next == sv.size()) break;
-				pos = next + 1;
-			}
-
-			auto get_field = [&](const char* name) -> std::string_view {
-				auto it = col_index_.find(name);
-				if (it == col_index_.end()) return {};
-				size_t idx = it->second;
-				return (idx < fields.size()) ? fields[idx] : std::string_view{};
-			};
-
-			auto date_sv   = get_field("date");
-			auto sym_sv    = get_field("symbol");
-			auto open_sv   = get_field("open");
-			auto high_sv   = get_field("high");
-			auto low_sv    = get_field("low");
-			auto close_sv  = get_field("close");
-			auto vol_sv    = get_field("volume");
-			auto ot_sv     = get_field("open_time");
-
-			rec.date   = std::string(date_sv);
-			rec.symbol = std::string(sym_sv);
-
-			// Fast path for integers, stod kept for doubles for portability.
-			rec.open   = open_sv.empty()  ? 0.0 : std::stod(std::string(open_sv));
-			rec.high   = high_sv.empty()  ? 0.0 : std::stod(std::string(high_sv));
-			rec.low    = low_sv.empty()   ? 0.0 : std::stod(std::string(low_sv));
-			rec.close  = close_sv.empty() ? 0.0 : std::stod(std::string(close_sv));
-			if (!tt::csv::parse_nonnegative_quantity(
-			        vol_sv, rec.volume, rec.quantity_scale))
-				return std::nullopt;
-
-			if (!ot_sv.empty())
-			{
-				try { rec.open_time_ms = tt::csv::fast_stoll(ot_sv); }
-				catch (...) { rec.open_time_ms = 0; }
-			}
-
-			return rec;
-		}
-		catch (const std::exception&)
-		{
-			return std::nullopt;
-		}
-	}
+        bar_record rec;
+        rec.date = std::string(parsed.date);
+        rec.symbol = std::string(parsed.symbol);
+        rec.open = parsed.open;
+        rec.high = parsed.high;
+        rec.low = parsed.low;
+        rec.close = parsed.close;
+        rec.volume = parsed.volume;
+        rec.open_time_ms = parsed.open_time_ms.value_or(0);
+        rec.quantity_scale = parsed.quantity_scale;
+        rec.source = tt::data_provenance::accepted_row{physical_row, accepted_count_++};
+        return rec;
+    }
 
 private:
-	std::unordered_map<std::string, int> col_index_;
-};
+    static tt::data_provenance::rejection_reason
+    map_reason(tt::strict_market_csv::error reason) noexcept
+    {
+        using source = tt::strict_market_csv::error;
+        using target = tt::data_provenance::rejection_reason;
+        switch (reason) {
+        case source::empty_row:
+            return target::empty_row;
+        case source::repeated_header:
+            return target::repeated_header;
+        case source::missing_required_field:
+            return target::missing_required_field;
+        case source::invalid_quantity:
+            return target::invalid_volume;
+        case source::invalid_timestamp:
+            return target::invalid_timestamp;
+        case source::conflicting_timestamp:
+            return target::invalid_timestamp;
+        case source::non_finite_price:
+            return target::non_finite_price;
+        case source::non_positive_price:
+            return target::non_positive_price;
+        case source::high_below_low:
+            return target::high_below_low;
+        case source::open_outside_range:
+            return target::open_outside_range;
+        case source::close_outside_range:
+            return target::close_outside_range;
+        case source::invalid_symbol:
+            return target::missing_required_field;
+        default:
+            return target::malformed_numeric;
+        }
+    }
 
+    static tt::data_provenance::source_field map_field(tt::strict_market_csv::field field) noexcept
+    {
+        using source = tt::strict_market_csv::field;
+        using target = tt::data_provenance::source_field;
+        switch (field) {
+        case source::date:
+            return target::date;
+        case source::symbol:
+            return target::symbol;
+        case source::open_time:
+            return target::open_time;
+        case source::open:
+            return target::open;
+        case source::high:
+            return target::high;
+        case source::low:
+            return target::low;
+        case source::close:
+            return target::close;
+        case source::volume:
+            return target::volume;
+        default:
+            return target::none;
+        }
+    }
+
+    void reject(std::size_t physical_row, tt::data_provenance::rejection_reason reason,
+                tt::data_provenance::source_field field = tt::data_provenance::source_field::none)
+    {
+        rejections_.push_back({physical_row, std::nullopt,
+                               tt::data_provenance::rejection_stage::parser, reason, field});
+    }
+
+    tt::strict_market_csv::bar_schema schema_;
+    std::vector<tt::data_provenance::rejected_row> rejections_;
+    std::size_t physical_rows_seen_ = 0;
+    std::size_t accepted_count_ = 0;
+};
 
 
 class CsvTickParser : public IDataParser<tick_record>
 {
 public:
-	bool header_frame_contains_records() const override { return false; }
-	std::optional<tick_record> parse_record(const std::string& line) override
-	{
-		if (line.empty()) return std::nullopt;
+    bool parse_header(const std::string& line) override
+    {
+        return static_cast<bool>(schema_.parse_header_or_first_row(line));
+    }
 
-		try
-		{
-			// Same performance improvements as CsvBarParser:
-			// reduce per-line allocations and use fast integer parsing.
-			std::string_view sv(line);
+    bool header_frame_contains_records() const override { return schema_.header_contains_record(); }
 
-			std::vector<std::string_view> fields;
-			fields.reserve(6);
-			size_t pos = 0;
-			while (pos <= sv.size())
-			{
-				size_t next = sv.find(',', pos);
-				if (next == std::string_view::npos) next = sv.size();
-				fields.emplace_back(sv.substr(pos, next - pos));
-				if (next == sv.size()) break;
-				pos = next + 1;
-			}
+    std::optional<tick_record> parse_record(const std::string& line) override
+    {
+        tt::strict_market_csv::parsed_tick parsed;
+        if (!schema_.parse_row(line, parsed)) return std::nullopt;
+        tick_record rec;
+        rec.timestamp = parsed.timestamp;
+        rec.symbol = std::string(parsed.symbol);
+        rec.price = parsed.price;
+        rec.quantity = parsed.quantity;
+        rec.quantity_scale = parsed.quantity_scale;
+        rec.side = parsed.side;
+        return rec;
+    }
 
-			if (fields.size() < 4) return std::nullopt;
-
-			int64_t ts_ms = 0;
-			try { ts_ms = tt::csv::fast_stoll(fields[0]); }
-			catch (...) { return std::nullopt; }
-
-			std::string symbol(fields[1]);
-
-			double price = 0.0;
-			try { price = std::stod(std::string(fields[2])); }
-			catch (...) { return std::nullopt; }
-
-			int64_t qty = 0;
-			std::uint64_t quantity_scale = 1;
-			if (!tt::csv::parse_nonnegative_quantity(
-			        fields[3], qty, quantity_scale))
-				return std::nullopt;
-
-			data_tick_side side = data_tick_side::unknown;
-			if (fields.size() >= 5 && !fields[4].empty())
-			{
-				char c = fields[4][0];
-				if (c == 'B' || c == 'b') side = data_tick_side::bid;
-				else if (c == 'A' || c == 'a') side = data_tick_side::ask;
-			}
-
-			auto timestamp = std::chrono::system_clock::time_point(
-				std::chrono::milliseconds(ts_ms));
-
-			tick_record rec;
-			rec.timestamp = timestamp;
-			rec.symbol = std::move(symbol);
-			rec.price = price;
-			rec.quantity = qty;
-			rec.quantity_scale = quantity_scale;
-			rec.side = side;
-			return rec;
-		}
-		catch (const std::exception&)
-		{
-			return std::nullopt;
-		}
-	}
+private:
+    tt::strict_market_csv::tick_schema schema_;
 };
-
 
 
 inline void bar_record_sink(const bar_record& rec, std::shared_ptr<data_handler> handler)
 {
-	handler->load_into_queue(rec.date, rec.symbol, rec.open, rec.high, rec.low,
-	                         rec.close, rec.volume, rec.quantity_scale);
+    handler->load_into_queue(rec.date, rec.symbol, rec.open, rec.high, rec.low, rec.close,
+                             rec.volume, rec.quantity_scale);
 }
 
 inline void tick_record_sink(const tick_record& rec, std::shared_ptr<data_handler> handler)
 {
-	handler->add_tick(rec);
+    handler->add_tick(rec);
 }

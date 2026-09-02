@@ -82,6 +82,13 @@ public:
 
     void set_fee_model(std::shared_ptr<IFeeModel> fm) { fee_model_ = std::move(fm); }
 
+    void set_fill_id_sequence(
+        std::shared_ptr<FillIdSequence> sequence) override
+    {
+        if (sequence)
+            fill_ids_ = std::move(sequence);
+    }
+
     void submit_order(const order_event& o) override
     {
         last_error_.clear();
@@ -112,13 +119,29 @@ public:
                 o.get_side(),
                 o.get_quantity(),
                 last_price_,
-                commission);
-            pending_fills_.back().set_recv_ns(o.get_recv_ns());
+                commission,
+                /*remaining=*/0.0,
+                fill_ids_->next());
+            auto& fill = pending_fills_.back();
+            fill.set_source(fill_source::simulated);
+            fill_provenance provenance;
+            provenance.model = fill_execution_model::synthetic_local_liquidity;
+            provenance.reason = fill_execution_reason::market_maker_requote;
+            provenance.exploratory = true;
+            provenance.intended_price = o.get_price() > 0.0 ? o.get_price() : px;
+            provenance.reference_price = px;
+            provenance.reference_timestamp = o.get_earliest_eligible_ts();
+            const auto decision_ts = o.get_decision_ts();
+            if (provenance.reference_timestamp > decision_ts)
+                provenance.modeled_latency = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    provenance.reference_timestamp - decision_ts);
+            fill.set_provenance(provenance);
+            fill.set_recv_ns(o.get_recv_ns());
             if (o.get_recv_ns() > 0)
             {
                 const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
-                pending_fills_.back().set_latency_ns(now_ns - o.get_recv_ns());
+                fill.set_latency_ns(now_ns - o.get_recv_ns());
             }
         }
     }
@@ -151,6 +174,8 @@ private:
     std::string last_error_;
     std::weak_ptr<truetest::ui::ConsoleDashboard> dashboard_;
     std::shared_ptr<IFeeModel> fee_model_;
+    std::shared_ptr<FillIdSequence> fill_ids_ =
+        std::make_shared<FillIdSequence>();
 };
 
 // Market → paper mid fill; passive limit → queue-aware when configured;
@@ -205,6 +230,16 @@ public:
                 book_, effective_fee, effective_fill,
                 42u, 1.1, qty_scale_, inner_latency_model_);
         }
+        bind_fill_id_sequence(fill_ids_);
+    }
+
+    void set_fill_id_sequence(
+        std::shared_ptr<FillIdSequence> sequence) override
+    {
+        if (!sequence)
+            return;
+        fill_ids_ = std::move(sequence);
+        bind_fill_id_sequence(fill_ids_);
     }
 
     void submit_order(const order_event& o) override
@@ -250,6 +285,15 @@ public:
         }
 
         append_inner_to_delayed();
+
+        std::sort(delayed_fills_.begin(), delayed_fills_.end(),
+                  [](const delayed_fill& lhs, const delayed_fill& rhs)
+                  {
+                      if (lhs.release_ts != rhs.release_ts)
+                          return lhs.release_ts < rhs.release_ts;
+                      return lhs.fill.get_fill_id()
+                          < rhs.fill.get_fill_id();
+                  });
 
         bool released = false;
         auto new_end = std::remove_if(delayed_fills_.begin(), delayed_fills_.end(),
@@ -525,10 +569,21 @@ private:
     void poll_inner_fills()
     {
         inner_fills_.clear();
-        paper_->poll_fills(inner_fills_);
-        book_adapter_->poll_fills(inner_fills_);
+        const auto drain = [&](IExecutionAdapter* child)
+        {
+            if (!child)
+                return;
+            (void)child->poll_fills(inner_fills_);
+        };
+        drain(paper_.get());
         if (aggressive_limit_adapter_)
-            aggressive_limit_adapter_->poll_fills(inner_fills_);
+            drain(aggressive_limit_adapter_.get());
+        drain(book_adapter_.get());
+        std::sort(inner_fills_.begin(), inner_fills_.end(),
+                  [](const fill_event& lhs, const fill_event& rhs)
+                  {
+                      return lhs.get_fill_id() < rhs.get_fill_id();
+                  });
     }
 
     void buffer_inner_fills()
@@ -576,6 +631,17 @@ private:
         return bid > 0.0 && ask > 0.0 ? (bid + ask) * 0.5 : contra;
     }
 
+    void bind_fill_id_sequence(
+        const std::shared_ptr<FillIdSequence>& sequence)
+    {
+        if (paper_)
+            paper_->set_fill_id_sequence(sequence);
+        if (book_adapter_)
+            book_adapter_->set_fill_id_sequence(sequence);
+        if (aggressive_limit_adapter_)
+            aggressive_limit_adapter_->set_fill_id_sequence(sequence);
+    }
+
     struct delayed_fill
     {
         fill_event fill;
@@ -606,6 +672,8 @@ private:
     std::unordered_map<uint64_t, order_latency_state> order_latencies_;
     std::vector<fill_event> inner_fills_;
     std::vector<delayed_fill> delayed_fills_;
+    std::shared_ptr<FillIdSequence> fill_ids_ =
+        std::make_shared<FillIdSequence>();
     std::chrono::system_clock::time_point now_proxy_{};
     std::chrono::system_clock::time_point next_cancel_cleanup_{
         std::chrono::system_clock::time_point::max()};

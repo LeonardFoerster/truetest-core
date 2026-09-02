@@ -4,6 +4,8 @@
 #include "binance_parser.h"
 
 #include <chrono>
+#include <charconv>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -24,28 +26,54 @@ public:
         out.symbol            = binance::extract_string(json, "s");
         out.client_order_id   = binance::extract_string(json, "c");
         out.exchange_order_id = take_id(json, "i");
+        out.venue_execution_id = take_id(json, "t");
 
         auto side = binance::extract_string(json, "S");
+        const bool side_valid = side == "BUY" || side == "SELL";
         out.side = (side == "SELL") ? order_side::sell : order_side::buy;
 
-        out.last_fill_qty    = to_double(binance::extract_string(json, "l"));
-        out.last_fill_price  = to_double(binance::extract_string(json, "L"));
-        out.cumulative_qty   = to_double(binance::extract_string(json, "z"));
-        out.commission       = to_double(binance::extract_string(json, "n"));
+        const auto last_qty = binance::extract_string(json, "l");
+        const auto last_price = binance::extract_string(json, "L");
+        const auto cumulative = binance::extract_string(json, "z");
+        const auto commission = binance::extract_string(json, "n");
+        const bool numeric_valid =
+            read_nonnegative(last_qty, out.last_fill_qty)
+            && read_nonnegative(last_price, out.last_fill_price)
+            && read_nonnegative(cumulative, out.cumulative_qty)
+            && read_finite_optional(commission, out.commission);
+        out.has_cumulative_qty = !cumulative.empty();
         out.commission_asset = binance::extract_string(json, "N");
 
         auto ts_ms = binance::extract_number(json, "E");
-        if (!ts_ms.empty())
+        std::int64_t event_time_ms = 0;
+        const bool timestamp_valid = !ts_ms.empty()
+            && parse_int64(ts_ms, event_time_ms) && event_time_ms > 0;
+        if (timestamp_valid)
         {
-            auto ms = std::strtoll(ts_ms.c_str(), nullptr, 10);
             out.ts = std::chrono::system_clock::time_point(
-                std::chrono::milliseconds(ms));
+                std::chrono::milliseconds(event_time_ms));
         }
 
         auto x_str = binance::extract_string(json, "x");
         auto X_str = binance::extract_string(json, "X");
 
         out.k = classify(x_str, X_str);
+
+        const bool is_fill = out.k == parsed_exec::kind::partial_fill
+            || out.k == parsed_exec::kind::full_fill;
+        if (!numeric_valid || !side_valid || !timestamp_valid
+            || out.symbol.empty() || out.client_order_id.empty()
+            || out.exchange_order_id.empty()
+            || (is_fill && (out.venue_execution_id.empty()
+                            || !out.has_cumulative_qty
+                            || !(out.last_fill_qty > 0.0)
+                            || !(out.last_fill_price > 0.0)
+                            || out.cumulative_qty < out.last_fill_qty)))
+        {
+            out.k = parsed_exec::kind::invalid;
+            out.error = "malformed executionReport";
+            return true;
+        }
 
         if (out.k == parsed_exec::kind::rejected)
             out.error = binance::extract_string(json, "r");
@@ -54,10 +82,40 @@ public:
     }
 
 private:
-    static double to_double(const std::string& s)
+    static bool parse_int64(std::string_view text, std::int64_t& out) noexcept
     {
-        if (s.empty()) return 0.0;
-        return std::strtod(s.c_str(), nullptr);
+        const auto [end, ec] = std::from_chars(
+            text.data(), text.data() + text.size(), out);
+        return ec == std::errc{} && end == text.data() + text.size();
+    }
+
+    static bool parse_double(std::string_view text, double& out) noexcept
+    {
+        const auto [end, ec] = std::from_chars(
+            text.data(), text.data() + text.size(), out,
+            std::chars_format::general);
+        return ec == std::errc{} && end == text.data() + text.size()
+            && std::isfinite(out);
+    }
+
+    static bool read_nonnegative(std::string_view text, double& out) noexcept
+    {
+        if (text.empty())
+        {
+            out = 0.0;
+            return true;
+        }
+        return parse_double(text, out) && out >= 0.0;
+    }
+
+    static bool read_finite_optional(std::string_view text, double& out) noexcept
+    {
+        if (text.empty())
+        {
+            out = 0.0;
+            return true;
+        }
+        return parse_double(text, out);
     }
 
     static std::string take_id(const std::string& json, const std::string& key)
@@ -74,17 +132,20 @@ private:
         {
             if (X == "FILLED")           return parsed_exec::kind::full_fill;
             if (X == "PARTIALLY_FILLED") return parsed_exec::kind::partial_fill;
-            return parsed_exec::kind::partial_fill;
+            return parsed_exec::kind::invalid;
         }
-        if (x == "NEW")      return parsed_exec::kind::ack;
-        if (x == "CANCELED") return parsed_exec::kind::canceled;
-        if (x == "REJECTED") return parsed_exec::kind::rejected;
-        if (x == "EXPIRED")  return parsed_exec::kind::expired;
-
-        if (X == "CANCELED") return parsed_exec::kind::canceled;
-        if (X == "REJECTED") return parsed_exec::kind::rejected;
-        if (X == "EXPIRED")  return parsed_exec::kind::expired;
-
-        return parsed_exec::kind::other;
+        if (x == "NEW" && X == "NEW")
+            return parsed_exec::kind::ack;
+        if (x == "CANCELED" && X == "CANCELED")
+            return parsed_exec::kind::canceled;
+        if (x == "REJECTED" && X == "REJECTED")
+            return parsed_exec::kind::rejected;
+        if (x == "EXPIRED"
+            && (X == "EXPIRED" || X == "EXPIRED_IN_MATCH"))
+            return parsed_exec::kind::expired;
+        if (x == "TRADE_PREVENTION"
+            && (X == "EXPIRED" || X == "EXPIRED_IN_MATCH"))
+            return parsed_exec::kind::expired;
+        return parsed_exec::kind::invalid;
     }
 };

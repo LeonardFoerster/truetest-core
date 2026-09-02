@@ -2,6 +2,7 @@
 #ifdef HAS_BITGET
 
 #include "data/data_handler.h"
+#include "data/date_parse.h"
 #include "data/quantity_scale.h"
 #include "providers/local/csv_parser.h"
 #include "providers/parser.h"
@@ -236,56 +237,207 @@ inline std::string_view extract_array(std::string_view json, std::string_view ke
     return extract_container(json, key, '[');
 }
 
+inline std::string_view top_level_object(std::string_view json,
+                                         std::string_view key)
+{
+    std::string_view value;
+    if (!provider_recovery::top_level_member(json, key, value)) return {};
+    value = provider_recovery::trim_json_ws(value);
+    return provider_recovery::is_authoritative_object(value)
+        ? value : std::string_view{};
+}
+
+inline std::string_view top_level_array(std::string_view json,
+                                        std::string_view key)
+{
+    std::string_view value;
+    if (!provider_recovery::top_level_member(json, key, value)) return {};
+    value = provider_recovery::trim_json_ws(value);
+    return provider_recovery::is_authoritative_object_array(value)
+        ? value : std::string_view{};
+}
+
+inline bool authoritative_public_envelope(std::string_view json)
+{
+    if (!provider_recovery::is_authoritative_object(json)
+        || !provider_recovery::decision_members_are_unique(
+            json, {"arg", "data", "symbol", "action", "ts"}))
+        return false;
+
+    std::string_view member;
+    const auto arg_result = provider_recovery::payload_parser(json)
+        .inspect_top_level_member("arg", member);
+    if (arg_result
+        == provider_recovery::payload_parser::member_result::invalid_or_duplicate
+        || (arg_result == provider_recovery::payload_parser::member_result::unique
+            && !provider_recovery::is_authoritative_object(member)))
+        return false;
+
+    const auto data_result = provider_recovery::payload_parser(json)
+        .inspect_top_level_member("data", member);
+    return data_result
+            != provider_recovery::payload_parser::member_result::invalid_or_duplicate
+        && (data_result == provider_recovery::payload_parser::member_result::missing
+            || provider_recovery::is_authoritative_object_array(member));
+}
+
+inline bool authoritative_arg(std::string_view arg)
+{
+    return arg.empty()
+        || (provider_recovery::is_authoritative_object(arg)
+            && provider_recovery::decision_members_are_unique(
+                arg, {"instType", "topic", "symbol", "interval"}));
+}
+
+inline bool authoritative_usdt_public_trade(std::string_view envelope,
+                                            std::string_view arg)
+{
+    if (arg.empty()) return false;
+    std::string_view inst_type;
+    std::string_view topic;
+    if (!provider_recovery::top_level_plain_string(
+            arg, "instType", inst_type)
+        || inst_type != "usdt-futures"
+        || !provider_recovery::top_level_plain_string(arg, "topic", topic)
+        || topic != "publicTrade")
+        return false;
+
+    std::string_view action;
+    const auto action_state = provider_recovery::payload_parser(envelope)
+        .inspect_top_level_member("action", action);
+    if (action_state
+        == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+        return false;
+    if (action_state == provider_recovery::payload_parser::member_result::unique)
+    {
+        if (!provider_recovery::top_level_plain_string(
+                envelope, "action", action)
+            || (action != "snapshot" && action != "update"))
+            return false;
+    }
+    return true;
+}
+
+inline bool at_most_one_top_level_member(
+    std::string_view object,
+    std::initializer_list<std::string_view> aliases)
+{
+    unsigned present = 0;
+    for (const auto alias : aliases)
+    {
+        std::string_view value;
+        const auto state = provider_recovery::payload_parser(object)
+            .inspect_top_level_member(alias, value);
+        if (state
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+            return false;
+        if (state == provider_recovery::payload_parser::member_result::unique)
+            ++present;
+    }
+    return present <= 1;
+}
+
+inline bool resolve_public_symbol(std::string_view envelope,
+                                  std::string_view arg,
+                                  std::string_view& symbol)
+{
+    std::string_view arg_symbol;
+    std::string_view outer_symbol;
+    if (!arg.empty())
+        (void)provider_recovery::top_level_plain_string(
+            arg, "symbol", arg_symbol);
+    (void)provider_recovery::top_level_plain_string(
+        envelope, "symbol", outer_symbol);
+    if (!arg_symbol.empty() && !outer_symbol.empty()
+        && arg_symbol != outer_symbol)
+        return false;
+    symbol = !arg_symbol.empty() ? arg_symbol : outer_symbol;
+    return !symbol.empty();
+}
+
 // Iterate top-level objects inside an array value `[ {...}, {...} ]`.
 template <typename Fn>
-inline void for_each_array_object(std::string_view array, Fn&& fn)
+inline bool for_each_array_object(std::string_view array, Fn&& fn)
 {
-    if (array.size() < 2 || array.front() != '[') return;
+    if (array.size() < 2 || array.front() != '[') return false;
     std::size_t pos = 1;
     const std::size_t n = array.size();
+    bool need_object = true;
+    bool saw_object = false;
     while (pos < n)
     {
         skip_ws(array, pos);
-        if (pos >= n || array[pos] == ']') break;
-        if (array[pos] == ',') { ++pos; continue; }
-        if (array[pos] != '{') break;
+        if (pos >= n) return false;
+        if (array[pos] == ']')
+            return !need_object || !saw_object;
+        if (!need_object || array[pos] != '{') return false;
         auto close = match_container(array, pos);
-        if (close == std::string_view::npos) break;
+        if (close == std::string_view::npos) return false;
         fn(array.substr(pos, close - pos + 1));
+        saw_object = true;
+        need_object = false;
         pos = close + 1;
+        skip_ws(array, pos);
+        if (pos >= n) return false;
+        if (array[pos] == ']') return true;
+        if (array[pos] != ',') return false;
+        ++pos;
+        need_object = true;
     }
+    return false;
 }
 
 inline std::string_view first_data_object(std::string_view json)
 {
-    auto arr = extract_array(json, "data");
+    auto arr = top_level_array(json, "data");
     if (arr.empty()) return {};
     std::string_view first;
-    for_each_array_object(arr, [&](std::string_view obj) {
+    std::size_t count = 0;
+    const bool valid = for_each_array_object(arr, [&](std::string_view obj) {
+        ++count;
         if (first.empty()) first = obj;
     });
-    return first;
+    return valid && count == 1 ? first : std::string_view{};
 }
 
 // Locate `"key":[` and append levels into out. Qty scaled *1e8 like Binance.
 inline bool append_levels(std::string_view json, std::string_view key,
                           std::vector<provider::l2_snapshot::level>& out)
 {
-    auto arr = extract_array(json, key);
-    if (arr.empty()) return true;
-    if (arr.size() < 2) return false;
+    std::string_view arr;
+    const auto result = provider_recovery::payload_parser(json)
+        .inspect_top_level_member(key, arr);
+    if (result
+        == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+        return false;
+    if (result == provider_recovery::payload_parser::member_result::missing)
+        return true;
+    arr = provider_recovery::trim_json_ws(arr);
+    if (arr.size() < 2 || arr.front() != '[' || arr.back() != ']')
+        return false;
 
     if (out.capacity() < out.size() + 8)
         out.reserve(out.size() + 8);
 
     std::size_t pos = 1;
     const std::size_t n = arr.size();
+    bool first = true;
     while (pos < n)
     {
-        while (pos < n && (arr[pos] == ' ' || arr[pos] == ',' || arr[pos] == '\n' ||
-                           arr[pos] == '\r' || arr[pos] == '\t'))
+        while (pos < n && (arr[pos] == ' ' || arr[pos] == '\n'
+                           || arr[pos] == '\r' || arr[pos] == '\t'))
             ++pos;
-        if (pos >= n || arr[pos] == ']') break;
+        if (pos >= n) return false;
+        if (arr[pos] == ']') return pos + 1 == n;
+        if (!first)
+        {
+            if (arr[pos] != ',') return false;
+            ++pos;
+            while (pos < n && (arr[pos] == ' ' || arr[pos] == '\n'
+                               || arr[pos] == '\r' || arr[pos] == '\t'))
+                ++pos;
+            if (pos >= n || arr[pos] == ']') return false;
+        }
         if (arr[pos] != '[') return false;
         ++pos;
 
@@ -297,8 +449,10 @@ inline bool append_levels(std::string_view json, std::string_view key,
         std::string_view price_sv = arr.substr(pos, price_end - pos);
         pos = price_end + 1;
 
-        while (pos < n && (arr[pos] == ',' || arr[pos] == ' ' || arr[pos] == '\t'))
-            ++pos;
+        skip_ws(arr, pos);
+        if (pos >= n || arr[pos] != ',') return false;
+        ++pos;
+        skip_ws(arr, pos);
 
         if (pos >= n || arr[pos] != '"') return false;
         ++pos;
@@ -307,33 +461,76 @@ inline bool append_levels(std::string_view json, std::string_view key,
         std::string_view qty_sv = arr.substr(pos, qty_end - pos);
         pos = qty_end + 1;
 
-        while (pos < n && arr[pos] != ']') ++pos;
-        if (pos < n) ++pos;
+        skip_ws(arr, pos);
+        if (pos >= n || arr[pos] != ']') return false;
+        ++pos;
 
-        double price = 0.0, qty = 0.0;
-        if (!parse_double_sv(price_sv, price) || !(price > 0.0)
-            || !parse_double_sv(qty_sv, qty))
+        double price = 0.0;
+        if (!parse_double_sv(price_sv, price) || !(price > 0.0))
             return false;
-        std::int64_t qty_atoms = 0;
-        if (!tt::quantity_scale::from_base_nonnegative(
-                qty, tt::quantity_scale::canonical_atoms, qty_atoms))
+        const auto qty_atoms =
+            tt::quantity_scale::parse_decimal_canonical_atoms(qty_sv);
+        // Bitget books* messages are snapshots. A zero quantity is a delta
+        // delete semantic and is not valid in this parser.
+        if (!qty_atoms || *qty_atoms <= 0)
             return false;
-        out.push_back({price, qty_atoms});
+        out.push_back({price, *qty_atoms});
+        first = false;
     }
-    return true;
+    return false;
 }
 
-inline std::chrono::system_clock::time_point tp_from_ms(int64_t ts_ms)
+inline bool parse_book_side(
+    std::string_view body, std::string_view short_key,
+    std::string_view long_key,
+    std::vector<provider::l2_snapshot::level>& out)
 {
-    return std::chrono::system_clock::time_point(std::chrono::milliseconds(ts_ms));
+    std::string_view ignored;
+    const auto short_result = provider_recovery::payload_parser(body)
+        .inspect_top_level_member(short_key, ignored);
+    const auto long_result = provider_recovery::payload_parser(body)
+        .inspect_top_level_member(long_key, ignored);
+    if (short_result
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate
+        || long_result
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate
+        || (short_result == provider_recovery::payload_parser::member_result::unique
+            && long_result == provider_recovery::payload_parser::member_result::unique))
+        return false;
+    const auto key = short_result
+            == provider_recovery::payload_parser::member_result::unique
+        ? short_key : long_key;
+    return append_levels(body, key, out);
 }
 
 inline std::optional<std::chrono::system_clock::time_point>
 parse_ts_ms(std::string_view sv)
 {
     int64_t ts_ms = 0;
-    if (!parse_int64_sv(sv, ts_ms)) return std::nullopt;
-    return tp_from_ms(ts_ms);
+    if (!parse_int64_sv(sv, ts_ms))
+        return std::nullopt;
+    return tt::date_parse::from_epoch_milliseconds(ts_ms);
+}
+
+enum class optional_time_result { missing, valid, invalid };
+
+inline optional_time_result parse_optional_frame_time(
+    std::string_view envelope,
+    std::chrono::system_clock::time_point& out)
+{
+    std::string_view raw;
+    const auto state = provider_recovery::payload_parser(envelope)
+        .inspect_top_level_member("ts", raw);
+    if (state == provider_recovery::payload_parser::member_result::missing)
+        return optional_time_result::missing;
+    if (state
+            != provider_recovery::payload_parser::member_result::unique
+        || !provider_recovery::top_level_scalar_text(envelope, "ts", raw))
+        return optional_time_result::invalid;
+    const auto parsed = parse_ts_ms(raw);
+    if (!parsed) return optional_time_result::invalid;
+    out = *parsed;
+    return optional_time_result::valid;
 }
 
 // Map Bitget taker side → aggressor side (Binance semantics).
@@ -424,6 +621,19 @@ inline bool parse_int64_sv(std::string_view sv, int64_t& out)
     return detail::parse_int64_sv(sv, out);
 }
 
+inline bool parse_nonzero_uint64_sv(std::string_view sv,
+                                    std::uint64_t& out)
+{
+    sv = provider_recovery::trim_json_ws(sv);
+    if (sv.empty()) return false;
+    for (const char c : sv)
+        if (c < '0' || c > '9') return false;
+    const auto [end, error] =
+        std::from_chars(sv.data(), sv.data() + sv.size(), out);
+    return error == std::errc{} && end == sv.data() + sv.size()
+        && out != 0;
+}
+
 // ---------------------------------------------------------------------------
 // Trade
 // ---------------------------------------------------------------------------
@@ -432,18 +642,25 @@ inline bool parse_int64_sv(std::string_view sv, int64_t& out)
 inline std::optional<provider::tick> parse_trade_object(std::string_view obj,
                                                         std::string_view symbol)
 {
-    if (symbol.empty()) return std::nullopt;
+    if (symbol.empty() || !provider_recovery::is_authoritative_object(obj)
+        || !provider_recovery::decision_members_are_unique(
+            obj, {"i", "p", "v", "S", "side", "T", "ts"})
+        || !detail::at_most_one_top_level_member(obj, {"S", "side"})
+        || !detail::at_most_one_top_level_member(obj, {"T", "ts"}))
+        return std::nullopt;
 
     std::string_view price_sv;
     std::string_view qty_sv;
     std::string_view side_sv;
     std::string_view time_sv;
+    std::string_view native_id_sv;
 
     detail::for_each_flat_field(obj, 0, obj.size(),
         [&](std::string_view key, std::string_view value) {
             // Prefer short wire keys; accept long aliases without key_tag
             // (unsigned 32-bit tag overflows past 4 chars).
-            if (key == "p") price_sv = value;
+            if (key == "i") native_id_sv = value;
+            else if (key == "p") price_sv = value;
             else if (key == "v") qty_sv = value;
             else if (key == "S") side_sv = value;
             else if (key == "side" && side_sv.empty()) side_sv = value;
@@ -451,18 +668,20 @@ inline std::optional<provider::tick> parse_trade_object(std::string_view obj,
             else if (key == "ts" && time_sv.empty()) time_sv = value;
         });
 
-    if (price_sv.empty() || qty_sv.empty() || side_sv.empty())
+    if (native_id_sv.empty() || price_sv.empty() || qty_sv.empty()
+        || side_sv.empty())
         return std::nullopt;
 
-    double price = 0.0, qty = 0.0;
+    std::uint64_t native_id = 0;
+    if (!parse_nonzero_uint64_sv(native_id_sv, native_id))
+        return std::nullopt;
+
+    double price = 0.0;
     if (!detail::parse_double_sv(price_sv, price) || !(price > 0.0))
         return std::nullopt;
-    if (!detail::parse_double_sv(qty_sv, qty)) return std::nullopt;
-
-    std::int64_t qty_atoms = 0;
-    if (!tt::quantity_scale::from_base_nonnegative(
-            qty, tt::quantity_scale::canonical_atoms, qty_atoms)
-        || qty_atoms <= 0)
+    const auto qty_atoms =
+        tt::quantity_scale::parse_decimal_canonical_atoms(qty_sv);
+    if (!qty_atoms || *qty_atoms <= 0)
         return std::nullopt;
 
     auto side = detail::map_side(side_sv);
@@ -471,14 +690,14 @@ inline std::optional<provider::tick> parse_trade_object(std::string_view obj,
     provider::tick t;
     t.symbol.assign(symbol.data(), symbol.size());
     t.price = price;
-    t.quantity = qty_atoms;
+    t.quantity = *qty_atoms;
     t.quantity_scale = tt::quantity_scale::canonical_atoms;
     t.side = detail::side_to_u8(*side);
+    t.native_trade_id = native_id;
 
-    if (auto tp = detail::parse_ts_ms(time_sv))
-        t.timestamp = *tp;
-    else
-        t.timestamp = std::chrono::system_clock::now();
+    const auto tp = detail::parse_ts_ms(time_sv);
+    if (!tp) return std::nullopt;
+    t.timestamp = *tp;
 
     return t;
 }
@@ -487,24 +706,61 @@ inline std::optional<provider::tick> parse_trade_object(std::string_view obj,
 // Multi-trade frames: use parse_all_trades() / BitgetTradeParser::parse_records.
 inline std::optional<provider::tick> parse_trade(std::string_view json)
 {
-    auto arg = detail::extract_object(json, "arg");
+    if (!detail::authoritative_public_envelope(json))
+        return std::nullopt;
+    auto arg = detail::top_level_object(json, "arg");
+    if (!detail::authoritative_arg(arg)
+        || !detail::authoritative_usdt_public_trade(json, arg))
+        return std::nullopt;
     std::string_view symbol;
     std::string_view topic;
     if (!arg.empty())
     {
-        symbol = extract_sv_string(arg, "symbol");
-        topic  = extract_sv_string(arg, "topic");
+        (void)provider_recovery::top_level_plain_string(arg, "topic", topic);
     }
-    if (symbol.empty())
-        symbol = extract_sv_string(json, "symbol");
-
-    if (!topic.empty() && topic != "publicTrade")
+    if (!detail::resolve_public_symbol(json, arg, symbol))
         return std::nullopt;
 
-    auto obj = detail::first_data_object(json);
-    if (obj.empty())
-        return parse_trade_object(json, symbol);
-    return parse_trade_object(obj, symbol);
+    if (topic != "publicTrade") return std::nullopt;
+
+    std::chrono::system_clock::time_point frame_time;
+    const auto frame_time_state = detail::parse_optional_frame_time(
+        json, frame_time);
+    if (frame_time_state != detail::optional_time_result::valid)
+        return std::nullopt;
+
+    auto arr = detail::top_level_array(json, "data");
+    if (arr.empty())
+    {
+        auto parsed = parse_trade_object(json, symbol);
+        if (parsed && parsed->timestamp > frame_time)
+            return std::nullopt;
+        if (parsed) parsed->timestamp = frame_time;
+        return parsed;
+    }
+
+    std::optional<provider::tick> first;
+    bool invalid_element = false;
+    const bool valid_array = detail::for_each_array_object(
+        arr, [&](std::string_view obj) {
+            auto parsed = parse_trade_object(obj, symbol);
+            if (!parsed)
+            {
+                invalid_element = true;
+                return;
+            }
+            if (parsed->timestamp > frame_time)
+            {
+                invalid_element = true;
+                return;
+            }
+            parsed->timestamp = frame_time;
+            if (!first)
+                first = std::move(parsed);
+        });
+    if (!valid_array || invalid_element)
+        return std::nullopt;
+    return first;
 }
 
 // All trades in a publicTrade push (data[]). Provider-facing batch API:
@@ -513,28 +769,62 @@ inline std::optional<provider::tick> parse_trade(std::string_view json)
 inline std::vector<provider::tick> parse_all_trades(std::string_view json)
 {
     std::vector<provider::tick> out;
-    auto arg = detail::extract_object(json, "arg");
+    if (!detail::authoritative_public_envelope(json))
+        return out;
+    auto arg = detail::top_level_object(json, "arg");
+    if (!detail::authoritative_arg(arg)
+        || !detail::authoritative_usdt_public_trade(json, arg))
+        return out;
     std::string_view symbol;
     std::string_view topic;
     if (!arg.empty())
     {
-        symbol = extract_sv_string(arg, "symbol");
-        topic  = extract_sv_string(arg, "topic");
+        (void)provider_recovery::top_level_plain_string(arg, "topic", topic);
     }
-    if (symbol.empty())
-        symbol = extract_sv_string(json, "symbol");
-    if (symbol.empty())
+    if (!detail::resolve_public_symbol(json, arg, symbol))
         return out;
-    if (!topic.empty() && topic != "publicTrade")
+    if (topic != "publicTrade") return out;
+
+    std::chrono::system_clock::time_point frame_time;
+    const auto frame_time_state = detail::parse_optional_frame_time(
+        json, frame_time);
+    if (frame_time_state != detail::optional_time_result::valid)
         return out;
 
-    auto arr = detail::extract_array(json, "data");
+    auto arr = detail::top_level_array(json, "data");
     if (arr.empty()) return out;
 
-    detail::for_each_array_object(arr, [&](std::string_view obj) {
+    bool invalid_element = false;
+    std::optional<std::chrono::system_clock::time_point> last_time;
+    const bool valid_array = detail::for_each_array_object(
+        arr, [&](std::string_view obj) {
         if (auto t = parse_trade_object(obj, symbol))
+        {
+            const auto occurrence_time = t->timestamp;
+            if ((last_time && occurrence_time < *last_time)
+                || occurrence_time > frame_time)
+            {
+                invalid_element = true;
+                return;
+            }
+            for (const auto& existing : out) {
+                if (existing.native_trade_id == t->native_trade_id) {
+                    invalid_element = true;
+                    return;
+                }
+            }
+            last_time = occurrence_time;
+            // provider::tick currently exposes one engine time. Use the
+            // authoritative envelope publication time so strategies cannot
+            // observe the trade before the frame was knowable.
+            t->timestamp = frame_time;
             out.push_back(std::move(*t));
+        }
+        else
+            invalid_element = true;
     });
+    if (!valid_array || invalid_element)
+        out.clear();
     return out;
 }
 
@@ -580,25 +870,26 @@ inline std::vector<tick_record> parse_all_trade_records(std::string_view json)
 
 inline std::optional<provider::l2_snapshot> parse_books5(std::string_view json)
 {
-    auto arg = detail::extract_object(json, "arg");
+    if (!detail::authoritative_public_envelope(json))
+        return std::nullopt;
+    auto arg = detail::top_level_object(json, "arg");
+    if (!detail::authoritative_arg(arg))
+        return std::nullopt;
     std::string_view symbol;
     std::string_view topic;
     if (!arg.empty())
     {
-        symbol = extract_sv_string(arg, "symbol");
-        topic  = extract_sv_string(arg, "topic");
+        (void)provider_recovery::top_level_plain_string(arg, "topic", topic);
     }
-    if (symbol.empty())
-        symbol = extract_sv_string(json, "symbol");
-    // Require symbol (same fail-closed rule as trade).
-    if (symbol.empty())
+    if (!detail::resolve_public_symbol(json, arg, symbol))
         return std::nullopt;
 
     // Action / topic gates (Phase 0 snapshot path only):
     // - books5 / books1 / books50: always snapshot; missing action OK;
     //   reject action=update (or any non-snapshot).
     // - books (full): require action=="snapshot"; deltas rejected.
-    auto action = extract_sv_string(json, "action");
+    std::string_view action;
+    (void)provider_recovery::top_level_plain_string(json, "action", action);
     if (!topic.empty())
     {
         const bool limited =
@@ -619,26 +910,31 @@ inline std::optional<provider::l2_snapshot> parse_books5(std::string_view json)
 
     auto obj = detail::first_data_object(json);
     std::string_view body = obj.empty() ? json : obj;
+    if (!provider_recovery::is_authoritative_object(body)
+        || !provider_recovery::decision_members_are_unique(
+            body, {"a", "asks", "b", "bids", "ts"}))
+        return std::nullopt;
 
     provider::l2_snapshot snap;
     snap.symbol.assign(symbol.data(), symbol.size());
     snap.quantity_scale = 100'000'000ULL;
 
-    auto ts_sv = extract_sv_number(body, "ts");
-    if (ts_sv.empty())
-        ts_sv = extract_sv_number(json, "ts");
-    if (auto tp = detail::parse_ts_ms(ts_sv))
-        snap.timestamp = *tp;
-    else
-        snap.timestamp = std::chrono::system_clock::now();
+    std::chrono::system_clock::time_point frame_time;
+    if (detail::parse_optional_frame_time(json, frame_time)
+        != detail::optional_time_result::valid)
+        return std::nullopt;
+    std::string_view body_ts_sv;
+    if (!provider_recovery::top_level_scalar_text(body, "ts", body_ts_sv))
+        return std::nullopt;
+    const auto body_time = detail::parse_ts_ms(body_ts_sv);
+    if (!body_time || *body_time > frame_time) return std::nullopt;
+    snap.timestamp = frame_time;
 
-    bool levels_valid = detail::append_levels(body, "b", snap.bids);
-    if (levels_valid && snap.bids.empty())
-        levels_valid = detail::append_levels(body, "bids", snap.bids);
+    bool levels_valid = detail::parse_book_side(
+        body, "b", "bids", snap.bids);
     if (levels_valid)
-        levels_valid = detail::append_levels(body, "a", snap.asks);
-    if (levels_valid && snap.asks.empty())
-        levels_valid = detail::append_levels(body, "asks", snap.asks);
+        levels_valid = detail::parse_book_side(
+            body, "a", "asks", snap.asks);
     if (!levels_valid)
         return std::nullopt;
 
@@ -654,20 +950,18 @@ inline std::optional<provider::l2_snapshot> parse_books5(std::string_view json)
 
 inline std::optional<provider::bar> parse_kline(std::string_view json)
 {
-    auto arg = detail::extract_object(json, "arg");
+    if (!detail::authoritative_public_envelope(json))
+        return std::nullopt;
+    auto arg = detail::top_level_object(json, "arg");
+    if (!detail::authoritative_arg(arg))
+        return std::nullopt;
     std::string_view symbol;
     std::string_view topic;
-    std::string_view interval;
     if (!arg.empty())
     {
-        symbol   = extract_sv_string(arg, "symbol");
-        topic    = extract_sv_string(arg, "topic");
-        interval = extract_sv_string(arg, "interval");
+        (void)provider_recovery::top_level_plain_string(arg, "topic", topic);
     }
-    if (symbol.empty())
-        symbol = extract_sv_string(json, "symbol");
-    // Require symbol (same fail-closed rule as trade).
-    if (symbol.empty())
+    if (!detail::resolve_public_symbol(json, arg, symbol))
         return std::nullopt;
 
     if (!topic.empty() && topic != "kline")
@@ -675,12 +969,34 @@ inline std::optional<provider::bar> parse_kline(std::string_view json)
 
     auto obj = detail::first_data_object(json);
     std::string_view body = obj.empty() ? json : obj;
+    if (!provider_recovery::is_authoritative_object(body)
+        || !provider_recovery::decision_members_are_unique(
+            body, {"open", "high", "low", "close", "volume", "vol",
+                   "start", "o", "h", "l", "c", "v", "t", "confirm"})
+        || !detail::at_most_one_top_level_member(body, {"open", "o"})
+        || !detail::at_most_one_top_level_member(body, {"high", "h"})
+        || !detail::at_most_one_top_level_member(body, {"low", "l"})
+        || !detail::at_most_one_top_level_member(body, {"close", "c"})
+        || !detail::at_most_one_top_level_member(
+            body, {"volume", "vol", "v"})
+        || !detail::at_most_one_top_level_member(body, {"start", "t"}))
+        return std::nullopt;
+    std::string_view confirm_raw;
+    const auto confirm_state = provider_recovery::payload_parser(body)
+        .inspect_top_level_member("confirm", confirm_raw);
+    if (confirm_state
+        == provider_recovery::payload_parser::member_result::unique)
+    {
+        confirm_raw = provider_recovery::trim_json_ws(confirm_raw);
+        if (confirm_raw != "true" && confirm_raw != "false")
+            return std::nullopt;
+    }
 
     // Pure OHLCV parse — no closed-bar policy here. UTA kline pushes have no
     // `confirm` field and update the open candle ~1/s; closed-bar emission is
-    // handled by kline_closed_gate (start rollover) on the production parsers.
-    // When a classic/legacy payload carries confirm:false the gate still
-    // buffers; confirm:true emits immediately.
+    // characterized by kline_closed_gate. Production adapters currently
+    // refuse every Bitget candle until the frozen engine contract can carry
+    // candle-open and causal known/decision timestamps separately.
 
     std::string_view open_sv, high_sv, low_sv, close_sv, vol_sv, start_sv;
 
@@ -702,7 +1018,8 @@ inline std::optional<provider::bar> parse_kline(std::string_view json)
             else if (key == "t" && start_sv.empty()) start_sv = value;
         });
 
-    if (open_sv.empty() || high_sv.empty() || low_sv.empty() || close_sv.empty())
+    if (open_sv.empty() || high_sv.empty() || low_sv.empty() || close_sv.empty()
+        || vol_sv.empty() || !detail::parse_ts_ms(start_sv))
         return std::nullopt;
 
     provider::bar b;
@@ -719,17 +1036,36 @@ inline std::optional<provider::bar> parse_kline(std::string_view json)
     if (!detail::parse_double_sv(close_sv, v) || !(v > 0.0)) return std::nullopt;
     b.close = v;
 
-    if (vol_sv.empty())
-        b.volume = 0;
-    else if (!detail::parse_double_sv(vol_sv, v)
-             || !tt::quantity_scale::from_base_nonnegative(
-                 v, tt::quantity_scale::canonical_atoms, b.volume))
+    if (b.high < std::max(b.open, b.close)
+        || b.low > std::min(b.open, b.close)
+        || b.high < b.low)
         return std::nullopt;
 
-    if (!start_sv.empty())
-        b.date.assign(start_sv.data(), start_sv.size());
-    else if (!interval.empty())
-        b.date.assign(interval.data(), interval.size());
+    const auto volume_atoms =
+        tt::quantity_scale::parse_decimal_canonical_atoms(vol_sv);
+    // Zero is an unlimited-liquidity sentinel in the current bar execution
+    // model, so an external venue bar must carry positive exact volume.
+    if (!volume_atoms || *volume_atoms <= 0)
+        return std::nullopt;
+    b.volume = *volume_atoms;
+
+    b.date.assign(start_sv.data(), start_sv.size());
+
+    if (confirm_state
+            == provider_recovery::payload_parser::member_result::unique
+        && provider_recovery::trim_json_ws(confirm_raw) == "true")
+    {
+        std::string_view known_text;
+        std::int64_t start_ms = 0;
+        std::int64_t known_ms = 0;
+        if (!provider_recovery::top_level_scalar_text(
+                json, "ts", known_text)
+            || !detail::parse_int64_sv(start_sv, start_ms)
+            || !detail::parse_int64_sv(known_text, known_ms)
+            || !detail::parse_ts_ms(known_text)
+            || known_ms < start_ms)
+            return std::nullopt;
+    }
 
     return b;
 }
@@ -739,9 +1075,21 @@ inline std::optional<bool> extract_kline_confirm(std::string_view json)
 {
     auto obj = detail::first_data_object(json);
     std::string_view body = obj.empty() ? json : obj;
-    if (auto conf = extract_sv_optional_bool(body, "confirm"))
-        return conf;
-    return extract_sv_optional_bool(json, "confirm");
+    std::string_view raw;
+    if (provider_recovery::top_level_member(body, "confirm", raw))
+    {
+        raw = provider_recovery::trim_json_ws(raw);
+        if (raw == "true") return true;
+        if (raw == "false") return false;
+        return std::nullopt;
+    }
+    if (provider_recovery::top_level_member(json, "confirm", raw))
+    {
+        raw = provider_recovery::trim_json_ws(raw);
+        if (raw == "true") return true;
+        if (raw == "false") return false;
+    }
+    return std::nullopt;
 }
 
 // Closed-bar policy for Bitget klines:
@@ -753,17 +1101,69 @@ inline std::optional<bool> extract_kline_confirm(std::string_view json)
 struct kline_closed_gate
 {
     std::optional<provider::bar> on_bar(provider::bar b,
-                                        std::optional<bool> confirm = std::nullopt)
+                                        std::optional<bool> confirm = std::nullopt,
+                                        std::optional<std::int64_t> known_ms = std::nullopt)
     {
+        last_rejected_ = false;
+        std::int64_t start_ms = 0;
+        if (b.symbol.empty() || !detail::parse_int64_sv(b.date, start_ms)
+            || start_ms <= 0)
+        {
+            last_rejected_ = true;
+            return std::nullopt;
+        }
+
+        if (last_emitted_start_ms_)
+        {
+            if (b.symbol != last_emitted_symbol_
+                || start_ms <= *last_emitted_start_ms_)
+            {
+                last_rejected_ = true;
+                return std::nullopt;
+            }
+        }
+
+        std::int64_t pending_start_ms = 0;
+        if (pending_)
+        {
+            if (pending_->symbol != b.symbol
+                || !detail::parse_int64_sv(
+                    pending_->date, pending_start_ms)
+                || pending_start_ms <= 0 || start_ms < pending_start_ms)
+            {
+                last_rejected_ = true;
+                return std::nullopt;
+            }
+        }
+
         if (confirm.has_value())
         {
             if (!*confirm)
             {
+                if (pending_ && start_ms > pending_start_ms)
+                {
+                    auto closed = std::move(*pending_);
+                    pending_ = std::move(b);
+                    last_emitted_symbol_ = closed.symbol;
+                    last_emitted_start_ms_ = pending_start_ms;
+                    closed.date = std::to_string(start_ms);
+                    return closed;
+                }
                 pending_ = std::move(b);
                 return std::nullopt;
             }
-            // Explicit closed candle — emit now; clear pending for that start.
+            // A pending candle may only be finalized by the same symbol/start.
+            // Skipping across starts would silently discard an observation.
+            if (!known_ms || *known_ms < start_ms
+                || (pending_ && start_ms != pending_start_ms))
+            {
+                last_rejected_ = true;
+                return std::nullopt;
+            }
             pending_.reset();
+            last_emitted_symbol_ = b.symbol;
+            last_emitted_start_ms_ = start_ms;
+            b.date = std::to_string(*known_ms);
             return b;
         }
 
@@ -772,22 +1172,37 @@ struct kline_closed_gate
             pending_ = std::move(b);
             return std::nullopt;
         }
-        if (b.date == pending_->date)
+        if (start_ms == pending_start_ms)
         {
             pending_ = std::move(b); // in-progress update
             return std::nullopt;
         }
         auto closed = std::move(*pending_);
         pending_ = std::move(b);
+        last_emitted_symbol_ = closed.symbol;
+        last_emitted_start_ms_ = pending_start_ms;
+        // The previous candle only becomes knowable at this rollover. Carry
+        // causal decision time, not the old candle-open timestamp.
+        closed.date = std::to_string(start_ms);
         return closed;
     }
 
-    void reset() { pending_.reset(); }
+    void reset()
+    {
+        pending_.reset();
+        last_emitted_symbol_.clear();
+        last_emitted_start_ms_.reset();
+        last_rejected_ = false;
+    }
 
     const std::optional<provider::bar>& pending() const { return pending_; }
+    bool last_rejected() const noexcept { return last_rejected_; }
 
 private:
     std::optional<provider::bar> pending_;
+    std::string last_emitted_symbol_;
+    std::optional<std::int64_t> last_emitted_start_ms_;
+    bool last_rejected_ = false;
 };
 
 inline std::optional<bar_record> to_bar_record(const provider::bar& b)
@@ -820,15 +1235,15 @@ inline std::optional<bar_record> parse_kline_record(std::string_view json)
 // parse_ws_message returns the first trade only; BitgetCombinedParser
 // overrides parse_records to emit the full data[] batch.
 //
-// Kline: raw parse only (no closed-bar gate). Production parsers apply
-// kline_closed_gate so open-candle updates are not treated as completed bars.
+// Kline: raw parse only for validation/tests. Production adapters currently
+// fail closed on Bitget candles because the engine has no dual-time contract.
 
 inline std::optional<provider::event> parse_ws_message(std::string_view json)
 {
-    auto arg = detail::extract_object(json, "arg");
+    auto arg = detail::top_level_object(json, "arg");
     std::string_view topic;
     if (!arg.empty())
-        topic = extract_sv_string(arg, "topic");
+        (void)provider_recovery::top_level_plain_string(arg, "topic", topic);
 
     if (topic == "publicTrade")
     {
@@ -869,7 +1284,19 @@ gated_kline_bar(kline_closed_gate& gate, std::string_view json)
 {
     auto b = parse_kline(json);
     if (!b) return std::nullopt;
-    return gate.on_bar(std::move(*b), extract_kline_confirm(json));
+    const auto confirm = extract_kline_confirm(json);
+    std::optional<std::int64_t> known_ms;
+    if (confirm && *confirm)
+    {
+        std::string_view text;
+        std::int64_t parsed = 0;
+        if (!provider_recovery::top_level_scalar_text(json, "ts", text)
+            || !detail::parse_int64_sv(text, parsed)
+            || !detail::parse_ts_ms(text))
+            return std::nullopt;
+        known_ms = parsed;
+    }
+    return gate.on_bar(std::move(*b), confirm, known_ms);
 }
 
 } // namespace bitget
@@ -884,18 +1311,28 @@ public:
 
     std::optional<tick_record> parse_record(const std::string& line) override
     {
-        return bitget::parse_trade_record(std::string_view{line});
+        return parse_record(std::string_view{line});
     }
 
     std::optional<tick_record> parse_record(std::string_view line) override
     {
-        return bitget::parse_trade_record(line);
+        auto batch = parse_records(line);
+        if (batch.empty()) return std::nullopt;
+        return std::move(batch.front());
     }
 
     std::vector<tick_record> parse_records(std::string_view line) override
     {
-        return bitget::parse_all_trade_records(line);
+        auto batch = bitget::parse_all_trade_records(line);
+        if (batch.empty()) return batch;
+        if (last_timestamp_ && batch.front().timestamp < *last_timestamp_)
+            return {};
+        last_timestamp_ = batch.back().timestamp;
+        return batch;
     }
+
+private:
+    std::optional<std::chrono::system_clock::time_point> last_timestamp_;
 };
 
 // Stateful: only emits closed bars (start rollover / confirm:true).
@@ -911,12 +1348,16 @@ public:
 
     std::optional<bar_record> parse_record(std::string_view line) override
     {
-        auto closed = bitget::gated_kline_bar(gate_, line);
-        if (!closed) return std::nullopt;
-        return bitget::to_bar_record(*closed);
+        // The frozen engine contract has only one bar timestamp and treats it
+        // as candle open in batch while streaming needs a distinct known-at /
+        // decision time. Until that contract carries both clocks, emitting a
+        // Bitget candle would make batch/stream decisions diverge.
+        (void)line;
+        return std::nullopt;
     }
 
 private:
+    [[maybe_unused]]
     bitget::kline_closed_gate gate_;
 };
 
@@ -937,7 +1378,7 @@ public:
 };
 
 // Combined event adapter. publicTrade → full data[] via parse_records;
-// kline path uses closed-bar gate (same as BitgetKlineParser).
+// kline path is explicitly unsupported/fail-closed (same as BitgetKlineParser).
 class BitgetCombinedParser : public IDataParser<provider::event>
 {
 public:
@@ -958,16 +1399,22 @@ public:
     std::vector<provider::event> parse_records(std::string_view line) override
     {
         std::vector<provider::event> out;
-        auto arg = bitget::detail::extract_object(line, "arg");
+        last_kline_rejected_ = false;
+        auto arg = bitget::detail::top_level_object(line, "arg");
         std::string_view topic;
         if (!arg.empty())
-            topic = bitget::extract_sv_string(arg, "topic");
+            (void)provider_recovery::top_level_plain_string(
+                arg, "topic", topic);
 
         if (topic == "publicTrade" || topic.empty())
         {
             auto ticks = bitget::parse_all_trades(line);
             if (!ticks.empty())
             {
+                if (last_timestamp_
+                    && ticks.front().timestamp < *last_timestamp_)
+                    return out;
+                last_timestamp_ = ticks.back().timestamp;
                 out.reserve(ticks.size());
                 for (auto& t : ticks)
                     out.emplace_back(std::move(t));
@@ -977,9 +1424,9 @@ public:
 
         if (topic == "kline")
         {
-            auto closed = bitget::gated_kline_bar(kline_gate_, line);
-            if (closed)
-                out.emplace_back(std::move(*closed));
+            // Explicitly unsupported until the frozen engine model exposes a
+            // separate causal decision timestamp for completed candles.
+            last_kline_rejected_ = true;
             return out;
         }
 
@@ -987,12 +1434,9 @@ public:
         // through to raw parse_ws_message which would emit open candles).
         if (topic.empty())
         {
-            if (auto raw = bitget::parse_kline(line))
+            if (bitget::parse_kline(line))
             {
-                auto closed = kline_gate_.on_bar(
-                    std::move(*raw), bitget::extract_kline_confirm(line));
-                if (closed)
-                    out.emplace_back(std::move(*closed));
+                last_kline_rejected_ = true;
                 return out;
             }
         }
@@ -1004,6 +1448,8 @@ public:
 
     empty_parse_status classify_empty_frame(std::string_view line) const override
     {
+        if (last_kline_rejected_)
+            return empty_parse_status::malformed;
         if (!provider_recovery::is_authoritative_object(line))
             return empty_parse_status::malformed;
         std::string_view arg;
@@ -1050,6 +1496,8 @@ public:
 
 private:
     bitget::kline_closed_gate kline_gate_;
+    std::optional<std::chrono::system_clock::time_point> last_timestamp_;
+    bool last_kline_rejected_ = false;
 };
 
 #endif // HAS_BITGET

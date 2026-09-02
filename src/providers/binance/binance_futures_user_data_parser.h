@@ -180,6 +180,7 @@ public:
         out.symbol            = std::string(binance::extract_sv_string(inner, "s"));
         out.client_order_id   = std::string(binance::extract_sv_string(inner, "c"));
         out.exchange_order_id = take_id(inner, "i");
+        out.venue_execution_id = take_id(inner, "t");
 
         auto side = binance::extract_sv_string(inner, "S");
         const bool side_valid = side == "BUY" || side == "SELL";
@@ -193,11 +194,13 @@ public:
             }
             return parse_double(raw_value, value) && value >= 0.0;
         };
+        const auto cumulative_raw = binance::extract_sv_string(inner, "z");
         const bool numeric_valid =
             read_nonnegative("l", out.last_fill_qty)
             && read_nonnegative("L", out.last_fill_price)
             && read_nonnegative("z", out.cumulative_qty)
             && read_finite_optional(inner, "n", out.commission);
+        out.has_cumulative_qty = !cumulative_raw.empty();
         out.commission_asset = std::string(binance::extract_sv_string(inner, "N"));
 
         // Wrapper-level event time (matches spot, which uses `E`).
@@ -220,7 +223,10 @@ public:
             || out.k == parsed_exec::kind::full_fill;
         if (!numeric_valid || !side_valid || !timestamp_valid
             || out.symbol.empty() || out.client_order_id.empty()
-            || (is_fill && (!(out.last_fill_qty > 0.0)
+            || out.exchange_order_id.empty()
+            || (is_fill && (out.venue_execution_id.empty()
+                            || !out.has_cumulative_qty
+                            || !(out.last_fill_qty > 0.0)
                             || !(out.last_fill_price > 0.0)
                             || out.cumulative_qty < out.last_fill_qty)))
         {
@@ -355,17 +361,15 @@ private:
         {
             if (X == "FILLED")           return parsed_exec::kind::full_fill;
             if (X == "PARTIALLY_FILLED") return parsed_exec::kind::partial_fill;
-            return parsed_exec::kind::partial_fill;
+            return parsed_exec::kind::invalid;
         }
-        if (x == "NEW")      return parsed_exec::kind::ack;
-        if (x == "CANCELED") return parsed_exec::kind::canceled;
-        if (x == "REJECTED") return parsed_exec::kind::rejected;
-        if (x == "EXPIRED")  return parsed_exec::kind::expired;
-
-        if (X == "CANCELED") return parsed_exec::kind::canceled;
-        if (X == "REJECTED") return parsed_exec::kind::rejected;
-        if (X == "EXPIRED")  return parsed_exec::kind::expired;
-
-        return parsed_exec::kind::other;
+        if (x == "NEW" && X == "NEW")
+            return parsed_exec::kind::ack;
+        if (x == "CANCELED" && X == "CANCELED")
+            return parsed_exec::kind::canceled;
+        if (x == "EXPIRED"
+            && (X == "EXPIRED" || X == "EXPIRED_IN_MATCH"))
+            return parsed_exec::kind::expired;
+        return parsed_exec::kind::invalid;
     }
 };

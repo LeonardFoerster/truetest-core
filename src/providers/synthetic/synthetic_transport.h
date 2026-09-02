@@ -1,7 +1,7 @@
 #pragma once
 
+#include "providers/provider_event.h"
 #include "providers/transport.h"
-#include "simulation/monte_carlo_types.h"
 
 #include <memory>
 #include <string>
@@ -18,7 +18,7 @@ namespace truetest::simulation {
  */
 class SyntheticTransport : public IDataTransport {
 public:
-    explicit SyntheticTransport(SyntheticPath path);
+    explicit SyntheticTransport(std::vector<provider::bar> bars);
 
     bool open() override;
     void close() override;
@@ -28,8 +28,7 @@ public:
     std::optional<std::string> read_line() override;
 
 private:
-    SyntheticPath path_;
-    std::vector<std::string> lines_;
+    std::vector<provider::bar> bars_;
     size_t next_line_ = 0;
     bool open_ = false;
 };

@@ -214,6 +214,31 @@ public:
 	virtual bool has_data_feed() const = 0;
 	virtual bool has_execution() const = 0;
 
+	// Authoritative declaration for private exchange mutations. This is
+	// intentionally separate from has_execution(), which is also true for
+	// local paper/shadow adapters. Providers with execution must override the
+	// fail-closed `unknown` default.
+	virtual private_execution_capability
+	private_execution_capability_level() const noexcept
+	{
+		return private_execution_capability::unknown;
+	}
+
+	// Cold, network-free preparation of reconciler and kill-switch objects.
+	// A private-write provider is not opened unless this succeeds and both
+	// resulting capabilities validate. No-op/default implementations refuse.
+	virtual bool prepare_write_safety() { return false; }
+
+	// Installs the immutable result of central startup validation. This hook is
+	// network-free and has a strong failure guarantee: false/throw must leave
+	// private writes disabled. Private providers pass the token into every
+	// ExecutionBridge they create. The default refuses so a newly added write
+	// provider cannot silently omit the gate.
+	virtual bool install_write_safety_readiness(WriteSafetyReadiness)
+	{
+		return false;
+	}
+
 	virtual bool open() = 0;
 	virtual void close() = 0;
 	virtual void quiesce_for_live_shutdown() {}

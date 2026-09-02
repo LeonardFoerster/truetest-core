@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <atomic>
+#include <charconv>
 #include <condition_variable>
 #include <fstream>
 #include <mutex>
@@ -29,7 +30,9 @@ public:
         open_.store(true, std::memory_order_release);
         stop_requested_.store(false, std::memory_order_release);
         clean_eof_.store(false, std::memory_order_release);
+        failed_.store(false, std::memory_order_release);
         first_record_ts_ = 0;
+        last_record_ts_ = 0;
         replay_start_ = std::chrono::steady_clock::now();
         return true;
     }
@@ -75,6 +78,8 @@ public:
             return transport_terminal_status::operator_stop;
         if (clean_eof_.load(std::memory_order_acquire))
             return transport_terminal_status::clean_eof;
+        if (failed_.load(std::memory_order_acquire))
+            return transport_terminal_status::failed;
         return transport_terminal_status::unknown;
     }
 
@@ -85,11 +90,13 @@ private:
     std::atomic<bool> open_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> clean_eof_{false};
+    std::atomic<bool> failed_{false};
     std::mutex file_mu_;
     std::mutex pace_mu_;
     std::condition_variable pace_cv_;
 
     int64_t first_record_ts_ = 0;
+    int64_t last_record_ts_ = 0;
     std::chrono::steady_clock::time_point replay_start_;
 
     std::optional<std::string> read_next(bool apply_pacing)
@@ -116,7 +123,20 @@ private:
         if (tab_pos == std::string::npos)
             return line;
 
-        int64_t ts_ms = std::stoll(line.substr(0, tab_pos));
+        const std::string_view timestamp_text{line.data(), tab_pos};
+        int64_t ts_ms = 0;
+        const auto [end, error] = std::from_chars(
+            timestamp_text.data(),
+            timestamp_text.data() + timestamp_text.size(), ts_ms);
+        if (error != std::errc{}
+            || end != timestamp_text.data() + timestamp_text.size()
+            || ts_ms <= 0 || (last_record_ts_ != 0 && ts_ms < last_record_ts_))
+        {
+            failed_.store(true, std::memory_order_release);
+            open_.store(false, std::memory_order_release);
+            return std::nullopt;
+        }
+        last_record_ts_ = ts_ms;
         std::string payload = line.substr(tab_pos + 1);
 
         if (apply_pacing && ts_ms > 0)

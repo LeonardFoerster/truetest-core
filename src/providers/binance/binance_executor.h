@@ -3,6 +3,7 @@
 
 #include "execution/execution_adapter.h"
 #include "execution/fee_model.h"
+#include "types/order_id.h"
 #include "ui/console_dashboard.h"
 
 #include <algorithm>
@@ -31,6 +32,13 @@ public:
     }
 
     void set_fee_model(std::shared_ptr<IFeeModel> fm) { fee_model_ = std::move(fm); }
+
+    void set_fill_id_sequence(
+        std::shared_ptr<FillIdSequence> sequence) override
+    {
+        if (sequence)
+            fill_ids_ = std::move(sequence);
+    }
 
     void submit_order(const order_event& o) override
     {
@@ -64,14 +72,30 @@ public:
                 o.get_side(),
                 o.get_quantity(),
                 last_price_,
-                commission
+                commission,
+                /*remaining=*/0.0,
+                fill_ids_->next()
             );
-            pending_fills_.back().set_recv_ns(o.get_recv_ns());
+            auto& fill = pending_fills_.back();
+            fill.set_source(fill_source::simulated);
+            fill_provenance provenance;
+            provenance.model = fill_execution_model::synthetic_local_liquidity;
+            provenance.reason = fill_execution_reason::market_maker_requote;
+            provenance.exploratory = true;
+            provenance.intended_price = o.get_price() > 0.0 ? o.get_price() : px;
+            provenance.reference_price = px;
+            provenance.reference_timestamp = o.get_earliest_eligible_ts();
+            const auto decision_ts = o.get_decision_ts();
+            if (provenance.reference_timestamp > decision_ts)
+                provenance.modeled_latency = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    provenance.reference_timestamp - decision_ts);
+            fill.set_provenance(provenance);
+            fill.set_recv_ns(o.get_recv_ns());
             if (o.get_recv_ns() > 0)
             {
                 const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count();
-                pending_fills_.back().set_latency_ns(now_ns - o.get_recv_ns());
+                fill.set_latency_ns(now_ns - o.get_recv_ns());
             }
         }
     }
@@ -104,6 +128,8 @@ private:
     std::string last_error_;
     std::weak_ptr<truetest::ui::ConsoleDashboard> dashboard_;
     std::shared_ptr<IFeeModel> fee_model_;
+    std::shared_ptr<FillIdSequence> fill_ids_ =
+        std::make_shared<FillIdSequence>();
 };
 
 #endif // HAS_BINANCE

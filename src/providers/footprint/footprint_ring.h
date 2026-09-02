@@ -38,8 +38,7 @@ public:
         if (ring_.try_push(trade))
             return true;
 
-        discontinuity_count_.fetch_add(1, std::memory_order_relaxed);
-        discontinuous_.store(true, std::memory_order_release);
+        discontinuity_count_.fetch_add(1, std::memory_order_release);
         return false;
     }
 
@@ -49,24 +48,32 @@ public:
         return ring_.try_pop(out);
     }
 
-    // Sticky since the last acknowledge_discontinuity(); set as soon as any
-    // push has been dropped.
+    // Sticky since the last acknowledged generation. A monotonic generation
+    // is used instead of a bool so a producer overflow racing a consumer
+    // acknowledgement cannot be cleared accidentally.
     bool discontinuous() const noexcept
     {
-        return discontinuous_.load(std::memory_order_acquire);
+        return discontinuity_generation() !=
+            acknowledged_generation_.load(std::memory_order_acquire);
+    }
+
+    std::size_t discontinuity_generation() const noexcept
+    {
+        return discontinuity_count_.load(std::memory_order_acquire);
     }
 
     std::size_t discontinuity_count() const noexcept
     {
-        return discontinuity_count_.load(std::memory_order_relaxed);
+        return discontinuity_generation();
     }
 
     // Consumer-only: acknowledge the discontinuity once cold-path recovery
     // has been entered (RECOVERING, §2.2). Not safe to call from the
     // producer side - single-consumer ownership only.
-    void acknowledge_discontinuity() noexcept
+    void acknowledge_discontinuity(std::size_t observed_generation) noexcept
     {
-        discontinuous_.store(false, std::memory_order_release);
+        acknowledged_generation_.store(observed_generation,
+                                       std::memory_order_release);
     }
 
     std::size_t size() const noexcept { return ring_.size(); }
@@ -76,8 +83,8 @@ private:
     // Policy template arg only affects RingBuffer::push(), which this class
     // never calls - try_push()/try_pop() are always non-blocking.
     RingBuffer<PublicTrade, N> ring_;
-    std::atomic<bool> discontinuous_{false};
     std::atomic<std::size_t> discontinuity_count_{0};
+    std::atomic<std::size_t> acknowledged_generation_{0};
 };
 
 } // namespace truetest::footprint

@@ -4,10 +4,14 @@
 #include "providers/footprint/footprint_venue_capabilities.h"
 #include "providers/provider_event.h"
 #include "types/public_trade.h"
+#include "types/quantity_scale.h"
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <optional>
+#include <string_view>
 
 // The opt-in DataBridge research tap: converts an already-parsed
 // provider::tick into a PublicTrade and try_push()es it into the bounded
@@ -27,7 +31,8 @@ namespace truetest::footprint {
 struct FootprintTapContext
 {
     venue_id venue = venue_id::unknown;
-    std::uint16_t symbol_id = 0;
+    std::uint16_t symbol_id = kInvalidSymbolId;
+    std::string_view symbol;
 
     // Bumped by the owner on every new connection/reconnect - an explicit
     // continuity boundary, especially for venues without a native trade id
@@ -51,7 +56,11 @@ struct FootprintTapContext
 // misuse never silently fabricates ticks against a zero tick size.
 inline bool tap_context_ready(const FootprintTapContext& ctx) noexcept
 {
-    return ctx.tick_size > 0.0;
+    return ctx.venue != venue_id::unknown
+        && ctx.symbol_id != kInvalidSymbolId && !ctx.symbol.empty()
+        && ctx.session_id != 0 && std::isfinite(ctx.tick_size)
+        && ctx.tick_size > 0.0 && std::isfinite(ctx.qty_atom_scale)
+        && ctx.qty_atom_scale > 0.0;
 }
 
 // Converts a parsed tick into a PublicTrade using ctx. Does not push -
@@ -70,9 +79,21 @@ inline bool tap_context_ready(const FootprintTapContext& ctx) noexcept
 // t.quantity_scale, and ctx.qty_atom_scale; this fallback exists for venues/tests that have not
 // yet been wired for exact-decimal parsing and must not be relied on for
 // production tick-grouping precision (see footprint.md §2.1 tick-size note).
-inline PublicTrade tick_to_public_trade(const FootprintTapContext& ctx,
-                                         const provider::tick& t) noexcept
+inline std::optional<PublicTrade>
+tick_to_public_trade(const FootprintTapContext& ctx,
+                     const provider::tick& t) noexcept
 {
+    if (ctx.venue == venue_id::unknown
+        || ctx.symbol_id == kInvalidSymbolId
+        || ctx.symbol.empty() || t.symbol != ctx.symbol
+        || ctx.session_id == 0
+        || t.timestamp.time_since_epoch().count() <= 0)
+        return std::nullopt;
+    if ((ctx.venue == venue_id::binance_usdm
+         || ctx.venue == venue_id::bitget_usdtm)
+        && t.native_trade_id == 0)
+        return std::nullopt;
+
     PublicTrade out;
     out.event_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         t.timestamp.time_since_epoch()).count();
@@ -86,22 +107,36 @@ inline PublicTrade tick_to_public_trade(const FootprintTapContext& ctx,
 
     if (t.has_exact_decimal)
     {
+        if (t.price_ticks <= 0 || t.base_qty_atoms <= 0)
+            return std::nullopt;
         out.price_ticks = t.price_ticks;
         out.base_qty_atoms = t.base_qty_atoms;
     }
-    else if (ctx.tick_size > 0.0 && t.quantity_scale != 0)
+    else
     {
-        out.price_ticks = static_cast<std::int64_t>(
-            std::llround(t.price / ctx.tick_size));
-        out.base_qty_atoms = static_cast<std::int64_t>(
-            std::llround(
-                (static_cast<long double>(t.quantity)
-                 / static_cast<long double>(t.quantity_scale))
-                * static_cast<long double>(ctx.qty_atom_scale)));
+        if (!std::isfinite(t.price) || !(t.price > 0.0)
+            || !std::isfinite(ctx.tick_size) || !(ctx.tick_size > 0.0)
+            || t.quantity <= 0 || t.quantity_scale == 0)
+            return std::nullopt;
+
+        const double price_ticks = t.price / ctx.tick_size;
+        if (!std::isfinite(price_ticks) || !(price_ticks > 0.0)
+            || std::floor(price_ticks) != price_ticks
+            || price_ticks >= 0x1p63)
+            return std::nullopt;
+        out.price_ticks = static_cast<std::int64_t>(price_ticks);
+
+        std::uint64_t quantity_atoms = 0;
+        if (!tt::quantity_scale::rescale_nonnegative(
+                t.quantity, t.quantity_scale, ctx.qty_atom_scale,
+                quantity_atoms)
+            || quantity_atoms == 0
+            || quantity_atoms
+                > static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int64_t>::max()))
+            return std::nullopt;
+        out.base_qty_atoms = static_cast<std::int64_t>(quantity_atoms);
     }
-    // else: tick_size unresolved and no exact decimal on the tick - leave
-    // price_ticks/base_qty_atoms at 0. try_tap_push() below refuses to push
-    // this case (ctx not ready) rather than emit a zero-price trade.
 
     out.flags = provenance_live;
     if (t.native_trade_id != 0)
@@ -133,11 +168,18 @@ inline bool try_tap_push(FootprintTapContext& ctx,
                           const provider::tick& t,
                           FootprintResearchRing<N>& ring) noexcept
 {
-    if (!t.has_exact_decimal
-        && (!tap_context_ready(ctx) || t.quantity_scale == 0))
+    if (ctx.venue == venue_id::unknown
+        || ctx.symbol_id == kInvalidSymbolId
+        || ctx.symbol.empty() || t.symbol != ctx.symbol
+        || ctx.session_id == 0
+        || (!t.has_exact_decimal
+            && (!tap_context_ready(ctx) || t.quantity_scale == 0)))
         return false;
 
-    PublicTrade trade = tick_to_public_trade(ctx, t);
+    auto converted = tick_to_public_trade(ctx, t);
+    if (!converted)
+        return false;
+    PublicTrade trade = *converted;
     trade.recv_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     trade.obs_seq = ctx.next_obs_seq++;

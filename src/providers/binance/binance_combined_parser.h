@@ -7,7 +7,7 @@
 #include "providers/footprint/decimal_ticks.h"
 #include "providers/recovery_payload.h"
 
-#include <cstdlib>
+#include <charconv>
 #include <optional>
 #include <string>
 
@@ -37,14 +37,16 @@ public:
     {
         // Accept both combined-stream envelopes ({"stream":...,"data":{...}})
         // and raw single-stream data objects.
-        const std::string stream_name = extract_stream_name(line);
-        std::string data_json = extract_data(line);
-        if (data_json.empty())
-        {
-            data_json = line;
-        }
+        std::string_view stream_name;
+        std::string_view data_json;
+        if (!authoritative_market_payload(line, stream_name, data_json))
+            return std::nullopt;
 
-        auto event_type = binance::extract_string(data_json, "e");
+        std::string_view event_type;
+        (void)provider_recovery::top_level_plain_string(
+            data_json, "e", event_type);
+        if (!stream_matches_payload(stream_name, event_type, data_json))
+            return std::nullopt;
 
         if (event_type == "trade")
         {
@@ -59,14 +61,20 @@ public:
             t.side = (rec->side == data_tick_side::bid) ? 0 :
                      (rec->side == data_tick_side::ask) ? 1 : 2;
             t.quantity_scale = rec->quantity_scale;
+            if (last_timestamp_ && t.timestamp < *last_timestamp_)
+                return std::nullopt;
 
             // Native trade id ("t") - unconditional, cheap, always exact
             // (it's an integer already). footprint.md §2.1.
-            if (const auto id_str = binance::extract_number(data_json, "t"); !id_str.empty())
+            std::string_view id_text;
+            if (provider_recovery::top_level_scalar_text(
+                    data_json, "t", id_text))
             {
-                char* end = nullptr;
-                const auto id = std::strtoull(id_str.c_str(), &end, 10);
-                if (end && *end == '\0')
+                std::uint64_t id = 0;
+                const auto [end, error] = std::from_chars(
+                    id_text.data(), id_text.data() + id_text.size(), id);
+                if (error == std::errc{}
+                    && end == id_text.data() + id_text.size())
                     t.native_trade_id = id;
             }
 
@@ -77,8 +85,12 @@ public:
             // (already lossy doubles) for this path.
             if (exact_tick_size_)
             {
-                const auto price_str = binance::extract_number(data_json, "p");
-                const auto qty_str = binance::extract_number(data_json, "q");
+                std::string_view price_str;
+                std::string_view qty_str;
+                (void)provider_recovery::top_level_plain_string(
+                    data_json, "p", price_str);
+                (void)provider_recovery::top_level_plain_string(
+                    data_json, "q", qty_str);
                 const auto price_dec = truetest::footprint::parse_decimal(price_str);
                 const auto qty_dec = truetest::footprint::parse_decimal(qty_str);
                 if (price_dec && qty_dec)
@@ -94,6 +106,7 @@ public:
                 }
             }
 
+            last_timestamp_ = t.timestamp;
             return provider::event{t};
         }
         else if (event_type == "kline")
@@ -110,6 +123,15 @@ public:
             b.close = rec->close;
             b.volume = rec->volume;
             b.quantity_scale = rec->quantity_scale;
+            std::int64_t known_ms = 0;
+            if (!binance::parse_int64_sv(rec->date, known_ms))
+                return std::nullopt;
+            const auto known_time =
+                tt::date_parse::from_epoch_milliseconds(known_ms);
+            if (!known_time
+                || (last_timestamp_ && *known_time < *last_timestamp_))
+                return std::nullopt;
+            last_timestamp_ = *known_time;
             return provider::event{b};
         }
         else if (event_type == "depthUpdate")
@@ -137,15 +159,23 @@ public:
 
     std::vector<provider::event> parse_records(std::string_view line) override
     {
-        const std::string stream_name = extract_stream_name(std::string(line));
-        std::string data_json = extract_data(std::string(line));
-        if (data_json.empty())
-            data_json.assign(line.data(), line.size());
+        std::string_view stream_name;
+        std::string_view data_json;
+        if (!authoritative_market_payload(line, stream_name, data_json))
+            return {};
 
-        if (binance::extract_string(data_json, "e") == "depthUpdate")
+        std::string_view event_type;
+        if (provider_recovery::top_level_plain_string(
+                data_json, "e", event_type)
+            && event_type == "depthUpdate")
         {
+            if (!stream_matches_payload(stream_name, event_type, data_json))
+                return {};
             auto batch = binance::parse_depth_delta_batch(data_json);
             if (!batch) return {};
+            if (last_timestamp_ && batch->timestamp < *last_timestamp_)
+                return {};
+            last_timestamp_ = batch->timestamp;
             return {provider::event{std::move(*batch)}};
         }
 
@@ -163,11 +193,14 @@ public:
                 line, {"result", "id", "data"}))
             return empty_parse_status::malformed;
 
-        const std::string frame(line);
-        std::string data_json = extract_data(frame);
-        if (data_json.empty())
-            data_json = frame;
-        if (is_well_formed_forming_kline(data_json))
+        std::string_view stream_name;
+        std::string_view data_json;
+        std::string_view event_type;
+        if (authoritative_market_payload(line, stream_name, data_json)
+            && provider_recovery::top_level_plain_string(
+                data_json, "e", event_type)
+            && stream_matches_payload(stream_name, event_type, data_json)
+            && is_well_formed_forming_kline(data_json))
             return empty_parse_status::ignored;
 
         std::string_view result;
@@ -187,56 +220,52 @@ public:
     }
 
 private:
-    static bool is_well_formed_forming_kline(const std::string& json)
+    static bool is_well_formed_forming_kline(std::string_view json)
     {
-        if (binance::extract_string(json, "e") != "kline")
-            return false;
-        const auto closed = binance::extract_sv_optional_bool(json, "x");
-        if (!closed.has_value() || *closed)
+        return binance::is_well_formed_forming_kline(json);
+    }
+
+    static bool authoritative_market_payload(std::string_view json,
+                                             std::string_view& stream_name,
+                                             std::string_view& data_json)
+    {
+        stream_name = {};
+        data_json = {};
+        if (!provider_recovery::is_authoritative_object(json)
+            || !provider_recovery::decision_members_are_unique(
+                json, {"stream", "data"}))
             return false;
 
-        double value = 0.0;
-        for (const std::string_view key : {"o", "h", "l", "c"})
+        std::string_view data;
+        const auto data_state = provider_recovery::payload_parser(json)
+            .inspect_top_level_member("data", data);
+        if (data_state
+            == provider_recovery::payload_parser::member_result::unique)
         {
-            if (!binance::parse_double_sv(
-                    binance::extract_sv_number(json, key), value))
+            data = provider_recovery::trim_json_ws(data);
+            if (!provider_recovery::top_level_plain_string(
+                    json, "stream", stream_name)
+                || stream_name.empty()
+                || !provider_recovery::is_authoritative_object(data))
                 return false;
+            data_json = data;
+            return true;
         }
+        if (data_state
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+            return false;
+
+        std::string_view unexpected_stream;
+        if (provider_recovery::top_level_plain_string(
+                json, "stream", unexpected_stream))
+            return false;
+        data_json = json;
         return true;
-    }
-
-    static std::string extract_data(const std::string& json)
-    {
-        std::string search = "\"data\":";
-        auto pos = json.find(search);
-        if (pos == std::string::npos) return "";
-        pos += search.size();
-
-        while (pos < json.size() && json[pos] == ' ') pos++;
-
-        if (pos >= json.size() || json[pos] != '{') return "";
-
-        int depth = 0;
-        size_t start = pos;
-        for (size_t i = pos; i < json.size(); ++i)
-        {
-            if (json[i] == '{') depth++;
-            else if (json[i] == '}') depth--;
-            if (depth == 0)
-                return json.substr(start, i - start + 1);
-        }
-
-        return "";
-    }
-
-    static std::string extract_stream_name(const std::string& json)
-    {
-        return binance::extract_string(json, "stream");
     }
 
     // Match "@depth" + digit so partial-book ("@depth5@…") isn't confused
     // with the diff stream ("@depth@100ms", no level count).
-    static bool is_partial_book_stream(const std::string& stream_name)
+    static bool is_partial_book_stream(std::string_view stream_name)
     {
         auto pos = stream_name.find("@depth");
         if (pos == std::string::npos) return false;
@@ -245,17 +274,58 @@ private:
                stream_name[after] >= '0' && stream_name[after] <= '9';
     }
 
-    static std::string symbol_from_stream(const std::string& stream_name)
+    static bool stream_matches_payload(std::string_view stream_name,
+                                       std::string_view event_type,
+                                       std::string_view payload)
+    {
+        if (stream_name.empty()) return true;
+        const auto at = stream_name.find('@');
+        if (at == std::string_view::npos || at == 0) return false;
+
+        std::string expected_symbol{stream_name.substr(0, at)};
+        for (auto& c : expected_symbol)
+            c = static_cast<char>(std::toupper(
+                static_cast<unsigned char>(c)));
+        std::string_view payload_symbol;
+        if (provider_recovery::top_level_plain_string(
+                payload, "s", payload_symbol)
+            && payload_symbol != expected_symbol)
+            return false;
+
+        const auto channel = stream_name.substr(at);
+        if (channel == "@trade") return event_type == "trade";
+        if (channel.rfind("@kline_", 0) == 0)
+        {
+            if (event_type != "kline") return false;
+            std::string_view kline;
+            std::string_view interval;
+            return provider_recovery::top_level_member(payload, "k", kline)
+                && provider_recovery::is_authoritative_object(kline)
+                && provider_recovery::top_level_plain_string(
+                    kline, "i", interval)
+                && !interval.empty()
+                && channel.substr(std::string_view{"@kline_"}.size())
+                    == interval;
+        }
+        if (channel.rfind("@depth@", 0) == 0)
+            return event_type == "depthUpdate";
+        if (is_partial_book_stream(stream_name))
+            return event_type.empty() && payload_symbol.empty();
+        return false;
+    }
+
+    static std::string symbol_from_stream(std::string_view stream_name)
     {
         auto at = stream_name.find('@');
-        std::string sym = (at == std::string::npos)
+        std::string sym{(at == std::string_view::npos)
             ? stream_name
-            : stream_name.substr(0, at);
+            : stream_name.substr(0, at)};
         for (auto& c : sym)
             c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return sym;
     }
 
     std::optional<truetest::footprint::DecimalValue> exact_tick_size_;
+    std::optional<std::chrono::system_clock::time_point> last_timestamp_;
     int atom_decimals_ = 8;
 };

@@ -157,10 +157,60 @@ public:
 
     bool parse(std::string_view raw, parsed_exec& out) override
     {
-        auto arg = bitget::detail::extract_object(raw, "arg");
+        auto invalid = [&](std::string_view reason) {
+            out = parsed_exec{};
+            out.k = parsed_exec::kind::invalid;
+            out.error.assign(reason.data(), reason.size());
+            return true;
+        };
+
+        provider_recovery::payload_parser root(raw);
+        std::string_view arg;
+        const auto arg_result = root.inspect_top_level_member("arg", arg);
+        if (arg_result
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+        {
+            return invalid("malformed private execution envelope");
+        }
+
+        std::string_view data;
+        const auto data_result = root.inspect_top_level_member("data", data);
+        if (data_result
+            == provider_recovery::payload_parser::member_result::invalid_or_duplicate)
+        {
+            return invalid("malformed private execution data envelope");
+        }
+
+        std::string_view obj;
+        std::size_t row_count = 0;
+        const bool valid_rows = data_result
+                == provider_recovery::payload_parser::member_result::unique
+            && provider_recovery::every_top_level_object(
+                data, [&](std::string_view row) {
+                    ++row_count;
+                    if (row_count == 1) obj = row;
+                    return true;
+                });
+
+        if (arg_result
+            == provider_recovery::payload_parser::member_result::missing)
+        {
+            const bool execution_like = valid_rows && row_count > 0
+                && (!bitget::extract_sv_string(obj, "orderStatus").empty()
+                    || !first_sv(obj, "execQty").empty());
+            return execution_like
+                ? invalid("malformed private execution: missing arg envelope")
+                : false;
+        }
+        if (!provider_recovery::is_authoritative_object(arg))
+            return invalid("malformed private execution arg envelope");
+
         std::string_view topic;
-        if (!arg.empty())
-            topic = bitget::extract_sv_string(arg, "topic");
+        std::string_view inst_type;
+        if (!provider_recovery::top_level_plain_string(arg, "topic", topic)
+            || !provider_recovery::top_level_plain_string(
+                arg, "instType", inst_type))
+            return invalid("malformed private execution routing envelope");
 
         if (topic == "position" || topic == "account")
             return false;
@@ -169,17 +219,22 @@ public:
         if (!topic.empty() && topic != "order" && topic != "fill"
             && topic != "fast-fill")
             return false;
+        if (inst_type != "UTA")
+            return invalid("unsupported private execution account type");
 
-        auto obj = bitget::detail::first_data_object(raw);
-        if (obj.empty())
-        {
-            // Some pushes nest a single object under "data":{...}.
-            auto data_obj = bitget::detail::extract_object(raw, "data");
-            if (!data_obj.empty())
-                obj = data_obj;
-        }
-        if (obj.empty())
-            return false;
+        std::string_view action;
+        if (!provider_recovery::top_level_plain_string(raw, "action", action)
+            || action != "snapshot")
+            return invalid("unsupported private execution action");
+        if (!valid_rows || row_count != 1 || obj.empty())
+            return invalid(
+                "private execution batch is malformed or explicitly unsupported");
+        if (!provider_recovery::decision_members_are_unique(
+                obj, {"clientOid", "orderId", "symbol", "side",
+                      "orderStatus", "execQty", "execPrice", "execId",
+                      "tradeId", "cumExecQty", "execTime", "updatedTime",
+                      "feeDetail"}))
+            return invalid("ambiguous private execution row");
 
         // Guard: order/fill payloads carry clientOid or orderId.
         auto client = bitget::extract_sv_string(obj, "clientOid");
@@ -187,19 +242,8 @@ public:
         if (order_id.empty())
             order_id = bitget::extract_sv_number(obj, "orderId");
         if (client.empty() && order_id.empty())
-            return false;
-
-        // Position-looking objects (size + posSide, no orderStatus/execQty)
-        // must not leak into the exec path.
-        if (topic.empty())
-        {
-            auto status = bitget::extract_sv_string(obj, "orderStatus");
-            auto exec_qty = bitget::extract_sv_string(obj, "execQty");
-            if (exec_qty.empty())
-                exec_qty = bitget::extract_sv_number(obj, "execQty");
-            if (status.empty() && exec_qty.empty())
-                return false;
-        }
+            return invalid(
+                "private order/fill payload lacks all order identities");
 
         out = parsed_exec{};
         out.client_order_id.assign(client.data(), client.size());
@@ -207,35 +251,58 @@ public:
         out.symbol = std::string(bitget::extract_sv_string(obj, "symbol"));
 
         auto side = bitget::extract_sv_string(obj, "side");
-        out.side = map_side(side);
+        const bool valid_side = map_side(side, out.side);
 
         // Prefer fill channel fields for last_fill_*.
         const bool is_fill =
-            (topic == "fill" || topic == "fast-fill"
-             || (!bitget::extract_sv_string(obj, "execQty").empty()
-                 || !bitget::extract_sv_number(obj, "execQty").empty()));
+            topic == "fill" || topic == "fast-fill";
 
         if (is_fill && topic != "order")
         {
-            out.last_fill_qty = to_double(
-                first_sv(obj, "execQty"));
-            out.last_fill_price = to_double(
-                first_sv(obj, "execPrice"));
+            auto execution_id = bitget::extract_sv_string(obj, "execId");
+            if (execution_id.empty())
+                execution_id = bitget::extract_sv_string(obj, "tradeId");
+            out.venue_execution_id.assign(
+                execution_id.data(), execution_id.size());
+            const bool valid_qty = parse_finite_double(
+                first_sv(obj, "execQty"), out.last_fill_qty)
+                && out.last_fill_qty > 0.0;
+            const bool valid_price = parse_finite_double(
+                first_sv(obj, "execPrice"), out.last_fill_price)
+                && out.last_fill_price > 0.0;
             // Fill channel is per-slice only — do not invent order-level
             // cumulative from execQty. ExecutionBridge accumulates
             // last_fill_qty; leave cumulative_qty at 0 when venue omits it.
             auto cum = first_sv(obj, "cumExecQty");
-            out.cumulative_qty = cum.empty() ? 0.0 : to_double(cum);
+            const bool valid_cumulative = cum.empty()
+                || (parse_finite_double(cum, out.cumulative_qty)
+                    && out.cumulative_qty > 0.0);
+            out.has_cumulative_qty = !cum.empty();
             out.k = parsed_exec::kind::partial_fill;
-            extract_fee(obj, out);
+            const bool valid_fee = extract_fee(obj, out)
+                && !out.commission_asset.empty();
             out.ts = parse_ts(obj, raw);
+            if (!valid_side || out.symbol.empty()
+                || out.venue_execution_id.empty()
+                || !valid_qty || !valid_price || !valid_cumulative
+                || !valid_fee
+                || out.ts.time_since_epoch().count() <= 0)
+            {
+                out.k = parsed_exec::kind::invalid;
+                out.error = "malformed fill: missing or invalid mandatory field";
+            }
             return true;
         }
 
         // Order channel (or bare order object).
         auto status = bitget::extract_sv_string(obj, "orderStatus");
         out.k = classify_order_status(status);
-        out.cumulative_qty = to_double(first_sv(obj, "cumExecQty"));
+        const bool valid_status = out.k != parsed_exec::kind::other;
+        const auto cumulative = first_sv(obj, "cumExecQty");
+        out.has_cumulative_qty = !cumulative.empty();
+        const bool valid_cumulative = cumulative.empty()
+            || (parse_finite_double(cumulative, out.cumulative_qty)
+                && out.cumulative_qty >= 0.0);
 
         // Prefer fill channel for last_fill_*; leave 0 on pure order status
         // unless the venue embeds an incremental fill (rare on UTA order).
@@ -252,7 +319,7 @@ public:
             && out.last_fill_qty <= 0.0)
             out.k = parsed_exec::kind::other;
 
-        extract_fee(obj, out);
+        const bool valid_fee = extract_fee(obj, out);
 
         if (out.k == parsed_exec::kind::rejected
             || out.k == parsed_exec::kind::canceled)
@@ -266,6 +333,13 @@ public:
         }
 
         out.ts = parse_ts(obj, raw);
+        if (!valid_side || out.symbol.empty() || !valid_cumulative
+            || !valid_fee || !valid_status
+            || out.ts.time_since_epoch().count() <= 0)
+        {
+            out.k = parsed_exec::kind::invalid;
+            out.error = "malformed order lifecycle: invalid mandatory field";
+        }
         return true;
     }
 
@@ -337,13 +411,15 @@ public:
             return parsed_position_snapshot::reason::other;
         };
 
-        auto parse_balance_row = [](std::string_view obj)
-            -> parsed_position_snapshot::balance_row {
-            parsed_position_snapshot::balance_row b;
+        auto parse_balance_row = [](std::string_view obj,
+                                    parsed_position_snapshot::balance_row& b)
+            -> bool {
             auto coin = bitget::extract_sv_string(obj, "coin");
             if (coin.empty())
                 coin = bitget::extract_sv_string(obj, "asset");
             b.asset.assign(coin.data(), coin.size());
+            if (b.asset.empty())
+                return false;
 
             auto bal = first_sv(obj, "available");
             if (bal.empty())
@@ -352,15 +428,21 @@ public:
                 bal = first_sv(obj, "walletBalance");
             if (bal.empty())
                 bal = first_sv(obj, "balance");
-            b.wallet_balance = to_double(bal);
 
             auto delta = first_sv(obj, "balanceChange");
             if (delta.empty())
                 delta = first_sv(obj, "change");
             if (delta.empty())
                 delta = first_sv(obj, "delta");
-            b.balance_change = to_double(delta);
-            return b;
+            if (bal.empty() && delta.empty())
+                return false;
+            if (!bal.empty()
+                && !parse_finite_double(bal, b.wallet_balance))
+                return false;
+            if (!delta.empty()
+                && !parse_finite_double(delta, b.balance_change))
+                return false;
+            return true;
         };
 
         // --- account channel (balances / funding) ---
@@ -375,20 +457,22 @@ public:
                 std::string_view body =
                     !data_obj.empty() ? data_obj : raw;
                 out.r = classify_account_reason(body);
-                auto bal = parse_balance_row(body);
-                if (!bal.asset.empty() || bal.wallet_balance != 0.0
-                    || bal.balance_change != 0.0)
+                parsed_position_snapshot::balance_row bal;
+                if (parse_balance_row(body, bal))
                     out.balances.push_back(std::move(bal));
                 out.ts = parse_ts(body, raw);
-                return !out.balances.empty();
+                return !out.balances.empty()
+                    && out.ts.time_since_epoch().count() > 0;
             }
+            bool valid_balance_rows = true;
             bitget::detail::for_each_array_object(arr, [&](std::string_view obj) {
                 if (out.r == parsed_position_snapshot::reason::other)
                     out.r = classify_account_reason(obj);
-                auto bal = parse_balance_row(obj);
-                if (!bal.asset.empty() || bal.wallet_balance != 0.0
-                    || bal.balance_change != 0.0)
+                parsed_position_snapshot::balance_row bal;
+                if (parse_balance_row(obj, bal))
                     out.balances.push_back(std::move(bal));
+                else
+                    valid_balance_rows = false;
             });
             auto ts_sv = first_sv(raw, "ts");
             if (!ts_sv.empty())
@@ -398,7 +482,8 @@ public:
                     out.ts = std::chrono::system_clock::time_point(
                         std::chrono::milliseconds(ms));
             }
-            return !out.balances.empty();
+            return valid_balance_rows && !out.balances.empty()
+                && out.ts.time_since_epoch().count() > 0;
         }
 
         auto arr = bitget::detail::extract_array(raw, "data");
@@ -489,16 +574,14 @@ public:
 
     static parsed_exec::kind classify_order_status(std::string_view status)
     {
-        if (status == "new" || status == "live" || status == "init")
+        if (status == "new")
             return parsed_exec::kind::ack;
         if (status == "partially_filled")
             return parsed_exec::kind::partial_fill;
         if (status == "filled")
             return parsed_exec::kind::full_fill;
-        if (status == "cancelled" || status == "canceled")
+        if (status == "cancelled")
             return parsed_exec::kind::canceled;
-        if (status == "rejected")
-            return parsed_exec::kind::rejected;
         return parsed_exec::kind::other;
     }
 
@@ -559,16 +642,6 @@ private:
             && std::isfinite(out);
     }
 
-    static double to_double(std::string_view sv)
-    {
-        if (sv.empty())
-            return 0.0;
-        double v = 0.0;
-        if (bitget::parse_double_sv(sv, v))
-            return v;
-        return 0.0;
-    }
-
     static std::string_view first_sv(std::string_view obj, std::string_view key)
     {
         auto s = bitget::extract_sv_string(obj, key);
@@ -577,37 +650,58 @@ private:
         return bitget::extract_sv_number(obj, key);
     }
 
-    static order_side map_side(std::string_view side)
+    static bool map_side(std::string_view side, order_side& out) noexcept
     {
         if (side == "sell" || side == "SELL" || side == "Sell")
-            return order_side::sell;
-        return order_side::buy;
+        {
+            out = order_side::sell;
+            return true;
+        }
+        if (side == "buy" || side == "BUY" || side == "Buy")
+        {
+            out = order_side::buy;
+            return true;
+        }
+        return false;
     }
 
-    static void extract_fee(std::string_view obj, parsed_exec& out)
+    static bool extract_fee(std::string_view obj, parsed_exec& out)
     {
         auto fee_arr = bitget::detail::extract_array(obj, "feeDetail");
         if (!fee_arr.empty())
         {
-            bool done = false;
+            std::size_t rows = 0;
+            bool valid = true;
             bitget::detail::for_each_array_object(
                 fee_arr, [&](std::string_view fee_obj) {
-                    if (done)
+                    ++rows;
+                    if (rows != 1)
+                    {
+                        valid = false;
                         return;
-                    out.commission = std::abs(to_double(first_sv(fee_obj, "fee")));
+                    }
+                    const auto fee = first_sv(fee_obj, "fee");
                     auto coin = bitget::extract_sv_string(fee_obj, "feeCoin");
+                    if (fee.empty() || coin.empty()
+                        || !parse_finite_double(fee, out.commission))
+                    {
+                        valid = false;
+                        return;
+                    }
                     out.commission_asset.assign(coin.data(), coin.size());
-                    done = true;
                 });
-            return;
+            return valid && rows == 1;
         }
         // Flat fee fields (fast-fill / REST-shaped).
         auto fee = first_sv(obj, "fee");
-        if (!fee.empty())
-            out.commission = std::abs(to_double(fee));
         auto coin = bitget::extract_sv_string(obj, "feeCoin");
-        if (!coin.empty())
-            out.commission_asset.assign(coin.data(), coin.size());
+        if (fee.empty() && coin.empty())
+            return true;
+        if (fee.empty() || coin.empty()
+            || !parse_finite_double(fee, out.commission))
+            return false;
+        out.commission_asset.assign(coin.data(), coin.size());
+        return true;
     }
 
     static std::chrono::system_clock::time_point

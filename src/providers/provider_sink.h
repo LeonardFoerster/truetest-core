@@ -32,9 +32,10 @@ inline void event_sink(const event& ev, IMarketSink& sink)
 			b.close = e.close;
 			b.volume = e.volume;
 			b.quantity_scale = e.quantity_scale;
-			if (auto tp = tt::date_parse::parse(e.date))
-				b.ts = *tp;
-			sink.on_bar(b);
+			const auto tp = tt::date_parse::parse(e.date);
+			if (!tp) return;
+			b.ts = *tp;
+			(void)sink.on_bar(b);
 		}
 		else if constexpr (std::is_same_v<E, tick>)
 		{

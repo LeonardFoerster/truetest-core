@@ -54,6 +54,12 @@ public:
         , minter_(std::move(minter))
     {}
 
+    bool is_operational() const noexcept override
+    {
+        return (rest_ || (del_ && get_ && post_))
+            && !symbol_.empty() && !base_asset_.empty();
+    }
+
     bool cancel_all_and_flatten(std::chrono::milliseconds deadline) override
     {
         if (!rest_ && (!del_ || !get_ || !post_))

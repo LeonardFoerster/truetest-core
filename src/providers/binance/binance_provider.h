@@ -77,6 +77,45 @@ public:
 
     bool has_data_feed() const override { return true; }
     bool has_execution() const override { return true; }
+    private_execution_capability
+    private_execution_capability_level() const noexcept override
+    {
+        return mode_ == engine_mode::live
+            ? private_execution_capability::exchange_writes
+            : private_execution_capability::no_private_writes;
+    }
+
+    bool prepare_write_safety() override
+    {
+        if (state_ != lifecycle::closed || mode_ != engine_mode::live
+            || api_key_.empty() || api_secret_.empty())
+            return false;
+
+        rest_ = std::make_shared<BinanceRestClient>(
+            api_key_, api_secret_, rest_host_for_stream(), endpoints_.rest_port);
+        rest_->set_per_call_timeout(std::chrono::seconds(3));
+        minter_ = std::make_shared<ClientOrderIdMinter>("tt", seed_);
+        auto assets = split_symbol(symbol_);
+        reconciler_ = std::make_shared<BinanceReconciler>(
+            rest_, upper(symbol_), assets.base, assets.quote,
+            endpoints_.is_testnet);
+        kill_switch_ = std::make_shared<BinanceKillSwitch>(
+            rest_, upper(symbol_), assets.base, minter_);
+        return reconciler_->is_operational() && kill_switch_->is_operational();
+    }
+
+    bool install_write_safety_readiness(
+        WriteSafetyReadiness readiness) override
+    {
+        if (state_ != lifecycle::closed || mode_ != engine_mode::live
+            || !readiness.permits_private_exchange_writes()
+            || !reconciler_ || !reconciler_->is_operational()
+            || !kill_switch_ || !kill_switch_->is_operational())
+            return false;
+        write_safety_readiness_ = readiness;
+        live_mutations_cancelled_->store(false, std::memory_order_release);
+        return true;
+    }
 
     lifecycle lifecycle_state() const override { return state_; }
 
@@ -105,6 +144,15 @@ public:
     bool open() override
     {
         state_ = lifecycle::opening;
+
+        if (mode_ == engine_mode::live
+            && !write_safety_readiness_.permits_private_exchange_writes())
+        {
+            std::cerr << "BinanceProvider: refusing live open - write safety "
+                         "was not validated.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
 
         if (mode_ == engine_mode::live &&
             (api_key_.empty() || api_secret_.empty()))
@@ -165,7 +213,16 @@ public:
 
             prepend.reserve(bars.size());
             for (const auto& b : bars)
-                prepend.push_back(encode_kline_json(b, interval));
+            {
+                auto encoded = binance::encode_backfill_kline_json(
+                    b, symbol_, interval);
+                if (!encoded)
+                {
+                    state_ = lifecycle::error;
+                    return false;
+                }
+                prepend.push_back(std::move(*encoded));
+            }
         }
 
         if (!prepend.empty())
@@ -183,10 +240,6 @@ public:
 
         if (mode_ == engine_mode::live && !api_key_.empty())
         {
-            rest_ = std::make_shared<BinanceRestClient>(
-                api_key_, api_secret_, rest_host, endpoints_.rest_port);
-            rest_->set_per_call_timeout(std::chrono::seconds(3));
-
             // Prime offset cache so the first signed req doesn't resync.
             // verify_clock_skew below is the authoritative gate.
             (void)rest_->resync_clock_now();
@@ -223,7 +276,6 @@ public:
 
             // Limiter tracks Binance spot's 50/10s order-rate rule -
             // NOT covered by the REST client's weight throttle.
-            minter_ = std::make_shared<ClientOrderIdMinter>("tt", seed_);
             if (endpoints_.is_testnet)
             {
                 auto kw = ClientOrderIdMinter::sql_keyword_in(minter_->prefix());
@@ -240,13 +292,6 @@ public:
             order_rate_limiter_ = std::make_shared<TokenBucketRateLimiter>(
                 /*capacity=*/50.0, /*refill_per_sec=*/5.0);
 
-            auto assets = split_symbol(symbol_);
-            reconciler_ = std::make_shared<BinanceReconciler>(
-                rest_, upper(symbol_), assets.base, assets.quote,
-                endpoints_.is_testnet);
-            kill_switch_ = std::make_shared<BinanceKillSwitch>(
-                rest_, upper(symbol_), assets.base, minter_);
-            live_mutations_cancelled_->store(false, std::memory_order_release);
             bracket_adapter_ = make_binance_oco_bracket_adapter(
                 rest_, live_mutations_cancelled_);
 
@@ -261,6 +306,7 @@ public:
             d.parser   = std::make_shared<BinanceUserDataParser>();
             d.order_rate_limiter = order_rate_limiter_;
             d.client_id_fn = [m = minter_](uint64_t) { return m->next(); };
+            d.write_safety_readiness = write_safety_readiness_;
 
             bridge_ = std::make_shared<ExecutionBridge>(std::move(d));
             if (!bridge_->open())
@@ -307,6 +353,7 @@ public:
 
     void quiesce_for_live_shutdown() override
     {
+        write_safety_readiness_ = {};
         live_mutations_cancelled_->store(true, std::memory_order_release);
         if (transport_) transport_->request_stop();
         if (bridge_)    bridge_->quiesce();
@@ -355,16 +402,58 @@ public:
         apply_halt_cb_to_transports();
     }
 
-    // Only with depth - otherwise the single-stream parser is cheaper.
+    // Every native JSON stream owns its parser capability, including
+    // trade-/kline-only transports without depth.
     bool supports_event_stream() const override
     {
-        return !depth_stream_.empty();
+        return true;
     }
 
     std::shared_ptr<IDataParser<provider::event>> get_event_parser() override
     {
-        if (depth_stream_.empty()) return nullptr;
         return std::make_shared<BinanceCombinedParser>();
+    }
+
+    std::optional<MarketDataFeed> get_market_data_feed() override
+    {
+        auto feed = IProvider::get_market_data_feed();
+        if (!feed)
+            return std::nullopt;
+
+        market_data_request request;
+        request.symbol = symbol_;
+        market_data_capabilities capabilities;
+        if (is_kline_stream())
+        {
+            request.channels.push_back(
+                {market_data_channel_kind::candles});
+            capabilities.candles = true;
+        }
+        else
+        {
+            request.channels.push_back(
+                {market_data_channel_kind::trades});
+            capabilities.trades = true;
+        }
+        if (!depth_stream_.empty())
+        {
+            const bool partial = depth_stream_.rfind("depth5", 0) == 0
+                || depth_stream_.rfind("depth10", 0) == 0
+                || depth_stream_.rfind("depth20", 0) == 0;
+            request.channels.push_back({partial
+                ? market_data_channel_kind::l2_snapshot
+                : market_data_channel_kind::l2_delta});
+            capabilities.l2_snapshots = partial;
+            capabilities.l2_deltas = !partial;
+            capabilities.max_l2_depth = partial
+                ? (depth_stream_.rfind("depth20", 0) == 0
+                    ? 20U
+                    : depth_stream_.rfind("depth10", 0) == 0 ? 10U : 5U)
+                : 0U;
+        }
+        feed->request = std::move(request);
+        feed->capabilities = capabilities;
+        return feed;
     }
 
     const std::string& symbol() const { return symbol_; }
@@ -424,11 +513,11 @@ private:
     std::shared_ptr<TradeTapeShadowAdapter> shadow_exec_;
     std::shared_ptr<ExecutionBridge> bridge_;
     std::shared_ptr<std::atomic<bool>> live_mutations_cancelled_ =
-        std::make_shared<std::atomic<bool>>(false);
+        std::make_shared<std::atomic<bool>>(true);
+    WriteSafetyReadiness write_safety_readiness_;
     std::shared_ptr<IExecutionAdapter> executor_;
 
-    // Live-only; null in shadow/backtest so accessors return nullptr
-    // and the engine installs its Noop defaults.
+    // Live-only; prepared without network I/O before provider open.
     std::shared_ptr<BinanceRestClient> rest_;
     std::shared_ptr<ClientOrderIdMinter> minter_;
     std::shared_ptr<TokenBucketRateLimiter> order_rate_limiter_;
@@ -497,22 +586,6 @@ private:
         return stream_type_.substr(pos + 1);
     }
 
-    static std::string encode_kline_json(const backfill_bar& b,
-                                         const std::string& interval)
-    {
-        char buf[1024];
-        std::snprintf(buf, sizeof(buf),
-            "{\"e\":\"kline\",\"E\":%lld,\"s\":\"\",\"k\":{"
-            "\"t\":%lld,\"T\":%lld,\"s\":\"\",\"i\":\"%s\","
-            "\"o\":\"%.8f\",\"c\":\"%.8f\",\"h\":\"%.8f\",\"l\":\"%.8f\","
-            "\"v\":\"%.8f\",\"x\":true}}",
-            static_cast<long long>(b.open_time),
-            static_cast<long long>(b.open_time),
-            static_cast<long long>(b.open_time),
-            interval.c_str(),
-            b.open, b.close, b.high, b.low, b.volume);
-        return std::string(buf);
-    }
 };
 
 #endif // HAS_BINANCE

@@ -17,6 +17,11 @@ public:
 
 	bool has_data_feed() const override { return true; }
 	bool has_execution() const override { return false; }
+	private_execution_capability
+	private_execution_capability_level() const noexcept override
+	{
+		return private_execution_capability::no_private_writes;
+	}
 
 	bool open() override
 	{

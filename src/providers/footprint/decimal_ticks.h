@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -82,13 +81,12 @@ inline std::optional<std::int64_t> pow10_checked(int n) noexcept
 }
 } // namespace detail
 
-// Converts an exact price to integer ticks via round(price / tick_size),
-// using only integer arithmetic - both operands are exact decimals, never
-// doubles. Returns nullopt on a non-positive tick size or overflow.
+// Converts an exact positive price to integer ticks. Off-grid values reject;
+// an "exact" enrichment must never conceal venue-tick rounding.
 inline std::optional<std::int64_t> decimal_to_ticks(
     const DecimalValue& price, const DecimalValue& tick_size) noexcept
 {
-    if (tick_size.mantissa <= 0)
+    if (price.mantissa <= 0 || tick_size.mantissa <= 0)
         return std::nullopt;
 
     const int common_scale = std::max(price.scale, tick_size.scale);
@@ -98,9 +96,9 @@ inline std::optional<std::int64_t> decimal_to_ticks(
         return std::nullopt;
 
     const std::int64_t kMax = std::numeric_limits<std::int64_t>::max();
-    if (price.mantissa != 0 && std::abs(price.mantissa) > kMax / *price_mult)
+    if (price.mantissa > kMax / *price_mult)
         return std::nullopt;
-    if (std::abs(tick_size.mantissa) > kMax / *tick_mult)
+    if (tick_size.mantissa > kMax / *tick_mult)
         return std::nullopt;
 
     const std::int64_t price_scaled = price.mantissa * (*price_mult);
@@ -108,22 +106,19 @@ inline std::optional<std::int64_t> decimal_to_ticks(
     if (tick_scaled <= 0)
         return std::nullopt;
 
-    // Round-to-nearest; price_scaled may be negative (nonsensical for a
-    // real trade price, but handled correctly rather than UB), tick_scaled
-    // is always positive here.
-    if (price_scaled >= 0)
-        return (price_scaled + tick_scaled / 2) / tick_scaled;
-    return -((-price_scaled + tick_scaled / 2) / tick_scaled);
+    if (price_scaled % tick_scaled != 0)
+        return std::nullopt;
+    return price_scaled / tick_scaled;
 }
 
 // Converts an exact quantity to integer base-qty atoms at `atom_decimals`
-// fractional digits (e.g. 8 for a satoshi-like base asset). Rounds to
-// nearest when atom_decimals is coarser than the source string's own
-// scale; exact (no rounding) when it is not.
+// fractional digits (e.g. 8 for a satoshi-like base asset). Values below or
+// between target atoms reject rather than being rounded into an economic
+// quantity.
 inline std::optional<std::int64_t> decimal_to_atoms(
     const DecimalValue& qty, int atom_decimals) noexcept
 {
-    if (atom_decimals < 0 || atom_decimals > 18)
+    if (qty.mantissa <= 0 || atom_decimals < 0 || atom_decimals > 18)
         return std::nullopt;
 
     const int shift = atom_decimals - qty.scale;
@@ -134,7 +129,7 @@ inline std::optional<std::int64_t> decimal_to_atoms(
         const auto mult = detail::pow10_checked(shift);
         if (!mult)
             return std::nullopt;
-        if (qty.mantissa != 0 && std::abs(qty.mantissa) > kMax / *mult)
+        if (qty.mantissa > kMax / *mult)
             return std::nullopt;
         return qty.mantissa * (*mult);
     }
@@ -142,9 +137,9 @@ inline std::optional<std::int64_t> decimal_to_atoms(
     const auto div = detail::pow10_checked(-shift);
     if (!div || *div == 0)
         return std::nullopt;
-    const std::int64_t half = *div / 2;
-    return qty.mantissa >= 0 ? (qty.mantissa + half) / (*div)
-                             : -((-qty.mantissa + half) / (*div));
+    if (qty.mantissa % *div != 0)
+        return std::nullopt;
+    return qty.mantissa / *div;
 }
 
 } // namespace truetest::footprint

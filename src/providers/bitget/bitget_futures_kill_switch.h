@@ -59,6 +59,11 @@ public:
         , get_(std::move(get))
     {}
 
+    bool is_operational() const noexcept override
+    {
+        return post_ && get_ && !category_.empty() && !symbol_.empty();
+    }
+
     bool cancel_all_and_flatten(std::chrono::milliseconds deadline) override
     {
         if (!post_)

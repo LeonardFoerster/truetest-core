@@ -313,6 +313,47 @@ public:
 
     bool has_data_feed() const override { return true; }
     bool has_execution() const override { return true; }
+    private_execution_capability
+    private_execution_capability_level() const noexcept override
+    {
+        return mode_ == engine_mode::live
+            ? private_execution_capability::exchange_writes
+            : private_execution_capability::no_private_writes;
+    }
+
+    bool prepare_write_safety() override
+    {
+        if (state_ != lifecycle::closed || mode_ != engine_mode::live
+            || api_key_.empty()
+            || api_secret_.empty() || api_passphrase_.empty())
+            return false;
+
+        rest_ = std::make_shared<BitgetRestClient>(
+            api_key_, api_secret_, api_passphrase_,
+            endpoints_.rest_host, endpoints_.rest_port,
+            "/api/v2/public/time",
+            /*paptrading=*/endpoints_.is_demo);
+        rest_->set_per_call_timeout(std::chrono::milliseconds(3000));
+        minter_ = std::make_shared<bitget::ShortClientOidMinter>(seed_);
+        reconciler_ = std::make_shared<BitgetFuturesReconciler>(
+            rest_, upper(symbol_), category_, endpoints_.is_demo);
+        kill_switch_ = make_bitget_futures_kill_switch(
+            rest_, category_, upper(symbol_));
+        return reconciler_->is_operational() && kill_switch_->is_operational();
+    }
+
+    bool install_write_safety_readiness(
+        WriteSafetyReadiness readiness) override
+    {
+        if (state_ != lifecycle::closed || mode_ != engine_mode::live
+            || !readiness.permits_private_exchange_writes()
+            || !reconciler_ || !reconciler_->is_operational()
+            || !kill_switch_ || !kill_switch_->is_operational())
+            return false;
+        write_safety_readiness_ = readiness;
+        live_mutations_cancelled_->store(false, std::memory_order_release);
+        return true;
+    }
 
     lifecycle lifecycle_state() const override { return state_; }
 
@@ -339,6 +380,15 @@ public:
     bool open() override
     {
         state_ = lifecycle::opening;
+
+        if (mode_ == engine_mode::live
+            && !write_safety_readiness_.permits_private_exchange_writes())
+        {
+            std::cerr << "BitgetFuturesProvider: refusing live open - write "
+                         "safety was not validated.\n";
+            state_ = lifecycle::error;
+            return false;
+        }
 
         if (mode_ == engine_mode::live &&
             (api_key_.empty() || api_secret_.empty() || api_passphrase_.empty()))
@@ -530,6 +580,7 @@ public:
 
     void quiesce_for_live_shutdown() override
     {
+        write_safety_readiness_ = {};
         quiesce_futures_live_resources(
             live_mutations_cancelled_, dms_, bridge_, bitget_private_ws_,
             transport_);
@@ -628,14 +679,48 @@ public:
 
     bool supports_event_stream() const override
     {
-        return !depth_stream_.empty();
+        return true;
     }
 
     // BitgetCombinedParser::parse_records emits every publicTrade data[] tick.
     std::shared_ptr<IDataParser<provider::event>> get_event_parser() override
     {
-        if (depth_stream_.empty()) return nullptr;
         return std::make_shared<BitgetCombinedParser>();
+    }
+
+    std::optional<MarketDataFeed> get_market_data_feed() override
+    {
+        auto feed = IProvider::get_market_data_feed();
+        if (!feed)
+            return std::nullopt;
+
+        market_data_request request;
+        request.symbol = symbol_;
+        market_data_capabilities capabilities;
+        if (is_kline_stream())
+        {
+            request.channels.push_back(
+                {market_data_channel_kind::candles});
+            capabilities.candles = true;
+        }
+        else
+        {
+            request.channels.push_back(
+                {market_data_channel_kind::trades});
+            capabilities.trades = true;
+        }
+        if (!depth_stream_.empty())
+        {
+            request.channels.push_back(
+                {market_data_channel_kind::l2_snapshot});
+            capabilities.l2_snapshots = true;
+            capabilities.max_l2_depth = depth_stream_ == "books50"
+                ? 50U
+                : depth_stream_ == "books1" ? 1U : 5U;
+        }
+        feed->request = std::move(request);
+        feed->capabilities = capabilities;
+        return feed;
     }
 
     const std::string& symbol() const { return symbol_; }
@@ -676,7 +761,8 @@ private:
     std::shared_ptr<TradeTapeShadowAdapter> shadow_exec_;
     std::shared_ptr<ExecutionBridge> bridge_;
     std::shared_ptr<std::atomic<bool>> live_mutations_cancelled_ =
-        std::make_shared<std::atomic<bool>>(false);
+        std::make_shared<std::atomic<bool>>(true);
+    WriteSafetyReadiness write_safety_readiness_;
     std::shared_ptr<IExecutionAdapter> executor_;
 
     // Live-only
@@ -722,16 +808,6 @@ private:
                          "api_secret and api_passphrase are required\n";
             return false;
         }
-
-        rest_ = std::make_shared<BitgetRestClient>(
-            api_key_, api_secret_, api_passphrase_,
-            endpoints_.rest_host, endpoints_.rest_port,
-            "/api/v2/public/time",
-            /*paptrading=*/endpoints_.is_demo);
-
-        // Bound shared REST I/O so DMS/kill cannot stall forever behind one hung call.
-        // Kill-switch may tighten further per-call; this is the live default floor.
-        rest_->set_per_call_timeout(std::chrono::milliseconds(3000));
 
         if (!rest_->resync_clock_now())
         {
@@ -851,19 +927,10 @@ private:
             }
         }
 
-        minter_ = std::make_shared<bitget::ShortClientOidMinter>(seed_);
-
         // Conservative place-order rate: capacity 10, refill 5/s (~5–10/s).
         order_rate_limiter_ = std::make_shared<TokenBucketRateLimiter>(
             /*capacity=*/10.0, /*refill_per_sec=*/5.0);
 
-        reconciler_ = std::make_shared<BitgetFuturesReconciler>(
-            rest_, upper(symbol_), category_, endpoints_.is_demo);
-
-        kill_switch_ = make_bitget_futures_kill_switch(
-            rest_, category_, upper(symbol_));
-
-        live_mutations_cancelled_->store(false, std::memory_order_release);
         bracket_adapter_ = make_bitget_futures_bracket_adapter(
             rest_, category_, live_mutations_cancelled_, upper(symbol_));
 
@@ -893,6 +960,7 @@ private:
         d.parser = std::make_shared<BitgetFuturesUserDataParser>();
         d.order_rate_limiter = order_rate_limiter_;
         d.client_id_fn = [m = minter_](uint64_t) { return m->next(); };
+        d.write_safety_readiness = write_safety_readiness_;
 
         const auto funding_symbol = upper(symbol_);
         d.funding_update_handler =
