@@ -3,6 +3,7 @@
 #include "execution_adapter.h"
 #include "queue_aware_book_adapter.h"
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -23,6 +24,16 @@ public:
         , shared_book_(std::move(shared_book))
         , aggressive_limits_(std::move(aggressive_limits))
     {
+        bind_fill_id_sequence(fill_ids_);
+    }
+
+    void set_fill_id_sequence(
+        std::shared_ptr<FillIdSequence> sequence) override
+    {
+        if (!sequence)
+            return;
+        fill_ids_ = std::move(sequence);
+        bind_fill_id_sequence(fill_ids_);
     }
 
     void set_mid_price(double price) override
@@ -72,10 +83,25 @@ public:
     bool poll_fills(std::vector<fill_event>& out) override
     {
         bool any = false;
-        if (local_ && local_->poll_fills(out)) any = true;
-        if (has_distinct_aggressive_limits()
-            && aggressive_limits_->poll_fills(out)) any = true;
-        if (queue_ && queue_->poll_fills(out)) any = true;
+        const auto first_fill = out.size();
+        const auto drain = [&](IExecutionAdapter* child)
+        {
+            if (!child)
+                return;
+            if (!child->poll_fills(out))
+                return;
+            any = true;
+        };
+        drain(local_.get());
+        if (has_distinct_aggressive_limits())
+            drain(aggressive_limits_.get());
+        drain(queue_.get());
+        std::sort(out.begin() + static_cast<std::ptrdiff_t>(first_fill),
+                  out.end(),
+                  [](const fill_event& lhs, const fill_event& rhs)
+                  {
+                      return lhs.get_fill_id() < rhs.get_fill_id();
+                  });
         return any;
     }
 
@@ -283,6 +309,17 @@ public:
     QueueAwareBookAdapter* queue() const { return queue_.get(); }
 
 private:
+    void bind_fill_id_sequence(
+        const std::shared_ptr<FillIdSequence>& sequence)
+    {
+        if (local_)
+            local_->set_fill_id_sequence(sequence);
+        if (queue_)
+            queue_->set_fill_id_sequence(sequence);
+        if (has_distinct_aggressive_limits())
+            aggressive_limits_->set_fill_id_sequence(sequence);
+    }
+
     void migrate_aggressive_residual(const order_event& original)
     {
         if (!aggressive_limits_ || !shared_book_ || !queue_
@@ -332,4 +369,6 @@ private:
     std::shared_ptr<QueueAwareBookAdapter> queue_;
     std::shared_ptr<orderbook> shared_book_;
     std::shared_ptr<LocalBookAdapter> aggressive_limits_;
+    std::shared_ptr<FillIdSequence> fill_ids_ =
+        std::make_shared<FillIdSequence>();
 };

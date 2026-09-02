@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cassert>
 
 portfolio::portfolio() : initial_balance_(10000.0), cash_(10000.0) {}
 
@@ -170,9 +171,10 @@ void portfolio::apply_lot_fill(const fill_event& fill, std::uint64_t opener_orde
     // Clamp the close leg to the referenced lot. Any overshoot is real
     // opposite-side exposure and therefore becomes a new lot, rather than
     // driving qty_open negative and silently discarding the residual.
-    const double close_qty = std::min(fill_qty,
-                                      std::max(0.0, old_opener->second.qty_open));
-    old_opener->second.qty_open -= close_qty;
+    // BF-17: Defensive clamp ensures open quantity never goes negative.
+    const double close_qty = std::clamp(fill_qty, 0.0,
+                                        std::max(0.0, old_opener->second.qty_open));
+    old_opener->second.qty_open = std::max(0.0, old_opener->second.qty_open - close_qty);
     if (old_opener->second.qty_open <= eps)
         lots_.erase(old_opener);
 
@@ -201,7 +203,18 @@ bool portfolio::position_open(const std::string& symbol) const
     return it != positions_.end() && std::abs(it->second.qty) > 1e-12;
 }
 
+void portfolio::observe_marked_equity(double marked_equity)
+{
+    // A missing or unusable mark yields NaN upstream; that is a data-quality
+    // condition, not a bankruptcy, and must never latch one.
+    if (bankrupt_ || !std::isfinite(marked_equity)) return;
+    if (marked_equity > 0.0) return;
+    bankrupt_ = true;
+    bankrupt_equity_ = marked_equity;
+}
+
 double portfolio::get_equity(double last_price) const
+
 {
     double equity = cash_;
     for (const auto& [_, pos] : positions_)
@@ -271,4 +284,6 @@ void portfolio::reset()
     total_trades_ = 0;
     total_fills_ = 0;
     total_funding_pnl_ = 0.0;
+    bankrupt_ = false;
+    bankrupt_equity_ = 0.0;
 }

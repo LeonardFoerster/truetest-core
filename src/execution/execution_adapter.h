@@ -7,6 +7,7 @@
 #include "impact_model.h"
 #include "latency_model.h"
 #include "async_support.h"
+#include "reproducibility/deterministic_rng.h"
 
 #include <chrono>
 #include <cmath>
@@ -14,10 +15,31 @@
 #include <limits>
 #include <memory>
 #include <optional>
-#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+// One causal identity namespace shared by every child of a composite paper
+// adapter. Children stamp at fill creation time; the composite can then merge
+// independently buffered fills without making identity or event order depend
+// on how often the engine polls. Engine-thread ownership makes this a plain
+// counter rather than an atomic hot-path contention point.
+class FillIdSequence final
+{
+public:
+    [[nodiscard]] std::uint64_t next() noexcept
+    {
+        if (next_ == 0)
+            return 0; // exhausted: canonical ingress rejects instead of wrap
+        const auto result = next_;
+        next_ = next_ == std::numeric_limits<std::uint64_t>::max()
+            ? 0 : next_ + 1;
+        return result;
+    }
+
+private:
+    std::uint64_t next_{1};
+};
 
 class IExecutionAdapter
 {
@@ -25,6 +47,24 @@ public:
     virtual ~IExecutionAdapter() = default;
     virtual void submit_order(const order_event& o) = 0;
     virtual bool poll_fills(std::vector<fill_event>& out) = 0;
+
+    // Live execution ingress may not destructively drain a batch before the
+    // engine has committed each economic fill. Transactional adapters expose
+    // a non-destructive front item and remove it only after explicit ACK from
+    // the canonical FillProcessor. Legacy simulation adapters retain the
+    // bulk poll contract; live mode refuses those at the canonical boundary.
+    virtual bool supports_transactional_fill_delivery() const noexcept
+    {
+        return false;
+    }
+    virtual bool peek_fill(fill_event& /*out*/) { return false; }
+    virtual bool acknowledge_fill(std::uint64_t /*fill_id*/) { return false; }
+
+    // Cold-path composition hook. Leaf adapters that synthesize fills replace
+    // their private sequence with the composite-owned causal namespace.
+    virtual void set_fill_id_sequence(
+        std::shared_ptr<FillIdSequence> /*sequence*/) {}
+
     virtual bool cancel_order(uint64_t order_id) { (void)order_id; return false; }
     virtual bool modify_order(uint64_t order_id, double new_price, double new_qty)
     {
@@ -155,7 +195,7 @@ public:
     LocalBookAdapter(std::shared_ptr<orderbook> ob,
                      std::shared_ptr<IFeeModel> fee_model,
                      std::shared_ptr<IFillModel> fill_model,
-                     unsigned rng_seed = 42,
+                     std::uint64_t rng_seed = 42,
                      double market_aggression = 1.1,
                      double qty_scale = 1e8,
                      std::shared_ptr<ILatencyModel> latency_model = nullptr,
@@ -165,7 +205,6 @@ public:
         , fee_model_(std::move(fee_model))
         , fill_model_(std::move(fill_model))
         , fill_rng_(rng_seed)
-        , fill_dist_(0.0, 1.0)
         , market_aggression_(market_aggression)
         , qty_scale_(qty_scale)
         , latency_model_(std::move(latency_model))
@@ -178,6 +217,12 @@ public:
     LocalBookAdapter& operator=(LocalBookAdapter&&) = delete;
 
     void set_mid_price(double price) override { mid_price_ = price; }
+    void set_fill_id_sequence(
+        std::shared_ptr<FillIdSequence> sequence) override
+    {
+        if (sequence)
+            fill_ids_ = std::move(sequence);
+    }
     // Symbol carries real L2 depth — enables the walked-book VWAP
     // reference for market orders (walked_book_impact).
     void set_l2_seeded(bool seeded) override { l2_seeded_ = seeded; }
@@ -216,11 +261,12 @@ private:
         if (o.get_order_type() == order_type::stop || o.get_order_type() == order_type::stop_limit)
             return;
 
+        double fill_probability = 1.0;
         if (fill_model_ && o.get_order_type() == order_type::limit && mid_price_ > 0.0)
         {
             double distance = std::abs(o.get_price() - mid_price_) / mid_price_;
-            double prob = fill_model_->get_fill_probability(o.get_side(), distance);
-            if (fill_dist_(fill_rng_) > prob)
+            fill_probability = fill_model_->get_fill_probability(o.get_side(), distance);
+            if (fill_rng_.uniform_unit() > fill_probability)
                 return;
         }
 
@@ -234,9 +280,12 @@ private:
         side book_side = (o.get_side() == order_side::buy) ? side::buy : side::sell;
 
         Price book_price;
+        double raw_reference_price = o.get_price();
+        double reference_price = o.get_price();
         if (o.get_order_type() == order_type::market)
         {
             double ref_price = (mid_price_ > 0.0) ? mid_price_ : o.get_price();
+            raw_reference_price = ref_price;
             bool walked_used = false;
 
             // Walked-book impact: when L2 depth is real, the actual VWAP
@@ -270,6 +319,8 @@ private:
                                                                ref_price);
             }
 
+            reference_price = ref_price;
+
             book_price = (book_side == side::buy) ? Price::from_double(ref_price * market_aggression_)
                                                   : Price::from_double(ref_price * (2.0 - market_aggression_));
         }
@@ -290,6 +341,23 @@ private:
         quantity book_quantity = static_cast<quantity>(std::round(match_qty * qty_scale_));
         if (book_quantity <= 0)
             return;
+
+        fill_provenance provenance;
+        provenance.model = l2_seeded_
+            ? fill_execution_model::l2_local_book
+            : fill_execution_model::synthetic_local_liquidity;
+        provenance.reason = fill_execution_reason::aggressive_ladder_match;
+        provenance.exploratory = true;
+        provenance.intended_price = o.get_price();
+        provenance.reference_price = reference_price;
+        provenance.reference_timestamp = o.get_earliest_eligible_ts();
+        provenance.fill_probability = fill_probability;
+        provenance.modeled_impact_bps = signed_bps(
+            o.get_side(), raw_reference_price, reference_price);
+        const auto decision_ts = o.get_decision_ts();
+        if (provenance.reference_timestamp > decision_ts)
+            provenance.modeled_latency = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                provenance.reference_timestamp - decision_ts);
 
         // Prefer the orderbook object pool (prewarmed + forbid_runtime_grow)
         // over a freestanding heap allocation on every paper submit.
@@ -318,7 +386,18 @@ private:
             book_order->get_remaining_quantity() > 0)
         {
             track_resting(o.get_order_id(), book_order,
-                          o.get_symbol(), o.get_side());
+                          o.get_symbol(), o.get_side(), provenance);
+        }
+
+        double remaining_after_leg =
+            static_cast<double>(book_order->get_remaining_quantity()) / qty_scale_;
+        for (const auto& trade : resulting_trades)
+        {
+            const bool we_are_bid = (trade.get_bid_trade().orderId_ == o.get_order_id());
+            const auto& our_trade_info = we_are_bid ? trade.get_bid_trade() : trade.get_ask_trade();
+            if (our_trade_info.orderId_ == o.get_order_id())
+                remaining_after_leg +=
+                    static_cast<double>(our_trade_info.quantity_) / qty_scale_;
         }
 
         for (const auto& trade : resulting_trades)
@@ -331,7 +410,8 @@ private:
             // order (strategy-vs-strategy crossing) — surface its maker
             // fill too, not just the aggressor's.
             if (counter_trade.orderId_ != o.get_order_id())
-                record_resting_fill(counter_trade, o.get_earliest_eligible_ts());
+                record_resting_fill(counter_trade, o.get_earliest_eligible_ts(),
+                                    fill_execution_reason::aggressive_ladder_match);
 
             if (our_trade_info.orderId_ == o.get_order_id())
             {
@@ -351,7 +431,12 @@ private:
                     commission = fee_model_->compute_commission(o.get_side(), fill_qty, fill_price, is_taker);
                 }
 
-                double remaining = static_cast<double>(book_order->get_remaining_quantity()) / qty_scale_;
+                remaining_after_leg -= fill_qty;
+                const double remaining = std::max(0.0, remaining_after_leg);
+
+                auto fill_provenance = provenance;
+                fill_provenance.modeled_spread_bps = signed_bps(
+                    o.get_side(), reference_price, fill_price);
 
                 pending_fills_.emplace_back(
                     o.get_earliest_eligible_ts(),
@@ -362,8 +447,10 @@ private:
                     fill_price,
                     commission,
                     remaining,
-                    next_fill_id_++
+                    fill_ids_->next()
                 );
+                pending_fills_.back().set_source(fill_source::simulated);
+                pending_fills_.back().set_provenance(fill_provenance);
                 pending_fills_.back().set_recv_ns(o.get_recv_ns());
                 if (o.get_recv_ns() > 0)
                 {
@@ -513,8 +600,10 @@ public:
     {
         for (const auto& tr : trs)
         {
-            record_resting_fill(tr.get_bid_trade(), ts);
-            record_resting_fill(tr.get_ask_trade(), ts);
+            record_resting_fill(tr.get_bid_trade(), ts,
+                                fill_execution_reason::market_maker_requote);
+            record_resting_fill(tr.get_ask_trade(), ts,
+                                fill_execution_reason::market_maker_requote);
         }
     }
 
@@ -601,10 +690,17 @@ public:
                     current->side, fill_qty, px, /*is_taker=*/false);
 
             const double rem_after = remaining - fill_qty;
+            auto provenance = current->provenance;
+            provenance.reason = fill_execution_reason::bar_range_sweep;
+            provenance.reference_timestamp = ts;
+            provenance.reference_price = px;
+            provenance.modeled_spread_bps = 0.0;
             pending_fills_.emplace_back(
                 ts, current->symbol, order_id, current->side,
                 fill_qty, px, commission,
-                rem_after, next_fill_id_++);
+                rem_after, fill_ids_->next());
+            pending_fills_.back().set_source(fill_source::simulated);
+            pending_fills_.back().set_provenance(provenance);
             any = true;
             volume_left -= fill_qty;
             last_sweep_fill_qty_ += fill_qty;
@@ -637,16 +733,26 @@ public:
     double last_sweep_fill_qty() const override { return last_sweep_fill_qty_; }
 
 private:
+    static double signed_bps(order_side side,
+                             double reference_price,
+                             double observed_price) noexcept
+    {
+        if (!(reference_price > 0.0) || !(observed_price > 0.0))
+            return 0.0;
+        const double raw_bps = (observed_price / reference_price - 1.0) * 1.0e4;
+        return side == order_side::buy ? raw_bps : -raw_bps;
+    }
+
     std::shared_ptr<orderbook> ob_;
     std::shared_ptr<IFeeModel> fee_model_;
     std::shared_ptr<IFillModel> fill_model_;
     std::vector<fill_event> pending_fills_;
-    std::mt19937 fill_rng_;
-    std::uniform_real_distribution<double> fill_dist_;
+    truetest::reproducibility::DeterministicRng fill_rng_;
     double mid_price_ = 0.0;
     double market_aggression_ = 1.1;
     double qty_scale_ = 1e8;
-    uint64_t next_fill_id_ = 1;
+    std::shared_ptr<FillIdSequence> fill_ids_ =
+        std::make_shared<FillIdSequence>();
     bool debug_fills_ = false;
     int debug_fills_left_ = 0;
     double last_sweep_fill_qty_ = 0.0;
@@ -682,6 +788,7 @@ private:
         std::string symbol;
         order_side side = order_side::buy;
         uint64_t order_id = 0;
+        fill_provenance provenance{};
         resting_info* fifo_prev = nullptr;
         resting_info* fifo_next = nullptr;
     };
@@ -725,10 +832,11 @@ private:
     void track_resting(uint64_t order_id,
                        order_pointer book_order,
                        const std::string& symbol,
-                       order_side side)
+                       order_side side,
+                       const fill_provenance& provenance)
     {
         resting_info replacement{
-            std::move(book_order), symbol, side, order_id, nullptr, nullptr};
+            std::move(book_order), symbol, side, order_id, provenance, nullptr, nullptr};
         auto [it, inserted] = resting_.try_emplace(
             order_id, std::move(replacement));
         if (inserted)
@@ -740,6 +848,7 @@ private:
         it->second.book_order = std::move(replacement.book_order);
         it->second.symbol = std::move(replacement.symbol);
         it->second.side = side;
+        it->second.provenance = provenance;
         move_resting_to_back(&it->second);
     }
 
@@ -757,7 +866,8 @@ private:
     }
 
     void record_resting_fill(const trade_info& ti,
-                             std::chrono::system_clock::time_point ts)
+                             std::chrono::system_clock::time_point ts,
+                             fill_execution_reason reason)
     {
         auto it = resting_.find(ti.orderId_);
         if (it == resting_.end())
@@ -783,7 +893,14 @@ private:
             fill_price,
             commission,
             remaining,
-            next_fill_id_++);
+            fill_ids_->next());
+        auto provenance = it->second.provenance;
+        provenance.reason = reason;
+        provenance.reference_timestamp = ts;
+        provenance.reference_price = fill_price;
+        provenance.modeled_spread_bps = 0.0;
+        pending_fills_.back().set_source(fill_source::simulated);
+        pending_fills_.back().set_provenance(provenance);
 
         if (it->second.book_order->is_filled())
             erase_resting(it);

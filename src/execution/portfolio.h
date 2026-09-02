@@ -71,6 +71,22 @@ public:
                       double fallback_price = 0.0) const;
     double get_total_funding_pnl() const { return total_funding_pnl_; }
 
+    // F-05a — bankruptcy latch. A backtest is allowed to run its account to
+    // and past zero: there is no margin call, liquidation or bankruptcy stop
+    // anywhere in the engine, so every metric printed after equity crosses
+    // zero describes a position that could not exist. This does NOT
+    // auto-liquidate (that is a behaviour change owned by F-05b); it makes
+    // the condition observable and queryable so the engine and the report
+    // can refuse to treat the run as valid.
+    //
+    // Driven by the engine's authoritative marked-equity pass, which runs on
+    // the engine thread before every strategy callback. Latched: once an
+    // account has been wiped out, a later favourable mark does not undo it.
+    void observe_marked_equity(double marked_equity);
+    bool is_bankrupt() const noexcept { return bankrupt_; }
+    double bankrupt_equity() const noexcept { return bankrupt_equity_; }
+
+
     const std::unordered_map<std::string, position>& get_positions() const { return positions_; }
 
     const std::unordered_map<std::uint64_t, lot>& get_lots() const { return lots_; }
@@ -100,6 +116,9 @@ private:
     std::size_t total_trades_ = 0;
     std::size_t total_fills_ = 0;
     double total_funding_pnl_ = 0.0;   // separate accumulator for funding P&L
+    bool   bankrupt_ = false;          // F-05a
+    double bankrupt_equity_ = 0.0;     // the equity that first breached zero
+
 
     void apply_netted_fill(const fill_event& fill);
     void apply_lot_fill(const fill_event& fill, std::uint64_t opener_order_id,

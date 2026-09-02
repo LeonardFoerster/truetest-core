@@ -3,6 +3,7 @@
 #include "../core/event.h"
 
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <optional>
 #include <string>
@@ -53,6 +54,28 @@ struct synth_meta
     std::string   strategy_name;
 };
 
+enum class venue_order_transition : std::uint8_t
+{
+    acknowledged,
+    canceled,
+    rejected,
+    expired,
+    amended,
+    cancel_rejected,
+    amend_rejected,
+};
+
+// Authoritative user-data lifecycle evidence, already correlated to an
+// engine order by the venue bridge. The fixed representation is suitable for
+// the provider-owned SPSC handoff; the engine can recover symbol/side from its
+// canonical ledger and must reject stale or impossible transitions there.
+struct venue_lifecycle_event
+{
+    std::uint64_t engine_order_id = 0;
+    venue_order_transition transition = venue_order_transition::acknowledged;
+    std::chrono::system_clock::time_point exchange_ts{};
+};
+
 using unknown_fill_handler =
     std::function<std::optional<synth_result>(const parsed_exec&,
                                               std::uint64_t fill_id)>;
@@ -87,4 +110,8 @@ public:
     // Engine should call this after submit_order (and periodically).
     // Mirrors the poll_fills pattern used for incoming fills.
     virtual bool poll_submit_results(std::vector<submit_result>& out) = 0;
+
+    // Single-consumer, non-allocating authoritative lifecycle handoff. A
+    // false result means no event is currently available.
+    virtual bool poll_lifecycle_event(venue_lifecycle_event& out) noexcept = 0;
 };

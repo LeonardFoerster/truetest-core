@@ -42,6 +42,12 @@ public:
         , latency_model_(std::move(latency_model)) {}
 
     void set_mid_price(double price) override { mid_price_ = price; }
+    void set_fill_id_sequence(
+        std::shared_ptr<FillIdSequence> sequence) override
+    {
+        if (sequence)
+            fill_ids_ = std::move(sequence);
+    }
 
     void submit_order(const order_event& o) override
     {
@@ -76,6 +82,7 @@ public:
             po.size_ahead = std::numeric_limits<double>::infinity();
         }
         po.submit_ts = o.get_earliest_eligible_ts();
+        po.decision_ts = o.get_decision_ts();
         po.strategy_name = o.get_strategy_name();
         po.opener_order_id = o.get_opener_order_id();
         po.recv_ns = o.get_recv_ns();
@@ -303,7 +310,11 @@ public:
                 // order_status::partially_filled / open-order rows correct.
                 const double rem = std::max(0.0, po.qty_remaining - fill_qty);
                 fill_event f(trade_ts, po.symbol, po.order_id,
-                             po.side, fill_qty, po.price, commission, rem);
+                             po.side, fill_qty, po.price, commission, rem,
+                             fill_ids_->next());
+                f.set_source(fill_source::simulated);
+                f.set_provenance(make_provenance(
+                    po, trade_ts, fill_execution_reason::recorded_trade_print));
                 if (!po.strategy_name.empty()) f.set_strategy_name(po.strategy_name);
                 if (po.opener_order_id != 0) f.set_opener_order_id(po.opener_order_id);
                 f.set_recv_ns(po.recv_ns);
@@ -409,7 +420,11 @@ public:
             const double rem = po.qty_remaining - fill_qty;
 
             fill_event f(ts, po.symbol, po.order_id,
-                         po.side, fill_qty, po.price, commission, rem);
+                         po.side, fill_qty, po.price, commission, rem,
+                         fill_ids_->next());
+            f.set_source(fill_source::simulated);
+            f.set_provenance(make_provenance(
+                po, ts, fill_execution_reason::bar_range_sweep));
             if (!po.strategy_name.empty()) f.set_strategy_name(po.strategy_name);
             if (po.opener_order_id != 0) f.set_opener_order_id(po.opener_order_id);
             f.set_recv_ns(po.recv_ns);
@@ -476,6 +491,7 @@ private:
         double        qty_remaining{0.0};
         double        size_ahead{0.0};
         std::chrono::system_clock::time_point submit_ts{};
+        std::chrono::system_clock::time_point decision_ts{};
         // Per-lot attribution captured at submit time (Phase 1 deepdive).
         std::string   strategy_name;
         std::uint64_t opener_order_id = 0;
@@ -492,6 +508,24 @@ private:
     static level_key make_key(const std::string& sym, order_side s, double price)
     {
         return {sym, s, static_cast<std::int64_t>(std::llround(price * 1e8))};
+    }
+
+    static fill_provenance make_provenance(
+        const paper_order& po,
+        std::chrono::system_clock::time_point reference_timestamp,
+        fill_execution_reason reason)
+    {
+        fill_provenance provenance;
+        provenance.model = fill_execution_model::queue_aware_paper;
+        provenance.reason = reason;
+        provenance.exploratory = true;
+        provenance.intended_price = po.price;
+        provenance.reference_price = po.price;
+        provenance.reference_timestamp = reference_timestamp;
+        if (reference_timestamp > po.decision_ts)
+            provenance.modeled_latency = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                reference_timestamp - po.decision_ts);
+        return provenance;
     }
 
     bool try_emplace_fill(fill_event f)
@@ -513,6 +547,8 @@ private:
     std::size_t max_pending_fills_{4096};
     std::size_t dropped_fills_for_cap_{0};
     double last_sweep_fill_qty_{0.0};
+    std::shared_ptr<FillIdSequence> fill_ids_ =
+        std::make_shared<FillIdSequence>();
 
     std::unordered_map<std::uint64_t, paper_order> orders_;
     std::map<level_key, level_state>               levels_;

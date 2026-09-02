@@ -76,6 +76,10 @@ struct parsed_exec
     double last_fill_qty   = 0.0;
     double last_fill_price = 0.0;
     double cumulative_qty  = 0.0;
+    bool   has_cumulative_qty = false;
+    // Native venue execution/fill identifier.  This is deliberately a
+    // string: supported venues do not promise a numeric-only domain.
+    std::string venue_execution_id;
     double commission      = 0.0;
     std::string commission_asset;
 

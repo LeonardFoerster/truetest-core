@@ -48,6 +48,7 @@ public:
         oo.type          = o.get_order_type();
         oo.limit_price   = o.get_price();
         oo.qty_remaining = o.get_quantity();
+        oo.decision_ts   = o.get_decision_ts();
         auto arrival_ts  = o.get_earliest_eligible_ts();
         if (latency_model_)
             arrival_ts += latency_model_->get_order_latency();
@@ -231,6 +232,19 @@ public:
             if (!oo.strategy_name.empty()) fe.set_strategy_name(oo.strategy_name);
             if (oo.opener_order_id != 0) fe.set_opener_order_id(oo.opener_order_id);
             fe.set_source(fill_source::exchange);
+            fill_provenance provenance;
+            provenance.model = fill_execution_model::recorded_trade_tape;
+            provenance.reason = fill_execution_reason::recorded_trade_print;
+            // A tape cross is observational, but this adapter has no full
+            // historical queue reconstruction; retain the exploratory label.
+            provenance.exploratory = true;
+            provenance.intended_price = oo.limit_price;
+            provenance.reference_price = trade_price;
+            provenance.reference_timestamp = trade_ts;
+            if (trade_ts > oo.decision_ts)
+                provenance.modeled_latency = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    trade_ts - oo.decision_ts);
+            fe.set_provenance(provenance);
             pending_fills_.push_back(std::move(fe));
 
             if (oo.qty_remaining <= 1e-12)
@@ -317,6 +331,7 @@ private:
         double       queue_consumed = 0.0;
         bool         counted_drain  = false;
         std::chrono::system_clock::time_point submit_ts;
+        std::chrono::system_clock::time_point decision_ts;
         // Per-lot attribution (Phase 1 deepdive consolidation).
         std::string   strategy_name;
         std::uint64_t opener_order_id = 0;

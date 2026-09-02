@@ -1,6 +1,7 @@
 #pragma once
 
 #include "execution_adapter.h"
+#include "live_safety.h"
 #include "order_transport.h"
 #include "fill_transport.h"
 #include "order_encoder.h"
@@ -9,11 +10,14 @@
 #include "async_support.h"
 #include "../core/event.h"
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -43,6 +47,11 @@ public:
         std::shared_ptr<IOrderEncoder>   encoder;
         std::shared_ptr<IFillParser>     parser;
 
+        // Immutable cold-path proof installed only after central startup
+        // validation. Every bridge is a private-write adapter, so the public
+        // default-invalid value refuses before transports or admission open.
+        WriteSafetyReadiness write_safety_readiness;
+
         // Optional. If set, each submit consults it before sending and
         // blocks until a token is available - gates the venue's order-rate
         // cap (Binance spot: 50 orders / 10s). Left null, submit is ungated.
@@ -70,6 +79,12 @@ public:
         std::function<void()> funding_failure_handler;
 
         bool start_transport_thread = true;
+
+        // Cold-start capacities for execution ingress.  Both are hard bounds:
+        // exhaustion latches terminal admission instead of allocating/growing
+        // silently on the private execution hot path.
+        std::size_t fill_ingress_capacity = 4096;
+        std::size_t execution_dedupe_capacity = 16384;
     };
 
     struct status_event
@@ -128,6 +143,8 @@ public:
     explicit ExecutionBridge(deps d)
         : d_(std::move(d))
     {
+        pending_fills_.reserve(d_.fill_ingress_capacity);
+        execution_dedupe_.resize(d_.execution_dedupe_capacity);
         if (d_.fill_tx)
         {
             d_.fill_tx->set_on_message([this](std::string_view raw) {
@@ -142,6 +159,17 @@ public:
 
     bool open()
     {
+        // Establish a closed admission baseline before either transport may
+        // synchronously invoke callbacks. A fatal callback during open must
+        // remain latched and can never be erased by startup completion.
+        ingress_failure_latched_.store(false, std::memory_order_release);
+        accepting_orders_.store(false, std::memory_order_release);
+        if (!d_.write_safety_readiness.permits_private_exchange_writes())
+        {
+            set_error(
+                "ExecutionBridge: write safety readiness is not validated");
+            return false;
+        }
         if (!d_.order_tx || !d_.fill_tx)
         {
             set_error("ExecutionBridge: missing transport");
@@ -159,7 +187,12 @@ public:
             return false;
         }
 
-        ingress_failure_latched_.store(false, std::memory_order_release);
+        if (ingress_failure_latched_.load(std::memory_order_acquire))
+        {
+            d_.fill_tx->close();
+            d_.order_tx->close();
+            return false;
+        }
         accepting_orders_.store(true, std::memory_order_release);
         // Start background transport thread (only for live order paths).
         // The thread owns all actual calls to order_tx.
@@ -203,6 +236,13 @@ public:
     {
         clear_error();
 
+        if (!d_.write_safety_readiness.permits_private_exchange_writes())
+        {
+            set_error(
+                "ExecutionBridge: write safety readiness is not validated");
+            return;
+        }
+
         if (!accepting_orders_.load(std::memory_order_acquire))
         {
             set_error("ExecutionBridge: live submission is quiesced");
@@ -226,6 +266,8 @@ public:
         t.symbol    = o.get_symbol();
         t.side      = o.get_side();
         t.total_qty = o.get_quantity();
+        t.intended_price = o.get_price();
+        t.decision_ts = o.get_decision_ts();
 
         {
             std::lock_guard<std::mutex> lk(map_mu_);
@@ -256,22 +298,62 @@ public:
     bool poll_fills(std::vector<fill_event>& out) override
     {
         std::lock_guard<std::mutex> lk(fills_mu_);
-        if (pending_fills_.empty()) return false;
+        if (pending_fill_head_ == pending_fills_.size()) return false;
         out.insert(out.end(),
-                   std::make_move_iterator(pending_fills_.begin()),
+                   std::make_move_iterator(
+                       pending_fills_.begin()
+                       + static_cast<std::ptrdiff_t>(pending_fill_head_)),
                    std::make_move_iterator(pending_fills_.end()));
         pending_fills_.clear();
+        pending_fill_head_ = 0;
+        return true;
+    }
+
+    bool supports_transactional_fill_delivery() const noexcept override
+    {
+        return true;
+    }
+
+    bool peek_fill(fill_event& out) override
+    {
+        std::lock_guard<std::mutex> lk(fills_mu_);
+        if (pending_fill_head_ == pending_fills_.size())
+            return false;
+        out = pending_fills_[pending_fill_head_];
+        return true;
+    }
+
+    bool acknowledge_fill(std::uint64_t fill_id) override
+    {
+        std::lock_guard<std::mutex> lk(fills_mu_);
+        if (pending_fill_head_ == pending_fills_.size()
+            || pending_fills_[pending_fill_head_].get_fill_id() != fill_id)
+            return false;
+        ++pending_fill_head_;
+        if (pending_fill_head_ == pending_fills_.size())
+        {
+            pending_fills_.clear();
+            pending_fill_head_ = 0;
+        }
         return true;
     }
 
     bool cancel_order(uint64_t engine_order_id) override
     {
+        clear_error();
+        if (!d_.write_safety_readiness.permits_private_exchange_writes())
+        {
+            set_error(
+                "ExecutionBridge: write safety readiness is not validated");
+            return false;
+        }
         if (!accepting_orders_.load(std::memory_order_acquire)) return false;
         std::string exchange_id, symbol, client_id;
         {
             std::lock_guard<std::mutex> lk(map_mu_);
             auto it = by_engine_id_.find(engine_order_id);
-            if (it == by_engine_id_.end()) return false;
+            if (it == by_engine_id_.end() || it->second.terminal_observed)
+                return false;
             exchange_id = it->second.exchange_id;
             symbol      = it->second.symbol;
             client_id   = it->second.client_id;
@@ -336,6 +418,16 @@ public:
         return true;
     }
 
+    bool poll_lifecycle_event(venue_lifecycle_event& out) noexcept override
+    {
+        const auto read = lifecycle_read_.load(std::memory_order_relaxed);
+        const auto write = lifecycle_write_.load(std::memory_order_acquire);
+        if (read >= write) return false;
+        out = lifecycle_events_[read & (lifecycle_capacity - 1U)];
+        lifecycle_read_.store(read + 1U, std::memory_order_release);
+        return true;
+    }
+
     // Test helper: synchronously drain and process any pending outbound
     // submissions (for unit tests that need deterministic immediate results
     // without relying on thread scheduling). Safe to call from test thread.
@@ -351,7 +443,113 @@ private:
         order_side  side           = order_side::buy;
         double      total_qty      = 0.0;
         double      cumulative_qty = 0.0;
+        double      intended_price = 0.0;
+        std::chrono::system_clock::time_point decision_ts{};
+        bool        terminal_observed = false;
     };
+
+    struct execution_dedupe_slot
+    {
+        bool occupied = false;
+        std::uint64_t engine_id = 0;
+        bounded_event_text<64> symbol{};
+        order_side side = order_side::buy;
+        bounded_event_text<96> venue_execution_id{};
+        bounded_event_text<24> commission_asset{};
+        double last_fill_qty = 0.0;
+        double last_fill_price = 0.0;
+        double cumulative_qty = 0.0;
+        double commission = 0.0;
+        std::chrono::system_clock::time_point ts{};
+        bool has_cumulative_qty = false;
+    };
+
+    enum class execution_probe_code : std::uint8_t
+    {
+        insert,
+        duplicate,
+        conflict,
+        capacity_exhausted
+    };
+
+    struct execution_probe
+    {
+        execution_probe_code code = execution_probe_code::capacity_exhausted;
+        std::size_t slot = 0;
+    };
+
+    [[nodiscard]] execution_probe probe_execution_id(
+        std::uint64_t engine_id, const parsed_exec& msg) const noexcept
+    {
+        if (execution_dedupe_.empty()
+            || msg.venue_execution_id.empty()
+            || msg.venue_execution_id.size() > 96U
+            || msg.symbol.empty()
+            || msg.symbol.size() > 64U
+            || msg.commission_asset.empty()
+            || msg.commission_asset.size() > 24U)
+            return {};
+
+        std::uint64_t hash = 1469598103934665603ULL;
+        for (const unsigned char c : msg.symbol)
+        {
+            hash ^= c;
+            hash *= 1099511628211ULL;
+        }
+        for (const unsigned char c : msg.venue_execution_id)
+        {
+            hash ^= c;
+            hash *= 1099511628211ULL;
+        }
+
+        const std::size_t capacity = execution_dedupe_.size();
+        std::size_t index = static_cast<std::size_t>(hash % capacity);
+        for (std::size_t probe = 0; probe < capacity; ++probe)
+        {
+            const auto& slot = execution_dedupe_[index];
+            if (!slot.occupied)
+                return {execution_probe_code::insert, index};
+            if (slot.symbol.view() == msg.symbol
+                && slot.venue_execution_id.view() == msg.venue_execution_id)
+            {
+                const bool exact =
+                    slot.engine_id == engine_id
+                    && slot.side == msg.side
+                    && slot.last_fill_qty == msg.last_fill_qty
+                    && slot.last_fill_price == msg.last_fill_price
+                    && slot.commission == msg.commission
+                    && slot.commission_asset.view() == msg.commission_asset
+                    && slot.has_cumulative_qty == msg.has_cumulative_qty
+                    && (!msg.has_cumulative_qty
+                        || slot.cumulative_qty == msg.cumulative_qty)
+                    && slot.ts == msg.ts;
+                return {exact ? execution_probe_code::duplicate
+                              : execution_probe_code::conflict,
+                        index};
+            }
+            index = (index + 1U) % capacity;
+        }
+        return {execution_probe_code::capacity_exhausted, 0};
+    }
+
+    void commit_execution_id(std::size_t index,
+                             std::uint64_t engine_id,
+                             const parsed_exec& msg) noexcept
+    {
+        auto& slot = execution_dedupe_[index];
+        slot.engine_id = engine_id;
+        (void)slot.symbol.assign(msg.symbol);
+        slot.side = msg.side;
+        (void)slot.venue_execution_id.assign(msg.venue_execution_id);
+        (void)slot.commission_asset.assign(msg.commission_asset);
+        slot.last_fill_qty = msg.last_fill_qty;
+        slot.last_fill_price = msg.last_fill_price;
+        slot.cumulative_qty = msg.cumulative_qty;
+        slot.commission = msg.commission;
+        slot.ts = msg.ts;
+        slot.has_cumulative_qty = msg.has_cumulative_qty;
+        slot.occupied = true;
+    }
 
     void handle_message(std::string_view raw)
     {
@@ -395,6 +593,10 @@ private:
 
         const bool fill_kind = msg.k == parsed_exec::kind::partial_fill
             || msg.k == parsed_exec::kind::full_fill;
+        const bool lifecycle_kind = msg.k == parsed_exec::kind::ack
+            || msg.k == parsed_exec::kind::canceled
+            || msg.k == parsed_exec::kind::rejected
+            || msg.k == parsed_exec::kind::expired;
         if (msg.k == parsed_exec::kind::invalid
             || !std::isfinite(msg.last_fill_qty)
             || !std::isfinite(msg.last_fill_price)
@@ -403,8 +605,13 @@ private:
             || msg.last_fill_qty < 0.0
             || msg.last_fill_price < 0.0
             || msg.cumulative_qty < 0.0
+            || (lifecycle_kind
+                && msg.ts.time_since_epoch().count() == 0)
             || (fill_kind && (!(msg.last_fill_qty > 0.0)
-                              || !(msg.last_fill_price > 0.0))))
+                              || !(msg.last_fill_price > 0.0)
+                              || msg.venue_execution_id.empty()
+                              || msg.commission_asset.empty()
+                              || msg.ts.time_since_epoch().count() == 0)))
         {
             fail_terminal_ingress(
                 "ExecutionBridge: malformed execution report", msg.symbol);
@@ -412,9 +619,9 @@ private:
         }
 
         uint64_t engine_id = 0;
-        double total_qty = 0.0;
-        double tracked_cumulative = 0.0;
         const char* invalid_tracking = nullptr;
+        bool duplicate_execution = false;
+        bool fill_enqueued = false;
         {
             bool unknown = false;
             {
@@ -427,6 +634,20 @@ private:
             }
             if (unknown)
             {
+                // Bracket synthesis is an economic-fill-only seam.  ACK,
+                // cancel, reject, expire and informational reports must never
+                // acquire an engine order id or enter the fill pipeline.
+                // Their canonical lifecycle ingress is handled separately.
+                if (!fill_kind)
+                {
+                    if (lifecycle_kind)
+                    {
+                        fail_terminal_ingress(
+                            "ExecutionBridge: lifecycle references unknown order",
+                            msg.symbol);
+                    }
+                    return;
+                }
                 // Unknown client_id but we may still recognize the
                 // exchange_order_id as a venue-managed bracket leg.
                 // Defer to the engine-supplied handler.
@@ -440,60 +661,218 @@ private:
             auto eit = by_engine_id_.find(engine_id);
             if (eit == by_engine_id_.end()) return;
 
-            if (fill_kind
-                && (msg.symbol != eit->second.symbol
-                    || msg.side != eit->second.side))
+            if (msg.symbol != eit->second.symbol
+                || msg.side != eit->second.side)
             {
                 invalid_tracking =
-                    "ExecutionBridge: fill identity differs from submitted order";
+                    "ExecutionBridge: execution identity differs from submitted order";
             }
-
-            if (!msg.exchange_order_id.empty() && eit->second.exchange_id.empty())
-                eit->second.exchange_id = msg.exchange_order_id;
+            else if (!msg.exchange_order_id.empty()
+                     && !eit->second.exchange_id.empty()
+                     && msg.exchange_order_id != eit->second.exchange_id)
+            {
+                invalid_tracking =
+                    "ExecutionBridge: exchange order identity changed";
+            }
 
             if (fill_kind && !invalid_tracking)
             {
-                const double next_cumulative =
-                    eit->second.cumulative_qty + msg.last_fill_qty;
-                const double tolerance = std::max(
-                    1e-9, std::abs(eit->second.total_qty) * 1e-9);
-                if (!std::isfinite(next_cumulative)
-                    || next_cumulative > eit->second.total_qty + tolerance
-                    || (msg.cumulative_qty > 0.0
-                        && std::abs(msg.cumulative_qty - next_cumulative)
-                            > tolerance))
+                const auto execution = probe_execution_id(engine_id, msg);
+                if (execution.code == execution_probe_code::duplicate)
+                {
+                    duplicate_execution = true;
+                }
+                else if (execution.code == execution_probe_code::conflict)
+                {
+                    invalid_tracking =
+                        "ExecutionBridge: native execution id replay changed economic fields";
+                }
+                else if (execution.code
+                         == execution_probe_code::capacity_exhausted)
+                {
+                    invalid_tracking =
+                        "ExecutionBridge: native execution id registry exhausted or identity oversized";
+                }
+
+                const double next_cumulative = msg.has_cumulative_qty
+                    ? msg.cumulative_qty
+                    : eit->second.cumulative_qty + msg.last_fill_qty;
+                const double scale = std::max(
+                    {1.0, std::abs(next_cumulative),
+                     std::abs(eit->second.cumulative_qty),
+                     std::abs(msg.last_fill_qty)});
+                const double next_scale = std::nextafter(
+                    scale, std::numeric_limits<double>::infinity());
+                const double ulp = next_scale - scale;
+                const double arithmetic_tolerance =
+                    std::isfinite(ulp) ? 2.0 * ulp : 0.0;
+                if (!duplicate_execution && !invalid_tracking
+                    && (!std::isfinite(next_cumulative)
+                    || next_cumulative > eit->second.total_qty
+                    || next_cumulative <= eit->second.cumulative_qty
+                    || std::abs((next_cumulative - eit->second.cumulative_qty)
+                                - msg.last_fill_qty)
+                        > arithmetic_tolerance))
                 {
                     invalid_tracking =
                         "ExecutionBridge: fill cumulative quantity is inconsistent";
                 }
-                else if (msg.k == parsed_exec::kind::full_fill
-                         && std::abs(next_cumulative
-                                     - eit->second.total_qty) > tolerance)
+                else if (!duplicate_execution && !invalid_tracking
+                         && msg.k == parsed_exec::kind::full_fill
+                         && next_cumulative != eit->second.total_qty)
                 {
                     invalid_tracking =
                         "ExecutionBridge: terminal fill does not complete order";
                 }
-                else
+                else if (!duplicate_execution && !invalid_tracking)
                 {
-                    eit->second.cumulative_qty = next_cumulative;
                     if (msg.k == parsed_exec::kind::partial_fill
-                        && std::abs(next_cumulative
-                                    - eit->second.total_qty) <= tolerance)
+                        && next_cumulative == eit->second.total_qty)
                         msg.k = parsed_exec::kind::full_fill;
+
+                    const double remaining = std::max(
+                        0.0, eit->second.total_qty - next_cumulative);
+                    std::lock_guard<std::mutex> fill_lock(fills_mu_);
+                    const auto pending_fill_count =
+                        pending_fills_.size() - pending_fill_head_;
+                    if (pending_fill_count >= d_.fill_ingress_capacity)
+                    {
+                        invalid_tracking =
+                            "ExecutionBridge: economic fill ingress capacity exhausted";
+                    }
+                    else if (next_fill_id_ == 0
+                             || next_fill_id_
+                                == std::numeric_limits<std::uint64_t>::max())
+                    {
+                        invalid_tracking =
+                            "ExecutionBridge: local fill correlation id exhausted";
+                    }
+                    else
+                    {
+                        const auto fill_id = next_fill_id_;
+                        fill_event fe(
+                            msg.ts, msg.symbol, engine_id, msg.side,
+                            msg.last_fill_qty, msg.last_fill_price,
+                            msg.commission, remaining, fill_id);
+                        fe.set_source(fill_source::exchange);
+                        const bool identity_stamped =
+                            fe.set_venue_execution_id(msg.venue_execution_id)
+                            && fe.set_commission_currency(msg.commission_asset);
+                        if (!identity_stamped)
+                        {
+                            invalid_tracking =
+                                "ExecutionBridge: execution identity exceeds event capacity";
+                        }
+                        else
+                        {
+                            // ACKed prefix slots are reclaimed in-place. This
+                            // compaction is bounded and cannot grow the vector;
+                            // it keeps the configured ingress capacity a hard
+                            // limit even when producer and consumer interleave.
+                            if (pending_fill_head_ != 0
+                                && pending_fills_.size()
+                                   >= d_.fill_ingress_capacity)
+                            {
+                                std::move(
+                                    pending_fills_.begin()
+                                        + static_cast<std::ptrdiff_t>(
+                                            pending_fill_head_),
+                                    pending_fills_.end(),
+                                    pending_fills_.begin());
+                                pending_fills_.erase(
+                                    pending_fills_.begin()
+                                        + static_cast<std::ptrdiff_t>(
+                                            pending_fill_count),
+                                    pending_fills_.end());
+                                pending_fill_head_ = 0;
+                            }
+                            fe.set_cumulative_filled_qty(
+                                next_cumulative,
+                                msg.has_cumulative_qty
+                                    ? fill_cumulative_source::venue_reported
+                                    : fill_cumulative_source::engine_accumulated);
+                            fill_provenance provenance;
+                            provenance.model = fill_execution_model::venue_reported;
+                            provenance.reason =
+                                fill_execution_reason::venue_execution_report;
+                            provenance.intended_price = eit->second.intended_price;
+                            provenance.reference_price = msg.last_fill_price;
+                            provenance.reference_timestamp = msg.ts;
+                            if (msg.ts > eit->second.decision_ts)
+                            {
+                                provenance.modeled_latency =
+                                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        msg.ts - eit->second.decision_ts);
+                            }
+                            fe.set_provenance(provenance);
+                            pending_fills_.push_back(std::move(fe));
+
+                            // Commit bridge cursor and exact replay identity
+                            // only after the bounded handoff succeeded.
+                            ++next_fill_id_;
+                            eit->second.cumulative_qty = next_cumulative;
+                            if (msg.k == parsed_exec::kind::full_fill)
+                                eit->second.terminal_observed = true;
+                            if (eit->second.exchange_id.empty())
+                                eit->second.exchange_id = msg.exchange_order_id;
+                            commit_execution_id(execution.slot, engine_id, msg);
+                            fill_enqueued = true;
+                        }
+                    }
                 }
             }
-
-            total_qty = eit->second.total_qty;
-            tracked_cumulative = eit->second.cumulative_qty;
-
-            if (!invalid_tracking &&
-                (msg.k == parsed_exec::kind::full_fill   ||
-                msg.k == parsed_exec::kind::canceled    ||
-                msg.k == parsed_exec::kind::rejected    ||
-                msg.k == parsed_exec::kind::expired))
+            else if (!invalid_tracking
+                     && !msg.exchange_order_id.empty()
+                     && eit->second.exchange_id.empty())
             {
-                by_client_id_.erase(msg.client_order_id);
-                by_engine_id_.erase(engine_id);
+                // ACK/REST identity is advisory correlation state. Keep the
+                // mapping as a tombstone across terminal lifecycle reports so
+                // a legitimate late fill or reconnect replay remains known.
+                eit->second.exchange_id = msg.exchange_order_id;
+            }
+            if (lifecycle_kind && !invalid_tracking)
+            {
+                venue_lifecycle_event event;
+                event.engine_order_id = engine_id;
+                event.exchange_ts = msg.ts;
+                switch (msg.k)
+                {
+                case parsed_exec::kind::ack:
+                    event.transition = venue_order_transition::acknowledged;
+                    break;
+                case parsed_exec::kind::canceled:
+                    event.transition = venue_order_transition::canceled;
+                    break;
+                case parsed_exec::kind::rejected:
+                    event.transition = venue_order_transition::rejected;
+                    break;
+                case parsed_exec::kind::expired:
+                    event.transition = venue_order_transition::expired;
+                    break;
+                default:
+                    break;
+                }
+                const auto write = lifecycle_write_.load(
+                    std::memory_order_relaxed);
+                const auto read = lifecycle_read_.load(
+                    std::memory_order_acquire);
+                if (write - read >= lifecycle_capacity)
+                {
+                    invalid_tracking =
+                        "ExecutionBridge: lifecycle ingress capacity exhausted";
+                }
+                else
+                {
+                    lifecycle_events_[write & (lifecycle_capacity - 1U)] = event;
+                    lifecycle_write_.store(
+                        write + 1U, std::memory_order_release);
+                    if (msg.k == parsed_exec::kind::canceled
+                        || msg.k == parsed_exec::kind::rejected
+                        || msg.k == parsed_exec::kind::expired)
+                    {
+                        eit->second.terminal_observed = true;
+                    }
+                }
             }
         }
 
@@ -503,37 +882,8 @@ private:
             return;
         }
 
-        if (msg.k != parsed_exec::kind::partial_fill &&
-            msg.k != parsed_exec::kind::full_fill)
-            return;
-
-        auto ts = (msg.ts.time_since_epoch().count() != 0)
-                    ? msg.ts
-                    : std::chrono::system_clock::now();
-
-        double remaining = 0.0;
-        if (msg.k == parsed_exec::kind::partial_fill && total_qty > 0.0)
-            remaining = std::max(0.0, total_qty - tracked_cumulative);
-
-        uint64_t fill_id;
-        {
-            std::lock_guard<std::mutex> lk(fills_mu_);
-            fill_id = next_fill_id_++;
-
-            fill_event fe(
-                ts,
-                msg.symbol,
-                engine_id,
-                msg.side,
-                msg.last_fill_qty,
-                msg.last_fill_price,
-                msg.commission,
-                remaining,
-                fill_id
-            );
-            fe.set_source(fill_source::exchange);
-            pending_fills_.push_back(std::move(fe));
-        }
+        (void)duplicate_execution;
+        (void)fill_enqueued;
     }
 
     void handle_status(IFillTransport::lifecycle st, std::string_view note)
@@ -567,6 +917,17 @@ private:
 
     void dispatch_unknown_fill(const parsed_exec& msg)
     {
+        if (msg.k != parsed_exec::kind::partial_fill
+            && msg.k != parsed_exec::kind::full_fill)
+            return;
+        if (!msg.has_cumulative_qty)
+        {
+            fail_terminal_ingress(
+                "ExecutionBridge: venue bracket fill lacks authoritative cumulative quantity",
+                msg.symbol);
+            return;
+        }
+
         unknown_fill_handler handler;
         {
             std::lock_guard<std::mutex> lk(handler_mu_);
@@ -583,6 +944,24 @@ private:
 
         auto sr = handler(msg, fill_id);
         if (!sr) return;
+
+        auto& fill = sr->fill;
+        if (fill.get_symbol() != msg.symbol
+            || fill.get_side() != msg.side
+            || fill.get_filled_quantity() != msg.last_fill_qty
+            || fill.get_fill_price() != msg.last_fill_price
+            || fill.get_commission() != msg.commission
+            || !fill.set_venue_execution_id(msg.venue_execution_id)
+            || !fill.set_commission_currency(msg.commission_asset))
+        {
+            fail_terminal_ingress(
+                "ExecutionBridge: synthesized venue bracket fill changed execution identity",
+                msg.symbol);
+            return;
+        }
+        fill.set_source(fill_source::exchange);
+        fill.set_cumulative_filled_qty(
+            msg.cumulative_qty, fill_cumulative_source::venue_reported);
 
         // Record meta first so the engine can register in order_meta_
         // before processing the fill. Both queues use their own mutex
@@ -620,13 +999,23 @@ private:
     mutable std::mutex map_mu_;
     std::unordered_map<uint64_t, tracked_order> by_engine_id_;
     std::unordered_map<std::string, uint64_t>   by_client_id_;
+    std::vector<execution_dedupe_slot> execution_dedupe_;
 
     std::mutex fills_mu_;
     std::vector<fill_event> pending_fills_;
+    std::size_t pending_fill_head_ = 0;
     uint64_t next_fill_id_ = 1;
 
     std::mutex status_mu_;
     std::vector<status_event> pending_status_;
+
+    // One private user-data reader produces and the engine loop consumes.
+    // Lifecycle loss is unsafe, so overflow is terminal and never overwrites.
+    static constexpr std::size_t lifecycle_capacity = 4096;
+    static_assert((lifecycle_capacity & (lifecycle_capacity - 1U)) == 0U);
+    std::array<venue_lifecycle_event, lifecycle_capacity> lifecycle_events_{};
+    alignas(64) std::atomic<std::size_t> lifecycle_write_{0};
+    alignas(64) std::atomic<std::size_t> lifecycle_read_{0};
 
     mutable std::mutex error_mu_;
     std::string last_error_;
@@ -756,6 +1145,7 @@ inline void ExecutionBridge::close_terminal_admission()
 inline void ExecutionBridge::process_one_submit(const submit_request& req)
 {
     if (!d_.order_tx || !d_.encoder
+        || !d_.write_safety_readiness.permits_private_exchange_writes()
         || !accepting_orders_.load(std::memory_order_acquire)) return;
 
     if (req.is_cancel)
@@ -784,7 +1174,8 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
         IOrderTransport::result res;
         {
             std::lock_guard<std::mutex> admission_lock(venue_admission_mu_);
-            if (!accepting_orders_.load(std::memory_order_acquire)) return;
+            if (!d_.write_safety_readiness.permits_private_exchange_writes()
+                || !accepting_orders_.load(std::memory_order_acquire)) return;
             res = d_.order_tx->cancel(enc.endpoint, enc.wire_payload);
             if (res.uncertain || res.fatal) close_terminal_admission();
         }
@@ -792,13 +1183,10 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
         if (!res.ok) {
             set_error("cancel failed: " + res.error);
         }
-        else
-        {
-            std::lock_guard<std::mutex> lk(map_mu_);
-            by_engine_id_.erase(req.engine_id);
-            if (!client_id.empty())
-                by_client_id_.erase(client_id);
-        }
+        // A REST cancel response is command acknowledgement, not proof that
+        // the order reached a terminal economic state.  Preserve correlation
+        // as a tombstone until authoritative user-data reconciliation; a fill
+        // already in flight must still resolve to the original engine order.
 
         submit_result sr;
         sr.engine_id = req.engine_id;
@@ -824,7 +1212,8 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
     IOrderTransport::result res;
     {
         std::lock_guard<std::mutex> admission_lock(venue_admission_mu_);
-        if (!accepting_orders_.load(std::memory_order_acquire)) return;
+        if (!d_.write_safety_readiness.permits_private_exchange_writes()
+            || !accepting_orders_.load(std::memory_order_acquire)) return;
         res = d_.order_tx->submit(req.endpoint, req.wire_payload);
         if (res.uncertain || res.fatal) close_terminal_admission();
     }
@@ -832,9 +1221,9 @@ inline void ExecutionBridge::process_one_submit(const submit_request& req)
     if (!res.ok && !res.uncertain && !res.fatal) {
         set_error("submit failed: " + res.error);
         std::lock_guard<std::mutex> lk(map_mu_);
-        by_engine_id_.erase(req.engine_id);
-        if (!req.client_id.empty())
-            by_client_id_.erase(req.client_id);
+        auto it = by_engine_id_.find(req.engine_id);
+        if (it != by_engine_id_.end())
+            it->second.terminal_observed = true;
     }
 
     if (res.ok && !res.exchange_order_id.empty())
