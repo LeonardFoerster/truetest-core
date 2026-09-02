@@ -1,14 +1,25 @@
+#include <algorithm>
 #include <atomic>
+#include <array>
+#include <chrono>
+#include <charconv>
+#include <cmath>
 #include <climits>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <locale>
 #include <memory>
-#include <random>
+#include <map>
 #include <exception>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -20,8 +31,13 @@
 #include "engine/engine.h"
 #include "engine/engine_config.h"
 #include "engine/live_safety_session.h"
+#include "engine/deterministic_lifecycle_sink.h"
+#include "engine/deterministic_order_id_scope.h"
 #include "core/event_log.h"
 #include "core/tt_target.h"
+#include "reproducibility/deterministic_seed.h"
+#include "reproducibility/run_manifest.h"
+#include "reproducibility/sha256.h"
 #include "data/data_source.h"
 #include "data/csv_data_source.h"
 #include "data/tick_csv_data_source.h"
@@ -36,9 +52,10 @@
 #include "orderbook/orderbook.h"
 #include "strategy/strategy_registry.h"
 #include "strategy/apply_execution_cost_params.h"
-#include "strategy/mean_reversion_strategy.h"
-#include "strategy/sma_strategy.h"
-#include "strategy/ma_crossover_strategy.h"
+#include "strategy/deterministic_parameter_config.h"
+#include "strategy/mean_reversion/mean_reversion_strategy.h"
+#include "strategy/sma/sma_strategy.h"
+#include "strategy/ma_crossover/ma_crossover_strategy.h"
 #include "market_maker/market_maker.h"
 #include "threading/thread_config.h"
 #include "utils/log/logger.h"
@@ -47,6 +64,7 @@
 #include "presets/preset.h"
 
 #include "providers/provider_registry.h"
+#include "bin/live_operator_challenge.h"
 #include "bin/provider_open_policy.h"
 #include "providers/data_bridge.h"
 #include "providers/provider_sink.h"
@@ -56,6 +74,8 @@
 // Monte Carlo support (Phase 2+)
 #include "simulation/monte_carlo_controller.h"
 #include "simulation/monte_carlo_reporter.h"
+#include "simulation/deterministic_mc_manifest.h"
+#include "simulation/deterministic_trial_artifacts.h"
 
 #ifdef HAS_QUESTDB
 #include "data/questdb/store.h"
@@ -107,60 +127,6 @@ static void install_shutdown_handler()
     std::signal(SIGTERM, truetest::bin::mark_shutdown_signal);
 }
 
-// Live-money safety gate. Prints a loud red warning and forces the operator
-// to solve a fresh random addition problem before real orders can be sent.
-// Returns true iff the answer was correct.
-static bool confirm_real_money_math()
-{
-    const char* RED  = ::isatty(fileno(stdout)) ? "\033[1;31m" : "";
-    const char* YEL  = ::isatty(fileno(stdout)) ? "\033[1;33m" : "";
-    const char* OFF  = ::isatty(fileno(stdout)) ? "\033[0m"    : "";
-
-    std::random_device rd;
-    std::mt19937 rng(rd());
-    std::uniform_int_distribution<int> dist(100, 9999);
-    int a = dist(rng);
-    int b = dist(rng);
-    int answer = a + b;
-
-    std::cout << "\n";
-    std::cout << RED << "  ###############################################\n";
-    std::cout << "  #                                             #\n";
-    std::cout << "  #   !!!  LIVE TRADING - REAL MONEY  !!!       #\n";
-    std::cout << "  #                                             #\n";
-    std::cout << "  #   Orders submitted from here will execute   #\n";
-    std::cout << "  #   on a real exchange against real funds.    #\n";
-    std::cout << "  #   Losses are real and irreversible.         #\n";
-    std::cout << "  #                                             #\n";
-    std::cout << "  ###############################################" << OFF << "\n\n";
-
-    std::cout << YEL << "  Solve to confirm: " << a << " + " << b << " = " << OFF;
-    std::cout.flush();
-
-    std::string line;
-    if (!std::getline(std::cin, line))
-    {
-        std::cout << "  Aborted (no input).\n";
-        return false;
-    }
-
-    int given = 0;
-    try { given = std::stoi(line); }
-    catch (...) {
-        std::cout << "  ! Could not parse a number from \"" << line << "\". Aborted.\n";
-        return false;
-    }
-
-    if (given != answer)
-    {
-        std::cout << "  ! Wrong answer (expected " << answer << "). Aborted.\n";
-        return false;
-    }
-
-    std::cout << "  Confirmed. Proceeding with live execution.\n";
-    return true;
-}
-
 // Renders a multi-line breakdown of threading: preset, OS-thread count,
 // physical/logical core counts, per-role core pins, and spin policy. Used
 // by the dry-run and run banners so the operator sees the same layout
@@ -206,6 +172,9 @@ static void print_threading_details(std::ostream& os,
     switch (preset) {
     case thread_preset::inline_mode:
         break;
+    case thread_preset::logging_only:
+        print_role("logging    ", core_role::logging);
+        break;
     case thread_preset::light:
         print_role("observer   ", core_role::logging);
         break;
@@ -234,12 +203,30 @@ struct cli_options
     std::string replay_path;
     int64_t replay_from_us = 0;
     int64_t replay_to_us = INT64_MAX;
+    bool replay_from_explicitly_set = false;
+    bool replay_to_explicitly_set = false;
     std::string event_log_path;
     std::string log_file_path;
     std::uint64_t log_max_size_mb = 0;
     int log_keep = 5;
     bool compress_log = true;
     uint64_t seed = 0;
+    bool seed_explicitly_set = false;
+    std::string write_run_manifest_path;
+    std::string replay_run_manifest_path;
+    std::string reproducibility_artifacts_directory;
+    bool verify_hashes = false;
+    bool allow_dataset_mismatch = false;
+    std::size_t deterministic_trial_index = 0;
+    bool deterministic_trial_index_explicitly_set = false;
+    bool deterministic_replay_input_override_requested = false;
+    bool deterministic_local_replay = false;
+    std::string deterministic_run_fingerprint;
+    std::string deterministic_expected_dataset_identity;
+    std::vector<std::string> deterministic_dataset_mismatches;
+    std::size_t deterministic_lifecycle_record_capacity = 0;
+    std::map<std::string, std::string, std::less<>>
+        deterministic_expected_hashes;
     std::string thread_preset_str;
     std::string spin_policy_str;
     bool no_pin = false;
@@ -255,14 +242,19 @@ struct cli_options
 
     // Monte Carlo / synthetic provider (Phase 1+)
     std::string mc_params;
+    bool mc_params_explicitly_set = false;
 
     // Phase 3: Full Monte Carlo campaign mode
     bool monte_carlo = false;
     std::size_t mc_trials = 0;
+    bool mc_trials_explicitly_set = false;
     std::string mc_model;           // gbm, ou, etc.
+    bool mc_model_explicitly_set = false;
 
     // Phase 5: Experimental parallel MC trials (see warnings in controller)
     bool mc_parallel = false;
+    unsigned mc_workers = 0;
+    bool mc_workers_explicitly_set = false;
 
     // Phase A (MC object reuse): reuse data_handler + strategy (and prepared reset for others)
     bool mc_reuse_objects = false;
@@ -271,10 +263,19 @@ struct cli_options
     std::vector<std::string> params;
     std::string mode;
 
-    std::string fee_model;
+    // Conservative, venue-agnostic crypto baseline (10 bps per side).
+    // `--fee zero` is an explicit research opt-out; venue-specific configs
+    // should override these rates with their documented schedule.
+    std::string fee_model{"tiered"};
     double fee_value = 0.0;
-    double maker_rate = 0.0;
-    double taker_rate = 0.0;
+    double maker_rate = 0.001;
+    double taker_rate = 0.001;
+    // Defaults are acceptable for reproducible backtests only. Protected
+    // provider modes require the operator/config to state their actual fee
+    // schedule and period basis explicitly.
+    bool fee_model_explicit = false;
+    bool maker_rate_explicit = false;
+    bool taker_rate_explicit = false;
 
     std::string symbol;
     std::string stream;
@@ -312,8 +313,9 @@ struct cli_options
 
     double balance = 10000.0;
     double risk_fraction = 0.02;
-    double sl_pct = 0.003;   // platform default stop-loss 0.3%
-    double tp_pct = 0.01;    // platform default take-profit 1%
+    double sl_pct = 0.003;   // platform default stop-loss (0 = off / strategy-defined)
+    double tp_pct = 0.01;    // platform default take-profit (0 = off / strategy-defined)
+    double trail_pct = 0.0;  // manifest-bound engine default; no CLI override
     // Platform default exit policy: floor|strategy_only|engine_only|union
     std::string exit_policy = "floor";
 
@@ -327,7 +329,9 @@ struct cli_options
     double market_aggression = 1.1;
     double qty_scale = 1e8;
     unsigned fill_rng_seed = 42;
+    bool fill_rng_seed_explicitly_set = false;
     double spread_step = 0.0001;
+    bool spread_step_explicitly_set = false;
 
     bool debug_fills = false;
     int debug_fills_budget = 20;
@@ -338,7 +342,8 @@ struct cli_options
 
     std::size_t rolling_window = 252;
     double risk_free_rate = 0.0;
-    std::size_t periods_per_year = 252;
+    std::size_t periods_per_year = 525600; // 1-minute 24/7 crypto calendar
+    bool periods_per_year_explicit = false;
     std::size_t max_equity_points = 100000;
     std::size_t exec_bar_delay = 1;
     int wire_latency_us = 0;
@@ -408,7 +413,11 @@ struct cli_options
     double risk_max_loss_per_trade = 10000.0;
     int risk_max_open_orders = 1000;
     double risk_max_portfolio_exposure = 5e9;
+    // F-05b: negative = "not set", so the spot default can be applied without
+    // overriding an explicit --max-leverage 0 (meaning: disable the cap).
+    double risk_max_gross_leverage = -1.0;
     double risk_max_daily_loss = 0.0;
+
     int risk_daily_reset_hour = 0;
     int risk_max_trades_per_hour = 0;
     int risk_max_orders_per_minute = 0;
@@ -418,6 +427,7 @@ struct cli_options
     long long risk_max_mark_age_ms = 0;       // 0 = staleness classification off
     bool risk_require_fresh_mark = false;     // stale/missing mark blocks new inventory
     bool risk_unwind = false;
+    std::optional<bool> risk_soft_portfolio_limits;
 
 #ifdef HAS_QUESTDB
     bool persist = false;
@@ -441,7 +451,78 @@ static bool provider_is_binance_futures(const std::string& name)
     return name == "binance-futures";
 }
 
+// F-10b (docs/todos/11-F-forensic-lifecycle-audit.md): generate the
+// --strategy help from StrategyRegistry — the registry that actually
+// validates and constructs the flag. The hardcoded list this replaces named
+// six strategies and omitted every one registered after it was written,
+// including ema-rsi-atr-pullback, so `--help` told operators a constructible
+// strategy did not exist.
+static std::string strategy_help_text()
+{
+    auto names = StrategyRegistry::instance().available();
+    std::sort(names.begin(), names.end());
+    std::string out = "Strategy: ";
+    for (std::size_t i = 0; i < names.size(); ++i)
+    {
+        if (i) out += ", ";
+        out += names[i];
+    }
+    if (names.empty()) out += "(none registered)";
+    return out;
+}
+
+// F-07b (docs/todos/11-F-forensic-lifecycle-audit.md): bind --symbol to a
+
+// symbol-less source at load. The Binance kline CSV carries no symbol column,
+// so every bar arrives with symbol "" and nothing downstream binds to it —
+// --symbol does not match, per-symbol attribution is blank, and --instrument
+// filters are inert. Only unbound rows are rewritten, so a real multi-symbol
+// load is never touched.
+//
+// Decision (plan open question 5): an unset --symbol on symbol-less data is
+// NOT an error. Plenty of single-instrument research runs never name the
+// instrument and do not care. It is a loud warning instead, because the
+// consequences (blank attribution, inert instrument filters) are silent
+// otherwise — and engine::validate_instrument_overrides turns it into a hard
+// failure the moment an --instrument spec is actually configured.
+static void bind_symbol_to_series(MarketSeries& series, const std::string& symbol)
+{
+    if (!series.has_unbound_symbols()) return;
+
+    if (symbol.empty())
+    {
+        std::cerr << "  ! Data source carries no symbol column and --symbol is "
+                     "unset: per-symbol attribution stays blank and any "
+                     "--instrument spec cannot bind.\n";
+        return;
+    }
+
+    const auto bound = series.bind_unset_symbols(symbol);
+    if (bound.bars > 0 || bound.ticks > 0)
+    {
+        std::cout << "    Bound --symbol " << symbol << " to "
+                  << bound.bars << " bar(s) and " << bound.ticks
+                  << " tick(s) with no symbol of their own\n";
+    }
+}
+
+// F-05b: spot accounts cannot borrow, so gross exposure is bounded by equity.
+
+// Futures venues keep the cap off — FuturesRiskCheck already owns notional,
+// leverage and liquidation distance there, and stacking both would
+// double-charge the same exposure. A negative CLI value means "unset".
+static double resolve_max_gross_leverage(double cli_value,
+                                         const std::string& provider_name)
+{
+    if (cli_value >= 0.0) return cli_value;   // explicit operator choice wins
+    const bool futures =
+        provider_name.find("futures") != std::string::npos ||
+        provider_name.rfind("bitget", 0) == 0;
+    return futures ? 0.0 : 1.0;
+}
+
 // Phase-0 live discipline for futures venues (Binance USDT-M + Bitget UTA).
+
 // Mainnet/live without sandbox flags: refuse if no venue caps or daily-loss.
 // Sandbox (Binance --testnet; Bitget --demo|--testnet): warn only.
 static bool is_futures_live_provider(const std::string& name)
@@ -609,16 +690,24 @@ static void apply_exit_defaults(engine_config& cfg, const cli_options& o)
     cfg.exit_defaults.mode = *mode;
     cfg.exit_defaults.sl_pct = o.sl_pct;
     cfg.exit_defaults.tp_pct = o.tp_pct;
+    cfg.exit_defaults.trail_pct = o.trail_pct;
 }
 
 // Push CLI fee / spread realism into strategy sizing params when supported.
-// Market entries and stop exits are treated as taker; half bar-spread is a
-// conservative adverse-slip estimate when no L2 walk is available at size time.
+// Market entries and stop exits are treated as taker.
+//
+// F-04: the adverse-slip estimate comes from --mm-spread-pct, the parameter
+// that actually sets the synthetic book's half spread and therefore the price
+// a market entry fills at. It used to come from --bar-spread-bps, which the
+// CLI documents as having no effect and which defaults to zero — so sizing
+// saw no execution cost at all and overshot by ≈4.9×.
 static void apply_execution_cost_params(IStrategy& strategy, const cli_options& o)
 {
     ::apply_execution_cost_params(strategy, o.maker_rate, o.taker_rate,
-                                  o.bar_spread_bps, o.fee_model, o.fee_value);
+                                  o.bar_spread_bps, o.fee_model, o.fee_value,
+                                  o.mm_spread_pct);
 }
+
 
 // Parse one --instrument entry (e.g. "BTCUSDT:tick=0.01,lot=0.00001,minn=5").
 // Unknown fields are ignored so the syntax stays extensible.
@@ -714,9 +803,6 @@ static void load_config_file(const std::string& path, cli_options& o)
     auto get_double = [&](const char* k, double& out) {
         if (j.contains(k) && j[k].is_number()) out = j[k].get<double>();
     };
-    auto get_uint64 = [&](const char* k, uint64_t& out) {
-        if (j.contains(k) && j[k].is_number_unsigned()) out = j[k].get<uint64_t>();
-    };
     auto get_size = [&](const char* k, std::size_t& out) {
         if (j.contains(k) && j[k].is_number_unsigned()) out = j[k].get<std::size_t>();
     };
@@ -735,7 +821,21 @@ static void load_config_file(const std::string& path, cli_options& o)
 
     get_str("replay", o.replay_path);
     get_str("log_events", o.event_log_path);
-    get_uint64("seed", o.seed);
+    get_str("write_run_manifest", o.write_run_manifest_path);
+    get_str("replay_run_manifest", o.replay_run_manifest_path);
+    get_str("artifacts_dir", o.reproducibility_artifacts_directory);
+    get_bool("verify_hashes", o.verify_hashes);
+    get_bool("allow_dataset_mismatch", o.allow_dataset_mismatch);
+    if (j.contains("seed"))
+    {
+        if (!j["seed"].is_number_unsigned())
+        {
+            std::cerr << "  ! Config field 'seed' must be an unsigned integer\n";
+            std::exit(1);
+        }
+        o.seed = j["seed"].get<std::uint64_t>();
+        o.seed_explicitly_set = true;
+    }
     get_str("thread_preset", o.thread_preset_str);
     get_str("preset", o.preset);
     get_bool("no_pin", o.no_pin);
@@ -743,17 +843,47 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_str("path", o.provider_path);
     get_bool("monte_carlo", o.monte_carlo);
     get_size("mc_trials", o.mc_trials);
+    o.mc_trials_explicitly_set =
+        j.contains("mc_trials") && j["mc_trials"].is_number_unsigned();
     get_str("mc_model", o.mc_model);
+    o.mc_model_explicitly_set = j.contains("mc_model");
     get_str("mc_params", o.mc_params);
+    o.mc_params_explicitly_set = j.contains("mc_params");
     get_bool("mc_parallel", o.mc_parallel);
+    if (j.contains("mc_workers") && j["mc_workers"].is_number_unsigned())
+    {
+        o.mc_workers = j["mc_workers"].get<unsigned>();
+        o.mc_workers_explicitly_set = true;
+    }
     get_bool("mc_reuse_objects", o.mc_reuse_objects);
     get_str("strategy", o.strategy);
+    if (j.contains("params"))
+    {
+        if (!j["params"].is_array())
+        {
+            std::cerr << "  ! Config field 'params' must be an array of strings\n";
+            std::exit(1);
+        }
+        o.params.clear();
+        for (const auto& parameter : j["params"])
+        {
+            if (!parameter.is_string())
+            {
+                std::cerr << "  ! Config field 'params' must contain only strings\n";
+                std::exit(1);
+            }
+            o.params.push_back(parameter.get<std::string>());
+        }
+    }
     get_str("format", o.format);
     get_size("sma_period", o.sma_period);
     get_str("fee", o.fee_model);
     get_double("fee_value", o.fee_value);
     get_double("maker_rate", o.maker_rate);
     get_double("taker_rate", o.taker_rate);
+    o.fee_model_explicit = j.contains("fee") && j["fee"].is_string();
+    o.maker_rate_explicit = j.contains("maker_rate") && j["maker_rate"].is_number();
+    o.taker_rate_explicit = j.contains("taker_rate") && j["taker_rate"].is_number();
     get_str("symbol", o.symbol);
     get_str("stream", o.stream);
     get_str("api_key", o.api_key);
@@ -774,6 +904,20 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_str("exit_policy", o.exit_policy);
     get_int("backfill", o.backfill);
     get_str("backfill_interval", o.backfill_interval);
+    get_double("market_aggression", o.market_aggression);
+    get_double("quantity_scale", o.qty_scale);
+    if (j.contains("fill_rng_seed")
+        && j["fill_rng_seed"].is_number_unsigned())
+    {
+        o.fill_rng_seed = j["fill_rng_seed"].get<unsigned>();
+        o.fill_rng_seed_explicitly_set = true;
+    }
+    if (j.contains("spread_step_factor")
+        && j["spread_step_factor"].is_number())
+    {
+        o.spread_step = j["spread_step_factor"].get<double>();
+        o.spread_step_explicitly_set = true;
+    }
 
     if (j.contains("risk") && j["risk"].is_object())
     {
@@ -789,6 +933,7 @@ static void load_config_file(const std::string& path, cli_options& o)
         rd("max_loss_per_trade", o.risk_max_loss_per_trade);
         ri("max_open_orders", o.risk_max_open_orders);
         rd("max_portfolio_exposure", o.risk_max_portfolio_exposure);
+        rd("max_gross_leverage", o.risk_max_gross_leverage);
         rd("max_daily_loss", o.risk_max_daily_loss);
         ri("daily_reset_hour", o.risk_daily_reset_hour);
         ri("max_trades_per_hour", o.risk_max_trades_per_hour);
@@ -799,11 +944,17 @@ static void load_config_file(const std::string& path, cli_options& o)
             o.risk_max_mark_age_ms = r["max_mark_age_ms"].get<long long>();
         if (r.contains("require_fresh_mark") && r["require_fresh_mark"].is_boolean())
             o.risk_require_fresh_mark = r["require_fresh_mark"].get<bool>();
+        if (r.contains("soft_portfolio_limits") && r["soft_portfolio_limits"].is_boolean())
+            o.risk_soft_portfolio_limits = r["soft_portfolio_limits"].get<bool>();
+        if (r.contains("unwind") && r["unwind"].is_boolean())
+            o.risk_unwind = r["unwind"].get<bool>();
     }
 
     get_size("rolling_window", o.rolling_window);
     get_double("risk_free_rate", o.risk_free_rate);
     get_size("periods_per_year", o.periods_per_year);
+    o.periods_per_year_explicit =
+        j.contains("periods_per_year") && j["periods_per_year"].is_number_unsigned();
     get_size("max_equity_points", o.max_equity_points);
     get_size("exec_bar_delay", o.exec_bar_delay);
     get_int("wire_latency_us", o.wire_latency_us);
@@ -824,6 +975,24 @@ static void load_config_file(const std::string& path, cli_options& o)
     get_double("mm_max_spread_pct", o.mm_max_spread_pct);
     get_str("queue_model", o.queue_model);
     get_str("maker_queue_model", o.maker_queue_model);
+    if (j.contains("instrument"))
+    {
+        if (!j["instrument"].is_array())
+        {
+            std::cerr << "  ! Config field 'instrument' must be an array of strings\n";
+            std::exit(1);
+        }
+        o.instrument_specs.clear();
+        for (const auto& instrument : j["instrument"])
+        {
+            if (!instrument.is_string())
+            {
+                std::cerr << "  ! Config field 'instrument' must contain only strings\n";
+                std::exit(1);
+            }
+            o.instrument_specs.push_back(instrument.get<std::string>());
+        }
+    }
     get_str("output", o.output);
     get_str("output_format", o.output_format);
 #ifdef HAS_QUESTDB
@@ -843,6 +1012,10 @@ static void dump_config(const cli_options& o)
     nlohmann::json j;
     j["replay"] = o.replay_path;
     j["log_events"] = o.event_log_path;
+    j["write_run_manifest"] = o.write_run_manifest_path;
+    j["replay_run_manifest"] = o.replay_run_manifest_path;
+    j["artifacts_dir"] = o.reproducibility_artifacts_directory;
+    j["verify_hashes"] = o.verify_hashes;
     j["seed"] = o.seed;
     j["thread_preset"] = o.thread_preset_str;
     j["preset"] = o.preset;
@@ -854,8 +1027,11 @@ static void dump_config(const cli_options& o)
     j["mc_model"] = o.mc_model;
     j["mc_params"] = o.mc_params;
     j["mc_parallel"] = o.mc_parallel;
+    j["mc_workers"] = o.mc_workers;
     j["mc_reuse_objects"] = o.mc_reuse_objects;
+    j["periods_per_year"] = o.periods_per_year;
     j["strategy"] = o.strategy.empty() ? "mean-reversion" : o.strategy;
+    j["params"] = o.params;
     j["format"] = o.format;
     j["sma_period"] = o.sma_period;
     j["fee"] = o.fee_model;
@@ -880,6 +1056,10 @@ static void dump_config(const cli_options& o)
     j["exit_policy"] = o.exit_policy;
     j["backfill"] = o.backfill;
     j["backfill_interval"] = o.backfill_interval;
+    j["market_aggression"] = o.market_aggression;
+    j["quantity_scale"] = o.qty_scale;
+    j["fill_rng_seed"] = o.fill_rng_seed;
+    j["spread_step_factor"] = o.spread_step;
     j["wire_latency_us"] = o.wire_latency_us;
     j["order_latency_us"] = o.order_latency_us;
     j["order_latency_stddev_us"] = o.order_latency_stddev_us;
@@ -898,12 +1078,14 @@ static void dump_config(const cli_options& o)
     j["mm_max_spread_pct"] = o.mm_max_spread_pct;
     j["queue_model"] = o.queue_model;
     j["maker_queue_model"] = o.maker_queue_model;
+    j["instrument"] = o.instrument_specs;
     j["risk"] = {
         {"max_position_value", o.risk_max_position_value},
         {"max_drawdown", o.risk_max_drawdown},
         {"max_loss_per_trade", o.risk_max_loss_per_trade},
         {"max_open_orders", o.risk_max_open_orders},
         {"max_portfolio_exposure", o.risk_max_portfolio_exposure},
+        {"max_gross_leverage", o.risk_max_gross_leverage},
         {"max_daily_loss", o.risk_max_daily_loss},
         {"daily_reset_hour", o.risk_daily_reset_hour},
         {"max_trades_per_hour", o.risk_max_trades_per_hour},
@@ -911,7 +1093,9 @@ static void dump_config(const cli_options& o)
         {"max_symbol_inventory_qty", o.risk_max_inventory_qty},
         {"max_funding_8h_rate", o.risk_max_funding_8h_rate},
         {"max_mark_age_ms", o.risk_max_mark_age_ms},
-        {"require_fresh_mark", o.risk_require_fresh_mark}
+        {"require_fresh_mark", o.risk_require_fresh_mark},
+        {"soft_portfolio_limits", o.risk_soft_portfolio_limits.value_or(true)},
+        {"unwind", o.risk_unwind}
     };
 #ifdef HAS_QUESTDB
     j["persist"] = o.persist;
@@ -936,12 +1120,26 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Replay upper bound (microseconds since epoch; non-default "
                    "is currently refused because append order need not follow event time)");
     app.add_option("--log-events", o.event_log_path, "Path to write binary event log");
+    app.add_option("--write-run-manifest", o.write_run_manifest_path,
+                   "Write a canonical deterministic-run manifest (backtest MC)");
+    app.add_option("--replay-run-manifest", o.replay_run_manifest_path,
+                   "Replay a deterministic run from a canonical manifest");
+    app.add_option("--artifacts-dir", o.reproducibility_artifacts_directory,
+                   "Root for deterministic receipt/report/per-trial artifacts");
+    app.add_flag("--verify-hashes", o.verify_hashes,
+                 "Compare replay outputs with hashes stored in the manifest");
+    app.add_flag("--allow-dataset-mismatch", o.allow_dataset_mismatch,
+                 "Explicitly continue after dataset mismatch; receipt marks replay non-exact");
+    app.add_option("--trial", o.deterministic_trial_index,
+                   "Replay only this stable Monte Carlo trial index");
     app.add_option("--log-file", o.log_file_path, "Path to write operational log (L1, default: stderr)");
     app.add_option("--log-max-size", o.log_max_size_mb, "Max size (MB) per event/text log before rotation (L3, 0 = no rotation)");
     app.add_option("--log-keep", o.log_keep, "Number of rotated log files to retain (L3, default: 5)");
     app.add_flag("--compress-log,!--no-compress-log", o.compress_log, "Compress binary event logs with zstd (default: on)");
-    app.add_option("--seed", o.seed, "RNG seed (0 = non-deterministic)");
-    app.add_option("--thread-preset", o.thread_preset_str, "Threading: inline, light, standard, full, extended");
+    app.add_option("--seed", o.seed,
+                   "Required deterministic master seed for backtest/Monte Carlo; 0 is valid");
+    app.add_option("--thread-preset", o.thread_preset_str,
+                   "Threading: inline, logging, light, standard, full, extended");
     app.add_option("--preset", o.preset, "Named run preset/profile (e.g. futures-phase0, mc-robustness, backtest-l2, shadow-tape). Provides bundles of realistic defaults for common scenarios; explicit flags and --config override the preset. See --help or docs for the list.");
     app.add_flag("--no-pin", o.no_pin, "Disable CPU affinity pinning");
     app.add_option("--spin-policy", o.spin_policy_str, "Worker spin policy: spin, yield, adaptive (default: adaptive)");
@@ -954,17 +1152,21 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--mc-trials", o.mc_trials, "Number of independent Monte Carlo trials");
     app.add_option("--mc-model", o.mc_model, "Generator model for Monte Carlo (gbm only; default: gbm)");
     app.add_flag("--mc-parallel", o.mc_parallel, "EXPERIMENTAL: Run MC trials in parallel (Phase 5). Strong warnings apply - see controller docs. Only safe with inline threading preset.");
+    app.add_option("--mc-workers", o.mc_workers,
+                   "Explicit maximum parallel MC workers (required for deterministic parallel manifests)");
     app.add_flag("--mc-reuse-objects", o.mc_reuse_objects, "Phase A: Reuse data_handler/strategy (and reset other heavy objects) between MC trials instead of full reconstruction each time.");
-    app.add_option("--strategy", o.strategy, "Strategy: mean-reversion, sma, ma-crossover, breakout, coiled-spring, structure-continuation");
+    app.add_option("--strategy", o.strategy, strategy_help_text());
+
     app.add_option("--format", o.format, "Data format: tick, bar");
     app.add_option("--sma-period", o.sma_period, "SMA indicator period")->default_val(20);
     app.add_option("--param", o.params, "Strategy parameter: key=value (repeatable)");
     app.add_option("--mode", o.mode, "Engine mode: backtest, shadow, live");
 
-    app.add_option("--fee", o.fee_model, "Fee model: fixed, tiered");
+    app.add_option("--fee", o.fee_model, "Fee model: zero, fixed, tiered")
+       ->default_val("tiered");
     app.add_option("--fee-value", o.fee_value, "Fixed fee per trade");
-    app.add_option("--maker-rate", o.maker_rate, "Maker fee rate (tiered)");
-    app.add_option("--taker-rate", o.taker_rate, "Taker fee rate (tiered)");
+    app.add_option("--maker-rate", o.maker_rate, "Maker fee rate (tiered)")->default_val(0.001);
+    app.add_option("--taker-rate", o.taker_rate, "Taker fee rate (tiered)")->default_val(0.001);
 
     app.add_option("--symbol", o.symbol, "Trading symbol (e.g., BTCUSDT)");
     app.add_option("--stream", o.stream, "Stream type: trade, kline, or interval");
@@ -1076,7 +1278,7 @@ static void register_cli_options(CLI::App& app, cli_options& o)
     app.add_option("--periods-per-year", o.periods_per_year,
                    "Bars per year for Sharpe/Sortino/Calmar annualization "
                    "(252 daily, 252*390 US-equities minute, 525600 crypto minute, 31536000 crypto second)")
-        ->default_val(252);
+        ->default_val(525600);
     app.add_option("--max-equity-points", o.max_equity_points,
                    "Max points retained in equity/benchmark curves before decimation")
         ->default_val(100000);
@@ -1203,7 +1405,19 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "A missed deadline prints a warning so operators know to intervene.")
         ->default_val(5000);
 
+    // F-05b (docs/todos/11-F-forensic-lifecycle-audit.md): a spot account
+    // cannot borrow, but nothing in the engine said so — the audit accepted
+    // $186,325 of notional on $10,000 of equity (18.6x), later 68.3x.
+    app.add_option("--max-gross-leverage", o.risk_max_gross_leverage,
+                   "Portfolio-wide cap on gross mark-to-market exposure as a multiple of "
+                   "account equity (1.0 = cash account, cannot borrow; 0 = disabled). "
+                   "Defaults to 1.0 on spot venues and to disabled on futures venues, "
+                   "where --max-leverage / FuturesRiskCheck owns leverage instead. "
+                   "Distinct from --max-leverage, which is a per-order futures cap.")
+        ->default_val(-1.0);
+
     app.add_option("--max-daily-loss", o.risk_max_daily_loss, "Maximum daily loss before halt (0 = no limit)")->default_val(0.0);
+
     app.add_option("--daily-reset-hour", o.risk_daily_reset_hour, "UTC hour (0-23) to reset daily loss counter")->default_val(0);
     app.add_option("--max-trades-per-hour", o.risk_max_trades_per_hour, "Maximum fills per rolling hour (0 = no limit)")->default_val(0);
     app.add_option("--max-orders-per-minute", o.risk_max_orders_per_minute, "Maximum orders per rolling minute (0 = no limit)")->default_val(0);
@@ -1218,6 +1432,8 @@ static void register_cli_options(CLI::App& app, cli_options& o)
                    "Age above which a mark counts as stale for risk (0 = no staleness classification)")->default_val(0);
     app.add_flag("--risk-require-fresh-mark", o.risk_require_fresh_mark,
                  "Refuse inventory-increasing orders when the mark is stale or missing (reductions stay allowed)");
+    app.add_flag("--risk-soft-limits,!--no-risk-soft-limits", o.risk_soft_portfolio_limits,
+                 "Enable soft risk limits in research/backtest (reject/log on breach instead of terminal engine halt)");
     app.add_flag("--risk-unwind", o.risk_unwind, "On risk halt, unwind all positions before stopping");
     app.add_option("--output", o.output, "Write results to file (default: stdout)");
     app.add_option("--output-format", o.output_format, "Output format: json or csv")->default_val("json");
@@ -1298,19 +1514,67 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
 
     if (!was_set("--replay")) opts.replay_path = file_opts.replay_path;
     if (!was_set("--log-events")) opts.event_log_path = file_opts.event_log_path;
-    if (!was_set("--seed")) opts.seed = file_opts.seed;
+    if (!was_set("--write-run-manifest"))
+        opts.write_run_manifest_path = file_opts.write_run_manifest_path;
+    if (!was_set("--replay-run-manifest"))
+        opts.replay_run_manifest_path = file_opts.replay_run_manifest_path;
+    if (!was_set("--artifacts-dir"))
+        opts.reproducibility_artifacts_directory =
+            file_opts.reproducibility_artifacts_directory;
+    if (!was_set("--verify-hashes"))
+        opts.verify_hashes = file_opts.verify_hashes;
+    if (!was_set("--allow-dataset-mismatch"))
+        opts.allow_dataset_mismatch = file_opts.allow_dataset_mismatch;
+    if (!was_set("--seed")) {
+        opts.seed = file_opts.seed;
+        opts.seed_explicitly_set = file_opts.seed_explicitly_set;
+    }
     if (!was_set("--thread-preset")) opts.thread_preset_str = file_opts.thread_preset_str;
     if (!was_set("--preset")) opts.preset = file_opts.preset;
     if (!was_set("--no-pin")) opts.no_pin = file_opts.no_pin;
     if (!was_set("--provider")) opts.provider_name = file_opts.provider_name;
     if (!was_set("--path")) opts.provider_path = file_opts.provider_path;
+    if (!was_set("--monte-carlo")) opts.monte_carlo = file_opts.monte_carlo;
+    if (!was_set("--mc-trials")) {
+        opts.mc_trials = file_opts.mc_trials;
+        opts.mc_trials_explicitly_set =
+            file_opts.mc_trials_explicitly_set;
+    }
+    if (!was_set("--mc-model")) {
+        opts.mc_model = file_opts.mc_model;
+        opts.mc_model_explicitly_set =
+            file_opts.mc_model_explicitly_set;
+    }
+    if (!was_set("--mc-params")) {
+        opts.mc_params = file_opts.mc_params;
+        opts.mc_params_explicitly_set =
+            file_opts.mc_params_explicitly_set;
+    }
+    if (!was_set("--mc-parallel")) opts.mc_parallel = file_opts.mc_parallel;
+    if (!was_set("--mc-workers")) {
+        opts.mc_workers = file_opts.mc_workers;
+        opts.mc_workers_explicitly_set =
+            file_opts.mc_workers_explicitly_set;
+    }
+    if (!was_set("--mc-reuse-objects"))
+        opts.mc_reuse_objects = file_opts.mc_reuse_objects;
     if (!was_set("--strategy")) opts.strategy = file_opts.strategy;
+    if (!was_set("--param")) opts.params = file_opts.params;
     if (!was_set("--format")) opts.format = file_opts.format;
     if (!was_set("--sma-period")) opts.sma_period = file_opts.sma_period;
-    if (!was_set("--fee")) opts.fee_model = file_opts.fee_model;
+    if (!was_set("--fee")) {
+        opts.fee_model = file_opts.fee_model;
+        opts.fee_model_explicit = file_opts.fee_model_explicit;
+    }
     if (!was_set("--fee-value")) opts.fee_value = file_opts.fee_value;
-    if (!was_set("--maker-rate")) opts.maker_rate = file_opts.maker_rate;
-    if (!was_set("--taker-rate")) opts.taker_rate = file_opts.taker_rate;
+    if (!was_set("--maker-rate")) {
+        opts.maker_rate = file_opts.maker_rate;
+        opts.maker_rate_explicit = file_opts.maker_rate_explicit;
+    }
+    if (!was_set("--taker-rate")) {
+        opts.taker_rate = file_opts.taker_rate;
+        opts.taker_rate_explicit = file_opts.taker_rate_explicit;
+    }
     if (!was_set("--symbol")) opts.symbol = file_opts.symbol;
     if (!was_set("--stream")) opts.stream = file_opts.stream;
     if (!was_set("--api-key")) opts.api_key = file_opts.api_key;
@@ -1331,9 +1595,25 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--exit-policy")) opts.exit_policy = file_opts.exit_policy;
     if (!was_set("--backfill")) opts.backfill = file_opts.backfill;
     if (!was_set("--backfill-interval")) opts.backfill_interval = file_opts.backfill_interval;
+    if (!was_set("--aggression"))
+        opts.market_aggression = file_opts.market_aggression;
+    if (!was_set("--qty-scale")) opts.qty_scale = file_opts.qty_scale;
+    if (!was_set("--fill-rng-seed")) {
+        opts.fill_rng_seed = file_opts.fill_rng_seed;
+        opts.fill_rng_seed_explicitly_set =
+            file_opts.fill_rng_seed_explicitly_set;
+    }
+    if (!was_set("--spread-step")) {
+        opts.spread_step = file_opts.spread_step;
+        opts.spread_step_explicitly_set =
+            file_opts.spread_step_explicitly_set;
+    }
     if (!was_set("--rolling-window")) opts.rolling_window = file_opts.rolling_window;
     if (!was_set("--risk-free-rate")) opts.risk_free_rate = file_opts.risk_free_rate;
-    if (!was_set("--periods-per-year")) opts.periods_per_year = file_opts.periods_per_year;
+    if (!was_set("--periods-per-year")) {
+        opts.periods_per_year = file_opts.periods_per_year;
+        opts.periods_per_year_explicit = file_opts.periods_per_year_explicit;
+    }
     if (!was_set("--max-equity-points")) opts.max_equity_points = file_opts.max_equity_points;
     if (!was_set("--exec-bar-delay")) opts.exec_bar_delay = file_opts.exec_bar_delay;
     if (!was_set("--wire-latency-us")) opts.wire_latency_us = file_opts.wire_latency_us;
@@ -1357,6 +1637,8 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
         opts.mm_max_spread_pct = file_opts.mm_max_spread_pct;
     if (!was_set("--queue-model")) opts.queue_model = file_opts.queue_model;
     if (!was_set("--maker-queue-model")) opts.maker_queue_model = file_opts.maker_queue_model;
+    if (!was_set("--instrument"))
+        opts.instrument_specs = file_opts.instrument_specs;
     if (!was_set("--output")) opts.output = file_opts.output;
     if (!was_set("--output-format")) opts.output_format = file_opts.output_format;
 
@@ -1371,8 +1653,12 @@ static void apply_config_overlay(CLI::App& app, cli_options& opts)
     if (!was_set("--max-orders-per-minute")) opts.risk_max_orders_per_minute = file_opts.risk_max_orders_per_minute;
     if (!was_set("--max-inventory-qty")) opts.risk_max_inventory_qty = file_opts.risk_max_inventory_qty;
     if (!was_set("--max-funding-8h-rate")) opts.risk_max_funding_8h_rate = file_opts.risk_max_funding_8h_rate;
+    if (!was_set("--max-gross-leverage"))
+        opts.risk_max_gross_leverage = file_opts.risk_max_gross_leverage;
     if (!was_set("--max-mark-age-ms")) opts.risk_max_mark_age_ms = file_opts.risk_max_mark_age_ms;
     if (!was_set("--risk-require-fresh-mark")) opts.risk_require_fresh_mark = file_opts.risk_require_fresh_mark;
+    if (!was_set("--risk-unwind")) opts.risk_unwind = file_opts.risk_unwind;
+    if (!was_set("--risk-soft-limits") && !was_set("--no-risk-soft-limits")) opts.risk_soft_portfolio_limits = file_opts.risk_soft_portfolio_limits;
 #ifdef HAS_QUESTDB
     if (!was_set("--persist")) opts.persist = file_opts.persist;
     if (!was_set("--run-tag")) opts.run_tag = file_opts.run_tag;
@@ -1485,6 +1771,68 @@ static int apply_sim_realism(engine_config& cfg, const cli_options& o, bool is_l
     return 0;
 }
 
+static bool validate_fee_configuration(const cli_options& o, std::ostream& err)
+{
+    if (o.fee_model != "zero" && o.fee_model != "fixed" && o.fee_model != "tiered")
+    {
+        err << "  ! Unknown fee model: " << o.fee_model << "\n";
+        return false;
+    }
+    if (o.fee_model == "fixed" &&
+        (!std::isfinite(o.fee_value) || !(o.fee_value > 0.0)))
+    {
+        err << "  ! --fee fixed requires a finite --fee-value > 0; "
+               "use --fee zero for an intentional zero-cost research run.\n";
+        return false;
+    }
+    if (o.fee_model == "tiered" &&
+        (!std::isfinite(o.maker_rate) || !std::isfinite(o.taker_rate) ||
+         o.maker_rate < 0.0 || o.taker_rate < 0.0))
+    {
+        err << "  ! Tiered fee rates must be finite and non-negative.\n";
+        return false;
+    }
+    if (o.periods_per_year == 0)
+    {
+        err << "  ! --periods-per-year must be positive.\n";
+        return false;
+    }
+
+    const bool protected_mode = o.live || o.mode == "live" || o.mode == "shadow";
+    if (!protected_mode) return true;
+
+    if (o.fee_model == "zero")
+    {
+        err << "  ! --fee zero is research-only and is refused in shadow/live mode.\n";
+        return false;
+    }
+    if (!o.fee_model_explicit)
+    {
+        err << "  ! Shadow/live requires an explicit fee model and venue fee schedule; "
+               "the backtest default is not venue-authoritative.\n";
+        return false;
+    }
+    if (o.fee_model == "tiered" &&
+        (!o.maker_rate_explicit || !o.taker_rate_explicit ||
+         !(o.maker_rate > 0.0) || !(o.taker_rate > 0.0)))
+    {
+        err << "  ! Shadow/live tiered fees require explicit positive --maker-rate "
+               "and --taker-rate values from the venue schedule.\n";
+        return false;
+    }
+
+    // A provider can change or aggregate stream cadence. Never annualize a
+    // protected shadow/live record using the backtest default: the operator
+    // must state the intended sampling basis for every protected stream.
+    if (!o.periods_per_year_explicit)
+    {
+        err << "  ! Shadow/live requires explicit --periods-per-year; "
+               "the backtest 1-minute default is not venue-authoritative.\n";
+        return false;
+    }
+    return true;
+}
+
 static int run_dry_run(const cli_options& o)
 {
     // Without L2, QueueAware joins conservatively (no front-of-queue on tape);
@@ -1519,7 +1867,10 @@ static int run_dry_run(const cli_options& o)
     std::cout << "    Provider:   " << (o.provider_name.empty() ? "(TUI)" : o.provider_name) << "\n";
     std::cout << "    Data path:  " << (o.provider_path.empty() ? "(none)" : o.provider_path) << "\n";
     std::cout << "    Fee model:  " << (o.fee_model.empty() ? "zero" : o.fee_model) << "\n";
-    std::cout << "    Seed:       " << (o.seed == 0 ? "random" : std::to_string(o.seed)) << "\n";
+    std::cout << "    Seed:       "
+              << (o.seed_explicitly_set ? std::to_string(o.seed)
+                                        : std::string("<missing>"))
+              << "\n";
     std::cout << "  ── Risk Limits ──\n";
     std::cout << "    Max drawdown:        " << (o.risk_max_drawdown * 100) << "%\n";
     std::cout << "    Max position value:  $" << o.risk_max_position_value << "\n";
@@ -1570,11 +1921,13 @@ static int run_dry_run(const cli_options& o)
     }
     if (!validate_binance_futures_live_phase0(o, std::cerr, std::cout))
         valid = false;
-    if (!o.fee_model.empty() && o.fee_model != "fixed" && o.fee_model != "tiered")
-    {
-        std::cerr << "  ! Unknown fee model: " << o.fee_model << "\n";
+    if (!validate_fee_configuration(o, std::cerr)) valid = false;
+#if TT_TARGET == TT_TARGET_BACKTEST
+    if (!o.seed_explicitly_set) {
+        std::cerr << "  ! Backtest requires an explicit deterministic seed\n";
         valid = false;
     }
+#endif
     if (!o.thread_preset_str.empty())
     {
         try { string_to_preset(o.thread_preset_str); }
@@ -1601,6 +1954,7 @@ static int run_replay_mode(const cli_options& o)
 
     engine_config cfg;
     cfg.seed = o.seed;
+    cfg.seed_explicitly_set = o.seed_explicitly_set;
     cfg.initial_balance = o.balance;
     cfg.threading = thread_preset::inline_mode;
     cfg.compress_log = o.compress_log;
@@ -1616,56 +1970,1731 @@ static int run_replay_mode(const cli_options& o)
     return eng->run_succeeded() ? 0 : 1;
 }
 
+static std::string reproducibility_utc_now()
+{
+    const std::time_t now = std::time(nullptr);
+    std::tm utc{};
+    if (::gmtime_r(&now, &utc) == nullptr)
+        throw std::runtime_error("cannot convert receipt timestamp to UTC");
+    char buffer[32]{};
+    if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc)
+        == 0)
+        throw std::runtime_error("cannot format receipt timestamp");
+    return buffer;
+}
+
+static std::filesystem::path default_reproducibility_artifact_root(
+    const std::filesystem::path& manifest_path)
+{
+    const std::string name = manifest_path.stem().string() + ".artifacts";
+    return manifest_path.parent_path() / name;
+}
+
+static std::string trial_hash_name(std::size_t trial_index,
+                                   std::string_view kind)
+{
+    return "trial_" + std::to_string(trial_index) + "." + std::string(kind);
+}
+
+static std::map<std::string, std::string, std::less<>>
+deterministic_campaign_hashes(
+    const truetest::simulation::McAggregate& results,
+    const truetest::simulation::McRunConfig& config)
+{
+    std::map<std::string, std::string, std::less<>> hashes{
+        {"economic_result",
+         truetest::simulation::economic_result_sha256(results)},
+        {"event_log",
+         truetest::simulation::aggregate_event_log_sha256(results)},
+        {"report",
+         truetest::simulation::deterministic_report_sha256(results, config)},
+    };
+    for (const auto& trial : results.trials)
+    {
+        hashes.emplace(trial_hash_name(trial.trial_id, "event_log"),
+                       trial.event_log_sha256);
+        hashes.emplace(trial_hash_name(trial.trial_id, "lifecycle"),
+                       trial.lifecycle_sha256);
+        hashes.emplace(trial_hash_name(trial.trial_id, "result"),
+                       trial.trial_result_sha256);
+        if (config.generator_config.emit_synthetic_l2)
+            hashes.emplace(trial_hash_name(trial.trial_id, "synthetic_l2"),
+                           trial.synthetic_l2_sha256);
+    }
+    return hashes;
+}
+
+static std::vector<std::string> compare_expected_hashes(
+    const std::map<std::string, std::string, std::less<>>& expected,
+    const std::map<std::string, std::string, std::less<>>& actual,
+    const std::vector<std::string>& required)
+{
+    std::vector<std::string> mismatches;
+    for (const auto& kind : required)
+    {
+        const auto expected_value = expected.find(kind);
+        const auto actual_value = actual.find(kind);
+        if (expected_value == expected.end())
+        {
+            std::cout << "MISMATCH " << kind
+                      << " expected=<missing> actual="
+                      << (actual_value == actual.end() ? "<missing>"
+                                                       : actual_value->second)
+                      << '\n';
+            mismatches.push_back(kind + ": expected hash missing");
+            continue;
+        }
+        if (actual_value == actual.end()
+            || actual_value->second != expected_value->second)
+        {
+            std::cout << "MISMATCH " << kind
+                      << " expected=" << expected_value->second
+                      << " actual="
+                      << (actual_value == actual.end() ? "<missing>"
+                                                       : actual_value->second)
+                      << '\n';
+            mismatches.push_back(kind + ": hash mismatch");
+        }
+        else
+        {
+            std::cout << "MATCH " << kind << " expected="
+                      << expected_value->second << " actual="
+                      << actual_value->second << '\n';
+        }
+    }
+    return mismatches;
+}
+
+static double deterministic_number(std::string_view text,
+                                   std::string_view field)
+{
+    double value = 0.0;
+    const auto parsed = std::from_chars(
+        text.data(), text.data() + text.size(), value,
+        std::chars_format::general);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()
+        || !std::isfinite(value))
+        throw std::invalid_argument(
+            "invalid finite deterministic value for " + std::string(field));
+    return value;
+}
+
+static instrument_spec deterministic_instrument_snapshot(
+    const cli_options& options)
+{
+    if (options.symbol.empty() || options.instrument_specs.size() != 1U)
+        throw std::invalid_argument(
+            "deterministic local backtest requires --symbol and exactly one --instrument snapshot");
+    const std::string& input = options.instrument_specs.front();
+    const auto colon = input.find(':');
+    if (colon == std::string::npos || input.substr(0, colon) != options.symbol)
+        throw std::invalid_argument(
+            "deterministic --instrument must match --symbol");
+
+    instrument_spec result;
+    result.symbol = options.symbol;
+    std::map<std::string, bool, std::less<>> seen{
+        {"tick", false}, {"lot", false}, {"minq", false}, {"minn", false},
+        {"maker", false}, {"taker", false},
+    };
+    std::string_view fields(input.data() + colon + 1,
+                            input.size() - colon - 1);
+    std::size_t cursor = 0;
+    while (cursor <= fields.size())
+    {
+        const std::size_t comma = fields.find(',', cursor);
+        const std::size_t end = comma == std::string_view::npos
+            ? fields.size() : comma;
+        const std::string_view token = fields.substr(cursor, end - cursor);
+        const auto equals = token.find('=');
+        if (equals == std::string_view::npos || equals == 0
+            || equals + 1 >= token.size())
+            throw std::invalid_argument(
+                "deterministic --instrument requires key=value fields");
+        const std::string key(token.substr(0, equals));
+        const double value = deterministic_number(
+            token.substr(equals + 1), key);
+        const auto known = seen.find(key);
+        if (known == seen.end() || known->second)
+            throw std::invalid_argument(
+                "unknown or duplicate deterministic instrument field: " + key);
+        known->second = true;
+        if (key == "tick") result.tick_size = value;
+        else if (key == "lot") result.lot_size = value;
+        else if (key == "minq") result.min_qty = value;
+        else if (key == "minn") result.min_notional = value;
+        else if (key == "maker") result.maker_rate = value;
+        else if (key == "taker") result.taker_rate = value;
+        if (comma == std::string_view::npos) break;
+        cursor = comma + 1;
+    }
+    for (const auto& [field, present] : seen)
+        if (!present)
+            throw std::invalid_argument(
+                "deterministic instrument snapshot lacks field: " + field);
+    if (!(result.tick_size > 0.0) || !(result.lot_size > 0.0)
+        || result.min_qty < 0.0 || result.min_notional < 0.0)
+        throw std::invalid_argument(
+            "deterministic instrument tick/lot must be positive and minima non-negative");
+    return result;
+}
+
+static truetest::reproducibility::CanonicalJsonValue
+configure_deterministic_local_strategy(
+    IStrategy& strategy, const cli_options& options,
+    std::string_view strategy_name, std::size_t strategy_index)
+{
+    namespace strategy_config = truetest::strategy_config;
+    using Json = truetest::reproducibility::CanonicalJsonValue;
+    if (strategy_index == 0U
+        && (strategy_name == "sma" || strategy_name == "mean-reversion")
+        && options.sma_period != 20U)
+        (void)strategy_config::set_parameter_if_declared(
+            strategy, "period", static_cast<double>(options.sma_period));
+    (void)strategy_config::set_parameter_if_declared(
+        strategy, "equity", options.balance);
+    (void)strategy_config::set_parameter_if_declared(
+        strategy, "risk_fraction", options.risk_fraction);
+    (void)strategy_config::set_parameter_if_declared(
+        strategy, "sl_pct", options.sl_pct);
+    (void)strategy_config::set_parameter_if_declared(
+        strategy, "tp_pct", options.tp_pct);
+
+    const double entry_fee =
+        (options.fee_model == "zero" || options.fee_model == "fixed")
+            ? 0.0
+            : options.taker_rate > 0.0 ? options.taker_rate
+            : options.maker_rate > 0.0 ? options.maker_rate : 0.0;
+    (void)strategy_config::set_parameter_if_declared(
+        strategy, "entry_fee_rate", entry_fee);
+    (void)strategy_config::set_parameter_if_declared(
+        strategy, "exit_fee_rate", entry_fee);
+    (void)strategy_config::set_parameter_if_declared(
+        strategy, "fixed_fee_per_leg",
+        options.fee_model == "fixed" ? options.fee_value : 0.0);
+    const double slip_bps = std::max(
+        options.mm_spread_pct > 0.0
+            ? options.mm_spread_pct * 10'000.0 : 0.0,
+        options.bar_spread_bps > 0.0
+            ? options.bar_spread_bps * 0.5 : 0.0);
+    (void)strategy_config::set_parameter_if_declared(
+        strategy, "entry_slip_bps", slip_bps);
+    (void)strategy_config::set_parameter_if_declared(
+        strategy, "exit_slip_bps", slip_bps);
+
+    for (const auto& parameter : options.params)
+    {
+        const auto equals = parameter.find('=');
+        if (equals == std::string::npos || equals == 0
+            || equals + 1 >= parameter.size())
+            throw std::invalid_argument(
+                "deterministic strategy parameter must be key=value");
+        const std::string key = parameter.substr(0, equals);
+        const double value = deterministic_number(
+            std::string_view(parameter).substr(equals + 1), key);
+        (void)strategy_config::set_parameter_if_declared(
+            strategy, key, value, true);
+    }
+
+    Json::Object output;
+    for (const auto& [name, value] :
+         strategy_config::effective_parameter_values(strategy))
+        output.emplace(name, value);
+    return Json(std::move(output));
+}
+
+static truetest::reproducibility::CanonicalJsonValue
+deterministic_strategy_snapshot(const cli_options& options)
+{
+    namespace repro = truetest::reproducibility;
+    using Json = repro::CanonicalJsonValue;
+    const auto names = split_csv(
+        options.strategy.empty() ? std::string("mean-reversion")
+                                 : options.strategy);
+    if (names.empty())
+        throw std::invalid_argument(
+            "deterministic backtest requires at least one strategy");
+
+    Json::Array descriptors;
+    descriptors.reserve(names.size());
+    for (std::size_t strategy_index = 0;
+         strategy_index < names.size(); ++strategy_index)
+    {
+        const auto& name = names[strategy_index];
+        const auto& registry = StrategyRegistry::instance();
+        if (!registry.has(name))
+            throw std::invalid_argument(
+                "deterministic backtest has unknown strategy '" + name + "'");
+        auto strategy = registry.create(name);
+        if (!strategy)
+            throw std::invalid_argument(
+                "deterministic backtest strategy factory returned null for '"
+                + name + "'");
+        Json parameter_values = configure_deterministic_local_strategy(
+            *strategy, options, name, strategy_index);
+        descriptors.push_back(Json::object({
+            {"config", Json::object({
+                {"effective_parameters", std::move(parameter_values)},
+            })},
+            {"id", name},
+            {"version", "strategy-source-contract-v1"},
+        }));
+    }
+    Json primary = descriptors.front();
+    Json::Array additional;
+    for (std::size_t index = 1; index < descriptors.size(); ++index)
+        additional.push_back(descriptors[index]);
+    primary["config"]["additional_strategies"] = std::move(additional);
+    return primary;
+}
+
+static void validate_deterministic_local_effective_config(
+    const cli_options& options)
+{
+    const auto finite_nonnegative = [](double value) {
+        return std::isfinite(value) && value >= 0.0;
+    };
+    if (!(options.balance > 0.0) || !std::isfinite(options.balance)
+        || !finite_nonnegative(options.risk_fraction)
+        || options.risk_fraction > 1.0
+        || options.rolling_window == 0 || options.periods_per_year == 0
+        || !std::isfinite(options.risk_free_rate)
+        || !(options.market_aggression > 0.0)
+        || !std::isfinite(options.market_aggression)
+        || !(options.qty_scale > 0.0) || !std::isfinite(options.qty_scale))
+        throw std::invalid_argument(
+            "deterministic local analytics, balance, and execution scaling must be finite and effective");
+    if (!finite_nonnegative(options.fill_prob) || options.fill_prob > 1.0
+        || !finite_nonnegative(options.fill_fade) || options.fill_fade > 1.0
+        || !finite_nonnegative(options.fill_decay)
+        || (options.fill_fade > 0.0 && !(options.fill_prob > 0.0)))
+        throw std::invalid_argument(
+            "deterministic local fill configuration is invalid");
+    if (options.fill_prob == 0.0
+        && (options.fill_fade != 0.0 || options.fill_decay != 10.0))
+        throw std::invalid_argument(
+            "deterministic local disabled fill model refuses inert calibration");
+    if (options.order_latency_us < 0
+        || options.order_latency_stddev_us < 0)
+        throw std::invalid_argument(
+            "deterministic local latency must be non-negative");
+    if (options.order_latency_stddev_us > 0
+        && options.order_latency_us <= 0)
+        throw std::invalid_argument(
+            "deterministic local stochastic latency requires a positive mean");
+    if (options.wire_latency_us != 0)
+        throw std::invalid_argument(
+            "deterministic local wire latency is unsupported by the local execution adapter");
+    if (!finite_nonnegative(options.impact_k_bps)
+        || !finite_nonnegative(options.impact_adv)
+        || ((options.impact_k_bps > 0.0)
+            != (options.impact_adv > 0.0)))
+        throw std::invalid_argument(
+            "deterministic local impact requires positive k_bps and ADV together");
+    if (options.walked_book_impact)
+        throw std::invalid_argument(
+            "deterministic local walked-book impact requires a hashed L2 dataset and is unsupported");
+    if (!finite_nonnegative(options.bar_spread_bps)
+        || options.mm_levels <= 0 || options.mm_base_depth <= 0
+        || !(options.mm_spread_pct > 0.0)
+        || !std::isfinite(options.mm_spread_pct)
+        || !finite_nonnegative(options.mm_vol_mult)
+        || !(options.mm_max_spread_pct > 0.0)
+        || !std::isfinite(options.mm_max_spread_pct))
+        throw std::invalid_argument(
+            "deterministic local market-maker calibration is invalid");
+    if (!std::isfinite(options.sl_pct) || !std::isfinite(options.tp_pct)
+        || !std::isfinite(options.trail_pct)
+        || options.sl_pct < 0.0 || options.sl_pct > 1.0
+        || options.tp_pct < 0.0 || options.tp_pct > 1.0
+        || options.trail_pct < 0.0 || options.trail_pct > 1.0
+        || !truetest::exits::parse_exit_policy_mode(options.exit_policy))
+        throw std::invalid_argument(
+            "deterministic local exit configuration is invalid");
+    if (options.fill_rng_seed_explicitly_set)
+        throw std::invalid_argument(
+            "deterministic local run refuses --fill-rng-seed; fill seeds derive from the master seed");
+    if (options.spread_step_explicitly_set)
+        throw std::invalid_argument(
+            "deterministic local run refuses --spread-step; the local adapter does not consume it");
+    if (options.debug_fills || options.debug_fills_budget != 20
+        || options.realistic_fills || options.log_max_size_mb != 0
+        || options.log_keep != 5 || !options.compress_log
+        || options.output_format != "json")
+        throw std::invalid_argument(
+            "deterministic local run refuses debug, deprecated, log-rotation, compression, and alternate output side paths");
+    if (!options.api_key.empty() || !options.api_secret.empty()
+        || !options.api_passphrase.empty()
+        || options.checkpoint_interval != 10'000
+        || options.backfill != 500 || !options.backfill_interval.empty()
+        || !options.margin_type.empty()
+        || options.liquidation_warn_pct != -1.0
+        || options.margin_type_strict
+        || options.max_notional_usdt != -1.0
+        || options.max_leverage != -1.0
+        || options.min_liquidation_distance_pct != -1.0
+        || options.dead_man_countdown_ms != 30'000
+        || options.dead_man_heartbeat_ms != 0 || options.disarm_deadman
+        || options.reconcile_tolerance_bps != 10.0
+        || options.kill_switch_deadline_ms != 5'000)
+        throw std::invalid_argument(
+            "deterministic local run refuses credentials and provider-only checkpoint, backfill, venue-risk, dead-man, reconciliation, and kill-switch inputs");
+    if (options.mc_trials_explicitly_set
+        || options.mc_model_explicitly_set || !options.mc_model.empty()
+        || options.mc_params_explicitly_set || !options.mc_params.empty()
+        || options.mc_parallel
+        || options.mc_workers != 0 || options.mc_workers_explicitly_set
+        || options.mc_reuse_objects || options.replay_from_explicitly_set
+        || options.replay_to_explicitly_set)
+        throw std::invalid_argument(
+            "deterministic local run refuses mode-specific Monte Carlo and event-log replay inputs");
+    (void)deterministic_strategy_snapshot(options);
+}
+
+static truetest::reproducibility::CanonicalJsonValue
+deterministic_local_effective_config(
+    const cli_options& options,
+    std::size_t lifecycle_record_capacity)
+{
+    using Json = truetest::reproducibility::CanonicalJsonValue;
+    const engine_config defaults;
+    const pool_prewarm_settings& pools = defaults.pool_prewarm;
+    Json::Array parameters;
+    for (const auto& parameter : options.params)
+        parameters.emplace_back(parameter);
+    return Json::object({
+        {"artifact_persistence", Json::object({
+            {"event_log_compression", "zstd"},
+            {"event_log_file_version", static_cast<std::uint64_t>(
+                EVENT_LOG_FILE_VERSION)},
+            {"lifecycle_capture", "full-preallocated-v1"},
+            {"lifecycle_record_capacity", static_cast<std::uint64_t>(
+                lifecycle_record_capacity)},
+            {"economic_result_schema", "economic-result-v2"},
+            {"report_canonicalization", "canonical-json-v1"},
+            {"report_schema", "deterministic-report-v1"},
+        })},
+        {"balance", options.balance},
+        {"bar_spread_bps", options.bar_spread_bps},
+        {"engine_runtime", Json::object({
+            {"disable_pinning", true},
+            {"drop_policy", "block"},
+            {"max_consecutive_worker_errors", static_cast<std::uint64_t>(
+                defaults.max_consecutive_worker_errors)},
+            {"mode", "backtest"},
+            {"pin_event_loop", defaults.pin_event_loop},
+            {"pin_logging", defaults.pin_logging},
+            {"pin_market_maker", defaults.pin_mm},
+            {"pin_risk", defaults.pin_risk},
+            {"pin_stats", defaults.pin_stats},
+            {"ring_buffer_capacity", static_cast<std::uint64_t>(
+                defaults.ring_buffer_capacity)},
+            {"show_progress", false},
+            {"spin_policy", options.spin_policy_str.empty()
+                ? std::string("adaptive") : options.spin_policy_str},
+            {"thread_preset", "logging"},
+        })},
+        {"execution_bar_delay", static_cast<std::uint64_t>(options.exec_bar_delay)},
+        {"exit_defaults", Json::object({
+            {"mode", options.exit_policy},
+            {"sl_pct", options.sl_pct},
+            {"tp_pct", options.tp_pct},
+            {"trail_pct", options.trail_pct},
+        })},
+        {"fill_decay", options.fill_decay},
+        {"fill_fade", options.fill_fade},
+        {"fill_probability", options.fill_prob},
+        {"fill_seed_source", "master-seed-fill-domain-v1"},
+        {"format", options.format.empty() ? std::string("bar") : options.format},
+        {"impact_adv", options.impact_adv},
+        {"impact_k_bps", options.impact_k_bps},
+        {"maker_queue_model", options.maker_queue_model},
+        {"market_aggression", options.market_aggression},
+        {"max_equity_points", static_cast<std::uint64_t>(
+            std::max<std::size_t>(options.max_equity_points, 4U))},
+        {"mm_base_depth", options.mm_base_depth},
+        {"mm_levels", options.mm_levels},
+        {"mm_max_spread_pct", options.mm_max_spread_pct},
+        {"mm_spread_pct", options.mm_spread_pct},
+        {"mm_vol_mult", options.mm_vol_mult},
+        {"order_latency_stddev_us", options.order_latency_stddev_us},
+        {"order_latency_us", options.order_latency_us},
+        {"periods_per_year", static_cast<std::uint64_t>(options.periods_per_year)},
+        {"pool_prewarm", Json::object({
+            {"amend_blocks", static_cast<std::uint64_t>(pools.amend_blocks)},
+            {"cancel_blocks", static_cast<std::uint64_t>(pools.cancel_blocks)},
+            {"control_block_slots", static_cast<std::uint64_t>(
+                pools.control_block_slots)},
+            {"fill_blocks", static_cast<std::uint64_t>(pools.fill_blocks)},
+            {"forbid_runtime_grow", pools.forbid_runtime_grow},
+            {"funding_blocks", static_cast<std::uint64_t>(pools.funding_blocks)},
+            {"l2_snapshot_blocks", static_cast<std::uint64_t>(
+                pools.l2_snapshot_blocks)},
+            {"l2_update_blocks", static_cast<std::uint64_t>(
+                pools.l2_update_blocks)},
+            {"market_blocks", static_cast<std::uint64_t>(pools.market_blocks)},
+            {"order_blocks", static_cast<std::uint64_t>(pools.order_blocks)},
+            {"orderbook_order_blocks", static_cast<std::uint64_t>(
+                pools.orderbook_order_blocks)},
+            {"rejection_blocks", static_cast<std::uint64_t>(
+                pools.rejection_blocks)},
+            {"tick_blocks", static_cast<std::uint64_t>(pools.tick_blocks)},
+        })},
+        {"provider", "local"},
+        {"quantity_scale", options.qty_scale},
+        {"queue_model", options.queue_model},
+        {"risk_free_rate", options.risk_free_rate},
+        {"risk_fraction", options.risk_fraction},
+        {"risk", Json::object({
+            {"daily_reset_hour", options.risk_daily_reset_hour},
+            {"max_daily_loss", options.risk_max_daily_loss},
+            {"max_drawdown", options.risk_max_drawdown},
+            {"max_funding_8h_rate", options.risk_max_funding_8h_rate},
+            {"max_gross_leverage", resolve_max_gross_leverage(
+                options.risk_max_gross_leverage, "local")},
+            {"max_loss_per_trade", options.risk_max_loss_per_trade},
+            {"max_mark_age_ms", static_cast<std::int64_t>(
+                options.risk_max_mark_age_ms)},
+            {"max_open_orders", options.risk_max_open_orders},
+            {"max_orders_per_minute", options.risk_max_orders_per_minute},
+            {"max_portfolio_exposure", options.risk_max_portfolio_exposure},
+            {"max_position_pct_of_equity",
+                defaults.risk.max_position_pct_of_equity},
+            {"max_position_value", options.risk_max_position_value},
+            {"max_spread_bps", defaults.risk.max_spread_bps},
+            {"max_symbol_inventory_qty", options.risk_max_inventory_qty},
+            {"max_trades_per_hour", options.risk_max_trades_per_hour},
+            {"require_fresh_mark", options.risk_require_fresh_mark},
+            {"soft_portfolio_limits", resolve_risk_soft_portfolio_limits(
+                false, "backtest", options.risk_soft_portfolio_limits)},
+            {"unwind", options.risk_unwind},
+        })},
+        {"rolling_window", static_cast<std::uint64_t>(options.rolling_window)},
+        {"sma_period", static_cast<std::uint64_t>(options.sma_period)},
+        {"strategy", options.strategy.empty()
+             ? std::string("mean-reversion") : options.strategy},
+        {"strategy_overrides", std::move(parameters)},
+        {"symbol", options.symbol},
+        {"walked_book_impact", options.walked_book_impact},
+        {"wire_latency_us", options.wire_latency_us},
+    });
+}
+
+static truetest::reproducibility::RunManifestV1
+make_deterministic_local_manifest(
+    const cli_options& options,
+    const truetest::reproducibility::DatasetSnapshot& dataset,
+    const instrument_spec& instrument,
+    std::size_t lifecycle_record_capacity)
+{
+    namespace repro = truetest::reproducibility;
+    using Json = repro::CanonicalJsonValue;
+    const repro::DeterministicSeedDeriver seeds(options.seed);
+    Json::Array strategy_seed_instances;
+    auto strategy_names = split_csv(
+        options.strategy.empty() ? std::string("mean-reversion")
+                                 : options.strategy);
+    if (strategy_names.empty())
+        strategy_names.emplace_back("mean-reversion");
+    strategy_seed_instances.reserve(strategy_names.size());
+    for (std::size_t index = 0; index < strategy_names.size(); ++index)
+    {
+        strategy_seed_instances.push_back(Json::object({
+            {"index", static_cast<std::uint64_t>(index)},
+            {"name", strategy_names[index]},
+            {"seed", seeds.derive(
+                repro::SeedDomain::strategy,
+                static_cast<std::uint64_t>(index))},
+        }));
+    }
+    const auto model = [](std::string id, std::string version,
+                          Json::Object config = {}) {
+        return Json::object({{"config", std::move(config)},
+                             {"id", std::move(id)},
+                             {"version", std::move(version)}});
+    };
+    const std::string fee_id = options.fee_model.empty()
+        ? "zero" : options.fee_model;
+    const auto inputs = Json::object({
+        {"build", repro::build_identity_json(repro::current_build_identity())},
+        {"dataset", repro::dataset_identity_json(dataset)},
+        {"determinism_envelope", Json::object({
+            {"cross_compiler_bit_identity", false},
+            {"cross_cpu_bit_identity", false},
+            {"event_log_binary_encoding",
+             "little-endian-ieee754-binary64-v3"},
+            {"prng", "xoshiro256starstar-v1"},
+            {"sampling", "truetest-uniform-box-muller-v1"},
+            {"scope", "same-source-build-toolchain-libc-stdlib-architecture"},
+        })},
+        {"effective_config", deterministic_local_effective_config(
+            options, lifecycle_record_capacity)},
+        {"fee_schedule", Json::object({
+            {"fixed_fee", options.fee_value},
+            {"funding", Json::object({{"enabled", false}, {"version", "disabled-v1"}})},
+            {"maker_rate", options.maker_rate},
+            {"snapshot_version", "local-fee-snapshot-v1"},
+            {"taker_rate", options.taker_rate},
+            {"type", fee_id},
+        })},
+        {"instrument", Json::object({
+            {"asset_type", "configured-local-instrument"},
+            {"lot_size", instrument.lot_size},
+            {"maker_rate", instrument.maker_rate},
+            {"minimum_notional", instrument.min_notional},
+            {"minimum_quantity", instrument.min_qty},
+            {"minimum_validation_policy",
+             "qty-epsilon-1e-12-notional-epsilon-1e-9-v1"},
+            {"rounding_policy",
+             "price-nearest-tick-quantity-floor-lot-v1"},
+            {"symbol", instrument.symbol},
+            {"taker_rate", instrument.taker_rate},
+            {"tick_size", instrument.tick_size},
+            {"venue", "local"},
+        })},
+        {"models", Json::object({
+            {"fee", model(fee_id, "fee-model-v1", {
+                {"fixed_fee", options.fee_value},
+                {"maker_rate", options.maker_rate},
+                {"taker_rate", options.taker_rate},
+            })},
+            {"fill", model(options.fill_prob > 0.0 ? "realistic" : "perfect",
+                           "fill-model-v1", {
+                {"decay", options.fill_decay}, {"fade", options.fill_fade},
+                {"probability", options.fill_prob},
+            })},
+            {"impact", model(options.impact_k_bps > 0.0 ? "square-root" : "zero",
+                             "impact-model-v1", {
+                {"adv", options.impact_adv}, {"k_bps", options.impact_k_bps},
+                {"walked_book", options.walked_book_impact},
+            })},
+            {"latency", model(options.order_latency_stddev_us > 0
+                    ? "deterministic-stochastic" : options.order_latency_us > 0
+                    ? "fixed" : "zero", "latency-model-v1", {
+                {"mean_us", options.order_latency_us},
+                {"stddev_us", options.order_latency_stddev_us},
+                {"wire_us", options.wire_latency_us},
+            })},
+            {"queue", model(options.maker_queue_model, "queue-model-v1", {
+                {"position_model", options.queue_model},
+            })},
+            {"simulator", model("truetest-event-engine", "simulation-engine-v1", {
+                {"event_ordering", dataset.event_ordering_rule},
+                {"tie_breaking", dataset.tie_breaking_rule},
+            })},
+            {"synthetic_gbm", model("disabled", "synthetic-gbm-v1")},
+            {"synthetic_l2", model("seeded-market-maker", "synthetic-l2-v1", {
+                {"base_depth", options.mm_base_depth},
+                {"levels", options.mm_levels},
+                {"max_spread_pct", options.mm_max_spread_pct},
+                {"spread_pct", options.mm_spread_pct},
+                {"volatility_multiplier", options.mm_vol_mult},
+            })},
+        })},
+        {"monte_carlo", Json::object({
+            {"lifecycle_persistence", "full"},
+            {"trial_count", std::uint64_t{0}},
+        })},
+        {"run_mode", "backtest"},
+        {"seed_hierarchy", Json::object({
+            {"derivation_version", std::uint64_t{repro::kSeedDerivationVersion}},
+            {"domains", Json::object({
+                {"fill_model", seeds.derive(repro::SeedDomain::fill_model)},
+                {"impact_model", seeds.derive(repro::SeedDomain::impact_model)},
+                {"latency_model", seeds.derive(repro::SeedDomain::latency_model)},
+                {"market_maker", seeds.derive(repro::SeedDomain::market_maker)},
+                {"queue_model", seeds.derive(repro::SeedDomain::queue_model)},
+                {"run", seeds.derive(repro::SeedDomain::run)},
+                {"strategy", seeds.derive(repro::SeedDomain::strategy)},
+            })},
+            {"master_seed", options.seed},
+            {"strategy_instances", std::move(strategy_seed_instances)},
+            {"trials", Json::array({})},
+        })},
+        {"strategy", deterministic_strategy_snapshot(options)},
+        {"target", "engine_backtest"},
+        {"threading", Json::object({
+            {"completion_order_affects_results", false},
+            {"analytics_execution", "inline"},
+            {"logging_workers", std::uint64_t{1}},
+            {"preset", "logging"},
+            {"workers", std::uint64_t{2}},
+        })},
+    });
+    return repro::RunManifestV1(
+        inputs, repro::dataset_locations_json(dataset), true);
+}
+
+static std::string deterministic_double_text(double value)
+{
+    std::ostringstream output;
+    output.imbue(std::locale::classic());
+    output << std::setprecision(std::numeric_limits<double>::max_digits10)
+           << value;
+    return output.str();
+}
+
+[[maybe_unused]] static cli_options deterministic_local_options_from_manifest(
+    const truetest::reproducibility::RunManifestV1& manifest,
+    const std::filesystem::path& manifest_directory)
+{
+    using Json = truetest::reproducibility::CanonicalJsonValue;
+    const Json& inputs = manifest.deterministic_inputs();
+    if (inputs.at("target").as_string() != "engine_backtest"
+        || inputs.at("run_mode").as_string() != "backtest")
+        throw std::invalid_argument(
+            "manifest is not a local engine_backtest run");
+    const Json& config = inputs.at("effective_config");
+    if (config.at("provider").as_string() != "local")
+        throw std::invalid_argument(
+            "deterministic provider replay supports local datasets only");
+    cli_options result;
+    result.provider_name = "local";
+    const auto dataset = truetest::reproducibility::dataset_snapshot_from_json(
+        inputs.at("dataset"), manifest.dataset_locations());
+    if (dataset.schema_version != 1U)
+        throw std::invalid_argument(
+            "unsupported deterministic local dataset schema version");
+    for (std::size_t index = 0; index < dataset.artifacts.size(); ++index)
+    {
+        if (index != 0) result.provider_path.push_back(',');
+        std::filesystem::path locator(dataset.artifacts[index].locator);
+        if (locator.is_relative()) locator = manifest_directory / locator;
+        result.provider_path += locator.string();
+    }
+    result.seed = inputs.at("seed_hierarchy").at("master_seed").as_u64();
+    result.seed_explicitly_set = true;
+    result.balance = config.at("balance").as_double();
+    result.deterministic_lifecycle_record_capacity =
+        static_cast<std::size_t>(config.at("artifact_persistence")
+            .at("lifecycle_record_capacity").as_u64());
+    result.bar_spread_bps = config.at("bar_spread_bps").as_double();
+    result.exec_bar_delay = static_cast<std::size_t>(
+        config.at("execution_bar_delay").as_u64());
+    const Json& exit_defaults = config.at("exit_defaults");
+    result.exit_policy = exit_defaults.at("mode").as_string();
+    result.sl_pct = exit_defaults.at("sl_pct").as_double();
+    result.tp_pct = exit_defaults.at("tp_pct").as_double();
+    result.trail_pct = exit_defaults.at("trail_pct").as_double();
+    result.fill_decay = config.at("fill_decay").as_double();
+    result.fill_fade = config.at("fill_fade").as_double();
+    result.fill_prob = config.at("fill_probability").as_double();
+    result.format = config.at("format").as_string();
+    result.impact_adv = config.at("impact_adv").as_double();
+    result.impact_k_bps = config.at("impact_k_bps").as_double();
+    result.spin_policy_str = config.at("engine_runtime")
+        .at("spin_policy").as_string();
+    result.maker_queue_model = config.at("maker_queue_model").as_string();
+    result.market_aggression = config.at("market_aggression").as_double();
+    result.max_equity_points = static_cast<std::size_t>(
+        config.at("max_equity_points").as_u64());
+    result.mm_base_depth = static_cast<int>(config.at("mm_base_depth").as_i64());
+    result.mm_levels = static_cast<int>(config.at("mm_levels").as_i64());
+    result.mm_max_spread_pct = config.at("mm_max_spread_pct").as_double();
+    result.mm_spread_pct = config.at("mm_spread_pct").as_double();
+    result.mm_vol_mult = config.at("mm_vol_mult").as_double();
+    result.order_latency_stddev_us = static_cast<int>(
+        config.at("order_latency_stddev_us").as_i64());
+    result.order_latency_us = static_cast<int>(
+        config.at("order_latency_us").as_i64());
+    result.periods_per_year = static_cast<std::size_t>(
+        config.at("periods_per_year").as_u64());
+    result.periods_per_year_explicit = true;
+    result.qty_scale = config.at("quantity_scale").as_double();
+    result.queue_model = config.at("queue_model").as_string();
+    result.risk_free_rate = config.at("risk_free_rate").as_double();
+    result.risk_fraction = config.at("risk_fraction").as_double();
+    const Json& risk = config.at("risk");
+    result.risk_daily_reset_hour = static_cast<int>(
+        risk.at("daily_reset_hour").as_i64());
+    result.risk_max_daily_loss = risk.at("max_daily_loss").as_double();
+    result.risk_max_drawdown = risk.at("max_drawdown").as_double();
+    result.risk_max_funding_8h_rate =
+        risk.at("max_funding_8h_rate").as_double();
+    result.risk_max_gross_leverage =
+        risk.at("max_gross_leverage").as_double();
+    result.risk_max_loss_per_trade =
+        risk.at("max_loss_per_trade").as_double();
+    result.risk_max_mark_age_ms =
+        risk.at("max_mark_age_ms").as_i64();
+    result.risk_max_open_orders = static_cast<int>(
+        risk.at("max_open_orders").as_i64());
+    result.risk_max_orders_per_minute = static_cast<int>(
+        risk.at("max_orders_per_minute").as_i64());
+    result.risk_max_portfolio_exposure =
+        risk.at("max_portfolio_exposure").as_double();
+    result.risk_max_position_value =
+        risk.at("max_position_value").as_double();
+    result.risk_max_inventory_qty =
+        risk.at("max_symbol_inventory_qty").as_double();
+    result.risk_max_trades_per_hour = static_cast<int>(
+        risk.at("max_trades_per_hour").as_i64());
+    result.risk_require_fresh_mark =
+        risk.at("require_fresh_mark").as_bool();
+    result.risk_soft_portfolio_limits =
+        risk.at("soft_portfolio_limits").as_bool();
+    result.risk_unwind = risk.at("unwind").as_bool();
+    result.rolling_window = static_cast<std::size_t>(
+        config.at("rolling_window").as_u64());
+    result.sma_period = static_cast<std::size_t>(
+        config.at("sma_period").as_u64());
+    result.strategy = config.at("strategy").as_string();
+    for (const auto& parameter : config.at("strategy_overrides").as_array())
+        result.params.push_back(parameter.as_string());
+    result.symbol = config.at("symbol").as_string();
+    result.walked_book_impact = config.at("walked_book_impact").as_bool();
+    result.wire_latency_us = static_cast<int>(
+        config.at("wire_latency_us").as_i64());
+    const Json& fees = inputs.at("fee_schedule");
+    result.fee_model = fees.at("type").as_string();
+    result.fee_value = fees.at("fixed_fee").as_double();
+    result.maker_rate = fees.at("maker_rate").as_double();
+    result.taker_rate = fees.at("taker_rate").as_double();
+    result.fee_model_explicit = true;
+    result.maker_rate_explicit = true;
+    result.taker_rate_explicit = true;
+    const Json& instrument = inputs.at("instrument");
+    if (instrument.at("rounding_policy").as_string()
+            != "price-nearest-tick-quantity-floor-lot-v1"
+        || instrument.at("minimum_validation_policy").as_string()
+            != "qty-epsilon-1e-12-notional-epsilon-1e-9-v1")
+        throw std::invalid_argument(
+            "unsupported deterministic local instrument validation policy");
+    result.instrument_specs.push_back(
+        result.symbol + ":tick="
+        + deterministic_double_text(instrument.at("tick_size").as_double())
+        + ",lot="
+        + deterministic_double_text(instrument.at("lot_size").as_double())
+        + ",minq="
+        + deterministic_double_text(
+            instrument.at("minimum_quantity").as_double())
+        + ",minn="
+        + deterministic_double_text(
+            instrument.at("minimum_notional").as_double())
+        + ",maker="
+        + deterministic_double_text(instrument.at("maker_rate").as_double())
+        + ",taker="
+        + deterministic_double_text(instrument.at("taker_rate").as_double()));
+    result.mode = "backtest";
+    result.thread_preset_str = "logging";
+    result.no_pin = true;
+    result.no_tui = true;
+    result.status_format = "off";
+    return result;
+}
+
+struct deterministic_local_artifact_paths
+{
+    std::filesystem::path directory;
+    std::filesystem::path dataset_directory;
+    std::filesystem::path event_log;
+    std::filesystem::path event_log_partial;
+    std::filesystem::path lifecycle;
+    std::filesystem::path report;
+    std::filesystem::path receipt;
+};
+
+static deterministic_local_artifact_paths deterministic_local_paths(
+    const std::filesystem::path& directory)
+{
+    if (directory.empty())
+        throw std::invalid_argument(
+            "deterministic local run requires an artifacts directory");
+    return {
+        directory,
+        directory / "dataset",
+        directory / "events.zst",
+        directory / "events.zst.partial",
+        directory / "lifecycle.jsonl",
+        directory / "report.json",
+        directory / "run_receipt.json",
+    };
+}
+
+static void require_new_artifact_destination(
+    const std::filesystem::path& path,
+    std::string_view description)
+{
+    if (path.empty() || path.filename().empty())
+        throw std::invalid_argument(
+            std::string(description) + " must name a file");
+    std::error_code error;
+    if (std::filesystem::exists(path, error))
+        throw std::runtime_error(
+            "refusing to overwrite " + std::string(description) + ": "
+            + path.string());
+    if (error)
+        throw std::runtime_error(
+            "cannot inspect " + std::string(description) + ": "
+            + path.string());
+    const std::filesystem::path partial(path.string() + ".partial");
+    if (std::filesystem::exists(partial, error))
+        throw std::runtime_error(
+            "incomplete " + std::string(description) + " already exists: "
+            + partial.string());
+    if (error)
+        throw std::runtime_error(
+            "cannot inspect " + std::string(description)
+            + " staging path: " + partial.string());
+}
+
+static void prepare_deterministic_local_artifacts(
+    const deterministic_local_artifact_paths& paths)
+{
+    const std::array targets{
+        paths.event_log,
+        paths.event_log_partial,
+        paths.lifecycle,
+        std::filesystem::path(paths.lifecycle.string() + ".partial"),
+        paths.report,
+        std::filesystem::path(paths.report.string() + ".partial"),
+        paths.receipt,
+        std::filesystem::path(paths.receipt.string() + ".partial"),
+    };
+    std::error_code error;
+    for (const auto& target : targets)
+    {
+        if (std::filesystem::exists(target, error))
+            throw std::runtime_error(
+                "refusing to overwrite deterministic run artifact: "
+                + target.string());
+        if (error)
+            throw std::runtime_error(
+                "cannot inspect deterministic run artifact: "
+                + target.string());
+    }
+    std::filesystem::create_directories(paths.directory, error);
+    if (error)
+        throw std::runtime_error(
+            "cannot create deterministic artifact directory: "
+            + error.message());
+}
+
+class deterministic_local_receipt_guard final
+{
+public:
+    deterministic_local_receipt_guard(
+        deterministic_local_artifact_paths paths,
+        std::chrono::steady_clock::time_point started,
+        bool dataset_override)
+        : paths_(std::move(paths)), started_(started),
+          dataset_override_(dataset_override)
+    {
+    }
+
+    deterministic_local_receipt_guard(
+        const deterministic_local_receipt_guard&) = delete;
+    deterministic_local_receipt_guard& operator=(
+        const deterministic_local_receipt_guard&) = delete;
+
+    ~deterministic_local_receipt_guard()
+    {
+        if (receipt_published_)
+            return;
+        try
+        {
+            truetest::reproducibility::RunReceiptV1 receipt;
+            receipt.executed_at_utc = reproducibility_utc_now();
+            receipt.duration_ms = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started_).count());
+            receipt.status = "failed";
+            receipt.dataset_mismatch_override_used = dataset_override_;
+            receipt.run_fingerprint = run_fingerprint_;
+            receipt.mismatches = dataset_mismatches_;
+            receipt.mismatches.push_back(failure_reason_);
+            receipt.write_atomic(paths_.receipt);
+        }
+        catch (const std::exception& error)
+        {
+            std::cerr << "  ! Failed to persist deterministic receipt: "
+                      << error.what() << '\n';
+        }
+    }
+
+    void set_run_fingerprint(std::string fingerprint)
+    {
+        run_fingerprint_ = std::move(fingerprint);
+    }
+
+    void set_failure(std::string_view reason)
+    {
+        if (!reason.empty())
+            failure_reason_.assign(reason);
+    }
+
+    void set_dataset_mismatches(std::vector<std::string> mismatches)
+    {
+        dataset_mismatches_ = std::move(mismatches);
+    }
+
+    void mark_receipt_published() noexcept { receipt_published_ = true; }
+
+private:
+    deterministic_local_artifact_paths paths_;
+    std::chrono::steady_clock::time_point started_;
+    bool dataset_override_ = false;
+    bool receipt_published_ = false;
+    std::string run_fingerprint_;
+    std::string failure_reason_ =
+        "deterministic run terminated before artifact finalization";
+    std::vector<std::string> dataset_mismatches_;
+};
+
+struct staged_deterministic_dataset final
+{
+    std::vector<std::string> execution_paths;
+    std::vector<truetest::reproducibility::DatasetArtifact> identities;
+};
+
+static staged_deterministic_dataset stage_deterministic_dataset(
+    const std::vector<std::string>& original_paths,
+    const deterministic_local_artifact_paths& paths)
+{
+    namespace repro = truetest::reproducibility;
+    staged_deterministic_dataset staged;
+    staged.execution_paths.reserve(original_paths.size());
+    staged.identities.reserve(original_paths.size());
+
+    std::error_code error;
+    std::filesystem::create_directories(paths.dataset_directory, error);
+    if (error)
+        throw std::runtime_error(
+            "cannot create deterministic dataset snapshot directory: "
+            + error.message());
+
+    for (std::size_t index = 0; index < original_paths.size(); ++index)
+    {
+        std::ostringstream name;
+        name << "input_" << std::setw(6) << std::setfill('0') << index;
+        const std::filesystem::path destination =
+            paths.dataset_directory / name.str();
+        require_new_artifact_destination(
+            destination, "deterministic dataset snapshot");
+        const std::filesystem::path partial(destination.string() + ".partial");
+        std::filesystem::copy_file(
+            std::filesystem::path(original_paths[index]), partial,
+            std::filesystem::copy_options::none, error);
+        if (error)
+            throw std::runtime_error(
+                "cannot snapshot deterministic dataset input: "
+                + original_paths[index] + ": " + error.message());
+        std::filesystem::rename(partial, destination, error);
+        if (error)
+            throw std::runtime_error(
+                "cannot publish deterministic dataset snapshot: "
+                + destination.string() + ": " + error.message());
+
+        const auto original_size = std::filesystem::file_size(
+            std::filesystem::path(original_paths[index]), error);
+        if (error)
+            throw std::runtime_error(
+                "cannot stat deterministic dataset input after snapshot: "
+                + original_paths[index]);
+        const auto snapshot_size = std::filesystem::file_size(
+            destination, error);
+        if (error)
+            throw std::runtime_error(
+                "cannot stat deterministic dataset snapshot: "
+                + destination.string());
+        const std::string original_hash = repro::sha256_file_hex(
+            std::filesystem::path(original_paths[index]));
+        const std::string snapshot_hash = repro::sha256_file_hex(destination);
+        if (original_size != snapshot_size || original_hash != snapshot_hash)
+            throw std::runtime_error(
+                "dataset changed while creating deterministic input snapshot");
+
+        std::ostringstream logical_name;
+        logical_name << "input-" << std::setw(6) << std::setfill('0')
+                     << index;
+        staged.execution_paths.push_back(destination.string());
+        staged.identities.push_back({
+            logical_name.str(), original_paths[index],
+            static_cast<std::uint64_t>(snapshot_size), snapshot_hash});
+    }
+    return staged;
+}
+
+static std::string deterministic_utc_timestamp(
+    std::chrono::system_clock::time_point timestamp)
+{
+    const auto nanoseconds = std::chrono::duration_cast<
+        std::chrono::nanoseconds>(timestamp.time_since_epoch()).count();
+    return "unix-ns:" + std::to_string(nanoseconds) + ":UTC";
+}
+
+static truetest::reproducibility::DatasetSnapshot
+snapshot_deterministic_local_dataset(
+    const staged_deterministic_dataset& staged,
+    const MarketSeries& series,
+    bool is_tick)
+{
+    namespace repro = truetest::reproducibility;
+    if (staged.execution_paths.empty()
+        || staged.execution_paths.size() != staged.identities.size()
+        || series.empty())
+        throw std::invalid_argument(
+            "deterministic local dataset and parsed series must not be empty");
+
+    std::vector<repro::DatasetInput> inputs;
+    inputs.reserve(staged.execution_paths.size());
+    for (std::size_t index = 0; index < staged.execution_paths.size(); ++index)
+    {
+        inputs.push_back({staged.identities[index].logical_name,
+                          staged.execution_paths[index]});
+    }
+
+    const auto first_timestamp = is_tick
+        ? series.tick_at(0).timestamp : series.bar_at(0).ts;
+    const auto last_timestamp = is_tick
+        ? series.tick_at(series.tick_count() - 1U).timestamp
+        : series.bar_at(series.bar_count() - 1U).ts;
+    auto snapshot = repro::snapshot_dataset(
+        is_tick ? "local-tick-dataset-v1" : "local-bar-dataset-v1",
+        1,
+        std::move(inputs),
+        deterministic_utc_timestamp(first_timestamp),
+        deterministic_utc_timestamp(last_timestamp),
+        is_tick ? "timestamp-then-symbol-stable-v1"
+                : "timestamp-then-symbol-then-date-stable-v1",
+        "normalized-logical-input-order-then-source-row-v1",
+        "0-events");
+    if (snapshot.artifacts.size() != staged.identities.size())
+        throw std::logic_error(
+            "deterministic dataset snapshot cardinality changed");
+    for (std::size_t index = 0; index < snapshot.artifacts.size(); ++index)
+    {
+        auto& actual = snapshot.artifacts[index];
+        const auto& expected = staged.identities[index];
+        if (actual.logical_name != expected.logical_name
+            || actual.size_bytes != expected.size_bytes
+            || actual.sha256 != expected.sha256)
+            throw std::runtime_error(
+                "deterministic dataset snapshot changed while being consumed");
+        actual.locator = expected.locator;
+    }
+    snapshot.dataset_id = "sha256:" + snapshot.aggregate_sha256;
+    return snapshot;
+}
+
+static void validate_deterministic_dataset_symbol(
+    const MarketSeries& series,
+    bool is_tick,
+    std::string_view expected_symbol)
+{
+    if (expected_symbol.empty())
+        throw std::invalid_argument(
+            "deterministic dataset requires a nonempty instrument symbol");
+    if (is_tick)
+    {
+        for (std::size_t index = 0; index < series.tick_count(); ++index)
+            if (series.tick_at(index).symbol != expected_symbol)
+                throw std::invalid_argument(
+                    "deterministic tick dataset contains a symbol outside the instrument snapshot");
+    }
+    else
+    {
+        for (std::size_t index = 0; index < series.bar_count(); ++index)
+            if (series.bar_at(index).symbol != expected_symbol)
+                throw std::invalid_argument(
+                    "deterministic bar dataset contains a symbol outside the instrument snapshot");
+    }
+}
+
+static truetest::reproducibility::CanonicalJsonValue
+deterministic_local_sanitized_report(const AnalyticsReport& report)
+{
+    namespace repro = truetest::reproducibility;
+    auto payload = repro::parse_json_strict(report.to_results_json());
+    auto& object = payload.as_object();
+    object.erase("avg_tick_to_trade_ns");
+    object.erase("min_tick_to_trade_ns");
+    object.erase("max_tick_to_trade_ns");
+    object.erase("tick_to_trade_samples");
+    auto& open_positions = payload["open_positions"].as_array();
+    std::sort(open_positions.begin(), open_positions.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return truetest::reproducibility::serialize_canonical_json(lhs)
+                 < truetest::reproducibility::serialize_canonical_json(rhs);
+        });
+    return payload;
+}
+
+static truetest::reproducibility::CanonicalJsonValue
+deterministic_local_report_payload(
+    const AnalyticsReport& report,
+    std::string_view run_fingerprint)
+{
+    namespace repro = truetest::reproducibility;
+    return repro::CanonicalJsonValue::object({
+        {"observability_fields_excluded",
+         repro::CanonicalJsonValue::array({
+             "avg_tick_to_trade_ns", "max_tick_to_trade_ns",
+             "min_tick_to_trade_ns", "tick_to_trade_samples"})},
+        {"report", deterministic_local_sanitized_report(report)},
+        {"report_artifact_schema_version", std::uint64_t{1}},
+        {"run_fingerprint", run_fingerprint},
+    });
+}
+
+static truetest::reproducibility::CanonicalJsonValue
+deterministic_local_economic_payload(const AnalyticsReport& report)
+{
+    using Json = truetest::reproducibility::CanonicalJsonValue;
+    return Json::object({
+        {"economic_result_schema_version", std::uint64_t{2}},
+        {"included_fields", "all-deterministic-analytics-report-fields-v1"},
+        {"report", deterministic_local_sanitized_report(report)},
+    });
+}
+
+static void finalize_deterministic_local_event_log(
+    const deterministic_local_artifact_paths& paths)
+{
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(paths.event_log_partial, error)
+        || error)
+        throw std::runtime_error(
+            "deterministic event log was not finalized by the engine: "
+            + paths.event_log_partial.string());
+    if (std::filesystem::exists(paths.event_log, error))
+        throw std::runtime_error(
+            "refusing to overwrite deterministic event log: "
+            + paths.event_log.string());
+    if (error)
+        throw std::runtime_error(
+            "cannot inspect deterministic event-log destination: "
+            + paths.event_log.string());
+    std::filesystem::rename(
+        paths.event_log_partial, paths.event_log, error);
+    if (error)
+        throw std::runtime_error(
+            "cannot atomically publish deterministic event log: "
+            + error.message());
+}
+
+static int run_provider_mode(const cli_options& o);
+
+static int run_deterministic_manifest_replay(const cli_options& o)
+{
+#if TT_TARGET != TT_TARGET_BACKTEST
+    (void)o;
+    std::cerr << "  ! Deterministic run-manifest replay requires the "
+                 "engine_backtest target\n";
+    return 2;
+#else
+    namespace repro = truetest::reproducibility;
+    namespace sim = truetest::simulation;
+
+    if (o.replay_run_manifest_path.empty())
+        return 1;
+    if (!o.write_run_manifest_path.empty())
+    {
+        std::cerr << "  ! --write-run-manifest and --replay-run-manifest are mutually exclusive\n";
+        return 2;
+    }
+    if (o.reproducibility_artifacts_directory.empty())
+    {
+        std::cerr << "  ! Manifest replay requires an explicit new --artifacts-dir\n";
+        return 2;
+    }
+    if (!o.replay_path.empty() || !o.event_log_path.empty())
+    {
+        std::cerr << "  ! Manifest replay cannot be combined with --replay or --log-events\n";
+        return 2;
+    }
+    if (!o.config_file.empty()
+        || o.deterministic_replay_input_override_requested)
+    {
+        std::cerr << "  ! Manifest replay refuses deterministic input overrides; the manifest is authoritative\n";
+        return 2;
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    repro::RunReceiptV1 receipt;
+    receipt.executed_at_utc = reproducibility_utc_now();
+    receipt.status = "failed";
+    receipt.dataset_mismatch_override_used = false;
+    try
+    {
+        repro::validate_deterministic_runtime_environment();
+        const std::filesystem::path manifest_path(o.replay_run_manifest_path);
+        const auto manifest = repro::RunManifestV1::load(manifest_path);
+        receipt.run_fingerprint = manifest.run_fingerprint();
+        const std::string manifest_run_mode = manifest.deterministic_inputs()
+            .at("run_mode").as_string();
+        if (o.verify_hashes && !manifest.exact_lifecycle_replayable())
+            throw std::invalid_argument(
+                "--verify-hashes requires an exact lifecycle-replayable manifest");
+        if (manifest_run_mode != "monte_carlo"
+            && o.deterministic_trial_index_explicitly_set)
+            throw std::invalid_argument(
+                "--trial is only valid for Monte Carlo run manifests");
+        const auto verification = sim::verify_mc_manifest_environment(
+            manifest, manifest_path.parent_path());
+        if (!verification.build_exact)
+        {
+            throw std::runtime_error(
+                "replay rejected: build identity does not match manifest");
+        }
+        if (!verification.dataset_exact && !o.allow_dataset_mismatch)
+        {
+            for (const auto& mismatch : verification.mismatches)
+                std::cerr << "    " << mismatch << '\n';
+            throw std::runtime_error(
+                "replay rejected: dataset identity does not match manifest");
+        }
+        receipt.dataset_mismatch_override_used =
+            !verification.dataset_exact && o.allow_dataset_mismatch;
+        if (receipt.dataset_mismatch_override_used)
+        {
+            std::cerr << "  ! Dataset mismatch override active; replay cannot be exact\n";
+            receipt.mismatches.insert(receipt.mismatches.end(),
+                verification.mismatches.begin(), verification.mismatches.end());
+        }
+
+        if (manifest_run_mode == "backtest")
+        {
+            auto replay_options = deterministic_local_options_from_manifest(
+                manifest, manifest_path.parent_path());
+            const auto dataset = repro::dataset_snapshot_from_json(
+                manifest.deterministic_inputs().at("dataset"),
+                manifest.dataset_locations());
+            const auto instrument = deterministic_instrument_snapshot(
+                replay_options);
+            const auto reconstructed = make_deterministic_local_manifest(
+                replay_options, dataset, instrument,
+                replay_options.deterministic_lifecycle_record_capacity);
+            if (repro::serialize_canonical_json(
+                    reconstructed.deterministic_inputs())
+                != repro::serialize_canonical_json(
+                    manifest.deterministic_inputs()))
+                throw std::invalid_argument(
+                    "local run manifest contains contradictory deterministic inputs");
+
+            replay_options.deterministic_local_replay = true;
+            replay_options.deterministic_run_fingerprint =
+                manifest.run_fingerprint();
+            replay_options.deterministic_expected_dataset_identity =
+                repro::serialize_canonical_json(
+                    repro::dataset_identity_json(dataset));
+            replay_options.deterministic_expected_hashes =
+                manifest.expected_hashes();
+            replay_options.verify_hashes = o.verify_hashes;
+            replay_options.allow_dataset_mismatch =
+                receipt.dataset_mismatch_override_used;
+            if (receipt.dataset_mismatch_override_used)
+                replay_options.deterministic_dataset_mismatches =
+                    verification.mismatches;
+            replay_options.reproducibility_artifacts_directory =
+                o.reproducibility_artifacts_directory;
+            return run_provider_mode(replay_options);
+        }
+
+        auto config = sim::mc_config_from_manifest(
+            manifest, o.reproducibility_artifacts_directory);
+        sim::MonteCarloController controller(config);
+        sim::McAggregate results;
+        std::vector<std::string> required_hashes;
+        if (o.deterministic_trial_index_explicitly_set)
+        {
+            receipt.verification_scope = "trial";
+            receipt.trial_index = static_cast<std::uint64_t>(
+                o.deterministic_trial_index);
+            auto trial = controller.run_trial(o.deterministic_trial_index);
+            results.trials.push_back(std::move(trial));
+            sim::summarize_monte_carlo_trials(results);
+            required_hashes = {
+                trial_hash_name(o.deterministic_trial_index, "event_log"),
+                trial_hash_name(o.deterministic_trial_index, "lifecycle"),
+                trial_hash_name(o.deterministic_trial_index, "result"),
+            };
+            if (config.generator_config.emit_synthetic_l2)
+                required_hashes.push_back(
+                    trial_hash_name(o.deterministic_trial_index,
+                                    "synthetic_l2"));
+        }
+        else
+        {
+            results = controller.run();
+            required_hashes = {"event_log", "economic_result", "report"};
+            for (const auto& trial : results.trials)
+            {
+                required_hashes.push_back(
+                    trial_hash_name(trial.trial_id, "event_log"));
+                required_hashes.push_back(
+                    trial_hash_name(trial.trial_id, "lifecycle"));
+                required_hashes.push_back(
+                    trial_hash_name(trial.trial_id, "result"));
+                if (config.generator_config.emit_synthetic_l2)
+                    required_hashes.push_back(
+                        trial_hash_name(trial.trial_id, "synthetic_l2"));
+            }
+        }
+
+        if (o.deterministic_trial_index_explicitly_set)
+        {
+            const auto& trial = results.trials.front();
+            receipt.actual_hashes.emplace(required_hashes[0],
+                                           trial.event_log_sha256);
+            receipt.actual_hashes.emplace(required_hashes[1],
+                                           trial.lifecycle_sha256);
+            receipt.actual_hashes.emplace(required_hashes[2],
+                                           trial.trial_result_sha256);
+            if (config.generator_config.emit_synthetic_l2)
+                receipt.actual_hashes.emplace(required_hashes[3],
+                                               trial.synthetic_l2_sha256);
+        }
+        else
+        {
+            receipt.actual_hashes = deterministic_campaign_hashes(
+                results, config);
+            const std::string report = sim::deterministic_report_json(
+                results, config);
+            repro::write_text_file_atomic(
+                std::filesystem::path(o.reproducibility_artifacts_directory)
+                    / "report.json",
+                report);
+        }
+
+        if (o.verify_hashes)
+        {
+            const auto hash_mismatches = compare_expected_hashes(
+                manifest.expected_hashes(), receipt.actual_hashes,
+                required_hashes);
+            receipt.mismatches.insert(receipt.mismatches.end(),
+                hash_mismatches.begin(), hash_mismatches.end());
+        }
+
+        receipt.exact_reproduction = o.verify_hashes
+            && manifest.exact_lifecycle_replayable()
+            && verification.exact && receipt.mismatches.empty();
+        receipt.status = receipt.mismatches.empty()
+            ? "complete" : "hash_mismatch";
+        receipt.duration_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count());
+        receipt.write_atomic(
+            std::filesystem::path(o.reproducibility_artifacts_directory)
+                / "run_receipt.json");
+        std::cout << "  Run fingerprint: " << receipt.run_fingerprint << '\n';
+        return receipt.mismatches.empty() ? 0 : 4;
+    }
+    catch (const std::exception& error)
+    {
+        receipt.mismatches.emplace_back(error.what());
+        receipt.duration_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count());
+        std::cerr << "  ! Deterministic manifest replay failed: "
+                  << error.what() << '\n';
+        try
+        {
+            receipt.write_atomic(
+                std::filesystem::path(o.reproducibility_artifacts_directory)
+                    / "run_receipt.json");
+        }
+        catch (const std::exception& receipt_error)
+        {
+            std::cerr << "  ! Failed to persist replay receipt: "
+                      << receipt_error.what() << '\n';
+        }
+        return 3;
+    }
+#endif
+}
+
+static double parse_mc_finite_double(std::string_view text,
+                                     std::string_view field)
+{
+    double value = 0.0;
+    const auto parsed = std::from_chars(
+        text.data(), text.data() + text.size(), value,
+        std::chars_format::general);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()
+        || !std::isfinite(value))
+        throw std::invalid_argument(
+            "invalid finite MC parameter '" + std::string(field) + "'");
+    return value;
+}
+
+static std::int64_t parse_mc_i64(std::string_view text,
+                                 std::string_view field)
+{
+    std::int64_t value = 0;
+    const auto parsed = std::from_chars(
+        text.data(), text.data() + text.size(), value);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+        throw std::invalid_argument(
+            "invalid integer MC parameter '" + std::string(field) + "'");
+    return value;
+}
+
+static void apply_mc_generator_parameters(
+    std::string_view parameters,
+    truetest::simulation::McGeneratorConfig& config)
+{
+    if (parameters.empty())
+        return;
+    std::size_t cursor = 0;
+    while (cursor <= parameters.size())
+    {
+        const std::size_t comma = parameters.find(',', cursor);
+        const std::size_t end = comma == std::string_view::npos
+            ? parameters.size() : comma;
+        const std::string_view token = parameters.substr(cursor, end - cursor);
+        const std::size_t equals = token.find('=');
+        if (token.empty() || equals == std::string_view::npos || equals == 0
+            || equals + 1 >= token.size())
+            throw std::invalid_argument(
+                "MC parameters must be nonempty key=value pairs");
+        const std::string_view key = token.substr(0, equals);
+        const std::string_view value = token.substr(equals + 1);
+        if (key == "n_steps" || key == "n_bars")
+            config.n_steps = parse_mc_i64(value, key);
+        else if (key == "dt") config.dt = parse_mc_finite_double(value, key);
+        else if (key == "mu") config.mu = parse_mc_finite_double(value, key);
+        else if (key == "sigma") config.sigma = parse_mc_finite_double(value, key);
+        else if (key == "initial_price")
+            config.initial_price = parse_mc_finite_double(value, key);
+        else if (key == "base_spread_bps" || key == "spread_bps")
+            config.base_spread_bps = parse_mc_finite_double(value, key);
+        else if (key == "depth_noise")
+            config.depth_noise = parse_mc_finite_double(value, key);
+        else if (key == "emit_synthetic_l2" || key == "emit_l2")
+        {
+            if (value == "1" || value == "true")
+                config.emit_synthetic_l2 = true;
+            else if (value == "0" || value == "false")
+                config.emit_synthetic_l2 = false;
+            else
+                throw std::invalid_argument(
+                    "emit_synthetic_l2 must be true|false|1|0");
+        }
+        else if (key == "symbol") config.symbol = std::string(value);
+        else
+            throw std::invalid_argument(
+                "unknown MC generator parameter: " + std::string(key));
+        if (comma == std::string_view::npos)
+            break;
+        cursor = comma + 1;
+    }
+    truetest::simulation::validate_mc_generator_config(config);
+}
+
 // Monte Carlo campaign runner (Phase 3)
 static int run_monte_carlo_mode(const cli_options& o)
 {
+#if TT_TARGET != TT_TARGET_BACKTEST
+    std::cerr << "  ! Monte Carlo execution requires the engine_backtest target\n";
+    return 2;
+#endif
+    if ((!o.mode.empty() && o.mode != "backtest") || o.live
+        || o.testnet || o.demo)
+    {
+        std::cerr << "  ! Monte Carlo execution requires mode=backtest\n";
+        return 2;
+    }
+    try
+    {
+        truetest::reproducibility::validate_deterministic_runtime_environment();
+    }
+    catch (const std::exception& error)
+    {
+        std::cerr << "  ! Monte Carlo deterministic runtime rejected: "
+                  << error.what() << '\n';
+        return 2;
+    }
+    if ((!o.provider_name.empty() && o.provider_name != "synthetic"
+         && o.provider_name != "montecarlo")
+        || !o.provider_path.empty() || !o.depth_stream.empty()
+        || !o.stream.empty() || !o.record_path.empty()
+        || !o.replay_data_path.empty() || !o.host.empty() || !o.port.empty()
+        || !o.api_key.empty() || !o.api_secret.empty()
+        || !o.api_passphrase.empty())
+    {
+        std::cerr << "  ! Monte Carlo uses only its embedded synthetic dataset; "
+                     "external provider, path, stream, network, and credential "
+                     "inputs are unsupported\n";
+        return 2;
+    }
+    if (!o.format.empty() && o.format != "bar")
+    {
+        std::cerr << "  ! Monte Carlo currently requires --format bar\n";
+        return 2;
+    }
+    if (o.replay_from_explicitly_set || o.replay_to_explicitly_set
+        || o.replay_from_us != 0 || o.replay_to_us != INT64_MAX)
+    {
+        std::cerr << "  ! Monte Carlo refuses --replay-from/--replay-to; "
+                     "synthetic trials do not consume event-log time bounds\n";
+        return 2;
+    }
+    if (o.queue_model != "none")
+    {
+        std::cerr << "  ! Monte Carlo --queue-model requires an L2 consumer "
+                     "and is currently unsupported\n";
+        return 2;
+    }
+    const std::string_view required_trial_preset =
+        o.write_run_manifest_path.empty() ? std::string_view{"inline"}
+                                          : std::string_view{"logging"};
+    if (!o.spin_policy_str.empty()
+        || (!o.thread_preset_str.empty()
+            && o.thread_preset_str != required_trial_preset))
+    {
+        std::cerr << "  ! Monte Carlo trial threading is fixed: manifest runs "
+                     "use --thread-preset logging and exploratory runs use inline; "
+                     "custom thread/spin settings are unsupported\n";
+        return 2;
+    }
+    if (o.fill_rng_seed_explicitly_set)
+    {
+        std::cerr << "  ! Monte Carlo refuses --fill-rng-seed; fill seeds are "
+                     "derived from the explicit master seed\n";
+        return 2;
+    }
+    if (o.spread_step_explicitly_set)
+    {
+        std::cerr << "  ! Monte Carlo refuses --spread-step because the current "
+                     "trial adapter does not consume it\n";
+        return 2;
+    }
+    if (o.mc_workers_explicitly_set && !o.mc_parallel)
+    {
+        std::cerr << "  ! --mc-workers requires --mc-parallel\n";
+        return 2;
+    }
+    if (o.wire_latency_us != 0)
+    {
+        std::cerr << "  ! Monte Carlo refuses --wire-latency-us because the "
+                     "current local execution adapter does not consume it\n";
+        return 2;
+    }
+    if (o.order_latency_stddev_us > 0 && o.order_latency_us <= 0)
+    {
+        std::cerr << "  ! --order-latency-stddev-us requires "
+                     "--order-latency-us > 0\n";
+        return 2;
+    }
+    if (o.walked_book_impact)
+    {
+        std::cerr << "  ! Monte Carlo --walked-book-impact requires an "
+                     "L2-enabled trial consumer\n";
+        return 2;
+    }
+    if (o.output_format != "json")
+    {
+        std::cerr << "  ! Monte Carlo output currently supports only JSON\n";
+        return 2;
+    }
+    if (!o.event_log_path.empty() || !o.checkpoint_path.empty()
+        || o.checkpoint_interval != 10'000 || o.log_max_size_mb != 0
+        || o.log_keep != 5 || !o.compress_log || o.debug_fills
+        || o.debug_fills_budget != 20 || o.realistic_fills)
+    {
+        std::cerr << "  ! Monte Carlo refuses standalone event-log, checkpoint, "
+                     "log-rotation, debug-fill, and deprecated fill options; "
+                     "manifest mode owns its trial artifacts\n";
+        return 2;
+    }
+    if (!o.preset.empty() && o.preset != "mc-robustness"
+        && o.preset != "mc" && o.preset != "monte-carlo")
+    {
+        std::cerr << "  ! Monte Carlo accepts only the mc-robustness preset "
+                     "and its aliases\n";
+        return 2;
+    }
+    if (!o.margin_type.empty() || o.liquidation_warn_pct >= 0.0
+        || o.margin_type_strict || o.max_notional_usdt >= 0.0
+        || o.max_leverage >= 0.0 || o.min_liquidation_distance_pct >= 0.0
+        || o.dead_man_countdown_ms != 30'000
+        || o.dead_man_heartbeat_ms != 0 || o.disarm_deadman
+        || o.backfill != 500 || !o.backfill_interval.empty()
+        || o.reconcile_tolerance_bps != 10.0
+        || o.kill_switch_deadline_ms != 5'000)
+    {
+        std::cerr << "  ! Monte Carlo refuses provider-only backfill, venue-risk, "
+                     "reconciliation, kill-switch, and dead-man inputs\n";
+        return 2;
+    }
+    if (!validate_fee_configuration(o, std::cerr)) return 1;
     std::cout << "\n=== Monte Carlo Campaign ===\n";
 
     truetest::simulation::McRunConfig mc_cfg;
     mc_cfg.n_trials = (o.mc_trials > 0) ? o.mc_trials : 50;
     mc_cfg.generator_name = o.mc_model.empty() ? "gbm" : o.mc_model;
 
-    // Parse generator params
-    if (!o.mc_params.empty()) {
-        // Reuse the small parser logic by populating a temp provider_config style
-        // For simplicity we directly apply common keys here
-        // (in a real implementation we would share the parser)
-        std::istringstream iss(o.mc_params);
-        std::string token;
-        while (std::getline(iss, token, ',')) {
-            auto eq = token.find('=');
-            if (eq == std::string::npos) continue;
-            std::string key = token.substr(0, eq);
-            std::string val = token.substr(eq + 1);
-            if (key == "n_steps" || key == "n_bars") {
-                try { mc_cfg.generator_config.n_steps = std::stoll(val); } catch (...) {}
-            } else if (key == "mu") {
-                try { mc_cfg.generator_config.mu = std::stod(val); } catch (...) {}
-            } else if (key == "sigma") {
-                try { mc_cfg.generator_config.sigma = std::stod(val); } catch (...) {}
-            } else if (key == "initial_price") {
-                try { mc_cfg.generator_config.initial_price = std::stod(val); } catch (...) {}
-            }
-        }
+    try
+    {
+        apply_mc_generator_parameters(o.mc_params, mc_cfg.generator_config);
     }
+    catch (const std::exception& error)
+    {
+        std::cerr << "  ! Invalid --mc-params: " << error.what() << '\n';
+        return 2;
+    }
+    if (!o.symbol.empty())
+        mc_cfg.generator_config.symbol = o.symbol;
 
     if (!o.strategy.empty()) {
         mc_cfg.strategy_name = o.strategy;
     }
     mc_cfg.base_seed = o.seed;
+    mc_cfg.master_seed_explicitly_set = o.seed_explicitly_set;
     mc_cfg.initial_balance = o.balance;
     mc_cfg.risk_fraction = o.risk_fraction;
+    mc_cfg.sma_period = o.sma_period;
+    mc_cfg.rolling_window = o.rolling_window;
+    mc_cfg.risk_free_rate = o.risk_free_rate;
+    mc_cfg.periods_per_year = o.periods_per_year;
+    mc_cfg.max_equity_points = std::max<std::size_t>(
+        o.max_equity_points, 4U);
+    mc_cfg.execution_bar_delay = o.exec_bar_delay;
+    mc_cfg.market_aggression = o.market_aggression;
+    mc_cfg.quantity_scale = o.qty_scale;
+    const auto exit_mode = truetest::exits::parse_exit_policy_mode(
+        o.exit_policy);
+    if (!exit_mode)
+    {
+        std::cerr << "  ! Unknown --exit-policy '" << o.exit_policy
+                  << "' (use floor|strategy_only|engine_only|union)\n";
+        return 2;
+    }
+    mc_cfg.exit_defaults.mode = *exit_mode;
+    mc_cfg.exit_defaults.sl_pct = o.sl_pct;
+    mc_cfg.exit_defaults.tp_pct = o.tp_pct;
+    mc_cfg.risk.max_position_value = o.risk_max_position_value;
+    mc_cfg.risk.max_drawdown = o.risk_max_drawdown;
+    mc_cfg.risk.max_loss_per_trade = o.risk_max_loss_per_trade;
+    mc_cfg.risk.max_open_orders = o.risk_max_open_orders;
+    mc_cfg.risk.max_portfolio_exposure = o.risk_max_portfolio_exposure;
+    mc_cfg.risk.max_gross_leverage = resolve_max_gross_leverage(
+        o.risk_max_gross_leverage, "synthetic");
+    mc_cfg.risk.max_daily_loss = o.risk_max_daily_loss;
+    mc_cfg.risk.daily_reset_hour = o.risk_daily_reset_hour;
+    mc_cfg.risk.max_trades_per_hour = o.risk_max_trades_per_hour;
+    mc_cfg.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
+    mc_cfg.risk.max_symbol_inventory_qty = o.risk_max_inventory_qty;
+    mc_cfg.risk.max_funding_8h_rate = o.risk_max_funding_8h_rate;
+    mc_cfg.risk.max_mark_age_ms = o.risk_max_mark_age_ms;
+    mc_cfg.risk.require_fresh_mark = o.risk_require_fresh_mark;
+    mc_cfg.risk_unwind = o.risk_unwind;
+    mc_cfg.risk_soft_portfolio_limits = resolve_risk_soft_portfolio_limits(
+        false, "backtest", o.risk_soft_portfolio_limits);
 
     // Strategy --param key=value (same contract as single-run backtests)
     for (const auto& p : o.params) {
-        auto eq = p.find('=');
-        if (eq == std::string::npos) {
+        const auto eq = p.find('=');
+        if (eq == std::string::npos || eq == 0 || eq + 1 >= p.size()
+            || p.find('=', eq + 1) != std::string::npos) {
             std::cerr << "  ! Invalid --param format (expected key=value): " << p << "\n";
             return 1;
         }
         try {
             mc_cfg.strategy_params.emplace_back(
-                p.substr(0, eq), std::stod(p.substr(eq + 1)));
+                p.substr(0, eq), parse_mc_finite_double(
+                    std::string_view(p).substr(eq + 1), p.substr(0, eq)));
         } catch (const std::exception& e) {
             std::cerr << "  ! Invalid --param value for '" << p << "': " << e.what() << "\n";
             return 1;
@@ -1674,6 +3703,8 @@ static int run_monte_carlo_mode(const cli_options& o)
 
     // Wire fee/latency/impact + maker-queue into every MC trial (FR-02 / FR-mc-queue).
     mc_cfg.order_latency_us = o.order_latency_us;
+    mc_cfg.order_latency_stddev_us = o.order_latency_stddev_us;
+    mc_cfg.wire_latency_us = o.wire_latency_us;
     mc_cfg.impact_k_bps = o.impact_k_bps;
     mc_cfg.impact_adv = o.impact_adv;
     mc_cfg.fee_model = o.fee_model;
@@ -1681,6 +3712,37 @@ static int run_monte_carlo_mode(const cli_options& o)
     mc_cfg.maker_rate = o.maker_rate;
     mc_cfg.taker_rate = o.taker_rate;
     mc_cfg.bar_spread_bps = o.bar_spread_bps;
+    mc_cfg.mm_spread_pct = o.mm_spread_pct;   // F-04
+    mc_cfg.mm_levels_per_side = o.mm_levels;
+    mc_cfg.mm_base_depth = o.mm_base_depth;
+    mc_cfg.mm_vol_spread_mult = o.mm_vol_mult;
+    mc_cfg.mm_max_half_spread_pct = o.mm_max_spread_pct;
+    mc_cfg.fill_probability = o.fill_prob;
+    mc_cfg.fill_fade = o.fill_fade;
+    mc_cfg.fill_decay = o.fill_decay;
+
+    mc_cfg.instrument.symbol = mc_cfg.generator_config.symbol;
+    mc_cfg.instrument.lot_size =
+        truetest::simulation::kSyntheticDefaultLotSize;
+    mc_cfg.instrument.maker_rate = o.maker_rate;
+    mc_cfg.instrument.taker_rate = o.taker_rate;
+    if (!o.instrument_specs.empty())
+    {
+        try
+        {
+            cli_options instrument_options = o;
+            instrument_options.symbol = mc_cfg.generator_config.symbol;
+            mc_cfg.instrument = deterministic_instrument_snapshot(
+                instrument_options);
+        }
+        catch (const std::exception& error)
+        {
+            std::cerr << "  ! Invalid deterministic MC instrument snapshot: "
+                      << error.what() << '\n';
+            return 2;
+        }
+    }
+
     mc_cfg.maker_queue_model = o.maker_queue_model;
     mc_cfg.walked_book_impact = o.walked_book_impact;
     if (mc_cfg.impact_k_bps > 0.0 && !(mc_cfg.impact_adv > 0.0)) {
@@ -1705,6 +3767,7 @@ static int run_monte_carlo_mode(const cli_options& o)
 
     // Phase 5 parallel support
     mc_cfg.parallel_trials = o.mc_parallel;
+    mc_cfg.max_parallel_threads = o.mc_workers;
 
     // Phase A object reuse
     mc_cfg.reuse_objects_between_trials = o.mc_reuse_objects;
@@ -1713,6 +3776,80 @@ static int run_monte_carlo_mode(const cli_options& o)
         std::cerr << "  ! --mc-parallel and --mc-reuse-objects are mutually exclusive "
                      "(shared strategy/data_handler would race).\n";
         return 1;
+    }
+
+    if (o.deterministic_trial_index_explicitly_set)
+    {
+        std::cerr << "  ! --trial is only valid with --replay-run-manifest\n";
+        return 2;
+    }
+    if (o.verify_hashes)
+    {
+        std::cerr << "  ! --verify-hashes is only valid with --replay-run-manifest\n";
+        return 2;
+    }
+    if (o.allow_dataset_mismatch)
+    {
+        std::cerr << "  ! --allow-dataset-mismatch is only valid with --replay-run-manifest\n";
+        return 2;
+    }
+
+    namespace repro = truetest::reproducibility;
+    namespace sim = truetest::simulation;
+    std::optional<repro::RunManifestV1> deterministic_manifest;
+    std::filesystem::path deterministic_manifest_path;
+    std::filesystem::path deterministic_artifacts;
+    const auto deterministic_started = std::chrono::steady_clock::now();
+    if (!o.write_run_manifest_path.empty())
+    {
+        if (!o.output.empty())
+        {
+            std::cerr << "  ! Deterministic Monte Carlo manifest mode refuses --output; use the canonical hashed artifacts/report.json\n";
+            return 2;
+        }
+        if (!o.event_log_path.empty())
+        {
+            std::cerr << "  ! --log-events is replaced by per-trial logs in deterministic manifest mode\n";
+            return 2;
+        }
+#ifdef HAS_QUESTDB
+        if (o.persist)
+        {
+            std::cerr << "  ! Deterministic manifest mode refuses external QuestDB persistence\n";
+            return 2;
+        }
+#endif
+        deterministic_manifest_path = o.write_run_manifest_path;
+        deterministic_artifacts = o.reproducibility_artifacts_directory.empty()
+            ? default_reproducibility_artifact_root(
+                  deterministic_manifest_path)
+            : std::filesystem::path(
+                  o.reproducibility_artifacts_directory);
+        mc_cfg.persist_trial_lifecycle = true;
+        mc_cfg.artifacts_directory = deterministic_artifacts;
+        mc_cfg.lifecycle_record_capacity =
+            kDeterministicLifecycleRecordCapacityV1;
+        try
+        {
+            require_new_artifact_destination(
+                deterministic_manifest_path,
+                "deterministic run manifest");
+            require_new_artifact_destination(
+                deterministic_artifacts / "report.json",
+                "deterministic campaign report");
+            require_new_artifact_destination(
+                deterministic_artifacts / "run_receipt.json",
+                "deterministic campaign receipt");
+            deterministic_manifest = sim::make_deterministic_mc_manifest(mc_cfg);
+            mc_cfg.run_fingerprint =
+                deterministic_manifest->run_fingerprint();
+        }
+        catch (const std::exception& error)
+        {
+            std::cerr << "  ! Cannot initialize deterministic run manifest: "
+                      << error.what() << '\n';
+            return 2;
+        }
     }
 
 #ifdef HAS_QUESTDB
@@ -1756,12 +3893,10 @@ static int run_monte_carlo_mode(const cli_options& o)
     std::cout << "  Model:    " << mc_cfg.generator_name << "\n";
     std::cout << "  Strategy: " << mc_cfg.strategy_name << "\n";
     std::cout << "  Balance:  " << mc_cfg.initial_balance << "\n";
-    std::cout << "  Base seed:" << mc_cfg.base_seed
-              << (mc_cfg.base_seed == 0
-                      ? " (using fixed default " +
-                            std::to_string(truetest::simulation::kMcDefaultBaseSeed) + ")"
-                      : "")
-              << "\n\n";
+    std::cout << "  Base seed:" << mc_cfg.base_seed << "\n\n";
+    if (mc_cfg.generator_config.emit_synthetic_l2)
+        std::cout << "  Synthetic L2: deterministic trial sidecar only; "
+                     "not consumed by the bar execution model\n";
 
     truetest::simulation::McAggregate results;
     try {
@@ -1769,7 +3904,71 @@ static int run_monte_carlo_mode(const cli_options& o)
         results = controller.run();
     } catch (const std::exception& e) {
         std::cerr << "  ! Monte Carlo campaign failed: " << e.what() << "\n";
+        if (deterministic_manifest)
+        {
+            try
+            {
+                repro::RunReceiptV1 receipt;
+                receipt.executed_at_utc = reproducibility_utc_now();
+                receipt.duration_ms = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now()
+                            - deterministic_started).count());
+                receipt.status = "failed";
+                receipt.run_fingerprint = mc_cfg.run_fingerprint;
+                receipt.mismatches.emplace_back(e.what());
+                receipt.write_atomic(
+                    deterministic_artifacts / "run_receipt.json");
+            }
+            catch (const std::exception& receipt_error)
+            {
+                std::cerr << "  ! Failed to persist deterministic receipt: "
+                          << receipt_error.what() << '\n';
+            }
+        }
         return 1;
+    }
+
+    if (deterministic_manifest)
+    {
+        try
+        {
+            const auto hashes = deterministic_campaign_hashes(results, mc_cfg);
+            const std::string report = sim::deterministic_report_json(
+                results, mc_cfg);
+            repro::write_text_file_atomic(
+                deterministic_artifacts / "report.json", report);
+            for (const auto& [kind, hash] : hashes)
+                deterministic_manifest->set_expected_hash(kind, hash);
+            deterministic_manifest->write_atomic(
+                deterministic_manifest_path);
+
+            repro::RunReceiptV1 receipt;
+            receipt.executed_at_utc = reproducibility_utc_now();
+            receipt.duration_ms = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now()
+                        - deterministic_started).count());
+            receipt.status = "complete";
+            receipt.exact_reproduction = false;
+            receipt.run_fingerprint = mc_cfg.run_fingerprint;
+            receipt.actual_hashes = hashes;
+            receipt.write_atomic(
+                deterministic_artifacts / "run_receipt.json");
+
+            std::cout << "  Run fingerprint: " << mc_cfg.run_fingerprint << '\n';
+            std::cout << "  Event-log hash:  " << hashes.at("event_log") << '\n';
+            std::cout << "  Economic hash:   " << hashes.at("economic_result") << '\n';
+            std::cout << "  Report hash:     " << hashes.at("report") << '\n';
+            std::cout << "  Manifest:        "
+                      << deterministic_manifest_path.string() << '\n';
+        }
+        catch (const std::exception& error)
+        {
+            std::cerr << "  ! Deterministic artifact finalization failed: "
+                      << error.what() << '\n';
+            return 1;
+        }
     }
 
     std::string mc_json = truetest::simulation::MonteCarloReporter::render_json(results, mc_cfg);
@@ -1909,16 +4108,147 @@ static exchange_credentials resolve_exchange_credentials(
 
 static int run_provider_mode(const cli_options& o)
 {
-    bool run_ok = true;
-    std::string primary_path = o.provider_path;
-    {
-        auto comma = primary_path.find(',');
-        if (comma != std::string::npos)
-            primary_path = primary_path.substr(0, comma);
-    }
+    if (!validate_fee_configuration(o, std::cerr)) return 1;
+    namespace repro = truetest::reproducibility;
+    const bool deterministic_local = o.deterministic_local_replay
+        || !o.write_run_manifest_path.empty();
+    const auto deterministic_started = std::chrono::steady_clock::now();
+    std::optional<deterministic_local_artifact_paths> deterministic_paths;
+    std::optional<repro::RunManifestV1> deterministic_manifest;
+    std::optional<instrument_spec> deterministic_instrument;
+    std::optional<staged_deterministic_dataset> deterministic_dataset;
+    std::optional<deterministic_local_receipt_guard>
+        deterministic_receipt_guard;
 
-    auto creds = resolve_exchange_credentials(
-        o.provider_name, o.api_key, o.api_secret, o.api_passphrase);
+    auto input_paths = split_csv(o.provider_path);
+    if (deterministic_local)
+    {
+        try
+        {
+#if TT_TARGET != TT_TARGET_BACKTEST
+            throw std::invalid_argument(
+                "deterministic local runs require the engine_backtest target");
+#endif
+            repro::validate_deterministic_runtime_environment();
+            if (o.provider_name != "local"
+                || (!o.mode.empty() && o.mode != "backtest") || o.live)
+                throw std::invalid_argument(
+                    "deterministic local runs require provider=local and mode=backtest");
+            if (!o.seed_explicitly_set)
+                throw std::invalid_argument(
+                    "deterministic local backtest requires an explicit master seed");
+            if (input_paths.empty())
+                throw std::invalid_argument(
+                    "deterministic local backtest requires at least one --path");
+            if (!o.format.empty() && o.format != "bar" && o.format != "tick")
+                throw std::invalid_argument(
+                    "deterministic local backtest requires --format bar|tick");
+            if (!o.thread_preset_str.empty()
+                && o.thread_preset_str != "logging")
+                throw std::invalid_argument(
+                    "deterministic local full persistence requires --thread-preset logging");
+            if (!o.event_log_path.empty() || !o.checkpoint_path.empty()
+                || !o.resume_path.empty() || !o.record_path.empty()
+                || !o.replay_data_path.empty() || !o.depth_stream.empty()
+                || !o.stream.empty() || !o.host.empty() || !o.port.empty()
+                || o.testnet || o.demo || o.desk || o.web
+                || !o.output.empty() || !o.mc_params.empty())
+                throw std::invalid_argument(
+                    "deterministic local backtest refuses external, UI, checkpoint, output, depth-stream, and network side paths");
+#ifdef HAS_QUESTDB
+            if (o.persist || o.questdb_strict)
+                throw std::invalid_argument(
+                    "deterministic local backtest refuses external QuestDB persistence");
+#endif
+            if (o.queue_model != "none"
+                && o.queue_model != "l2-snapshot")
+                throw std::invalid_argument(
+                    "unsupported deterministic local queue model: "
+                    + o.queue_model);
+            if (o.queue_model == "l2-snapshot")
+                throw std::invalid_argument(
+                    "deterministic local backtest cannot use l2-snapshot without a hashed depth dataset");
+            if (o.maker_queue_model != "none"
+                && o.maker_queue_model != "uniform"
+                && o.maker_queue_model != "front"
+                && o.maker_queue_model != "back")
+                throw std::invalid_argument(
+                    "unsupported deterministic local maker queue model: "
+                    + o.maker_queue_model);
+            if (o.verify_hashes && !o.deterministic_local_replay)
+                throw std::invalid_argument(
+                    "--verify-hashes requires --replay-run-manifest");
+            if (o.allow_dataset_mismatch && !o.deterministic_local_replay)
+                throw std::invalid_argument(
+                    "--allow-dataset-mismatch requires --replay-run-manifest");
+            validate_deterministic_local_effective_config(o);
+
+            for (auto& path : input_paths)
+            {
+                std::error_code error;
+                auto normalized = std::filesystem::absolute(
+                    std::filesystem::path(path), error);
+                if (error)
+                    throw std::invalid_argument(
+                        "cannot normalize deterministic dataset path: "
+                        + path);
+                path = normalized.lexically_normal().generic_string();
+            }
+            std::sort(input_paths.begin(), input_paths.end());
+            if (std::adjacent_find(input_paths.begin(), input_paths.end())
+                != input_paths.end())
+                throw std::invalid_argument(
+                    "deterministic local dataset contains a duplicate path");
+            if (o.format == "tick" && input_paths.size() != 1U)
+                throw std::invalid_argument(
+                    "deterministic tick replay currently requires exactly one input file");
+
+            deterministic_instrument = deterministic_instrument_snapshot(o);
+            const std::filesystem::path artifacts =
+                o.reproducibility_artifacts_directory.empty()
+                    ? default_reproducibility_artifact_root(
+                          std::filesystem::path(o.write_run_manifest_path))
+                    : std::filesystem::path(
+                          o.reproducibility_artifacts_directory);
+            deterministic_paths = deterministic_local_paths(artifacts);
+            prepare_deterministic_local_artifacts(*deterministic_paths);
+            deterministic_receipt_guard.emplace(
+                *deterministic_paths, deterministic_started,
+                o.allow_dataset_mismatch);
+            if (o.deterministic_local_replay)
+            {
+                deterministic_receipt_guard->set_run_fingerprint(
+                    o.deterministic_run_fingerprint);
+                deterministic_receipt_guard->set_dataset_mismatches(
+                    o.deterministic_dataset_mismatches);
+            }
+            if (!o.deterministic_local_replay)
+                require_new_artifact_destination(
+                    std::filesystem::path(o.write_run_manifest_path),
+                    "deterministic run manifest");
+            deterministic_dataset = stage_deterministic_dataset(
+                input_paths, *deterministic_paths);
+        }
+        catch (const std::exception& error)
+        {
+            if (deterministic_receipt_guard)
+                deterministic_receipt_guard->set_failure(error.what());
+            std::cerr << "  ! Cannot initialize deterministic local backtest: "
+                      << error.what() << '\n';
+            return 2;
+        }
+    }
+    bool run_ok = true;
+    const std::vector<std::string>& execution_input_paths =
+        deterministic_dataset
+            ? deterministic_dataset->execution_paths : input_paths;
+    std::string primary_path = execution_input_paths.empty()
+        ? o.provider_path : execution_input_paths.front();
+
+    exchange_credentials creds;
+    if (!deterministic_local)
+        creds = resolve_exchange_credentials(
+            o.provider_name, o.api_key, o.api_secret, o.api_passphrase);
 
     provider_config pcfg;
     if (!primary_path.empty())  pcfg["path"] = primary_path;
@@ -1994,20 +4324,30 @@ static int run_provider_mode(const cli_options& o)
     if (strategy_names.empty()) strategy_names.push_back("mean-reversion");
     const std::string& resolved = strategy_names.front();
     auto prov_strategy = StrategyRegistry::instance().create(resolved);
-    if (resolved == "sma" && o.sma_period != 20)
-        prov_strategy->set_param("period", static_cast<double>(o.sma_period));
-    if (resolved == "mean-reversion" && o.sma_period != 20)
-        prov_strategy->set_param("period", static_cast<double>(o.sma_period));
     // Push platform sizing / protective exits into any strategy that accepts them.
     auto try_set = [](IStrategy& s, const char* key, double v) {
         try { s.set_param(key, v); } catch (const std::exception&) {}
     };
-    try_set(*prov_strategy, "equity", o.balance);
-    try_set(*prov_strategy, "risk_fraction", o.risk_fraction);
-    try_set(*prov_strategy, "sl_pct", o.sl_pct);
-    try_set(*prov_strategy, "tp_pct", o.tp_pct);
-    apply_execution_cost_params(*prov_strategy, o);
-    apply_strategy_params(*prov_strategy, o.params);
+    if (deterministic_local)
+        (void)configure_deterministic_local_strategy(
+            *prov_strategy, o, resolved, 0U);
+    else
+    {
+        if ((resolved == "sma" || resolved == "mean-reversion")
+            && o.sma_period != 20U)
+            prov_strategy->set_param(
+                "period", static_cast<double>(o.sma_period));
+        try_set(*prov_strategy, "equity", o.balance);
+        try_set(*prov_strategy, "risk_fraction", o.risk_fraction);
+        try_set(*prov_strategy, "sl_pct", o.sl_pct);
+        try_set(*prov_strategy, "tp_pct", o.tp_pct);
+        apply_execution_cost_params(*prov_strategy, o);
+        apply_strategy_params(*prov_strategy, o.params);
+    }
+    const truetest::reproducibility::DeterministicSeedDeriver strategy_seeds(
+        o.seed);
+    prov_strategy->reset(strategy_seeds.derive(
+        truetest::reproducibility::SeedDomain::strategy, 0U));
 
     std::vector<std::pair<std::string, std::shared_ptr<IStrategy>>> extra_strategies;
     for (std::size_t si = 1; si < strategy_names.size(); ++si) {
@@ -2017,17 +4357,27 @@ static int run_provider_mode(const cli_options& o)
             return 1;
         }
         auto extra = StrategyRegistry::instance().create(nm);
-        try_set(*extra, "equity", o.balance);
-        try_set(*extra, "risk_fraction", o.risk_fraction);
-        try_set(*extra, "sl_pct", o.sl_pct);
-        try_set(*extra, "tp_pct", o.tp_pct);
-        apply_execution_cost_params(*extra, o);
-        apply_strategy_params(*extra, o.params);
+        if (deterministic_local)
+            (void)configure_deterministic_local_strategy(
+                *extra, o, nm, si);
+        else
+        {
+            try_set(*extra, "equity", o.balance);
+            try_set(*extra, "risk_fraction", o.risk_fraction);
+            try_set(*extra, "sl_pct", o.sl_pct);
+            try_set(*extra, "tp_pct", o.tp_pct);
+            apply_execution_cost_params(*extra, o);
+            apply_strategy_params(*extra, o.params);
+        }
+        extra->reset(strategy_seeds.derive(
+            truetest::reproducibility::SeedDomain::strategy,
+            static_cast<std::uint64_t>(si)));
         extra_strategies.emplace_back(nm, std::move(extra));
     }
 
     engine_config prov_cfg;
     prov_cfg.seed = o.seed;
+    prov_cfg.seed_explicitly_set = o.seed_explicitly_set;
     prov_cfg.event_log_path = o.event_log_path;
     prov_cfg.compress_log = o.compress_log;
     prov_cfg.log_max_bytes = o.log_max_size_mb * 1024ull * 1024ull;
@@ -2051,6 +4401,16 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.periods_per_year = o.periods_per_year;
     prov_cfg.max_equity_points = o.max_equity_points;
     prov_cfg.execution_bar_delay = (o.mode == "live" || o.live) ? 0 : o.exec_bar_delay;
+    if (deterministic_local)
+    {
+        prov_cfg.event_log_path =
+            deterministic_paths->event_log_partial.string();
+        prov_cfg.compress_log = true;
+        prov_cfg.log_max_bytes = 0;
+        prov_cfg.log_max_files = 1;
+        prov_cfg.disable_pinning = true;
+        prov_cfg.show_progress = false;
+    }
     apply_exit_defaults(prov_cfg, o);
     if (o.wire_latency_us > 0 && o.mode != "live" && !o.live) {
         prov_cfg.wire_latency_model = std::make_shared<FixedLatencyModel>(
@@ -2061,7 +4421,10 @@ static int run_provider_mode(const cli_options& o)
             prov_cfg.latency_model = std::make_shared<StochasticLatencyModel>(
                 static_cast<double>(o.order_latency_us),
                 static_cast<double>(o.order_latency_stddev_us),
-                o.fill_rng_seed);
+                o.seed_explicitly_set
+                    ? truetest::reproducibility::DeterministicSeedDeriver(o.seed)
+                          .derive(truetest::reproducibility::SeedDomain::latency_model)
+                    : static_cast<std::uint64_t>(o.fill_rng_seed));
         } else {
             prov_cfg.latency_model = std::make_shared<FixedLatencyModel>(
                 latency_duration(o.order_latency_us));
@@ -2110,7 +4473,10 @@ static int run_provider_mode(const cli_options& o)
     prov_cfg.risk.max_loss_per_trade = o.risk_max_loss_per_trade;
     prov_cfg.risk.max_open_orders = o.risk_max_open_orders;
     prov_cfg.risk.max_portfolio_exposure = o.risk_max_portfolio_exposure;
+    prov_cfg.risk.max_gross_leverage =
+        resolve_max_gross_leverage(o.risk_max_gross_leverage, o.provider_name);
     prov_cfg.risk.max_daily_loss = o.risk_max_daily_loss;
+
     prov_cfg.risk.daily_reset_hour = o.risk_daily_reset_hour;
     prov_cfg.risk.max_trades_per_hour = o.risk_max_trades_per_hour;
     prov_cfg.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
@@ -2123,7 +4489,7 @@ static int run_provider_mode(const cli_options& o)
     // Soft portfolio limits: reject-only in backtest; hard halt in live/shadow.
     // Locked by EngineConfig.RiskSoftPortfolioLimitsResolveByMode unit tests.
     prov_cfg.risk_soft_portfolio_limits =
-        resolve_risk_soft_portfolio_limits(o.live, o.mode);
+        resolve_risk_soft_portfolio_limits(o.live, o.mode, o.risk_soft_portfolio_limits);
 
 #ifdef HAS_QUESTDB
     prov_cfg.persist_enabled = o.persist;
@@ -2150,7 +4516,9 @@ static int run_provider_mode(const cli_options& o)
             prov_cfg.backfill_host = "api.binance.com";
     }
 
-    if (!o.thread_preset_str.empty())
+    if (deterministic_local)
+        prov_cfg.threading = thread_preset::logging_only;
+    else if (!o.thread_preset_str.empty())
         prov_cfg.threading = string_to_preset(o.thread_preset_str);
     else
         prov_cfg.threading = select_preset(detect_physical_cores());
@@ -2162,7 +4530,7 @@ static int run_provider_mode(const cli_options& o)
         prov_cfg.fee_model = std::make_shared<FixedFeeModel>(o.fee_value);
     else if (o.fee_model == "tiered")
         prov_cfg.fee_model = std::make_shared<TieredFeeModel>(o.maker_rate, o.taker_rate);
-    else if (o.provider_name == "binance")
+    else if (o.fee_model.empty() && o.provider_name == "binance")
         prov_cfg.fee_model = std::make_shared<TieredFeeModel>(0.001, 0.001);
 
     const bool resolved_live = (o.mode == "live" || o.live);
@@ -2221,7 +4589,7 @@ static int run_provider_mode(const cli_options& o)
         }
         else
         {
-            if (!confirm_real_money_math())
+            if (!truetest::bin::confirm_real_money_math())
                 return 0;
         }
     }
@@ -2249,8 +4617,15 @@ static int run_provider_mode(const cli_options& o)
 
     provider->configure(prov_cfg);
 
+    live_safety_requirements safety_requirements;
+    safety_requirements.target_allows_private_exchange_writes =
+        truetest::target_allows_live_orders();
+    safety_requirements.private_exchange_execution_requested =
+        prov_cfg.mode == engine_mode::live;
+    safety_requirements.reconciler = prov_cfg.reconciler;
+    safety_requirements.kill_switch = prov_cfg.kill_switch;
     auto live_safety_session = std::make_shared<LiveSafetySession>(
-        provider, prov_cfg.mode == engine_mode::live,
+        provider, std::move(safety_requirements),
         prov_cfg.kill_switch_deadline);
     prov_cfg.live_safety_session = live_safety_session;
 
@@ -2261,7 +4636,11 @@ static int run_provider_mode(const cli_options& o)
     if (!truetest::bin::open_provider_if_required(
             *provider, *live_safety_session))
     {
-        std::cerr << "  ! Provider failed to open.\n";
+        const auto startup_error = live_safety_session->startup_error();
+        if (!startup_error.empty())
+            std::cerr << "  ! " << startup_error << "\n";
+        else
+            std::cerr << "  ! Provider failed to open.\n";
         return 1;
     }
 
@@ -2272,17 +4651,6 @@ static int run_provider_mode(const cli_options& o)
     auto market_data_feed = provider->get_market_data_feed();
     const bool provider_advertises_event_stream =
         provider->supports_event_stream();
-    if ((provider_advertises_event_stream && !market_data_feed)
-        || (market_data_feed && !market_data_feed->ready()))
-    {
-        // This is inside run_provider_session_guarded(). Throw rather than
-        // return so an already-open live provider runs the mandatory
-        // kill-before-finish shutdown sequence.
-        throw std::runtime_error(
-            "provider advertised an incomplete market-data event stream; "
-            "refusing unsafe parser fallback");
-    }
-
     auto transport = market_data_feed
         ? market_data_feed->transport
         : provider->get_transport();
@@ -2307,16 +4675,17 @@ static int run_provider_mode(const cli_options& o)
 
     bool is_tick = (o.format == "tick");
     bool is_streaming = transport->is_streaming();
-
-#ifdef HAS_BINANCE
-    if (o.provider_name == "binance" || is_streaming)
+    if (select_market_data_route(
+            provider_advertises_event_stream, market_data_feed,
+            is_streaming) == market_data_route::invalid)
     {
-        if (o.stream.empty() || o.stream == "trade")
-            is_tick = true;
-        else if (o.stream.find("kline") != std::string::npos)
-            is_tick = false;
+        // This is inside run_provider_session_guarded(). Throw rather than
+        // return so an already-open live provider runs the mandatory
+        // kill-before-finish shutdown sequence.
+        throw std::runtime_error(
+            "streaming provider lacks a complete declared parser capability; "
+            "refusing unsafe provider-name/CSV fallback");
     }
-#endif
 
     std::cout << "\n";
     std::cout << "  ============================================\n";
@@ -2401,6 +4770,8 @@ static int run_provider_mode(const cli_options& o)
             add_pin(core_role::event_loop);
             switch (prov_cfg.threading) {
             case thread_preset::inline_mode: break;
+            case thread_preset::logging_only:
+                                          add_pin(core_role::logging); break;
             case thread_preset::light:    add_pin(core_role::logging); break;
             case thread_preset::standard: add_pin(core_role::logging);
                                           add_pin(core_role::risk); break;
@@ -2760,7 +5131,7 @@ static int run_provider_mode(const cli_options& o)
 #endif
                 parser = std::make_shared<CsvBarParser>();
 
-            auto paths = split_csv(o.provider_path);
+            const auto& paths = execution_input_paths;
             if (paths.size() > 1 && o.provider_name == "local")
             {
                 for (const auto& p : paths)
@@ -2807,6 +5178,61 @@ static int run_provider_mode(const cli_options& o)
                       << " invalid/unparseable row(s)\n";
         }
 
+        bind_symbol_to_series(*dh, o.symbol);
+
+        std::shared_ptr<DeterministicLifecycleSink>
+            deterministic_lifecycle_sink;
+        std::optional<truetest::engine_support::deterministic_order_id_scope>
+            deterministic_order_ids;
+        if (deterministic_local)
+        {
+            if (data_rejects != 0)
+                throw std::runtime_error(
+                    "deterministic local dataset contains rejected rows");
+            validate_deterministic_dataset_symbol(
+                *dh, is_tick, o.symbol);
+            auto dataset = snapshot_deterministic_local_dataset(
+                *deterministic_dataset, *dh, is_tick);
+            const std::string actual_dataset_identity =
+                repro::serialize_canonical_json(
+                    repro::dataset_identity_json(dataset));
+            if (o.deterministic_local_replay
+                && actual_dataset_identity
+                    != o.deterministic_expected_dataset_identity
+                && !o.allow_dataset_mismatch)
+                throw std::runtime_error(
+                    "dataset identity changed between replay verification and engine startup");
+
+            if (!o.deterministic_local_replay)
+            {
+                deterministic_manifest = make_deterministic_local_manifest(
+                    o, dataset, *deterministic_instrument,
+                    kDeterministicLifecycleRecordCapacityV1);
+            }
+
+            const std::string run_fingerprint = o.deterministic_local_replay
+                ? o.deterministic_run_fingerprint
+                : deterministic_manifest->run_fingerprint();
+            if (!repro::is_lower_hex_sha256(run_fingerprint))
+                throw std::runtime_error(
+                    "deterministic local run lacks a valid run fingerprint");
+            const std::size_t lifecycle_capacity =
+                o.deterministic_local_replay
+                    ? o.deterministic_lifecycle_record_capacity
+                    : kDeterministicLifecycleRecordCapacityV1;
+            if (lifecycle_capacity == 0U)
+                throw std::invalid_argument(
+                    "deterministic local run requires an explicit lifecycle record capacity");
+            deterministic_lifecycle_sink =
+                std::make_shared<DeterministicLifecycleSink>(
+                    lifecycle_capacity);
+            prov_cfg.order_audit_sink = deterministic_lifecycle_sink;
+            deterministic_order_ids.emplace();
+            deterministic_receipt_guard->set_run_fingerprint(
+                run_fingerprint);
+        }
+
+
         // engine embeds multi-MiB ObjectPools — heap only (default stack is 8 MiB).
         auto eng = std::make_unique<engine>(dh, nullptr, prov_strategy, std::move(prov_cfg));
         if (data_rejects > 0)
@@ -2846,15 +5272,142 @@ static int run_provider_mode(const cli_options& o)
         }
 #endif
 
-        if (is_tick)
-            eng->run_tick_data();
-        else
-            eng->run();
+        const std::string deterministic_fingerprint = deterministic_local
+            ? (o.deterministic_local_replay
+                ? o.deterministic_run_fingerprint
+                : deterministic_manifest->run_fingerprint())
+            : std::string{};
+
+        try
+        {
+            if (is_tick)
+                eng->run_tick_data();
+            else
+                eng->run();
+        }
+        catch (const std::exception& error)
+        {
+            eng.reset();
+            if (deterministic_receipt_guard)
+                deterministic_receipt_guard->set_failure(error.what());
+            throw;
+        }
+        catch (...)
+        {
+            eng.reset();
+            if (deterministic_receipt_guard)
+                deterministic_receipt_guard->set_failure(
+                    "unknown deterministic engine failure");
+            throw;
+        }
 
         const bool shutdown_ok = eng->finalize_live_shutdown(
             live_shutdown_reason::normal_end);
         run_ok = shutdown_ok && eng->run_succeeded();
-        if (run_ok)
+        if (deterministic_local && run_ok)
+        {
+            try
+            {
+                const AnalyticsReport report =
+                    eng->get_analytics().generate_report();
+                const auto report_payload = deterministic_local_report_payload(
+                    report, deterministic_fingerprint);
+                const std::string report_bytes =
+                    repro::serialize_canonical_json(report_payload);
+                const std::string economic_bytes =
+                    repro::serialize_canonical_json(
+                        deterministic_local_economic_payload(report));
+
+                // Inline event logging is finalized by run_*(), and reset is
+                // an additional RAII boundary before the staging file is
+                // atomically published.
+                eng.reset();
+                finalize_deterministic_local_event_log(*deterministic_paths);
+                const std::string lifecycle_hash =
+                    deterministic_lifecycle_sink->write_atomic_and_hash(
+                        deterministic_paths->lifecycle);
+                repro::write_text_file_atomic(
+                    deterministic_paths->report, report_bytes);
+
+                std::map<std::string, std::string, std::less<>> hashes{
+                    {"economic_result", repro::sha256_hex(economic_bytes)},
+                    {"event_log", repro::sha256_file_hex(
+                        deterministic_paths->event_log)},
+                    {"lifecycle", lifecycle_hash},
+                    {"report", repro::sha256_hex(report_bytes)},
+                };
+
+                std::vector<std::string> mismatches;
+                if (o.deterministic_local_replay && o.verify_hashes)
+                    mismatches = compare_expected_hashes(
+                        o.deterministic_expected_hashes, hashes,
+                        {"event_log", "lifecycle", "economic_result",
+                         "report"});
+                if (o.allow_dataset_mismatch)
+                {
+                    mismatches.insert(
+                        mismatches.end(),
+                        o.deterministic_dataset_mismatches.begin(),
+                        o.deterministic_dataset_mismatches.end());
+                    if (o.deterministic_dataset_mismatches.empty())
+                        mismatches.emplace_back(
+                            "dataset mismatch override used");
+                }
+
+                if (!o.deterministic_local_replay)
+                {
+                    for (const auto& [kind, hash] : hashes)
+                        deterministic_manifest->set_expected_hash(kind, hash);
+                    deterministic_manifest->write_atomic(
+                        std::filesystem::path(o.write_run_manifest_path));
+                }
+
+                repro::RunReceiptV1 receipt;
+                receipt.executed_at_utc = reproducibility_utc_now();
+                receipt.duration_ms = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now()
+                            - deterministic_started).count());
+                receipt.status = mismatches.empty()
+                    ? "complete" : "hash_mismatch";
+                receipt.dataset_mismatch_override_used =
+                    o.allow_dataset_mismatch;
+                receipt.exact_reproduction = o.deterministic_local_replay
+                    && o.verify_hashes && mismatches.empty();
+                receipt.run_fingerprint = deterministic_fingerprint;
+                receipt.actual_hashes = hashes;
+                receipt.mismatches = mismatches;
+                receipt.write_atomic(deterministic_paths->receipt);
+                deterministic_receipt_guard->mark_receipt_published();
+
+                std::cout << "  Run fingerprint: "
+                          << deterministic_fingerprint << '\n';
+                std::cout << "  Event-log hash:  "
+                          << hashes.at("event_log") << '\n';
+                std::cout << "  Lifecycle hash:  "
+                          << hashes.at("lifecycle") << '\n';
+                std::cout << "  Economic hash:   "
+                          << hashes.at("economic_result") << '\n';
+                std::cout << "  Report hash:     "
+                          << hashes.at("report") << '\n';
+                run_ok = mismatches.empty();
+            }
+            catch (const std::exception& error)
+            {
+                eng.reset();
+                deterministic_receipt_guard->set_failure(error.what());
+                std::cerr << "  ! Deterministic local artifact finalization failed: "
+                          << error.what() << '\n';
+                run_ok = false;
+            }
+        }
+        else if (deterministic_local)
+        {
+            eng.reset();
+            deterministic_receipt_guard->set_failure(
+                "deterministic engine run or shutdown failed");
+        }
+        else if (run_ok)
         {
             eng->print_summary();
             export_results(eng->get_analytics(), o.output, o.output_format);
@@ -3072,6 +5625,7 @@ static int run_tui_configured_engine(const cli_options& o,
 
     engine_config config;
     config.seed = o.seed;
+    config.seed_explicitly_set = o.seed_explicitly_set;
     config.event_log_path = o.event_log_path;
     config.compress_log = o.compress_log;
     config.log_max_bytes = o.log_max_size_mb * 1024ull * 1024ull;
@@ -3101,7 +5655,10 @@ static int run_tui_configured_engine(const cli_options& o,
             config.latency_model = std::make_shared<StochasticLatencyModel>(
                 static_cast<double>(o.order_latency_us),
                 static_cast<double>(o.order_latency_stddev_us),
-                o.fill_rng_seed);
+                o.seed_explicitly_set
+                    ? truetest::reproducibility::DeterministicSeedDeriver(o.seed)
+                          .derive(truetest::reproducibility::SeedDomain::latency_model)
+                    : static_cast<std::uint64_t>(o.fill_rng_seed));
         } else {
             config.latency_model = std::make_shared<FixedLatencyModel>(
                 latency_duration(o.order_latency_us));
@@ -3171,7 +5728,10 @@ static int run_tui_configured_engine(const cli_options& o,
     config.risk.max_loss_per_trade = o.risk_max_loss_per_trade;
     config.risk.max_open_orders = o.risk_max_open_orders;
     config.risk.max_portfolio_exposure = o.risk_max_portfolio_exposure;
+    config.risk.max_gross_leverage =
+        resolve_max_gross_leverage(o.risk_max_gross_leverage, o.provider_name);
     config.risk.max_daily_loss = o.risk_max_daily_loss;
+
     config.risk.daily_reset_hour = o.risk_daily_reset_hour;
     config.risk.max_trades_per_hour = o.risk_max_trades_per_hour;
     config.risk.max_orders_per_minute = o.risk_max_orders_per_minute;
@@ -3183,7 +5743,7 @@ static int run_tui_configured_engine(const cli_options& o,
     // Non-provider path is always engine_backtest binary → soft by default.
     // Still route through the resolver so mode typos / future flags stay consistent.
     config.risk_soft_portfolio_limits =
-        resolve_risk_soft_portfolio_limits(/*live_flag=*/false, "backtest");
+        resolve_risk_soft_portfolio_limits(/*live_flag=*/false, "backtest", o.risk_soft_portfolio_limits);
 
     if (!o.thread_preset_str.empty())
         config.threading = string_to_preset(o.thread_preset_str);
@@ -3219,27 +5779,17 @@ static int run_tui_configured_engine(const cli_options& o,
     std::cout << "  |  Engine Mode                              |\n";
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  |  [1]  Backtest (batch data)               |\n";
-    std::cout << "  |  [2]  Shadow  (live feed, paper fills)    |\n";
-    std::cout << "  |  [3]  Live    (live feed, real fills)     |\n";
+    std::cout << "  |  Provider shadow/live: use CLI mode       |\n";
     std::cout << "  +-------------------------------------------+\n";
     std::cout << "  > ";
     int mode_choice;
     std::cin >> mode_choice;
 
-    if (mode_choice == 2)
-        config.mode = engine_mode::shadow;
-    else if (mode_choice == 3)
+    if (mode_choice != 1)
     {
-        if (!truetest::target_allows_live_orders())
-        {
-            std::cerr << "  ! Live mode is only permitted on the engine_live binary "
-                         "(this is " << truetest::target_name() << ").\n";
-            return 1;
-        }
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-        if (!confirm_real_money_math())
-            return 0;
-        config.mode = engine_mode::live;
+        std::cerr << "  ! The offline TUI only runs backtests. Use --provider with "
+                     "--mode shadow/live so fee and cadence validation runs.\n";
+        return 1;
     }
 
     // Soft portfolio limits were resolved as backtest earlier; re-resolve after
@@ -3250,7 +5800,7 @@ static int run_tui_configured_engine(const cli_options& o,
         else if (config.mode == engine_mode::live) mode_str = "live";
         config.risk_soft_portfolio_limits =
             resolve_risk_soft_portfolio_limits(
-                config.mode == engine_mode::live, mode_str);
+                config.mode == engine_mode::live, mode_str, o.risk_soft_portfolio_limits);
     }
 
     if (config.mode != engine_mode::backtest)
@@ -3278,6 +5828,9 @@ static int run_tui_configured_engine(const cli_options& o,
         return 1;
     }
 
+    bind_symbol_to_series(*dh, o.symbol);
+
+
     // engine embeds multi-MiB ObjectPools — heap only (default stack is 8 MiB).
     auto eng = std::make_unique<engine>(dh, nullptr, strategy, std::move(config));
     eng->run();
@@ -3285,6 +5838,44 @@ static int run_tui_configured_engine(const cli_options& o,
     export_results(eng->get_analytics(), o.output, o.output_format);
 
     return eng->run_succeeded() ? 0 : 1;
+}
+
+static std::optional<std::string> rejected_manifest_replay_argument(
+    int argc, char* argv[])
+{
+    const auto is_value_option = [](std::string_view name) {
+        return name == "--replay-run-manifest"
+            || name == "--artifacts-dir" || name == "--trial";
+    };
+    const auto is_flag_option = [](std::string_view name) {
+        return name == "--verify-hashes"
+            || name == "--allow-dataset-mismatch";
+    };
+
+    for (int index = 1; index < argc; ++index)
+    {
+        const std::string_view argument(argv[index]);
+        const std::size_t equals = argument.find('=');
+        const std::string_view name = equals == std::string_view::npos
+            ? argument : argument.substr(0, equals);
+        if (is_flag_option(name) && equals == std::string_view::npos)
+            continue;
+        if (is_value_option(name))
+        {
+            if (equals != std::string_view::npos)
+            {
+                if (equals + 1U == argument.size())
+                    return std::string(argument);
+                continue;
+            }
+            if (index + 1 >= argc)
+                return std::string(argument);
+            ++index;
+            continue;
+        }
+        return std::string(argument);
+    }
+    return std::nullopt;
 }
 
 int main(int argc, char* argv[])
@@ -3306,6 +5897,58 @@ int main(int argc, char* argv[])
         app.parse(argc, argv);
     } catch (const CLI::ParseError& e) {
         return app.exit(e);
+    }
+
+    if (!opts.replay_run_manifest_path.empty())
+    {
+        if (const auto rejected = rejected_manifest_replay_argument(
+                argc, argv))
+        {
+            std::cerr << "  ! Manifest replay refuses explicit option '"
+                      << *rejected
+                      << "'; only manifest/artifact/hash-verification options are allowed\n";
+            return 2;
+        }
+    }
+
+    auto option_was_set = [&](const char* name) {
+        auto option = app.get_option_no_throw(name);
+        return option && option->count() > 0;
+    };
+    opts.fee_model_explicit = option_was_set("--fee");
+    opts.maker_rate_explicit = option_was_set("--maker-rate");
+    opts.taker_rate_explicit = option_was_set("--taker-rate");
+    opts.periods_per_year_explicit = option_was_set("--periods-per-year");
+    opts.seed_explicitly_set = option_was_set("--seed");
+    opts.deterministic_trial_index_explicitly_set = option_was_set("--trial");
+    opts.replay_from_explicitly_set = option_was_set("--replay-from");
+    opts.replay_to_explicitly_set = option_was_set("--replay-to");
+    opts.mc_trials_explicitly_set = option_was_set("--mc-trials");
+    opts.mc_model_explicitly_set = option_was_set("--mc-model");
+    opts.mc_params_explicitly_set = option_was_set("--mc-params");
+    opts.mc_workers_explicitly_set = option_was_set("--mc-workers");
+    opts.fill_rng_seed_explicitly_set = option_was_set("--fill-rng-seed");
+    opts.spread_step_explicitly_set = option_was_set("--spread-step");
+    for (const char* deterministic_input_option : {
+             "--seed", "--preset", "--provider", "--path", "--strategy",
+             "--param", "--monte-carlo", "--mc-trials", "--mc-model",
+             "--mc-params", "--mc-parallel", "--mc-workers",
+             "--mc-reuse-objects", "--thread-preset", "--fee",
+             "--fee-value", "--maker-rate", "--taker-rate", "--symbol",
+             "--balance", "--risk-fraction", "--sl", "--tp",
+             "--exit-policy", "--exec-bar-delay", "--wire-latency-us",
+             "--order-latency-us", "--order-latency-stddev-us",
+             "--impact-k-bps", "--impact-adv", "--fill-prob",
+             "--fill-fade", "--fill-decay", "--mm-levels",
+             "--mm-base-depth", "--mm-spread-pct", "--mm-vol-mult",
+             "--mm-max-spread-pct", "--queue-model",
+             "--maker-queue-model", "--instrument"})
+    {
+        if (option_was_set(deterministic_input_option))
+        {
+            opts.deterministic_replay_input_override_requested = true;
+            break;
+        }
     }
 
     if (!opts.log_file_path.empty())
@@ -3334,6 +5977,39 @@ int main(int argc, char* argv[])
         }
     }
 
+    if (!opts.write_run_manifest_path.empty()
+        && (opts.dump_config_flag || opts.dry_run
+            || !opts.replay_path.empty()))
+    {
+        std::cerr << "  ! --write-run-manifest cannot be combined with "
+                     "--dump-config, --dry-run, or --replay\n";
+        return 2;
+    }
+
+#if TT_TARGET != TT_TARGET_BACKTEST
+    if (!opts.write_run_manifest_path.empty())
+    {
+        std::cerr << "  ! Deterministic run-manifest generation requires "
+                     "the engine_backtest target\n";
+        return 2;
+    }
+#endif
+
+    // A manifest-backed standalone synthetic simulation is the stable-index
+    // trial 0 of the existing MC machinery. Reusing that path gives it the
+    // same seed hierarchy, lifecycle persistence, hashing, and replay
+    // contract without maintaining a second synthetic artifact subsystem.
+    if (!opts.write_run_manifest_path.empty()
+        && (opts.provider_name == "synthetic"
+            || opts.provider_name == "montecarlo")
+        && !opts.monte_carlo && opts.mc_trials == 0)
+    {
+        opts.monte_carlo = true;
+        opts.mc_trials = 1;
+        std::cout << "  Deterministic synthetic run: using one-trial "
+                     "Monte Carlo replay envelope\n";
+    }
+
     if (!opts.resume_path.empty()) {
         std::cerr << "  ! --resume is unavailable: version 1 checkpoints are "
                      "diagnostic portfolio snapshots, not complete deterministic "
@@ -3349,8 +6025,29 @@ int main(int argc, char* argv[])
     }
 #endif
 
+    if (!opts.replay_run_manifest_path.empty())
+        return run_deterministic_manifest_replay(opts);
+    if (!opts.write_run_manifest_path.empty()
+        && !(opts.monte_carlo || opts.mc_trials > 0)
+        && opts.provider_name != "local")
+    {
+        std::cerr << "  ! --write-run-manifest requires Monte Carlo or --provider local\n";
+        return 2;
+    }
+    if (opts.deterministic_trial_index_explicitly_set)
+    {
+        std::cerr << "  ! --trial requires --replay-run-manifest\n";
+        return 2;
+    }
+
     if (opts.dump_config_flag) { dump_config(opts); return 0; }
     if (opts.dry_run) return run_dry_run(opts);
+#if TT_TARGET == TT_TARGET_BACKTEST
+    if (!opts.seed_explicitly_set) {
+        std::cerr << "  ! Configuration error: Backtest requires an explicit deterministic seed\n";
+        return 2;
+    }
+#endif
     if (!opts.replay_path.empty()) return run_replay_mode(opts);
     if (opts.monte_carlo || opts.mc_trials > 0) return run_monte_carlo_mode(opts);
     if (!opts.provider_name.empty()) return run_provider_mode(opts);
