@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <memory>
 #include <cstdint>
+#include <limits>
+#include <span>
 #include <string>
 #include <algorithm>
 
@@ -45,7 +47,7 @@ using lvl_infos = std::vector<lvl_info>;
 class orderbook_lvl_infos
 {
 public:
-    orderbook_lvl_infos(const lvl_infos& bids, const lvl_infos& asks);
+    orderbook_lvl_infos(lvl_infos bids, lvl_infos asks);
     const lvl_infos& get_bids() const;
     const lvl_infos& get_asks() const;
 private:
@@ -117,14 +119,18 @@ struct price_level
 
     bool empty() const { return head == nullptr; }
 
-    void append(order_node* n)
+    [[nodiscard]] bool append(order_node* n) noexcept
     {
+        const quantity remaining = n->order->get_remaining_quantity();
+        if (remaining > std::numeric_limits<quantity>::max() - total_qty)
+            return false;
         n->prev = tail;
         n->next = nullptr;
         if (tail) tail->next = n;
         else      head = n;
         tail = n;
-        total_qty += n->order->get_remaining_quantity();
+        total_qty += remaining;
+        return true;
     }
 
     void remove(order_node* n)
@@ -136,6 +142,21 @@ struct price_level
         total_qty -= n->order->get_remaining_quantity();
         n->prev = n->next = nullptr;
     }
+};
+
+struct external_depth_result
+{
+    std::size_t bid_count = 0;
+    std::size_t ask_count = 0;
+    std::size_t total_bid_levels = 0;
+    std::size_t total_ask_levels = 0;
+    bool quantity_overflow = false;
+};
+
+enum class l2_apply_status
+{
+    applied,
+    quantity_overflow
 };
 
 class orderbook
@@ -164,6 +185,14 @@ public:
     order_pointer get_order(order_id id) const;
     std::size_t size() const;
     orderbook_lvl_infos get_order_infos() const;
+    // Cold snapshot helper: excludes locally resting strategy orders. This is
+    // the only orderbook view suitable for a market-data BBO/imbalance panel.
+    orderbook_lvl_infos get_external_order_infos() const;
+    // Allocation-free bounded projection for operator snapshots. The spans
+    // receive the BBO prefix; total_* still describe all valid external
+    // levels. Any impossible aggregate overflow invalidates the projection.
+    external_depth_result copy_external_depth(
+        std::span<lvl_info> bids, std::span<lvl_info> asks) const noexcept;
     double best_bid_price() const noexcept
     {
         return bid_levels_.empty() ? 0.0
@@ -178,15 +207,24 @@ public:
     double best_external_ask_price() const noexcept;
     double external_vwap(side taker_side, quantity requested) const noexcept;
 
-    void apply_l2_snapshot(const std::pair<Price, quantity>* bids, std::size_t bid_count,
-                           const std::pair<Price, quantity>* asks, std::size_t ask_count);
+    // A quantity overflow rejects the complete replacement and leaves the
+    // previous external depth intact. Allocation failures propagate with the
+    // same strong guarantee because all fallible work is staged pre-commit.
+    l2_apply_status apply_l2_snapshot(
+        const std::pair<Price, quantity>* bids, std::size_t bid_count,
+        const std::pair<Price, quantity>* asks, std::size_t ask_count);
 
-    void apply_l2_snapshot(const std::vector<std::pair<Price, quantity>>& bids,
-                           const std::vector<std::pair<Price, quantity>>& asks)
+    l2_apply_status apply_l2_snapshot(
+        const std::vector<std::pair<Price, quantity>>& bids,
+        const std::vector<std::pair<Price, quantity>>& asks)
     {
-        apply_l2_snapshot(bids.data(), bids.size(), asks.data(), asks.size());
+        return apply_l2_snapshot(
+            bids.data(), bids.size(), asks.data(), asks.size());
     }
-    void apply_l2_update(side side, Price price, quantity new_qty);
+    // Replacing one venue level follows the same all-or-nothing overflow
+    // contract as a full snapshot.
+    l2_apply_status apply_l2_update(side side, Price price,
+                                    quantity new_qty);
     void clear();
 
     ~orderbook() { clear(); }
@@ -203,11 +241,16 @@ private:
 
     order_node* alloc_node();
     void free_node(order_node* n);
+    order_id next_unused_l2_order_id() noexcept;
 
     std::vector<price_level> bid_levels_;
     std::vector<price_level> ask_levels_;
 
     std::unordered_map<order_id, order_node*> order_map_;
+    // Venue-depth identities occupy the upper half of the local order-id
+    // space. They are implementation details, whereas strategy/MM ids are
+    // externally addressable for amend/cancel.
+    order_id next_l2_order_id_ = (order_id{1} << 63);
 
     price_level& find_or_insert_level(std::vector<price_level>& levels, Price price, side s);
     void remove_level_if_empty(std::vector<price_level>& levels, Price price);

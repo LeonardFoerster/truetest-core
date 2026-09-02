@@ -63,6 +63,16 @@ public:
         return result;
     }
 
+    template <typename Fn>
+    void for_each_book(Fn&& fn) const
+    {
+        for (std::size_t i = 0; i < books_.size(); ++i)
+        {
+            if (books_[i])
+                fn(symbols_.resolve(static_cast<std::uint16_t>(i)), *books_[i]);
+        }
+    }
+
     std::size_t size() const
     {
         std::size_t n = 0;
