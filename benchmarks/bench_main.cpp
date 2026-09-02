@@ -13,6 +13,7 @@
 
 #include "engine/engine.h"
 #include "engine/engine_config.h"
+#include "exits/exit_manager.h"
 #include "core/event.h"
 #include "data/data_handler.h"
 #include "execution/execution_adapter.h"
@@ -21,7 +22,7 @@
 #include "orderbook/orderbook.h"
 #include "risk/risk_accounting.h"
 #include "strategy/market_making/inventory_aware_mm_strategy.h"
-#include "strategy/sma_strategy.h"
+#include "strategy/sma/sma_strategy.h"
 #include "threading/ring_buffer.h"
 #include "types/price.h"
 
@@ -532,5 +533,97 @@ BENCHMARK(BM_MMStrategy_LatencyDistribution)
     ->Arg(8)
     ->Unit(benchmark::kMillisecond)
     ->Iterations(3);
+
+
+// ── ExitManager per-event hot path (F-01 / F-03 gate) ──────────────────────
+//
+// docs/todos/11-F-forensic-lifecycle-audit.md requires that the F-01 (entry
+// slippage clamp, gap anchoring) and F-03 (deferred arm) changes cost nothing
+// per event. Both live on ExitManager::on_bar (once per market observation
+// per symbol) and ExitManager::on_fill (once per fill).
+//
+// Deliberately written against the pre-F pubic API only, so the same
+// benchmark compiles and runs against the pre-fix tree for a true before/after.
+
+static truetest::exits::exit_intent bench_intent(std::uint64_t opener, double ref)
+{
+    truetest::exits::exit_intent ei;
+    ei.strategy_name   = "bench";
+    ei.symbol          = "BENCH";
+    ei.close_side      = order_side::sell;
+    ei.qty             = 1.0;
+    ei.reference_entry = ref;
+    ei.stop_loss       = ref * 0.98;
+    ei.take_profit     = ref * 1.04;
+    ei.opener_order_id = opener;
+    return ei;
+}
+
+// Steady state: N armed brackets, one bar that triggers none of them. This is
+// the cost paid on every single market observation of a run.
+static void BM_ExitManager_OnBar(benchmark::State& state)
+{
+    const auto armed = static_cast<std::uint64_t>(state.range(0));
+    const auto ts = std::chrono::system_clock::time_point{};
+
+    truetest::exits::ExitManager m;
+    for (std::uint64_t i = 1; i <= armed; ++i)
+    {
+        m.register_pending(bench_intent(i, 100.0));
+        fill_event f(ts, "BENCH", i, order_side::buy, 1.0, 100.0, 0.0, 0.0, i);
+        m.on_fill(f, i);
+    }
+
+    for (auto _ : state)
+    {
+        auto fires = m.on_bar("BENCH", 100.0, 99.5, 100.5, 100.0, ts);
+        benchmark::DoNotOptimize(fires);
+    }
+    state.SetItemsProcessed(state.iterations() * static_cast<std::int64_t>(armed));
+}
+BENCHMARK(BM_ExitManager_OnBar)->Arg(1)->Arg(16)->Arg(64)->Unit(benchmark::kNanosecond);
+
+// Arming path: register the intent, fill the opener, promote to armed, drop.
+// One full bracket lifecycle per iteration.
+static void BM_ExitManager_ArmFill(benchmark::State& state)
+{
+    const auto ts = std::chrono::system_clock::time_point{};
+    truetest::exits::ExitManager m;
+    std::uint64_t opener = 1;
+
+    for (auto _ : state)
+    {
+        m.register_pending(bench_intent(opener, 100.0));
+        fill_event f(ts, "BENCH", opener, order_side::buy, 1.0, 100.05, 0.0, 0.0, opener);
+        m.on_fill(f, opener);
+        m.cancel(opener);
+        ++opener;
+    }
+}
+BENCHMARK(BM_ExitManager_ArmFill)->Unit(benchmark::kNanosecond);
+
+// Multi-level opener walk: four partial fills growing one armed bracket. This
+// is the path F-09a re-anchors the SL/TP on.
+static void BM_ExitManager_MultiLevelOpenerFill(benchmark::State& state)
+{
+    const auto ts = std::chrono::system_clock::time_point{};
+    truetest::exits::ExitManager m;
+    std::uint64_t opener = 1;
+
+    for (auto _ : state)
+    {
+        m.register_pending(bench_intent(opener, 100.0));
+        for (int leg = 0; leg < 4; ++leg)
+        {
+            fill_event f(ts, "BENCH", opener, order_side::buy, 0.25,
+                         100.0 + 0.01 * leg, 0.0, 0.0, opener);
+            m.on_fill(f, opener);
+        }
+        m.cancel(opener);
+        ++opener;
+    }
+}
+BENCHMARK(BM_ExitManager_MultiLevelOpenerFill)->Unit(benchmark::kNanosecond);
+
 
 BENCHMARK_MAIN();
