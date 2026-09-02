@@ -15,6 +15,7 @@
 #include <memory>
 #include <functional>
 #include <iostream>
+#include <stdexcept>
 #include <type_traits>
 #include <variant>
 
@@ -100,7 +101,11 @@ public:
 		: transport_(std::move(transport))
 		, parser_(std::move(parser))
 		, sink_(std::move(sink))
-	{ }
+	{
+		if (!transport_ || !parser_)
+			throw std::invalid_argument(
+				"DataBridge requires a transport and parser");
+	}
 
 	void set_retain_streamed(bool retain) { retain_streamed_ = retain; }
 	bool retain_streamed() const { return retain_streamed_; }
@@ -191,23 +196,21 @@ public:
 	                         std::atomic<bool>* halt = nullptr,
 	                         LoadStats* stats = nullptr) override
 	{
-		// Prefer explicit halt pointer; fall back to member set by engine.
-		if (halt) halt_flag_ = halt;
 		return run_streaming_impl(
-			sink, /*on_record=*/nullptr, /*on_idle=*/nullptr, stats);
+			sink, /*on_record=*/nullptr, /*on_idle=*/nullptr, stats, halt);
 	}
-
-	void set_halt_flag(std::atomic<bool>* halt) { halt_flag_ = halt; }
 
 	// Engine streaming entry: optionally retain into handler (D-06).
 	StreamResult run_streaming(
 		std::shared_ptr<data_handler> handler,
 		record_callback on_record = nullptr,
-		idle_callback on_idle = nullptr)
+		idle_callback on_idle = nullptr,
+		std::atomic<bool>* halt = nullptr)
 	{
 		if (retain_streamed_ && handler)
 		{
-			return run_streaming_impl(*handler, on_record, on_idle, nullptr);
+			return run_streaming_impl(
+				*handler, on_record, on_idle, nullptr, halt);
 		}
 		else
 		{
@@ -215,7 +218,8 @@ public:
 			DiscardMarketSink discard;
 			// Still need to call legacy sink_ for L2-unrelated records if provided
 			// when retain is false — engine uses on_record for process_single_*.
-			return run_streaming_impl(discard, on_record, on_idle, nullptr);
+			return run_streaming_impl(
+				discard, on_record, on_idle, nullptr, halt);
 		}
 	}
 
@@ -227,10 +231,11 @@ public:
 	}
 
 private:
-		StreamResult run_streaming_impl(IMarketSink& sink,
-		                        record_callback on_record,
-		                        idle_callback on_idle,
-		                        LoadStats* stats)
+	StreamResult run_streaming_impl(IMarketSink& sink,
+	                                record_callback on_record,
+	                                idle_callback on_idle,
+	                                LoadStats* stats,
+	                                std::atomic<bool>* halt)
 	{
 		StreamResult result;
 		std::size_t count = 0;
@@ -247,16 +252,16 @@ private:
 
 		try
 		{
-		if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))
-		{
-			result.termination = stream_termination::engine_halt;
-			return result;
-		}
-		if (stop_requested_.load(std::memory_order_acquire))
-		{
-			result.termination = stream_termination::operator_stop;
-			return result;
-		}
+			if (halt && halt->load(std::memory_order_acquire))
+			{
+				result.termination = stream_termination::engine_halt;
+				return result;
+			}
+			if (stop_requested_.load(std::memory_order_acquire))
+			{
+				result.termination = stream_termination::operator_stop;
+				return result;
+			}
 			if (on_idle && !transport_->supports_bounded_idle_read())
 			{
 				std::cerr << "DataBridge: funding/control idle drain requires a bounded transport read\n";
@@ -269,26 +274,26 @@ private:
 			result.termination = stream_termination::transport_open_failure;
 			return result;
 		}
-		if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))
-		{
-			transport_->request_stop();
-			result.termination = stream_termination::engine_halt;
-			transport_->close();
-			return result;
-		}
-		if (stop_requested_.load(std::memory_order_acquire))
-		{
-			transport_->request_stop();
-			result.termination = stream_termination::operator_stop;
-			transport_->close();
-			return result;
-		}
+			if (halt && halt->load(std::memory_order_acquire))
+			{
+				transport_->request_stop();
+				result.termination = stream_termination::engine_halt;
+				transport_->close();
+				return result;
+			}
+			if (stop_requested_.load(std::memory_order_acquire))
+			{
+				transport_->request_stop();
+				result.termination = stream_termination::operator_stop;
+				transport_->close();
+				return result;
+			}
 
 			std::string_view frame;
 			auto read_next_frame = [&]() {
 				for (;;)
 				{
-					if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))
+					if (halt && halt->load(std::memory_order_acquire))
 						return false;
 					if (stop_requested_.load(std::memory_order_acquire))
 						return false;
@@ -336,14 +341,14 @@ private:
 			}
 			else
 			{
-				result.termination = classify_terminal();
+				result.termination = classify_terminal(halt);
 			}
 		}
 		else
 		{
 			if (!read_next_frame())
 			{
-				result.termination = classify_terminal();
+				result.termination = classify_terminal(halt);
 				transport_->close();
 				return result;
 			}
@@ -381,7 +386,7 @@ private:
 
 		while (!record_failed && transport_->is_open())
 		{
-			if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))
+			if (halt && halt->load(std::memory_order_acquire))
 			{
 				break;
 			}
@@ -389,7 +394,7 @@ private:
 			{
 				break;
 			}
-			if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))
+			if (halt && halt->load(std::memory_order_acquire))
 				break;
 
 			auto records = parser_->parse_records(frame);
@@ -409,12 +414,12 @@ private:
 		finish_result();
 		if (record_failed || result.rejected > 0)
 			result.termination = stream_termination::parse_or_sink_failure;
-		else if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))
+		else if (halt && halt->load(std::memory_order_acquire))
 			result.termination = stream_termination::engine_halt;
 		else if (stop_requested_.load(std::memory_order_acquire))
 			result.termination = stream_termination::operator_stop;
 		else
-			result.termination = classify_terminal();
+			result.termination = classify_terminal(halt);
 		transport_->close();
 		return result;
 		}
@@ -426,6 +431,17 @@ private:
 		{
 			std::cerr << "DataBridge: unknown streaming exception\n";
 		}
+		try
+		{
+			transport_->request_stop();
+			transport_->close();
+		}
+		catch (...)
+		{
+			// The original stream failure remains authoritative. Cleanup is
+			// best-effort here and the engine's terminal failure path is already
+			// responsible for fail-closed provider/session shutdown.
+		}
 		result.accepted = count;
 		if (stats)
 		{
@@ -436,9 +452,9 @@ private:
 		return result;
 	}
 
-	stream_termination classify_terminal() const
+	stream_termination classify_terminal(std::atomic<bool>* halt) const
 	{
-		if (halt_flag_ && halt_flag_->load(std::memory_order_acquire))
+		if (halt && halt->load(std::memory_order_acquire))
 			return stream_termination::engine_halt;
 		if (stop_requested_.load(std::memory_order_acquire))
 			return stream_termination::operator_stop;
@@ -461,7 +477,6 @@ private:
 	std::shared_ptr<IDataParser<T>> parser_;
 	sink_fn sink_;
 	research_tap_fn research_tap_;
-	std::atomic<bool>* halt_flag_ = nullptr;
 	std::atomic<bool> stop_requested_{false};
 	bool retain_streamed_ = false; // D-06 default: do not grow series on stream
 };

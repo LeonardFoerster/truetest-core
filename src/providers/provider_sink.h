@@ -11,6 +11,7 @@
 
 #include <memory>
 #include <cmath>
+#include <stdexcept>
 #include <type_traits>
 
 namespace provider {
@@ -92,7 +93,10 @@ inline void event_sink_l2(const event& ev, std::shared_ptr<orderbook> ob)
 				asks.emplace_back(price, qty);
 			}
 
-			ob->apply_l2_snapshot(bids, asks);
+            if (ob->apply_l2_snapshot(bids, asks) !=
+                l2_apply_status::applied)
+                throw std::runtime_error(
+                    "provider L2 snapshot aggregate quantity overflow");
 		}
 		else if constexpr (std::is_same_v<E, l2_update>)
 		{
@@ -106,7 +110,10 @@ inline void event_sink_l2(const event& ev, std::shared_ptr<orderbook> ob)
 			if (tt::quantity_scale::rescale_nonnegative(
 			        e.new_quantity, e.quantity_scale,
 			        static_cast<double>(tt::quantity_scale::canonical_atoms), qty))
-				ob->apply_l2_update(ob_side, price, qty);
+                if (ob->apply_l2_update(ob_side, price, qty) !=
+                    l2_apply_status::applied)
+                    throw std::runtime_error(
+                        "provider L2 update aggregate quantity overflow");
 		}
 	}, ev);
 }
