@@ -105,6 +105,7 @@ public:
         const std::unordered_map<std::string, mark_point>& last_mark_prices,
         std::mutex& last_mark_prices_mu,
         const std::chrono::system_clock::time_point& last_sim_time, // audit timestamps (cancel/modify/EOS)
+        const std::chrono::system_clock::time_point& last_decision_ts, // F-08 decision clock
         const std::unordered_set<std::string>& l2_seeded_symbols,
         const bool& mm_threaded,                        // true while MarketMakerWorker owns the book
         DashboardSnapshotBuilder* dashboard_builder,     // nullable
@@ -171,6 +172,35 @@ public:
                         std::size_t& event_count,
                         std::int64_t recv_ns);
 
+    // F-01(a): drains ExitManager's refused-bracket flatten requests and
+    // routes each for the observed symbol at the captured triggering mark.
+    // Returns true on a terminal halt, matching the
+    // evaluate_exits contract. Called from both evaluate_exits overloads
+    // before the armed brackets are probed.
+    bool route_exit_flatten_requests(const std::string& symbol,
+                                     std::size_t& event_count,
+                                     std::int64_t recv_ns);
+
+    // F-05a: latch (and report once) that the account's marked equity has
+    // reached or crossed zero. Observation only — never liquidation.
+    void note_marked_equity(double equity) const;
+
+    // F-02: the single emission point for an order leaving the active
+    // lifecycle without filling. Sets the terminal status, releases the
+    // order's exit intent (or, for a closer, its reserved close quantity)
+    // and resyncs the owning strategy's position gate. Every
+    // set_status(..., rejected/cancelled/expired) in this class routes
+    // through here — see the block comment on the definition.
+    bool emit_terminal_transition(
+        std::uint64_t order_id,
+        const std::string& symbol,
+        double qty,
+        order_status terminal,
+        std::chrono::system_clock::time_point authoritative_ts = {});
+
+
+
+
     // Verbatim move of the former engine::finalize_strategy_route (renamed
     // to drop the redundant "_route" stutter now that it hangs off orders_).
     // strategy is a caller-supplied parameter, never stored (the run loops
@@ -178,7 +208,8 @@ public:
     void finalize_route(IStrategy& strategy,
                         const std::string& strategy_name,
                         const order_event& order,
-                        bool halted);
+                        bool halted,
+                        std::optional<double> pre_route_net_qty = std::nullopt);
 
     // Verbatim move of the former engine::drain_pending_orders's domain-glue
     // half (MM re-center + process() submission); the pure due/compaction
@@ -231,7 +262,8 @@ private:
     // after this move.
     void register_strategy_exit_intent(IStrategy& strategy,
                                        const std::string& strategy_name,
-                                       const order_event& order);
+                                       const order_event& order,
+                                       std::optional<double> pre_route_net_qty = std::nullopt);
 
     // Former engine::resolve_instrument_spec / apply_instrument_spec —
     // private now: route()'s own instrument-spec-filter helpers, no other
@@ -294,6 +326,11 @@ private:
     const std::unordered_map<std::string, mark_point>& last_mark_prices_;
     std::mutex& last_mark_prices_mu_;
     const std::chrono::system_clock::time_point& last_sim_time_;
+    // F-08: when the information behind the current observation existed.
+    // Stamped onto every routed order so time-windowed risk rules and the
+    // audit trail stop inheriting the bar-open clock. See order_event.
+    const std::chrono::system_clock::time_point& last_decision_ts_;
+
     const std::unordered_set<std::string>& l2_seeded_symbols_;
     const bool& mm_threaded_;
     DashboardSnapshotBuilder* dashboard_builder_;

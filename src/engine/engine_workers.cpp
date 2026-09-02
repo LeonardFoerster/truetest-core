@@ -5,6 +5,7 @@
 #include "engine.h"
 #include "live_safety_session.h"
 #include "execution/async_support.h"
+#include "reproducibility/deterministic_seed.h"
 #ifdef HAS_QUESTDB
 #include "data/questdb/run_tag.h"
 #endif
@@ -97,6 +98,18 @@ void engine::start_workers()
     {
     case thread_preset::inline_mode:
         return;
+
+    case thread_preset::logging_only:
+    {
+        logging_ring_ = std::make_shared<EventRing>();
+        logging_worker_ = make_logging_worker();
+        wire_failure(*logging_worker_);
+        worker_threads_.emplace_back([this]() {
+            logging_worker_->run(*logging_ring_);
+        });
+        pin_to_core(worker_threads_.back(), find_core(core_role::logging));
+        break;
+    }
 
     case thread_preset::light:
     {
@@ -207,7 +220,8 @@ void engine::start_workers()
         if (async_mm)
         {
             mm_worker_ = std::make_unique<MarketMakerWorker>(
-                config_.seed != 0 ? static_cast<unsigned>(config_.seed + 3) : 42u,
+                truetest::reproducibility::DeterministicSeedDeriver(config_.seed)
+                    .derive(truetest::reproducibility::SeedDomain::market_maker),
                 *mm_order_ring_,
                 mm_calibration{config_.mm_levels_per_side,
                                config_.mm_base_depth,
@@ -482,7 +496,7 @@ void engine::questdb_begin()
                   << questdb_store_->run_tag() << ")\n";
         // Single canonical place that decides the concrete sink (ctor starts with Noop).
         // No raw if(active && store) remains in caller paths.
-        audit_sink_ = std::make_unique<QuestdbOrderAuditSink>(questdb_store_, &questdb_active_);
+        audit_sink_ = std::make_shared<QuestdbOrderAuditSink>(questdb_store_, &questdb_active_);
     }
     else
     {

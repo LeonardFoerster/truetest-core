@@ -60,6 +60,18 @@ class DashboardSnapshotBuilder;   // pointer-only; may be null pre-construction 
 class ShadowTracker;              // pointer-only; non-null only in shadow mode
 class IExecutionAdapter;          // used only via shared_ptr in process_adapter_fills
 
+// Explicit side-effect profile for the one economic-fill ingress.  Replay
+// rebuilds recorded accounting without regenerating decisions; unwind skips
+// recursive post-fill risk; shadow_simulated additionally updates divergence
+// telemetry.  No caller may bypass ingest() for authoritative accounting.
+enum class fill_context : std::uint8_t
+{
+    primary,
+    risk_unwind,
+    shadow_simulated,
+    authoritative_replay
+};
+
 class FillProcessor final
 {
 public:
@@ -81,6 +93,8 @@ public:
         const engine_config& config,
         DashboardSnapshotBuilder* dashboard_builder,
         ShadowTracker* shadow_tracker,
+        ::portfolio* exchange_portfolio,
+        Analytics* exchange_analytics,
         std::function<void(const event&)> log_event,
         std::function<void(const event_pointer&)> publish_event,
         std::function<void(std::string_view)> trigger_halt,
@@ -96,17 +110,30 @@ public:
     // mark_shadow_sim: true for paper/sim fills in shadow dual-track mode. status_reason:
     // optional audit reason (e.g. "risk_unwind"). Verbatim move of the former
     // engine::handle_engine_fill — see engine-decomposition.md for the call-site mapping.
-    bool handle_fill(fill_event& f,
-                     std::size_t& event_count,
-                     bool& halt_requested,
-                     bool run_post_fill_risk = true,
-                     bool mark_shadow_sim = false,
-                     const char* status_reason = nullptr);
+    bool ingest(fill_event& f,
+                std::size_t& event_count,
+                bool& halt_requested,
+                fill_context context = fill_context::primary,
+                const char* status_reason = nullptr,
+                bool* delivery_consumed = nullptr,
+                IExecutionAdapter* delivery_adapter = nullptr);
 
     // Canonical fill pipeline for one adapter's pending fills (poll + apply). Returns
     // false on a post-fill risk halt.
     bool process_adapter_fills(const std::shared_ptr<IExecutionAdapter>& adapter,
                                std::size_t& event_count, bool& halt_requested);
+    bool process_adapter_fills(const std::shared_ptr<IExecutionAdapter>& adapter,
+                               std::size_t& event_count, bool& halt_requested,
+                               fill_context context);
+
+    // Shadow exchange executions use an independent order/fill ledger. They
+    // are observational and must never mutate the canonical strategy book,
+    // but they still require the same identity, cursor, replay and quantity
+    // admission as every other economic fill before touching shadow state.
+    bool register_shadow_order(const order_event& order);
+    bool process_shadow_exchange_fills(
+        const std::shared_ptr<IExecutionAdapter>& adapter,
+        bool& halt_requested);
 
     // Stamp per-lot attribution (opener_order_id + strategy_name) onto a fill_event if
     // not already present. Public: also called directly from engine's shadow-mode fill
@@ -116,7 +143,16 @@ public:
     // Legacy net-truth push for strategies that still override set_position_open, plus
     // net-flat bracket sweep. Public: also called from engine's finalize_strategy_route
     // (order pipeline) on pause/reject resync, not just from handle_fill.
-    void notify_position_change_all(const std::string& symbol, bool open);
+    //
+    // F-02: sweep_flat_brackets=false pushes the net truth WITHOUT the
+    // net-flat bulk sweep. The terminal-transition emitter already cancels
+    // the dead order's own intent precisely, by opener id; letting the
+    // legacy sweep also fire there would additionally drop a *different*
+    // opener's still-live pending intent whenever the book happens to be
+    // flat. The unstick signal is the set_position_open push, not the sweep.
+    void notify_position_change_all(const std::string& symbol, bool open,
+                                    bool sweep_flat_brackets = true);
+
 
     // State ownership: this counter's only writer is handle_fill (soft post-fill risk
     // breach path, backtest-only). Canonical owner moved here from engine::
@@ -126,6 +162,13 @@ public:
 
 private:
     void dispatch_fill_to_strategy(const fill_event& f) const;
+    void sweep_flat_brackets_if_needed(
+        const std::string& symbol, bool position_open);
+    bool ingest_shadow_exchange_fill(
+        fill_event& fill, bool& halt_requested,
+        bool* delivery_consumed = nullptr,
+        IExecutionAdapter* delivery_adapter = nullptr);
+    void stamp_shadow_fill_attribution(fill_event& fill) const;
 
     // Thin, non-domain attribution lookups delegating to attribution_ (not a
     // duplicated subsystem — OrderAttributionStore is the sole canonical
@@ -155,6 +198,9 @@ private:
     const engine_config& config_;
     DashboardSnapshotBuilder* dashboard_builder_;
     ShadowTracker* shadow_tracker_;
+    portfolio* exchange_portfolio_;
+    Analytics* exchange_analytics_;
+    OrderTracker shadow_exchange_order_tracker_;
 
     // Narrow callbacks into engine's own hot-path/safety primitives (single event-log
     // writer, single ring-dispatch policy, single halt entry point) — see class-header

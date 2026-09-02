@@ -23,6 +23,7 @@ class IProvider;
 class LiveSafetySession;
 class IQueuePositionModel;
 class IQueueModel;
+class IOrderAuditSink;
 
 namespace truetest::ui { class ConsoleDashboard; }
 
@@ -33,10 +34,12 @@ enum class engine_mode { backtest, shadow, live };
 // Pure helper so unit tests lock main.inc wiring without spawning a process.
 // `live_flag` covers `--live`; `mode` covers `--mode live|shadow|backtest`.
 inline bool resolve_risk_soft_portfolio_limits(bool live_flag,
-                                               std::string_view mode) noexcept
+                                               std::string_view mode,
+                                               std::optional<bool> explicit_flag = std::nullopt) noexcept
 {
     if (live_flag) return false;
     if (mode == "live" || mode == "shadow") return false;
+    if (explicit_flag.has_value()) return *explicit_flag;
     return true;
 }
 
@@ -81,6 +84,11 @@ struct engine_config
     std::shared_ptr<IFeeModel> fee_model;
     std::shared_ptr<IFillModel> fill_model;
     std::shared_ptr<ILatencyModel> latency_model;
+
+    // Optional preallocated audit sink for deterministic/golden research
+    // runs. It is injected at composition time; normal runs retain the
+    // existing Noop/QuestDB selection. Persistence may not replace it.
+    std::shared_ptr<IOrderAuditSink> order_audit_sink;
 
     // Order -> venue delay, stacked on top of latency_model (strategy ->
     // order-ready). Used by TradeTapeShadowAdapter and HybridExecutor so
@@ -183,7 +191,9 @@ struct engine_config
 
     double risk_free_rate = 0.0;
 
-    std::size_t periods_per_year = 252;
+    // CLI/API defaults target 1-minute, 24/7 crypto data. Daily or other
+    // cadences must override this value with their actual periods per year.
+    std::size_t periods_per_year = 525600;
 
     std::size_t max_equity_points = 100000;
 
@@ -196,7 +206,8 @@ struct engine_config
 
     std::unordered_map<std::string, instrument_spec> instrument_overrides;
 
-    // Live-mode only. Null -> resolved from provider or safe defaults.
+    // Live-mode only. Null -> provider capability or startup refusal; there
+    // is deliberately no no-op/default safety fallback.
     std::shared_ptr<IReconciler> reconciler;
     std::shared_ptr<IKillSwitch> kill_switch;
     double reconcile_tolerance_bps = 10.0;
@@ -204,7 +215,10 @@ struct engine_config
 
     double market_aggression = 1.1;
     double qty_scale = 1e8;
-    unsigned fill_rng_seed = 42;
+    // Zero is a valid explicit deterministic master seed. Composition roots
+    // must set the presence bit only when CLI/config/manifest supplied it.
+    bool seed_explicitly_set = false;
+    std::uint64_t fill_rng_seed = 42;
     double spread_step_factor = 0.0001;
 
     // Synthetic MarketMaker calibration for bar-mode backtests. The seeded
@@ -250,5 +264,16 @@ struct engine_config
 
     std::shared_ptr<truetest::ui::ConsoleDashboard> dashboard;
 
-    bool is_threaded() const { return threading != thread_preset::inline_mode; }
+    // Worker ownership and analytics ownership are intentionally separate:
+    // logging_only offloads durable I/O but keeps economic analytics on the
+    // deterministic event-loop order.
+    bool is_threaded() const
+    {
+        return threading != thread_preset::inline_mode;
+    }
+    bool has_async_analytics() const
+    {
+        return threading != thread_preset::inline_mode
+            && threading != thread_preset::logging_only;
+    }
 };

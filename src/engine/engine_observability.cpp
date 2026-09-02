@@ -26,6 +26,7 @@ void engine::print_summary()
     switch (config_.threading)
     {
     case thread_preset::inline_mode:
+    case thread_preset::logging_only:
         analytics_.print_report();
         return;
     case thread_preset::light:

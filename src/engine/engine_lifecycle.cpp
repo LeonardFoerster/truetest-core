@@ -3,6 +3,8 @@
 // Extracted mechanically from engine.cpp (Phase 1 TU split); behavior unchanged.
 #include "engine.h"
 
+#include "reproducibility/deterministic_seed.h"
+
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -153,12 +155,15 @@ void engine::reset_for_next_trial(uint64_t new_seed)
     // do not claim full in-place reuse readiness until those are reset too.
 
     // Reset market maker and adverse selection trackers
-    market_maker_.reset();
+    market_maker_.reset(
+        truetest::reproducibility::DeterministicSeedDeriver(new_seed).derive(
+            truetest::reproducibility::SeedDomain::market_maker));
     adverse_selection_.reset();
 
     // Reset per-symbol caches that can leak state between trials
     if (instrument_spec_cache_) instrument_spec_cache_->clear();
     l2_seeded_symbols_.clear();
+    l2_sequence_states_.fill({});
 
     if (dashboard_builder_) dashboard_builder_->clear_for_mc_reset();
 

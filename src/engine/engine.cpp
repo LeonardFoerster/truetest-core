@@ -1,4 +1,6 @@
 #include "engine.h"
+
+#include "reproducibility/deterministic_seed.h"
 #include "data/quantity_scale.h"
 #include "checkpoint.h"
 #include "live_safety_session.h"
@@ -99,24 +101,33 @@ engine::engine(std::shared_ptr<data_handler> dh,
                engine_config config)
     : config_(refuse_legacy_resume(std::move(config))), data_handler_(std::move(dh)), strategy_(std::move(strategy)),
       portfolio_(config_.initial_balance),
+      order_tracker_(
+          OrderTracker::default_native_execution_capacity,
+          std::isfinite(config_.qty_scale) && config_.qty_scale > 0.0
+              ? 1.0 / config_.qty_scale : 0.0),
       analytics_(config_.initial_balance, config_.rolling_window, config_.risk_free_rate,
                  config_.periods_per_year, config_.max_equity_points),
       risk_manager_(config_.risk),
-      market_maker_(config_.seed != 0 ? MarketMaker(static_cast<unsigned>(config_.seed + 1))
-                                      : MarketMaker())
+      market_maker_(MarketMaker(
+          truetest::reproducibility::DeterministicSeedDeriver(config_.seed)
+              .derive(truetest::reproducibility::SeedDomain::market_maker)))
 {
+    if (config_.mode == engine_mode::live
+        && (!config_.provider
+            || !config_.live_safety_session
+            || !config_.live_safety_session->owns_provider(config_.provider)
+            || !config_.live_safety_session->is_open()
+            || !config_.live_safety_session->startup_safety_validated()
+            || !config_.live_safety_session->permits_private_exchange_writes()))
+        throw std::runtime_error(
+            "live provider requires its validated open pre-owned LiveSafetySession");
+    if (config_.mode == engine_mode::live && config_.live_safety_session
+        && !config_.live_safety_session->configured_safety_matches(
+            config_.reconciler, config_.kill_switch))
+        throw std::runtime_error(
+            "startup rejected: engine safety configuration differs from validated session");
     if (config_.provider)
         provider_funding_ingress_ = config_.provider->funding_ingress();
-    if (config_.mode == engine_mode::live && config_.provider
-        && (!config_.live_safety_session
-            || !config_.live_safety_session->owns_provider(config_.provider)
-            || !config_.live_safety_session->is_open()))
-        throw std::runtime_error(
-            "live provider requires its open pre-owned LiveSafetySession");
-    if (config_.mode == engine_mode::live && config_.live_safety_session
-        && config_.kill_switch
-        && !config_.live_safety_session->set_kill_switch(config_.kill_switch))
-        throw std::runtime_error("live safety session already began shutdown");
     market_maker_.set_calibration({config_.mm_levels_per_side,
                                    config_.mm_base_depth,
                                    config_.mm_base_spread_pct,
@@ -211,13 +222,18 @@ engine::engine(std::shared_ptr<data_handler> dh,
                     {
                         if (!armed_for_unknown || !armed_for_unknown->load(std::memory_order_acquire))
                             return std::nullopt;
+                        if (msg.k != parsed_exec::kind::partial_fill
+                            && msg.k != parsed_exec::kind::full_fill)
+                            return std::nullopt;
 
-                        const auto opener = exit_manager_
-                            .opener_for_exchange_order(msg.exchange_order_id);
-                        if (opener == 0) return std::nullopt;
-
-                        auto strategy_name = exit_manager_
-                            .strategy_name_for_exchange_order(msg.exchange_order_id);
+                        const auto attribution = exit_manager_
+                            .venue_fill_attribution_for_exchange_order(
+                                msg.exchange_order_id);
+                        if (!attribution || attribution->opener_order_id == 0)
+                            return std::nullopt;
+                        const auto opener = attribution->opener_order_id;
+                        auto strategy_name = attribution->strategy_name;
+                        const double intended_price = attribution->intended_price;
 
                         const auto engine_id = OrderIdGenerator::next();
                         const auto ts = (msg.ts.time_since_epoch().count() != 0)
@@ -231,6 +247,13 @@ engine::engine(std::shared_ptr<data_handler> dh,
                                       msg.last_fill_qty, msg.last_fill_price,
                                       msg.commission, remaining, fill_id);
                         fe.set_source(fill_source::exchange);
+                        fill_provenance provenance;
+                        provenance.model = fill_execution_model::venue_reported;
+                        provenance.reason = fill_execution_reason::venue_execution_report;
+                        provenance.intended_price = intended_price;
+                        provenance.reference_price = msg.last_fill_price;
+                        provenance.reference_timestamp = ts;
+                        fe.set_provenance(provenance);
                         if (!strategy_name.empty()) fe.set_strategy_name(strategy_name);
                         if (opener != 0) fe.set_opener_order_id(opener);
                         return synth_result{
@@ -244,14 +267,8 @@ engine::engine(std::shared_ptr<data_handler> dh,
 
     if (config_.mode == engine_mode::live)
     {
-        auto reconciler = config_.reconciler;
-        if (!reconciler && config_.provider)
-            reconciler = config_.provider->get_reconciler();
-        if (!reconciler)
-            throw std::runtime_error(
-                "reconciliation refused startup: provider has no reconciler");
-
-        auto err = reconciler->reconcile(portfolio_, config_.reconcile_tolerance_bps);
+        auto err = config_.live_safety_session->reconcile(
+            portfolio_, config_.reconcile_tolerance_bps);
         if (!err.empty())
             throw std::runtime_error("reconciliation refused startup: " + err);
 
@@ -335,9 +352,14 @@ engine::engine(std::shared_ptr<data_handler> dh,
     // No raw questdb decision sites for data capture. Activation only here.
     // Router is a partial seam; characterized direct submit-result/fill polling
     // remains until the documented decomposition follow-up.
-    audit_sink_ = std::make_unique<NoopOrderAuditSink>();
+    audit_sink_ = config_.order_audit_sink
+        ? config_.order_audit_sink
+        : std::make_shared<NoopOrderAuditSink>();
 #ifdef HAS_QUESTDB
     if (config_.persist_enabled) {
+        if (config_.order_audit_sink)
+            throw std::runtime_error(
+                "deterministic order audit sink cannot be replaced by QuestDB persistence");
         questdb_begin();  // activation (including sink swap to real QuestdbOrderAuditSink on success) lives inside
     }
 #endif
@@ -420,6 +442,8 @@ engine::engine(std::shared_ptr<data_handler> dh,
         strategy_, additional_strategies_, additional_strategy_names_,
         primary_strategy_name_, config_,
         dashboard_builder_.get(), shadow_tracker_.get(),
+        exchange_portfolio_.has_value() ? &*exchange_portfolio_ : nullptr,
+        exchange_analytics_.has_value() ? &*exchange_analytics_ : nullptr,
         [this](const event& e) { log_event(e); },
         [this](const event_pointer& e) { publish_event(e); },
         [this](std::string_view r) { trigger_halt(r); },
@@ -457,7 +481,9 @@ engine::engine(std::shared_ptr<data_handler> dh,
         execution_adapters_,
         order_pool_, rejection_pool_, cancel_pool_, amend_pool_,
         halt_flag_, pause_all_, last_mid_price_, last_mark_symbol_, last_mark_prices_,
-        last_mark_prices_mu_, last_sim_time_, l2_seeded_symbols_, mm_threaded_,
+        last_mark_prices_mu_, last_sim_time_, last_decision_ts_,
+        l2_seeded_symbols_, mm_threaded_,
+
         dashboard_builder_.get(), shadow_tracker_.get(),
         exchange_portfolio_.has_value() ? &*exchange_portfolio_ : nullptr,
         config_, *this
@@ -658,6 +684,11 @@ void engine::publish_event(const event_pointer& ev)
     case thread_preset::inline_mode:
         break;
 
+    case thread_preset::logging_only:
+        TT_PUSH(logging_ring_, logging_drops_, "logging",
+                durable_log_required, logging_diag_);
+        break;
+
     case thread_preset::light:
         TT_PUSH(observer_ring_, observer_drops_, "observer", true, observer_diag_);
         break;
@@ -823,6 +854,7 @@ engine::~engine()
 #endif
 }
 
+
 // See declaration in engine.h for documentation.
 
 void engine::run()
@@ -851,7 +883,7 @@ void engine::run()
 
     setup_event_loop_infra();
 
-    const auto base_ts = (config_.seed != 0)
+    const auto base_ts = (config_.mode == engine_mode::backtest)
         ? std::chrono::system_clock::time_point(std::chrono::milliseconds(0))
         : std::chrono::system_clock::now();
     // docs/internal/data-pipeline.md#D-02: engine batch loop uses MarketSeries read API only.
@@ -923,10 +955,17 @@ void engine::run()
         auto sim_time = mkt.get_timestamp();
         const auto& symbol = mkt.get_symbol();
         last_sim_time_ = sim_time;
+        // F-08: the bar's timestamp is its OPEN; a strategy reacting to its
+        // close decides one interval later. Carry that instant alongside.
+        last_decision_ts_ = sim_time + bar_interval_;
+
 
         last_mid_price_.store(mkt.get_open(), std::memory_order_release);
         last_mark_symbol_ = symbol;
         { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[symbol] = mark_point{mkt.get_open(), mkt.get_timestamp()}; }
+
+        if (flatten_request_.exchange(false, std::memory_order_acq_rel))
+            orders_->unwind_positions(event_count);
 
         // Advance adapter clocks so latency-gated cancels complete offline.
         if (router_) router_->advance_all(sim_time);
@@ -956,6 +995,7 @@ void engine::run()
 
         feed_paper_trade_and_drain(symbol, mkt.get_close(),
                                    std::max(0.0, bar_volume - swept_volume),
+                                   std::nullopt,
                                    sim_time, event_count, halt_requested);
         if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
@@ -969,31 +1009,15 @@ void engine::run()
             auto provider_adapter = config_.provider->get_execution_adapter();
             drain_venue_bracket_meta();
             orders_->drain_async_submit_results(provider_adapter.get());
-            std::vector<fill_event> provider_fills;
-            if (provider_adapter && provider_adapter->poll_fills(provider_fills))
+            if (provider_adapter && config_.mode != engine_mode::shadow)
             {
-                for (auto& f : provider_fills)
-                {
-                    if (config_.mode == engine_mode::shadow)
-                    {
-                        if (shadow_tracker_)
-                            shadow_tracker_->on_exchange_fill(f);
-                        if (exchange_portfolio_.has_value())
-                        {
-                            fills_->stamp_fill_attribution(f);
-                            exchange_portfolio_->on_fill(f, f.get_opener_order_id(),
-                                                       f.get_strategy_name());
-                        }
-                        if (exchange_analytics_.has_value())
-                        {
-                            auto fill_ptr = acquire_pooled(fill_pool_, f);
-                            exchange_analytics_->on_event(fill_ptr);
-                        }
-                        continue;
-                    }
-                    if (!fills_->handle_fill(f, event_count, halt_requested))
-                        break;
-                }
+                (void)fills_->process_adapter_fills(
+                    provider_adapter, event_count, halt_requested);
+            }
+            else if (provider_adapter)
+            {
+                (void)fills_->process_shadow_exchange_fills(
+                    provider_adapter, halt_requested);
             }
         }
         if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
@@ -1026,7 +1050,7 @@ void engine::run()
                         mm_side, Price::from_double(mm_order.get_price()),
                         static_cast<quantity>(std::round(
                             mm_order.get_quantity() * config_.qty_scale)));
-                    auto mm_trades = mm_ob->add_external_order(mm_ob_order);
+                    auto mm_trades = mm_ob->add_synthetic_order(mm_ob_order);
                     orders_->deliver_mm_book_trades(mm_order.get_symbol(), mm_trades,
                                            sim_time, event_count, halt_requested);
                 }
@@ -1039,7 +1063,7 @@ void engine::run()
             DEBUG_STAGE(stage_timer_, ring_publish);
             publish_event(mkt_ptr);
         }
-        if (!config_.is_threaded())
+        if (!config_.has_async_analytics())
             analytics_.on_event(mkt_ptr);
         else
             analytics_.on_mark(symbol, mkt.get_close());
@@ -1066,9 +1090,13 @@ void engine::run()
             order_opt->set_recv_ns(mkt.get_recv_ns());
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
+            const double pre_net = !primary_strategy_name_.empty()
+                ? portfolio_.get_strategy_position_qty(primary_strategy_name_, order_opt->get_symbol())
+                : (portfolio_.get_positions().count(order_opt->get_symbol())
+                    ? portfolio_.get_positions().at(order_opt->get_symbol()).qty : 0.0);
             orders_->route(*order_opt, sim_time, event_count, halt_requested);
             orders_->finalize_route(*strategy_, primary_strategy_name_, *order_opt,
-                                    halt_requested);
+                                    halt_requested, pre_net);
         }
         if (!halt_flag_.load(std::memory_order_acquire))
             dispatch_extras_on_market(mkt, sim_time, event_count);
@@ -1130,4 +1158,3 @@ void engine::run()
     }
 #endif
 }
-

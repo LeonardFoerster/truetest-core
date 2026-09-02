@@ -20,7 +20,8 @@ void engine::apply_l2_snapshot(const std::string& symbol,
                                const std::vector<l2_level>& bids,
                                const std::vector<l2_level>& asks,
                                std::chrono::system_clock::time_point timestamp,
-                               std::uint64_t quantity_scale)
+                               std::uint64_t quantity_scale,
+                               std::uint64_t last_update_id)
 {
     drain_object_pool_returns();
 
@@ -91,6 +92,18 @@ void engine::apply_l2_snapshot(const std::string& symbol,
     l2_seeded_symbols_.insert(symbol);
     auto ob = orderbook_registry_.get_or_create(symbol);
     ob->apply_l2_snapshot(ob_bids.data(), n_bids, ob_asks.data(), n_asks);
+    const std::uint16_t sequence_symbol_id =
+        orderbook_registry_.symbol_table().id_of(symbol);
+    if (sequence_symbol_id == SymbolTable::kInvalidId)
+    {
+        trigger_halt("L2 snapshot symbol was not interned");
+        return;
+    }
+    if (last_update_id != 0)
+        l2_sequence_states_[sequence_symbol_id] = {
+            last_update_id, true, true};
+    else
+        l2_sequence_states_[sequence_symbol_id] = {};
     const double best_bid = ob->best_external_bid_price();
     const double best_ask = ob->best_external_ask_price();
     const double l2_mark = (best_bid > 0.0 && best_ask > 0.0)
@@ -119,12 +132,13 @@ void engine::apply_l2_snapshot(const std::string& symbol,
     // case; keep in sync.
     l2_bid_scratch_.assign(abids.begin(), abids.begin() + n_bids);
     l2_ask_scratch_.assign(aasks.begin(), aasks.begin() + n_asks);
+    // Historical L2 must retain capture time. A missing timestamp is not
+    // replaced by wall clock: queue freshness would become nondeterministic.
+    const auto l2_ts = timestamp;
     if (router_) router_->on_l2_snapshot(
-        symbol, l2_bid_scratch_, l2_ask_scratch_);
-
-    const auto l2_ts = timestamp.time_since_epoch().count() != 0
-        ? timestamp : std::chrono::system_clock::now();
+        symbol, l2_bid_scratch_, l2_ask_scratch_, l2_ts);
     last_sim_time_ = l2_ts;
+    last_decision_ts_ = l2_ts;   // F-08: point observation
     auto ev = acquire_pooled(l2_snapshot_pool_, l2_ts, symbol,
         bids.data(), n_bids, asks.data(), n_asks, quantity_scale);
     const int64_t l2_recv_ns = std::chrono::duration_cast<
@@ -209,13 +223,13 @@ void engine::apply_l2_update(const std::string& symbol,
 
     // Forward L2 update to adapters for queue models (see apply_l2_snapshot).
     const order_side os = (ts_side == tick_side::bid) ? order_side::buy : order_side::sell;
+    // See snapshot path: no wall-clock substitution for replay records.
+    const auto l2_ts = timestamp;
     if (router_) router_->on_l2_update(
         symbol, os, price,
-        tt::quantity_scale::to_base(new_qty, quantity_scale));
-
-    const auto l2_ts = timestamp.time_since_epoch().count() != 0
-        ? timestamp : std::chrono::system_clock::now();
+        tt::quantity_scale::to_base(new_qty, quantity_scale), l2_ts);
     last_sim_time_ = l2_ts;
+    last_decision_ts_ = l2_ts;   // F-08: point observation
     const int64_t l2_recv_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
     auto ev = acquire_pooled(l2_update_pool_,
@@ -256,9 +270,12 @@ void engine::apply_l2_update(const std::string& symbol,
         if (auto o = strategy_->on_l2_update(*ev)) {
             o->set_recv_ns(l2_recv_ns);
             o->set_strategy_name(primary_strategy_name_);
+            const double pre_net = !primary_strategy_name_.empty()
+                ? portfolio_.get_strategy_position_qty(primary_strategy_name_, o->get_symbol())
+                : (portfolio_.get_positions().count(o->get_symbol()) ? portfolio_.get_positions().at(o->get_symbol()).qty : 0.0);
             bool route_halt = false;
             orders_->route(*o, l2_ts, l2_event_count, route_halt);
-            orders_->finalize_route(*strategy_, primary_strategy_name_, *o, route_halt);
+            orders_->finalize_route(*strategy_, primary_strategy_name_, *o, route_halt, pre_net);
             if (route_halt || halt_flag_.load(std::memory_order_acquire))
                 return;
         }
@@ -272,13 +289,167 @@ void engine::apply_l2_update(const std::string& symbol,
         if (auto o = s->on_l2_update(*ev)) {
             o->set_recv_ns(l2_recv_ns);
             o->set_strategy_name(additional_strategy_names_[i]);
+            const double pre_net = !additional_strategy_names_[i].empty()
+                ? portfolio_.get_strategy_position_qty(additional_strategy_names_[i], o->get_symbol())
+                : (portfolio_.get_positions().count(o->get_symbol()) ? portfolio_.get_positions().at(o->get_symbol()).qty : 0.0);
             bool route_halt = false;
             orders_->route(*o, l2_ts, l2_event_count, route_halt);
-            orders_->finalize_route(*s, additional_strategy_names_[i], *o, route_halt);
+            orders_->finalize_route(*s, additional_strategy_names_[i], *o, route_halt, pre_net);
             if (route_halt || halt_flag_.load(std::memory_order_acquire))
                 return;
         }
     }
+}
+
+void engine::apply_l2_delta_batch(const provider::l2_delta_batch& batch)
+{
+    drain_object_pool_returns();
+    if (batch.symbol.empty() || batch.timestamp.time_since_epoch().count() == 0
+        || batch.first_update_id == 0 || batch.final_update_id == 0
+        || batch.first_update_id > batch.final_update_id
+        || batch.updates.empty() || batch.updates.size() > kL2SnapshotMaxLevels)
+    {
+        trigger_halt("invalid sequenced L2 delta batch");
+        return;
+    }
+
+    const std::uint16_t sequence_symbol_id =
+        orderbook_registry_.symbol_table().id_of(batch.symbol);
+    if (sequence_symbol_id == SymbolTable::kInvalidId
+        || !l2_sequence_states_[sequence_symbol_id].present)
+    {
+        trigger_halt("sequenced L2 delta before sequenced snapshot");
+        return;
+    }
+    const auto state = l2_sequence_states_[sequence_symbol_id];
+    if (batch.final_update_id <= state.last_update_id)
+        return; // complete duplicate/stale frame: deterministic no-op
+
+    const std::uint64_t expected = state.last_update_id + 1;
+    const bool first_frame_ok = state.bootstrap_pending
+        ? batch.first_update_id <= expected && expected <= batch.final_update_id
+        : batch.first_update_id == expected;
+    if (!first_frame_ok
+        || (batch.has_previous_final_update_id
+            && batch.previous_final_update_id != state.last_update_id))
+    {
+        trigger_halt("sequenced L2 delta gap or out-of-order frame");
+        return;
+    }
+
+    struct validated_delta { side book_side; Price price; quantity qty; double px; double base_qty; };
+    std::array<validated_delta, kL2SnapshotMaxLevels> deltas{};
+    for (std::size_t i = 0; i < batch.updates.size(); ++i)
+    {
+        const auto& update = batch.updates[i];
+        if (update.symbol != batch.symbol || update.timestamp != batch.timestamp
+            || update.quantity_scale != batch.quantity_scale
+            || update.side > 1 || update.price <= 0.0 || update.new_quantity < 0)
+        {
+            trigger_halt("invalid L2 mutation in sequenced batch");
+            return;
+        }
+        Price book_price;
+        std::uint64_t book_qty = 0;
+        if (!Price::try_from_double(update.price, book_price)
+            || !tt::quantity_scale::rescale_nonnegative(
+                update.new_quantity, update.quantity_scale,
+                config_.qty_scale, book_qty))
+        {
+            trigger_halt("invalid L2 mutation quantity or price in sequenced batch");
+            return;
+        }
+        const side book_side = update.side == 0 ? side::buy : side::sell;
+        for (std::size_t j = 0; j < i; ++j)
+        {
+            if (deltas[j].book_side == book_side && deltas[j].price == book_price)
+            {
+                trigger_halt("duplicate price mutation in sequenced L2 batch");
+                return;
+            }
+        }
+        deltas[i] = {book_side, book_price, static_cast<quantity>(book_qty),
+                     update.price,
+                     tt::quantity_scale::to_base(update.new_quantity,
+                                                 update.quantity_scale)};
+    }
+
+    // All validation completed before any book/adapter/strategy mutation.
+    auto ob = orderbook_registry_.get_or_create(batch.symbol);
+    for (std::size_t i = 0; i < batch.updates.size(); ++i)
+        ob->apply_l2_update(deltas[i].book_side, deltas[i].price, deltas[i].qty);
+
+    const double best_bid = ob->best_external_bid_price();
+    const double best_ask = ob->best_external_ask_price();
+    const double l2_mark = (best_bid > 0.0 && best_ask > 0.0)
+        ? (best_bid + best_ask) * 0.5 : (best_bid > 0.0 ? best_bid : best_ask);
+    if (l2_mark > 0.0)
+    {
+        last_mid_price_.store(l2_mark, std::memory_order_release);
+        last_mark_symbol_ = batch.symbol;
+        std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
+        last_mark_prices_[batch.symbol] = mark_point{l2_mark, batch.timestamp};
+    }
+    refresh_top_of_book_atomics(*ob);
+
+    for (std::size_t i = 0; i < batch.updates.size(); ++i)
+    {
+        if (router_)
+            router_->on_l2_update(batch.symbol,
+                                  deltas[i].book_side == side::buy
+                                      ? order_side::buy : order_side::sell,
+                                  deltas[i].px, deltas[i].base_qty,
+                                  batch.timestamp);
+    }
+    l2_sequence_states_[sequence_symbol_id] = {
+        batch.final_update_id, false, true};
+    last_sim_time_ = batch.timestamp;
+    last_decision_ts_ = batch.timestamp + bar_interval_;   // F-08: bar close
+
+    // One post-commit callback is deliberately emitted for the complete frame.
+    // The final mutation supplies the legacy event payload; its observation is
+    // the fully committed book, never an intermediate side of the batch.
+    const auto& last = batch.updates.back();
+    const tick_side last_side = last.side == 0 ? tick_side::bid : tick_side::ask;
+    auto ev = acquire_pooled(l2_update_pool_, batch.timestamp, batch.symbol,
+                             last_side, last.price, last.new_quantity,
+                             last.quantity_scale);
+    const int64_t recv_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    ev->set_recv_ns(recv_ns);
+    log_event(*ev);
+    publish_event(ev);
+    if (l2_mark > 0.0) analytics_.on_mark(batch.symbol, l2_mark);
+
+    if (pause_all_.load(std::memory_order_acquire)
+        || halt_flag_.load(std::memory_order_acquire)) return;
+    std::size_t count = 0;
+    bool halted = false;
+    if (router_) router_->advance_all(batch.timestamp);
+    if (l2_mark > 0.0)
+        orders_->drain_due(batch.timestamp, count, halted, batch.symbol);
+    if (halted || halt_flag_.load(std::memory_order_acquire)) return;
+    if (l2_mark > 0.0 && orders_->evaluate_exits(
+            batch.symbol, l2_mark, batch.timestamp, count, recv_ns)) return;
+
+    auto dispatch = [&](std::shared_ptr<IStrategy>& strategy, const std::string& name) {
+        if (!strategy || halt_flag_.load(std::memory_order_acquire)) return;
+        sync_strategy_account_equity(*strategy);
+        if (auto order = strategy->on_l2_update(*ev))
+        {
+            order->set_recv_ns(recv_ns);
+            order->set_strategy_name(name);
+            const double pre_net = !name.empty()
+                ? portfolio_.get_strategy_position_qty(name, order->get_symbol())
+                : (portfolio_.get_positions().count(order->get_symbol()) ? portfolio_.get_positions().at(order->get_symbol()).qty : 0.0);
+            bool route_halt = false;
+            orders_->route(*order, batch.timestamp, count, route_halt);
+            orders_->finalize_route(*strategy, name, *order, route_halt, pre_net);
+        }
+    };
+    dispatch(strategy_, primary_strategy_name_);
+    for (std::size_t i = 0; i < additional_strategies_.size(); ++i)
+        dispatch(additional_strategies_[i], additional_strategy_names_[i]);
 }
 
 void engine::refresh_top_of_book_atomics(const orderbook& ob)
@@ -313,19 +484,17 @@ void engine::dispatch_extras_on_market(const market_event& mkt,
         auto& s = additional_strategies_[i];
         if (!s) continue;
 
-        if (orders_->evaluate_exits(mkt.get_symbol(),
-                           mkt.get_open(), mkt.get_low(), mkt.get_high(), mkt.get_close(),
-                           ts, event_count, mkt.get_recv_ns()))
-            return;
-
         sync_strategy_account_equity(*s);
         if (auto o = s->on_market(mkt))
         {
             o->set_recv_ns(mkt.get_recv_ns());
             o->set_strategy_name(additional_strategy_names_[i]);
+            const double pre_net = !additional_strategy_names_[i].empty()
+                ? portfolio_.get_strategy_position_qty(additional_strategy_names_[i], o->get_symbol())
+                : (portfolio_.get_positions().count(o->get_symbol()) ? portfolio_.get_positions().at(o->get_symbol()).qty : 0.0);
             bool halt = false;
             orders_->route(*o, ts, event_count, halt);
-            orders_->finalize_route(*s, additional_strategy_names_[i], *o, halt);
+            orders_->finalize_route(*s, additional_strategy_names_[i], *o, halt, pre_net);
             if (halt || halt_flag_.load(std::memory_order_acquire)) return;
         }
     }
@@ -342,18 +511,17 @@ void engine::dispatch_extras_on_tick(const tick_event& te,
         auto& s = additional_strategies_[i];
         if (!s) continue;
 
-        if (orders_->evaluate_exits(te.get_symbol(), te.get_price(), ts,
-                           event_count, te.get_recv_ns()))
-            return;
-
         sync_strategy_account_equity(*s);
         if (auto o = s->on_tick(te))
         {
             o->set_recv_ns(te.get_recv_ns());
             o->set_strategy_name(additional_strategy_names_[i]);
+            const double pre_net = !additional_strategy_names_[i].empty()
+                ? portfolio_.get_strategy_position_qty(additional_strategy_names_[i], o->get_symbol())
+                : (portfolio_.get_positions().count(o->get_symbol()) ? portfolio_.get_positions().at(o->get_symbol()).qty : 0.0);
             bool halt = false;
             orders_->route(*o, ts, event_count, halt);
-            orders_->finalize_route(*s, additional_strategy_names_[i], *o, halt);
+            orders_->finalize_route(*s, additional_strategy_names_[i], *o, halt, pre_net);
             if (halt || halt_flag_.load(std::memory_order_acquire)) return;
         }
     }
@@ -412,6 +580,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         std::chrono::steady_clock::now().time_since_epoch()).count());
 
     last_sim_time_ = timestamp;
+    last_decision_ts_ = timestamp + bar_interval_;   // F-08: bar close
     last_mid_price_.store(mkt.get_open(), std::memory_order_release);
     last_mark_symbol_ = mkt.get_symbol();
     { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[mkt.get_symbol()] = mark_point{mkt.get_open(), timestamp}; }
@@ -461,6 +630,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         bool halt_paper = false;
         feed_paper_trade_and_drain(mkt.get_symbol(), mkt.get_close(),
                                    std::max(0.0, bar_volume - swept_volume),
+                                   std::nullopt,
                                    timestamp, event_count, halt_paper);
         if (halt_paper || halt_flag_.load(std::memory_order_acquire))
             return;
@@ -482,35 +652,19 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
 
         drain_venue_bracket_meta();
         orders_->drain_async_submit_results(provider_adapter.get());
-        std::vector<fill_event> provider_fills;
-        if (provider_adapter && provider_adapter->poll_fills(provider_fills))
+        if (provider_adapter && config_.mode != engine_mode::shadow)
         {
-            for (auto& f : provider_fills)
-            {
-                if (config_.mode == engine_mode::shadow)
-                {
-                    if (shadow_tracker_)
-                        shadow_tracker_->on_exchange_fill(f);
-
-                    if (exchange_portfolio_.has_value())
-                    {
-                        fills_->stamp_fill_attribution(f);
-                        exchange_portfolio_->on_fill(f, f.get_opener_order_id(),
-                                                   f.get_strategy_name());
-                    }
-                    if (exchange_analytics_.has_value())
-                    {
-                        // Feed to second analytics for equity curve / metrics
-                        auto fill_ptr = acquire_pooled(fill_pool_,f);
-                        exchange_analytics_->on_event(fill_ptr);
-                    }
-                    continue;
-                }
-                // Live/async fills: full canonical pipeline (risk + tracker + audit).
-                bool fill_halt = false;
-                if (!fills_->handle_fill(f, event_count, fill_halt))
-                    return;
-            }
+            bool fill_halt = false;
+            if (!fills_->process_adapter_fills(
+                    provider_adapter, event_count, fill_halt))
+                return;
+        }
+        else if (provider_adapter)
+        {
+            bool shadow_halt = false;
+            if (!fills_->process_shadow_exchange_fills(
+                    provider_adapter, shadow_halt))
+                return;
         }
     }
 
@@ -520,7 +674,7 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
     auto mkt_ptr = acquire_pooled(market_pool_,mkt);
     log_event(mkt);
     publish_event(mkt_ptr);
-    if (!config_.is_threaded())
+    if (!config_.has_async_analytics())
         analytics_.on_event(mkt_ptr);
     else
         analytics_.on_mark(mkt.get_symbol(), mkt.get_close());
@@ -541,9 +695,12 @@ void engine::process_single_bar(const bar_record& rec, std::size_t& event_count,
         order_opt->set_recv_ns(mkt.get_recv_ns());
         if (!primary_strategy_name_.empty())
             order_opt->set_strategy_name(primary_strategy_name_);
+        const double pre_net = !primary_strategy_name_.empty()
+            ? portfolio_.get_strategy_position_qty(primary_strategy_name_, order_opt->get_symbol())
+            : (portfolio_.get_positions().count(order_opt->get_symbol()) ? portfolio_.get_positions().at(order_opt->get_symbol()).qty : 0.0);
         bool route_halt = false;
         orders_->route(*order_opt, timestamp, event_count, route_halt);
-        orders_->finalize_route(*strategy_, primary_strategy_name_, *order_opt, route_halt);
+        orders_->finalize_route(*strategy_, primary_strategy_name_, *order_opt, route_halt, pre_net);
     }
     if (!halt_flag_.load(std::memory_order_acquire))
         dispatch_extras_on_market(mkt, timestamp, event_count);
@@ -576,6 +733,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         std::chrono::steady_clock::now().time_since_epoch()).count());
 
     last_sim_time_ = rec.timestamp;
+    last_decision_ts_ = rec.timestamp;   // F-08: point observation
     last_mid_price_.store(rec.price, std::memory_order_release);
     last_mark_symbol_ = rec.symbol;
     { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[rec.symbol] = mark_point{rec.price, rec.timestamp}; }
@@ -598,6 +756,11 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         bool halt_paper = false;
         feed_paper_trade_and_drain(rec.symbol, rec.price,
                                    tick_qty,
+                                   rec.side == data_tick_side::bid
+                                       ? std::optional<order_side>{order_side::buy}
+                                       : rec.side == data_tick_side::ask
+                                           ? std::optional<order_side>{order_side::sell}
+                                           : std::nullopt,
                                    rec.timestamp, event_count, halt_paper);
         if (halt_paper || halt_flag_.load(std::memory_order_acquire))
             return;
@@ -613,40 +776,29 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         {
             provider_adapter->on_trade(rec.symbol, rec.price,
                                        tick_qty,
+                                       rec.side == data_tick_side::bid
+                                           ? std::optional<order_side>{order_side::buy}
+                                           : rec.side == data_tick_side::ask
+                                               ? std::optional<order_side>{order_side::sell}
+                                               : std::nullopt,
                                        rec.timestamp);
         }
 
         drain_venue_bracket_meta();
         orders_->drain_async_submit_results(provider_adapter.get());
-        std::vector<fill_event> provider_fills;
-        if (provider_adapter && provider_adapter->poll_fills(provider_fills))
+        if (provider_adapter && config_.mode != engine_mode::shadow)
         {
-            for (auto& f : provider_fills)
-            {
-                if (config_.mode == engine_mode::shadow)
-                {
-                    if (shadow_tracker_)
-                        shadow_tracker_->on_exchange_fill(f);
-
-                    if (exchange_portfolio_.has_value())
-                    {
-                        fills_->stamp_fill_attribution(f);
-                        exchange_portfolio_->on_fill(f, f.get_opener_order_id(),
-                                                   f.get_strategy_name());
-                    }
-                    if (exchange_analytics_.has_value())
-                    {
-                        // Feed to second analytics for equity curve / metrics
-                        auto fill_ptr = acquire_pooled(fill_pool_,f);
-                        exchange_analytics_->on_event(fill_ptr);
-                    }
-                    continue;
-                }
-                // Live/async fills: full canonical pipeline (risk + tracker + audit).
-                bool fill_halt = false;
-                if (!fills_->handle_fill(f, event_count, fill_halt))
-                    return;
-            }
+            bool fill_halt = false;
+            if (!fills_->process_adapter_fills(
+                    provider_adapter, event_count, fill_halt))
+                return;
+        }
+        else if (provider_adapter)
+        {
+            bool shadow_halt = false;
+            if (!fills_->process_shadow_exchange_fills(
+                    provider_adapter, shadow_halt))
+                return;
         }
     }
 
@@ -671,7 +823,7 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         DEBUG_STAGE(stage_timer_, ring_publish);
         publish_event(tick_ptr);
     }
-    if (!config_.is_threaded())
+    if (!config_.has_async_analytics())
         analytics_.on_event(tick_ptr);
     else
         analytics_.on_mark(rec.symbol, rec.price);
@@ -695,8 +847,11 @@ void engine::process_single_tick(const tick_record& rec, std::size_t& event_coun
         order_opt->set_recv_ns(te.get_recv_ns());
         if (!primary_strategy_name_.empty())
             order_opt->set_strategy_name(primary_strategy_name_);
+        const double pre_net = !primary_strategy_name_.empty()
+            ? portfolio_.get_strategy_position_qty(primary_strategy_name_, order_opt->get_symbol())
+            : (portfolio_.get_positions().count(order_opt->get_symbol()) ? portfolio_.get_positions().at(order_opt->get_symbol()).qty : 0.0);
         orders_->route(*order_opt, rec.timestamp, event_count, halt);
-        orders_->finalize_route(*strategy_, primary_strategy_name_, *order_opt, halt);
+        orders_->finalize_route(*strategy_, primary_strategy_name_, *order_opt, halt, pre_net);
     }
     if (!halt_flag_.load(std::memory_order_acquire))
         dispatch_extras_on_tick(te, rec.timestamp, event_count);
@@ -811,7 +966,16 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<bar_record>> bridg
                 pending_strategy_.clear();
                 strategy_params params;
                 params.balance = config_.initial_balance;
-                set_strategy(StrategyFactory::create(new_strat, params));
+                // F-10: StrategyFactory now resolves through StrategyRegistry
+                // and throws on an unknown name instead of silently handing
+                // back mean-reversion. An operator typo must not swap the
+                // running strategy, and must not abort a live stream either.
+                if (!StrategyFactory::has(new_strat)) {
+                    std::cerr << "  ! unknown --strategy '" << new_strat
+                              << "'; keeping the running strategy\n";
+                } else {
+                    set_strategy(StrategyFactory::create(new_strat, params));
+                }
             }
         }
 
@@ -969,7 +1133,16 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<tick_record>> brid
                 pending_strategy_.clear();
                 strategy_params params;
                 params.balance = config_.initial_balance;
-                set_strategy(StrategyFactory::create(new_strat, params));
+                // F-10: StrategyFactory now resolves through StrategyRegistry
+                // and throws on an unknown name instead of silently handing
+                // back mean-reversion. An operator typo must not swap the
+                // running strategy, and must not abort a live stream either.
+                if (!StrategyFactory::has(new_strat)) {
+                    std::cerr << "  ! unknown --strategy '" << new_strat
+                              << "'; keeping the running strategy\n";
+                } else {
+                    set_strategy(StrategyFactory::create(new_strat, params));
+                }
             }
         }
 
@@ -1097,7 +1270,7 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
                 for (const auto& lvl : e.asks)
                     asks.push_back({lvl.price, lvl.quantity});
                 apply_l2_snapshot(e.symbol, bids, asks, e.timestamp,
-                                  e.quantity_scale);
+                                  e.quantity_scale, e.last_update_id);
                 // (forward to queue models now centralized inside apply_l2_snapshot)
             }
             else if constexpr (std::is_same_v<E, provider::l2_update>)
@@ -1109,6 +1282,11 @@ StreamResult engine::run_streaming(std::shared_ptr<DataBridge<provider::event>> 
                 apply_l2_update(e.symbol, ts, e.price, e.new_quantity,
                                 e.timestamp, e.quantity_scale);
                 // (forward to queue models now centralized inside apply_l2_update)
+            }
+            else if constexpr (std::is_same_v<E, provider::l2_delta_batch>)
+            {
+                if (!drain_provider_funding_updates()) return;
+                apply_l2_delta_batch(e);
             }
         }, ev);
 
@@ -1256,7 +1434,7 @@ void engine::run_tick_data()
         auto bar_ptr = acquire_pooled(market_pool_,bar);
         bar_ptr->set_recv_ns(bar_recv_ns);
         publish_event(bar_ptr);
-        if (!config_.is_threaded())
+        if (!config_.has_async_analytics())
             analytics_.on_event(bar_ptr);
         else
             analytics_.on_mark(bar.get_symbol(), bar.get_close());
@@ -1270,6 +1448,7 @@ void engine::run_tick_data()
         const auto& tick = data_handler_->tick_at(i);
 
         last_sim_time_ = tick.timestamp;
+        last_decision_ts_ = tick.timestamp;   // F-08: point observation
         last_mid_price_.store(tick.price, std::memory_order_release);
         last_mark_symbol_ = tick.symbol;
         { std::lock_guard<std::mutex> lk(last_mark_prices_mu_); last_mark_prices_[tick.symbol] = mark_point{tick.price, tick.timestamp}; }
@@ -1307,6 +1486,11 @@ void engine::run_tick_data()
         feed_paper_trade_and_drain(tick.symbol, tick.price,
                                    tt::quantity_scale::to_base(
                                        tick.quantity, tick.quantity_scale),
+                                   tick.side == data_tick_side::bid
+                                       ? std::optional<order_side>{order_side::buy}
+                                       : tick.side == data_tick_side::ask
+                                           ? std::optional<order_side>{order_side::sell}
+                                           : std::nullopt,
                                    tick.timestamp, event_count, halt_requested);
         if (halt_requested || halt_flag_.load(std::memory_order_acquire)) break;
 
@@ -1325,7 +1509,7 @@ void engine::run_tick_data()
             DEBUG_STAGE(stage_timer_, ring_publish);
             publish_event(tick_ptr);
         }
-        if (!config_.is_threaded())
+        if (!config_.has_async_analytics())
             analytics_.on_event(tick_ptr);
         else
             analytics_.on_mark(tick.symbol, tick.price);
@@ -1359,10 +1543,13 @@ void engine::run_tick_data()
             order_opt->set_recv_ns(te.get_recv_ns());
             if (!primary_strategy_name_.empty())
                 order_opt->set_strategy_name(primary_strategy_name_);
+            const double pre_net = !primary_strategy_name_.empty()
+                ? portfolio_.get_strategy_position_qty(primary_strategy_name_, order_opt->get_symbol())
+                : (portfolio_.get_positions().count(order_opt->get_symbol()) ? portfolio_.get_positions().at(order_opt->get_symbol()).qty : 0.0);
             orders_->route(*order_opt, tick.timestamp, event_count, halt_requested);
             if (strategy_)
                 orders_->finalize_route(*strategy_, primary_strategy_name_, *order_opt,
-                                        halt_requested);
+                                        halt_requested, pre_net);
         }
         if (!halt_flag_.load(std::memory_order_acquire))
             dispatch_extras_on_tick(te, tick.timestamp, event_count);
@@ -1426,6 +1613,10 @@ void engine::run_replay(const std::string& log_path,
                         int64_t replay_from_us,
                         int64_t replay_to_us)
 {
+    if (authoritative_replay_started_)
+        throw std::runtime_error(
+            "authoritative ledger replay is one-shot per engine instance");
+    authoritative_replay_started_ = true;
     if (config_.is_threaded())
         throw std::runtime_error(
             "ledger replay requires --thread-preset inline");
@@ -1438,20 +1629,152 @@ void engine::run_replay(const std::string& log_path,
     if (!config_.event_log_path.empty())
         throw std::runtime_error(
             "ledger replay cannot also write --log-events; choose a separate audit workflow");
-
-    EventReplayer replayer(log_path, /*from_us=*/0, replay_to_us);
-    if (replayer.file_version() != EVENT_LOG_FILE_VERSION)
+    const auto before_report = analytics_.generate_report();
+    if (order_tracker_.orders_seen() != 0
+        || !portfolio_.get_positions().empty()
+        || !portfolio_.get_lots().empty()
+        || portfolio_.get_cash() != config_.initial_balance
+        || before_report.total_orders != 0
+        || before_report.total_fills != 0
+        || analytics_.total_funding_pnl() != 0.0)
         throw std::runtime_error(
-            "authoritative ledger replay requires a current v2 event log; "
+            "authoritative ledger replay requires a pristine engine state");
+
+    EventReplayer preflight(log_path, /*from_us=*/0, replay_to_us);
+    if (preflight.file_version() != EVENT_LOG_FILE_VERSION)
+        throw std::runtime_error(
+            "authoritative ledger replay requires a current v3 event log; "
             "legacy logs remain inspection-only");
-    if (!replayer.file_finalized())
+    if (!preflight.file_finalized())
         throw std::runtime_error(
             "authoritative ledger replay requires a finalized event log; "
             "an in-progress or crash-truncated prefix is inspection-only");
-    if (replayer.file_segmented())
+    if (preflight.file_segmented())
         throw std::runtime_error(
             "authoritative ledger replay refuses rotated log segments; "
             "segment stitching requires a complete manifest");
+
+    // Validate the complete economic/lifecycle ledger before mutating the
+    // engine. This prevents a corrupt suffix from leaving a plausible,
+    // externally visible prefix of cash/order/position state.
+    OrderTracker replay_ledger(
+        OrderTracker::default_native_execution_capacity,
+        std::isfinite(config_.qty_scale) && config_.qty_scale > 0.0
+            ? 1.0 / config_.qty_scale : 0.0);
+    const auto require_lifecycle_identity = [&replay_ledger](
+        std::uint64_t order_id,
+        const std::string& symbol,
+        std::chrono::system_clock::time_point timestamp)
+        -> const order_ledger_entry&
+    {
+        const auto* tracked = replay_ledger.find(order_id);
+        if (order_id == 0 || symbol.empty() || !tracked
+            || replay_ledger.symbol_of(*tracked) != symbol
+            || timestamp.time_since_epoch().count() <= 0
+            || (tracked->created_ts.time_since_epoch().count() > 0
+                && timestamp < tracked->created_ts)
+            || (tracked->updated_ts.time_since_epoch().count() > 0
+                && timestamp < tracked->updated_ts))
+            throw std::runtime_error(
+                "authoritative ledger contains invalid lifecycle identity");
+        return *tracked;
+    };
+    while (preflight.has_next())
+    {
+        auto ev = preflight.next();
+        if (!ev)
+            break;
+        switch (ev->get_type())
+        {
+        case event_type::order:
+        {
+            const auto& order = static_cast<const order_event&>(*ev);
+            if (!replay_ledger.register_order(order))
+                throw std::runtime_error(
+                    "authoritative replay contains an invalid or reused order identity");
+            replay_ledger.set_status(order.get_order_id(), order_status::open);
+            break;
+        }
+        case event_type::fill:
+        {
+            const auto& fill = static_cast<const fill_event&>(*ev);
+            const auto validation = replay_ledger.validate_fill(
+                fill, /*require_exchange_identity=*/false,
+                /*require_fill_identity=*/true);
+            if (!validation.applied()
+                || !replay_ledger.commit_fill(fill, validation))
+                throw std::runtime_error(
+                    "authoritative ledger contains an invalid economic fill");
+            break;
+        }
+        case event_type::cancel:
+        {
+            const auto& cancel = static_cast<const cancel_event&>(*ev);
+            const auto& tracked = require_lifecycle_identity(
+                cancel.get_order_id(), cancel.get_symbol(),
+                cancel.get_timestamp());
+            if (tracked.status == order_status::open
+                || tracked.status == order_status::partially_filled)
+                replay_ledger.set_status(
+                    cancel.get_order_id(), order_status::cancelled);
+            else if (tracked.status != order_status::filled)
+                throw std::runtime_error(
+                    "authoritative ledger contains an invalid cancel transition");
+            break;
+        }
+        case event_type::rejection:
+        {
+            const auto& rejection = static_cast<const rejection_event&>(*ev);
+            const auto& tracked = require_lifecycle_identity(
+                rejection.get_order_id(), rejection.get_symbol(),
+                rejection.get_timestamp());
+            if (tracked.status != order_status::open
+                && tracked.status != order_status::pending)
+                throw std::runtime_error(
+                    "authoritative ledger contains an invalid rejection transition");
+            replay_ledger.set_status(
+                rejection.get_order_id(), order_status::rejected);
+            break;
+        }
+        case event_type::funding:
+        {
+            const auto& funding = static_cast<const funding_event&>(*ev);
+            if (funding.get_timestamp().time_since_epoch().count() <= 0
+                || funding.get_symbol().empty()
+                || !std::isfinite(funding.get_qty_change())
+                || funding.get_qty_change() != 0.0
+                || !std::isfinite(funding.get_cash_delta())
+                || funding.get_cash_delta() == 0.0
+                || funding.get_reason() != "FUNDING_FEE")
+                throw std::runtime_error(
+                    "authoritative ledger contains an invalid funding event");
+            break;
+        }
+        case event_type::amend:
+        {
+            const auto& amend = static_cast<const amend_event&>(*ev);
+            (void)require_lifecycle_identity(
+                amend.get_order_id(), amend.get_symbol(),
+                amend.get_timestamp());
+            const auto validation = replay_ledger.validate_amend(
+                amend.get_order_id(), amend.get_symbol(),
+                amend.get_new_price(), amend.get_new_quantity());
+            if (!validation.applied()
+                || !replay_ledger.commit_amend(validation))
+                throw std::runtime_error(
+                    "authoritative ledger contains an invalid committed amendment");
+            break;
+        }
+        case event_type::market:
+        case event_type::signal:
+        case event_type::tick:
+        case event_type::l2_snapshot:
+        case event_type::l2_update:
+            break;
+        }
+    }
+
+    EventReplayer replayer(log_path, /*from_us=*/0, replay_to_us);
     clear_pending_state();
     prepare_mark_prices_for_run(/*symbol_hint=*/16);
 
@@ -1472,6 +1795,7 @@ void engine::run_replay(const std::string& log_path,
         {
             const auto& mkt = static_cast<const market_event&>(*ev);
             last_sim_time_ = mkt.get_timestamp();
+            last_decision_ts_ = mkt.get_timestamp() + bar_interval_;   // F-08
             last_mid_price_.store(mkt.get_close(), std::memory_order_release);
             last_mark_symbol_ = mkt.get_symbol();
             {
@@ -1487,6 +1811,7 @@ void engine::run_replay(const std::string& log_path,
         {
             const auto& tick = static_cast<const tick_event&>(*ev);
             last_sim_time_ = tick.get_timestamp();
+            last_decision_ts_ = tick.get_timestamp();   // F-08
             last_mid_price_.store(tick.get_price(), std::memory_order_release);
             last_mark_symbol_ = tick.get_symbol();
             {
@@ -1501,14 +1826,13 @@ void engine::run_replay(const std::string& log_path,
         case event_type::order:
         {
             const auto& order = static_cast<const order_event&>(*ev);
-            // Direct call (engine still owns the OrderAttributionStore
-            // instance) — the register_order_meta forward was removed in
-            // Phase 3 since this is its only remaining caller.
-            attribution_->register_order(order);
             // R3: replay must rebuild the authoritative ledger, not just a
             // status flag — the replayed run's risk decisions depend on the
             // same open-order quantities the original run saw.
-            order_tracker_.register_order(order);
+            if (!order_tracker_.register_order(order))
+                throw std::runtime_error(
+                    "authoritative replay contains an invalid or reused order identity");
+            attribution_->register_order(order);
             order_tracker_.set_status(order.get_order_id(), order_status::open);
             publish_event(ev);
             analytics_.on_event(ev);
@@ -1517,31 +1841,30 @@ void engine::run_replay(const std::string& log_path,
         case event_type::fill:
         {
             auto& fill = static_cast<fill_event&>(*ev);
-            fills_->stamp_fill_attribution(fill);
-            const bool replay_applied = order_tracker_.on_fill(fill);
-            const bool replay_partial =
-                order_tracker_.get_order_status(fill.get_order_id())
-                    == order_status::partially_filled;
-            if (!replay_applied)
-                break;   // duplicate fill id in the log: already accounted
-            if (dashboard_builder_)
-            {
-                dashboard_builder_->cache_fill(fill);
-                if (replay_partial)
-                    dashboard_builder_->update_open_order_status(
-                        fill.get_order_id(), "partial");
-                else
-                    dashboard_builder_->erase_open_order(fill.get_order_id());
-            }
-            portfolio_.on_fill(fill, fill.get_opener_order_id(),
-                               fill.get_strategy_name());
-            publish_event(ev);
-            analytics_.on_event(ev);
+            bool replay_halt = false;
+            if (!fills_->ingest(fill, event_count, replay_halt,
+                                fill_context::authoritative_replay))
+                throw std::runtime_error(
+                    "authoritative ledger contains an invalid economic fill");
             break;
         }
         case event_type::cancel:
         {
             const auto& cancel = static_cast<const cancel_event&>(*ev);
+            const auto* tracked = order_tracker_.find(cancel.get_order_id());
+            if (cancel.get_order_id() == 0 || cancel.get_symbol().empty()
+                || !tracked
+                || order_tracker_.symbol_of(*tracked) != cancel.get_symbol()
+                || cancel.get_timestamp().time_since_epoch().count() <= 0
+                || (tracked->created_ts.time_since_epoch().count() > 0
+                    && cancel.get_timestamp() < tracked->created_ts)
+                || (tracked->updated_ts.time_since_epoch().count() > 0
+                    && cancel.get_timestamp() < tracked->updated_ts)
+                || (tracked->status != order_status::open
+                    && tracked->status != order_status::partially_filled
+                    && tracked->status != order_status::filled))
+                throw std::runtime_error(
+                    "authoritative ledger contains an invalid cancel transition");
             order_tracker_.set_status(cancel.get_order_id(),
                                       order_status::cancelled);
             if (dashboard_builder_)
@@ -1553,6 +1876,22 @@ void engine::run_replay(const std::string& log_path,
         case event_type::rejection:
         {
             const auto& rejection = static_cast<const rejection_event&>(*ev);
+            const auto* tracked = order_tracker_.find(
+                rejection.get_order_id());
+            if (rejection.get_order_id() == 0
+                || rejection.get_symbol().empty()
+                || !tracked
+                || order_tracker_.symbol_of(*tracked)
+                    != rejection.get_symbol()
+                || rejection.get_timestamp().time_since_epoch().count() <= 0
+                || (tracked->created_ts.time_since_epoch().count() > 0
+                    && rejection.get_timestamp() < tracked->created_ts)
+                || (tracked->updated_ts.time_since_epoch().count() > 0
+                    && rejection.get_timestamp() < tracked->updated_ts)
+                || (tracked->status != order_status::open
+                    && tracked->status != order_status::pending))
+                throw std::runtime_error(
+                    "authoritative ledger contains an invalid rejection transition");
             order_tracker_.set_status(rejection.get_order_id(),
                                       order_status::rejected);
             if (dashboard_builder_)
@@ -1562,10 +1901,22 @@ void engine::run_replay(const std::string& log_path,
             break;
         }
         case event_type::funding:
+        {
+            const auto& funding = static_cast<const funding_event&>(*ev);
+            if (funding.get_timestamp().time_since_epoch().count() <= 0
+                || funding.get_symbol().empty()
+                || !std::isfinite(funding.get_qty_change())
+                || funding.get_qty_change() != 0.0
+                || !std::isfinite(funding.get_cash_delta())
+                || funding.get_cash_delta() == 0.0
+                || funding.get_reason() != "FUNDING_FEE")
+                throw std::runtime_error(
+                    "authoritative ledger contains an invalid funding event");
             // publish_event is the single Portfolio funding mutation.
             publish_event(ev);
             analytics_.on_event(ev);
             break;
+        }
         case event_type::l2_snapshot:
         {
             const auto& snapshot =
@@ -1600,6 +1951,7 @@ void engine::run_replay(const std::string& log_path,
             const double mark = bid > 0.0 && ask > 0.0
                 ? (bid + ask) * 0.5 : (bid > 0.0 ? bid : ask);
             last_sim_time_ = snapshot.get_timestamp();
+            last_decision_ts_ = snapshot.get_timestamp();   // F-08
             publish_event(ev);
             analytics_.on_event(ev);
             if (mark > 0.0)
@@ -1654,8 +2006,27 @@ void engine::run_replay(const std::string& log_path,
             }
             break;
         }
-        case event_type::signal:
         case event_type::amend:
+        {
+            const auto& amend = static_cast<const amend_event&>(*ev);
+            const auto* tracked = order_tracker_.find(amend.get_order_id());
+            if (!tracked
+                || order_tracker_.symbol_of(*tracked) != amend.get_symbol()
+                || amend.get_timestamp().time_since_epoch().count() <= 0
+                || (tracked->created_ts.time_since_epoch().count() > 0
+                    && amend.get_timestamp() < tracked->created_ts)
+                || (tracked->updated_ts.time_since_epoch().count() > 0
+                    && amend.get_timestamp() < tracked->updated_ts)
+                || !order_tracker_.amend(
+                    amend.get_order_id(), amend.get_new_price(),
+                    amend.get_new_quantity()))
+                throw std::runtime_error(
+                    "authoritative ledger contains an invalid committed amendment");
+            publish_event(ev);
+            analytics_.on_event(ev);
+            break;
+        }
+        case event_type::signal:
             // Observer/analytics reconstruction only: never apply executable
             // book state or regenerate decisions during ledger replay.
             publish_event(ev);

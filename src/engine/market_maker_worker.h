@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 
 static constexpr std::size_t MM_RING_SIZE = 65536;
 using MMRing = RingBuffer<event_pointer, MM_RING_SIZE>;
@@ -17,7 +18,7 @@ class MarketMakerWorker : public Worker
 public:
     // Default-constructed calibration keeps the frozen engine.cpp callsite
     // source-compatible until the CCB commit passes the configured values.
-    MarketMakerWorker(unsigned seed, MMRing& order_ring,
+    MarketMakerWorker(std::uint64_t seed, MMRing& order_ring,
                       const mm_calibration& cal = {})
         : mm_(seed), order_ring_(order_ring)
     {

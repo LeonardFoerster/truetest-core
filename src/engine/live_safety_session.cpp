@@ -4,10 +4,14 @@
 
 #include <iostream>
 
-LiveSafetySession::LiveSafetySession(std::shared_ptr<IProvider> provider,
-                                     bool live,
-                                     std::chrono::milliseconds kill_deadline)
-    : provider_(std::move(provider)), live_(live), kill_deadline_(kill_deadline)
+LiveSafetySession::LiveSafetySession(
+    std::shared_ptr<IProvider> provider,
+    live_safety_requirements requirements,
+    std::chrono::milliseconds kill_deadline)
+    : provider_(std::move(provider)),
+      requirements_(std::move(requirements)),
+      live_(requirements_.private_exchange_execution_requested),
+      kill_deadline_(kill_deadline)
 {
 }
 
@@ -24,10 +28,81 @@ bool LiveSafetySession::open_provider()
         if (open_state_ != state::idle || shutdown_state_ != state::idle)
             return false;
         open_state_ = state::in_progress;
+    }
+
+    const auto reject_startup = [this](std::string error) {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            startup_error_ = std::move(error);
+            open_state_ = state::complete;
+        }
+        cv_.notify_all();
+        return false;
+    };
+
+    private_execution_capability capability =
+        private_execution_capability::unknown;
+    std::shared_ptr<IReconciler> reconciler;
+    std::shared_ptr<IKillSwitch> kill_switch;
+    startup_safety_validation validation;
+    try
+    {
+        const bool provider_has_execution = provider_->has_execution();
+        capability = provider_->private_execution_capability_level();
+        auto scope_error = validate_private_execution_scope(
+            requirements_.target_allows_private_exchange_writes,
+            requirements_.private_exchange_execution_requested,
+            provider_has_execution, capability);
+        if (!scope_error.empty())
+            return reject_startup(std::move(scope_error));
+
+        if (capability == private_execution_capability::exchange_writes
+            && !provider_->prepare_write_safety())
+        {
+            return reject_startup(
+                "startup rejected: provider could not prepare operational safety components");
+        }
+
+        // An explicit object is authoritative, including an invalid one.
+        // Falling back after a bad override would recreate R5 fail-open.
+        reconciler = requirements_.reconciler
+            ? requirements_.reconciler
+            : provider_->get_reconciler();
+        kill_switch = requirements_.kill_switch
+            ? requirements_.kill_switch
+            : provider_->get_kill_switch();
+        validation = validate_startup_safety(
+            requirements_.target_allows_private_exchange_writes,
+            requirements_.private_exchange_execution_requested,
+            provider_has_execution, capability,
+            reconciler.get(), kill_switch.get());
+        if (!validation.accepted)
+            return reject_startup(std::move(validation.error));
+
+        if (capability == private_execution_capability::exchange_writes
+            && !provider_->install_write_safety_readiness(validation.readiness))
+        {
+            return reject_startup(
+                "startup rejected: provider refused validated write-safety readiness");
+        }
+    }
+    catch (...)
+    {
+        return reject_startup(
+            "startup rejected: provider safety preflight threw an exception");
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        reconciler_ = std::move(reconciler);
+        kill_switch_ = std::move(kill_switch);
+        write_safety_readiness_ = validation.readiness;
+        startup_safety_validated_ = true;
         // Ownership starts before open(): a throwing provider may already
         // have armed venue safety or opened one of several transports.
         opened_ = true;
     }
+
     bool ok = false;
     try
     {
@@ -39,6 +114,7 @@ bool LiveSafetySession::open_provider()
     }
     {
         std::lock_guard<std::mutex> lock(mu_);
+        provider_open_succeeded_ = ok;
         open_state_ = state::complete;
     }
     cv_.notify_all();
@@ -60,12 +136,11 @@ bool LiveSafetySession::kill_once(std::chrono::milliseconds deadline) noexcept
     try
     {
         auto kill = kill_switch_;
-        if (!kill && provider_) kill = provider_->get_kill_switch();
-        if (kill)
+        if (kill && kill->is_operational())
             ok = kill->cancel_all_and_flatten(
                 deadline.count() > 0 ? deadline : kill_deadline_);
         else
-            std::cerr << "live safety: provider has no kill switch\n";
+            std::cerr << "live safety: operational kill switch unavailable\n";
     }
     catch (...)
     {
@@ -85,8 +160,8 @@ bool LiveSafetySession::set_kill_switch(
     std::shared_ptr<IKillSwitch> kill_switch) noexcept
 {
     std::lock_guard<std::mutex> lock(mu_);
-    if (kill_state_ != state::idle) return false;
-    kill_switch_ = std::move(kill_switch);
+    if (open_state_ != state::idle || kill_state_ != state::idle) return false;
+    requirements_.kill_switch = std::move(kill_switch);
     return true;
 }
 
@@ -126,6 +201,7 @@ live_shutdown_report LiveSafetySession::shutdown_once(
 
     lock.lock();
     opened_ = false;
+    provider_open_succeeded_ = false;
     shutdown_state_ = state::complete;
     auto report = report_;
     lock.unlock();
@@ -136,11 +212,54 @@ live_shutdown_report LiveSafetySession::shutdown_once(
 bool LiveSafetySession::is_open() const noexcept
 {
     std::lock_guard<std::mutex> lock(mu_);
-    return opened_;
+    return opened_ && provider_open_succeeded_
+        && open_state_ == state::complete;
 }
 
 bool LiveSafetySession::owns_provider(
     const std::shared_ptr<IProvider>& provider) const noexcept
 {
     return provider_ && provider_ == provider;
+}
+
+bool LiveSafetySession::startup_safety_validated() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    return startup_safety_validated_;
+}
+
+bool LiveSafetySession::permits_private_exchange_writes() const noexcept
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    return write_safety_readiness_.permits_private_exchange_writes();
+}
+
+bool LiveSafetySession::configured_safety_matches(
+    const std::shared_ptr<IReconciler>& reconciler,
+    const std::shared_ptr<IKillSwitch>& kill_switch) const noexcept
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    return (!reconciler || reconciler == reconciler_)
+        && (!kill_switch || kill_switch == kill_switch_);
+}
+
+std::string LiveSafetySession::startup_error() const
+{
+    std::lock_guard<std::mutex> lock(mu_);
+    return startup_error_;
+}
+
+std::string LiveSafetySession::reconcile(const portfolio& local_view,
+                                         double tolerance_bps)
+{
+    std::shared_ptr<IReconciler> reconciler;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (!startup_safety_validated_)
+            return "startup rejected: write safety has not been validated";
+        reconciler = reconciler_;
+    }
+    if (!reconciler || !reconciler->is_operational())
+        return "startup rejected: operational reconciler is unavailable";
+    return reconciler->reconcile(local_view, tolerance_bps);
 }

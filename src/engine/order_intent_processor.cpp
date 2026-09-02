@@ -61,6 +61,7 @@ OrderIntentProcessor::OrderIntentProcessor(
     const std::unordered_map<std::string, mark_point>& last_mark_prices,
     std::mutex& last_mark_prices_mu,
     const std::chrono::system_clock::time_point& last_sim_time,
+    const std::chrono::system_clock::time_point& last_decision_ts,
     const std::unordered_set<std::string>& l2_seeded_symbols,
     const bool& mm_threaded,
     DashboardSnapshotBuilder* dashboard_builder,
@@ -80,25 +81,134 @@ OrderIntentProcessor::OrderIntentProcessor(
       halt_flag_(halt_flag), pause_all_(pause_all), last_mid_price_(last_mid_price),
       last_mark_symbol_(last_mark_symbol), last_mark_prices_(last_mark_prices),
       last_mark_prices_mu_(last_mark_prices_mu), last_sim_time_(last_sim_time),
+      last_decision_ts_(last_decision_ts),
+
       l2_seeded_symbols_(l2_seeded_symbols), mm_threaded_(mm_threaded),
       dashboard_builder_(dashboard_builder), shadow_tracker_(shadow_tracker),
       exchange_portfolio_(exchange_portfolio), config_(config), hotpath_(hotpath)
 {
 }
 
+bool OrderIntentProcessor::emit_terminal_transition(
+    std::uint64_t order_id,
+    const std::string& symbol,
+    double qty,
+    order_status terminal,
+    std::chrono::system_clock::time_point authoritative_ts)
+{
+    // ========================================================================
+    // F-02 — THE single point where an order leaves the active lifecycle
+    // without filling. docs/todos/11-F-forensic-lifecycle-audit.md.
+    //
+    // Before this existed, route() parked bar-delayed orders and returned
+    // `pending`, so finalize_route took the NON-rejected path and armed the
+    // exit intent. The actual rejection happened one bar later inside
+    // drain_due -> process(), which has no finalize_route and told nobody:
+    // the strategy kept its optimistic entry gate set and never traded
+    // again (traced: 1,713,190 silent bars after one drawdown reject), and
+    // the exit intent stayed in ExitManager::pending_ forever.
+    //
+    // Two things must happen for every terminal non-fill outcome, on every
+    // path, or the same trap reopens the next time a rejection rule is
+    // added:
+    //   (i)  the owning strategy is told the position did not change, so an
+    //        optimistic entry_pending state resets to flat;
+    //   (ii) the exit intent registered for that order is released.
+    //
+    // Every set_status(..., rejected/cancelled/expired) in this translation
+    // unit goes through here. The invariant test asserts that.
+    // ========================================================================
+    if (order_id == 0) return false;
+
+    const auto state_before = order_tracker_.get_order_status(order_id);
+    if (authoritative_ts.time_since_epoch().count() > 0)
+    {
+        const auto validation = order_tracker_.validate_lifecycle(
+            order_id, terminal, authoritative_ts);
+        if (validation.benign_noop()) return false;
+        if (!validation.applied()
+            || !order_tracker_.commit_lifecycle(validation))
+        {
+            hotpath_.trigger_halt(
+                "authoritative venue lifecycle transition is invalid");
+            return false;
+        }
+    }
+    else
+    {
+        order_tracker_.set_status(order_id, terminal);
+    }
+    if (dashboard_builder_) dashboard_builder_->erase_open_order(order_id);
+
+    const std::uint64_t opener = attribution_.opener_for(order_id);
+    const bool protective_terminal =
+        exit_manager_.on_protective_close_terminal(
+            order_id, [&](const truetest::exits::ExitManager::protective_exit_view& protective)
+            {
+                audit_sink_.record_exit_lifecycle(exit_lifecycle_record{
+                    order_id, order_id, protective.opener_order_id, 0,
+                    {}, {}, {}, {}, protective.requested_qty,
+                    protective.filled_qty, protective.remaining_qty,
+                    protective.reason, state_before, terminal,
+                    protective.symbol.data(), protective.strategy_name.data(),
+                    "terminal_non_fill", "terminal"});
+            });
+    if (protective_terminal)
+    {
+        // A bracket/forced flatten was already fired and a venue, filter, or
+        // risk path refused it. Retrying a protective close after a terminal
+        // outcome is forbidden: it can duplicate a venue order. Restore only
+        // the accounting reservation inside ExitManager, emit an auditable
+        // terminal state, and halt the process for operator reconciliation.
+        hotpath_.trigger_halt("protective exit reached terminal non-fill state");
+    }
+    else if (opener == 0 || opener == order_id)
+    {
+        // An opener died. Its intent can never be promoted, so release it
+        // instead of leaving it in pending_ to leak (F-06) and, on order-id
+        // reuse, phantom-arm on an unrelated entry.
+        exit_manager_.cancel(order_id);
+    }
+    else
+    {
+        // A closer died. The quantity it reserved came out of the opener's
+        // remaining size when the bracket fired; give it back so the lot is
+        // not silently understated.
+        exit_manager_.release_close_reservation(opener, qty);
+    }
+
+    if (!symbol.empty())
+    {
+        fills_.notify_position_change_all(
+            symbol, portfolio_.position_open(symbol),
+            /*sweep_flat_brackets=*/false);
+    }
+    return true;
+}
+
 double OrderIntentProcessor::marked_account_equity(std::string_view current_symbol,
+
                                                     double current_mark) const
 {
     double equity = portfolio_.get_cash();
     const auto& positions = portfolio_.get_positions();
     if (positions.empty())
+    {
+        note_marked_equity(equity);
         return equity;
+    }
+
     if (positions.size() == 1 && current_mark > 0.0)
     {
         const auto& [symbol, position] = *positions.begin();
         if (symbol == current_symbol)
-            return equity + position.qty * current_mark;
+        {
+            const double eq = equity + position.qty * current_mark;
+            note_marked_equity(eq);
+            return eq;
+        }
     }
+
     std::lock_guard<std::mutex> lk(last_mark_prices_mu_);
     for (const auto& [symbol, position] : positions)
     {
@@ -114,8 +224,27 @@ double OrderIntentProcessor::marked_account_equity(std::string_view current_symb
             return std::numeric_limits<double>::quiet_NaN();
         equity += position.qty * position_mark;
     }
+    note_marked_equity(equity);
     return equity;
 }
+
+void OrderIntentProcessor::note_marked_equity(double equity) const
+{
+    // F-05a: this is the engine's authoritative marked-equity pass — it runs
+    // on the engine thread before every strategy callback, so it is the one
+    // place that sees the account cross zero regardless of which loop is
+    // driving. Latch only; the engine does not auto-liquidate here (that
+    // behaviour change is F-05b's design decision, not a side effect of
+    // observing).
+    if (!std::isfinite(equity) || equity > 0.0) return;
+    if (portfolio_.is_bankrupt()) return;
+    portfolio_.observe_marked_equity(equity);
+    analytics_.mark_bankrupt(equity);
+    std::fprintf(stderr,
+        "[engine] F-05a: account equity reached %.2f — the run is past "
+        "bankruptcy and every metric after this point is invalid.\n", equity);
+}
+
 
 bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
                                    std::size_t& event_count,
@@ -128,6 +257,9 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
         halt_requested = true;
         return false;
     }
+
+    if (!o->has_submit_ts())
+        o->set_submit_ts(last_sim_time_);
 
     // ========================================================================
     // CANONICAL HOT-PATH ORDERING (Phase 3 deepdive cleanup; preserved
@@ -212,9 +344,9 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
                 char venue_reason[128];
                 std::snprintf(venue_reason, sizeof(venue_reason), "venue risk check refused: %s", vd.reason.c_str());
                 audit_sink_.record_rejection(*o, "venue_risk_reject", venue_reason);
-                order_tracker_.set_status(o->get_order_id(),
-                                          order_status::rejected);
-                if (dashboard_builder_) dashboard_builder_->erase_open_order(o->get_order_id());
+                emit_terminal_transition(o->get_order_id(), o->get_symbol(),
+                                         o->get_quantity(), order_status::rejected);
+
                 // Reject, not halt — engine continues. The cap describes
                 // what this operator considers prudent, not a market-wide
                 // risk-of-ruin condition that should stop everything.
@@ -282,9 +414,10 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
                 rule_code
             );
 
-            order_tracker_.set_status(o->get_order_id(), order_status::rejected);
-            if (dashboard_builder_) dashboard_builder_->erase_open_order(o->get_order_id());
+            emit_terminal_transition(o->get_order_id(), o->get_symbol(),
+                                     o->get_quantity(), order_status::rejected);
             if (action == risk_action::halt)
+
             {
                 // Terminal process-wide halt: set halt_flag_ so DataBridge,
                 // L2 dispatch, and run loops all stop — not just the local
@@ -307,7 +440,13 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
     // price are what makes the open-order state a risk input rather than a
     // bare status flag. Idempotent — stop conversions and pending releases
     // re-enter here with the same id.
-    order_tracker_.register_order(*o);
+    if (!order_tracker_.register_order(*o))
+    {
+        hotpath_.trigger_halt(
+            "authoritative order registration failed before submission");
+        halt_requested = true;
+        return false;
+    }
     order_tracker_.set_status(o->get_order_id(),
         async_submit ? order_status::pending : order_status::open);
     if (dashboard_builder_) {
@@ -318,12 +457,12 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
     hotpath_.log_event(*o);
     if (halt_flag_.load(std::memory_order_acquire))
     {
-        order_tracker_.set_status(o->get_order_id(), order_status::rejected);
-        if (dashboard_builder_)
-            dashboard_builder_->erase_open_order(o->get_order_id());
+        emit_terminal_transition(o->get_order_id(), o->get_symbol(),
+                                 o->get_quantity(), order_status::rejected);
         halt_requested = true;
         return false;
     }
+
     hotpath_.publish_event(o);
     analytics_.on_event(o);
 
@@ -356,6 +495,11 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
         auto exchange_adapter = config_.provider->get_execution_adapter();
         if (exchange_adapter)
         {
+            if (!fills_.register_shadow_order(*o))
+            {
+                halt_requested = true;
+                return false;
+            }
             exchange_adapter->submit_order(*o);
             drain_async_submit_results(exchange_adapter.get());
         }
@@ -370,25 +514,9 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
         if (exchange_adapter)
         {
             drain_async_submit_results(exchange_adapter.get());
-            std::vector<fill_event> exchange_fills;
-            if (exchange_adapter->poll_fills(exchange_fills))
-            {
-                for (auto& ef : exchange_fills)
-                {
-                    fills_.stamp_fill_attribution(ef);
-
-                    const uint64_t e_opener = ef.get_opener_order_id();
-                    const std::string& e_strat = ef.get_strategy_name();
-
-                    if (shadow_tracker_)
-                        shadow_tracker_->on_exchange_fill(ef);
-
-                    if (exchange_portfolio_)
-                    {
-                        exchange_portfolio_->on_fill(ef, e_opener, e_strat);
-                    }
-                }
-            }
+            if (!fills_.process_shadow_exchange_fills(
+                    exchange_adapter, halt_requested))
+                return false;
         }
     }
 
@@ -398,30 +526,68 @@ bool OrderIntentProcessor::process(const std::shared_ptr<order_event>& o,
 
 void OrderIntentProcessor::unwind_positions(std::size_t& event_count)
 {
-    // Snapshot before iterating — each fill mutates positions_.
-    std::vector<std::pair<std::string, double>> to_close;
-    to_close.reserve(portfolio_.get_positions().size());
-    for (const auto& [symbol, pos] : portfolio_.get_positions())
+    // Snapshot open lots before iterating — each fill mutates lots_ and positions_.
+    struct unwind_target
     {
-        if (std::abs(pos.qty) >= 1e-12)
-            to_close.emplace_back(symbol, pos.qty);
+        std::string symbol;
+        order_side  close_side;
+        double      qty;
+        uint64_t    opener_id;
+    };
+
+    std::vector<unwind_target> targets;
+    std::unordered_set<std::string> symbols_with_lots;
+
+    for (const auto& [id, l] : portfolio_.get_lots())
+    {
+        if (l.qty_open >= 1e-12)
+        {
+            const order_side close_side = (l.side == order_side::buy)
+                ? order_side::sell : order_side::buy;
+            targets.push_back({l.symbol, close_side, l.qty_open, id});
+            symbols_with_lots.insert(l.symbol);
+        }
     }
 
-    for (const auto& [symbol, qty] : to_close)
+    // Fallback: if a symbol has open position in portfolio_.get_positions()
+    // but no lots (legacy/un-lotted), close the netted position as well.
+    for (const auto& [symbol, pos] : portfolio_.get_positions())
     {
-        // Sign-aware flatten — shorts need market BUY, not SELL.
-        const order_side close_side = (qty > 0.0)
-            ? order_side::sell : order_side::buy;
-        const double close_qty = std::abs(qty);
+        if (symbols_with_lots.count(symbol) == 0 && std::abs(pos.qty) >= 1e-12)
+        {
+            const order_side close_side = (pos.qty > 0.0)
+                ? order_side::sell : order_side::buy;
+            targets.push_back({symbol, close_side, std::abs(pos.qty), 0});
+        }
+    }
 
-        auto now = std::chrono::system_clock::now();
-        auto close_order = acquire_pooled(order_pool_,order_event(
-            now, symbol, order_type::market, close_side,
-            close_qty, last_mid_price_.load(std::memory_order_relaxed)));
+    // An unwind is caused by the currently processed market/risk event. Its
+    // simulation timestamp is the authoritative lifecycle clock in replay;
+    // wall time would make otherwise identical backtests hash differently.
+    if (!targets.empty()
+        && last_sim_time_.time_since_epoch().count() == 0)
+    {
+        hotpath_.trigger_halt(
+            "risk unwind refused without an authoritative event timestamp");
+        return;
+    }
+    const auto now = last_sim_time_;
+    for (const auto& target : targets)
+    {
+        auto close_order = acquire_pooled(order_pool_, order_event(
+            now, target.symbol, order_type::market, target.close_side,
+            target.qty, last_mid_price_.load(std::memory_order_relaxed)));
         close_order->set_order_id(OrderIdGenerator::next());
-        close_order->set_strategy_name("risk_unwind");
+        close_order->set_opener_order_id(target.opener_id);
+        close_order->set_strategy_name("__engine_unwind__");
 
-        order_tracker_.register_order(*close_order);
+        if (!order_tracker_.register_order(*close_order))
+        {
+            hotpath_.trigger_halt(
+                "risk unwind order registration failed");
+            return;
+        }
+        attribution_.register_order(*close_order);
         order_tracker_.set_status(close_order->get_order_id(), order_status::open);
         if (dashboard_builder_) dashboard_builder_->cache_open_order(*close_order);
         hotpath_.log_event(*close_order);
@@ -433,27 +599,19 @@ void OrderIntentProcessor::unwind_positions(std::size_t& event_count)
         audit_sink_.record_status_transition(close_order->get_order_id(),
             order_status::pending, order_status::open, "risk_unwind");
 
-        auto adapter = router_.resolve_adapter(symbol);
+        auto adapter = router_.resolve_adapter(target.symbol);
         adapter->set_mid_price(last_mid_price_.load(std::memory_order_relaxed));
-        adapter->set_l2_seeded(l2_seeded_symbols_.count(symbol) > 0);
+        adapter->set_l2_seeded(l2_seeded_symbols_.count(target.symbol) > 0);
 
         router_.submit(*close_order, adapter.get());
 
         drain_async_submit_results(adapter.get());
 
-        std::vector<fill_event> fills;
-        if (router_.poll_fills(adapter.get(), fills))
-        {
-            bool unwind_halt = false;
-            for (auto& f : fills)
-            {
-                // Already in halt/unwind — skip post-fill re-halt.
-                (void)fills_.handle_fill(f, event_count, unwind_halt,
-                                         /*run_post_fill_risk=*/false,
-                                         /*mark_shadow_sim=*/false,
-                                         "risk_unwind");
-            }
-        }
+        bool unwind_halt = false;
+        // Already in halt/unwind — use the same transactional delivery gate,
+        // but suppress recursive post-fill risk in the economic pipeline.
+        (void)fills_.process_adapter_fills(
+            adapter, event_count, unwind_halt, fill_context::risk_unwind);
     }
 }
 
@@ -463,7 +621,7 @@ void OrderIntentProcessor::drain_async_submit_results(IExecutionAdapter* adapter
     if (!cap) return;
 
     std::vector<submit_result> results;
-    if (!cap->poll_submit_results(results)) return;
+    (void)cap->poll_submit_results(results);
 
     for (const auto& sr : results)
     {
@@ -484,15 +642,12 @@ void OrderIntentProcessor::drain_async_submit_results(IExecutionAdapter* adapter
             }
             if (sr.ok)
             {
-                if (order_tracker_.get_order_status(sr.engine_id) == order_status::pending)
-                {
-                    order_tracker_.set_status(sr.engine_id, order_status::open);
-                    if (dashboard_builder_) dashboard_builder_->update_open_order_status(sr.engine_id, "open");
-                    // Unconditional via audit_sink (replaces questdb guard + #ifdef).
-                    audit_sink_.record_status_transition(sr.engine_id,
-                        order_status::pending, order_status::open,
-                        "venue submit acknowledged");
-                }
+                // The REST response acknowledges only the command. Economic
+                // lifecycle state advances exclusively from authoritative
+                // user-data evidence delivered below.
+                if (dashboard_builder_)
+                    dashboard_builder_->update_open_order_status(
+                        sr.engine_id, "venue_ack_pending");
                 continue;
             }
             if (!order_tracker_.is_active(sr.engine_id)) continue;
@@ -502,8 +657,10 @@ void OrderIntentProcessor::drain_async_submit_results(IExecutionAdapter* adapter
                 "submit failed: " + sr.error);
             hotpath_.log_event(*rej);
             hotpath_.publish_event(rej);
-            order_tracker_.set_status(sr.engine_id, order_status::rejected);
-            if (dashboard_builder_) dashboard_builder_->erase_open_order(sr.engine_id);
+            emit_terminal_transition(sr.engine_id, sr.symbol,
+                                     order_tracker_.pending_qty(sr.engine_id),
+                                     order_status::rejected);
+
             // Unconditional via audit_sink using the single record_rejection shape
             // (the rich order_event overload). For async submit transport errors
             // we synthesize a minimal stack order_event carrying the identity we have
@@ -555,31 +712,109 @@ void OrderIntentProcessor::drain_async_submit_results(IExecutionAdapter* adapter
         }
         else if (sr.ok)
         {
-            if (order_tracker_.is_active(sr.engine_id))
-            {
-                order_tracker_.set_status(sr.engine_id, order_status::cancelled);
-                if (dashboard_builder_) dashboard_builder_->erase_open_order(sr.engine_id);
-                auto cancel_ev = acquire_pooled(cancel_pool_,
-                    std::chrono::system_clock::now(), symbol, sr.engine_id, reason);
-                hotpath_.log_event(*cancel_ev);
-                hotpath_.publish_event(cancel_ev);
-                if (!config_.is_threaded())
-                    analytics_.on_event(cancel_ev);
-                // Unconditional via audit_sink (replaces questdb guard + #ifdef).
-                audit_sink_.record_cancellation(sr.engine_id, symbol.c_str(),
-                    attribution_.strategy_for(sr.engine_id).c_str(),
-                    reason.empty() ? "manual" : reason.c_str());
-                audit_sink_.record_status_transition(sr.engine_id,
-                    order_status::open, order_status::cancelled, reason.empty() ? nullptr : reason.c_str());
-            }
+            if (dashboard_builder_)
+                dashboard_builder_->update_open_order_status(
+                    sr.engine_id, "cancel_pending");
         }
         else
         {
             if (dashboard_builder_) dashboard_builder_->update_open_order_status(sr.engine_id, "cancel_failed");
         }
 
-        if (meta_it != pending_cancels_.end())
+        if (!sr.ok && !sr.uncertain && !sr.fatal
+            && meta_it != pending_cancels_.end())
             pending_cancels_.erase(meta_it);
+    }
+
+    venue_lifecycle_event lifecycle;
+    while (cap->poll_lifecycle_event(lifecycle))
+    {
+        const auto* tracked = order_tracker_.find(lifecycle.engine_order_id);
+        if (!tracked)
+        {
+            hotpath_.trigger_halt(
+                "authoritative venue lifecycle references unknown order");
+            continue;
+        }
+        const std::string& symbol = order_tracker_.symbol_of(*tracked);
+        const auto before = tracked->status;
+
+        if (lifecycle.transition == venue_order_transition::acknowledged)
+        {
+            const auto validation = order_tracker_.validate_lifecycle(
+                lifecycle.engine_order_id, order_status::open,
+                lifecycle.exchange_ts);
+            if (validation.benign_noop()) continue;
+            if (!validation.applied()
+                || !order_tracker_.commit_lifecycle(validation))
+            {
+                hotpath_.trigger_halt(
+                    "authoritative venue ACK transition is invalid");
+                continue;
+            }
+            if (dashboard_builder_)
+                dashboard_builder_->update_open_order_status(
+                    lifecycle.engine_order_id, "open");
+            audit_sink_.record_status_transition(
+                lifecycle.engine_order_id, before, order_status::open,
+                "authoritative user-data ACK");
+            continue;
+        }
+
+        order_status terminal = order_status::unknown;
+        switch (lifecycle.transition)
+        {
+        case venue_order_transition::canceled:
+            terminal = order_status::cancelled;
+            break;
+        case venue_order_transition::rejected:
+            terminal = order_status::rejected;
+            break;
+        case venue_order_transition::expired:
+            terminal = order_status::expired;
+            break;
+        case venue_order_transition::amended:
+        case venue_order_transition::cancel_rejected:
+        case venue_order_transition::amend_rejected:
+            hotpath_.trigger_halt(
+                "venue lifecycle transition is explicitly unsupported");
+            continue;
+        case venue_order_transition::acknowledged:
+            continue;
+        }
+
+        const double pending = order_tracker_.pending_qty(
+            lifecycle.engine_order_id);
+        if (!emit_terminal_transition(
+                lifecycle.engine_order_id, symbol, pending, terminal,
+                lifecycle.exchange_ts))
+            continue;
+
+        if (terminal == order_status::cancelled)
+        {
+            auto meta_it = pending_cancels_.find(lifecycle.engine_order_id);
+            const std::string reason =
+                meta_it != pending_cancels_.end() && !meta_it->second.reason.empty()
+                    ? meta_it->second.reason
+                    : "authoritative venue cancel";
+            auto cancel_ev = acquire_pooled(
+                cancel_pool_, lifecycle.exchange_ts, symbol,
+                lifecycle.engine_order_id, reason);
+            hotpath_.log_event(*cancel_ev);
+            hotpath_.publish_event(cancel_ev);
+            if (!config_.has_async_analytics()) analytics_.on_event(cancel_ev);
+            if (meta_it != pending_cancels_.end())
+                audit_sink_.record_cancellation(
+                    lifecycle.engine_order_id, symbol.c_str(),
+                    attribution_.strategy_for(
+                        lifecycle.engine_order_id).c_str(),
+                    reason.c_str());
+            if (meta_it != pending_cancels_.end())
+                pending_cancels_.erase(meta_it);
+        }
+        audit_sink_.record_status_transition(
+            lifecycle.engine_order_id, before, terminal,
+            "authoritative user-data lifecycle");
     }
 }
 
@@ -669,11 +904,44 @@ bool OrderIntentProcessor::route(order_event& order,
     }
 
     order.set_order_id(OrderIdGenerator::next());
-    // Canonical step: register attribution before any submit or potential
-    // fill. This populates opener/strategy so stamp_fill_attribution and
-    // rich on_fill paths have the data (critical for per-lot and multi-lot).
-    attribution_.register_order(order);
-
+    if (order.get_signal_id() == 0)
+        order.set_signal_id(order.get_order_id());
+    // F-08: stamp the decision clock before anything downstream reads it.
+    // A caller that already knows better (replay, a venue-originated order)
+    // keeps its own value.
+    if (!order.has_decision_ts() &&
+        last_decision_ts_.time_since_epoch().count() != 0)
+        order.set_decision_ts(last_decision_ts_);
+    if (order.get_protective_exit_ticket() != 0 &&
+        !exit_manager_.bind_protective_exit(order.get_protective_exit_ticket(),
+                                            order.get_order_id()))
+    {
+        // A close can be returned by an evaluation pass whose opener became
+        // flat re-entrantly (for example, another fill drained during book
+        // recentering). The ticket is then intentionally gone; suppress this
+        // stale command rather than submitting an unowned close through zero.
+        audit_sink_.record_event("exit_lifecycle", order.get_symbol().c_str(),
+            order.get_strategy_name().c_str(), order.get_order_id(),
+            "stale_suppressed", "protective exit ticket already resolved", "{}");
+        return true;
+    }
+    if (order.get_protective_exit_ticket() != 0)
+    {
+        order.set_submit_ts(sim_time);
+        if (const auto protective =
+                exit_manager_.protective_exit_for_order(order.get_order_id()))
+        {
+            audit_sink_.record_exit_lifecycle(exit_lifecycle_record{
+                order.get_signal_id(), order.get_order_id(),
+                protective->opener_order_id, 0, order.get_decision_ts(),
+                order.get_submit_ts(), order.get_earliest_eligible_ts(), {},
+                protective->requested_qty, protective->filled_qty,
+                protective->remaining_qty, protective->reason,
+                order_status::unknown, order_status::pending,
+                protective->symbol.data(), protective->strategy_name.data(),
+                "pending", "submitted"});
+        }
+    }
     if (auto* spec = resolve_instrument_spec(order.get_symbol()))
     {
         if (!apply_instrument_spec(order, *spec))
@@ -687,9 +955,44 @@ bool OrderIntentProcessor::route(order_event& order,
             // Unconditional via audit_sink (replaces questdb guard + #ifdef + dead total_rejections_).
             audit_sink_.record_order_submitted(order, "rejected");
             audit_sink_.record_rejection(order, "venue_filter", reason);
-            order_tracker_.set_status(order.get_order_id(), order_status::rejected);
+            emit_terminal_transition(order.get_order_id(), order.get_symbol(),
+                                     order.get_quantity(), order_status::rejected);
             (void)event_count;
-            (void)halt_requested;
+            if (halt_flag_.load(std::memory_order_acquire))
+            {
+                halt_requested = true;
+                return false;
+            }
+            return true;
+        }
+    }
+
+    // A fired engine-owned close reserves this quantity before route().  A
+    // second strategy close may use only the unreserved remainder; admitting
+    // an overlapping close is how a delayed opposite signal previously
+    // crossed an otherwise flat lot into a fresh reverse position.
+    if (order.get_protective_exit_ticket() == 0)
+    {
+        const auto pos_it = portfolio_.get_positions().find(order.get_symbol());
+        const double position_qty = pos_it != portfolio_.get_positions().end()
+            ? pos_it->second.qty : 0.0;
+        const auto effect = classify_inventory_effect(
+            order.get_side(), order.get_quantity(), position_qty);
+        const double reserved = exit_manager_.reserved_close_qty(
+            order.get_symbol(), order.get_side());
+        if (effect == inventory_effect::reducing && reserved > 1e-12 &&
+            order.get_quantity() > std::max(0.0, std::abs(position_qty) - reserved) + 1e-12)
+        {
+            constexpr const char* reason =
+                "order rejected: protective close already reserves this lot";
+            auto rej = acquire_pooled(rejection_pool_, order.get_timestamp(),
+                order.get_symbol(), order.get_order_id(), reason);
+            hotpath_.log_event(*rej);
+            hotpath_.publish_event(rej);
+            audit_sink_.record_order_submitted(order, "rejected");
+            audit_sink_.record_rejection(order, "close_reservation", reason);
+            emit_terminal_transition(order.get_order_id(), order.get_symbol(),
+                                     order.get_quantity(), order_status::rejected);
             return true;
         }
     }
@@ -700,9 +1003,20 @@ bool OrderIntentProcessor::route(order_event& order,
     // performs the remaining venue and portfolio checks. Registration must
     // precede the slot reservation so a staged order already carries its
     // quantity in the ledger's pending exposure.
-    order_tracker_.register_order(order);
+    if (!order_tracker_.register_order(order))
+    {
+        hotpath_.trigger_halt(
+            "authoritative order registration failed during routing");
+        halt_requested = true;
+        return false;
+    }
+    // Attribution is committed only after the authoritative identity/terms
+    // ledger accepted the order. A rejected registration must leave no ghost
+    // metadata that a later unknown fill could accidentally inherit.
+    attribution_.register_order(order);
     const auto existing_active_orders = order_tracker_.active_count();
-    if (risk_manager_.open_order_limit_reached(existing_active_orders))
+    if (order.get_protective_exit_ticket() == 0 &&
+        risk_manager_.open_order_limit_reached(existing_active_orders))
     {
         const char* reason = "order rejected by risk manager (max open orders)";
         auto rej = acquire_pooled(rejection_pool_, order.get_timestamp(),
@@ -712,8 +1026,15 @@ bool OrderIntentProcessor::route(order_event& order,
         audit_sink_.record_order_submitted(order, "rejected");
         audit_sink_.record_rejection(order,
             to_string(risk_rule::max_open_orders), reason);
-        order_tracker_.set_status(order.get_order_id(), order_status::rejected);
+        emit_terminal_transition(order.get_order_id(), order.get_symbol(),
+                                 order.get_quantity(), order_status::rejected);
+        if (halt_flag_.load(std::memory_order_acquire))
+        {
+            halt_requested = true;
+            return false;
+        }
         return true;
+
     }
     order.set_pretrade_open_order_count(existing_active_orders);
     order_tracker_.set_status(order.get_order_id(), order_status::pending);
@@ -779,14 +1100,16 @@ bool OrderIntentProcessor::route(order_event& order,
         {
             constexpr const char* reason =
                 "order rejected: delayed-order capacity exhausted";
-            order_tracker_.set_status(order.get_order_id(), order_status::rejected);
             auto rej = acquire_pooled(rejection_pool_, order.get_timestamp(),
                 order.get_symbol(), order.get_order_id(), reason);
             hotpath_.log_event(*rej);
             hotpath_.publish_event(rej);
-            if (!config_.is_threaded()) analytics_.on_event(rej);
+            if (!config_.has_async_analytics()) analytics_.on_event(rej);
             audit_sink_.record_rejection(order, "capacity_reject", reason);
+            emit_terminal_transition(order.get_order_id(), order.get_symbol(),
+                                     order.get_quantity(), order_status::rejected);
             return true;
+
         }
         auto pooled = acquire_pooled(order_pool_, order);
         const auto seq = pending_scheduler_.next_seq();
@@ -954,8 +1277,11 @@ bool OrderIntentProcessor::evaluate_exits(const std::string& symbol, double px,
     // See canonical sequence comment in process(). Closes emitted here go
     // through route (which registers attribution) + process to maintain
     // per-lot / opener discipline and full state propagation.
+    if (route_exit_flatten_requests(symbol, event_count, recv_ns))
+        return true;
     auto closes = exit_manager_.on_price(symbol, px, ts);
     if (closes.empty()) return false;
+
     for (auto& close : closes)
     {
         close.set_recv_ns(recv_ns);
@@ -975,8 +1301,11 @@ bool OrderIntentProcessor::evaluate_exits(const std::string& symbol,
     // See canonical sequence comment in process(). Bar fires go through
     // route for consistent attribution registration and full propagation,
     // anchored at the fire price computed within the trigger bar.
+    if (route_exit_flatten_requests(symbol, event_count, recv_ns))
+        return true;
     auto fires = exit_manager_.on_bar(symbol, open, low, high, close, ts);
     if (fires.empty()) return false;
+
     for (auto& c : fires)
     {
         c.set_recv_ns(recv_ns);
@@ -987,10 +1316,51 @@ bool OrderIntentProcessor::evaluate_exits(const std::string& symbol,
     return false;
 }
 
+bool OrderIntentProcessor::route_exit_flatten_requests(
+    const std::string& symbol,
+    std::size_t& event_count,
+    std::int64_t recv_ns)
+{
+    // F-01(a): ExitManager refused to arm a bracket because the entry
+    // slippage reached the trade's own designed stop distance. Shifting the
+    // stop by that much would put it through its trigger the instant it was
+    // armed (the phantom stop-outs F-01 documents); keeping the unshifted
+    // stop would leave a lot whose realized risk exceeds its budget. Neither
+    // is acceptable, so the lot is closed at the current mark instead.
+    //
+    // The request captures the fill observation that invalidated its premise.
+    // Do not drain another symbol's request, and do not re-price this at the
+    // current bar close: both would turn a bar-open fill into future data.
+    if (!exit_manager_.has_flatten_requests()) return false;
+
+    auto reqs = exit_manager_.take_flatten_requests_for(symbol);
+    for (const auto& r : reqs)
+    {
+        if (!(r.qty > 0.0) || !(r.trigger_price > 0.0))
+        {
+            hotpath_.trigger_halt("protective slippage flatten has no valid trigger mark");
+            return true;
+        }
+        order_event close(r.trigger_ts, r.symbol, order_type::market, r.close_side,
+                          r.qty, r.trigger_price);
+        close.set_opener_order_id(r.opener_order_id);
+        close.set_strategy_name(r.strategy_name);
+        close.set_protective_exit_ticket(r.protective_exit_ticket);
+        close.set_exit_reason(order_exit_reason::slippage_flatten);
+        close.set_recv_ns(recv_ns);
+        bool halt = false;
+        route(close, r.trigger_ts, event_count, halt, /*anchor_immediate=*/true);
+        if (halt) return true;
+    }
+    return false;
+}
+
 void OrderIntentProcessor::finalize_route(IStrategy& strategy,
+
                                           const std::string& strategy_name,
                                           const order_event& order,
-                                          bool halted)
+                                          bool halted,
+                                          std::optional<double> pre_route_net_qty)
 {
     if (halted)
     {
@@ -1019,12 +1389,13 @@ void OrderIntentProcessor::finalize_route(IStrategy& strategy,
         return;
     }
 
-    register_strategy_exit_intent(strategy, strategy_name, order);
+    register_strategy_exit_intent(strategy, strategy_name, order, pre_route_net_qty);
 }
 
 void OrderIntentProcessor::register_strategy_exit_intent(IStrategy& strategy,
                                                           const std::string& strategy_name,
-                                                          const order_event& order)
+                                                          const order_event& order,
+                                                          std::optional<double> pre_route_net_qty)
 {
     const std::uint64_t order_id = order.get_order_id();
     if (order_id == 0)
@@ -1040,6 +1411,15 @@ void OrderIntentProcessor::register_strategy_exit_intent(IStrategy& strategy,
     // strategy that omitted them. Position-reducing signal closes are skipped
     // so death-cross sells do not arm inverted short brackets.
     double net_qty = 0.0;
+    if (pre_route_net_qty.has_value())
+    {
+        net_qty = *pre_route_net_qty;
+    }
+    else if (!strategy_name.empty())
+    {
+        net_qty = portfolio_.get_strategy_position_qty(strategy_name, order.get_symbol());
+    }
+    else
     {
         const auto& positions = portfolio_.get_positions();
         auto it = positions.find(order.get_symbol());
@@ -1065,8 +1445,19 @@ void OrderIntentProcessor::drain_due(
     // Preserve the event-loop mid (open/tick of the current symbol). Each
     // pending order may belong to a different symbol; fill mid and MM
     // re-center must track the order's marks, not the event's (EL-MULTISYM-MID).
+    // F-01(b): open this observation's exit-evaluation window before any
+    // delayed order can fill inside it. Every bracket armed from a fill in
+    // this window carries this epoch, so this window's on_bar knows the bar
+    // open is a price printed before the bracket existed and refuses to
+    // anchor a gap fill there. drain_due is the one call that precedes
+    // evaluate_exits on every market path (bar, tick, L2, streaming, batch),
+    // which is why the window opens here.
+    exit_manager_.begin_evaluation_window();
+
+
     const double event_mid = last_mid_price_.load(std::memory_order_relaxed);
     auto submit = [&](const std::shared_ptr<order_event>& order) {
+
         if (!order)
             return true;
         const auto& sym = order->get_symbol();
@@ -1204,8 +1595,9 @@ bool OrderIntentProcessor::cancel(const std::string& symbol, uint64_t order_id,
 
     if (cancelled)
     {
-        order_tracker_.set_status(order_id, order_status::cancelled);
-        if (dashboard_builder_) dashboard_builder_->erase_open_order(order_id);
+        emit_terminal_transition(order_id, symbol,
+                                 order_tracker_.pending_qty(order_id),
+                                 order_status::cancelled);
         // Prefer last sim time (EL-CANCEL-WALLCLOCK); wall clock only if no event yet.
         const auto cancel_ts = (last_sim_time_.time_since_epoch().count() != 0)
             ? last_sim_time_
@@ -1214,7 +1606,7 @@ bool OrderIntentProcessor::cancel(const std::string& symbol, uint64_t order_id,
             cancel_ts, symbol, order_id, reason);
         hotpath_.log_event(*cancel_ev);
         hotpath_.publish_event(cancel_ev);
-        if (!config_.is_threaded())
+        if (!config_.has_async_analytics())
             analytics_.on_event(cancel_ev);
         // Unconditional via audit_sink (replaces questdb guard + #ifdef).
         //
@@ -1238,38 +1630,194 @@ bool OrderIntentProcessor::cancel(const std::string& symbol, uint64_t order_id,
 }
 
 bool OrderIntentProcessor::modify(const std::string& symbol, uint64_t order_id,
-                                  double new_price, double new_qty)
+                                  double new_price, double new_total_qty)
 {
-    // S3: no amend of resting live orders after process-wide terminal halt
-    // or operator pause (new risk / size changes must not sneak through).
+    // Public amend semantics are NEW TOTAL quantity.  A venue/local adapter
+    // receives only the derived remaining quantity after confirmed fills.
+    // This distinction is mandatory for a partially-filled order: total=6
+    // after cumulative fills=4 means remaining=2, never a replacement body
+    // of 6 that could take the economic total to 10.
     if (halt_flag_.load(std::memory_order_acquire) ||
         pause_all_.load(std::memory_order_acquire))
         return false;
 
     auto adapter = router_.resolve_adapter(symbol);
-    bool modified = adapter->modify_order(order_id, new_price, new_qty);
+    if (!adapter)
+        return false;
+    drain_async_submit_results(adapter.get());
+    if (halt_flag_.load(std::memory_order_acquire))
+        return false;
+
+    const auto* tracked = order_tracker_.find(order_id);
+    if (!tracked || order_tracker_.symbol_of(*tracked) != symbol)
+        return false;
+
+    // A synchronous bool-returning adapter cannot safely represent a pending
+    // venue amend/ACK/reject lifecycle.  Current live bridges deliberately do
+    // not implement modify_order; only an acknowledged resting limit is
+    // admitted here. Other types/states remain explicit fail-closed.
+    if ((tracked->status != order_status::open
+         && tracked->status != order_status::partially_filled)
+        || tracked->type != order_type::limit)
+        return false;
+
+    const auto now = last_sim_time_.time_since_epoch().count() != 0
+        ? last_sim_time_ : tracked->updated_ts;
+    if (now.time_since_epoch().count() == 0)
+        return false;
+
+    // Normalize and venue-filter the requested TOTAL terms exactly once,
+    // before any adapter mutation.  The normalized values are the only terms
+    // allowed into risk, venue state, ledger, event log, and reporting.
+    order_event normalized_total(
+        now, symbol, tracked->type, tracked->side,
+        new_total_qty, new_price, time_in_force::gtc);
+    normalized_total.set_order_id(order_id);
+    const auto* spec = resolve_instrument_spec(symbol);
+    if (spec)
+    {
+        if (!apply_instrument_spec(normalized_total, *spec))
+            return false;
+    }
+
+    const auto amend_validation = order_tracker_.validate_amend(
+        order_id, symbol, normalized_total.get_price(),
+        normalized_total.get_quantity());
+    if (!amend_validation.applied())
+        return false;
+
+    const double new_remaining_qty =
+        amend_validation.new_remaining_qty();
+    if (!std::isfinite(new_remaining_qty)
+        || !(new_remaining_qty > OrderTracker::qty_epsilon))
+        return false;
+
+    // Risk evaluates the full projected state: current portfolio + every
+    // other pending order + this amended remainder. Remove the old remainder
+    // for this order from the authoritative view before presenting the
+    // replacement candidate, otherwise the same order is counted twice.
+    order_event projected(
+        now, symbol, tracked->type, tracked->side,
+        new_remaining_qty, normalized_total.get_price(), time_in_force::gtc);
+    projected.set_order_id(order_id);
+    projected.set_strategy_name(attribution_.strategy_for(order_id));
+
+    // Venue replacement filters apply to the quantity that will actually
+    // remain on the book, not to the new economic total (which still includes
+    // already confirmed fills). Re-normalizing silently would desynchronise
+    // the adapter quantity from the ledger total, so any lot-size change is a
+    // rejection rather than an implicit second amendment.
+    if (spec)
+    {
+        const double normalized_remaining = spec->lot_size > 0.0
+            ? floor_qty_to_lot(new_remaining_qty, spec->lot_size)
+            : new_remaining_qty;
+        const double scale = std::max(1.0, std::abs(new_remaining_qty));
+        if (!std::isfinite(normalized_remaining)
+            || std::abs(normalized_remaining - new_remaining_qty)
+                > OrderTracker::qty_epsilon * scale
+            || !meets_min_qty(new_remaining_qty, spec->min_qty)
+            || !meets_min_notional(
+                new_remaining_qty, normalized_total.get_price(),
+                spec->min_notional))
+            return false;
+    }
+
+    auto snap = analytics_.risk_view();
+    build_authoritative_risk_view(projected, snap);
+    snap.portfolio.daily_realized_loss = risk_manager_.daily_realized_loss();
+    const double old_pending = order_tracker_.pending_qty(order_id);
+    double& same_side = tracked->side == order_side::buy
+        ? snap.instrument.open_buy_qty
+        : snap.instrument.open_sell_qty;
+    same_side = std::max(0.0, same_side - old_pending);
+    if (snap.instrument.open_order_count > 0)
+        --snap.instrument.open_order_count;
+    auto other_active_orders = order_tracker_.active_count();
+    if (other_active_orders > 0)
+        --other_active_orders;
+    projected.set_pretrade_open_order_count(other_active_orders);
+
+    // Venue-specific risk remains ordered before generic portfolio risk.
+    if (risk_check_)
+    {
+        const auto venue_decision = risk_check_->evaluate_with_account_equity(
+            projected, portfolio_, snap.instrument.mark_price,
+            snap.portfolio.equity);
+        if (!venue_decision.allow)
+            return false;
+    }
+
+    risk_rule rule = risk_rule::none;
+    auto amend_risk_action = risk_manager_.check_order(
+        projected, portfolio_, snap, other_active_orders, &rule);
+    const bool soft_portfolio_limit = config_.risk_soft_portfolio_limits
+        && config_.mode == engine_mode::backtest;
+    if (amend_risk_action == risk_action::halt && soft_portfolio_limit)
+        amend_risk_action = risk_action::reject;
+    if (amend_risk_action == risk_action::halt)
+    {
+        audit_sink_.record_event(
+            "risk_decision", symbol.c_str(),
+            projected.get_strategy_name().c_str(), order_id, "halt",
+            "amend rejected by risk manager; engine halted", to_string(rule));
+        hotpath_.trigger_halt("amend risk limit breached - engine halted");
+        return false;
+    }
+    if (amend_risk_action == risk_action::reject)
+    {
+        audit_sink_.record_event(
+            "risk_decision", symbol.c_str(),
+            projected.get_strategy_name().c_str(), order_id, "reject",
+            "amend rejected by risk manager", to_string(rule));
+        return false;
+    }
+
+    // Reserve the only fallible engine resource before the adapter commit.
+    // Pool exhaustion therefore cannot leave venue/local book state ahead of
+    // the ledger and event stream.
+    auto amend_ev = acquire_pooled(
+        amend_pool_, now, symbol, order_id,
+        normalized_total.get_price(), normalized_total.get_quantity());
+
+    const bool modified = adapter->modify_order(
+        order_id, normalized_total.get_price(), new_remaining_qty);
 
     if (modified)
     {
-        // The ledger's original quantity must follow a venue amendment, or a
-        // shrunk order could never reach filled == original and would leak an
-        // open slot (and its pending exposure) forever.
-        order_tracker_.amend(order_id, new_price, new_qty);
-        const auto now = (last_sim_time_.time_since_epoch().count() != 0)
-            ? last_sim_time_
-            : std::chrono::system_clock::now();
-        auto amend_ev = acquire_pooled(amend_pool_,
-            now, symbol, order_id, new_price, new_qty);
+        // The engine loop is the sole ledger writer. A revision mismatch here
+        // means an adapter re-entered or another lifecycle mutation crossed
+        // this supposedly synchronous commit. The venue may already differ,
+        // so this is terminal reconciliation, never a recoverable false.
+        if (!order_tracker_.commit_amend(amend_validation))
+        {
+            audit_sink_.record_event(
+                "order_lifecycle", symbol.c_str(),
+                projected.get_strategy_name().c_str(), order_id,
+                "amend_commit_fault",
+                "adapter amended but authoritative ledger token became stale",
+                "{}");
+            hotpath_.trigger_halt(
+                "adapter amend committed but ledger commit failed");
+            return false;
+        }
         hotpath_.log_event(*amend_ev);
         hotpath_.publish_event(amend_ev);
-        if (!config_.is_threaded())
+        if (!config_.has_async_analytics())
             analytics_.on_event(amend_ev);
-        // Unconditional via audit_sink (replaces questdb guard + #ifdef).
-        // Engine doesn't preserve old price/qty cleanly here; log zeros
-        // and rely on the orders/order_status tables for history.
         audit_sink_.record_amendment(order_id, symbol.c_str(),
-            /*old_price=*/0.0, new_price,
-            /*old_qty=*/0.0, new_qty, now);
+            amend_validation.old_price, amend_validation.new_price,
+            amend_validation.old_total_qty,
+            amend_validation.new_total_qty, now);
+
+        if (dashboard_builder_)
+        {
+            normalized_total.set_strategy_name(
+                projected.get_strategy_name());
+            dashboard_builder_->cache_open_order(normalized_total);
+            if (tracked->status == order_status::partially_filled)
+                dashboard_builder_->update_open_order_status(order_id, "partial");
+        }
     }
 
     return modified;
@@ -1288,19 +1836,18 @@ void OrderIntentProcessor::finalize_end_of_stream(std::size_t& event_count, bool
         const auto order_id = order->get_order_id();
         // R3: EOS expiry is its own terminal state. It is not an operator
         // cancel, and conflating the two hid genuine expiries in the audit.
-        order_tracker_.set_status(order_id, order_status::expired);
-        if (dashboard_builder_) dashboard_builder_->erase_open_order(order_id);
+        emit_terminal_transition(order_id, sym, order->get_quantity(),
+                                 order_status::expired);
         const auto ts = last_sim_time_.time_since_epoch().count() != 0
+
             ? last_sim_time_ : order->get_timestamp();
         constexpr const char* reason =
             "backtest_eos_without_future_market_event";
         auto cancel_ev = acquire_pooled(cancel_pool_, ts, sym, order_id, reason);
         hotpath_.log_event(*cancel_ev);
         hotpath_.publish_event(cancel_ev);
-        if (!config_.is_threaded())
+        if (!config_.has_async_analytics())
             analytics_.on_event(cancel_ev);
-        audit_sink_.record_cancellation(order_id, sym.c_str(),
-            attribution_.strategy_for(order_id).c_str(), reason);
         audit_sink_.record_status_transition(order_id,
             order_status::pending, order_status::expired, reason);
         ++event_count;

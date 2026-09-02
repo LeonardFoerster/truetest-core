@@ -12,7 +12,7 @@ public:
     explicit StatsWorker(double initial_cash = 100000.0,
                          std::size_t /*legacy_snapshot_interval*/ = 1000,
                          std::size_t rolling_window = 252, double risk_free_rate = 0.0,
-                         std::size_t periods_per_year = 252,
+                         std::size_t periods_per_year = 525600,
                          std::size_t max_equity_points = 100000)
         : analytics_(initial_cash, rolling_window, risk_free_rate,
                      periods_per_year, max_equity_points) {}

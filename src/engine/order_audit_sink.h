@@ -12,6 +12,32 @@
 #include "data/questdb/store.h"
 #endif
 
+// A single auditable view of an engine-owned exit.  The normal order/fill
+// audit callbacks remain useful for broad telemetry; this record is the
+// lifecycle join key for safety investigations and deliberately carries the
+// causality timestamps and terminal state in one schema.
+struct exit_lifecycle_record
+{
+    std::uint64_t signal_id = 0;
+    std::uint64_t order_id = 0;
+    std::uint64_t opener_order_id = 0;
+    std::uint64_t fill_id = 0;
+    std::chrono::system_clock::time_point decision_ts{};
+    std::chrono::system_clock::time_point submit_ts{};
+    std::chrono::system_clock::time_point eligible_ts{};
+    std::chrono::system_clock::time_point fill_ts{};
+    double requested_qty = 0.0;
+    double filled_qty = 0.0;
+    double remaining_qty = 0.0;
+    order_exit_reason reason = order_exit_reason::none;
+    order_status state_before = order_status::unknown;
+    order_status state_after = order_status::unknown;
+    const char* symbol = "";
+    const char* strategy_name = "";
+    const char* risk_outcome = "";
+    const char* phase = "";
+};
+
 // Full proposed interface. All methods use const char* where possible to avoid temporaries on hot paths.
 // Matches QuestdbStore call sites 1:1 but hides overloads and QuestDB types from engine callers.
 //
@@ -57,6 +83,8 @@ public:
                               const char* message,
                               const char* details_json = "") = 0;
 
+    virtual void record_exit_lifecycle(const exit_lifecycle_record& record) = 0;
+
     virtual std::size_t total_rejections() const { return 0; }
 
     // Run tag for metadata (e.g. funding records). Noop returns empty; real sink captures at activation.
@@ -95,6 +123,7 @@ public:
     void record_amendment(uint64_t, const char*, double, double, double, double, std::chrono::system_clock::time_point) override {}
     void record_funding(const funding_event&, const char*) override {}
     void record_event(const char*, const char*, const char*, uint64_t, const char*, const char*, const char*) override {}
+    void record_exit_lifecycle(const exit_lifecycle_record&) override {}
     std::size_t total_rejections() const override { return total_rejections_; }
     const char* run_tag() const override { return ""; }
     Health health() const override { return {}; }
@@ -143,6 +172,7 @@ public:
                       const char* severity,
                       const char* message,
                       const char* details_json = "") override;
+    void record_exit_lifecycle(const exit_lifecycle_record& record) override;
 
     std::size_t total_rejections() const override;
     const char* run_tag() const override;

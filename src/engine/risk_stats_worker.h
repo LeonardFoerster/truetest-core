@@ -20,7 +20,7 @@ public:
                     double initial_cash = 100000.0,
                     std::size_t rolling_window = 252,
                     double risk_free_rate = 0.0,
-                    std::size_t periods_per_year = 252,
+                    std::size_t periods_per_year = 525600,
                     std::size_t max_equity_points = 100000,
                     std::function<void(std::string_view)> halt_cb = {},
                     bool enforce_terminal_halt = true)

@@ -6,6 +6,7 @@
 #include "execution/queue_aware_book_adapter.h"
 #include "orderbook/orderbook_registry.h"
 #include "providers/provider.h"
+#include "reproducibility/deterministic_seed.h"
 // NOTE: no concrete bridge / local / shadow includes here.
 // Capability queries go through the IExecutionAdapter base.
 
@@ -40,11 +41,15 @@ std::shared_ptr<IExecutionAdapter> ExecutionRouter::resolve_adapter(const std::s
     if (!adapter)
     {
         auto ob = ob_reg_.get_or_create(symbol);
+        const std::uint64_t fill_seed = cfg_.seed_explicitly_set
+            ? truetest::reproducibility::DeterministicSeedDeriver(cfg_.seed)
+                  .derive(truetest::reproducibility::SeedDomain::fill_model)
+            : cfg_.fill_rng_seed;
 
         // Local book always needed for market/stop (exits + aggressive entries).
         auto local = std::make_shared<LocalBookAdapter>(
             ob, cfg_.fee_model, cfg_.fill_model,
-            cfg_.seed != 0 ? static_cast<unsigned>(cfg_.seed + 2) : cfg_.fill_rng_seed,
+            fill_seed,
             cfg_.market_aggression, cfg_.qty_scale,
             cfg_.latency_model, cfg_.impact_model,
             cfg_.walked_book_impact);
@@ -64,8 +69,7 @@ std::shared_ptr<IExecutionAdapter> ExecutionRouter::resolve_adapter(const std::s
             // dropping or downsizing an already marketable order.
             auto aggressive_limits = std::make_shared<LocalBookAdapter>(
                 ob, cfg_.fee_model, std::make_shared<PerfectFillModel>(),
-                cfg_.seed != 0 ? static_cast<unsigned>(cfg_.seed + 2)
-                               : cfg_.fill_rng_seed,
+                fill_seed,
                 cfg_.market_aggression, cfg_.qty_scale,
                 /*latency_model=*/nullptr, cfg_.impact_model,
                 cfg_.walked_book_impact);

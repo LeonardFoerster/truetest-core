@@ -3,6 +3,9 @@
 #include "core/event.h"
 #include "providers/provider.h"
 
+#include <algorithm>
+
+
 InstrumentSpecCache::InstrumentSpecCache(
     const std::unordered_map<std::string, instrument_spec>& overrides,
     IProvider* provider)
@@ -59,7 +62,22 @@ bool InstrumentSpecCache::apply_instrument_spec(order_event& o, const instrument
     return true;
 }
 
+std::vector<std::string> InstrumentSpecCache::unmatched_overrides(
+    const std::unordered_set<std::string>& present_symbols) const
+{
+    std::vector<std::string> missing;
+    for (const auto& [symbol, spec] : overrides_)
+    {
+        (void)spec;
+        if (present_symbols.count(symbol) == 0)
+            missing.push_back(symbol);
+    }
+    std::sort(missing.begin(), missing.end());   // deterministic diagnostics
+    return missing;
+}
+
 void InstrumentSpecCache::clear()
+
 {
     cache_.clear();
 }

@@ -68,11 +68,13 @@ namespace truetest::ui { struct streaming_stats; }
 #endif
 
 #include "providers/data_bridge.h"
+#include "providers/provider_event.h"
 #include "providers/local/csv_parser.h"
 #include "providers/provider_event.h"
 #include "analytics/shadow_tracker.h"
 #include "strategy/strategy_factory.h"
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -165,6 +167,16 @@ private:
     // Last market/tick sim timestamp for cancel/amend audit (EL-CANCEL-WALLCLOCK).
     // Updated on every bar/tick event path; cancel_event uses this, not wall clock.
     std::chrono::system_clock::time_point last_sim_time_{};
+    // F-08: the instant the information behind the current observation
+    // existed. Equal to last_sim_time_ for ticks and L2 updates (which are
+    // point observations); one bar interval later for bars, whose timestamp
+    // is the OPEN and whose close is what a strategy actually reacts to.
+    std::chrono::system_clock::time_point last_decision_ts_{};
+    // Inferred once per run from the loaded series. Zero when it cannot be
+    // inferred, which leaves the decision timestamp equal to the bar open —
+    // i.e. exactly the pre-F-08 behaviour, never a guess.
+    std::chrono::system_clock::duration bar_interval_{};
+
     std::size_t data_rows_rejected_{0};
 
     // Instrument spec cache (moved out; engine delegates). Cold path.
@@ -173,6 +185,16 @@ private:
     // Symbols already carrying real L2 depth - MarketMaker::replenish is
     // suppressed here so paper liquidity can't corrupt the fill sim.
     std::unordered_set<std::string> l2_seeded_symbols_;
+    struct l2_sequence_state
+    {
+        std::uint64_t last_update_id{0};
+        bool bootstrap_pending{false};
+        bool present{false};
+    };
+    // Indexed by the orderbook registry's bounded dense SymbolTable id.
+    // This avoids a second node/string allocation on the L2 event path.
+    std::array<l2_sequence_state, SymbolTable::kMaxSymbols>
+        l2_sequence_states_{};
     // resolve_instrument_spec / apply_instrument_spec moved to
     // OrderIntentProcessor (Phase 2) — route()'s own helpers now.
 
@@ -254,7 +276,7 @@ private:
     // - router_: partial adapter seam. Resolution, basic submit/poll, L2 and
     //   advance delegate here; async submit-result and exchange-shadow paths
     //   remain characterized engine-owned bypasses pending extraction.
-    std::unique_ptr<IOrderAuditSink> audit_sink_;
+    std::shared_ptr<IOrderAuditSink> audit_sink_;
     std::unique_ptr<ExecutionRouter> router_;
     ProviderFundingIngress* provider_funding_ingress_ = nullptr;
 
@@ -427,6 +449,10 @@ private:
 
     std::atomic<bool> worker_failed_{false};
     std::atomic<bool> run_failed_{false};
+    // Authoritative replay is one-shot. A failed application can expose a
+    // prefix internally, so the same engine object may never retry or replay
+    // a second ledger on top of existing economic state.
+    bool authoritative_replay_started_{false};
     std::atomic<bool> live_shutdown_failure_reported_{false};
     // pause_all_ moved up next to halt_flag_ (declared before orders_, see
     // above) — Phase 3 construction-order fix; was here originally.
@@ -491,7 +517,29 @@ private:
     void clear_pending_state();
     void prepare_event_logging();
     void finalize_inline_event_log() noexcept;
+    // F-07a: fail closed when a configured --instrument spec binds to no
+    // symbol present in the loaded series. Runs once, before any worker.
+    void validate_instrument_overrides();
+
+    // F-08: derive the bar interval from the loaded series (the modal gap
+    // between consecutive same-symbol bars). Zero when undecidable.
+    void infer_bar_interval();
+
+public:
+    // F-08: the interval the decision clock is offset by, for diagnostics and
+    // regression tests. Zero means "undecidable" — decision time then equals
+    // the bar open, i.e. the pre-F-08 behaviour.
+    std::chrono::system_clock::duration inferred_bar_interval() const
+    {
+        return bar_interval_;
+    }
+
+private:
+
+
+
     void setup_event_loop_infra();
+
     void teardown_event_loop_infra();
     // mid_for_symbol / drain_pending_orders moved to OrderIntentProcessor
     // (Phase 2, renamed drain_due) — call sites now say orders_->drain_due(...).
@@ -503,6 +551,7 @@ private:
     // No-op unless config_.maker_queue_model is set (QueueAware needs a tape).
     void feed_paper_trade_and_drain(const std::string& symbol,
                                     double price, double qty,
+                                    std::optional<order_side> aggressor_side,
                                     std::chrono::system_clock::time_point ts,
                                     std::size_t& event_count, bool& halt_requested);
     // After workers join: stamp soft/data research counters onto export analytics.
@@ -580,11 +629,13 @@ public:
                            const std::vector<l2_level>& bids,
                            const std::vector<l2_level>& asks,
                            std::chrono::system_clock::time_point timestamp = {},
-                           std::uint64_t quantity_scale = 1);
+                           std::uint64_t quantity_scale = 1,
+                           std::uint64_t last_update_id = 0);
     void apply_l2_update(const std::string& symbol,
                          tick_side side, double price, int64_t new_qty,
                          std::chrono::system_clock::time_point timestamp = {},
                          std::uint64_t quantity_scale = 1);
+    void apply_l2_delta_batch(const provider::l2_delta_batch& batch);
     void print_summary();
     const Analytics& get_analytics() const;
     // Research honesty: invalid CSV/tick rows counted at load (before workers start).
@@ -616,6 +667,9 @@ public:
     // Only valid in shadow mode. Returns nullptr otherwise.
     const portfolio* get_exchange_portfolio() const;
     const Analytics* get_exchange_analytics() const;
+
+    const portfolio& get_portfolio() const { return portfolio_; }
+    const truetest::exits::ExitManager& get_exit_manager() const { return exit_manager_; }
 
     // Fill `out` with a coherent dashboard snapshot. Returns false when no
     // snapshot exists yet (engine just constructed; first refresh hasn't

@@ -1,5 +1,7 @@
 #include "order_audit_sink.h"
 
+#include <cstdio>
+
 // Implementation of IOrderAuditSink seam (see core/docs/internal/engine-decomposition.md Phase 2 E-21 + engine-decomposition skill).
 // Engine never bypasses this for recording.
 
@@ -110,6 +112,37 @@ void QuestdbOrderAuditSink::record_event(const char* event_type,
                              message ? std::string(message) : std::string{},
                              details_json ? std::string(details_json) : std::string{});
     }
+}
+
+void QuestdbOrderAuditSink::record_exit_lifecycle(
+    const exit_lifecycle_record& record)
+{
+    if (!store_ || !active_flag_ || !*active_flag_)
+        return;
+    char details[640];
+    const int length = std::snprintf(details, sizeof(details),
+        "{\"signal_id\":%llu,\"order_id\":%llu,\"opener_order_id\":%llu,\"fill_id\":%llu,"
+        "\"decision_ts_ns\":%lld,\"submit_ts_ns\":%lld,\"eligible_ts_ns\":%lld,\"fill_ts_ns\":%lld,"
+        "\"requested_qty\":%.12g,\"filled_qty\":%.12g,\"remaining_qty\":%.12g,"
+        "\"exit_reason\":%u,\"state_before\":\"%s\",\"state_after\":\"%s\",\"risk_outcome\":\"%s\"}",
+        static_cast<unsigned long long>(record.signal_id),
+        static_cast<unsigned long long>(record.order_id),
+        static_cast<unsigned long long>(record.opener_order_id),
+        static_cast<unsigned long long>(record.fill_id),
+        static_cast<long long>(record.decision_ts.time_since_epoch().count()),
+        static_cast<long long>(record.submit_ts.time_since_epoch().count()),
+        static_cast<long long>(record.eligible_ts.time_since_epoch().count()),
+        static_cast<long long>(record.fill_ts.time_since_epoch().count()),
+        record.requested_qty, record.filled_qty, record.remaining_qty,
+        static_cast<unsigned>(record.reason), to_string(record.state_before),
+        to_string(record.state_after),
+        record.risk_outcome ? record.risk_outcome : "");
+    const char* encoded = length >= 0
+            && static_cast<std::size_t>(length) < sizeof(details)
+        ? details : "{\"encoding_error\":\"bounded exit lifecycle overflow\"}";
+    record_event("exit_lifecycle", record.symbol, record.strategy_name,
+                 record.order_id, record.phase,
+                 "exit lifecycle transition", encoded);
 }
 
 std::size_t QuestdbOrderAuditSink::total_rejections() const
