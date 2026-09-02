@@ -484,27 +484,28 @@ class ImmediateFillAdapter : public IExecutionAdapter
 {
 public:
     int submit_count = 0;
+    const std::atomic<bool>* halt_flag = nullptr;
+    std::vector<bool> halt_observed_on_submit;
     void submit_order(const order_event& o) override
     {
         ++submit_count;
-        fill_event f(o.get_earliest_eligible_ts(), o.get_symbol(), o.get_order_id(),
-                     o.get_side(), o.get_quantity(),
-                     o.get_price() > 0.0 ? o.get_price() : 100.0);
+        halt_observed_on_submit.push_back(halt_flag && halt_flag->load(std::memory_order_acquire));
+        fill_event f(o.get_earliest_eligible_ts(), o.get_symbol(), o.get_order_id(), o.get_side(),
+                     o.get_quantity(), o.get_price() > 0.0 ? o.get_price() : 100.0);
         f.set_source(fill_source::exchange);
-        if (!o.get_strategy_name().empty())
-            f.set_strategy_name(o.get_strategy_name());
+        if (!o.get_strategy_name().empty()) f.set_strategy_name(o.get_strategy_name());
         queue_.push_back(std::move(f));
     }
     bool poll_fills(std::vector<fill_event>& out) override
     {
         if (queue_.empty()) return false;
-        out.insert(out.end(),
-                   std::make_move_iterator(queue_.begin()),
+        out.insert(out.end(), std::make_move_iterator(queue_.begin()),
                    std::make_move_iterator(queue_.end()));
         queue_.clear();
         return true;
     }
     bool cancel_order(uint64_t) override { return false; }
+
 private:
     std::vector<fill_event> queue_;
 };
@@ -512,18 +513,14 @@ private:
 class ImmediateFillProvider : public IProvider
 {
 public:
-    std::shared_ptr<ImmediateFillAdapter> adapter =
-        std::make_shared<ImmediateFillAdapter>();
+    std::shared_ptr<ImmediateFillAdapter> adapter = std::make_shared<ImmediateFillAdapter>();
     std::string name() const override { return "immediate-fill"; }
     bool has_data_feed() const override { return false; }
     bool has_execution() const override { return true; }
     bool open() override { return true; }
     void close() override {}
     std::shared_ptr<IDataTransport> get_transport() override { return nullptr; }
-    std::shared_ptr<IExecutionAdapter> get_execution_adapter() override
-    {
-        return adapter;
-    }
+    std::shared_ptr<IExecutionAdapter> get_execution_adapter() override { return adapter; }
 };
 
 // S3: after process-wide halt from post-fill risk, no further submits.
@@ -540,8 +537,8 @@ TEST(TickToTradeSafety, ProcessWideHalt_RefusesFurtherSubmits)
     cfg.initial_balance = 100000.0;
     cfg.threading = thread_preset::inline_mode;
     cfg.disable_pinning = true;
-    cfg.execution_bar_delay = 0;  // submit immediately on emit
-    cfg.risk_soft_portfolio_limits = false; // hard post-fill halt under test
+    cfg.execution_bar_delay = 0;             // submit immediately on emit
+    cfg.risk_soft_portfolio_limits = false;  // hard post-fill halt under test
     // First fill trips post-fill max_trades_per_hour → trigger_halt.
     cfg.risk.max_trades_per_hour = 1;
     cfg.risk.max_drawdown = 1.0;
@@ -555,8 +552,44 @@ TEST(TickToTradeSafety, ProcessWideHalt_RefusesFurtherSubmits)
     // Exactly one submit (the fill that tripped halt); further bars must not submit.
     EXPECT_EQ(provider->adapter->submit_count, 1)
         << "after halt_flag_, process_order/route_order must refuse further submits";
-    EXPECT_LT(strat->calls, 20)
-        << "strategy loop should stop once process-wide halt is raised";
+    EXPECT_LT(strat->calls, 20) << "strategy loop should stop once process-wide halt is raised";
+}
+
+TEST(TickToTradeSafety, PostFillRiskUnwindsBeforeTerminalHalt)
+{
+    silence_cout quiet;
+    auto provider = std::make_shared<ImmediateFillProvider>();
+    auto strat = std::make_shared<OneShotBuyer>();
+
+    engine_config cfg;
+    cfg.mode = engine_mode::backtest;
+    cfg.provider = provider;
+    cfg.initial_balance = 100000.0;
+    cfg.threading = thread_preset::inline_mode;
+    cfg.disable_pinning = true;
+    cfg.execution_bar_delay = 0;
+    cfg.risk_soft_portfolio_limits = false;
+    cfg.risk_unwind = true;
+    cfg.risk.max_trades_per_hour = 1;
+    cfg.risk.max_drawdown = 1.0;
+    cfg.risk.max_loss_per_trade = 1e12;
+
+    engine eng(make_bars(20), nullptr, strat, std::move(cfg));
+    eng.set_primary_strategy_name("oneshot");
+    provider->adapter->halt_flag = &eng.get_halt_flag();
+    eng.run();
+
+    ASSERT_EQ(provider->adapter->submit_count, 2)
+        << "the risk-triggering order must be followed by one flatten order";
+    ASSERT_EQ(provider->adapter->halt_observed_on_submit.size(), 2U);
+    EXPECT_FALSE(provider->adapter->halt_observed_on_submit[0]);
+    EXPECT_FALSE(provider->adapter->halt_observed_on_submit[1])
+        << "the flatten order must reach the adapter before terminal halt";
+    EXPECT_TRUE(eng.get_halt_flag().load(std::memory_order_acquire));
+
+    const auto report = eng.get_analytics().generate_report();
+    EXPECT_EQ(report.total_fills, 2U);
+    EXPECT_TRUE(report.open_positions.empty());
 }
 
 TEST(TickToTradeSafety, LocalBookAdapter_StampsLatencyFromRecvNs)
