@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -17,7 +19,14 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <zstd.h>
 
@@ -705,7 +714,8 @@ static constexpr size_t   EVENT_LOG_MAX_INDEX_ENTRIES = 1'000'000;
 static constexpr std::array<uint8_t, 4> EVENT_LOG_FILE_MAGIC{
     0xFF, static_cast<uint8_t>('T'), static_cast<uint8_t>('T'), static_cast<uint8_t>('L')};
 static constexpr uint8_t EVENT_LOG_LEGACY_FILE_VERSION = 1;
-static constexpr uint8_t EVENT_LOG_FILE_VERSION = 2;
+static constexpr uint8_t EVENT_LOG_PREVIOUS_FILE_VERSION = 2;
+static constexpr uint8_t EVENT_LOG_FILE_VERSION = 3;
 static constexpr uint8_t EVENT_LOG_FILE_FLAG_ZSTD = 1U << 0;
 static constexpr uint8_t EVENT_LOG_FILE_FLAG_FINALIZED = 1U << 1;
 // Rotated files are independently finalized segments, not self-contained
@@ -716,6 +726,154 @@ static constexpr uint8_t EVENT_LOG_FILE_KNOWN_FLAGS =
     EVENT_LOG_FILE_FLAG_ZSTD | EVENT_LOG_FILE_FLAG_FINALIZED
     | EVENT_LOG_FILE_FLAG_SEGMENTED;
 static constexpr std::streamoff EVENT_LOG_FILE_PREAMBLE_BYTES = 6;
+static constexpr uint32_t EVENT_LOG_SEAL_MAGIC = 0x534C5454;
+static constexpr uint32_t EVENT_LOG_SEAL_VERSION = 1;
+static constexpr std::streamoff EVENT_LOG_INDEX_TRAILER_BYTES = 16;
+static constexpr std::streamoff EVENT_LOG_SEAL_BYTES = 40;
+
+constexpr uint32_t event_log_crc32c_table_entry(uint32_t index) noexcept
+{
+    uint32_t value = index;
+    for (int bit = 0; bit < 8; ++bit)
+        value = (value >> 1U) ^
+            ((value & 1U) != 0 ? 0x82F63B78U : 0U);
+    return value;
+}
+
+constexpr std::array<uint32_t, 256> make_event_log_crc32c_table() noexcept
+{
+    std::array<uint32_t, 256> table{};
+    for (std::size_t i = 0; i < table.size(); ++i)
+        table[i] = event_log_crc32c_table_entry(
+            static_cast<uint32_t>(i));
+    return table;
+}
+
+inline constexpr auto EVENT_LOG_CRC32C_TABLE =
+    make_event_log_crc32c_table();
+
+class EventLogCrc32c final
+{
+public:
+    void reset() noexcept { state_ = 0xFFFFFFFFU; }
+
+    void update(const void* bytes, std::size_t size) noexcept
+    {
+        const auto* cursor = static_cast<const uint8_t*>(bytes);
+        for (std::size_t i = 0; i < size; ++i)
+            state_ = EVENT_LOG_CRC32C_TABLE[
+                (state_ ^ cursor[i]) & 0xFFU] ^ (state_ >> 8U);
+    }
+
+    [[nodiscard]] uint32_t value() const noexcept
+    {
+        return state_ ^ 0xFFFFFFFFU;
+    }
+
+private:
+    uint32_t state_ = 0xFFFFFFFFU;
+};
+
+class EventLogWriterLock final
+{
+public:
+    EventLogWriterLock() noexcept = default;
+    ~EventLogWriterLock() noexcept { release(); }
+
+    EventLogWriterLock(const EventLogWriterLock&) = delete;
+    EventLogWriterLock& operator=(const EventLogWriterLock&) = delete;
+
+    void acquire(const std::string& path, bool create)
+    {
+        release();
+        fd_ = open_and_lock(path, create);
+    }
+
+    // Rotation must keep the sealed segment exclusively owned until the new
+    // base pathname is also locked.  Acquire the successor first so a failure
+    // leaves the old lock intact and the logger can fail closed without ever
+    // creating a two-writer interval.
+    void handoff_to(const std::string& path, bool create)
+    {
+        const int successor = open_and_lock(path, create);
+        release();
+        fd_ = successor;
+    }
+
+    [[nodiscard]] std::string open_path() const
+    {
+        if (fd_ < 0)
+            throw std::logic_error(
+                "EventLogger: writer lock has no open file");
+        return "/proc/self/fd/" + std::to_string(fd_);
+    }
+
+    void release() noexcept
+    {
+        if (fd_ < 0)
+            return;
+        (void)::flock(fd_, LOCK_UN);
+        (void)::close(fd_);
+        fd_ = -1;
+    }
+
+private:
+    static int open_and_lock(const std::string& path, bool create)
+    {
+        int flags = O_RDWR | O_CLOEXEC | O_NONBLOCK;
+        if (create)
+            flags |= O_CREAT;
+        const int candidate = ::open(path.c_str(), flags, 0666);
+        if (candidate < 0)
+            throw std::runtime_error(
+                "EventLogger: cannot open writer lock for " + path + ": " +
+                std::strerror(errno));
+        if (::flock(candidate, LOCK_EX | LOCK_NB) != 0)
+        {
+            const int saved_errno = errno;
+            ::close(candidate);
+            throw std::runtime_error(
+                "EventLogger: another writer owns " + path + ": " +
+                std::strerror(saved_errno));
+        }
+        struct stat locked {};
+        struct stat visible {};
+        if (::fstat(candidate, &locked) != 0 ||
+            ::stat(path.c_str(), &visible) != 0 ||
+            locked.st_dev != visible.st_dev ||
+            locked.st_ino != visible.st_ino)
+        {
+            (void)::flock(candidate, LOCK_UN);
+            (void)::close(candidate);
+            throw std::runtime_error(
+                "EventLogger: writer target changed while acquiring lock: " +
+                path);
+        }
+        return candidate;
+    }
+
+    int fd_ = -1;
+};
+
+inline bool durable_log_directory_is_trusted(const struct stat& st) noexcept
+{
+    if (!S_ISDIR(st.st_mode))
+        return false;
+    static const uid_t namespace_root_owner = []() noexcept {
+        struct stat root {};
+        return ::lstat("/", &root) == 0 ? root.st_uid : uid_t{0};
+    }();
+    const uid_t owner = st.st_uid;
+    if (owner != 0 && owner != namespace_root_owner &&
+        owner != ::geteuid())
+        return false;
+    const bool writable_by_others =
+        (st.st_mode & (S_IWGRP | S_IWOTH)) != 0;
+    // Sticky directories (for example /tmp) prevent an unrelated uid from
+    // unlinking an entry it does not own. A writable non-sticky ancestor can
+    // replace the ledger pathname after its record fsync but before submit.
+    return !writable_by_others || (st.st_mode & S_ISVTX) != 0;
+}
 
 
 // Rejects /dev/null, FIFOs, device nodes, and symlinks resolving to any of
@@ -737,26 +895,305 @@ inline bool is_acceptable_durable_log_target(const std::string& path)
 {
     if (path.empty())
         return false;
+
+    const std::filesystem::path target(path);
+    const auto filename = target.filename();
+    if (filename.empty() || filename == "." || filename == "..")
+        return false;
+
     std::error_code ec;
-    const bool exists = std::filesystem::exists(path, ec);
+    const auto target_status = std::filesystem::symlink_status(target, ec);
     if (ec)
-        return false; // could not determine target state (e.g. a symlink
-                       // loop) -> fail closed rather than guess
-    if (exists)
     {
-        // is_regular_file() follows symlinks, so a symlink to /dev/null is
-        // correctly rejected here too.
-        const bool regular = std::filesystem::is_regular_file(path, ec);
-        return regular && !ec;
+        if (ec != std::errc::no_such_file_or_directory)
+            return false;
+        ec.clear();
     }
-    // Not yet created: require the parent directory to exist so a later
-    // ofstream::open(..., trunc) actually creates a genuine regular file.
-    const auto parent = std::filesystem::path(path).parent_path();
-    if (parent.empty())
-        return true; // relative path in CWD
-    const bool parent_is_dir = std::filesystem::is_directory(parent, ec);
-    return parent_is_dir && !ec;
+
+    // Mainnet ledgers are immutable session artifacts. Reusing even an empty
+    // path would make startup semantics depend on who created it and could
+    // truncate an earlier authoritative ledger. Actual acquisition below is
+    // the atomic O_EXCL authority; this predicate only keeps --dry-run aligned.
+    if (std::filesystem::exists(target_status))
+        return false;
+
+    const auto parent = target.parent_path().empty()
+        ? std::filesystem::path{"."}
+        : target.parent_path();
+    const auto absolute_parent =
+        std::filesystem::absolute(parent, ec).lexically_normal();
+    if (ec)
+        return false;
+    auto current = std::filesystem::path{"/"};
+    struct stat directory_stat {};
+    if (::lstat(current.c_str(), &directory_stat) != 0 ||
+        !durable_log_directory_is_trusted(directory_stat))
+        return false;
+    const auto components = absolute_parent.relative_path();
+    for (const auto& component : components)
+    {
+        if (component.empty() || component == ".")
+            continue;
+        current /= component;
+        const auto component_status =
+            std::filesystem::symlink_status(current, ec);
+        if (ec || std::filesystem::is_symlink(component_status) ||
+            !std::filesystem::is_directory(component_status) ||
+            ::lstat(current.c_str(), &directory_stat) != 0 ||
+            !durable_log_directory_is_trusted(directory_stat))
+            return false;
+    }
+    return ::access(absolute_parent.c_str(), W_OK | X_OK) == 0;
 }
+
+// Holds an already-open, kernel-verified regular file across provider startup.
+// EventLogger subsequently opens /proc/self/fd/<fd>, so pathname replacement
+// between CLI validation and logger construction cannot redirect the durable
+// ledger to a FIFO/device/different inode. The reservation is intentionally
+// Linux-specific, matching the supported production target.
+class DurableEventLogReservation final
+{
+public:
+    static std::shared_ptr<DurableEventLogReservation> acquire(
+        const std::string& path)
+    {
+        if (path.empty())
+            throw std::runtime_error(
+                "durable event log: target path is empty");
+
+        const std::filesystem::path target(path);
+        std::error_code ec;
+        const auto absolute_target =
+            std::filesystem::absolute(target, ec).lexically_normal();
+        if (ec)
+            throw std::runtime_error(
+                "durable event log: cannot resolve target path: " +
+                ec.message());
+        const auto filename_path = absolute_target.filename();
+        if (filename_path.empty() || filename_path == "." ||
+            filename_path == "..")
+            throw std::runtime_error(
+                "durable event log: target must name a new file");
+
+        const auto parent_path = absolute_target.parent_path();
+        unique_fd parent_fd(open_directory_without_symlinks(parent_path));
+
+        const std::string filename = filename_path.string();
+        const int flags = O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
+                          O_NOFOLLOW | O_NONBLOCK;
+        unique_fd file_fd(::openat(
+            parent_fd.get(), filename.c_str(), flags, 0640));
+        if (file_fd.get() < 0)
+            throw_system_error(
+                errno == EEXIST
+                    ? "target already exists; choose a unique session path"
+                    : "cannot create target");
+
+        struct stat st {};
+        if (::fstat(file_fd.get(), &st) != 0)
+            throw_system_error("cannot inspect created target");
+        if (!S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+            st.st_uid != ::geteuid())
+            throw std::runtime_error(
+                "durable event log: created target failed regular-file "
+                "ownership/link-count checks");
+
+        auto owned = std::unique_ptr<DurableEventLogReservation>(
+            new DurableEventLogReservation(
+                path, absolute_target.string(), filename,
+                file_fd.get(), parent_fd.get(), st.st_dev, st.st_ino,
+                st.st_uid));
+        file_fd.release();
+        parent_fd.release();
+        return std::shared_ptr<DurableEventLogReservation>(std::move(owned));
+    }
+
+    ~DurableEventLogReservation() noexcept
+    {
+        if (fd_ >= 0) ::close(fd_);
+        if (parent_fd_ >= 0) ::close(parent_fd_);
+    }
+
+    DurableEventLogReservation(const DurableEventLogReservation&) = delete;
+    DurableEventLogReservation& operator=(
+        const DurableEventLogReservation&) = delete;
+
+    const std::string& logical_path() const noexcept { return logical_path_; }
+    const std::string& open_path() const noexcept { return open_path_; }
+
+    bool sync() const noexcept
+    {
+        // The file fsync persists contents/metadata; the directory fsync is
+        // what makes the freshly-created pathname itself crash-durable.
+        return sync_fd(fd_) && sync_fd(parent_fd_);
+    }
+
+    bool still_refers_to_reserved_file() const noexcept
+    {
+        struct stat st {};
+        return fd_ >= 0 && ::fstat(fd_, &st) == 0 && S_ISREG(st.st_mode) &&
+               st.st_dev == device_ && st.st_ino == inode_ &&
+               st.st_uid == owner_ && st.st_nlink == 1;
+    }
+
+    bool logical_path_still_refers_to_reserved_file() const noexcept
+    {
+        struct stat pinned_parent_entry {};
+        struct stat visible_entry {};
+        return parent_fd_ >= 0 &&
+               ::fstatat(parent_fd_, filename_.c_str(),
+                         &pinned_parent_entry, AT_SYMLINK_NOFOLLOW) == 0 &&
+               ::lstat(identity_path_.c_str(), &visible_entry) == 0 &&
+               same_reserved_file(pinned_parent_entry) &&
+               same_reserved_file(visible_entry);
+    }
+
+    bool ready_for_venue_mutation() const noexcept
+    {
+        return still_refers_to_reserved_file() &&
+               logical_path_still_refers_to_reserved_file();
+    }
+
+    // A retained inode is a one-session capability, not a reusable file
+    // handle.  Claiming before EventLogger opens/truncates it prevents a
+    // second logger (or a constructor that will later reject its arguments)
+    // from erasing the first writer's ledger.
+    void claim_for_logger()
+    {
+        bool expected = false;
+        if (!logger_claimed_.compare_exchange_strong(
+                expected, true,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire))
+            throw std::runtime_error(
+                "durable event log: reservation already claimed");
+    }
+
+private:
+    class unique_fd final
+    {
+    public:
+        explicit unique_fd(int fd = -1) noexcept : fd_(fd) {}
+        ~unique_fd() noexcept { if (fd_ >= 0) ::close(fd_); }
+        unique_fd(const unique_fd&) = delete;
+        unique_fd& operator=(const unique_fd&) = delete;
+        unique_fd(unique_fd&& other) noexcept : fd_(other.fd_)
+        {
+            other.fd_ = -1;
+        }
+        unique_fd& operator=(unique_fd&& other) noexcept
+        {
+            if (this == &other) return *this;
+            if (fd_ >= 0) ::close(fd_);
+            fd_ = other.fd_;
+            other.fd_ = -1;
+            return *this;
+        }
+        [[nodiscard]] int get() const noexcept { return fd_; }
+        void release() noexcept { fd_ = -1; }
+
+    private:
+        int fd_ = -1;
+    };
+
+    [[noreturn]] static void throw_system_error(std::string_view operation)
+    {
+        const int saved_errno = errno;
+        throw std::runtime_error(
+            "durable event log: " + std::string(operation) + ": " +
+            std::strerror(saved_errno));
+    }
+
+    static int open_directory_without_symlinks(
+        const std::filesystem::path& input)
+    {
+        const auto normalized = input.lexically_normal();
+        unique_fd current(::open(
+            normalized.is_absolute() ? "/" : ".",
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+        if (current.get() < 0)
+            throw_system_error("cannot open path root");
+
+        const auto validate = [](int fd) {
+            struct stat st {};
+            if (::fstat(fd, &st) != 0)
+                throw_system_error("cannot inspect parent directory");
+            if (!durable_log_directory_is_trusted(st))
+                throw std::runtime_error(
+                    "durable event log: parent directory ancestry is "
+                    "untrusted or writable without sticky protection");
+        };
+        validate(current.get());
+
+        const auto relative = normalized.is_absolute()
+            ? normalized.relative_path()
+            : normalized;
+        for (const auto& component : relative)
+        {
+            const auto name = component.string();
+            if (name.empty() || name == ".")
+                continue;
+            unique_fd next(::openat(
+                current.get(), name.c_str(),
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+            if (next.get() < 0)
+                throw_system_error(
+                    "cannot open parent directory component without symlinks");
+            validate(next.get());
+            current = std::move(next);
+        }
+        const int result = current.get();
+        current.release();
+        return result;
+    }
+
+    static bool sync_fd(int fd) noexcept
+    {
+        if (fd < 0) return false;
+        int result = 0;
+        do
+        {
+            result = ::fsync(fd);
+        }
+        while (result != 0 && errno == EINTR);
+        return result == 0;
+    }
+
+    bool same_reserved_file(const struct stat& st) const noexcept
+    {
+        return S_ISREG(st.st_mode) && st.st_dev == device_ &&
+               st.st_ino == inode_ && st.st_uid == owner_ &&
+               st.st_nlink == 1;
+    }
+
+    DurableEventLogReservation(std::string path,
+                               std::string identity_path,
+                               std::string filename,
+                               int fd, int parent_fd,
+                               dev_t device, ino_t inode, uid_t owner)
+        : logical_path_(std::move(path))
+        , identity_path_(std::move(identity_path))
+        , filename_(std::move(filename))
+        , open_path_("/proc/self/fd/" + std::to_string(fd))
+        , fd_(fd)
+        , parent_fd_(parent_fd)
+        , device_(device)
+        , inode_(inode)
+        , owner_(owner)
+    {
+    }
+
+    std::string logical_path_;
+    std::string identity_path_;
+    std::string filename_;
+    std::string open_path_;
+    int fd_ = -1;
+    int parent_fd_ = -1;
+    dev_t device_{};
+    ino_t inode_{};
+    uid_t owner_{};
+    std::atomic<bool> logger_claimed_{false};
+};
 
 class EventLogger
 {
@@ -764,15 +1201,39 @@ public:
     explicit EventLogger(const std::string& path,
                          bool compress = true,
                          std::uint64_t max_bytes = 0,
-                         int max_files = 5)
+                         int max_files = 5,
+                         std::shared_ptr<DurableEventLogReservation>
+                             reservation = {})
         : path_(path)
-        , out_(path, std::ios::binary | std::ios::trunc)
+        , reservation_(std::move(reservation))
+        , out_()
         , compress_(compress)
         , cctx_(nullptr, &ZSTD_freeCCtx)
         , event_count_(0)
         , max_bytes_(max_bytes)
         , max_files_(max_files)
     {
+        if (reservation_)
+        {
+            // Claim first and never release the claim.  Any later constructor
+            // failure abandons this unique session path rather than making it
+            // reusable after a partially initialized writer.
+            reservation_->claim_for_logger();
+            if (reservation_->logical_path() != path_ ||
+                !reservation_->still_refers_to_reserved_file() ||
+                !reservation_->logical_path_still_refers_to_reserved_file())
+                throw std::runtime_error(
+                    "EventLogger: durable target reservation mismatch");
+            if (max_bytes_ > 0)
+                throw std::runtime_error(
+                    "EventLogger: rotation is unsupported for a reserved "
+                    "durable target");
+        }
+        writer_lock_.acquire(
+            reservation_ ? reservation_->open_path() : path,
+            /*create=*/!reservation_);
+        out_.open(writer_lock_.open_path(),
+                  std::ios::binary | std::ios::trunc);
         if (!out_)
             throw std::runtime_error("EventLogger: cannot open " + path);
         if (compress_) {
@@ -785,6 +1246,13 @@ public:
 
     ~EventLogger() noexcept
     {
+        // A reserved mainnet ledger may only be sealed by the engine after it
+        // has quiesced every producer, drained the logging ring, and proved
+        // that no record or durability acknowledgement was lost.  Destructor
+        // finalization has no access to that protocol state and must therefore
+        // leave an open reserved file as a diagnostic-only prefix.
+        if (reservation_ || state_ != logger_state::open)
+            return;
         try {
             finalize();
         } catch (...) {
@@ -796,13 +1264,68 @@ public:
     EventLogger(const EventLogger&) = delete;
     EventLogger& operator=(const EventLogger&) = delete;
 
+    [[nodiscard]] const std::string& logical_path() const noexcept
+    {
+        return path_;
+    }
+
+    [[nodiscard]] bool has_durable_reservation() const noexcept
+    {
+        return static_cast<bool>(reservation_);
+    }
+
+    [[nodiscard]] bool uses_durable_reservation(
+        const std::shared_ptr<DurableEventLogReservation>& expected) const
+        noexcept
+    {
+        return reservation_ == expected;
+    }
+
+    // Mainnet startup calls this before provider open. Flushing the preamble
+    // proves that the exact retained logger stream is writable; syncing the
+    // independently retained descriptor proves those bytes reached the same
+    // kernel-verified inode. The logger remains open and is transferred into
+    // the engine rather than reopening a mutable pathname later.
+    void verify_durable_ready()
+    {
+        if (!reservation_)
+            throw std::logic_error(
+                "EventLogger: durable readiness requires a reservation");
+        try
+        {
+            ensure_open();
+            out_.flush();
+            if (!out_)
+                throw std::runtime_error(
+                    "EventLogger: durable preamble flush failed");
+            if (!reservation_->still_refers_to_reserved_file() ||
+                !reservation_->logical_path_still_refers_to_reserved_file() ||
+                !reservation_->sync() ||
+                !reservation_->logical_path_still_refers_to_reserved_file())
+                throw std::runtime_error(
+                    "EventLogger: durable preamble sync failed");
+            durable_records_since_sync_ = 0;
+            last_durable_sync_ = std::chrono::steady_clock::now();
+        }
+        catch (...)
+        {
+            poison(std::current_exception());
+        }
+    }
+
     void log(const event& e)
     {
         ensure_open();
 
-        std::vector<uint8_t> payload;
+        // Any record-construction failure is terminal for this ledger, even
+        // when it happens before the first byte is written.  Otherwise a
+        // worker could skip one economic event, continue/finalize later, and
+        // incorrectly mark the incomplete file authoritative.
+        try
+        {
+            std::vector<uint8_t> payload;
 
-        switch (e.get_type()) {
+            switch (e.get_type()) {
         case event_type::market:
             payload = event_serial::serialise(require_event<market_event>(e, "market")); break;
         case event_type::signal:
@@ -827,47 +1350,46 @@ public:
             payload = event_serial::serialise(require_event<funding_event>(e, "funding")); break;
         default:
             throw std::runtime_error("EventLogger: unknown event type");
-        }
-
-        const uint8_t* encoded_data = payload.data();
-        std::size_t encoded_size = payload.size();
-        if (compress_) {
-            const size_t bound = ZSTD_compressBound(payload.size());
-            compressed_buf_.resize(bound);
-            const size_t compressed_size = ZSTD_compressCCtx(
-                cctx_.get(), compressed_buf_.data(), bound,
-                payload.data(), payload.size(), 1);
-            if (ZSTD_isError(compressed_size))
-                throw std::runtime_error(std::string("zstd compress: ") + ZSTD_getErrorName(compressed_size));
-            encoded_data = compressed_buf_.data();
-            encoded_size = compressed_size;
-        }
-
-        const auto encoded_size_u32 = event_serial::checked_u32_length(
-            encoded_size, compress_ ? "compressed payload" : "payload");
-        if (encoded_size >
-            static_cast<std::size_t>(
-                std::numeric_limits<std::streamsize>::max())) {
-            throw std::length_error("event_log: payload is not stream-writable");
-        }
-
-        const bool sample_index =
-            event_count_ % EVENT_LOG_INDEX_INTERVAL == 0 &&
-            index_.size() < EVENT_LOG_MAX_INDEX_ENTRIES;
-        EventLogIndexEntry index_entry{};
-        if (sample_index) {
-            if (index_.size() == index_.capacity()) {
-                const auto next_capacity = std::min(
-                    EVENT_LOG_MAX_INDEX_ENTRIES,
-                    std::max<std::size_t>(1, index_.capacity() * 2));
-                index_.reserve(next_capacity);
             }
-            index_entry.timestamp_us =
-                std::chrono::duration_cast<std::chrono::microseconds>(
-                    e.get_timestamp().time_since_epoch()).count();
-        }
 
-        try {
+            const uint8_t* encoded_data = payload.data();
+            std::size_t encoded_size = payload.size();
+            if (compress_) {
+                const size_t bound = ZSTD_compressBound(payload.size());
+                compressed_buf_.resize(bound);
+                const size_t compressed_size = ZSTD_compressCCtx(
+                    cctx_.get(), compressed_buf_.data(), bound,
+                    payload.data(), payload.size(), 1);
+                if (ZSTD_isError(compressed_size))
+                    throw std::runtime_error(std::string("zstd compress: ") + ZSTD_getErrorName(compressed_size));
+                encoded_data = compressed_buf_.data();
+                encoded_size = compressed_size;
+            }
+
+            const auto encoded_size_u32 = event_serial::checked_u32_length(
+                encoded_size, compress_ ? "compressed payload" : "payload");
+            if (encoded_size >
+                static_cast<std::size_t>(
+                    std::numeric_limits<std::streamsize>::max())) {
+                throw std::length_error("event_log: payload is not stream-writable");
+            }
+
+            const bool sample_index =
+                event_count_ % EVENT_LOG_INDEX_INTERVAL == 0 &&
+                index_.size() < EVENT_LOG_MAX_INDEX_ENTRIES;
+            EventLogIndexEntry index_entry{};
+            if (sample_index) {
+                if (index_.size() == index_.capacity()) {
+                    const auto next_capacity = std::min(
+                        EVENT_LOG_MAX_INDEX_ENTRIES,
+                        std::max<std::size_t>(1, index_.capacity() * 2));
+                    index_.reserve(next_capacity);
+                }
+                index_entry.timestamp_us =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        e.get_timestamp().time_since_epoch()).count();
+            }
+
             const auto record_position = out_.tellp();
             if (record_position == std::streampos(-1))
                 throw std::runtime_error("EventLogger: cannot determine record offset");
@@ -877,12 +1399,17 @@ public:
             if (sample_index)
                 index_entry.file_offset = static_cast<uint64_t>(record_offset);
 
-            event_serial::write_u8(out_, static_cast<uint8_t>(e.get_type()));
-            event_serial::write_u32(out_, encoded_size_u32);
-            if (encoded_size > 0) {
-                out_.write(reinterpret_cast<const char*>(encoded_data),
-                           static_cast<std::streamsize>(encoded_size));
-            }
+            const auto type_byte = static_cast<uint8_t>(e.get_type());
+            EventLogCrc32c record_crc;
+            record_crc.update(&type_byte, sizeof(type_byte));
+            record_crc.update(&encoded_size_u32, sizeof(encoded_size_u32));
+            record_crc.update(encoded_data, encoded_size);
+            const uint32_t record_checksum = record_crc.value();
+
+            write_tracked(&type_byte, sizeof(type_byte));
+            write_tracked(&encoded_size_u32, sizeof(encoded_size_u32));
+            write_tracked(encoded_data, encoded_size);
+            write_tracked(&record_checksum, sizeof(record_checksum));
             if (!out_)
                 throw std::runtime_error("EventLogger: record write failed");
 
@@ -898,7 +1425,20 @@ public:
                 throw std::runtime_error("EventLogger: invalid log size");
             if (max_bytes_ > 0 && static_cast<std::uint64_t>(log_size) >= max_bytes_)
                 rotate();
-        } catch (...) {
+
+            if (reservation_)
+            {
+                ++durable_records_since_sync_;
+                const auto now = std::chrono::steady_clock::now();
+                if (requires_immediate_durable_sync(e.get_type()) ||
+                    durable_records_since_sync_ >=
+                        DURABLE_SYNC_RECORD_INTERVAL ||
+                    now - last_durable_sync_ >= DURABLE_SYNC_TIME_INTERVAL)
+                    durable_checkpoint();
+            }
+        }
+        catch (...)
+        {
             poison(std::current_exception());
         }
     }
@@ -908,6 +1448,11 @@ public:
         if (state_ == logger_state::finalized) return;
         rethrow_if_poisoned();
         try {
+            if (reservation_)
+            {
+                durable_checkpoint();
+                return;
+            }
             out_.flush();
             if (!out_)
                 throw std::runtime_error("EventLogger: flush failed");
@@ -918,8 +1463,17 @@ public:
 
     void finalize()
     {
+        finalize_impl(/*release_writer_lock=*/true);
+    }
+
+private:
+    void finalize_impl(bool release_writer_lock)
+    {
         if (state_ == logger_state::finalized) return;
         rethrow_if_poisoned();
+        if (state_ == logger_state::abandoned)
+            throw std::logic_error(
+                "EventLogger: cannot finalize an abandoned ledger");
 
         try {
             const auto index_position = out_.tellp();
@@ -933,37 +1487,180 @@ public:
             const auto index_count = event_serial::checked_u32_length(
                 index_.size(), "index count");
             for (const auto& entry : index_) {
-                event_serial::write_i64(out_, entry.timestamp_us);
-                event_serial::write_u64(out_, entry.file_offset);
+                write_tracked(
+                    &entry.timestamp_us, sizeof(entry.timestamp_us));
+                write_tracked(
+                    &entry.file_offset, sizeof(entry.file_offset));
             }
-            event_serial::write_u64(
-                out_, static_cast<uint64_t>(signed_index_offset));
-            event_serial::write_u32(out_, index_count);
-            event_serial::write_u32(out_, EVENT_LOG_INDEX_MAGIC);
+            const auto index_offset =
+                static_cast<uint64_t>(signed_index_offset);
+            write_tracked(&index_offset, sizeof(index_offset));
+            write_tracked(&index_count, sizeof(index_count));
+            write_tracked(
+                &EVENT_LOG_INDEX_MAGIC, sizeof(EVENT_LOG_INDEX_MAGIC));
+
+            const auto seal_position = out_.tellp();
+            if (seal_position == std::streampos(-1))
+                throw std::runtime_error(
+                    "EventLogger: cannot determine seal offset");
+            const auto signed_covered_length =
+                static_cast<std::streamoff>(seal_position);
+            if (signed_covered_length < 0)
+                throw std::runtime_error(
+                    "EventLogger: invalid seal offset");
+
+            const uint64_t record_count =
+                static_cast<uint64_t>(event_count_);
+            const uint64_t covered_length =
+                static_cast<uint64_t>(signed_covered_length);
+            const uint32_t contents_crc = file_crc_.value();
+            EventLogCrc32c seal_crc;
+            seal_crc.update(
+                &EVENT_LOG_SEAL_MAGIC, sizeof(EVENT_LOG_SEAL_MAGIC));
+            seal_crc.update(
+                &EVENT_LOG_SEAL_VERSION, sizeof(EVENT_LOG_SEAL_VERSION));
+            seal_crc.update(&record_count, sizeof(record_count));
+            seal_crc.update(&index_offset, sizeof(index_offset));
+            seal_crc.update(&covered_length, sizeof(covered_length));
+            seal_crc.update(&contents_crc, sizeof(contents_crc));
+            const uint32_t seal_checksum = seal_crc.value();
+
+            // Commit in two durable phases.  The index/trailer prefix reaches
+            // stable storage first while the ledger is still unsealed.  Only
+            // then is the fixed terminal seal appended and synced.  A valid
+            // seal is the crash-recovery commit authority; if the final sync
+            // reports an error after all seal bytes reached the file, runtime
+            // remains failed/uncertain even though recovery may accept the
+            // independently verifiable seal.
+            out_.flush();
+            if (!out_)
+                throw std::runtime_error(
+                    "EventLogger: finalize prefix write failed");
+            if (reservation_)
+            {
+                if (!reservation_->still_refers_to_reserved_file() ||
+                    !reservation_->logical_path_still_refers_to_reserved_file() ||
+                    !reservation_->sync() ||
+                    !reservation_->logical_path_still_refers_to_reserved_file())
+                    throw std::runtime_error(
+                        "EventLogger: durable finalize prefix sync/path check "
+                        "failed");
+            }
+
+            event_serial::write_u32(out_, EVENT_LOG_SEAL_MAGIC);
+            event_serial::write_u32(out_, EVENT_LOG_SEAL_VERSION);
+            event_serial::write_u64(out_, record_count);
+            event_serial::write_u64(out_, index_offset);
+            event_serial::write_u64(out_, covered_length);
+            event_serial::write_u32(out_, contents_crc);
+            event_serial::write_u32(out_, seal_checksum);
             out_.flush();
             if (!out_)
                 throw std::runtime_error("EventLogger: finalize write failed");
-            mark_file_finalized();
+            if (reservation_)
+            {
+                if (!reservation_->still_refers_to_reserved_file() ||
+                    !reservation_->logical_path_still_refers_to_reserved_file() ||
+                    !reservation_->sync() ||
+                    !reservation_->logical_path_still_refers_to_reserved_file())
+                    throw std::runtime_error(
+                        "EventLogger: durable seal sync/path check failed");
+            }
             state_ = logger_state::finalized;
+            if (release_writer_lock)
+                writer_lock_.release();
         } catch (...) {
             poison(std::current_exception());
         }
     }
 
+public:
+    // Called only by the logging-worker thread itself or by the engine after
+    // that thread has joined. It is sticky and deliberately omits a complete
+    // integrity seal. The flushed prefix may still be useful for diagnosis,
+    // but it can never become an authoritative replay ledger.
+    void abandon() noexcept
+    {
+        if (state_ == logger_state::finalized ||
+            state_ == logger_state::poisoned ||
+            state_ == logger_state::abandoned)
+            return;
+        state_ = logger_state::abandoned;
+        try
+        {
+            out_.flush();
+            out_.close();
+            writer_lock_.release();
+        }
+        catch (...)
+        {
+        }
+    }
+
 private:
-    enum class logger_state { open, finalized, poisoned };
+    enum class logger_state { open, finalized, poisoned, abandoned };
 
     std::string path_;
+    std::shared_ptr<DurableEventLogReservation> reservation_;
+    EventLogWriterLock writer_lock_;
     std::ofstream out_;
     bool compress_;
     std::unique_ptr<ZSTD_CCtx, decltype(&ZSTD_freeCCtx)> cctx_;
     std::vector<uint8_t> compressed_buf_;
     std::vector<EventLogIndexEntry> index_;
+    EventLogCrc32c file_crc_;
     size_t event_count_;
     logger_state state_ = logger_state::open;
     std::exception_ptr failure_;
     std::uint64_t max_bytes_ = 0;
     int max_files_ = 5;
+    std::size_t durable_records_since_sync_ = 0;
+    std::chrono::steady_clock::time_point last_durable_sync_{};
+    static constexpr std::size_t DURABLE_SYNC_RECORD_INTERVAL = 256;
+    static constexpr auto DURABLE_SYNC_TIME_INTERVAL =
+        std::chrono::milliseconds(100);
+
+    static bool requires_immediate_durable_sync(event_type type) noexcept
+    {
+        switch (type)
+        {
+        case event_type::order:
+        case event_type::fill:
+        case event_type::cancel:
+        case event_type::amend:
+        case event_type::rejection:
+        case event_type::funding:
+            return true;
+        case event_type::market:
+        case event_type::signal:
+        case event_type::tick:
+        case event_type::l2_snapshot:
+        case event_type::l2_update:
+            return false;
+        }
+        return true;
+    }
+
+    void durable_checkpoint()
+    {
+        if (!reservation_)
+            return;
+        out_.flush();
+        if (!out_)
+            throw std::runtime_error(
+                "EventLogger: durable checkpoint flush failed");
+        if (!reservation_->still_refers_to_reserved_file() ||
+            !reservation_->logical_path_still_refers_to_reserved_file() ||
+            !reservation_->sync() ||
+            !reservation_->logical_path_still_refers_to_reserved_file())
+            throw std::runtime_error(
+                "EventLogger: durable checkpoint sync/path check failed");
+        durable_records_since_sync_ = 0;
+        // Measure the interval from completion, not from the pre-fsync call
+        // site. A slow fsync must not make every following market record look
+        // immediately overdue and collapse into an fsync feedback loop.
+        last_durable_sync_ = std::chrono::steady_clock::now();
+    }
 
     template <typename Event>
     static const Event& require_event(const event& value, std::string_view name)
@@ -980,6 +1677,9 @@ private:
     void ensure_open() const
     {
         rethrow_if_poisoned();
+        if (state_ == logger_state::abandoned)
+            throw std::logic_error(
+                "EventLogger: cannot use an abandoned ledger");
         if (state_ == logger_state::finalized)
             throw std::logic_error("EventLogger: cannot log after finalize");
     }
@@ -990,49 +1690,52 @@ private:
             std::rethrow_exception(failure_);
     }
 
+    void write_tracked(const void* bytes, std::size_t size)
+    {
+        if (size > static_cast<std::size_t>(
+                std::numeric_limits<std::streamsize>::max()))
+            throw std::length_error(
+                "EventLogger: tracked write is not stream-writable");
+        if (size != 0)
+        {
+            out_.write(static_cast<const char*>(bytes),
+                       static_cast<std::streamsize>(size));
+            file_crc_.update(bytes, size);
+        }
+    }
+
     [[noreturn]] void poison(std::exception_ptr failure)
     {
-        state_ = logger_state::poisoned;
-        failure_ = failure;
+        if (state_ != logger_state::poisoned)
+        {
+            state_ = logger_state::poisoned;
+            failure_ = failure;
+        }
         std::rethrow_exception(failure_);
     }
 
     void write_file_preamble()
     {
-        out_.write(reinterpret_cast<const char*>(EVENT_LOG_FILE_MAGIC.data()),
-                   static_cast<std::streamsize>(EVENT_LOG_FILE_MAGIC.size()));
-        event_serial::write_u8(out_, EVENT_LOG_FILE_VERSION);
-        event_serial::write_u8(out_, file_flags(/*finalized=*/false));
+        const uint8_t version = EVENT_LOG_FILE_VERSION;
+        const uint8_t flags = file_flags();
+        write_tracked(EVENT_LOG_FILE_MAGIC.data(), EVENT_LOG_FILE_MAGIC.size());
+        write_tracked(&version, sizeof(version));
+        write_tracked(&flags, sizeof(flags));
         if (!out_)
             throw std::runtime_error("EventLogger: preamble write failed");
     }
 
-    [[nodiscard]] uint8_t file_flags(bool finalized) const noexcept
+    [[nodiscard]] uint8_t file_flags() const noexcept
     {
         uint8_t flags = compress_ ? EVENT_LOG_FILE_FLAG_ZSTD : uint8_t{0};
-        if (finalized)
-            flags |= EVENT_LOG_FILE_FLAG_FINALIZED;
         if (max_bytes_ > 0)
             flags |= EVENT_LOG_FILE_FLAG_SEGMENTED;
         return flags;
     }
 
-    void mark_file_finalized()
-    {
-        constexpr std::streamoff flags_offset =
-            static_cast<std::streamoff>(EVENT_LOG_FILE_MAGIC.size() + 1U);
-        out_.seekp(flags_offset, std::ios::beg);
-        if (!out_)
-            throw std::runtime_error("EventLogger: cannot update finalize marker");
-        event_serial::write_u8(out_, file_flags(/*finalized=*/true));
-        out_.flush();
-        if (!out_)
-            throw std::runtime_error("EventLogger: finalize marker write failed");
-    }
-
     void rotate()
     {
-        finalize();
+        finalize_impl(/*release_writer_lock=*/false);
         out_.close();
         if (out_.fail())
             throw std::runtime_error("EventLogger: close before rotate failed");
@@ -1074,11 +1777,14 @@ private:
             remove_path(path_);
         }
 
-        out_.open(path_, std::ios::binary | std::ios::trunc);
+        writer_lock_.handoff_to(path_, /*create=*/true);
+        out_.open(writer_lock_.open_path(),
+                  std::ios::binary | std::ios::trunc);
         if (!out_)
             throw std::runtime_error("EventLogger: reopen after rotate failed: " + path_);
         index_.clear();
         event_count_ = 0;
+        file_crc_.reset();
         write_file_preamble();
         state_ = logger_state::open;
     }
@@ -1095,15 +1801,186 @@ struct EventReplayLimits
     std::uint32_t max_index_entries = 1'000'000;
 };
 
+class EventReplaySource final
+{
+public:
+    explicit EventReplaySource(const std::string& path)
+        : path_(path)
+    {
+        const int candidate =
+            ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        if (candidate < 0)
+            throw std::runtime_error(
+                "EventReplayer: cannot open " + path + ": " +
+                std::strerror(errno));
+        struct stat st {};
+        if (::fstat(candidate, &st) != 0 || !S_ISREG(st.st_mode))
+        {
+            (void)::close(candidate);
+            throw std::runtime_error(
+                "EventReplayer: source is not a readable regular file: " +
+                path);
+        }
+        try
+        {
+            open_path_ = "/proc/self/fd/" + std::to_string(candidate);
+        }
+        catch (...)
+        {
+            (void)::close(candidate);
+            throw;
+        }
+        fd_ = candidate;
+    }
+
+    ~EventReplaySource() noexcept
+    {
+        if (fd_ >= 0)
+        {
+            if (shared_lock_)
+                (void)::flock(fd_, LOCK_UN);
+            (void)::close(fd_);
+        }
+    }
+
+    EventReplaySource(const EventReplaySource&) = delete;
+    EventReplaySource& operator=(const EventReplaySource&) = delete;
+
+    [[nodiscard]] const std::string& open_path() const noexcept
+    {
+        return open_path_;
+    }
+
+    void acquire_shared_lock()
+    {
+        if (shared_lock_)
+            return;
+        if (::flock(fd_, LOCK_SH | LOCK_NB) != 0)
+            throw std::runtime_error(
+                "EventReplayer: sealed source is still owned by a writer");
+        shared_lock_ = true;
+    }
+
+    void capture_snapshot()
+    {
+        struct stat descriptor {};
+        struct stat visible {};
+        if (::fstat(fd_, &descriptor) != 0 ||
+            ::stat(path_.c_str(), &visible) != 0 ||
+            !same_identity(descriptor, visible))
+            throw std::runtime_error(
+                "EventReplayer: source identity changed during open");
+        snapshot_ = fingerprint(descriptor);
+        snapshot_captured_ = true;
+    }
+
+    [[nodiscard]] bool stable() const noexcept
+    {
+        if (!snapshot_captured_ || fd_ < 0)
+            return false;
+        struct stat descriptor {};
+        struct stat visible {};
+        return ::fstat(fd_, &descriptor) == 0 &&
+               ::stat(path_.c_str(), &visible) == 0 &&
+               same_identity(descriptor, visible) &&
+               same_fingerprint(snapshot_, fingerprint(descriptor));
+    }
+
+    void require_stable() const
+    {
+        if (!stable())
+            throw std::runtime_error(
+                "EventReplayer: source changed during replay");
+    }
+
+    [[nodiscard]] std::streamoff snapshot_size() const
+    {
+        if (!snapshot_captured_ || snapshot_.size < 0 ||
+            static_cast<uint64_t>(snapshot_.size) >
+                static_cast<uint64_t>(
+                    std::numeric_limits<std::streamoff>::max()))
+            throw std::runtime_error(
+                "EventReplayer: invalid source snapshot size");
+        return static_cast<std::streamoff>(snapshot_.size);
+    }
+
+private:
+    struct source_fingerprint
+    {
+        dev_t device{};
+        ino_t inode{};
+        uid_t owner{};
+        mode_t mode{};
+        nlink_t links{};
+        off_t size{};
+        time_t modified_seconds{};
+        long modified_nanoseconds{};
+        time_t changed_seconds{};
+        long changed_nanoseconds{};
+    };
+
+    static source_fingerprint fingerprint(const struct stat& st) noexcept
+    {
+        return {
+            st.st_dev,
+            st.st_ino,
+            st.st_uid,
+            st.st_mode,
+            st.st_nlink,
+            st.st_size,
+            st.st_mtim.tv_sec,
+            st.st_mtim.tv_nsec,
+            st.st_ctim.tv_sec,
+            st.st_ctim.tv_nsec,
+        };
+    }
+
+    static bool same_identity(const struct stat& lhs,
+                              const struct stat& rhs) noexcept
+    {
+        return S_ISREG(lhs.st_mode) && S_ISREG(rhs.st_mode) &&
+               lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino &&
+               lhs.st_uid == rhs.st_uid;
+    }
+
+    static bool same_fingerprint(const source_fingerprint& lhs,
+                                 const source_fingerprint& rhs) noexcept
+    {
+        return lhs.device == rhs.device && lhs.inode == rhs.inode &&
+               lhs.owner == rhs.owner && lhs.mode == rhs.mode &&
+               lhs.links == rhs.links && lhs.size == rhs.size &&
+               lhs.modified_seconds == rhs.modified_seconds &&
+               lhs.modified_nanoseconds == rhs.modified_nanoseconds &&
+               lhs.changed_seconds == rhs.changed_seconds &&
+               lhs.changed_nanoseconds == rhs.changed_nanoseconds;
+    }
+
+    std::string path_;
+    std::string open_path_;
+    int fd_ = -1;
+    source_fingerprint snapshot_{};
+    bool snapshot_captured_ = false;
+    bool shared_lock_ = false;
+};
+
 
 class EventReplayer
 {
+    struct integrity_seal
+    {
+        uint64_t record_count = 0;
+        uint64_t index_offset = 0;
+        uint64_t covered_length = 0;
+        uint32_t contents_crc = 0;
+    };
+
 public:
     explicit EventReplayer(const std::string& path,
                            int64_t replay_from_us = 0,
                            int64_t replay_to_us = INT64_MAX,
                            EventReplayLimits limits = {})
-        : in_(path, std::ios::binary)
+        : source_(path)
+        , in_(source_.open_path(), std::ios::binary)
         , compressed_(false)
         , dctx_(nullptr, &ZSTD_freeDCtx)
         , replay_from_us_(replay_from_us)
@@ -1112,6 +1989,7 @@ public:
     {
         if (!in_)
             throw std::runtime_error("EventReplayer: cannot open " + path);
+        source_.capture_snapshot();
 
         in_.seekg(0, std::ios::end);
         const auto file_end = in_.tellg();
@@ -1124,17 +2002,67 @@ public:
         const bool has_file_preamble = read_file_preamble(file_size);
         data_end_ = file_size;
 
-        constexpr std::streamoff trailer_bytes = 16;
-        const bool requires_index_trailer =
-            has_file_preamble && file_finalized_;
-        if (requires_index_trailer && file_size < trailer_bytes) {
-            throw std::runtime_error(
-                "EventReplayer: finalized file is missing index trailer");
-        }
+        if (integrity_records_)
+        {
+            integrity_seal seal{};
+            if (try_read_integrity_seal(file_size, seal))
+            {
+                file_finalized_ = true;
+                if (seal.covered_length <
+                    static_cast<uint64_t>(
+                        EVENT_LOG_FILE_PREAMBLE_BYTES +
+                        EVENT_LOG_INDEX_TRAILER_BYTES))
+                    throw std::runtime_error(
+                        "EventReplayer: integrity seal covered length is "
+                        "too small");
+                const uint64_t trailer_offset = seal.covered_length -
+                    static_cast<uint64_t>(EVENT_LOG_INDEX_TRAILER_BYTES);
+                seek_absolute(static_cast<std::streamoff>(trailer_offset));
+                uint64_t index_offset = 0;
+                uint32_t entry_count = 0;
+                uint32_t magic = 0;
+                read_exact(&index_offset, 8, "index offset");
+                read_exact(&entry_count, 4, "index count");
+                read_exact(&magic, 4, "index magic");
+                if (magic != EVENT_LOG_INDEX_MAGIC ||
+                    index_offset != seal.index_offset)
+                    throw std::runtime_error(
+                        "EventReplayer: integrity seal/index mismatch");
+                const uint64_t index_bytes =
+                    static_cast<uint64_t>(entry_count) * 16U;
+                if (entry_count > limits_.max_index_entries ||
+                    index_bytes > trailer_offset ||
+                    index_offset < static_cast<uint64_t>(data_begin_) ||
+                    index_offset != trailer_offset - index_bytes)
+                    throw std::runtime_error(
+                        "EventReplayer: invalid sealed index trailer");
 
-        if (requires_index_trailer ||
-            (!has_file_preamble && file_size >= trailer_bytes)) {
-            seek_absolute(file_size - trailer_bytes);
+                data_end_ = static_cast<std::streamoff>(index_offset);
+                const uint64_t observed_records =
+                    validate_index_and_seek(index_offset, entry_count);
+                if (observed_records != seal.record_count)
+                    throw std::runtime_error(
+                        "EventReplayer: sealed record count mismatch");
+            }
+            else
+            {
+                seek_absolute(data_begin_);
+            }
+        }
+        else
+        {
+            const bool requires_index_trailer =
+                has_file_preamble && file_finalized_;
+            if (requires_index_trailer &&
+                file_size < EVENT_LOG_INDEX_TRAILER_BYTES)
+                throw std::runtime_error(
+                    "EventReplayer: finalized file is missing index trailer");
+
+            if (requires_index_trailer ||
+                (!has_file_preamble &&
+                 file_size >= EVENT_LOG_INDEX_TRAILER_BYTES))
+            {
+            seek_absolute(file_size - EVENT_LOG_INDEX_TRAILER_BYTES);
             uint64_t index_offset = 0;
             uint32_t entry_count = 0;
             uint32_t magic = 0;
@@ -1144,7 +2072,8 @@ public:
 
             if (magic == EVENT_LOG_INDEX_MAGIC) {
                 const auto trailer_offset =
-                    static_cast<uint64_t>(file_size - trailer_bytes);
+                    static_cast<uint64_t>(
+                        file_size - EVENT_LOG_INDEX_TRAILER_BYTES);
                 constexpr uint64_t index_entry_bytes = 16;
                 const uint64_t index_bytes =
                     static_cast<uint64_t>(entry_count) * index_entry_bytes;
@@ -1157,21 +2086,25 @@ public:
                     throw std::runtime_error("EventReplayer: index entry limit exceeded");
 
                 data_end_ = static_cast<std::streamoff>(index_offset);
-                validate_index_and_seek(index_offset, entry_count);
+                (void)validate_index_and_seek(index_offset, entry_count);
             } else if (requires_index_trailer) {
                 throw std::runtime_error(
                     "EventReplayer: finalized file is missing index trailer");
             } else {
                 seek_absolute(data_begin_);
             }
-        } else {
+            }
+            else
+            {
             seek_absolute(data_begin_);
+            }
         }
 
         if (!has_file_preamble)
             compressed_ = detect_legacy_compression();
         if (compressed_)
             create_decompression_context();
+        source_.require_stable();
     }
 
     ~EventReplayer() = default;
@@ -1181,6 +2114,7 @@ public:
 
     bool has_next() const
     {
+        source_.require_stable();
         if (failed_ || !in_.good()) return false;
         const auto pos = in_.tellg();
         if (pos == std::streampos(-1)) return false;
@@ -1188,7 +2122,10 @@ public:
     }
 
     uint8_t file_version() const noexcept { return file_version_; }
-    bool file_finalized() const noexcept { return file_finalized_; }
+    bool file_finalized() const noexcept
+    {
+        return file_finalized_ && source_.stable();
+    }
     bool file_segmented() const noexcept { return file_segmented_; }
 
     event_pointer next()
@@ -1197,7 +2134,10 @@ public:
             std::rethrow_exception(failure_);
 
         try {
-            return next_impl();
+            source_.require_stable();
+            auto replayed = next_impl();
+            source_.require_stable();
+            return replayed;
         } catch (...) {
             // A malformed record is not a recoverable skip: continuing after
             // it could replay a suffix from an untrusted, corrupted log.
@@ -1215,7 +2155,9 @@ private:
             if (record_offset == data_end_) return nullptr;
             if (record_offset < 0 || record_offset > data_end_)
                 throw std::runtime_error("EventReplayer: invalid record offset");
-            if (data_end_ - record_offset < 5)
+            const std::streamoff record_overhead =
+                integrity_records_ ? 9 : 5;
+            if (data_end_ - record_offset < record_overhead)
                 throw std::runtime_error("EventReplayer: truncated record header");
 
             uint8_t type_byte = 0;
@@ -1237,13 +2179,31 @@ private:
 
             const auto payload_offset = current_position();
             const auto remaining = data_end_ - payload_offset;
-            if (remaining < 0 || static_cast<uint64_t>(remaining) < payload_size)
+            const uint64_t required_tail =
+                static_cast<uint64_t>(payload_size) +
+                (integrity_records_ ? sizeof(uint32_t) : 0U);
+            if (remaining < 0 ||
+                static_cast<uint64_t>(remaining) < required_tail)
                 throw std::runtime_error("EventReplayer: truncated payload");
 
             std::vector<uint8_t> raw(static_cast<std::size_t>(payload_size));
             if (!raw.empty())
                 read_exact(raw.data(), static_cast<std::streamsize>(raw.size()),
                            "payload");
+
+            if (integrity_records_)
+            {
+                uint32_t stored_checksum = 0;
+                read_exact(&stored_checksum, sizeof(stored_checksum),
+                           "record checksum");
+                EventLogCrc32c record_crc;
+                record_crc.update(&type_byte, sizeof(type_byte));
+                record_crc.update(&payload_size, sizeof(payload_size));
+                record_crc.update(raw.data(), raw.size());
+                if (stored_checksum != record_crc.value())
+                    throw std::runtime_error(
+                        "EventReplayer: record checksum mismatch");
+            }
 
             event_pointer ev;
             if (compressed_) {
@@ -1299,6 +2259,7 @@ private:
         }
     }
 
+    EventReplaySource source_;
     mutable std::ifstream in_;
     bool compressed_;
     std::unique_ptr<ZSTD_DCtx, decltype(&ZSTD_freeDCtx)> dctx_;
@@ -1310,6 +2271,7 @@ private:
     bool file_finalized_ = false;
     bool file_segmented_ = false;
     uint8_t file_version_ = 0; // 0 = headerless legacy stream
+    bool integrity_records_ = false;
     bool failed_ = false;
     std::exception_ptr failure_;
 
@@ -1368,6 +2330,7 @@ private:
         read_exact(&version, 1, "file preamble version");
         read_exact(&flags, 1, "file preamble flags");
         if (version != EVENT_LOG_FILE_VERSION &&
+            version != EVENT_LOG_PREVIOUS_FILE_VERSION &&
             version != EVENT_LOG_LEGACY_FILE_VERSION)
             throw std::runtime_error("EventReplayer: unsupported file version");
         if ((flags & ~EVENT_LOG_FILE_KNOWN_FLAGS) != 0)
@@ -1376,8 +2339,96 @@ private:
         file_version_ = version;
         data_begin_ = EVENT_LOG_FILE_PREAMBLE_BYTES;
         compressed_ = (flags & EVENT_LOG_FILE_FLAG_ZSTD) != 0;
-        file_finalized_ = (flags & EVENT_LOG_FILE_FLAG_FINALIZED) != 0;
+        integrity_records_ = version == EVENT_LOG_FILE_VERSION;
+        if (integrity_records_ &&
+            (flags & EVENT_LOG_FILE_FLAG_FINALIZED) != 0)
+            throw std::runtime_error(
+                "EventReplayer: v3 finalization must use a terminal seal");
+        file_finalized_ = !integrity_records_ &&
+            (flags & EVENT_LOG_FILE_FLAG_FINALIZED) != 0;
         file_segmented_ = (flags & EVENT_LOG_FILE_FLAG_SEGMENTED) != 0;
+        return true;
+    }
+
+    bool try_read_integrity_seal(std::streamoff file_size,
+                                 integrity_seal& seal)
+    {
+        if (file_size < EVENT_LOG_FILE_PREAMBLE_BYTES + EVENT_LOG_SEAL_BYTES)
+            return false;
+
+        const auto seal_offset = file_size - EVENT_LOG_SEAL_BYTES;
+        seek_absolute(seal_offset);
+
+        uint32_t magic = 0;
+        uint32_t version = 0;
+        uint32_t seal_checksum = 0;
+        read_exact(&magic, sizeof(magic), "integrity seal magic");
+        if (magic != EVENT_LOG_SEAL_MAGIC)
+            return false;
+        // A terminal seal is authoritative only while this reader owns a
+        // shared advisory lock and the pinned inode/path metadata remains the
+        // exact snapshot validated below. Re-read the seal after locking; the
+        // first magic read is only a lock-routing hint.
+        source_.acquire_shared_lock();
+        source_.capture_snapshot();
+        if (source_.snapshot_size() != file_size)
+            throw std::runtime_error(
+                "EventReplayer: source size changed before seal validation");
+        seek_absolute(seal_offset);
+        read_exact(&magic, sizeof(magic), "integrity seal magic");
+        if (magic != EVENT_LOG_SEAL_MAGIC)
+            throw std::runtime_error(
+                "EventReplayer: integrity seal changed while locking source");
+        read_exact(&version, sizeof(version), "integrity seal version");
+        read_exact(&seal.record_count, sizeof(seal.record_count),
+                   "integrity seal record count");
+        read_exact(&seal.index_offset, sizeof(seal.index_offset),
+                   "integrity seal index offset");
+        read_exact(&seal.covered_length, sizeof(seal.covered_length),
+                   "integrity seal covered length");
+        read_exact(&seal.contents_crc, sizeof(seal.contents_crc),
+                   "integrity seal contents checksum");
+        read_exact(&seal_checksum, sizeof(seal_checksum),
+                   "integrity seal checksum");
+
+        if (version != EVENT_LOG_SEAL_VERSION)
+            throw std::runtime_error(
+                "EventReplayer: unsupported integrity seal version");
+        if (seal.covered_length != static_cast<uint64_t>(seal_offset))
+            throw std::runtime_error(
+                "EventReplayer: integrity seal is not terminal");
+
+        EventLogCrc32c expected_seal_crc;
+        expected_seal_crc.update(&magic, sizeof(magic));
+        expected_seal_crc.update(&version, sizeof(version));
+        expected_seal_crc.update(
+            &seal.record_count, sizeof(seal.record_count));
+        expected_seal_crc.update(
+            &seal.index_offset, sizeof(seal.index_offset));
+        expected_seal_crc.update(
+            &seal.covered_length, sizeof(seal.covered_length));
+        expected_seal_crc.update(
+            &seal.contents_crc, sizeof(seal.contents_crc));
+        if (seal_checksum != expected_seal_crc.value())
+            throw std::runtime_error(
+                "EventReplayer: integrity seal checksum mismatch");
+
+        EventLogCrc32c contents_crc;
+        seek_absolute(0);
+        std::array<uint8_t, 64U * 1024U> buffer{};
+        uint64_t remaining = seal.covered_length;
+        while (remaining != 0)
+        {
+            const auto chunk = static_cast<std::size_t>(std::min<uint64_t>(
+                remaining, static_cast<uint64_t>(buffer.size())));
+            read_exact(buffer.data(), static_cast<std::streamsize>(chunk),
+                       "integrity-covered contents");
+            contents_crc.update(buffer.data(), chunk);
+            remaining -= chunk;
+        }
+        if (seal.contents_crc != contents_crc.value())
+            throw std::runtime_error(
+                "EventReplayer: integrity-covered contents checksum mismatch");
         return true;
     }
 
@@ -1427,7 +2478,8 @@ private:
                 "EventReplayer: failed to create zstd context");
     }
 
-    void validate_index_and_seek(uint64_t index_offset, uint32_t entry_count)
+    uint64_t validate_index_and_seek(uint64_t index_offset,
+                                     uint32_t entry_count)
     {
         const auto index_end = static_cast<std::streamoff>(index_offset);
         bool timestamps_sorted = true;
@@ -1473,6 +2525,7 @@ private:
         read_next_index();
         seek_absolute(data_begin_);
         std::streamoff record_offset = data_begin_;
+        uint64_t record_count = 0;
 
         // Validate the record area and every index target in one streaming
         // pass. No record payload or index vector is materialised here.
@@ -1487,7 +2540,9 @@ private:
                 seek_absolute(record_offset);
             }
 
-            if (index_end - record_offset < 5) {
+            const std::streamoff record_overhead =
+                integrity_records_ ? 9 : 5;
+            if (index_end - record_offset < record_overhead) {
                 throw std::runtime_error(
                     "EventReplayer: index does not start on a record boundary");
             }
@@ -1505,13 +2560,20 @@ private:
 
             const auto payload_offset = current_position();
             const auto remaining = index_end - payload_offset;
+            const uint64_t required_tail =
+                static_cast<uint64_t>(payload_size) +
+                (integrity_records_ ? sizeof(uint32_t) : 0U);
             if (remaining < 0 ||
-                static_cast<uint64_t>(remaining) < payload_size) {
+                static_cast<uint64_t>(remaining) < required_tail) {
                 throw std::runtime_error(
                     "EventReplayer: index cuts through a record");
             }
             record_offset = payload_offset +
-                            static_cast<std::streamoff>(payload_size);
+                            static_cast<std::streamoff>(required_tail);
+            if (record_count == std::numeric_limits<uint64_t>::max())
+                throw std::runtime_error(
+                    "EventReplayer: record count overflow");
+            ++record_count;
             seek_absolute(record_offset);
         }
 
@@ -1523,5 +2585,6 @@ private:
             seek_absolute(static_cast<std::streamoff>(best_offset));
         else
             seek_absolute(data_begin_);
+        return record_count;
     }
 };
