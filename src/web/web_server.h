@@ -27,7 +27,7 @@ namespace truetest::web {
 // Endpoints:
 //   GET /                 → static SPA (when asset_dir is set)
 //   GET /api/snapshot     → one-shot current SnapshotFrame
-//   GET /api/results      → ResultsReport JSON (via report callback)
+//   GET /api/results      → ResultsReport JSON after explicit safe publication
 //   WS  /stream           → live SnapshotFrame at poll_hz (initial frame on connect)
 //
 // Nothing here can place orders — there are no control routes.
@@ -37,10 +37,13 @@ public:
     // Fills `out` with the current engine snapshot; returns false if no
     // snapshot is available yet (engine not started / not initialised).
     using snapshot_fn = std::function<bool(truetest::ui::dashboard_snapshot& out)>;
-    // Returns the ResultsReport JSON for the completed/in-progress run.
+    // Returns an immutable/published ResultsReport JSON. The server must not
+    // call this while the engine owns and mutates the underlying Analytics.
     using report_fn = std::function<std::string()>;
+    using report_ready_fn = std::function<bool()>;
 
-    WebServer(web_config cfg, snapshot_fn snap, report_fn report);
+    WebServer(web_config cfg, snapshot_fn snap, report_fn report,
+              report_ready_fn report_ready = {});
     ~WebServer();
 
     WebServer(const WebServer&) = delete;
@@ -73,6 +76,7 @@ private:
     web_config  cfg_;
     snapshot_fn snap_;
     report_fn   report_;
+    report_ready_fn report_ready_;
 
     mg_context* ctx_ = nullptr;
     std::thread poller_;

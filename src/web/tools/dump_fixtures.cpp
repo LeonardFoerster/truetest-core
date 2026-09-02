@@ -150,6 +150,9 @@ AnalyticsReport build_report()
     r.rolling_sharpe = 2.02; r.rolling_max_drawdown = 12.1;
 
     r.win_rate = 59.8; r.profit_factor = 1.92;
+    r.total_win = 1'920.0; r.total_loss = 1'000.0;
+    r.profit_factor_valid = true;
+    r.profit_factor_reason = "computed_from_gross_win_and_loss";
     r.total_trades = 1284; r.winning_trades = 768;
     r.total_orders = 1320; r.total_fills = 1290;
     r.avg_win = 540.0; r.avg_loss = -360.0;
@@ -200,6 +203,7 @@ AnalyticsReport build_report()
     {
         trade_record t;
         t.order_id = 5000 - i;
+        t.fill_id = static_cast<std::uint64_t>(i + 1);
         t.side = (i % 2 == 0) ? order_side::buy : order_side::sell;
         t.symbol = syms[i % 3];
         t.strategy_name = strats[i % 4];

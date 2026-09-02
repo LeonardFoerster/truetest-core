@@ -36,8 +36,10 @@ bool starts_with(const std::string& s, const char* prefix)
 
 } // namespace
 
-WebServer::WebServer(web_config cfg, snapshot_fn snap, report_fn report)
-    : cfg_(std::move(cfg)), snap_(std::move(snap)), report_(std::move(report))
+WebServer::WebServer(web_config cfg, snapshot_fn snap, report_fn report,
+                     report_ready_fn report_ready)
+    : cfg_(std::move(cfg)), snap_(std::move(snap)), report_(std::move(report)),
+      report_ready_(std::move(report_ready))
 {
 }
 
@@ -157,9 +159,16 @@ bool WebServer::origin_allowed(const mg_connection* c) const
 // ── serialization helpers ────────────────────────────────────────────────────
 std::string WebServer::current_snapshot_json() const
 {
-    truetest::ui::dashboard_snapshot snap;
-    if (snap_ && snap_(snap)) return snapshot_to_json(snap);
-    return std::string();
+    try
+    {
+        truetest::ui::dashboard_snapshot snap;
+        if (snap_ && snap_(snap)) return snapshot_to_json(snap);
+        return std::string();
+    }
+    catch (...)
+    {
+        return "{\"error\":\"snapshot_serialization_failed\"}";
+    }
 }
 
 void WebServer::send_json(mg_connection* c, const std::string& body, const char* status) const
@@ -189,8 +198,31 @@ int WebServer::on_results(mg_connection* c, void* cbdata)
 {
     auto* self = static_cast<WebServer*>(cbdata);
     if (!self->authorized(c)) { self->send_json(c, "{\"error\":\"unauthorized\"}", "401 Unauthorized"); return 1; }
-    std::string body = self->report_ ? self->report_() : std::string("{}");
-    self->send_json(c, body);
+    // The default composition callback closes over engine::Analytics, which
+    // is mutated by the event loop. Reading it here on a CivetWeb thread is a
+    // data race. Only an explicit readiness callback may assert that the
+    // report source is an immutable publication or that the engine is fully
+    // quiescent. Until then the endpoint is deliberately unsupported.
+    if (!self->report_ready_ || !self->report_ready_())
+    {
+        self->send_json(
+            c,
+            "{\"error\":\"results_not_safely_published\"}",
+            "503 Service Unavailable");
+        return 1;
+    }
+    try
+    {
+        std::string body = self->report_ ? self->report_() : std::string("{}");
+        self->send_json(c, body);
+    }
+    catch (...)
+    {
+        self->send_json(
+            c,
+            "{\"error\":\"results_serialization_failed\"}",
+            "503 Service Unavailable");
+    }
     return 1;
 }
 
