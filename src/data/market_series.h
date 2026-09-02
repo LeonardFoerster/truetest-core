@@ -4,6 +4,7 @@
 // Evolved from data_handler. Knows validation + SoA/AoS layout only — no CSV/Parquet/HTTP.
 
 #include "data/market_sink.h"
+#include "data/market_provenance.h"
 #include "data/market_types.h"
 
 #include <chrono>
@@ -46,6 +47,8 @@ public:
 		std::size_t bar_count = 0;
 		std::size_t tick_count = 0;
 		std::size_t validation_errors = 0;
+		tt::data_provenance::rejection_reason last_bar_rejection =
+			tt::data_provenance::rejection_reason::none;
 	};
 	[[nodiscard]] AppendCheckpoint append_checkpoint() const noexcept;
 	void rollback_appends(AppendCheckpoint checkpoint) noexcept;
@@ -107,22 +110,47 @@ public:
 
 	// Convenience for engine/config (first bar symbol, or empty).
 	std::string first_symbol() const;
-	// switch_symbol: replace every bar symbol (legacy engine helper).
+	// Legacy historical-row rename primitive. Existing bars only; an empty
+	// target or an empty series is a no-op. This never creates records and is
+	// neither safe nor sufficient as a venue/engine runtime-symbol switch.
 	void set_all_bar_symbols(const std::string& symbol);
 
+	// F-07b (docs/todos/11-F-forensic-lifecycle-audit.md) — bind a CLI
+	// --symbol to a symbol-less source. The Binance kline CSV has no symbol
+	// column, so every bar loads with symbol "" and nothing downstream can
+	// bind to it: --symbol does not match, per-symbol attribution is blank,
+	// and an --instrument spec's tick/lot/min-qty/min-notional filters are
+	// completely inert (proven byte-identical output with a spec that should
+	// have rejected every order).
+	//
+	// Only *unbound* rows are touched, so a genuinely multi-symbol source is
+	// never rewritten. Returns how many bars and ticks were bound.
+	struct symbol_binding { std::size_t bars = 0; std::size_t ticks = 0; };
+	symbol_binding bind_unset_symbols(const std::string& symbol);
+
+	// True when at least one loaded row carries no symbol at all.
+	bool has_unbound_symbols() const noexcept;
+
 	std::size_t validation_errors() const noexcept { return validation_error_count_; }
+	tt::data_provenance::rejection_reason last_bar_rejection() const noexcept
+	{
+		return last_bar_rejection_;
+	}
 
 private:
 	bool validate_and_append_bar(std::string date, std::string symbol,
 	                             std::chrono::system_clock::time_point ts,
 	                             double o, double h, double l, double c, int64_t v,
 	                             uint64_t quantity_scale);
+	void ensure_bar_append_capacity(std::size_t required);
 	std::vector<std::size_t> sorted_bar_indices() const;
 	std::vector<std::size_t> sorted_tick_indices() const;
 	void apply_bar_permutation(std::vector<std::size_t>& source_for_dest);
 	void apply_tick_permutation(std::vector<std::size_t>& source_for_dest);
 
 	size_t validation_error_count_ = 0;
+	tt::data_provenance::rejection_reason last_bar_rejection_ =
+		tt::data_provenance::rejection_reason::none;
 
 	// Bar SoA (private — no format knowledge)
 	std::vector<std::chrono::system_clock::time_point> bar_ts_;

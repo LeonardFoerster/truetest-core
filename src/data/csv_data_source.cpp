@@ -1,200 +1,151 @@
 #include "csv_data_source.h"
-#include "date_parse.h"
 #include "market_series.h"
 #include "market_types.h"
+#include "strict_market_csv.h"
 
-#include <cmath>
 #include <fstream>
 #include <iostream>
-#include <sstream>
-#include <stdexcept>
 #include <string>
-#include <string_view>
-#include <unordered_map>
 #include <vector>
 
 namespace {
 
 bool load_csv_bars(const std::filesystem::path& path, IMarketSink& sink, LoadStats* stats)
 {
-	std::ifstream file(path);
-	if (!file.good())
-	{
-		if (stats) stats->message = "CSV file error: " + path.string();
-		return false;
-	}
+    if (stats) *stats = {};
+    std::ifstream file(path);
+    if (!file.good()) {
+        if (stats) stats->message = "CSV file error: " + path.string();
+        return false;
+    }
 
-	std::string line;
-	if (!std::getline(file, line))
-	{
-		if (stats) stats->message = "CSV empty: " + path.string();
-		return false;
-	}
+    std::string line;
+    if (!std::getline(file, line)) {
+        if (stats) stats->message = "CSV empty: " + path.string();
+        return false;
+    }
 
-	std::unordered_map<std::string, int> col_index;
-	{
-		std::stringstream hss(line);
-		std::string col;
-		int idx = 0;
-		while (std::getline(hss, col, ','))
-		{
-			auto start = col.find_first_not_of(" \t\r\n");
-			auto end = col.find_last_not_of(" \t\r\n");
-			col_index[start == std::string::npos ? "" : col.substr(start, end - start + 1)] = idx++;
-		}
-	}
+    tt::strict_market_csv::bar_schema schema;
+    if (!schema.parse_header(line)) {
+        if (stats) stats->message = "CSV invalid or incomplete header: " + path.string();
+        return false;
+    }
 
-	for (const auto* name : {"open", "high", "low", "close"})
-	{
-		if (!col_index.count(name))
-		{
-			if (stats) stats->message = std::string("CSV missing required column: ") + name;
-			return false;
-		}
-	}
+    // Pre-reserve when sink is a MarketSeries
+    if (auto* series = dynamic_cast<MarketSeries*>(&sink)) {
+        const auto fsz = std::filesystem::file_size(path);
+        const size_t est_rows = (fsz > 0) ? (fsz / 60 + 1024) : 2'000'000;
+        series->reserve_bars(est_rows);
+    }
 
-	// Pre-reserve when sink is a MarketSeries
-	if (auto* series = dynamic_cast<MarketSeries*>(&sink))
-	{
-		const auto fsz = std::filesystem::file_size(path);
-		const size_t est_rows = (fsz > 0) ? (fsz / 60 + 1024) : 2'000'000;
-		series->reserve_bars(est_rows);
-	}
+    std::size_t accepted = 0;
+    std::size_t rejected = 0;
+    std::vector<Bar> staged;
 
-	std::size_t accepted = 0;
-	std::size_t rejected = 0;
+    while (std::getline(file, line)) {
+        tt::strict_market_csv::parsed_bar parsed;
+        if (!schema.parse_row(line, parsed)) {
+            ++rejected;
+            continue;
+        }
 
-	while (std::getline(file, line))
-	{
-		if (line.empty()) continue;
+        Bar bar;
+        bar.date = std::string(parsed.date);
+        bar.symbol = std::string(parsed.symbol);
+        bar.ts = parsed.timestamp;
+        bar.open = parsed.open;
+        bar.high = parsed.high;
+        bar.low = parsed.low;
+        bar.close = parsed.close;
+        bar.volume = parsed.volume;
+        bar.quantity_scale = parsed.quantity_scale;
+        staged.push_back(std::move(bar));
+    }
 
-		std::vector<std::string_view> fields;
-		fields.reserve(8);
-		std::string_view sv(line);
-		size_t pos = 0;
-		while (pos <= sv.size())
-		{
-			size_t next = sv.find(',', pos);
-			if (next == std::string_view::npos) next = sv.size();
-			fields.emplace_back(sv.substr(pos, next - pos));
-			if (next == sv.size()) break;
-			pos = next + 1;
-		}
+    if (file.bad()) {
+        if (stats) {
+            stats->accepted = accepted;
+            stats->rejected = rejected;
+            stats->message = "CSV read error before EOF: " + path.string();
+        }
+        return false;
+    }
 
-		try
-		{
-			auto get = [&](const char* name) -> std::string {
-				auto it = col_index.find(name);
-				if (it == col_index.end()) return {};
-				size_t idx = static_cast<size_t>(it->second);
-				return (idx < fields.size()) ? std::string(fields[idx]) : std::string{};
-			};
+    // Input parsing is transactional: never expose a thinned valid/bad/valid
+    // dataset to a strategy. Sink-side transactional semantics are a separate
+    // port concern, so no sink callback is made until every row is valid.
+    if (rejected != 0) {
+        if (stats) {
+            stats->accepted = 0;
+            stats->rejected = rejected;
+            stats->message = "CSV contains invalid market rows";
+        }
+        return false;
+    }
 
-			Bar bar;
-			bar.date = get("date");
-			bar.symbol = get("symbol");
+    for (const auto& bar : staged) {
+        if (!sink.on_bar(bar)) {
+            if (stats) {
+                stats->accepted = accepted;
+                stats->rejected = 1;
+                stats->message = "CSV sink rejected a validated market row";
+            }
+            return false;
+        }
+        ++accepted;
+    }
 
-			std::string ot_s = get("open_time");
-			if (!ot_s.empty())
-			{
-				try
-				{
-					const auto ms = std::stoll(ot_s);
-					if (ms > 0)
-					{
-						bar.ts = std::chrono::system_clock::time_point{
-							std::chrono::milliseconds{ms}};
-					}
-				}
-				catch (...) {}
-			}
-			if (bar.ts == std::chrono::system_clock::time_point{})
-			{
-				if (auto tp = tt::date_parse::parse(bar.date))
-					bar.ts = *tp;
-			}
+    if (stats) {
+        stats->accepted = accepted;
+        stats->rejected = 0;
+    }
 
-			std::string o_s = get("open");
-			std::string h_s = get("high");
-			std::string l_s = get("low");
-			std::string c_s = get("close");
-			std::string v_s = get("volume");
-
-			bar.open = o_s.empty() ? 0.0 : std::stod(o_s);
-			bar.high = h_s.empty() ? 0.0 : std::stod(h_s);
-			bar.low = l_s.empty() ? 0.0 : std::stod(l_s);
-			bar.close = c_s.empty() ? 0.0 : std::stod(c_s);
-			// Integer volumes as-is; fractional base asset → * 1e8 (Binance klines).
-			if (!v_s.empty())
-			{
-				try
-				{
-					std::size_t idx = 0;
-					const long long iv = std::stoll(v_s, &idx);
-					if (idx == v_s.size())
-					{
-						bar.volume = iv;
-						bar.quantity_scale = 1;
-					}
-					else
-						throw std::invalid_argument("fractional");
-				}
-				catch (...)
-				{
-					try
-					{
-						const double d = std::stod(v_s);
-						if (std::isfinite(d) && d >= 0.0)
-						{
-							bar.volume = static_cast<int64_t>(std::llround(d * 1e8));
-							bar.quantity_scale = 100'000'000ULL;
-						}
-					}
-					catch (...) {}
-				}
-			}
-
-			if (sink.on_bar(bar))
-				++accepted;
-			else
-				++rejected;
-		}
-		catch (const std::exception&)
-		{
-			++rejected;
-		}
-	}
-
-	if (stats)
-	{
-		stats->accepted = accepted;
-		stats->rejected = rejected;
-	}
-
-	std::cout << "Loaded " << accepted << " records from CSV." << std::endl;
-	return accepted > 0;
+    std::cout << "Loaded " << accepted << " records from CSV." << std::endl;
+    return accepted > 0;
 }
 
-} // namespace
+}  // namespace
 
 CsvDataSource::CsvDataSource(std::filesystem::path path)
-	: path_(std::move(path)) {}
+    : path_(std::move(path))
+{}
 
 bool CsvDataSource::load_into(IMarketSink& sink, LoadStats* stats)
 {
-	return load_csv_bars(path_, sink, stats);
+    auto* series = dynamic_cast<MarketSeries*>(&sink);
+    if (!series) {
+        if (stats) {
+            *stats = {};
+            stats->message =
+                "CSV load requires a transactional MarketSeries sink";
+        }
+        return false;
+    }
+    const auto checkpoint = series->append_checkpoint();
+    try {
+        const bool loaded = load_csv_bars(path_, sink, stats);
+        if (!loaded) {
+            series->rollback_appends(checkpoint);
+            if (stats) stats->accepted = 0;
+        }
+        return loaded;
+    } catch (...) {
+        series->rollback_appends(checkpoint);
+        if (stats) stats->accepted = 0;
+        throw;
+    }
 }
 
 bool CsvDataSource::load_data(std::shared_ptr<data_handler> handler)
 {
-	if (!handler) return false;
-	try
-	{
-		return load_into(*handler, nullptr);
-	}
-	catch (const std::exception& e)
-	{
-		std::cerr << "CSV load failed: " << e.what() << std::endl;
-		return false;
-	}
+    if (!handler) return false;
+    const auto checkpoint = handler->append_checkpoint();
+    try {
+        const bool loaded = load_into(*handler, nullptr);
+        if (!loaded) handler->rollback_appends(checkpoint);
+        return loaded;
+    } catch (...) {
+        handler->rollback_appends(checkpoint);
+        throw;
+    }
 }

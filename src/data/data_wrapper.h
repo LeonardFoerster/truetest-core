@@ -28,6 +28,10 @@ struct DataLoadOptions
 	// Multi-file: default fail-closed on any part failure (DR-REPLAY-03).
 	// When true, keep rows accepted so far and return success if any accepted.
 	bool allow_partial_sources = false;
+	// Strict embedding/API mode: any malformed or sink-rejected input row makes
+	// the whole appended batch fail and roll back. Research CLI loaders may keep
+	// the default false when partial-data analysis is explicitly acceptable.
+	bool fail_on_rejected_rows = false;
 	bool retain_streamed = false; // live default: do not grow series
 	std::size_t reserve_hint = 0;
 };
@@ -51,10 +55,12 @@ public:
 
 	IMarketSource& source();
 	const DataLoadOptions& options() const { return opt_; }
+	const LoadStats& last_load_stats() const noexcept { return last_load_stats_; }
 
 private:
 	DataWrapper(std::unique_ptr<IMarketSource> source, DataLoadOptions opt);
 
 	std::unique_ptr<IMarketSource> source_;
 	DataLoadOptions opt_;
+	LoadStats last_load_stats_;
 };

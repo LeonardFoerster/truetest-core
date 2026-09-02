@@ -3,83 +3,100 @@
 #include "market_series.h"
 #include "tick_csv_data_source.h"
 
+#include <algorithm>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 
 namespace {
 
+std::size_t checked_validation_delta(const MarketSeries& series,
+                                     const MarketSeries::AppendCheckpoint& checkpoint)
+{
+    if (series.validation_errors() < checkpoint.validation_errors)
+        throw std::logic_error(
+            "DataWrapper: source violated the append-only IMarketSource contract");
+    return series.validation_errors() - checkpoint.validation_errors;
+}
+
+void checked_accumulate(std::size_t& total, std::size_t increment)
+{
+    if (increment > std::numeric_limits<std::size_t>::max() - total)
+        throw std::overflow_error("DataWrapper: LoadStats counter overflow");
+    total += increment;
+}
+
 class MultiSource final : public IMarketSource
 {
 public:
-	MultiSource(std::vector<std::unique_ptr<IMarketSource>> parts, bool allow_partial)
-		: parts_(std::move(parts))
-		, allow_partial_(allow_partial) {}
+    MultiSource(std::vector<std::unique_ptr<IMarketSource>> parts, bool allow_partial)
+        : parts_(std::move(parts))
+        , allow_partial_(allow_partial)
+    {}
 
-	bool load_into(IMarketSink& sink, LoadStats* stats) override
-	{
-		LoadStats total;
-		bool any = false;
-		bool had_partial_failure = false;
-		std::string first_failure;
-		auto* series = dynamic_cast<MarketSeries*>(&sink);
-		for (auto& p : parts_)
-		{
-			const auto checkpoint = series ? series->append_checkpoint()
-			                               : MarketSeries::AppendCheckpoint{};
-			LoadStats part;
-			if (!p->load_into(sink, &part))
-			{
-				// Partial mode means a failed input is skipped, not that a
-				// source may leave a prefix of its failed batch in the series.
-				// Native sources receive an append-only MarketSeries here; the
-				// outer DataWrapper remains the exception rollback boundary.
-				if (series)
-					series->rollback_appends(checkpoint);
-				had_partial_failure = true;
-				if (first_failure.empty())
-				{
-					first_failure = part.message.empty()
-						? "multi-source partial failure"
-						: part.message;
-				}
-			}
-			else
-			{
-				total.accepted += part.accepted;
-				total.rejected += part.rejected;
-				if (part.accepted > 0) any = true;
-			}
-			if (had_partial_failure && !allow_partial_)
-			{
-				if (stats)
-				{
-					*stats = total;
-					// DR-REPLAY-03: default fail-closed so multi-file portfolios
-					// never run green with missing legs. Callers that relied on
-					// the old soft-success default must now opt in explicitly.
-					stats->message = first_failure + " (fail-closed default; set "
-						"DataLoadOptions::allow_partial_sources=true to keep "
-						"rows accepted so far)";
-				}
-				return false;
-			}
-		}
-		if (stats)
-		{
-			*stats = total;
-			if (had_partial_failure)
-				stats->message = first_failure;
-		}
-		return any;
-	}
+    bool load_into(IMarketSink& sink, LoadStats* stats) override
+    {
+        LoadStats total;
+        bool any = false;
+        bool had_partial_failure = false;
+        std::string first_failure;
+        auto* series = dynamic_cast<MarketSeries*>(&sink);
+        for (auto& p : parts_) {
+            const auto checkpoint =
+                series ? series->append_checkpoint() : MarketSeries::AppendCheckpoint{};
+            LoadStats part;
+            const bool loaded = p->load_into(sink, &part);
+            if (series) {
+                const std::size_t observed_sink_rejections =
+                    checked_validation_delta(*series, checkpoint);
+                part.rejected = std::max(part.rejected, observed_sink_rejections);
+            }
+            // Rejected records from a skipped partial source must remain visible
+            // to strict callers even though that part's accepted prefix is rolled
+            // back and therefore is not committed to this composite source.
+            checked_accumulate(total.rejected, part.rejected);
+            if (!loaded) {
+                // Partial mode means a failed input is skipped, not that a
+                // source may leave a prefix of its failed batch in the series.
+                // Native sources receive an append-only MarketSeries here; the
+                // outer DataWrapper remains the exception rollback boundary.
+                if (series) series->rollback_appends(checkpoint);
+                had_partial_failure = true;
+                if (first_failure.empty()) {
+                    first_failure =
+                        part.message.empty() ? "multi-source partial failure" : part.message;
+                }
+            } else {
+                checked_accumulate(total.accepted, part.accepted);
+                if (part.accepted > 0) any = true;
+            }
+            if (had_partial_failure && !allow_partial_) {
+                if (stats) {
+                    *stats = total;
+                    // DR-REPLAY-03: default fail-closed so multi-file portfolios
+                    // never run green with missing legs. Callers that relied on
+                    // the old soft-success default must now opt in explicitly.
+                    stats->message = first_failure +
+                                     " (fail-closed default; set "
+                                     "DataLoadOptions::allow_partial_sources=true to keep "
+                                     "rows accepted so far)";
+                }
+                return false;
+            }
+        }
+        if (stats) {
+            *stats = total;
+            if (had_partial_failure) stats->message = first_failure;
+        }
+        return any;
+    }
 
 private:
-	std::vector<std::unique_ptr<IMarketSource>> parts_;
-	bool allow_partial_ = false;
+    std::vector<std::unique_ptr<IMarketSource>> parts_;
+    bool allow_partial_ = false;
 };
 
-std::unique_ptr<IMarketSource> source_for_path(const std::filesystem::path& path,
-                                               bool force_tick)
+std::unique_ptr<IMarketSource> source_for_path(const std::filesystem::path& path, bool force_tick)
 {
 	const auto ext = path.extension().string();
 	if (force_tick)
@@ -91,7 +108,7 @@ std::unique_ptr<IMarketSource> source_for_path(const std::filesystem::path& path
 	return std::make_unique<CsvDataSource>(path);
 }
 
-} // namespace
+}  // namespace
 
 DataWrapper::DataWrapper(std::unique_ptr<IMarketSource> source, DataLoadOptions opt)
 	: source_(std::move(source))
@@ -175,60 +192,69 @@ DataWrapper DataWrapper::from_uri(std::string_view uri, DataLoadOptions opt)
 
 bool DataWrapper::load(MarketSeries& out)
 {
-	if (opt_.reserve_hint > 0)
-		out.reserve(opt_.reserve_hint);
+    last_load_stats_ = {};
+    if (opt_.reserve_hint > 0) out.reserve(opt_.reserve_hint);
 
-	const auto checkpoint = out.append_checkpoint();
-	auto preserves_append_boundary = [&]() noexcept {
-		return out.bar_count() >= checkpoint.bar_count
-			&& out.tick_count() >= checkpoint.tick_count
-			&& out.validation_errors() >= checkpoint.validation_errors;
-	};
-	LoadStats stats;
-	bool ok = false;
-	try
-	{
-		ok = source_->load_into(out, &stats);
-	}
-	catch (...)
-	{
-		if (!preserves_append_boundary())
-		{
-			throw std::logic_error(
-				"DataWrapper: source violated the append-only IMarketSource contract");
-		}
-		// Source failures are allowed to be reported as false, but an
-		// exception is never an opt-in partial-source result. Restore the
-		// append-only marker before preserving the source's exception.
-		out.rollback_appends(checkpoint);
-		throw;
-	}
-	if (!preserves_append_boundary())
-	{
-		// Do not perform suffix arithmetic after a source has invalidated its
-		// checkpoint. The façade cannot reconstruct pre-existing rows without
-		// an unacceptable full copy, so make the contract violation loud.
-		throw std::logic_error(
-			"DataWrapper: source violated the append-only IMarketSource contract");
-	}
-	if (!ok)
-	{
-		// allow_partial_sources is resolved inside MultiSource: a successful
-		// partial result returns true. Any false result is a failed batch and
-		// must never leave a direct or multi-source prefix behind.
-		out.rollback_appends(checkpoint);
-		if (!stats.message.empty())
-			std::cerr << "  ! DataWrapper load failed: " << stats.message << "\n";
+    const auto checkpoint = out.append_checkpoint();
+    auto preserves_append_boundary = [&]() noexcept {
+        return out.bar_count() >= checkpoint.bar_count &&
+               out.tick_count() >= checkpoint.tick_count &&
+               out.validation_errors() >= checkpoint.validation_errors;
+    };
+    LoadStats stats;
+    bool ok = false;
+    try {
+        ok = source_->load_into(out, &stats);
+    } catch (...) {
+        if (!preserves_append_boundary()) {
+            throw std::logic_error(
+                "DataWrapper: source violated the append-only IMarketSource contract");
+        }
+        stats.rejected = std::max(stats.rejected, checked_validation_delta(out, checkpoint));
+        last_load_stats_ = stats;
+        // Source failures are allowed to be reported as false, but an
+        // exception is never an opt-in partial-source result. Restore the
+        // append-only marker before preserving the source's exception.
+        out.rollback_appends(checkpoint);
+        throw;
+    }
+    if (!preserves_append_boundary()) {
+        // Do not perform suffix arithmetic after a source has invalidated its
+        // checkpoint. The façade cannot reconstruct pre-existing rows without
+        // an unacceptable full copy, so make the contract violation loud.
+        throw std::logic_error(
+            "DataWrapper: source violated the append-only IMarketSource contract");
+    }
+    // A source owns parser-level rejection accounting, but the MarketSeries is
+    // the authority for sink validation. Reconcile the counter so a custom or
+    // buggy source cannot turn an observed sink rejection into strict success.
+    const std::size_t observed_sink_rejections = checked_validation_delta(out, checkpoint);
+    if (stats.rejected < observed_sink_rejections) stats.rejected = observed_sink_rejections;
+    last_load_stats_ = stats;
+    if (!ok) {
+        // allow_partial_sources is resolved inside MultiSource: a successful
+        // partial result returns true. Any false result is a failed batch and
+        // must never leave a direct or multi-source prefix behind.
+        out.rollback_appends(checkpoint);
+        if (!stats.message.empty())
+            std::cerr << "  ! DataWrapper load failed: " << stats.message << "\n";
+        return false;
+    }
+    if (!stats.message.empty()) {
+        // MultiSource records the first skipped source when partial mode is
+        // explicitly enabled. A successful partial result must still be loud.
+        std::cerr << "  ! DataWrapper partial source failure: " << stats.message << "\n";
+    }
+    if (opt_.fail_on_rejected_rows && stats.rejected > 0) {
+        out.rollback_appends(checkpoint);
+        if (!last_load_stats_.message.empty()) last_load_stats_.message += "; ";
+        last_load_stats_.message += "strict batch rejected malformed or invalid records";
+        std::cerr << "  ! DataWrapper: rejected " << stats.rejected
+		          << " malformed or invalid record(s); strict batch rolled back\n";
 		return false;
-	}
-	if (!stats.message.empty())
-	{
-		// MultiSource records the first skipped source when partial mode is
-		// explicitly enabled. A successful partial result must still be loud.
-		std::cerr << "  ! DataWrapper partial source failure: " << stats.message << "\n";
-	}
+    }
 
-	// DR-REPLAY-04: apply declared from/to/symbols filters (were previously no-ops).
+    // DR-REPLAY-04: apply declared from/to/symbols filters (were previously no-ops).
 	// Existing rows belong to the caller, not this batch; only filter the
 	// suffix accepted since the checkpoint so a failed/empty load cannot erase
 	// a reusable series' earlier data.

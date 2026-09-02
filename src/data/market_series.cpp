@@ -1,10 +1,13 @@
 #include "market_series.h"
 #include "date_parse.h"
+#include "symbol_validation.h"
 
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -19,6 +22,12 @@ static_assert(std::is_nothrow_move_constructible_v<std::string>);
 static_assert(std::is_nothrow_move_assignable_v<std::string>);
 static_assert(std::is_nothrow_move_constructible_v<Tick>);
 static_assert(std::is_nothrow_move_assignable_v<Tick>);
+
+struct staged_symbol_assignment
+{
+	std::string* destination;
+	std::string replacement;
+};
 
 std::chrono::system_clock::time_point parse_or_epoch(const std::string& date)
 {
@@ -36,9 +45,28 @@ bool MarketSeries::validate_and_append_bar(std::string date, std::string symbol,
 {
 	size_t row = bar_date_.size() + 1;
 
-	if (!std::isfinite(o) || !std::isfinite(h) || !std::isfinite(l)
-	    || !std::isfinite(c) || o <= 0 || h <= 0 || l <= 0 || c <= 0)
+	if (!symbol.empty() && !tt::symbol_validation::valid(symbol))
 	{
+		last_bar_rejection_ =
+			tt::data_provenance::rejection_reason::invalid_symbol;
+		std::cerr << "  ! Row " << row << ": invalid instrument symbol, skipping\n";
+		++validation_error_count_;
+		return false;
+	}
+
+	if (!std::isfinite(o) || !std::isfinite(h) || !std::isfinite(l)
+	    || !std::isfinite(c))
+	{
+		last_bar_rejection_ =
+			tt::data_provenance::rejection_reason::non_finite_price;
+		std::cerr << "  ! Row " << row << ": non-finite price, skipping\n";
+		++validation_error_count_;
+		return false;
+	}
+	if (o <= 0 || h <= 0 || l <= 0 || c <= 0)
+	{
+		last_bar_rejection_ =
+			tt::data_provenance::rejection_reason::non_positive_price;
 		std::cerr << "  ! Row " << row << ": non-positive price (o=" << o
 		          << " h=" << h << " l=" << l << " c=" << c << "), skipping\n";
 		++validation_error_count_;
@@ -46,18 +74,42 @@ bool MarketSeries::validate_and_append_bar(std::string date, std::string symbol,
 	}
 	if (h < l)
 	{
+		last_bar_rejection_ = tt::data_provenance::rejection_reason::high_below_low;
 		std::cerr << "  ! Row " << row << ": high (" << h << ") < low (" << l << "), skipping\n";
 		++validation_error_count_;
 		return false;
 	}
-	if (v < 0)
+	if (o < l || o > h)
 	{
-		std::cerr << "  ! Row " << row << ": negative volume (" << v << "), skipping\n";
+		last_bar_rejection_ =
+			tt::data_provenance::rejection_reason::open_outside_range;
+		std::cerr << "  ! Row " << row << ": open (" << o
+		          << ") outside [" << l << ", " << h << "], skipping\n";
+		++validation_error_count_;
+		return false;
+	}
+	if (c < l || c > h)
+	{
+		last_bar_rejection_ =
+			tt::data_provenance::rejection_reason::close_outside_range;
+		std::cerr << "  ! Row " << row << ": close (" << c
+		          << ") outside [" << l << ", " << h << "], skipping\n";
+		++validation_error_count_;
+		return false;
+	}
+	if (v <= 0)
+	{
+		last_bar_rejection_ =
+			tt::data_provenance::rejection_reason::non_positive_volume;
+		std::cerr << "  ! Row " << row << ": non-positive volume (" << v
+		          << "), skipping\n";
 		++validation_error_count_;
 		return false;
 	}
 	if (quantity_scale == 0)
 	{
+		last_bar_rejection_ =
+			tt::data_provenance::rejection_reason::zero_quantity_scale;
 		std::cerr << "  ! Row " << row << ": zero quantity scale, skipping\n";
 		++validation_error_count_;
 		return false;
@@ -65,7 +117,23 @@ bool MarketSeries::validate_and_append_bar(std::string date, std::string symbol,
 
 	if (ts == std::chrono::system_clock::time_point{} && !date.empty())
 		ts = parse_or_epoch(date);
+    if (ts.time_since_epoch().count() <= 0)
+	{
+		last_bar_rejection_ =
+			tt::data_provenance::rejection_reason::invalid_timestamp;
+		std::cerr << "  ! Row " << row << ": invalid timestamp, skipping\n";
+		++validation_error_count_;
+		return false;
+	}
 
+	if (bar_symbol_.size() == bar_symbol_.max_size())
+		throw std::length_error("MarketSeries bar capacity exhausted");
+	ensure_bar_append_capacity(bar_symbol_.size() + 1);
+	last_bar_rejection_ = tt::data_provenance::rejection_reason::none;
+
+	// Every column has sufficient capacity before the first size-changing
+	// operation. For the class's single-writer contract, the noexcept value
+	// moves below provide an exception-transactional commit across the SoA.
 	bar_ts_.push_back(ts);
 	bar_date_.emplace_back(std::move(date));
 	bar_symbol_.emplace_back(std::move(symbol));
@@ -101,6 +169,12 @@ bool MarketSeries::load_into_queue(std::string date, std::string symbol,
 
 bool MarketSeries::add_tick(tick_record rec)
 {
+	if (!rec.symbol.empty() && !tt::symbol_validation::valid(rec.symbol))
+	{
+		std::cerr << "  ! Tick: invalid instrument symbol, skipping\n";
+		++validation_error_count_;
+		return false;
+	}
 	if (!std::isfinite(rec.price) || rec.price <= 0)
 	{
 		std::cerr << "  ! Tick: non-positive price (" << rec.price << "), skipping\n";
@@ -116,6 +190,12 @@ bool MarketSeries::add_tick(tick_record rec)
 	if (rec.quantity_scale == 0)
 	{
 		std::cerr << "  ! Tick: zero quantity scale, skipping\n";
+		++validation_error_count_;
+		return false;
+	}
+	if (rec.timestamp.time_since_epoch().count() <= 0)
+	{
+		std::cerr << "  ! Tick: invalid timestamp, skipping\n";
 		++validation_error_count_;
 		return false;
 	}
@@ -371,15 +451,65 @@ std::string MarketSeries::first_symbol() const
 
 void MarketSeries::set_all_bar_symbols(const std::string& symbol)
 {
-	for (auto& s : bar_symbol_)
-		s = symbol;
-	if (bar_symbol_.empty())
-		bar_symbol_.push_back(symbol);
+	if (symbol.empty() || bar_symbol_.empty())
+		return;
+	if (!tt::symbol_validation::valid(symbol))
+		throw std::invalid_argument("invalid MarketSeries replacement symbol");
+
+	std::size_t changes = 0;
+	for (const auto& current : bar_symbol_)
+		changes += current != symbol ? 1u : 0u;
+	if (changes == 0)
+		return;
+
+	std::vector<staged_symbol_assignment> staged;
+	staged.reserve(changes);
+	for (auto& current : bar_symbol_)
+		if (current != symbol) staged.push_back({&current, symbol});
+
+	for (auto& assignment : staged)
+		assignment.destination->swap(assignment.replacement);
+}
+
+MarketSeries::symbol_binding MarketSeries::bind_unset_symbols(const std::string& symbol)
+{
+	symbol_binding bound;
+	if (symbol.empty()) return bound;
+	if (!tt::symbol_validation::valid(symbol))
+		throw std::invalid_argument("invalid MarketSeries binding symbol");
+
+	for (const auto& current : bar_symbol_)
+		bound.bars += current.empty() ? 1u : 0u;
+	for (const auto& tick : ticks_)
+		bound.ticks += tick.symbol.empty() ? 1u : 0u;
+	if (bound.ticks > std::numeric_limits<std::size_t>::max() - bound.bars)
+		throw std::length_error("MarketSeries symbol binding count overflow");
+
+	std::vector<staged_symbol_assignment> staged;
+	staged.reserve(bound.bars + bound.ticks);
+	for (auto& current : bar_symbol_)
+		if (current.empty()) staged.push_back({&current, symbol});
+	for (auto& tick : ticks_)
+		if (tick.symbol.empty()) staged.push_back({&tick.symbol, symbol});
+
+	for (auto& assignment : staged)
+		assignment.destination->swap(assignment.replacement);
+	return bound;
+}
+
+bool MarketSeries::has_unbound_symbols() const noexcept
+{
+	for (const auto& s : bar_symbol_)
+		if (s.empty()) return true;
+	for (const auto& t : ticks_)
+		if (t.symbol.empty()) return true;
+	return false;
 }
 
 void MarketSeries::clear()
 {
 	validation_error_count_ = 0;
+	last_bar_rejection_ = tt::data_provenance::rejection_reason::none;
 
 	bar_ts_.clear();
 	bar_date_.clear();
@@ -412,6 +542,29 @@ void MarketSeries::reserve_bars(std::size_t n)
 	bar_quantity_scale_.reserve(n);
 }
 
+void MarketSeries::ensure_bar_append_capacity(std::size_t required)
+{
+	if (bar_ts_.capacity() >= required
+		&& bar_date_.capacity() >= required
+		&& bar_symbol_.capacity() >= required
+		&& bar_open_.capacity() >= required
+		&& bar_high_.capacity() >= required
+		&& bar_low_.capacity() >= required
+		&& bar_close_.capacity() >= required
+		&& bar_volume_.capacity() >= required
+		&& bar_quantity_scale_.capacity() >= required)
+		return;
+
+	std::size_t target = required;
+	const std::size_t current = bar_symbol_.size();
+	if (current != 0 && current <= std::numeric_limits<std::size_t>::max() / 2)
+		target = std::max(required, current * 2);
+
+	// reserve_bars may increase some capacities before a later allocation
+	// fails, but vector sizes and all economic row data remain unchanged.
+	reserve_bars(target);
+}
+
 void MarketSeries::reserve_ticks(std::size_t n)
 {
 	ticks_.reserve(n);
@@ -419,7 +572,8 @@ void MarketSeries::reserve_ticks(std::size_t n)
 
 MarketSeries::AppendCheckpoint MarketSeries::append_checkpoint() const noexcept
 {
-	return {bar_count(), tick_count(), validation_error_count_};
+	return {bar_count(), tick_count(), validation_error_count_,
+	        last_bar_rejection_};
 }
 
 void MarketSeries::rollback_appends(AppendCheckpoint checkpoint) noexcept
@@ -444,4 +598,5 @@ void MarketSeries::rollback_appends(AppendCheckpoint checkpoint) noexcept
 	bar_quantity_scale_.resize(checkpoint.bar_count);
 	ticks_.resize(checkpoint.tick_count);
 	validation_error_count_ = checkpoint.validation_errors;
+	last_bar_rejection_ = checkpoint.last_bar_rejection;
 }

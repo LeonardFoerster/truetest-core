@@ -1,101 +1,146 @@
 #include "tick_csv_data_source.h"
 #include "market_series.h"
 #include "market_types.h"
+#include "strict_market_csv.h"
 
-#include <chrono>
 #include <fstream>
 #include <iostream>
-#include <sstream>
+#include <vector>
 
 bool TickCsvDataSource::load_into(IMarketSink& sink, LoadStats* stats)
 {
-	std::ifstream file(path_);
-	if (!file.is_open())
-	{
-		std::cerr << "  ! Failed to open tick CSV: " << path_ << "\n";
-		if (stats) stats->message = "Failed to open tick CSV: " + path_;
-		return false;
-	}
+    auto* series = dynamic_cast<MarketSeries*>(&sink);
+    if (!series) {
+        if (stats) {
+            *stats = {};
+            stats->message =
+                "Tick CSV load requires a transactional MarketSeries sink";
+        }
+        return false;
+    }
+    const auto checkpoint = series->append_checkpoint();
+    const auto rollback = [&] {
+        series->rollback_appends(checkpoint);
+        if (stats) stats->accepted = 0;
+    };
+    try {
+    if (stats) *stats = {};
+    std::ifstream file(path_);
+    if (!file.is_open()) {
+        std::cerr << "  ! Failed to open tick CSV: " << path_ << "\n";
+        if (stats) stats->message = "Failed to open tick CSV: " + path_;
+        rollback();
+        return false;
+    }
 
-	std::string line;
-	if (!std::getline(file, line))
-	{
-		if (stats) stats->message = "Tick CSV empty: " + path_;
-		return false;
-	}
+    std::string first_line;
+    if (!std::getline(file, first_line)) {
+        if (stats) stats->message = "Tick CSV empty: " + path_;
+        rollback();
+        return false;
+    }
+    tt::strict_market_csv::tick_schema schema;
+    if (!schema.parse_header_or_first_row(first_line)) {
+        if (stats) stats->message = "Tick CSV invalid header or first row: " + path_;
+        rollback();
+        return false;
+    }
 
-	auto* series = dynamic_cast<MarketSeries*>(&sink);
-	if (series)
-		series->reserve_ticks(4096);
+    auto* series = dynamic_cast<MarketSeries*>(&sink);
+    if (series) series->reserve_ticks(4096);
 
-	std::size_t accepted = 0;
-	std::size_t rejected = 0;
+    std::size_t accepted = 0;
+    std::size_t rejected = 0;
+    std::vector<Tick> staged;
 
-	while (std::getline(file, line))
-	{
-		if (line.empty()) continue;
+    auto emit = [&](std::string_view line) {
+        tt::strict_market_csv::parsed_tick parsed;
+        if (!schema.parse_row(line, parsed)) {
+            ++rejected;
+            return;
+        }
+        Tick record;
+        record.timestamp = parsed.timestamp;
+        record.symbol = std::string(parsed.symbol);
+        record.price = parsed.price;
+        record.quantity = parsed.quantity;
+        record.quantity_scale = parsed.quantity_scale;
+        record.side = parsed.side;
+        staged.push_back(std::move(record));
+    };
 
-		std::istringstream ss(line);
-		std::string token;
+    if (schema.header_contains_record()) emit(first_line);
+    std::string line;
+    while (std::getline(file, line))
+        emit(line);
 
-		if (!std::getline(ss, token, ',')) continue;
-		int64_t ts_ms = 0;
-		try { ts_ms = std::stoll(token); } catch (...) { ++rejected; continue; }
+    if (file.bad()) {
+        if (stats) {
+            stats->accepted = accepted;
+            stats->rejected = rejected;
+            stats->message = "Tick CSV read error before EOF: " + path_;
+        }
+        rollback();
+        return false;
+    }
 
-		std::string symbol;
-		if (!std::getline(ss, symbol, ',')) { ++rejected; continue; }
+    if (rejected != 0) {
+        if (stats) {
+            stats->accepted = 0;
+            stats->rejected = rejected;
+            stats->message = "Tick CSV contains invalid market rows";
+        }
+        rollback();
+        return false;
+    }
 
-		if (!std::getline(ss, token, ',')) { ++rejected; continue; }
-		double price = 0;
-		try { price = std::stod(token); } catch (...) { ++rejected; continue; }
+    for (const auto& record : staged) {
+        if (!sink.on_tick(record)) {
+            if (stats) {
+                stats->accepted = accepted;
+                stats->rejected = 1;
+                stats->message = "Tick CSV sink rejected a validated market row";
+            }
+            rollback();
+            return false;
+        }
+        ++accepted;
+    }
 
-		if (!std::getline(ss, token, ',')) { ++rejected; continue; }
-		int64_t qty = 0;
-		try { qty = std::stoll(token); } catch (...) { ++rejected; continue; }
+    if (stats) {
+        stats->accepted = accepted;
+        stats->rejected = 0;
+    }
 
-		data_tick_side side = data_tick_side::unknown;
-		if (std::getline(ss, token, ','))
-		{
-			if (!token.empty())
-			{
-				char c = token[0];
-				if (c == 'B' || c == 'b') side = data_tick_side::bid;
-				else if (c == 'A' || c == 'a') side = data_tick_side::ask;
-			}
-		}
-
-		Tick rec;
-		rec.timestamp = std::chrono::system_clock::time_point(
-			std::chrono::milliseconds(ts_ms));
-		rec.symbol = std::move(symbol);
-		rec.price = price;
-		rec.quantity = qty;
-		rec.side = side;
-
-		if (sink.on_tick(rec))
-			++accepted;
-		else
-			++rejected;
-	}
-
-	if (stats)
-	{
-		stats->accepted = accepted;
-		stats->rejected = rejected;
-	}
-
-	std::cout << "  Loaded " << accepted << " ticks from " << path_ << "\n";
-	return accepted > 0;
+    std::cout << "  Loaded " << accepted << " ticks from " << path_ << "\n";
+    if (accepted == 0) {
+        rollback();
+        return false;
+    }
+    return true;
+    } catch (...) {
+        rollback();
+        throw;
+    }
 }
 
 bool TickCsvDataSource::load_data(std::shared_ptr<data_handler> handler)
 {
-	if (!handler) return false;
-	const bool ok = load_into(*handler, nullptr);
-	// Direct legacy users retain the historical sorted-tape contract. The
-	// DataWrapper owns sorting for multi-source loads, once every source has
-	// succeeded, so a later failure cannot reorder pre-existing ticks.
-	if (ok)
-		handler->sort_ticks_by_time();
-	return ok;
+    if (!handler) return false;
+    const auto checkpoint = handler->append_checkpoint();
+    try {
+        const bool loaded = load_into(*handler, nullptr);
+        if (!loaded) {
+            handler->rollback_appends(checkpoint);
+            return false;
+        }
+        // Direct legacy users retain the historical sorted-tape contract. The
+        // DataWrapper owns sorting for multi-source loads, once every source has
+        // succeeded, so a later failure cannot reorder pre-existing ticks.
+        handler->sort_ticks_by_time();
+        return true;
+    } catch (...) {
+        handler->rollback_appends(checkpoint);
+        throw;
+    }
 }

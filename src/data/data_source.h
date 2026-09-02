@@ -31,13 +31,22 @@ public:
 			if (stats) stats->message = "IDataSource shim requires MarketSeries sink";
 			return false;
 		}
+		const auto checkpoint = series->append_checkpoint();
 		// Non-owning shared_ptr alias so legacy load_data can accept it.
 		auto sp = std::shared_ptr<data_handler>(series, [](data_handler*) {});
 		const bool ok = load_data(sp);
 		if (stats)
 		{
-			stats->accepted = series->bar_count() + series->tick_count();
-			stats->rejected = series->validation_errors();
+			stats->accepted =
+				(series->bar_count() >= checkpoint.bar_count
+				 && series->tick_count() >= checkpoint.tick_count)
+				? (series->bar_count() - checkpoint.bar_count)
+				  + (series->tick_count() - checkpoint.tick_count)
+				: 0;
+			stats->rejected =
+				series->validation_errors() >= checkpoint.validation_errors
+				? series->validation_errors() - checkpoint.validation_errors
+				: 0;
 			if (!ok && stats->message.empty())
 				stats->message = "load_data failed";
 		}

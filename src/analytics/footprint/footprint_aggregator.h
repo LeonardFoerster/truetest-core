@@ -48,7 +48,9 @@ public:
     // Trades must arrive in non-decreasing event_ns order (the §2.2
     // reconciliation layer's job, not this class's). Rolls/closes bars as
     // needed, including inserting EMPTY time bars for skipped intervals.
-    void on_trade(const PublicTrade& trade);
+    // Returns false without mutation when the trade is invalid, out of order,
+    // would overflow an economic accumulator, or arrives after flush().
+    bool on_trade(const PublicTrade& trade);
 
     // Force-closes the current forming bar without waiting for the next
     // trade to trigger a roll. footprint.md §2.2 "End-of-stream flushes
@@ -86,7 +88,6 @@ private:
     void recompute_derived(FootprintBar& bar) const;
     void recompute_poc(FootprintBar& bar) const;
     void recompute_imbalance(FootprintBar& bar) const;
-    void apply_cvd(const PublicTrade& trade);
     void trim_to_max_bars();
 
     FootprintAggregatorConfig config_;
@@ -96,6 +97,10 @@ private:
     std::int64_t cvd_ = 0;
     std::int64_t cvd_last_boundary_ns_ = 0;
     bool cvd_initialized_ = false;
+    std::int64_t last_event_ns_ = 0;
+    bool have_last_event_ = false;
+    bool sealed_ = false;
+    bool config_valid_ = false;
 };
 
 } // namespace truetest::footprint

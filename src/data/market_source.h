@@ -44,7 +44,12 @@ public:
 	// batch façade so a failed multi-source load can remain transactional.
 	// Sources used through DataWrapper must treat the sink as append-only: they
 	// must not clear, reorder, or otherwise mutate records that predate this
-	// call. That lets the façade fail atomically with an O(1) checkpoint.
+	// call. That lets the façade fail atomically with an O(1) checkpoint. When
+	// stats is non-null, rejected must include every parser rejection and every
+	// sink call that returned false, including records observed before a hard
+	// false return. DataWrapper independently lower-bounds this count with
+	// MarketSeries validation failures but cannot reconstruct omitted parser
+	// rejects from an arbitrary source.
 	virtual bool load_into(IMarketSink& sink, LoadStats* stats = nullptr) = 0;
 
 	// Stream: optional; default false = not supported

@@ -1,6 +1,8 @@
 #include "analytics/footprint/footprint_aggregator.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -10,59 +12,62 @@ namespace {
 constexpr double kDiagonalImbalanceRatio = 3.0; // 300%, footprint.md §2.2 - fixed by spec
 constexpr std::int64_t kDayNs = 86'400LL * 1'000'000'000LL;
 
-FootprintAggregatorConfig sanitize(FootprintAggregatorConfig cfg)
+bool checked_add(std::int64_t lhs, std::int64_t rhs,
+                 std::int64_t& output) noexcept
 {
-    if (cfg.group_size < 1) cfg.group_size = 1;
-    if (cfg.max_bars < 1) cfg.max_bars = 1;
-    // interval_ns is a divisor/step in ensure_bar_for and roll_time_bars_to.
-    // <=0 is caller error (bad config, corrupt request) - clamp to the
-    // struct's own documented default rather than SIGFPE (0) or hanging
-    // forever synthesizing backwards-shrinking "intervals" (negative).
-    if (cfg.bar_spec.kind == bar_kind::time && cfg.bar_spec.interval_ns <= 0)
-        cfg.bar_spec.interval_ns = 60'000'000'000LL;
-    return cfg;
+    if ((rhs > 0 && lhs > std::numeric_limits<std::int64_t>::max() - rhs)
+        || (rhs < 0 && lhs < std::numeric_limits<std::int64_t>::min() - rhs))
+        return false;
+    output = lhs + rhs;
+    return true;
+}
+
+std::int64_t cvd_boundary(std::int64_t event_ns,
+                          std::int64_t reset_ns_of_day) noexcept
+{
+    const std::int64_t day_start = event_ns - event_ns % kDayNs;
+    if (reset_ns_of_day <= event_ns - day_start)
+        return day_start + reset_ns_of_day;
+    if (day_start >= kDayNs)
+        return day_start - kDayNs + reset_ns_of_day;
+    return reset_ns_of_day - kDayNs;
+}
+
+bool valid_config(const FootprintAggregatorConfig& cfg) noexcept
+{
+    if (cfg.group_size < 1 || cfg.max_bars < 1
+        || !std::isfinite(cfg.tick_size) || !(cfg.tick_size > 0.0)
+        || !std::isfinite(cfg.qty_atom_scale)
+        || !(cfg.qty_atom_scale > 0.0)
+        || cfg.imbalance_min_volume < 0
+        || cfg.cvd_reset_ns_of_day < 0
+        || cfg.cvd_reset_ns_of_day >= kDayNs)
+        return false;
+    if (cfg.bar_spec.kind == bar_kind::time)
+        return cfg.bar_spec.interval_ns > 0;
+    return cfg.bar_spec.kind == bar_kind::volume
+        && std::isfinite(cfg.bar_spec.volume_threshold)
+        && cfg.bar_spec.volume_threshold > 0.0;
 }
 } // namespace
 
 FootprintAggregator::FootprintAggregator(FootprintAggregatorConfig config)
-    : config_(sanitize(std::move(config)))
+    : config_(std::move(config)), config_valid_(valid_config(config_))
 {
 }
 
 void FootprintAggregator::reset(FootprintAggregatorConfig new_config)
 {
-    config_ = sanitize(std::move(new_config));
+    config_ = std::move(new_config);
+    config_valid_ = valid_config(config_);
     bars_.clear();
     cvd_ = 0;
     cvd_last_boundary_ns_ = 0;
     cvd_initialized_ = false;
+    last_event_ns_ = 0;
+    have_last_event_ = false;
+    sealed_ = false;
     ++version_; // signal the change even though bars_ is now empty
-}
-
-void FootprintAggregator::apply_cvd(const PublicTrade& trade)
-{
-    // Assumes trade.event_ns - reset_ns_of_day is non-negative, true for any
-    // real epoch-nanosecond timestamp since reset_ns_of_day is < one day.
-    const std::int64_t recent_boundary =
-        ((trade.event_ns - config_.cvd_reset_ns_of_day) / kDayNs) * kDayNs
-        + config_.cvd_reset_ns_of_day;
-
-    if (!cvd_initialized_)
-    {
-        cvd_last_boundary_ns_ = recent_boundary;
-        cvd_initialized_ = true;
-    }
-    else if (recent_boundary > cvd_last_boundary_ns_)
-    {
-        cvd_ = 0;
-        cvd_last_boundary_ns_ = recent_boundary;
-    }
-
-    if (trade.side == aggressor_side::buy)
-        cvd_ += trade.base_qty_atoms;
-    else if (trade.side == aggressor_side::sell)
-        cvd_ -= trade.base_qty_atoms;
-    // unknown aggression: no CVD contribution (§2.2)
 }
 
 void FootprintAggregator::ensure_bar_for(std::int64_t event_ns)
@@ -208,14 +213,16 @@ void FootprintAggregator::recompute_imbalance(FootprintBar& bar) const
         // Buy diagonal: this level's buy volume vs the sell volume one
         // grouped level below (§2.2 "diagonal imbalance against the
         // adjacent grouped price level").
-        if (auto it = bar.cells.find(level - 1); it != bar.cells.end())
+        if (level != std::numeric_limits<price_level>::min())
         {
-            const std::int64_t below_sell = it->second.sell_base_qty;
-            if (cell.buy_base_qty >= config_.imbalance_min_volume && below_sell > 0 &&
-                static_cast<double>(cell.buy_base_qty) >=
-                    kDiagonalImbalanceRatio * static_cast<double>(below_sell))
-            {
-                cell.diagonal = FootprintCell::imbalance::buy;
+            if (auto it = bar.cells.find(level - 1); it != bar.cells.end()) {
+                const std::int64_t below_sell = it->second.sell_base_qty;
+                if (cell.buy_base_qty >= config_.imbalance_min_volume && below_sell > 0 &&
+                    static_cast<double>(cell.buy_base_qty) >=
+                        kDiagonalImbalanceRatio * static_cast<double>(below_sell))
+                {
+                    cell.diagonal = FootprintCell::imbalance::buy;
+                }
             }
         }
         // Sell diagonal: this level's sell volume vs the buy volume one
@@ -224,14 +231,16 @@ void FootprintAggregator::recompute_imbalance(FootprintBar& bar) const
         // deterministic tie-break rather than an arbitrary last-write.
         if (cell.diagonal == FootprintCell::imbalance::none)
         {
-            if (auto it = bar.cells.find(level + 1); it != bar.cells.end())
+            if (level != std::numeric_limits<price_level>::max())
             {
-                const std::int64_t above_buy = it->second.buy_base_qty;
-                if (cell.sell_base_qty >= config_.imbalance_min_volume && above_buy > 0 &&
-                    static_cast<double>(cell.sell_base_qty) >=
-                        kDiagonalImbalanceRatio * static_cast<double>(above_buy))
-                {
-                    cell.diagonal = FootprintCell::imbalance::sell;
+                if (auto it = bar.cells.find(level + 1); it != bar.cells.end()) {
+                    const std::int64_t above_buy = it->second.buy_base_qty;
+                    if (cell.sell_base_qty >= config_.imbalance_min_volume && above_buy > 0 &&
+                        static_cast<double>(cell.sell_base_qty) >=
+                            kDiagonalImbalanceRatio * static_cast<double>(above_buy))
+                    {
+                        cell.diagonal = FootprintCell::imbalance::sell;
+                    }
                 }
             }
         }
@@ -253,7 +262,9 @@ void FootprintAggregator::recompute_imbalance(FootprintBar& bar) const
         {
             const auto dir_prev = bar.cells[levels[i - 1]].diagonal;
             const auto dir_cur = bar.cells[levels[i]].diagonal;
-            contiguous_same_dir = (levels[i] == levels[i - 1] + 1) &&
+            contiguous_same_dir =
+                levels[i - 1] != std::numeric_limits<price_level>::max() &&
+                (levels[i] == levels[i - 1] + 1) &&
                                    dir_prev != FootprintCell::imbalance::none &&
                                    dir_prev == dir_cur;
         }
@@ -275,10 +286,91 @@ void FootprintAggregator::trim_to_max_bars()
         bars_.pop_front();
 }
 
-void FootprintAggregator::on_trade(const PublicTrade& trade)
+bool FootprintAggregator::on_trade(const PublicTrade& trade)
 {
-    apply_cvd(trade);
+    if (!config_valid_ || sealed_ || trade.event_ns <= 0
+        || trade.recv_ns < trade.event_ns
+        || trade.price_ticks <= 0 || trade.base_qty_atoms <= 0
+        || trade.venue_id == 0 || trade.symbol_id == kInvalidSymbolId
+        || trade.session_id == 0
+        || (have_last_event_ && trade.event_ns < last_event_ns_)
+        )
+        return false;
+
+    if (config_.bar_spec.kind == bar_kind::time) {
+        const std::int64_t interval = config_.bar_spec.interval_ns;
+        const std::int64_t start = (trade.event_ns / interval) * interval;
+        if (start > std::numeric_limits<std::int64_t>::max() - interval)
+            return false;
+    } else if (!std::isfinite(config_.bar_spec.volume_threshold)
+               || !(config_.bar_spec.volume_threshold > 0.0)) {
+        return false;
+    }
+
+    const std::int64_t recent_boundary =
+        cvd_boundary(trade.event_ns, config_.cvd_reset_ns_of_day);
+    const bool reset_cvd =
+        !cvd_initialized_ || recent_boundary > cvd_last_boundary_ns_;
+    const std::int64_t cvd_base = reset_cvd ? 0 : cvd_;
+    std::int64_t next_cvd = cvd_base;
+    if (trade.side == aggressor_side::buy) {
+        if (!checked_add(cvd_base, trade.base_qty_atoms, next_cvd))
+            return false;
+    } else if (trade.side == aggressor_side::sell) {
+        if (!checked_add(cvd_base, -trade.base_qty_atoms, next_cvd))
+            return false;
+    }
+
+    // If this trade remains in the forming bar, prove all integer and
+    // floating-point accumulations before any bar/CVD mutation. A trade that
+    // cannot be represented economically is rejected atomically.
+    const FootprintBar* target = nullptr;
+    if (!bars_.empty()) {
+        const FootprintBar& current = bars_.back();
+        const bool remains_in_time_bar =
+            config_.bar_spec.kind == bar_kind::time
+            && trade.event_ns < current.end_ns;
+        if (config_.bar_spec.kind == bar_kind::volume || remains_in_time_bar)
+            target = &current;
+    }
+
+    const double price = static_cast<double>(trade.price_ticks) * config_.tick_size;
+    const double qty = static_cast<double>(trade.base_qty_atoms) / config_.qty_atom_scale;
+    const double contribution = price * qty;
+    if (!std::isfinite(price) || !std::isfinite(qty)
+        || !std::isfinite(contribution) || !(contribution > 0.0))
+        return false;
+
+    if (target) {
+        std::int64_t total = 0;
+        if (!checked_add(target->buy_volume, target->sell_volume, total)
+            || !checked_add(total, target->unknown_volume, total)
+            || total > std::numeric_limits<std::int64_t>::max()
+                           - trade.base_qty_atoms)
+            return false;
+
+        const price_level level = trade.price_ticks / config_.group_size;
+        if (const auto found = target->cells.find(level);
+            found != target->cells.end()) {
+            const FootprintCell& cell = found->second;
+            const std::int64_t side_total =
+                trade.side == aggressor_side::buy ? cell.buy_base_qty
+                : trade.side == aggressor_side::sell ? cell.sell_base_qty
+                                                     : cell.unknown_base_qty;
+            if (side_total > std::numeric_limits<std::int64_t>::max()
+                                 - trade.base_qty_atoms)
+                return false;
+        }
+
+        if (!std::isfinite(target->quote_notional + contribution))
+            return false;
+    }
+
     ensure_bar_for(trade.event_ns);
+
+    cvd_ = next_cvd;
+    cvd_last_boundary_ns_ = recent_boundary;
+    cvd_initialized_ = true;
 
     FootprintBar& bar = bars_.back();
     if (!bar.has_trades)
@@ -315,9 +407,7 @@ void FootprintAggregator::on_trade(const PublicTrade& trade)
             break;
     }
 
-    const double price = static_cast<double>(trade.price_ticks) * config_.tick_size;
-    const double qty = static_cast<double>(trade.base_qty_atoms) / config_.qty_atom_scale;
-    bar.quote_notional += price * qty;
+    bar.quote_notional += contribution;
 
     recompute_derived(bar);
     ++version_;
@@ -335,13 +425,17 @@ void FootprintAggregator::on_trade(const PublicTrade& trade)
     }
 
     trim_to_max_bars();
+    last_event_ns_ = trade.event_ns;
+    have_last_event_ = true;
+    return true;
 }
 
 void FootprintAggregator::flush()
 {
-    if (bars_.empty())
+    if (bars_.empty() || sealed_)
         return;
     close_current_bar();
+    sealed_ = true;
     ++version_;
 }
 

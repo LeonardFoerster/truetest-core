@@ -87,8 +87,18 @@ std::string render_attribution(
         char pnl[32], wr[32], pf[32];
         std::snprintf(pnl, sizeof(pnl), "%+.2f", sa.total_pnl);
         std::snprintf(wr,  sizeof(wr),  "%.1f%%", sa.win_rate());
-        std::snprintf(pf,  sizeof(pf),  "%.2f", sa.profit_factor());
-        rows.push_back({key, std::to_string(sa.trade_count), pnl, wr, pf});
+        std::string pf_value;
+        if (sa.profit_factor_valid())
+        {
+            std::snprintf(pf, sizeof(pf), "%.2f", sa.profit_factor());
+            pf_value = pf;
+        }
+        else if (sa.profit_factor_unbounded())
+            pf_value = "unbounded";
+        else
+            pf_value = "unsupported";
+        rows.push_back({key, std::to_string(sa.trade_count), pnl, wr,
+                        std::move(pf_value)});
     }
     oss << ascii::table(
         {"name", "trades", "pnl", "win%", "pf"},
@@ -103,8 +113,22 @@ std::string render_returns_section(const AnalyticsReport& r, const report_option
 {
     std::ostringstream oss;
     oss << "\n" << ascii::section_header("Returns", o.width) << "\n";
+    if (!r.portfolio_time_series_valid)
+        oss << metric("PORTFOLIO TIME SERIES",
+                      "UNSUPPORTED: " + r.portfolio_time_series_reason);
     oss << metric("initial equity", ascii::fmt_money(r.initial_equity));
     oss << metric("final equity",   ascii::fmt_money(r.final_equity));
+    oss << metric("realized gross", ascii::fmt_money(r.gross_realized_pnl));
+    oss << metric("realized net",   ascii::fmt_money(r.realized_pnl));
+    oss << metric("commissions",    ascii::fmt_money(-r.total_commission));
+    if (r.funding_pnl != 0.0)
+        oss << metric("funding", ascii::fmt_money(r.funding_pnl));
+    if (r.unrealized_pnl != 0.0)
+        oss << metric("unrealized", ascii::fmt_money(r.unrealized_pnl));
+    oss << metric("reconciliation residual", ascii::fmt_money(r.reconciliation_residual));
+    if (!r.valuation_complete)
+        oss << metric("VALUATION", "UNSUPPORTED: " + r.valuation_reason
+                                 + " (equity/returns provisional)");
 
     double ret_abs = std::abs(r.cumulative_return);
     double bh_abs  = std::abs(r.buy_and_hold_return);
@@ -112,10 +136,21 @@ std::string render_returns_section(const AnalyticsReport& r, const report_option
 
     oss << metric("total return", ascii::fmt_signed_pct(r.cumulative_return),
                   ret_abs, bar_max, o.bar_width);
-    oss << metric("annualized",   ascii::fmt_signed_pct(r.annualized_return));
-    oss << metric("buy & hold",   ascii::fmt_signed_pct(r.buy_and_hold_return),
-                  bh_abs, bar_max, o.bar_width);
-    oss << metric("vs benchmark", ascii::fmt_signed_pct(r.strategy_vs_benchmark));
+    if (r.annualized_return_valid)
+        oss << metric("annualized", ascii::fmt_signed_pct(r.annualized_return));
+    else
+        oss << metric("annualized", "unsupported: " + r.annualized_return_reason);
+    if (r.benchmark_valid)
+    {
+        oss << metric("buy & hold", ascii::fmt_signed_pct(r.buy_and_hold_return),
+                      bh_abs, bar_max, o.bar_width);
+        oss << metric("vs benchmark", ascii::fmt_signed_pct(r.strategy_vs_benchmark));
+    }
+    else
+    {
+        oss << metric("buy & hold", "unsupported: " + r.benchmark_reason);
+        oss << metric("vs benchmark", "unsupported: " + r.benchmark_reason);
+    }
     return oss.str();
 }
 
@@ -123,11 +158,18 @@ std::string render_risk_section(const AnalyticsReport& r, const report_options& 
 {
     std::ostringstream oss;
     oss << "\n" << ascii::section_header("Risk", o.width) << "\n";
-    oss << metric("sharpe ratio",   fmt_fixed(r.sharpe_ratio));
-    oss << metric("sortino ratio",  fmt_fixed(r.sortino_ratio));
+    oss << metric("sharpe ratio", r.sharpe_ratio_valid
+        ? fmt_fixed(r.sharpe_ratio)
+        : "unsupported (" + r.sharpe_ratio_reason + ")");
+    oss << metric("sortino ratio", r.sortino_ratio_valid
+        ? fmt_fixed(r.sortino_ratio)
+        : "unsupported (" + r.sortino_ratio_reason + ")");
     oss << metric("max drawdown",   ascii::fmt_pct(r.max_drawdown / 100.0),
                   r.max_drawdown, std::max(r.max_drawdown, 1.0), o.bar_width);
-    oss << metric("calmar ratio",   fmt_fixed(r.calmar_ratio));
+    if (r.calmar_ratio_valid)
+        oss << metric("calmar ratio", fmt_fixed(r.calmar_ratio));
+    else
+        oss << metric("calmar ratio", "unsupported (" + r.calmar_ratio_reason + ")");
     oss << metric("rolling sharpe", fmt_fixed(r.rolling_sharpe));
     oss << metric("rolling max dd", ascii::fmt_pct(r.rolling_max_drawdown / 100.0));
     return oss.str();
@@ -138,9 +180,21 @@ std::string render_trades_section(const AnalyticsReport& r, const report_options
     std::ostringstream oss;
     oss << "\n" << ascii::section_header("Trades", o.width) << "\n";
     oss << metric("total trades", std::to_string(r.total_trades));
+    // F-09b: a round trip that exits across several book levels is one
+    // trade that filled in several pieces. Showing both keeps the trade
+    // count honest without hiding execution fragmentation.
+    if (r.closing_fill_legs != r.total_trades)
+        oss << metric("closing fill legs", std::to_string(r.closing_fill_legs));
+
     oss << metric("win rate", ascii::fmt_pct(r.win_rate / 100.0, 1),
                   r.win_rate, 100.0, o.bar_width);
-    oss << metric("profit factor",  fmt_fixed(r.profit_factor));
+    if (r.profit_factor_valid)
+        oss << metric("profit factor", fmt_fixed(r.profit_factor));
+    else if (r.profit_factor_unbounded)
+        oss << metric("profit factor", "unbounded (no losses)");
+    else
+        oss << metric("profit factor",
+                      "unsupported (" + r.profit_factor_reason + ")");
     oss << metric("avg win",        ascii::fmt_money(r.avg_win));
     oss << metric("avg loss",       ascii::fmt_money(r.avg_loss));
     oss << metric("largest win",    ascii::fmt_money(r.largest_winner));
@@ -162,6 +216,78 @@ std::string render_execution_section(const AnalyticsReport& r, const report_opti
                                        + "  n=" + std::to_string(r.favorable_slippage_count));
     oss << metric("total orders",  std::to_string(r.total_orders));
     oss << metric("total fills",   std::to_string(r.total_fills));
+    if (r.duplicate_fill_replays_ignored > 0)
+        oss << metric("duplicate fill replays",
+                      std::to_string(r.duplicate_fill_replays_ignored)
+                      + "  ignored exactly once");
+    if (r.conflicting_fill_replays_rejected > 0)
+        oss << metric("CONFLICTING FILL REPLAYS",
+                      std::to_string(r.conflicting_fill_replays_rejected)
+                      + "  REJECTED");
+    if (r.missing_fill_identities_rejected > 0)
+        oss << metric("MISSING FILL IDENTITIES",
+                      std::to_string(r.missing_fill_identities_rejected)
+                      + "  REJECTED");
+    if (r.invalid_fill_payloads_rejected > 0)
+        oss << metric("INVALID FILL PAYLOADS",
+                      std::to_string(r.invalid_fill_payloads_rejected)
+                      + "  REJECTED");
+    if (r.unreconciled_funding_events_rejected > 0)
+        oss << metric("UNRECONCILED FUNDING EVENTS",
+                      std::to_string(r.unreconciled_funding_events_rejected)
+                      + "  REJECTED / RISK LATCHED");
+    if (r.duplicate_funding_replays_ignored > 0)
+        oss << metric("duplicate funding replays",
+                      std::to_string(r.duplicate_funding_replays_ignored)
+                      + "  ignored exactly once");
+    if (r.conflicting_funding_replays_rejected > 0)
+        oss << metric("CONFLICTING FUNDING REPLAYS",
+                      std::to_string(r.conflicting_funding_replays_rejected)
+                      + "  REJECTED / RISK LATCHED");
+    if (r.late_fill_events_rejected > 0)
+        oss << metric("LATE FILL EVENTS",
+                      std::to_string(r.late_fill_events_rejected)
+                      + "  REJECTED / TIME INVALID");
+    if (r.late_funding_events_rejected > 0)
+        oss << metric("LATE FUNDING EVENTS",
+                      std::to_string(r.late_funding_events_rejected)
+                      + "  REJECTED / TIME INVALID");
+    if (r.late_market_events_rejected > 0)
+        oss << metric("LATE MARKET EVENTS",
+                      std::to_string(r.late_market_events_rejected)
+                      + "  REJECTED / TIME SERIES INVALID");
+    if (r.duplicate_market_marks_ignored > 0)
+        oss << metric("DUPLICATE MARKET MARKS",
+                      std::to_string(r.duplicate_market_marks_ignored)
+                      + "  IGNORED");
+    if (r.conflicting_market_marks_rejected > 0)
+        oss << metric("CONFLICTING MARKET MARKS",
+                      std::to_string(r.conflicting_market_marks_rejected)
+                      + "  REJECTED / TIME SERIES INVALID");
+    if (r.contains_exploratory_execution)
+        oss << metric("execution claims",
+                      "EXPLORATORY — synthetic fills are not historical execution evidence");
+    // F-06: intent lifecycle. registered != armed means intents died without
+    // a terminal notification; evicted != 0 means the bound had to catch it.
+    if (r.exit_intents_registered > 0 || r.exit_intents_evicted > 0)
+    {
+        oss << metric("exit intents reg/armed",
+                      std::to_string(r.exit_intents_registered) + "/"
+                      + std::to_string(r.exit_intents_armed));
+        if (r.exit_intents_cancelled > 0)
+            oss << metric("exit intents cancelled",
+                          std::to_string(r.exit_intents_cancelled));
+        if (r.exit_intents_evicted > 0)
+            oss << metric("exit intents EVICTED",
+                          std::to_string(r.exit_intents_evicted)
+                          + "  (leaked - see F-02/F-06)");
+    }
+    // F-01(a): entries that slipped past their own designed stop distance.
+    if (r.exit_slippage_disarms > 0)
+        oss << metric("brackets refused (slippage)",
+                      std::to_string(r.exit_slippage_disarms)
+                      + "  flattened=" + std::to_string(r.exit_flatten_requests));
+
     if (r.tick_to_trade_samples > 0)
     {
         oss << metric("avg tick→trade", format_latency_ns(r.avg_tick_to_trade_ns));
@@ -175,8 +301,11 @@ std::string render_exposure_section(const AnalyticsReport& r, const report_optio
 {
     std::ostringstream oss;
     oss << "\n" << ascii::section_header("Exposure", o.width) << "\n";
-    oss << metric("time in market", ascii::fmt_pct(r.time_in_market_pct / 100.0, 1),
-                  r.time_in_market_pct, 100.0, o.bar_width);
+    if (r.time_in_market_valid)
+        oss << metric("time in market", ascii::fmt_pct(r.time_in_market_pct / 100.0, 1),
+                      r.time_in_market_pct, 100.0, o.bar_width);
+    else
+        oss << metric("time in market", "unsupported: " + r.time_in_market_reason);
     oss << metric("avg holding", format_duration_ms(r.avg_holding_period_ms));
     return oss.str();
 }
@@ -185,7 +314,7 @@ std::string render_distribution_section(const AnalyticsReport& r, const report_o
 {
     if (r.trade_returns.empty()) return "";
     std::ostringstream oss;
-    oss << "\n" << ascii::section_header("Per-Trade PnL Distribution", o.width) << "\n";
+    oss << "\n" << ascii::section_header("Closing-Fill PnL Distribution", o.width) << "\n";
     auto bins = ascii::equal_width_bins(r.trade_returns, o.distribution_bins);
     oss << ascii::horizontal_histogram(bins, o.bar_width + 6);
     return oss.str();
@@ -218,6 +347,12 @@ std::string render_benchmark_section(const AnalyticsReport& r, const report_opti
 {
     std::ostringstream oss;
     oss << "\n" << ascii::section_header("Benchmark", o.width) << "\n";
+    if (!r.benchmark_valid)
+    {
+        oss << metric("status", "unsupported (" + r.benchmark_reason + ")");
+        return oss.str();
+    }
+    oss << metric("symbol", r.benchmark_symbol);
     oss << metric("alpha",             fmt_fixed(r.alpha, 4));
     oss << metric("beta",              fmt_fixed(r.beta, 4));
     oss << metric("information ratio", fmt_fixed(r.information_ratio, 4));
@@ -283,7 +418,22 @@ std::string render_report(const AnalyticsReport& r, const report_options& o)
     oss << "  " << o.title << "\n";
     oss << ascii::rule(o.width, "\xe2\x95\x90") << "\n";
 
+    // F-05a: an account that reached zero cannot have held the positions the
+    // rest of this report is derived from. Say so before any ratio is shown,
+    // rather than printing a Sharpe ratio for a wiped account.
+    if (r.bankrupt)
+    {
+        oss << "\n" << ascii::rule(o.width, "!") << "\n";
+        oss << "  RUN INVALID - ACCOUNT BANKRUPT\n";
+        oss << "  Marked equity reached " << fmt_fixed(r.bankrupt_equity, 2)
+            << ". The engine has no margin call, liquidation or bankruptcy\n"
+               "  stop, so trading continued on an account that no longer\n"
+               "  existed. Every metric below is meaningless. See F-05.\n";
+        oss << ascii::rule(o.width, "!") << "\n";
+    }
+
     if (o.include_returns)          oss << render_returns_section(r, o);
+
     if (o.include_risk)             oss << render_risk_section(r, o);
     if (o.include_equity_sparkline) oss << render_equity_sparkline_section(r, o);
     if (o.include_trades)           oss << render_trades_section(r, o);

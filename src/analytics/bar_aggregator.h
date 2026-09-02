@@ -1,12 +1,14 @@
 #pragma once
 
 #include "../core/event.h"
+#include "../types/quantity_scale.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <vector>
 
 class BarAggregator
@@ -33,9 +35,12 @@ public:
                  std::uint64_t quantity_scale = 1)
     {
         if (symbol.empty() || !std::isfinite(price) || !(price > 0.0)
-            || volume < 0 || quantity_scale == 0)
+            || volume <= 0 || quantity_scale == 0
+            || interval_.count() <= 0
+            || timestamp.time_since_epoch().count() <= 0
+            || (last_input_timestamp_
+                && timestamp < *last_input_timestamp_))
             return false;
-
         bar_state* state = nullptr;
         for (auto& candidate : states_)
         {
@@ -49,57 +54,63 @@ public:
         {
             if (states_.size() >= max_symbols_)
                 return false;
-            states_.push_back({});
+        }
+
+        // Validate every mutation that can still fail before advancing global
+        // event time or publishing completed bars. A rejected tick must not
+        // close quiet-symbol bars or move the replay watermark.
+        int64_t next_volume = volume;
+        const bool adds_to_open_bar =
+            state && state->bar_open && timestamp - state->bar_start < interval_;
+        if (adds_to_open_bar) {
+            next_volume = state->volume;
+            if (quantity_scale == state->quantity_scale) {
+                if (state->volume > std::numeric_limits<int64_t>::max() - volume)
+                    return false;
+                next_volume += volume;
+            } else {
+                std::uint64_t normalized = 0;
+                if (!tt::quantity_scale::rescale_nonnegative_exact(
+                        volume, quantity_scale, state->quantity_scale,
+                        normalized)
+                    || normalized > static_cast<std::uint64_t>(
+                        std::numeric_limits<int64_t>::max() - state->volume))
+                    return false;
+                next_volume += static_cast<int64_t>(normalized);
+            }
+        }
+
+        std::optional<bar_state> new_state;
+        if (!state) {
+            new_state.emplace();
+            new_state->symbol = symbol;
+        }
+
+        // A quiet symbol's completed bar must be emitted before a newer
+        // symbol's bar. Close every interval that is knowably complete at the
+        // current global event time, in deterministic start/symbol order.
+        emit_due(timestamp);
+
+        if (!state) {
+            states_.push_back(std::move(*new_state));
             state = &states_.back();
-            state->symbol = symbol;
         }
         auto& s = *state;
 
-        if (!s.bar_open)
-        {
+        if (!s.bar_open) {
             s.bar_start = timestamp;
             s.open = s.high = s.low = s.close = price;
             s.volume = volume;
             s.quantity_scale = quantity_scale;
             s.bar_open = true;
-            return true;
+        } else {
+            s.high = std::max(s.high, price);
+            s.low = std::min(s.low, price);
+            s.close = price;
+            s.volume = next_volume;
         }
 
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            timestamp - s.bar_start);
-        if (elapsed >= interval_)
-        {
-            emit_bar(s);
-            s.bar_start = timestamp;
-            s.open = s.high = s.low = s.close = price;
-            s.volume = volume;
-            s.quantity_scale = quantity_scale;
-            return true;
-        }
-
-        int64_t next_volume = s.volume;
-        if (quantity_scale == s.quantity_scale)
-        {
-            if (s.volume > std::numeric_limits<int64_t>::max() - volume)
-                return false;
-            next_volume += volume;
-        }
-        else
-        {
-            const long double normalized = static_cast<long double>(volume)
-                * static_cast<long double>(s.quantity_scale)
-                / static_cast<long double>(quantity_scale);
-            const long double max_add = static_cast<long double>(
-                std::numeric_limits<int64_t>::max()) - s.volume;
-            if (!(normalized >= 0.0L) || normalized > max_add)
-                return false;
-            next_volume += static_cast<int64_t>(std::llround(normalized));
-        }
-
-        s.high = std::max(s.high, price);
-        s.low = std::min(s.low, price);
-        s.close = price;
-        s.volume = next_volume;
+        last_input_timestamp_ = timestamp;
         return true;
     }
 
@@ -130,6 +141,7 @@ public:
     void reset()
     {
         states_.clear();
+        last_input_timestamp_.reset();
     }
 
 private:
@@ -154,9 +166,30 @@ private:
         callback_(bar);
     }
 
+    void emit_due(std::chrono::system_clock::time_point now)
+    {
+        while (true)
+        {
+            bar_state* next = nullptr;
+            for (auto& state : states_)
+            {
+                if (!state.bar_open || now - state.bar_start < interval_)
+                    continue;
+                if (!next || state.bar_start < next->bar_start
+                    || (state.bar_start == next->bar_start
+                        && state.symbol < next->symbol))
+                    next = &state;
+            }
+            if (!next) return;
+            emit_bar(*next);
+            next->bar_open = false;
+        }
+    }
+
     std::chrono::milliseconds interval_;
     bar_callback callback_;
 
     std::size_t max_symbols_ = 16;
     std::vector<bar_state> states_;
+    std::optional<std::chrono::system_clock::time_point> last_input_timestamp_;
 };
