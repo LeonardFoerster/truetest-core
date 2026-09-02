@@ -21,6 +21,7 @@ FootprintLiveSource::FootprintLiveSource(FootprintLiveSourceConfig config)
 {
     tap_ctx_.venue = config_.venue;
     tap_ctx_.symbol_id = config_.symbol_id;
+    tap_ctx_.symbol = config_.symbol_label;
     tap_ctx_.session_id = 1; // bumped externally on reconnect once that plumbing exists (Phase 2b)
     tap_ctx_.tick_size = config_.tick_size;
     tap_ctx_.qty_atom_scale = config_.qty_atom_scale;
@@ -34,13 +35,15 @@ void FootprintLiveSource::tap(const provider::event& ev) noexcept
 
 void FootprintLiveSource::tap_tick(const provider::tick& t) noexcept
 {
-    truetest::footprint::try_tap_push(tap_ctx_, t, ring_);
+    if (!truetest::footprint::try_tap_push(tap_ctx_, t, ring_))
+        rejected_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
 research_view_handle FootprintLiveSource::poll()
 {
     truetest::footprint::PublicTrade trade;
     std::size_t drained = 0;
+    std::size_t accepted = 0;
     // Bounded by the ring's own capacity - never an unbounded/hanging loop
     // even under a sustained burst (footprint.md §2.1 "must never halt or
     // slow the engine" applies to the tap; this cold consumer just must not
@@ -48,18 +51,28 @@ research_view_handle FootprintLiveSource::poll()
     constexpr std::size_t kMaxPerPoll = decltype(ring_)::capacity();
     while (drained < kMaxPerPoll && ring_.try_pop(trade))
     {
-        aggregator_.on_trade(trade);
-        ++received_count_;
+        if (aggregator_.on_trade(trade)) {
+            ++received_count_;
+            ++accepted;
+        } else {
+            rejected_count_.fetch_add(1, std::memory_order_relaxed);
+        }
         ++drained;
     }
 
     const auto status_before = status_;
-    if (ring_.discontinuous())
+    const auto rejected_now = rejected_count_.load(std::memory_order_relaxed);
+    const bool newly_rejected = rejected_now != observed_rejected_count_;
+    observed_rejected_count_ = rejected_now;
+    const auto discontinuity_generation = ring_.discontinuity_generation();
+    if (ring_.discontinuous() || newly_rejected)
     {
         status_ = truetest::footprint::data_status::recovering;
-        ring_.acknowledge_discontinuity();
+        if (ring_.discontinuous())
+            ring_.acknowledge_discontinuity(discontinuity_generation);
     }
-    else if (received_count_ > 0 && status_ == truetest::footprint::data_status::recovering)
+    else if (accepted > 0
+             && status_ == truetest::footprint::data_status::recovering)
     {
         // Ring caught back up after a drop - without cache/reconciliation
         // (Phase 2b) there is no bounded repair to attempt, so the honest
@@ -78,7 +91,10 @@ research_view_handle FootprintLiveSource::poll()
     auto view = std::make_shared<ResearchPresentation>();
     view->footprint = to_footprint_bar_views(aggregator_, opts);
     view->footprint_status = status_;
-    view->state = received_count_ > 0 ? DeskDataState::live : DeskDataState::unavailable;
+    view->state = status_ == truetest::footprint::data_status::recovering
+        ? DeskDataState::error
+        : received_count_ > 0 ? DeskDataState::stale
+                              : DeskDataState::unavailable;
     view->source = config_.symbol_label;
     // Only mint a new version when something actually changed - new trades
     // drained or a status transition - not on every ~100ms poll cadence

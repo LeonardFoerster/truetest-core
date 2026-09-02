@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace truetest::ui::desk {
 
@@ -108,6 +109,11 @@ std::vector<truetest::footprint::PublicTrade> make_demo_public_trades(
                : (side_roll % 2 == 0 ? aggressor_side::buy : aggressor_side::sell);
         t.obs_seq = static_cast<std::uint64_t>(i);
         t.session_id = 1;
+        // Local DEMO DATA never enters cache/reconciliation. Give it an
+        // explicit non-venue identity instead of leaving the production
+        // unresolved sentinel, which the aggregator correctly rejects.
+        t.venue_id = std::numeric_limits<std::uint16_t>::max() - 1;
+        t.symbol_id = 0; // first dense SymbolTable id is valid
         out.push_back(t);
 
         // 0.2 - 1.1s between prints.

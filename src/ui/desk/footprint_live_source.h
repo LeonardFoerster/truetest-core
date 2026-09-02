@@ -8,6 +8,7 @@
 #include "ui/desk/research_views.h"
 
 #include <cstdint>
+#include <atomic>
 #include <string>
 
 // Live counterpart to FootprintDemoState (footprint_panel_state.h): installs
@@ -27,7 +28,7 @@ namespace truetest::ui::desk {
 struct FootprintLiveSourceConfig
 {
     truetest::footprint::venue_id venue = truetest::footprint::venue_id::unknown;
-    std::uint16_t symbol_id = 0;
+    std::uint16_t symbol_id = truetest::footprint::kInvalidSymbolId;
     std::string symbol_label; // ResearchSurfaceStatus.source / logs only - not hashed/compared
 
     // resolve_footprint_tick_size()'s result - 0 means unavailable; the tap
@@ -64,6 +65,10 @@ public:
 
     truetest::footprint::data_status status() const noexcept { return status_; }
     std::uint64_t received_count() const noexcept { return received_count_; }
+    std::uint64_t rejected_count() const noexcept
+    {
+        return rejected_count_.load(std::memory_order_relaxed);
+    }
 
 private:
     FootprintLiveSourceConfig config_;
@@ -73,6 +78,8 @@ private:
 
     truetest::footprint::data_status status_ = truetest::footprint::data_status::backfilling;
     std::uint64_t received_count_ = 0;
+    std::atomic<std::uint64_t> rejected_count_{0};
+    std::uint64_t observed_rejected_count_ = 0;
     // Version handed out on the last publish that actually changed
     // anything (drained new trades or a status transition) - see poll()'s
     // comment. Drawn from the shared next_research_version() sequence
