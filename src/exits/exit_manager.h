@@ -5,14 +5,17 @@
 #include "exits/bracket_adapter.h"
 
 #include <chrono>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <type_traits>
 
 namespace truetest::exits {
 
@@ -75,6 +78,8 @@ public:
 
     std::size_t armed_count() const { return armed_.size(); }
     std::size_t pending_count() const { return pending_.size(); }
+    std::size_t venue_handle_count() const;
+    std::size_t exchange_leg_count() const;
 
     // Live opener count for a (strategy,symbol) pair across pending+armed.
     // Used by the engine to distinguish single-lot strategies (where a
@@ -140,6 +145,40 @@ public:
         std::chrono::system_clock::time_point ts_armed{};
     };
     std::vector<armed_view> snapshot_armed() const;
+    void snapshot_armed_into(std::vector<armed_view>& out) const;
+
+    struct fixed_venue_handle_view
+    {
+        std::uint64_t opener_order_id = 0;
+        bool venue_managed = false;
+        bool list_id_complete = true;
+        std::uint16_t list_id_size = 0;
+        std::array<char, 128> list_id{};
+    };
+    struct fixed_venue_snapshot_result
+    {
+        std::size_t count = 0;
+        std::size_t total_count = 0;
+        bool complete = true;
+    };
+
+    // Cold-reader view of only the mutex-protected venue index. Storage is
+    // supplied by the caller, so the critical section never allocates.
+    fixed_venue_snapshot_result snapshot_venue_handles_into(
+        std::span<fixed_venue_handle_view> out) const;
+
+    // Allocation-free engine-thread projection. The callback must be
+    // noexcept; this API is intentionally not thread-safe and may only be
+    // used by the sole engine producer at a committed event boundary.
+    template <typename Fn>
+    void for_each_armed_event_thread(Fn&& fn) const noexcept
+    {
+        static_assert(std::is_nothrow_invocable_v<
+            Fn, std::uint64_t, const exit_intent&, double,
+            std::chrono::system_clock::time_point>);
+        for (const auto& [opener, armed] : armed_)
+            fn(opener, armed.intent, armed.entry_price, armed.ts_armed);
+    }
 
 private:
     struct armed_intent

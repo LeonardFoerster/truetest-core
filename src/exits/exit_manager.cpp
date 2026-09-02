@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -428,21 +429,19 @@ std::string ExitManager::strategy_name_for_exchange_order(const std::string& exc
 std::vector<ExitManager::armed_view> ExitManager::snapshot_armed() const
 {
     std::vector<armed_view> out;
-    out.reserve(armed_.size());
+    snapshot_armed_into(out);
+    return out;
+}
 
-    // Snapshot venue handles separately so we can mark each row's
-    // venue_managed flag without touching armed_ across the lock.
-    std::unordered_map<std::uint64_t, std::string> oco_ids;
-    {
-        std::lock_guard<std::mutex> lk(venue_mu_);
-        for (const auto& [opener, h] : handles_)
-            oco_ids.emplace(opener,
-                h.oco_list_id ? *h.oco_list_id : std::string{});
-    }
+void ExitManager::snapshot_armed_into(std::vector<armed_view>& out) const
+{
+    if (out.capacity() < armed_.size()) out.reserve(armed_.size());
+    std::size_t index = 0;
 
     for (const auto& [opener, ai] : armed_)
     {
-        armed_view v;
+        if (index == out.size()) out.emplace_back();
+        auto& v = out[index++];
         v.opener_order_id = opener;
         v.strategy_name   = ai.intent.strategy_name;
         v.symbol          = ai.intent.symbol;
@@ -452,12 +451,70 @@ std::vector<ExitManager::armed_view> ExitManager::snapshot_armed() const
         v.stop_loss       = ai.intent.stop_loss;
         v.take_profit     = ai.intent.take_profit;
         v.ts_armed        = ai.ts_armed;
-        auto hit = oco_ids.find(opener);
-        v.venue_managed = (hit != oco_ids.end());
-        if (v.venue_managed) v.venue_list_id = hit->second;
-        out.push_back(std::move(v));
+        v.venue_managed = false;
+        v.venue_list_id.clear();
     }
-    return out;
+    out.resize(index);
+
+    // `armed_` and handle mutation are engine-thread owned; provider threads
+    // only perform guarded lookups. Capture stable string pointers under the
+    // short lock, then perform every potentially allocating copy after it.
+    std::vector<const std::string*> venue_ids(out.size(), nullptr);
+    {
+        std::lock_guard<std::mutex> lk(venue_mu_);
+        for (std::size_t i = 0; i < out.size(); ++i)
+        {
+            const auto hit = handles_.find(out[i].opener_order_id);
+            out[i].venue_managed = hit != handles_.end();
+            if (out[i].venue_managed && hit->second.oco_list_id)
+                venue_ids[i] = &*hit->second.oco_list_id;
+        }
+    }
+    for (std::size_t i = 0; i < out.size(); ++i)
+        if (venue_ids[i]) out[i].venue_list_id = *venue_ids[i];
+}
+
+std::size_t ExitManager::venue_handle_count() const
+{
+    std::lock_guard<std::mutex> lk(venue_mu_);
+    return handles_.size();
+}
+
+ExitManager::fixed_venue_snapshot_result
+ExitManager::snapshot_venue_handles_into(
+    std::span<fixed_venue_handle_view> out) const
+{
+    fixed_venue_snapshot_result result;
+    std::lock_guard<std::mutex> lk(venue_mu_);
+    result.total_count = handles_.size();
+    for (const auto& [opener, handles] : handles_)
+    {
+        if (result.count == out.size())
+        {
+            result.complete = false;
+            continue;
+        }
+        auto& row = out[result.count++];
+        row = fixed_venue_handle_view{};
+        row.opener_order_id = opener;
+        row.venue_managed = true;
+        if (!handles.oco_list_id) continue;
+        const auto& source = *handles.oco_list_id;
+        const auto copied = std::min(source.size(), row.list_id.size() - 1U);
+        if (copied != 0U)
+            std::memcpy(row.list_id.data(), source.data(), copied);
+        row.list_id[copied] = '\0';
+        row.list_id_size = static_cast<std::uint16_t>(copied);
+        row.list_id_complete = copied == source.size();
+        if (!row.list_id_complete) result.complete = false;
+    }
+    return result;
+}
+
+std::size_t ExitManager::exchange_leg_count() const
+{
+    std::lock_guard<std::mutex> lk(venue_mu_);
+    return exchange_to_leg_.size();
 }
 
 void ExitManager::rehydrate(const IBracketAdapter::recovered_bracket& rb)
