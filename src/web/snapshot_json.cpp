@@ -4,6 +4,8 @@
 #include "../ui/dashboard_snapshot.h"
 
 #include <chrono>
+#include <cmath>
+#include <string_view>
 
 namespace truetest::web {
 
@@ -12,9 +14,37 @@ using jx::Json;
 
 namespace {
 
+// A dashboard_snapshot timestamps itself with steady_clock so in-process
+// consumers cannot be fooled by wall-clock adjustments.  The web boundary
+// needs a Unix timestamp, however, so project the captured steady-clock age
+// onto system_clock at serialization time. A future monotonic timestamp is
+// internally inconsistent and is therefore published as unavailable.
+
 long long ts_ms(std::chrono::system_clock::time_point tp)
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count();
+}
+
+struct generated_at_wire
+{
+    long long epoch_ms = 0;
+    bool available = false;
+};
+
+generated_at_wire project_generated_at(const dashboard_snapshot& snapshot)
+{
+    if (!snapshot.generated_at_available) return {};
+
+    const auto steady_now = std::chrono::steady_clock::now();
+    if (snapshot.generated_at > steady_now) return {};
+
+    const auto age = snapshot.generated_at < steady_now
+        ? steady_now - snapshot.generated_at
+        : std::chrono::steady_clock::duration::zero();
+    const auto generated_system =
+        std::chrono::system_clock::now() -
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(age);
+    return {.epoch_ms = ts_ms(generated_system), .available = true};
 }
 
 const char* l2_source_name(dashboard_snapshot::l2_source s)
@@ -37,6 +67,32 @@ void write_levels(Json& j, const std::vector<dashboard_snapshot::l2_level>& lv)
     j.endarr();
 }
 
+bool metric_available(bool declared_available, double value) noexcept
+{
+    return declared_available && std::isfinite(value);
+}
+
+void write_metric(Json& j,
+                  const char* value_key,
+                  double value,
+                  const char* availability_key,
+                  bool declared_available)
+{
+    const bool available = metric_available(declared_available, value);
+    j.key(value_key);
+    if (available) j.num(value);
+    else j.null();
+    j.kv(availability_key, available);
+}
+
+const char* fill_source_name(const char* source) noexcept
+{
+    const std::string_view value = source ? std::string_view{source} : std::string_view{};
+    if (value == "exchange") return "exchange";
+    if (value == "simulated") return "simulated";
+    return "unknown";
+}
+
 } // namespace
 
 std::string snapshot_to_json(const dashboard_snapshot& s)
@@ -47,15 +103,23 @@ std::string snapshot_to_json(const dashboard_snapshot& s)
 
     j.obj();
     j.kv("schema_version", static_cast<long long>(snapshot_schema_version));
+    const auto generated_at = project_generated_at(s);
+    j.key("generated_at_ms");
+    if (generated_at.available) j.inum(generated_at.epoch_ms);
+    else j.null();
+    j.kv("generated_at_available", generated_at.available);
 
     // ---- account ----
     j.key("account").obj()
         .kv("cash", s.cash)
-        .kv("equity", s.equity)
-        .kv("initial_balance", s.initial_balance)
-        .kv("realized_pnl", s.realized_pnl)
-        .kv("unrealized_pnl", s.unrealized_pnl)
-        .endobj();
+        .kv("initial_balance", s.initial_balance);
+    write_metric(j, "equity", s.equity, "equity_available", s.equity_available);
+    write_metric(j, "total_pnl", s.total_pnl, "total_pnl_available", s.total_pnl_available);
+    write_metric(j, "realized_pnl", s.realized_pnl,
+                 "realized_pnl_available", s.realized_pnl_available);
+    write_metric(j, "unrealized_pnl", s.unrealized_pnl,
+                 "unrealized_pnl_available", s.unrealized_pnl_available);
+    j.endobj();
 
     // ---- positions ----
     j.key("positions").arr();
@@ -64,10 +128,11 @@ std::string snapshot_to_json(const dashboard_snapshot& s)
         j.obj()
             .kv("symbol", p.symbol)
             .kv("qty", p.qty)
-            .kv("avg_entry", p.avg_entry)
-            .kv("mark", p.mark)
-            .kv("unrealized", p.unrealized)
-            .endobj();
+            .kv("avg_entry", p.avg_entry);
+        write_metric(j, "mark", p.mark, "mark_available", p.mark_available);
+        write_metric(j, "unrealized", p.unrealized,
+                     "unrealized_available", p.unrealized_available);
+        j.endobj();
     }
     j.endarr();
 
@@ -98,8 +163,10 @@ std::string snapshot_to_json(const dashboard_snapshot& s)
             .kv_char("side", o.side)
             .kv_char("type", o.type)
             .kv("qty", o.qty)
-            .kv("price", o.price)
-            .kv("age_seconds", static_cast<long long>(o.age_seconds))
+            .kv("price", o.price);
+        write_metric(j, "trigger_price", o.trigger_price,
+                     "trigger_price_available", o.trigger_price_available);
+        j.kv("age_seconds", static_cast<long long>(o.age_seconds))
             .kv("status", o.status ? o.status : "")
             .endobj();
     }
@@ -116,7 +183,7 @@ std::string snapshot_to_json(const dashboard_snapshot& s)
             .kv("qty", f.qty)
             .kv("price", f.price)
             .kv("fee", f.fee)
-            .kv("source", f.source ? f.source : "")
+            .kv("source", fill_source_name(f.source))
             .endobj();
     }
     j.endarr();
@@ -163,13 +230,16 @@ std::string snapshot_to_json(const dashboard_snapshot& s)
 
     // ---- risk ----
     j.key("risk").obj()
-        .kv("halted", s.risk.halted)
-        .kv("daily_loss", s.risk.daily_loss)
-        .kv("daily_loss_limit", s.risk.daily_loss_limit)
-        .kv("max_drawdown_pct", s.risk.max_drawdown_pct)
-        .kv("max_drawdown_limit", s.risk.max_drawdown_limit)
-        .kv("exposure", s.risk.exposure)
-        .kv("exposure_limit", s.risk.exposure_limit)
+        .kv("halted", s.risk.halted);
+    write_metric(j, "daily_loss", s.risk.daily_loss,
+                 "daily_loss_available", s.risk.daily_loss_available);
+    j.kv("daily_loss_limit", s.risk.daily_loss_limit);
+    write_metric(j, "max_drawdown_pct", s.risk.max_drawdown_pct,
+                 "max_drawdown_available", s.risk.max_drawdown_available);
+    j.kv("max_drawdown_limit", s.risk.max_drawdown_limit);
+    write_metric(j, "exposure", s.risk.exposure,
+                 "exposure_available", s.risk.exposure_available);
+    j.kv("exposure_limit", s.risk.exposure_limit)
         .kv("open_orders", s.risk.open_orders)
         .kv("open_orders_limit", s.risk.open_orders_limit)
         .endobj();
@@ -247,13 +317,30 @@ std::string snapshot_to_json(const dashboard_snapshot& s)
     write_tail("equity_tail", s.trend.equity_tail);
     write_tail("drawdown_tail", s.trend.drawdown_tail);
     write_tail("rate_tail", s.trend.rate_tail);
-    j.kv("equity_now", s.trend.equity_now)
-        .kv("equity_change_pct", s.trend.equity_change_pct)
-        .kv("drawdown_now_pct", s.trend.drawdown_now_pct)
-        .kv("rate_now", s.trend.rate_now)
+    write_metric(j, "equity_now", s.trend.equity_now,
+                 "equity_available", s.trend.equity_available);
+    write_metric(j, "equity_change_pct", s.trend.equity_change_pct,
+                 "equity_change_available",
+                 s.trend.equity_available &&
+                     std::isfinite(s.initial_balance) &&
+                     s.initial_balance > 0.0);
+    write_metric(j, "drawdown_now_pct", s.trend.drawdown_now_pct,
+                 "drawdown_now_available", s.trend.drawdown_now_available);
+    j.kv("rate_now", s.trend.rate_now)
         .endobj();
 
-    // ---- memory (v2) — /proc + in-process pool/ring footprints ----
+    // ---- queue position ----
+    j.key("queue").obj();
+    j.key("avg_bps");
+    if (s.queue.available) j.unum(s.queue.avg_bps);
+    else j.null();
+    j.kv("available", s.queue.available)
+        .kv("submitted_with_queue", s.queue.submitted_with_queue)
+        .kv("filled_after_drain", s.queue.filled_after_drain)
+        .kv("blocked_at_eos", s.queue.blocked_at_eos)
+        .endobj();
+
+    // ---- memory (v2+) — /proc + in-process pool/ring footprints ----
     {
         const auto& m = s.memory;
         j.key("memory").obj()
@@ -292,7 +379,7 @@ std::string snapshot_to_json(const dashboard_snapshot& s)
         j.endobj();
     }
 
-    // ---- debug (v2) — workers, rings, pools, mode (cold-path only) ----
+    // ---- debug (v2+) — workers, rings, pools, mode (cold-path only) ----
     {
         const auto& d = s.debug;
         j.key("debug").obj()

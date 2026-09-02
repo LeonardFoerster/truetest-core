@@ -18,6 +18,10 @@ std::string snapshot_to_json(const truetest::ui::dashboard_snapshot& s);
 
 // v1: account/positions/health/l2/trend (initial web UI)
 // v2: additive `memory` + `debug` blocks for Trading desk engine telemetry
-inline constexpr int snapshot_schema_version = 2;
+// v3: unavailable dashboard metrics are null and carry an effective
+//     availability flag; open orders expose their stop trigger; fill
+//     provenance is the closed exchange/simulated/unknown set; top-level
+//     generated_at_ms projects the snapshot's monotonic age onto Unix time.
+inline constexpr int snapshot_schema_version = 3;
 
 } // namespace truetest::web

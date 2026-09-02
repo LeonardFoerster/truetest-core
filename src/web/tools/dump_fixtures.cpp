@@ -7,8 +7,7 @@
 // this is the source of the engine-shaped contract samples.
 //
 // Build:
-//   g++ -std=c++23 -I src src/web/snapshot_json.cpp src/web/report_json.cpp \
-//       src/web/tools/dump_fixtures.cpp -o /tmp/dump_fixtures
+//   g++ -std=c++23 -I src src/web/snapshot_json.cpp src/web/report_json.cpp src/web/tools/dump_fixtures.cpp -o /tmp/dump_fixtures
 // Run:
 //   /tmp/dump_fixtures [out_dir]   (default: src/web/frontend/src/fixtures)
 
@@ -44,50 +43,112 @@ dashboard_snapshot build_snapshot()
     s.cash            = 642880.10;
     s.equity          = 1284316.42;
     s.initial_balance = 1150000.00;
+    s.total_pnl       = 134316.42;
     s.realized_pnl    = 47312.88;
     s.unrealized_pnl  = 9893.55;
+    s.equity_available = true;
+    s.total_pnl_available = true;
+    s.realized_pnl_available = true;
+    s.unrealized_pnl_available = true;
 
     s.positions = {
-        {"BTCUSDT",  8.42,  70180.25, 71248.50, (71248.50 - 70180.25) * 8.42},
-        {"ETHUSDT",  142.0, 3798.40,  3842.18,  (3842.18 - 3798.40) * 142.0},
-        {"SOLUSDT", -1200.0, 182.10,  177.94,   (177.94 - 182.10) * -1200.0},
+        {.symbol = "BTCUSDT", .qty = 8.42, .avg_entry = 70180.25,
+         .mark = 71248.50, .unrealized = (71248.50 - 70180.25) * 8.42,
+         .mark_available = true, .unrealized_available = true},
+        {.symbol = "ETHUSDT", .qty = 142.0, .avg_entry = 3798.40,
+         .mark = 3842.18, .unrealized = (3842.18 - 3798.40) * 142.0,
+         .mark_available = true, .unrealized_available = true},
+        {.symbol = "SOLUSDT", .qty = -1200.0, .avg_entry = 182.10,
+         .mark = 177.94, .unrealized = (177.94 - 182.10) * -1200.0,
+         .mark_available = true, .unrealized_available = true},
     };
 
     s.lots = {
-        {4471, "BTCUSDT", "MOM-XBT",   'L', 8.42,  70180.25, 5280},
-        {4468, "ETHUSDT", "MR-ETH",    'L', 142.0, 3798.40,  4110},
-        {4459, "SOLUSDT", "BASIS-SOL", 'S', 1200.0, 182.10,  9230},
+        {.opener_order_id = 4471, .symbol = "BTCUSDT", .strategy_name = "MOM-XBT",
+         .side = 'L', .qty_open = 8.42, .entry_price = 70180.25, .age_seconds = 5280},
+        {.opener_order_id = 4468, .symbol = "ETHUSDT", .strategy_name = "MR-ETH",
+         .side = 'L', .qty_open = 142.0, .entry_price = 3798.40, .age_seconds = 4110},
+        {.opener_order_id = 4459, .symbol = "SOLUSDT", .strategy_name = "BASIS-SOL",
+         .side = 'S', .qty_open = 1200.0, .entry_price = 182.10, .age_seconds = 9230},
     };
 
     s.open_orders = {
-        {90231, "BTCUSDT", "MOM-XBT", 'B', 'L', 0.50, 70900.00, 42, "working"},
-        {90244, "ETHUSDT", "MR-ETH",  'S', 'L', 30.0, 3905.00,  18, "working"},
+        {.order_id = 90231, .symbol = "BTCUSDT", .strategy_name = "MOM-XBT",
+         .side = 'B', .type = 's', .qty = 0.50, .price = 70900.00,
+         .trigger_price = 71000.00, .trigger_price_available = true,
+         .age_seconds = 42, .status = "working"},
+        {.order_id = 90244, .symbol = "ETHUSDT", .strategy_name = "MR-ETH",
+         .side = 'S', .type = 'L', .qty = 30.0, .price = 3905.00,
+         .trigger_price = 0.0, .trigger_price_available = false,
+         .age_seconds = 18, .status = "working"},
     };
 
     s.recent_fills = {
-        {at(base_ms + 41 * 60000), "BTCUSDT", 'B', 0.18, 71240.5, 2.31, "exchange"},
-        {at(base_ms + 40 * 60000), "ETHUSDT", 'S', 4.20, 3842.0,  1.45, "simulated"},
-        {at(base_ms + 39 * 60000), "SOLUSDT", 'B', 60.0, 177.92, 0.96, "exchange"},
+        {.ts = at(base_ms + 41 * 60000), .symbol = "BTCUSDT", .side = 'B',
+         .qty = 0.18, .price = 71240.5, .fee = 2.31, .source = "exchange"},
+        {.ts = at(base_ms + 40 * 60000), .symbol = "ETHUSDT", .side = 'S',
+         .qty = 4.20, .price = 3842.0, .fee = 1.45, .source = "simulated"},
+        {.ts = at(base_ms + 39 * 60000), .symbol = "SOLUSDT", .side = 'B',
+         .qty = 60.0, .price = 177.92, .fee = 0.96, .source = "unexpected"},
     };
 
     s.brackets = {
-        {4471, "MOM-XBT",   "BTCUSDT", 'L', 8.42,  70180.25, 69240.00, 72600.00, 71248.50, false, "",          5280},
-        {4468, "MR-ETH",    "ETHUSDT", 'L', 142.0, 3798.40,  3742.00,  3930.00,  3842.18,  true,  "oco-88241", 4110},
-        {4459, "BASIS-SOL", "SOLUSDT", 'S', 1200.0, 182.10,  187.40,   171.00,   177.94,   false, "",          9230},
-        {4455, "MOM-XBT",   "BTCUSDT", 'L', 4.00,  70910.00, 70050.00, 73100.00, 71248.50, false, "",          1980},
+        {.opener_order_id = 4471, .strategy_name = "MOM-XBT", .symbol = "BTCUSDT",
+         .side = 'L', .qty = 8.42, .entry_price = 70180.25, .stop_loss = 69240.00,
+         .take_profit = 72600.00, .mark = 71248.50, .venue_managed = false,
+         .venue_list_id = "", .age_seconds = 5280},
+        {.opener_order_id = 4468, .strategy_name = "MR-ETH", .symbol = "ETHUSDT",
+         .side = 'L', .qty = 142.0, .entry_price = 3798.40, .stop_loss = 3742.00,
+         .take_profit = 3930.00, .mark = 3842.18, .venue_managed = true,
+         .venue_list_id = "oco-88241", .age_seconds = 4110},
+        {.opener_order_id = 4459, .strategy_name = "BASIS-SOL", .symbol = "SOLUSDT",
+         .side = 'S', .qty = 1200.0, .entry_price = 182.10, .stop_loss = 187.40,
+         .take_profit = 171.00, .mark = 177.94, .venue_managed = false,
+         .venue_list_id = "", .age_seconds = 9230},
+        {.opener_order_id = 4455, .strategy_name = "MOM-XBT", .symbol = "BTCUSDT",
+         .side = 'L', .qty = 4.00, .entry_price = 70910.00, .stop_loss = 70050.00,
+         .take_profit = 73100.00, .mark = 71248.50, .venue_managed = false,
+         .venue_list_id = "", .age_seconds = 1980},
     };
 
     // win_rate is a percent (0..100), matching sub_analytics::win_rate() in the engine.
     s.strategies = {
-        {"MOM-XBT",   28940.55, 184, 113, 61.2, 2.31, 41200, 17840, 2, 2},
-        {"MR-ETH",    12184.20, 241, 140, 58.3, 1.74, 28600, 16420, 1, 1},
-        {"BASIS-SOL", -3420.18, 96,  46,  47.6, 0.91, 14200, 15620, 1, 1},
-        {"STAT-ARB",  9601.31,  312, 208, 66.8, 2.02, 19300, 9560,  0, 0},
+        {.name = "MOM-XBT", .pnl = 28940.55, .trade_count = 184, .win_count = 113,
+         .win_rate = 61.2, .profit_factor = 2.31, .total_win = 41200,
+         .total_loss = 17840, .open_lots = 2, .armed_brackets = 2},
+        {.name = "MR-ETH", .pnl = 12184.20, .trade_count = 241, .win_count = 140,
+         .win_rate = 58.3, .profit_factor = 1.74, .total_win = 28600,
+         .total_loss = 16420, .open_lots = 1, .armed_brackets = 1},
+        {.name = "BASIS-SOL", .pnl = -3420.18, .trade_count = 96, .win_count = 46,
+         .win_rate = 47.6, .profit_factor = 0.91, .total_win = 14200,
+         .total_loss = 15620, .open_lots = 1, .armed_brackets = 1},
+        {.name = "STAT-ARB", .pnl = 9601.31, .trade_count = 312, .win_count = 208,
+         .win_rate = 66.8, .profit_factor = 2.02, .total_win = 19300,
+         .total_loss = 9560, .open_lots = 0, .armed_brackets = 0},
     };
 
-    s.risk = {false, 8240.0, 25000.0, 4.18, 8.0, 1.42e6, 2.0e6, 11, 20};
+    s.risk = {.halted = false,
+              .daily_loss = 8240.0,
+              .daily_loss_limit = 25000.0,
+              .daily_loss_available = true,
+              .max_drawdown_pct = 4.18,
+              .max_drawdown_limit = 8.0,
+              .max_drawdown_available = true,
+              .exposure = 1.42e6,
+              .exposure_limit = 2.0e6,
+              .exposure_available = true,
+              .open_orders = 11,
+              .open_orders_limit = 20};
 
-    s.perf = {1320, 1290, 1284, 59.8, 2.14, 3.08, 1.92, 1.4, 1290};
+    s.perf = {.total_orders = 1320,
+              .total_fills = 1290,
+              .total_trades = 1284,
+              .win_rate = 59.8,
+              .sharpe = 2.14,
+              .sortino = 3.08,
+              .profit_factor = 1.92,
+              .avg_markout_bps = 1.4,
+              .markout_samples = 1290};
 
     // L2 ladder around the BTC mid.
     s.l2.symbol = "BTCUSDT";
@@ -99,8 +160,10 @@ dashboard_snapshot build_snapshot()
         double bsz = 6.0 + i * 0.4;
         double asz = 5.6 + i * 0.5;
         cb += bsz; ca += asz;
-        s.l2.bids.push_back({mid - (i + 1) * 4.0, bsz, cb});
-        s.l2.asks.push_back({mid + (i + 1) * 4.0, asz, ca});
+        s.l2.bids.push_back(
+            {.price = mid - (i + 1) * 4.0, .size = bsz, .cum = cb});
+        s.l2.asks.push_back(
+            {.price = mid + (i + 1) * 4.0, .size = asz, .cum = ca});
     }
     s.l2.total_bid_levels = s.l2.bids.size();
     s.l2.total_ask_levels = s.l2.asks.size();
@@ -135,6 +198,14 @@ dashboard_snapshot build_snapshot()
     s.trend.equity_change_pct = (s.equity - s.initial_balance) / s.initial_balance * 100.0;
     s.trend.drawdown_now_pct = s.trend.drawdown_tail.back();
     s.trend.rate_now = s.trend.rate_tail.back();
+    s.trend.equity_available = true;
+    s.trend.drawdown_now_available = true;
+
+    s.queue = {.available = true,
+               .avg_bps = 2450,
+               .submitted_with_queue = 28,
+               .filled_after_drain = 19,
+               .blocked_at_eos = 2};
 
     return s;
 }
