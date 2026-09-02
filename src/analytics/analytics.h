@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -37,6 +38,10 @@ struct equity_point
 {
     std::chrono::system_clock::time_point timestamp;
     double equity;
+    // Positive percentage below the running peak of the retained equity
+    // curve.  Persisting the prefix result makes dashboard tail reads O(n)
+    // in the requested samples instead of O(the complete retained history).
+    double drawdown_pct = 0.0;
 };
 
 struct trade_record
@@ -246,18 +251,26 @@ public:
     // render tick. Returns the most recent n samples (or fewer if the
     // curve is shorter); empty if nothing recorded yet.
     std::vector<double> equity_tail(std::size_t n) const;
+    void copy_equity_tail(std::size_t n, std::vector<double>& out) const;
+    std::size_t copy_equity_tail(std::span<double> out) const noexcept;
 
     // Last n drawdown values as positive percentages (0 = at peak,
-    // 5.0 = 5% below peak). Walks equity_curve_ once to recover the
-    // running peak so the values match how the live drawdown atomic
-    // is reported elsewhere.
+    // 5.0 = 5% below peak). Drawdown is maintained incrementally with each
+    // retained equity point, so copying a tail is O(n requested).
     std::vector<double> drawdown_tail(std::size_t n) const;
+    void copy_drawdown_tail(std::size_t n, std::vector<double>& out) const;
+    std::size_t copy_drawdown_tail(std::span<double> out) const noexcept;
 
     // Cheap O(K) read of the per-strategy analytics map for the live
     // TUI. Avoids snapshot()'s full report rebuild on every render
     // tick (~tens of ms in a 100k-trade run). Returns a copy because
     // the underlying map is mutated on the analytics worker thread.
     std::unordered_map<std::string, sub_analytics> per_strategy_view() const
+    {
+        return per_strategy_;
+    }
+    const std::unordered_map<std::string, sub_analytics>&
+    per_strategy_view_ref() const noexcept
     {
         return per_strategy_;
     }
@@ -284,6 +297,24 @@ public:
     double realized_pnl() const { return total_win_ - total_loss_; }
     double gross_profit() const { return total_win_; }
     double gross_loss() const { return total_loss_; }
+    std::size_t total_orders() const { return total_orders_; }
+    double profit_factor_now() const
+    {
+        return total_loss_ > 0.0
+            ? total_win_ / total_loss_
+            : (total_win_ > 0.0 ? 1e9 : 0.0);
+    }
+    double sortino_now() const
+    {
+        if (return_stats_.n <= 1 || periods_per_year_ == 0) return 0.0;
+        const double ppy = static_cast<double>(periods_per_year_);
+        const double excess_mean = return_stats_.mean - risk_free_rate_ / ppy;
+        const double downside_dev = std::sqrt(
+            downside_sq_sum_ / static_cast<double>(return_stats_.n));
+        if (downside_dev > 0.0)
+            return excess_mean / downside_dev * std::sqrt(ppy);
+        return excess_mean > 0.0 ? 1e9 : 0.0;
+    }
     double max_drawdown_pct() const { return max_drawdown_ * 100.0; }
     double win_rate_pct() const
     {
@@ -349,11 +380,13 @@ private:
     void record_equity_point(std::vector<equity_point>& curve,
                              std::size_t& stride,
                              std::size_t& counter,
-                             const equity_point& pt);
+                             const equity_point& pt,
+                             bool track_drawdown = false);
     void update_risk_equity(double equity) noexcept;
 
     double last_close_ = 0.0;
     std::vector<equity_point> equity_curve_;
+    double equity_curve_peak_ = 0.0;
 
     std::deque<double> rolling_returns_;
     double prev_equity_ = 0.0;

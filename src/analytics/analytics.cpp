@@ -48,6 +48,7 @@ void Analytics::reset(double initial_cash)
     bench_counter_ = 0;
 
     equity_curve_.clear();
+    equity_curve_peak_ = 0.0;
     benchmark_curve_.clear();
     strategy_returns_.clear();
     benchmark_returns_.clear();
@@ -115,19 +116,64 @@ void Analytics::reset(double initial_cash)
 void Analytics::record_equity_point(std::vector<equity_point>& curve,
                                     std::size_t& stride,
                                     std::size_t& counter,
-                                    const equity_point& pt)
+                                    const equity_point& pt,
+                                    bool track_drawdown)
 {
     ++counter;
     if (counter % stride != 0) return;
-    curve.push_back(pt);
-    if (curve.size() > max_equity_points_)
+
+    equity_point stored = pt;
+    if (track_drawdown)
     {
-        std::vector<equity_point> reduced;
-        reduced.reserve(curve.size() / 2 + 1);
-        for (std::size_t i = 0; i < curve.size(); i += 2)
-            reduced.push_back(curve[i]);
-        curve = std::move(reduced);
-        stride *= 2;
+        if (stored.equity > equity_curve_peak_)
+            equity_curve_peak_ = stored.equity;
+        stored.drawdown_pct = equity_curve_peak_ > 0.0
+            ? std::max(0.0,
+                       (equity_curve_peak_ - stored.equity)
+                           / equity_curve_peak_ * 100.0)
+            : 0.0;
+    }
+
+    if (curve.size() < max_equity_points_)
+    {
+        curve.push_back(stored);
+        return;
+    }
+
+    // Compact before appending.  The previous implementation first grew to
+    // max+1 and allocated a replacement vector; doing the equivalent
+    // even-index retention in place keeps a prewarmed curve allocation-free.
+    const std::size_t old_size = curve.size();
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < old_size; read += 2)
+    {
+        if (write != read)
+            curve[write] = std::move(curve[read]);
+        ++write;
+    }
+    // In the prospective max+1 sequence the new point is at index old_size,
+    // and therefore survives exactly when that index is even.
+    if ((old_size & 1U) == 0U)
+        curve[write++] = stored;
+    curve.resize(write);
+    stride *= 2;
+
+    if (track_drawdown)
+    {
+        // Compaction can discard the prior peak. Recompute only at this rare
+        // bounded maintenance point so stored values remain exactly those of
+        // a prefix scan over the retained curve.
+        equity_curve_peak_ = 0.0;
+        for (auto& point : curve)
+        {
+            if (point.equity > equity_curve_peak_)
+                equity_curve_peak_ = point.equity;
+            point.drawdown_pct = equity_curve_peak_ > 0.0
+                ? std::max(0.0,
+                           (equity_curve_peak_ - point.equity)
+                               / equity_curve_peak_ * 100.0)
+                : 0.0;
+        }
     }
 }
 
@@ -179,7 +225,7 @@ void Analytics::on_funding(const funding_event& fe)
 
     // Record a point so the equity curve (and any downstream reports) shows the funding step
     record_equity_point(equity_curve_, equity_stride_, equity_counter_,
-                        {fe.get_timestamp(), equity});
+                        {fe.get_timestamp(), equity}, /*track_drawdown=*/true);
 }
 
 void Analytics::on_market(const market_event& m)
@@ -211,7 +257,7 @@ void Analytics::on_market(const market_event& m)
     last_equity_ = equity;
 
     record_equity_point(equity_curve_, equity_stride_, equity_counter_,
-                        {m.get_timestamp(), equity});
+                        {m.get_timestamp(), equity}, /*track_drawdown=*/true);
 
     double bh_equity_now = 0.0;
     bool have_bh_now = false;
@@ -484,41 +530,56 @@ void Analytics::on_l2_update(const l2_update_event& /*ev*/)
 std::vector<double> Analytics::equity_tail(std::size_t n) const
 {
     std::vector<double> out;
-    if (n == 0 || equity_curve_.empty()) return out;
+    copy_equity_tail(n, out);
+    return out;
+}
+
+void Analytics::copy_equity_tail(std::size_t n, std::vector<double>& out) const
+{
+    out.clear();
+    if (n == 0 || equity_curve_.empty()) return;
     const std::size_t take = std::min(n, equity_curve_.size());
     out.reserve(take);
     const std::size_t start = equity_curve_.size() - take;
     for (std::size_t i = start; i < equity_curve_.size(); ++i)
         out.push_back(equity_curve_[i].equity);
-    return out;
+}
+
+std::size_t Analytics::copy_equity_tail(std::span<double> out) const noexcept
+{
+    const std::size_t take = std::min(out.size(), equity_curve_.size());
+    const std::size_t start = equity_curve_.size() - take;
+    for (std::size_t i = 0; i < take; ++i)
+        out[i] = equity_curve_[start + i].equity;
+    return take;
 }
 
 std::vector<double> Analytics::drawdown_tail(std::size_t n) const
 {
     std::vector<double> out;
-    if (n == 0 || equity_curve_.empty()) return out;
+    copy_drawdown_tail(n, out);
+    return out;
+}
 
-    // Walk from the start so the running peak we report reflects the
-    // full history, matching how max_drawdown_pct() is computed
-    // elsewhere. Cheap - we only emit n values into out.
+void Analytics::copy_drawdown_tail(std::size_t n, std::vector<double>& out) const
+{
+    out.clear();
+    if (n == 0 || equity_curve_.empty()) return;
+
     const std::size_t take = std::min(n, equity_curve_.size());
     out.reserve(take);
-    const std::size_t emit_start = equity_curve_.size() - take;
+    const std::size_t start = equity_curve_.size() - take;
+    for (std::size_t i = start; i < equity_curve_.size(); ++i)
+        out.push_back(equity_curve_[i].drawdown_pct);
+}
 
-    double peak = 0.0;
-    for (std::size_t i = 0; i < equity_curve_.size(); ++i)
-    {
-        const double eq = equity_curve_[i].equity;
-        if (eq > peak) peak = eq;
-        if (i >= emit_start)
-        {
-            const double dd_pct = (peak > 0.0)
-                ? std::max(0.0, (peak - eq) / peak * 100.0)
-                : 0.0;
-            out.push_back(dd_pct);
-        }
-    }
-    return out;
+std::size_t Analytics::copy_drawdown_tail(std::span<double> out) const noexcept
+{
+    const std::size_t take = std::min(out.size(), equity_curve_.size());
+    const std::size_t start = equity_curve_.size() - take;
+    for (std::size_t i = 0; i < take; ++i)
+        out[i] = equity_curve_[start + i].drawdown_pct;
+    return take;
 }
 
 double Analytics::rolling_sharpe() const
