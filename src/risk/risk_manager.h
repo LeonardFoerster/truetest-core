@@ -45,7 +45,25 @@ struct risk_limits
     double max_spread_bps = 0.0;         // 0 = disabled
     double max_funding_8h_rate = 0.0;    // 0 = disabled (as fraction, e.g. 0.0005 = 0.05%)
 
+    // F-05b — spot cash admission. Gross mark-to-market exposure (this
+    // symbol's worst case plus every other held instrument) may not exceed
+    // account equity times this multiple. 1.0 is a cash account that cannot
+    // borrow, which is what a spot backtest actually is.
+    //
+    // 0 = disabled, and that is the library default so an embedder's existing
+    // configuration is not changed underneath it. The CLI turns it on at 1.0
+    // for spot venues. Futures venues leave it off and run their own leverage
+    // and liquidation-distance model through IRiskCheck instead — stacking
+    // both would double-charge the same exposure.
+    //
+    // The audit found $186,325 of notional accepted on $10,000 of equity
+    // (18.6x), later 50.3x, and 68.3x at a larger balance, with no rule in
+    // the engine that could ever bind: max_position_value defaults to $1e9,
+    // max_exposure to $5e9, and max_notional_frac to 0 (off).
+    double max_gross_leverage = 0.0;
+
     // R3 — hard inventory limit in base quantity, applied to the worst case
+
     // (current position + every open order on the increasing side + this
     // candidate). 0 = disabled. Inventory-reducing orders stay permitted
     // after a breach so an operator can always de-risk.
@@ -86,8 +104,10 @@ enum class risk_rule : std::uint8_t
     trades_per_hour,
     orders_per_minute,
     spread_limit,
-    funding_limit
+    funding_limit,
+    gross_leverage
 };
+
 
 [[nodiscard]] inline const char* to_string(risk_rule rule) noexcept
 {
@@ -108,6 +128,8 @@ enum class risk_rule : std::uint8_t
     case risk_rule::orders_per_minute:      return "orders_per_minute";
     case risk_rule::spread_limit:           return "spread_limit";
     case risk_rule::funding_limit:          return "funding_limit";
+    case risk_rule::gross_leverage:         return "gross_leverage";
+
     }
     return "none";
 }

@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <string>
+#include <string_view>
 
 namespace truetest::risk {
 
@@ -10,6 +11,7 @@ namespace truetest::risk {
  * See https://binance-docs.github.io/apidocs/futures/en/#notional-and-leverage-brackets
  */
 struct MarginTier {
+    double notional_floor;          // lower bound of this tier (inclusive)
     double notional_cap;            // upper bound of this tier (inclusive)
     double maintenance_margin_rate; // e.g. 0.005 for 0.5%
     double maint_amount;            // maintenance amount (cumulative)
@@ -28,7 +30,8 @@ public:
      * Parse the JSON body returned by GET /fapi/v1/leverageBracket?symbol=XXX
      * and populate the internal tiers (sorted by notional_cap ascending).
      */
-    void load_from_leverage_bracket_json(const std::string& body);
+    bool load_from_leverage_bracket_json(
+        const std::string& body, std::string_view expected_symbol = {});
 
     /**
      * Return the maintenance margin rate that applies for the given notional.
@@ -43,9 +46,11 @@ public:
     double maint_amount_for_notional(double notional) const;
 
     bool empty() const { return tiers_.empty(); }
+    bool valid() const noexcept { return valid_; }
 
 private:
     std::vector<MarginTier> tiers_;   // kept sorted by notional_cap
+    bool valid_ = false;
 };
 
 } // namespace truetest::risk

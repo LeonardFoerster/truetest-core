@@ -148,8 +148,12 @@ risk_action RiskManager::check_order(const order_event& order,
     // The engine-owned OrderTracker ledger supplies the exact lifecycle count
     // before this candidate becomes active. Analytics counters are reporting
     // only and are structurally absent from risk_snapshot since R3.
-    // This capacity limit deliberately has no reduce-only exemption.
-    if (open_order_limit_reached(open_order_count))
+    // A ticketed protective exit has already reserved a specific filled lot
+    // in ExitManager. It must retain a dedicated escape slot even when the
+    // ordinary order budget is saturated; all other reduce-only orders keep
+    // the normal cap so this is not a general capacity bypass.
+    if (order.get_protective_exit_ticket() == 0 &&
+        open_order_limit_reached(open_order_count))
         return deny(risk_rule::max_open_orders, risk_action::reject);
 
     // ---- hard inventory limit (quantity, no mark required) ----------------
@@ -195,9 +199,11 @@ risk_action RiskManager::check_order(const order_event& order,
     // account valuation. A missing mark must not turn a configured cap off.
     // True reductions remain exempt so a broken mark cannot trap inventory.
     if (!reducing_exposure &&
-        limits_.max_position_pct_of_equity > 0.0 &&
+        (limits_.max_position_pct_of_equity > 0.0 ||
+         limits_.max_gross_leverage > 0.0) &&
         (!std::isfinite(snap.equity) || snap.equity <= 0.0))
         return deny(risk_rule::invalid_equity, risk_action::reject);
+
 
     // Phase 2.3 - max position as % of equity
     if (!reducing_exposure &&
@@ -239,6 +245,19 @@ risk_action RiskManager::check_order(const order_event& order,
         projected_total_exposure > limits_.max_portfolio_exposure)
         return deny(risk_rule::portfolio_exposure, risk_action::reject);
 
+    // F-05b — spot cash admission. A spot account cannot borrow, so gross
+    // mark-to-market exposure is bounded by equity. Reductions stay exempt:
+    // an account already over the line must always be able to get back under
+    // it. Off by default; the CLI enables it at 1.0 for spot venues, and
+    // futures venues keep it off because IRiskCheck owns their leverage.
+    if (!reducing_exposure && limits_.max_gross_leverage > 0.0)
+    {
+        const double max_notional = snap.equity * limits_.max_gross_leverage;
+        if (projected_total_exposure > max_notional)
+            return deny(risk_rule::gross_leverage, risk_action::reject);
+    }
+
+
     // Phase 2.3 - portfolio-wide % of equity
     if (!reducing_exposure &&
         limits_.max_position_pct_of_equity > 0.0) {
@@ -272,18 +291,24 @@ risk_action RiskManager::check_order(const order_event& order,
         return deny(risk_rule::funding_limit, risk_action::reject);
     }
 
+    // F-08: rate limits describe how fast decisions are being made, so they
+    // key off the decision clock. An order's own timestamp is the market-data
+    // clock — for a bar that is its OPEN, one full interval before the close
+    // the order was derived from — which silently shifted every window.
+    // get_decision_ts() falls back to the timestamp when nobody stamped one.
     if (limits_.max_orders_per_minute > 0)
     {
-        auto cutoff = order.get_timestamp() - std::chrono::seconds(60);
+        auto cutoff = order.get_decision_ts() - std::chrono::seconds(60);
         prune_old_entries(order_timestamps_, cutoff);
         if (static_cast<int>(order_timestamps_.size()) >= limits_.max_orders_per_minute)
             return deny(risk_rule::orders_per_minute, risk_action::reject);
-        order_timestamps_.push_back({order.get_timestamp()});
+        order_timestamps_.push_back({order.get_decision_ts()});
     }
 
     if (!reducing_exposure && limits_.max_daily_loss > 0.0)
     {
-        update_daily_reset(order.get_timestamp());
+        update_daily_reset(order.get_decision_ts());
+
         if (daily_loss_ >= limits_.max_daily_loss)
             return deny(risk_rule::daily_loss, risk_action::halt);
     }
