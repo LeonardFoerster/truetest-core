@@ -659,30 +659,29 @@ against unstable, partially-extracted internals.
 
 ```
 portfolio&, OrderTracker&, ExitManager&, RiskManager&, AdverseSelectionTracker&,
-Analytics&, IOrderAuditSink&, ExecutionRouter&, ObjectPool<fill_event>&,
-const unordered_map<uint64_t, order_meta>& (read-only attribution lookup),
+Analytics&, const unique_ptr<IOrderAuditSink>& (replaceable owner slot),
+ExecutionRouter&, ObjectPool<fill_event>&,
+const OrderAttributionStore& (read-only attribution lookup),
 shared_ptr<IStrategy>& (primary strategy, reseatable), vector<shared_ptr<IStrategy>>&,
 vector<string>& (additional-strategy names), const string& (primary strategy name),
 const engine_config&, DashboardSnapshotBuilder* (nullable), ShadowTracker* (nullable),
-+ four std::function callbacks into engine: log_event, publish_event, trigger_halt,
-request_unwind (+ debug::StageTimer& under HAS_DEBUG).
++ IEngineHotPathSink& for log/publish/halt, IRiskUnwindSink& for request_unwind
+(+ debug::StageTimer& under HAS_DEBUG).
 ```
 
 Every dependency is a plain named reference/pointer to an already-existing domain
 component — nothing is bundled into a struct, and no service locator or
 `unordered_map<Type, void*>` was introduced.
 
-**Why four `std::function` callbacks (deliberate trade-off, not a new pattern)**:
+**Why two narrow interfaces**:
 `log_event`/`publish_event`/`trigger_halt` are `engine`'s own hot-path/safety
 primitives (single event-log writer, single ring-dispatch policy, single halt entry
 point) and must stay centralized — but they fire from the *middle* of the fill
 sequence, not simply before/after it, so `engine` cannot wrap them around a call to
-`fills_->handle_fill(...)`. This exact narrow-callback-into-engine pattern already
-exists in this codebase for `WorkerWatchdog`'s and `IProvider`'s halt callbacks; it
-is not a new idiom. Fills are not the tightest loop (market ticks are), and the
-codebase already pays per-fill virtual dispatch via `IStrategy::on_fill` and
-`IExecutionAdapter`, so the added indirection is proportionally small (confirmed, not
-just assumed — see Verification below).
+`fills_->handle_fill(...)`. `IEngineHotPathSink` is the same shared contract used by
+`OrderIntentProcessor`; it replaces three independently type-erased callbacks.
+`engine` inherits it privately so external callers cannot acquire the safety-capable
+base surface, while `engine::trigger_halt` remains public on the concrete class.
 
 `request_unwind` is the one deliberate, narrow exception to strict one-directional
 composition: on a post-fill risk halt, current code calls `unwind_positions(event_count)`
@@ -690,7 +689,7 @@ composition: on a post-fill risk halt, current code calls `unwind_positions(even
 yet set (`unwind_positions` bypasses `process_order`'s halt gate). `unwind_positions`
 stays engine-owned this round (order-pipeline territory) and, after this change, calls
 `fills_->handle_fill(...)` for the liquidation fills it produces — a legitimate domain
-cycle (liquidation produces fills), not an accidental one. The callback preserves this
+cycle (liquidation produces fills), not an accidental one. The narrow interface call preserves this
 exact call order without engine having to unpack a richer return type at the ~8 call
 sites of `handle_fill`.
 
@@ -709,7 +708,7 @@ audit/dashboard-reporting sub-collaborator), deferred unless evidence demands it
 | State | Canonical owner (before) | Canonical owner (after) | Readers | Writers |
 |---|---|---|---|---|
 | `soft_post_fill_breaches_` | `engine` | **`FillProcessor`** | `engine::fold_research_counters_into_export_analytics` (via getter), `engine::reset_for_next_trial` (via reset method) | `FillProcessor::handle_fill` only |
-| `portfolio_`, `order_tracker_`, `order_meta_`, `exit_manager_`, `risk_manager_`, `analytics_`, `adverse_selection_`, `audit_sink_`, `router_`, `dashboard_builder_`, `shadow_tracker_`, `halt_flag_` | `engine` | unchanged — `engine` | `FillProcessor` (references/const refs; never writes `order_meta_` or `halt_flag_` directly) | unchanged (halt only via `trigger_halt` callback) |
+| `portfolio_`, `order_tracker_`, `attribution_`, `exit_manager_`, `risk_manager_`, `analytics_`, `adverse_selection_`, `audit_sink_`, `router_`, `dashboard_builder_`, `shadow_tracker_`, `halt_flag_` | `engine` | unchanged — `engine` | `FillProcessor` (references/const refs; never writes attribution state or `halt_flag_` directly) | unchanged (halt only through `IEngineHotPathSink::trigger_halt`) |
 
 No canonical mutable state was duplicated; `FillProcessor` only gained ownership of
 the one counter it exclusively writes.
@@ -750,9 +749,8 @@ surrounding control flow — no reordering, no new branches, no new early return
 - Full `ctest` broad regression — see test run below.
 - Hot-path allocation matrix (`test_hotpath_alloc_matrix`, `test_hotpath_allocs`) —
   confirms no new heap allocation was introduced on the event loop by the
-  `FillProcessor` indirection (pointer-call + `std::function` callback overhead is
-  off the allocation-tracked path; no new `acquire`/`new` sites were added — the pool
-  acquisition moved, it did not multiply).
+  `FillProcessor` indirection (ordinary narrow-interface dispatch only; no new
+  `acquire`/`new` sites were added — the pool acquisition moved, it did not multiply).
 
 (Exact pass/fail counts and any follow-up recorded once the verification run in this
 session completes — see the commit this section lands with.)
@@ -1089,8 +1087,10 @@ independently checked:
   `ObjectPool<T>&` (acquire mutates pool state).
 - **Ownership explicit?** Yes — every dependency is a distinct named
   reference or nullable pointer (`IRiskCheck*`, `DashboardSnapshotBuilder*`,
-  `ShadowTracker*`, `portfolio*` all documented nullable in the header); no
-  `shared_ptr`/`unique_ptr` taken by value, no hidden copy.
+  `ShadowTracker*` are documented nullable in the header). The exchange view is
+  an `optional<portfolio>&`, and the audit dependency references engine's
+  replaceable `unique_ptr<IOrderAuditSink>` owner slot; no smart pointer is taken
+  by value and no hidden ownership copy occurs.
 - **Lifetime safe?** Yes — every reference is a member `engine` constructs
   and owns for its own lifetime, and `orders_` (`engine`'s `unique_ptr` to
   this class) is declared after every member it references in `engine.h`
@@ -1209,7 +1209,7 @@ Every hop is a named collaborator call (`exit_manager_.on_price`/`on_bar`,
 `risk_unwind_sink_.request_unwind`, `orders_->unwind_positions`); at no
 point does the recursion pass through `engine` as a generic service bag —
 `engine`'s only role in the cycle is implementing the two narrow interfaces
-(`EngineHotPathSink`, `IRiskUnwindSink`) that let `FillProcessor` reach
+(`IEngineHotPathSink`, `IRiskUnwindSink`) that let `FillProcessor` reach
 `orders_` without a concrete back-reference. The `run_post_fill_risk=false`
 flag on the unwind-triggered `handle_fill` call is confirmed still present
 and is the sole recursion-breaker (unwind fills can't re-trigger another
@@ -1223,7 +1223,7 @@ Re-read `engine.h`, `engine.cpp`, `engine_orders.cpp`, `engine_pending.cpp`,
 and `engine_market.cpp` end-to-end as a new contributor would:
 
 - **`engine.cpp`** (1131 LOC): ctor (composition-root wiring only), dtor,
-  `log_event`/`publish_event`/`trigger_halt`/`request_unwind` (one-line
+  `log_event`/`publish_event`/`trigger_halt`/`request_unwind` (guarded
   forward)/`request_operator_kill`/`finalize_live_shutdown`, and `run()`
   (the bar-mode loop, narrated top-to-bottom, calling `orders_->drain_due`/
   `check_pending_stops`/`sweep_resting_limits`/`deliver_mm_book_trades`/
@@ -1373,7 +1373,7 @@ this document, and the codebase is in a clean state to attempt it whenever
 a future session is explicitly asked to: `OrderIntentProcessor` now exists
 as a proven, independent domain-processor for it to depend on (matching the
 "market events route orders" dependency direction already assumed in the
-original Phase 2 candidate-work note), the `EngineHotPathSink`/
+original Phase 2 candidate-work note), the `IEngineHotPathSink`/
 `IRiskUnwindSink`-style interface pattern is established for any similar
 construction-order need, and `scripts/check-layer-deps.sh` Check B is ready
 to take a new collaborator header the moment one is extracted. **No

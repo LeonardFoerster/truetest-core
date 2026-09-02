@@ -205,7 +205,7 @@ proposed here as the cost/benefit did not clear the bar — see §7):
 | Pending stops, pending cancel-acks (former engine `pending_stops_`/`pending_cancels_`) | `OrderIntentProcessor` (owned outright — no external reference; the sole reader and writer of each is a method on this class) | `OrderIntentProcessor` ctor (default-constructed) | with `orders_` | Yes | No (small vectors/maps, not on the per-event pooled-allocation path) | Event-loop thread only |
 | Order-domain orchestration (`process`, `route`, `cancel`, `modify`, `evaluate_exits`, `finalize_end_of_stream`, ...) | `OrderIntentProcessor` (`engine`-held `unique_ptr orders_`) | ctor, last (needs every other collaborator to already exist — see `engine.h` comment at the `orders_` declaration) | dtor, first (declared last, after everything it references, including `halt_flag_`/`pause_all_`/`mm_threaded_`) | Yes (canonical order-submission/lifecycle path) | No | Event-loop thread only |
 | Object pools (`market_pool_`, `order_pool_`, `fill_pool_`, ...) | `engine` | ctor + `prewarm_object_pools()` | dtor (with debug-mode in-use assertions) | Yes | No after prewarm (`forbid_runtime_grow`) | Event-loop thread acquires; worker threads release (drained via `drain_object_pool_returns()`) |
-| `audit_sink_` (`IOrderAuditSink`) | `engine` (`unique_ptr`) | ctor (Noop, upgraded to QuestDB on `questdb_begin()`) | dtor | No (cold record calls off the allocation-tracked path) | Yes (cold) | Event-loop thread |
+| `audit_sink_` (`IOrderAuditSink`) | `engine` (`unique_ptr`, replaceable owner slot referenced by its consumers) | ctor (Noop, upgraded to QuestDB on `questdb_begin()`) | dtor | Yes (record calls occur in order/fill paths) | Sink-dependent; the owner-slot seam itself does not allocate | Event-loop thread |
 | `router_` (`ExecutionRouter`) | `engine` (`unique_ptr`) | ctor | dtor | Partially (resolve/submit/poll are hot; async-result draining is cold) | No on hot calls | Event-loop thread |
 | `dashboard_builder_` (`DashboardSnapshotBuilder`) | `engine` (`unique_ptr`) | ctor, after `router_`/`audit_sink_` | dtor | Cache writes are on the event loop (cheap); `build_dashboard_view` is cold/debounced | Cold path only | Event loop writes caches; TUI/web poller thread reads via `snapshot_dashboard` under mutex |
 | `fills_` (`FillProcessor`) | `engine` (`unique_ptr`) | ctor, after `router_`/`dashboard_builder_`/`attribution_` are valid (destruction-order dependency — see `engine.h` comment at the `fills_` declaration) | dtor, before its dependencies | Yes (canonical fill pipeline) | No | Event-loop thread |
@@ -216,12 +216,14 @@ proposed here as the cost/benefit did not clear the bar — see §7):
 
 `OrderIntentProcessor` and `FillProcessor` reach engine's centralized
 hot-path primitives (`log_event`/`publish_event`/`trigger_halt`) through
-`EngineHotPathSink&` — `engine` implements the interface, never a concrete
-`engine&` passed to either collaborator. `FillProcessor` reaches emergency
-unwind through `IRiskUnwindSink&` (also implemented by `engine`, forwarding
-one line to `orders_->unwind_positions(...)`) rather than holding a
-concrete `OrderIntentProcessor&`, which would be constructible before
-`OrderIntentProcessor` exists. See `engine_hotpath_sink.h` /
+`IEngineHotPathSink&` — `engine` privately implements the interface, never a
+concrete `engine&` passed to either collaborator and never exposing a public
+upcast to the safety-capable surface. `FillProcessor` reaches emergency
+unwind through `IRiskUnwindSink&` (also implemented by `engine`). Its guarded
+forward calls `orders_->unwind_positions(...)` after construction and
+fail-closes with the existing terminal post-fill-risk halt if invoked before
+`orders_` exists. This avoids a concrete `OrderIntentProcessor&`, which would
+not be constructible when `FillProcessor` is created. See `engine_hotpath_sink.h` /
 `risk_unwind_sink.h` and the "OrderIntentProcessor Extraction" report in
 `docs/internal/engine-decomposition.md` for the full construction-order proof.
 
