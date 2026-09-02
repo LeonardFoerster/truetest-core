@@ -9,37 +9,11 @@ import { fmt, cls, fmtClock } from "./format";
 import { Panel, TickNum, Delta, Spark, Gauge, Side, Sym, useSort } from "./components";
 import type { Account, Position, Lot, Book, Fill, Strategy, RiskLimit, Health, EquityPoint } from "./types";
 
-// Deterministic decorative sparkline (engine emits no per-stat series).
-function genSpark(seed: string, bias: number, n = 40): number[] {
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  const rnd = () => {
-    h ^= h << 13;
-    h ^= h >>> 17;
-    h ^= h << 5;
-    return ((h >>> 0) % 1e6) / 1e6 - 0.5;
-  };
-  const a: number[] = [];
-  let v = 0;
-  for (let i = 0; i < n; i++) {
-    v += rnd() * 1.1 + bias;
-    a.push(v);
-  }
-  return a;
-}
-
 /* ----- Account strip ----- */
 export function AccountStrip({ account, equityCurve }: { account: Account; equityCurve: EquityPoint[] }) {
   const heroSpark = useMemo(
-    () => (equityCurve.length > 1 ? equityCurve.map((p) => p.eq) : genSpark("eq", 0.22, 48)),
+    () => (equityCurve.length > 1 ? equityCurve.map((p) => p.eq) : []),
     [equityCurve],
-  );
-  const sparks = useMemo(
-    () => ({ cash: genSpark("cash", -0.1), real: genSpark("real", 0.18), unreal: genSpark("unreal", -0.05), day: genSpark("day", 0.12) }),
-    [],
   );
   const a = account;
   return (
@@ -47,40 +21,43 @@ export function AccountStrip({ account, equityCurve }: { account: Account; equit
       <div className="stat hero">
         <div className="top">
           <span className="lbl">Account Equity</span>
-          <Delta value={a.equityDelta} pct={a.equityPct / 100} />
+          <Delta value={a.equityDelta} pct={a.equityPct === null ? null : a.equityPct / 100} />
         </div>
         <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12 }}>
           <TickNum value={a.equity} fmt={(v: number) => fmt.usd(v)} className="val" />
-          <Spark data={heroSpark} w={88} h={28} stroke="var(--up)" fill strokeW={1.5} />
+          {heroSpark.length > 1 ? <Spark data={heroSpark} w={88} h={28} stroke="var(--up)" fill strokeW={1.5} /> : <span className="num">—</span>}
         </div>
       </div>
-      <Stat label="Cash" value={a.cash} delta={a.cashDelta} money spark={sparks.cash} />
-      <Stat label="Realized P&L" value={a.realized} delta={a.realizedDelta} money colored spark={sparks.real} signed />
-      <StatLive label="Unrealized P&L" value={a.unrealized} delta={a.unrealizedDelta} spark={sparks.unreal} />
-      <Stat label="Day P&L" value={a.equityDelta} delta={a.equityPct} pct money colored spark={sparks.day} signed />
+      <Stat label="Cash" value={a.cash} delta={a.cashDelta} money />
+      <Stat label="Realized P&L" value={a.realized} delta={a.realizedDelta} money colored signed />
+      <StatLive label="Unrealized P&L" value={a.unrealized} delta={a.unrealizedDelta} />
+      <Stat label="Day P&L" value={a.equityDelta} delta={a.equityPct} pct money colored signed />
     </div>
   );
 }
-function Stat({ label, value, delta, money, pct, colored, signed, spark }: any) {
+function Stat({ label, value, delta, money, pct, colored, signed }: any) {
+  const usable = typeof value === "number" && Number.isFinite(value);
   return (
     <div className="stat">
       <div className="top">
         <span className="lbl">{label}</span>
-        <Spark data={spark} w={58} h={18} stroke={spark[spark.length - 1] >= spark[0] ? "var(--up)" : "var(--down)"} />
+        <span className="num">—</span>
       </div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 7, flexWrap: "wrap" }}>
-        <span className={"val md num " + (colored ? cls(value) : "")}>{signed ? fmt.signUsd(value) : money ? fmt.usd(value) : fmt.num(value)}</span>
+        <span className={"val md num " + (colored && usable ? cls(value) : "")}>
+          {usable ? (signed ? fmt.signUsd(value) : money ? fmt.usd(value) : fmt.num(value)) : "—"}
+        </span>
         <Delta value={delta} pct={pct ? delta / 100 : null} money={money && !pct} />
       </div>
     </div>
   );
 }
-function StatLive({ label, value, delta, spark }: any) {
+function StatLive({ label, value, delta }: any) {
   return (
     <div className="stat">
       <div className="top">
         <span className="lbl">{label}</span>
-        <Spark data={spark} w={58} h={18} />
+        <span className="num">—</span>
       </div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 7, flexWrap: "wrap" }}>
         <TickNum value={value} fmt={(v: number) => fmt.signUsd(v)} className="val md" colored />
@@ -92,10 +69,20 @@ function StatLive({ label, value, delta, spark }: any) {
 
 /* ----- Positions ----- */
 export function PositionsPanel({ positions }: { positions: Position[] }) {
-  const rows = positions.map((p) => ({ ...p, pct: ((p.mark - p.entry) / p.entry) * (p.side === "long" ? 1 : -1) }));
+  const rows = positions.map((p) => ({
+    ...p,
+    pct:
+      p.mark !== null && Number.isFinite(p.entry) && p.entry !== 0
+        ? ((p.mark - p.entry) / p.entry) * (p.side === "long" ? 1 : -1)
+        : null,
+  }));
   const { sorted, onSort, arrow } = useSort(rows, "upnl");
+  const allPnlsAvailable = rows.every((r) => r.upnl !== null);
+  const netPnl = allPnlsAvailable
+    ? rows.reduce((sum, row) => sum + (row.upnl ?? 0), 0)
+    : null;
   return (
-    <Panel title="Positions" sub={rows.length + " open"} right={<span className="chip">Net {fmt.usdK(rows.reduce((a, r) => a + r.upnl, 0))}</span>}>
+    <Panel title="Positions" sub={rows.length + " open"} right={<span className="chip">Net {netPnl === null ? "N/A" : fmt.usdK(netPnl)}</span>}>
       <table className="dt">
         <thead>
           <tr>
@@ -129,8 +116,9 @@ export function PositionsPanel({ positions }: { positions: Position[] }) {
               <td className="hi">
                 <TickNum value={r.mark} fmt={(v: number) => fmt.num(v, v > 1000 ? 1 : 2)} />
               </td>
-              <td className={cls(r.upnl)}>
-                {fmt.signUsd(r.upnl)} <span style={{ color: "var(--tx-faint)", fontSize: 10 }}>{fmt.pct(r.pct)}</span>
+              <td className={r.upnl === null ? "" : cls(r.upnl)}>
+                {r.upnl === null ? "—" : fmt.signUsd(r.upnl)}{" "}
+                <span style={{ color: "var(--tx-faint)", fontSize: 10 }}>{r.pct === null ? "—" : fmt.pct(r.pct)}</span>
               </td>
             </tr>
           ))}
@@ -281,7 +269,7 @@ export function FillsTape({ fills }: { fills: Fill[] }) {
             <span className="num" style={{ textAlign: "right", color: "var(--tx-hi)" }}>
               {fmt.num(f.px, f.px > 1000 ? 1 : 2)}
             </span>
-            <span className="src">{f.src === "exchange" ? "EXC" : "SIM"}</span>
+            <span className="src">{f.src === "exchange" ? "EXC" : f.src === "simulated" ? "SIM" : "UNK"}</span>
           </div>
         ))}
       </div>
@@ -318,7 +306,11 @@ export function StrategyPanel({ strategies }: { strategies: Strategy[] }) {
               <span className="sn">{s.name}</span>
               <span className={"pnl " + cls(s.pnl)}>{fmt.signUsd(s.pnl, 0)}</span>
             </div>
-            <Spark data={s.spark} w={150} h={22} stroke={s.pnl >= 0 ? "var(--up)" : "var(--down)"} fill />
+            {s.spark.length > 1 ? (
+              <Spark data={s.spark} w={150} h={22} stroke={s.pnl >= 0 ? "var(--up)" : "var(--down)"} fill />
+            ) : (
+              <div className="num" style={{ height: 22 }}>history unavailable</div>
+            )}
             <div className="grid">
               <div className="kv">
                 <span className="k">Win</span>
@@ -346,6 +338,13 @@ export function StrategyPanel({ strategies }: { strategies: Strategy[] }) {
 
 /* ----- Risk panel ----- */
 export function RiskPanel({ risk, halted }: { risk: RiskLimit[]; halted: boolean }) {
+  const complete = risk.every(
+    (r) =>
+      r.used !== null &&
+      Number.isFinite(r.used) &&
+      Number.isFinite(r.limit) &&
+      r.limit > 0,
+  );
   return (
     <Panel
       title="Risk Limits"
@@ -355,9 +354,13 @@ export function RiskPanel({ risk, halted }: { risk: RiskLimit[]; halted: boolean
           <span className="chip" style={{ background: "var(--down-dim)", color: "var(--down)", borderColor: "var(--down)" }}>
             BREACH
           </span>
-        ) : (
+        ) : complete ? (
           <span className="chip" style={{ background: "var(--up-dim)", color: "var(--up)" }}>
             WITHIN
+          </span>
+        ) : (
+          <span className="chip" style={{ background: "var(--bg-3)", color: "var(--tx-mid)" }}>
+            UNKNOWN
           </span>
         )
       }
@@ -365,7 +368,7 @@ export function RiskPanel({ risk, halted }: { risk: RiskLimit[]; halted: boolean
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 13 }}>
         {risk.map((r) => (
-          <Gauge key={r.name} {...r} used={halted && r.name === "Daily loss" ? r.limit * 0.96 : r.used} />
+          <Gauge key={r.name} {...r} />
         ))}
       </div>
     </Panel>

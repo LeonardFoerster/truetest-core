@@ -11,7 +11,7 @@ import snapshotJson from "./snapshot.json";
 import reportJson from "./report.json";
 import { adaptSnapshot, type LiveData } from "../adapters/snapshot";
 import { adaptReport, type ReportData } from "../adapters/report";
-import type { SnapshotFrame, ResultsReport } from "../wire";
+import { parseSnapshotFrame, type ResultsReport } from "../wire";
 
-export const fixtureSnapshot: LiveData = adaptSnapshot(snapshotJson as unknown as SnapshotFrame);
+export const fixtureSnapshot: LiveData = adaptSnapshot(parseSnapshotFrame(snapshotJson));
 export const fixtureReport: ReportData = adaptReport(reportJson as unknown as ResultsReport);

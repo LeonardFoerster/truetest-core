@@ -5,10 +5,10 @@
    onto the live cockpit's component prop shapes (./types.ts, the shapes the
    Claude Design components consume unchanged). ALL reconciliation lives here —
    field renames, the signed-qty → side+abs split, drawdown %→fraction, char
-   sides → "long"/"buy", win-rate scale normalization, and synthesizing the
-   per-strategy sparkline the engine doesn't emit. The components never change.
+   sides → "long"/"buy", and win-rate scale normalization. Missing series
+   stay missing; this adapter never fabricates operational history.
    ========================================================================= */
-import type { SnapshotFrame, WireFill, WireStrategy } from "../wire";
+import type { SnapshotFrame, WireBracket, WireFill, WireStrategy } from "../wire";
 import type { Account, Position, Lot, Book, Fill, Strategy, RiskLimit, Health, EquityPoint } from "../types";
 
 export interface LiveData {
@@ -36,28 +36,8 @@ const buySell = (sideChar: string): "buy" | "sell" =>
 
 const secondsOfDay = (tsMs: number) => Math.floor((tsMs / 1000) % 86400);
 
-// Deterministic pseudo-sparkline from a seed (engine emits no per-strategy
-// series). Bias by P&L sign so winners trend up, losers down.
-function synthSpark(seed: string, bias: number, n = 40): number[] {
-  let h = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    h ^= seed.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  const rnd = () => {
-    h ^= h << 13;
-    h ^= h >>> 17;
-    h ^= h << 5;
-    return ((h >>> 0) % 1e6) / 1e6 - 0.5;
-  };
-  const a: number[] = [];
-  let v = 0;
-  for (let i = 0; i < n; i++) {
-    v += rnd() * 1.2 + bias * 0.18;
-    a.push(v);
-  }
-  return a;
-}
+const availableMetric = (available: boolean, value: number | null): number | null =>
+  available && value !== null && Number.isFinite(value) ? value : null;
 
 function adaptStrategy(s: WireStrategy): Strategy {
   return {
@@ -67,11 +47,13 @@ function adaptStrategy(s: WireStrategy): Strategy {
     pf: s.profit_factor,
     trades: s.trade_count,
     lots: s.open_lots,
-    spark: synthSpark(s.name, s.pnl >= 0 ? 1 : -1),
+    spark: [],
   };
 }
 
 function adaptFill(f: WireFill, idx: number): Fill {
+  const source: Fill["src"] =
+    f.source === "exchange" || f.source === "simulated" ? f.source : "unknown";
   return {
     id: f.ts_ms * 1000 + idx,
     t: secondsOfDay(f.ts_ms),
@@ -80,36 +62,57 @@ function adaptFill(f: WireFill, idx: number): Fill {
     qty: f.qty,
     px: f.price,
     fee: f.fee,
-    src: f.source === "exchange" ? "exchange" : "simulated",
+    src: source,
   };
 }
 
 export function adaptSnapshot(f: SnapshotFrame): LiveData {
   const a = f.account;
-  const equityDelta = a.equity - a.initial_balance;
+  const equity = availableMetric(a.equity_available, a.equity);
+  const equityDelta = availableMetric(a.total_pnl_available, a.total_pnl);
+  const equityPct =
+    equityDelta !== null && Number.isFinite(a.initial_balance) && a.initial_balance !== 0
+      ? (equityDelta / a.initial_balance) * 100
+      : null;
 
   const account: Account = {
-    equity: a.equity,
+    equity,
     equityDelta,
-    equityPct: a.initial_balance ? (equityDelta / a.initial_balance) * 100 : 0,
+    equityPct,
     cash: a.cash,
-    cashDelta: 0, // engine snapshot carries no period deltas yet
-    realized: a.realized_pnl,
-    realizedDelta: 0,
-    unrealized: a.unrealized_pnl,
-    unrealizedDelta: 0,
+    cashDelta: null, // engine snapshot carries no period deltas yet
+    realized: availableMetric(a.realized_pnl_available, a.realized_pnl),
+    realizedDelta: null,
+    unrealized: availableMetric(a.unrealized_pnl_available, a.unrealized_pnl),
+    unrealizedDelta: null,
   };
 
   const positions: Position[] = f.positions.map((p) => {
     const side: "long" | "short" = p.qty >= 0 ? "long" : "short";
     const qty = Math.abs(p.qty);
-    return { sym: p.symbol, side, qty, entry: p.avg_entry, mark: p.mark, upnl: p.unrealized, notional: p.mark * qty };
+    const mark = availableMetric(p.mark_available, p.mark);
+    const upnl = availableMetric(p.unrealized_available, p.unrealized);
+    return {
+      sym: p.symbol,
+      side,
+      qty,
+      entry: p.avg_entry,
+      mark,
+      upnl,
+      notional: mark === null ? null : mark * qty,
+    };
   });
 
   // Design "Open Lots" panel is the SL↔TP band viz → engine brackets carry
   // the stop/target. Brackets without both legs are skipped (nothing to draw).
   const lots: Lot[] = f.brackets
-    .filter((b) => b.stop_loss != null && b.take_profit != null)
+    .filter(
+      (b): b is WireBracket & { stop_loss: number; take_profit: number; mark: number } =>
+        b.stop_loss !== null &&
+        b.take_profit !== null &&
+        b.mark !== null &&
+        Number.isFinite(b.entry_price),
+    )
     .map((b) => ({
       id: "L-" + b.opener_order_id,
       strat: b.strategy_name,
@@ -137,9 +140,9 @@ export function adaptSnapshot(f: SnapshotFrame): LiveData {
 
   const r = f.risk;
   const risk: RiskLimit[] = [
-    { name: "Daily loss", used: r.daily_loss, limit: r.daily_loss_limit, unit: "$", inv: true },
-    { name: "Max drawdown", used: r.max_drawdown_pct, limit: r.max_drawdown_limit, unit: "%", inv: true },
-    { name: "Gross exposure", used: r.exposure, limit: r.exposure_limit, unit: "$" },
+    { name: "Daily loss", used: availableMetric(r.daily_loss_available, r.daily_loss), limit: r.daily_loss_limit, unit: "$", inv: true },
+    { name: "Max drawdown", used: availableMetric(r.max_drawdown_available, r.max_drawdown_pct), limit: r.max_drawdown_limit, unit: "%", inv: true },
+    { name: "Gross exposure", used: availableMetric(r.exposure_available, r.exposure), limit: r.exposure_limit, unit: "$" },
     { name: "Open orders", used: r.open_orders, limit: r.open_orders_limit, unit: "" },
   ];
 
@@ -160,10 +163,12 @@ export function adaptSnapshot(f: SnapshotFrame): LiveData {
   // Live equity sparkline/chart: engine trend tails. drawdown_tail is a
   // positive %, the chart wants a negative fraction.
   let peak = -Infinity;
-  const equityCurve: EquityPoint[] = f.trend.equity_tail.map((eq, i) => {
+  const equityCurve: EquityPoint[] = [];
+  f.trend.equity_tail.forEach((eq, i) => {
+    const drawdown = f.trend.drawdown_tail[i];
+    if (!Number.isFinite(eq) || !Number.isFinite(drawdown)) return;
     peak = Math.max(peak, eq);
-    const dd = -(f.trend.drawdown_tail[i] ?? 0) / 100;
-    return { i, eq, peak, dd };
+    equityCurve.push({ i, eq, peak, dd: -drawdown / 100 });
   });
 
   return { halted: f.risk.halted, account, positions, lots, book, fills, strategies, risk, health, equityCurve };

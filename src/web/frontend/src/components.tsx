@@ -22,21 +22,27 @@ export function Panel({ title, sub, right, children, className = "", bodyClass =
 
 /* ---------- Num with tick flash ---------- */
 export function TickNum({ value, fmt: f = (v: number) => fmt.num(v), className = "", colored = false }: any) {
-  const prev = useRef(value);
+  const usable = typeof value === "number" && Number.isFinite(value);
+  const prev = useRef<number | null>(usable ? value : null);
   const [flash, setFlash] = useState("");
   useEffect(() => {
-    if (value > prev.current) setFlash("tick-up");
-    else if (value < prev.current) setFlash("tick-down");
-    prev.current = value;
+    if (usable && prev.current !== null) {
+      if (value > prev.current) setFlash("tick-up");
+      else if (value < prev.current) setFlash("tick-down");
+    }
+    prev.current = usable ? value : null;
     const t = setTimeout(() => setFlash(""), 560);
     return () => clearTimeout(t);
-  }, [value]);
-  const colorCls = colored ? cls(value) : "";
-  return <span className={"num " + colorCls + " " + className + " " + flash} style={{ borderRadius: 3, padding: "0 2px" }}>{f(value)}</span>;
+  }, [usable, value]);
+  const colorCls = colored && usable ? cls(value) : "";
+  return <span className={"num " + colorCls + " " + className + " " + flash} style={{ borderRadius: 3, padding: "0 2px" }}>{usable ? f(value) : "—"}</span>;
 }
 
 /* ---------- Delta chip ---------- */
 export function Delta({ value, pct, money = false }: any) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return <span className="delta flat">—</span>;
+  }
   const c = cls(value);
   const arrow = value >= 0 ? "▲" : "▼";
   return (
@@ -85,6 +91,18 @@ export function Spark({ data, w = 64, h = 18, stroke, fill = false, strokeW = 1.
 
 /* ---------- Gauge / limit bar ---------- */
 export function Gauge({ name, used, limit, unit, inv }: any) {
+  const usable = typeof used === "number" && Number.isFinite(used) && typeof limit === "number" && Number.isFinite(limit) && limit > 0;
+  if (!usable) {
+    return (
+      <div className="gauge">
+        <div className="gtop">
+          <span className="gname">{name}</span>
+          <span className="gval">N/A</span>
+        </div>
+        <div className="track" />
+      </div>
+    );
+  }
   const pctUsed = Math.max(0, Math.min(1, used / limit));
   // color ramps amber->red as it approaches limit
   let color = "var(--up)";
@@ -138,6 +156,12 @@ export function useSort(rows: any[], initialKey: string, initialDir = "desc") {
     const r = [...rows].sort((a, b) => {
       const av = a[key],
         bv = b[key];
+      const aMissing = av == null || (typeof av === "number" && !Number.isFinite(av));
+      const bMissing = bv == null || (typeof bv === "number" && !Number.isFinite(bv));
+      if (aMissing || bMissing) {
+        if (aMissing && bMissing) return 0;
+        return aMissing ? 1 : -1;
+      }
       if (typeof av === "string") return dir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
       return dir === "asc" ? av - bv : bv - av;
     });

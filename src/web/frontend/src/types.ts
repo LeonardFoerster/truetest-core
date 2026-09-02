@@ -22,15 +22,15 @@ export interface SymbolMeta {
 }
 
 export interface Account {
-  equity: number;
-  equityDelta: number;
-  equityPct: number;
+  equity: number | null;
+  equityDelta: number | null;
+  equityPct: number | null;
   cash: number;
-  cashDelta: number;
-  realized: number;
-  realizedDelta: number;
-  unrealized: number;
-  unrealizedDelta: number;
+  cashDelta: number | null;
+  realized: number | null;
+  realizedDelta: number | null;
+  unrealized: number | null;
+  unrealizedDelta: number | null;
 }
 
 export interface EquityPoint {
@@ -45,9 +45,9 @@ export interface Position {
   side: Side;
   qty: number;
   entry: number;
-  mark: number;
-  upnl: number;
-  notional: number;
+  mark: number | null;
+  upnl: number | null;
+  notional: number | null;
 }
 
 export interface Lot {
@@ -85,7 +85,7 @@ export interface Fill {
   qty: number;
   px: number;
   fee: number;
-  src: "exchange" | "simulated";
+  src: "exchange" | "simulated" | "unknown";
   isNew?: boolean;
 }
 
@@ -101,7 +101,7 @@ export interface Strategy {
 
 export interface RiskLimit {
   name: string;
-  used: number;
+  used: number | null;
   limit: number;
   unit: "$" | "%" | "";
   inv?: boolean;
@@ -215,5 +215,5 @@ export interface TTData {
   buildBook: (mid: number, tick: number) => Book;
 }
 
-export type ConnStatus = "live" | "loading" | "empty" | "disconnected" | "halted";
+export type ConnStatus = "live" | "loading" | "empty" | "degraded" | "disconnected" | "halted";
 export type Mode = "live" | "backtest";

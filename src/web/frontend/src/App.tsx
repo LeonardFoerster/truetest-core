@@ -17,10 +17,11 @@ import type { LiveData } from "./adapters/snapshot";
 import type { ConnStatus, Mode, EquityPoint } from "./types";
 
 /* ---- Equity panel (live) ---- */
-function EquityPanel({ equityCurve, equity }: { equityCurve: EquityPoint[]; equity: number }) {
-  const first = equityCurve.length ? equityCurve[0].eq : equity;
-  const up = equity >= first;
-  const data = equityCurve.length > 1 ? equityCurve : [{ i: 0, eq: equity, peak: equity, dd: 0 }, { i: 1, eq: equity, peak: equity, dd: 0 }];
+function EquityPanel({ equityCurve, equity }: { equityCurve: EquityPoint[]; equity: number | null }) {
+  const effectiveEquity = equity ?? (equityCurve.length ? equityCurve[equityCurve.length - 1].eq : null);
+  const first = equityCurve.length ? equityCurve[0].eq : null;
+  const up = effectiveEquity !== null && first !== null ? effectiveEquity >= first : null;
+  const change = effectiveEquity !== null && first !== null && first !== 0 ? (effectiveEquity - first) / first : null;
   return (
     <Panel
       title="Equity & Drawdown"
@@ -28,14 +29,20 @@ function EquityPanel({ equityCurve, equity }: { equityCurve: EquityPoint[]; equi
       right={
         <>
           <TickNum value={equity} fmt={(v: number) => fmt.usd(v)} className="hi" />
-          <span className="chip" style={{ background: up ? "var(--up-dim)" : "var(--down-dim)", color: up ? "var(--up)" : "var(--down)" }}>
-            {fmt.pct(first ? (equity - first) / first : 0)}
+          <span
+            className="chip"
+            style={{
+              background: up === null ? "var(--bg-3)" : up ? "var(--up-dim)" : "var(--down-dim)",
+              color: up === null ? "var(--tx-mid)" : up ? "var(--up)" : "var(--down)",
+            }}
+          >
+            {change === null ? "N/A" : fmt.pct(change)}
           </span>
         </>
       }
       bodyClass="pad"
     >
-      <EquityChart data={data} />
+      {equityCurve.length > 1 ? <EquityChart data={equityCurve} /> : <div className="placeholder"><div className="pd">Equity history unavailable.</div></div>}
     </Panel>
   );
 }
@@ -149,11 +156,25 @@ function DisconnectedState() {
     </div>
   );
 }
+function DegradedState() {
+  return (
+    <div style={{ padding: 9 }}>
+      <div className="panel" style={{ minHeight: "calc(100vh - 140px)" }}>
+        <div className="placeholder">
+          <div className="pico" style={{ color: "var(--warn)", borderColor: "var(--warn-dim)" }}>⚠</div>
+          <div className="pt" style={{ color: "var(--warn)" }}>Feed stale</div>
+          <div className="pd">The stream is connected but no fresh, valid engine snapshot has arrived. Values are hidden until freshness is restored.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* ---- Live dashboard composition ---- */
 function LiveDashboard({ status, live, onResume }: { status: ConnStatus; live: LiveData | null; onResume: () => void }) {
   if (status === "empty") return <EmptyState />;
   if (status === "disconnected") return <DisconnectedState />;
+  if (status === "degraded") return <DegradedState />;
   if (status === "loading" || !live) return <SkeletonGrid />;
   const halted = status === "halted";
   return (
@@ -187,6 +208,7 @@ function ConnBadge({ status, offline }: { status: ConnStatus; offline: boolean }
     live: { c: "conn", t: "Connected", pulse: true },
     halted: { c: "conn halt", t: "Halted" },
     disconnected: { c: "conn reconn", t: "Reconnecting" },
+    degraded: { c: "conn reconn", t: "Stale feed" },
     loading: { c: "conn reconn", t: "Connecting" },
     empty: { c: "conn off", t: "No session" },
   };
@@ -207,7 +229,7 @@ export default function App() {
 
   // Real status from the feed; data.halted promotes to the alarm state.
   const base: ConnStatus =
-    live.data?.halted ? "halted" : live.status === "live" ? "live" : live.status === "disconnected" ? "disconnected" : "loading";
+    live.data?.halted ? "halted" : live.status === "live" ? "live" : live.status === "degraded" ? "degraded" : live.status === "disconnected" ? "disconnected" : "loading";
   const status: ConnStatus = override ?? base;
 
   const symbols = live.data ? Array.from(new Set(live.data.positions.map((p) => p.sym.replace("USDT", "")))) : [];
@@ -218,6 +240,7 @@ export default function App() {
     { k: "loading", l: "Loading" },
     { k: "empty", l: "Empty" },
     { k: "disconnected", l: "Disconnected" },
+    { k: "degraded", l: "Stale" },
     { k: "halted", l: "HALTED", halt: true },
   ];
 

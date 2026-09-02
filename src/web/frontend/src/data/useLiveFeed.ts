@@ -8,11 +8,16 @@
    ========================================================================= */
 import { useEffect, useRef, useState } from "react";
 import { adaptSnapshot, type LiveData } from "../adapters/snapshot";
-import type { SnapshotFrame } from "../wire";
+import { parseSnapshotFrame } from "../wire";
 import { fixtureSnapshot } from "../fixtures";
 import { authToken } from "./store";
+import {
+  LIVE_FRAME_STALE_MS,
+  LiveFeedFreshness,
+  type FreshnessStatus,
+} from "./liveFeedFreshness";
 
-export type FeedStatus = "connecting" | "live" | "disconnected";
+export type FeedStatus = FreshnessStatus | "disconnected";
 
 export interface LiveFeed {
   status: FeedStatus;
@@ -30,6 +35,8 @@ export function useLiveFeed(): LiveFeed {
 
   // Refs so the WS handlers always see current values without re-subscribing.
   const gotLive = useRef(false);
+  const sawBackend = useRef(false);
+  const showingOffline = useRef(false);
   const retries = useRef(0);
 
   useEffect(() => {
@@ -37,6 +44,9 @@ export function useLiveFeed(): LiveFeed {
     let ws: WebSocket | null = null;
     let reconnectTimer: number | undefined;
     let fallbackTimer: number | undefined;
+    let freshnessTimer: number | undefined;
+    let transportOpen = false;
+    const freshness = new LiveFeedFreshness();
 
     const wsUrl = () => {
       const proto = window.location.protocol === "https:" ? "wss" : "ws";
@@ -60,17 +70,35 @@ export function useLiveFeed(): LiveFeed {
         return;
       }
       ws.onopen = () => {
+        transportOpen = true;
         retries.current = 0;
+        sawBackend.current = true;
+        const openedAt = Date.now();
+        freshness.markOpen(openedAt);
+        if (showingOffline.current) {
+          showingOffline.current = false;
+          setOffline(false);
+          setData(null);
+        }
+        setStatus(freshness.statusAt(openedAt));
       };
       ws.onmessage = (ev) => {
         try {
-          const frame = JSON.parse(ev.data as string) as SnapshotFrame;
+          const frame = parseSnapshotFrame(JSON.parse(ev.data as string));
+          const receivedAt = Date.now();
+          freshness.markAccepted(frame, receivedAt);
           gotLive.current = true;
+          showingOffline.current = false;
           setData(adaptSnapshot(frame));
           setOffline(false);
-          setStatus("live");
-        } catch {
-          /* ignore malformed frame */
+          setStatus(freshness.statusAt(receivedAt));
+        } catch (error) {
+          sawBackend.current = true;
+          freshness.markMalformed();
+          showingOffline.current = false;
+          setOffline(false);
+          setStatus("degraded");
+          console.error(error instanceof Error ? error.message : "Rejected malformed SnapshotFrame");
         }
       };
       ws.onerror = () => {
@@ -82,18 +110,30 @@ export function useLiveFeed(): LiveFeed {
       };
       ws.onclose = () => {
         if (closed) return;
-        if (gotLive.current) setStatus("disconnected");
+        transportOpen = false;
+        if (gotLive.current || sawBackend.current) setStatus("disconnected");
         scheduleReconnect();
       };
     };
 
     connect();
 
+    // A WebSocket can remain OPEN while its producer is dead. Re-evaluate
+    // freshness independently of callbacks so silence, unavailable source
+    // timestamps, and replayed snapshots cannot leave the UI green.
+    freshnessTimer = window.setInterval(() => {
+      if (closed || showingOffline.current || !transportOpen) return;
+      const freshnessStatus = freshness.statusAt(Date.now());
+      if (freshnessStatus !== "connecting" || sawBackend.current)
+        setStatus(freshnessStatus);
+    }, Math.min(500, LIVE_FRAME_STALE_MS / 4));
+
     // Offline grace: if no live frame arrived, render the fixture so the design
     // is usable without an engine. A later live frame transparently takes over.
     fallbackTimer = window.setTimeout(() => {
-      if (!gotLive.current) {
+      if (!gotLive.current && !sawBackend.current) {
         setData(fixtureSnapshot);
+        showingOffline.current = true;
         setOffline(true);
         setStatus("live");
       }
@@ -103,6 +143,7 @@ export function useLiveFeed(): LiveFeed {
       closed = true;
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       if (fallbackTimer) window.clearTimeout(fallbackTimer);
+      if (freshnessTimer) window.clearInterval(freshnessTimer);
       try {
         ws?.close();
       } catch {
